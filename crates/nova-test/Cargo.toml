@@ -1,0 +1,13 @@
+[package]
+name = "nova-test"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test runner for Nova projects"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+anyhow = { workspace = true }
+tracing = { workspace = true }

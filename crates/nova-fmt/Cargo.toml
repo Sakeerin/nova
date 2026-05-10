@@ -1,0 +1,15 @@
+[package]
+name = "nova-fmt"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Opinionated code formatter for Nova"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-ast = { path = "../nova-ast" }
+nova-lexer = { path = "../nova-lexer" }
+nova-parser = { path = "../nova-parser" }
+anyhow = { workspace = true }

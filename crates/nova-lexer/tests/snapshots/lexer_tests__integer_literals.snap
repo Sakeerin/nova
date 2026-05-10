@@ -1,0 +1,13 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: "token_kinds(\"0 42 1_000_000 0xff 0b1010 0o755\")"
+---
+[
+    "Int(0)",
+    "Int(42)",
+    "Int(1000000)",
+    "Int(255)",
+    "Int(10)",
+    "Int(493)",
+    "Eof",
+]

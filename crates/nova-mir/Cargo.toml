@@ -1,0 +1,12 @@
+[package]
+name = "nova-mir"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Mid-level IR for Nova (3-address style)"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+indexmap = { workspace = true }

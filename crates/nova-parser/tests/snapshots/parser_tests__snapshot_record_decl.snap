@@ -1,0 +1,115 @@
+---
+source: crates/nova-parser/tests/parser_tests.rs
+expression: ast
+---
+Some(
+    File {
+        items: [
+            Spanned {
+                value: Record(
+                    Record {
+                        vis: Private,
+                        name: Spanned {
+                            value: "Point",
+                            span: Span {
+                                start: 7,
+                                end: 12,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                        generics: [],
+                        fields: [
+                            RecordField {
+                                vis: Private,
+                                name: Spanned {
+                                    value: "x",
+                                    span: Span {
+                                        start: 15,
+                                        end: 16,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                                ty: Spanned {
+                                    value: Path {
+                                        path: Path {
+                                            segments: [
+                                                Spanned {
+                                                    value: "Float",
+                                                    span: Span {
+                                                        start: 18,
+                                                        end: 23,
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                        args: [],
+                                    },
+                                    span: Span {
+                                        start: 18,
+                                        end: 23,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                            },
+                            RecordField {
+                                vis: Private,
+                                name: Spanned {
+                                    value: "y",
+                                    span: Span {
+                                        start: 25,
+                                        end: 26,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                                ty: Spanned {
+                                    value: Path {
+                                        path: Path {
+                                            segments: [
+                                                Spanned {
+                                                    value: "Float",
+                                                    span: Span {
+                                                        start: 28,
+                                                        end: 33,
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                        args: [],
+                                    },
+                                    span: Span {
+                                        start: 28,
+                                        end: 33,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 36,
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ],
+    },
+)

@@ -1,0 +1,11 @@
+trait Display {
+    fn fmt(self) -> String
+}
+
+record Point { x: Float, y: Float, }
+
+impl Display for Point {
+    fn fmt(self) -> String {
+        "(${self.x}, ${self.y})"
+    }
+}

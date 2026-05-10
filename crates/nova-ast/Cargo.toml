@@ -1,0 +1,13 @@
+[package]
+name = "nova-ast"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Abstract Syntax Tree node definitions for Nova"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+smol_str = { workspace = true }
+serde = { workspace = true }

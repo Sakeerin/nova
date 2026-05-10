@@ -1,0 +1,26 @@
+[package]
+name = "nova-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The nova compiler and toolchain CLI"
+
+[[bin]]
+name = "nova"
+path = "src/main.rs"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-lexer = { path = "../nova-lexer" }
+nova-ast = { path = "../nova-ast" }
+nova-parser = { path = "../nova-parser" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+insta = { workspace = true }

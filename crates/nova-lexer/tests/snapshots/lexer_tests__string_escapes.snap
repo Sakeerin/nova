@@ -1,0 +1,12 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: toks
+---
+[
+    StrStart,
+    StrPart(
+        "tab:\t newline:\n quote:\" backslash:\\",
+    ),
+    StrEnd,
+    Eof,
+]

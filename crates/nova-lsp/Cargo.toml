@@ -1,0 +1,16 @@
+[package]
+name = "nova-lsp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Language Server Protocol implementation for Nova"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-lexer = { path = "../nova-lexer" }
+nova-ast = { path = "../nova-ast" }
+nova-parser = { path = "../nova-parser" }
+anyhow = { workspace = true }
+tracing = { workspace = true }

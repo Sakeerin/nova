@@ -1,0 +1,7 @@
+/target
+/fuzz/target
+Cargo.lock
+*.pdb
+*.orig
+.env
+.env.local

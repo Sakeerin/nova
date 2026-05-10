@@ -1,0 +1,8 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: token_kinds(src)
+---
+[
+    "RawStr(\"raw \\\"quoted\\\" string\")",
+    "Eof",
+]

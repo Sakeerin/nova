@@ -1,0 +1,18 @@
+[package]
+name = "nova-parser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Parser for the Nova programming language"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-lexer = { path = "../nova-lexer" }
+nova-ast = { path = "../nova-ast" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }

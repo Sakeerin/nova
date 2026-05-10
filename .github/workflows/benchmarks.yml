@@ -1,0 +1,23 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  bench:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run benchmarks
+        run: cargo bench --workspace -- --output-format bencher | tee output.txt
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true

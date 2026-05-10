@@ -1,0 +1,15 @@
+[package]
+name = "nova-resolver"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Name resolution and module graph for Nova"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-ast = { path = "../nova-ast" }
+indexmap = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }

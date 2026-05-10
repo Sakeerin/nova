@@ -1,0 +1,159 @@
+---
+source: crates/nova-parser/tests/parser_tests.rs
+expression: ast
+---
+Some(
+    File {
+        items: [
+            Spanned {
+                value: Function(
+                    Function {
+                        vis: Private,
+                        is_async: false,
+                        name: Spanned {
+                            value: "identity",
+                            span: Span {
+                                start: 3,
+                                end: 11,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                        generics: [
+                            TypeParam {
+                                name: Spanned {
+                                    value: "T",
+                                    span: Span {
+                                        start: 12,
+                                        end: 13,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                                bounds: [],
+                            },
+                        ],
+                        params: [
+                            Param {
+                                is_mut: false,
+                                name: Spanned {
+                                    value: "x",
+                                    span: Span {
+                                        start: 15,
+                                        end: 16,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                                ty: Spanned {
+                                    value: Path {
+                                        path: Path {
+                                            segments: [
+                                                Spanned {
+                                                    value: "T",
+                                                    span: Span {
+                                                        start: 18,
+                                                        end: 19,
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                        args: [],
+                                    },
+                                    span: Span {
+                                        start: 18,
+                                        end: 19,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                            },
+                        ],
+                        return_ty: Some(
+                            Spanned {
+                                value: Path {
+                                    path: Path {
+                                        segments: [
+                                            Spanned {
+                                                value: "T",
+                                                span: Span {
+                                                    start: 24,
+                                                    end: 25,
+                                                    file: FileId(
+                                                        0,
+                                                    ),
+                                                },
+                                            },
+                                        ],
+                                    },
+                                    args: [],
+                                },
+                                span: Span {
+                                    start: 24,
+                                    end: 25,
+                                    file: FileId(
+                                        0,
+                                    ),
+                                },
+                            },
+                        ),
+                        where_clause: [],
+                        body: Spanned {
+                            value: Block {
+                                stmts: [],
+                                trailing: Some(
+                                    Spanned {
+                                        value: Path(
+                                            Path {
+                                                segments: [
+                                                    Spanned {
+                                                        value: "x",
+                                                        span: Span {
+                                                            start: 28,
+                                                            end: 29,
+                                                            file: FileId(
+                                                                0,
+                                                            ),
+                                                        },
+                                                    },
+                                                ],
+                                            },
+                                        ),
+                                        span: Span {
+                                            start: 28,
+                                            end: 29,
+                                            file: FileId(
+                                                0,
+                                            ),
+                                        },
+                                    },
+                                ),
+                            },
+                            span: Span {
+                                start: 26,
+                                end: 31,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 31,
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ],
+    },
+)

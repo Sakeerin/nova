@@ -1,0 +1,5 @@
+async fn fetch_user(id: Int) -> Result<User, HttpError> {
+    let res = http.get("/users/${id}").await?
+    let user = res.json::<User>()?
+    Ok(user)
+}

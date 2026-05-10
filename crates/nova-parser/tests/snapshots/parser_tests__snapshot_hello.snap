@@ -1,0 +1,107 @@
+---
+source: crates/nova-parser/tests/parser_tests.rs
+expression: ast
+---
+Some(
+    File {
+        items: [
+            Spanned {
+                value: Function(
+                    Function {
+                        vis: Private,
+                        is_async: false,
+                        name: Spanned {
+                            value: "main",
+                            span: Span {
+                                start: 3,
+                                end: 7,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                        generics: [],
+                        params: [],
+                        return_ty: None,
+                        where_clause: [],
+                        body: Spanned {
+                            value: Block {
+                                stmts: [],
+                                trailing: Some(
+                                    Spanned {
+                                        value: Call {
+                                            callee: Spanned {
+                                                value: Path(
+                                                    Path {
+                                                        segments: [
+                                                            Spanned {
+                                                                value: "println",
+                                                                span: Span {
+                                                                    start: 12,
+                                                                    end: 19,
+                                                                    file: FileId(
+                                                                        0,
+                                                                    ),
+                                                                },
+                                                            },
+                                                        ],
+                                                    },
+                                                ),
+                                                span: Span {
+                                                    start: 12,
+                                                    end: 19,
+                                                    file: FileId(
+                                                        0,
+                                                    ),
+                                                },
+                                            },
+                                            args: [
+                                                Spanned {
+                                                    value: StringInterp(
+                                                        [
+                                                            Lit(
+                                                                "Hello, World!",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    span: Span {
+                                                        start: 20,
+                                                        end: 35,
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                        span: Span {
+                                            start: 12,
+                                            end: 36,
+                                            file: FileId(
+                                                0,
+                                            ),
+                                        },
+                                    },
+                                ),
+                            },
+                            span: Span {
+                                start: 10,
+                                end: 38,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 38,
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ],
+    },
+)

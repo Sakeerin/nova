@@ -1,0 +1,7 @@
+fn map<T, U>(list: [T], f: fn(T) -> U) -> [U] {
+    let mut out = []
+    for item in list {
+        out.push(f(item))
+    }
+    out
+}

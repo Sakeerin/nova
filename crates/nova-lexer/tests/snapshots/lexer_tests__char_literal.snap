@@ -1,0 +1,10 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: "token_kinds(r\"'a' '\\n' '\\t'\")"
+---
+[
+    "Char('a')",
+    "Char('\\n')",
+    "Char('\\t')",
+    "Eof",
+]

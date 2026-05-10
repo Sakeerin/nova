@@ -1,0 +1,10 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: token_kinds(src)
+---
+[
+    "StrStart",
+    "StrPart(\"hello world\")",
+    "StrEnd",
+    "Eof",
+]

@@ -1,0 +1,16 @@
+[package]
+name = "nova-typeck"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Type checker and inference for Nova (Hindley-Milner + extensions)"
+
+[dependencies]
+nova-diagnostics = { path = "../nova-diagnostics" }
+nova-ast = { path = "../nova-ast" }
+nova-hir = { path = "../nova-hir" }
+indexmap = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }

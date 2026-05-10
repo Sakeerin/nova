@@ -1,0 +1,11 @@
+---
+source: crates/nova-lexer/tests/lexer_tests.rs
+expression: "token_kinds(\"1.5 1.5e3 1.5e-3 1_000.5\")"
+---
+[
+    "Float(1.5)",
+    "Float(1500.0)",
+    "Float(0.0015)",
+    "Float(1000.5)",
+    "Eof",
+]
