@@ -16,6 +16,7 @@ nova-diagnostics = { path = "../nova-diagnostics" }
 nova-lexer = { path = "../nova-lexer" }
 nova-ast = { path = "../nova-ast" }
 nova-parser = { path = "../nova-parser" }
+nova-driver = { path = "../nova-driver" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

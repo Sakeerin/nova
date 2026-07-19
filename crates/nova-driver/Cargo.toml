@@ -9,5 +9,12 @@ description = "Compilation pipeline orchestration for Nova"
 
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
+nova-lexer = { path = "../nova-lexer" }
+nova-parser = { path = "../nova-parser" }
+nova-resolver = { path = "../nova-resolver" }
+nova-typeck = { path = "../nova-typeck" }
+nova-hir = { path = "../nova-hir" }
+nova-mir = { path = "../nova-mir" }
+nova-codegen-cranelift = { path = "../nova-codegen-cranelift" }
 anyhow = { workspace = true }
 tracing = { workspace = true }

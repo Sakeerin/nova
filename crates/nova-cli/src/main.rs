@@ -1,7 +1,8 @@
 //! The `nova` command-line tool.
 //!
 //! Dispatches to subcommands: parse, build, run, fmt, lsp, test, doc, bundle.
-//! Phase 0 implements `nova parse <file>` for parser testing.
+//! Phase 0 implements `nova parse`; Phase 1 adds `nova run` (Cranelift JIT)
+//! and `nova check`.
 
 mod cmd;
 
@@ -23,6 +24,10 @@ struct Cli {
 enum Command {
     /// Parse a Nova source file and print the AST (for debugging).
     Parse(cmd::parse::ParseCmd),
+    /// Compile and run a Nova program.
+    Run(cmd::run::RunCmd),
+    /// Type-check a Nova program without running it.
+    Check(cmd::run::CheckCmd),
 }
 
 fn main() -> Result<()> {
@@ -36,5 +41,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Parse(cmd) => cmd::parse::run(cmd),
+        Command::Run(cmd) => cmd::run::run(cmd),
+        Command::Check(cmd) => cmd::run::check(cmd),
     }
 }
