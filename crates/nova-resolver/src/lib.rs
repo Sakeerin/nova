@@ -314,9 +314,8 @@ fn insert_type(
     id: DefId,
 ) {
     if definitions.types.contains_key(&name) {
-        let mut diag =
-            Diagnostic::error("E0002", format!("duplicate definition of type `{name}`"))
-                .with_primary_label(span, "redefined here");
+        let mut diag = Diagnostic::error("E0002", format!("duplicate definition of type `{name}`"))
+            .with_primary_label(span, "redefined here");
         if let Some(prev) = first.get(&name) {
             diag = diag.with_secondary_label(*prev, "first defined here");
         }

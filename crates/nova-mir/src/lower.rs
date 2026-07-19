@@ -211,11 +211,7 @@ impl<'a> Lowerer<'a> {
                     hir::UnOp::Neg => {
                         let class = operand_class(&expr.ty);
                         let t = self.new_temp(self.temps[src.0 as usize]);
-                        self.push(Stmt::Neg {
-                            dst: t,
-                            class,
-                            src,
-                        });
+                        self.push(Stmt::Neg { dst: t, class, src });
                         t
                     }
                     hir::UnOp::Not => {
@@ -619,13 +615,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// String matches lower to a chain of equality tests.
-    fn lower_string_match(
-        &mut self,
-        scrut: Temp,
-        arms: &[hir::Arm],
-        result: Temp,
-        join: BlockId,
-    ) {
+    fn lower_string_match(&mut self, scrut: Temp, arms: &[hir::Arm], result: Temp, join: BlockId) {
         for arm in arms {
             match &arm.pattern {
                 hir::Pattern::LitStr(lit) => {

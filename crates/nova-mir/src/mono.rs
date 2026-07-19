@@ -180,9 +180,7 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
         },
         K::Return(v) => K::Return(v.as_ref().map(|e| Box::new(subst_expr(e, args)))),
         K::ToStr(inner) => K::ToStr(Box::new(subst_expr(inner, args))),
-        K::StrConcat(parts) => {
-            K::StrConcat(parts.iter().map(|p| subst_expr(p, args)).collect())
-        }
+        K::StrConcat(parts) => K::StrConcat(parts.iter().map(|p| subst_expr(p, args)).collect()),
     };
     hir::Expr {
         kind,

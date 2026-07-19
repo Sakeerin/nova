@@ -31,9 +31,15 @@ pub enum Ty {
     /// The unit type `()`.
     Unit,
     /// A function type `fn(A, B) -> R`.
-    Fn { params: Vec<Ty>, ret: Box<Ty> },
+    Fn {
+        params: Vec<Ty>,
+        ret: Box<Ty>,
+    },
     /// A user-defined sum type with generic arguments.
-    Sum { def_id: DefId, args: Vec<Ty> },
+    Sum {
+        def_id: DefId,
+        args: Vec<Ty>,
+    },
     /// A generic type parameter of the enclosing item (`T`).
     Param(u32),
     /// An unsolved inference variable (only during type checking).
@@ -49,10 +55,7 @@ impl Ty {
     /// and monomorphization.
     pub fn subst(&self, args: &[Ty]) -> Ty {
         match self {
-            Ty::Param(i) => args
-                .get(*i as usize)
-                .cloned()
-                .unwrap_or(Ty::Error),
+            Ty::Param(i) => args.get(*i as usize).cloned().unwrap_or(Ty::Error),
             Ty::Fn { params, ret } => Ty::Fn {
                 params: params.iter().map(|p| p.subst(args)).collect(),
                 ret: Box::new(ret.subst(args)),
@@ -217,7 +220,10 @@ pub enum ExprKind {
     Local(LocalId),
     /// Reference a top-level function as a value (e.g. passed as callback).
     /// `type_args` instantiate the callee's generics.
-    FnRef { def: DefId, type_args: Vec<Ty> },
+    FnRef {
+        def: DefId,
+        type_args: Vec<Ty>,
+    },
     /// Call a function. `type_args` instantiate the callee's generics when
     /// `func` is `Callee::Def`.
     Call {
@@ -239,17 +245,29 @@ pub enum ExprKind {
         rhs: Box<Expr>,
     },
     /// Short-circuit `&&`.
-    LogicalAnd { lhs: Box<Expr>, rhs: Box<Expr> },
+    LogicalAnd {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     /// Short-circuit `||`.
-    LogicalOr { lhs: Box<Expr>, rhs: Box<Expr> },
+    LogicalOr {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
     },
     /// `let` binding as a unit-typed statement expression.
-    Let { local: LocalId, init: Box<Expr> },
+    Let {
+        local: LocalId,
+        init: Box<Expr>,
+    },
     /// Assignment to a mutable local; unit-typed.
-    Assign { local: LocalId, value: Box<Expr> },
+    Assign {
+        local: LocalId,
+        value: Box<Expr>,
+    },
     /// `{ stmts; trailing }` — value is `trailing` or unit.
     Block {
         stmts: Vec<Expr>,
@@ -260,7 +278,10 @@ pub enum ExprKind {
         then: Box<Expr>,
         else_: Option<Box<Expr>>,
     },
-    While { cond: Box<Expr>, body: Box<Expr> },
+    While {
+        cond: Box<Expr>,
+        body: Box<Expr>,
+    },
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,

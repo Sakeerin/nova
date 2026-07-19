@@ -80,7 +80,9 @@ fn native_isa() -> Result<Arc<dyn TargetIsa>> {
     flags
         .set("use_colocated_libcalls", "false")
         .context("setting cranelift flags")?;
-    flags.set("is_pic", "false").context("setting cranelift flags")?;
+    flags
+        .set("is_pic", "false")
+        .context("setting cranelift flags")?;
     let isa_builder = cranelift_native::builder()
         .map_err(|e| anyhow!("host machine is not supported by cranelift: {e}"))?;
     isa_builder
@@ -249,14 +251,12 @@ impl<'m> Codegen<'m> {
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
 
-        // Bind incoming parameters to their variables.
-        let mut param_idx = 0;
+        // Bind incoming parameters to their variables (unit params carry
+        // no ABI value, so zip non-unit vars with the block params).
         let entry_params: Vec<Value> = builder.block_params(entry).to_vec();
-        for temp in 0..f.params as usize {
-            if let Some(var) = vars[temp] {
-                builder.def_var(var, entry_params[param_idx]);
-                param_idx += 1;
-            }
+        let param_vars = vars.iter().take(f.params as usize).copied().flatten();
+        for (var, value) in param_vars.zip(entry_params) {
+            builder.def_var(var, value);
         }
 
         let mut tr = Translator {
@@ -307,10 +307,7 @@ impl<'a, 'm> Translator<'a, 'm> {
     }
 
     fn call_func_id(&mut self, id: FuncId, args: &[Value]) -> Result<Option<Value>> {
-        let func_ref = self
-            .cg
-            .module
-            .declare_func_in_func(id, self.builder.func);
+        let func_ref = self.cg.module.declare_func_in_func(id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
         let results = self.builder.inst_results(inst);
         Ok(results.first().copied())
@@ -430,10 +427,7 @@ impl<'a, 'm> Translator<'a, 'm> {
                     .functions
                     .get(callee)
                     .ok_or_else(|| anyhow!("address of undeclared function `{callee}`"))?;
-                let func_ref = self
-                    .cg
-                    .module
-                    .declare_func_in_func(id, self.builder.func);
+                let func_ref = self.cg.module.declare_func_in_func(id, self.builder.func);
                 let ptr_ty = self.cg.ptr_ty();
                 let addr = self.builder.ins().func_addr(ptr_ty, func_ref);
                 self.def_temp(*dst, addr);
@@ -455,7 +449,9 @@ impl<'a, 'm> Translator<'a, 'm> {
                     }
                     let v = self.use_temp(*field)?;
                     let offset = (8 + 8 * i) as i32;
-                    self.builder.ins().store(MemFlags::trusted(), v, ptr, offset);
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), v, ptr, offset);
                 }
                 self.def_temp(*dst, ptr);
             }

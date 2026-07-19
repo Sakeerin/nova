@@ -211,10 +211,8 @@ impl<'a> Checker<'a> {
                         .find(|s| s.def_id == def_id)
                         .map(|s| s.generics)
                         .unwrap_or(0);
-                    let converted: Vec<Ty> = args
-                        .iter()
-                        .map(|a| self.convert_ty(a, generics))
-                        .collect();
+                    let converted: Vec<Ty> =
+                        args.iter().map(|a| self.convert_ty(a, generics)).collect();
                     if converted.len() != expected as usize {
                         self.error(
                             "E0012",
@@ -616,8 +614,7 @@ impl<'a> Checker<'a> {
                     let Some(sig) = self.sigs.get(&def_id).cloned() else {
                         return error_expr(span);
                     };
-                    let type_args: Vec<Ty> =
-                        (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
+                    let type_args: Vec<Ty> = (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
                     let ty = Ty::Fn {
                         params: sig.params.iter().map(|p| p.subst(&type_args)).collect(),
                         ret: Box::new(sig.ret.subst(&type_args)),
@@ -1082,7 +1079,11 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         };
         let Some(local) = fcx.lookup(name) else {
-            self.error("E0001", format!("cannot find `{name}` in this scope"), lhs.span);
+            self.error(
+                "E0001",
+                format!("cannot find `{name}` in this scope"),
+                lhs.span,
+            );
             return error_expr(span);
         };
         let info = fcx.locals[local.0 as usize].clone();
@@ -1096,7 +1097,9 @@ impl<'a> Checker<'a> {
                 .last_mut()
                 .expect("just pushed")
                 .notes
-                .push(format!("declare it as `let mut {name}` to allow assignment"));
+                .push(format!(
+                    "declare it as `let mut {name}` to allow assignment"
+                ));
         }
         let value = self.check_expr(fcx, rhs);
 
@@ -1288,12 +1291,7 @@ impl<'a> Checker<'a> {
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
                 }
-                let local = fcx.new_local(
-                    name.value.clone(),
-                    scrut_ty.clone(),
-                    *is_mut,
-                    name.span,
-                );
+                let local = fcx.new_local(name.value.clone(), scrut_ty.clone(), *is_mut, name.span);
                 hir::Pattern::Bind(local)
             }
             ast::Pattern::Path(path) if path.segments.len() == 1 => {
@@ -1316,7 +1314,14 @@ impl<'a> Checker<'a> {
                 if let Some(sum_id) = self.defs.resolve_type(ty_name) {
                     if let Some(vi) = self.variant_index(sum_id, v_name) {
                         if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
-                            return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
+                            return self.variant_pattern(
+                                fcx,
+                                sum_id,
+                                vi,
+                                &[],
+                                scrut_ty,
+                                pattern.span,
+                            );
                         }
                     }
                 }
@@ -1431,8 +1436,7 @@ impl<'a> Checker<'a> {
             match &field_pat.value {
                 ast::Pattern::Wildcard => binders.push(None),
                 ast::Pattern::Ident { is_mut, name } => {
-                    let local =
-                        fcx.new_local(name.value.clone(), bound_ty, *is_mut, name.span);
+                    let local = fcx.new_local(name.value.clone(), bound_ty, *is_mut, name.span);
                     binders.push(Some(local));
                 }
                 _ => {
@@ -1600,7 +1604,9 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         residual.push(expr.span);
     }
     match &mut expr.kind {
-        hir::ExprKind::Call { type_args, args, .. } => {
+        hir::ExprKind::Call {
+            type_args, args, ..
+        } => {
             for t in type_args.iter_mut() {
                 *t = icx.apply(t);
                 if t.has_vars() {
@@ -1754,7 +1760,10 @@ mod tests {
     }
 
     fn collect_call_type_args(expr: &hir::Expr, out: &mut Vec<Vec<Ty>>) {
-        if let hir::ExprKind::Call { type_args, args, .. } = &expr.kind {
+        if let hir::ExprKind::Call {
+            type_args, args, ..
+        } = &expr.kind
+        {
             if !type_args.is_empty() {
                 out.push(type_args.clone());
             }

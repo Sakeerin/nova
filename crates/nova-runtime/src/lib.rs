@@ -76,10 +76,7 @@ pub unsafe extern "C" fn nova_rt_print(s: *const NovaStr) {
 /// # Safety
 /// `a` and `b` must be valid `NovaStr` pointers.
 #[no_mangle]
-pub unsafe extern "C" fn nova_rt_str_concat(
-    a: *const NovaStr,
-    b: *const NovaStr,
-) -> *mut NovaStr {
+pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr) -> *mut NovaStr {
     let mut s = String::with_capacity((*a).len as usize + (*b).len as usize);
     s.push_str(as_str(a));
     s.push_str(as_str(b));

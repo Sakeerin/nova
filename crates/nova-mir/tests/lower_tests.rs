@@ -111,9 +111,10 @@ fn fn_as_value_lowers_to_fnaddr_and_indirect_call() {
         .iter()
         .find(|f| f.name == "apply_twice$i")
         .expect("instance exists");
-    let has_indirect = apply
-        .blocks
-        .iter()
-        .any(|b| b.stmts.iter().any(|s| matches!(s, nova_mir::Stmt::CallIndirect { .. })));
+    let has_indirect = apply.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s, nova_mir::Stmt::CallIndirect { .. }))
+    });
     assert!(has_indirect, "call through fn param should be indirect");
 }
