@@ -9,6 +9,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.0] - 2026-05-10
+
+Phase 0 (Foundation) milestone. Gate verified: `examples/01-hello-world` and
+`examples/02-fibonacci` parse to AST with zero errors.
+
 ### Added
 - Initial workspace setup (Phase 0)
 - `nova-diagnostics`: error reporting infrastructure with codespan-reporting
