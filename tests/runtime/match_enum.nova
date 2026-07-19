@@ -1,0 +1,29 @@
+type Shape =
+  | Circle(Int)
+  | Rect(Int, Int)
+  | Empty
+
+fn area(s: Shape) -> Int {
+    match s {
+        Circle(r) => 3 * r * r,
+        Rect(w, h) => w * h,
+        Empty => 0,
+    }
+}
+
+fn name(s: Shape) -> String {
+    match s {
+        Circle(r) => "circle",
+        Rect(w, h) => "rect",
+        Empty => "empty",
+    }
+}
+
+fn main() {
+    let c = Circle(10)
+    let r = Rect(3, 4)
+    let e = Empty
+    println("${name(c)} area = ${area(c)}")
+    println("${name(r)} area = ${area(r)}")
+    println("${name(e)} area = ${area(e)}")
+}

@@ -22,6 +22,12 @@ indexmap = "2"
 smol_str = "0.2"
 rustc-hash = "1.1"
 
+# Codegen (Phase 1: Cranelift debug backend)
+cranelift = "0.105"
+cranelift-module = "0.105"
+cranelift-jit = "0.105"
+cranelift-native = "0.105"
+
 # Tooling
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"

@@ -1,0 +1,26 @@
+fn identity<T>(x: T) -> T {
+    x
+}
+
+fn first<A, B>(a: A, b: B) -> A {
+    a
+}
+
+fn apply_twice<T>(f: fn(T) -> T, x: T) -> T {
+    f(f(x))
+}
+
+fn double(n: Int) -> Int {
+    n * 2
+}
+
+fn main() {
+    let i = identity(41) + 1
+    let s = identity("generic string")
+    let f = first(7, "ignored")
+    let d = apply_twice(double, 5)
+    println("identity(41) + 1 = ${i}")
+    println("identity string: ${s}")
+    println("first(7, _) = ${f}")
+    println("apply_twice(double, 5) = ${d}")
+}
