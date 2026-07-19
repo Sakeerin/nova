@@ -1,4 +1,4 @@
 identity(41) + 1 = 42
 identity string: generic string
 first(7, _) = 7
-apply_twice(double, 5) = 10
+apply_twice(double, 5) = 20

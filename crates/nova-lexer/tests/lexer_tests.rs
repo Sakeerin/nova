@@ -120,3 +120,18 @@ mod prop {
         }
     }
 }
+
+#[test]
+fn interpolation_preserves_leading_whitespace_after_close() {
+    // Regression: whitespace right after `${expr}` is part of the string
+    // and must not be skipped when the lexer resumes string mode.
+    let toks = tokens(r#""${a} b ${c}""#);
+    let parts: Vec<&str> = toks
+        .iter()
+        .filter_map(|t| match t {
+            Token::StrPart(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parts, vec![" b "]);
+}

@@ -82,6 +82,15 @@ impl<'src> Lexer<'src> {
     }
 
     fn next_token(&mut self) -> Result<Option<Spanned<Token>>, LexError> {
+        // Inside a string (including resuming after `${expr}`) whitespace is
+        // significant — dispatch to string-content lexing before any skipping.
+        if self.in_string {
+            if self.pos >= self.source.len() {
+                return Ok(None);
+            }
+            return self.lex_string_content();
+        }
+
         // Skip whitespace
         while self.pos < self.source.len() {
             let ch = self.source.as_bytes()[self.pos];
@@ -97,12 +106,8 @@ impl<'src> Lexer<'src> {
         }
 
         // String literal handling
-        if self.source.as_bytes()[self.pos] == b'"' && !self.in_string {
+        if self.source.as_bytes()[self.pos] == b'"' {
             return self.lex_string_start();
-        }
-
-        if self.in_string {
-            return self.lex_string_content();
         }
 
         // Check for raw strings
