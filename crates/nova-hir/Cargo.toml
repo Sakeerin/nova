@@ -9,5 +9,4 @@ description = "High-level IR for Nova (desugared AST)"
 
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
-indexmap = { workspace = true }
-smol_str = { workspace = true }
+nova-resolver = { path = "../nova-resolver" }

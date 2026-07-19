@@ -11,6 +11,11 @@ description = "Type checker and inference for Nova (Hindley-Milner + extensions)
 nova-diagnostics = { path = "../nova-diagnostics" }
 nova-ast = { path = "../nova-ast" }
 nova-hir = { path = "../nova-hir" }
+nova-resolver = { path = "../nova-resolver" }
 indexmap = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+nova-lexer = { path = "../nova-lexer" }
+nova-parser = { path = "../nova-parser" }
