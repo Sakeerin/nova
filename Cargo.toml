@@ -27,6 +27,8 @@ cranelift = "0.105"
 cranelift-module = "0.105"
 cranelift-jit = "0.105"
 cranelift-native = "0.105"
+cranelift-object = "0.105"
+cc = "1"
 
 # Tooling
 clap = { version = "4", features = ["derive"] }

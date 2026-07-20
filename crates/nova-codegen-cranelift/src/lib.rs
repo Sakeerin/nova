@@ -1,8 +1,13 @@
 //! Cranelift codegen backend for Nova (the fast debug backend).
 //!
-//! Translates monomorphized MIR into native code. Phase 1 exposes the
-//! in-memory JIT path used by `nova run`; object-file emission for
-//! `nova build --debug` follows once the LLVM release backend lands.
+//! Translates monomorphized MIR into native code, through two paths:
+//!
+//! - [`compile_jit`]: in-memory JIT for `nova run` — runtime symbols are
+//!   registered directly with the JIT.
+//! - [`compile_object`]: native object bytes for `nova build` — the MIR
+//!   entry is emitted as `nova_main` plus an exported C `main(argc, argv)`
+//!   wrapper, and runtime symbols resolve at link time against the
+//!   `nova-runtime` static library.
 //!
 //! MIR temps become Cranelift frontend `Variable`s, so the SSA builder
 //! inserts block parameters (phis) at join points automatically. Unit-class
@@ -15,10 +20,15 @@ use cranelift::codegen::settings::{self, Configurable};
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift::prelude::{EntityRef, FloatCC, IntCC, TrapCode};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as _};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as ClModule};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 use nova_mir::{MirTy, Module as MirModule, OperandClass, RtFunc, Stmt, Terminator};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// The symbol name the MIR `main` gets in object files, so the exported
+/// C-ABI `main(argc, argv)` wrapper can keep the conventional name.
+pub const NOVA_ENTRY_SYMBOL: &str = "nova_main";
 
 // `mir_ty` is re-exported for driver convenience.
 pub use nova_mir::mangle;
@@ -45,7 +55,7 @@ impl CompiledProgram {
 /// All `nova-runtime` symbols are registered with the JIT so compiled code
 /// can call the runtime directly.
 pub fn compile_jit(mir: &MirModule) -> Result<CompiledProgram> {
-    let isa = native_isa()?;
+    let isa = native_isa(false)?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     for (name, ptr) in nova_runtime::symbols() {
         builder.symbol(name, ptr);
@@ -55,7 +65,7 @@ pub fn compile_jit(mir: &MirModule) -> Result<CompiledProgram> {
     let functions = {
         let mut cg = Codegen::new(&mut module);
         cg.declare_runtime()?;
-        cg.declare_functions(mir)?;
+        cg.declare_functions(mir, None)?;
         cg.define_functions(mir)?;
         cg.functions
     };
@@ -75,13 +85,37 @@ pub fn compile_jit(mir: &MirModule) -> Result<CompiledProgram> {
     })
 }
 
-fn native_isa() -> Result<Arc<dyn TargetIsa>> {
+/// Compile a MIR module to native object-file bytes for `nova build`.
+///
+/// The object exports a C `main(argc, argv) -> i32` that calls the Nova
+/// entry ([`NOVA_ENTRY_SYMBOL`]); `nova_rt_*` symbols are unresolved
+/// imports satisfied by linking the `nova-runtime` static library.
+pub fn compile_object(mir: &MirModule) -> Result<Vec<u8>> {
+    // PIC on Unix-likes (PIE-by-default linkers); non-PIC COFF on Windows.
+    let isa = native_isa(!cfg!(windows))?;
+    let obj_builder = ObjectBuilder::new(isa, "nova", cranelift_module::default_libcall_names())
+        .context("creating object builder")?;
+    let mut module = ObjectModule::new(obj_builder);
+
+    {
+        let mut cg = Codegen::new(&mut module);
+        cg.declare_runtime()?;
+        cg.declare_functions(mir, Some(NOVA_ENTRY_SYMBOL))?;
+        cg.define_functions(mir)?;
+        cg.emit_c_main()?;
+    }
+
+    let product = module.finish();
+    product.emit().context("emitting object file")
+}
+
+fn native_isa(pic: bool) -> Result<Arc<dyn TargetIsa>> {
     let mut flags = settings::builder();
     flags
         .set("use_colocated_libcalls", "false")
         .context("setting cranelift flags")?;
     flags
-        .set("is_pic", "false")
+        .set("is_pic", if pic { "true" } else { "false" })
         .context("setting cranelift flags")?;
     let isa_builder = cranelift_native::builder()
         .map_err(|e| anyhow!("host machine is not supported by cranelift: {e}"))?;
@@ -90,9 +124,10 @@ fn native_isa() -> Result<Arc<dyn TargetIsa>> {
         .context("building native ISA")
 }
 
-/// Per-module codegen state: declared function and data ids.
-struct Codegen<'m> {
-    module: &'m mut JITModule,
+/// Per-module codegen state: declared function and data ids. Generic over
+/// the Cranelift module flavor (JIT vs object emission).
+struct Codegen<'m, M: ClModule> {
+    module: &'m mut M,
     functions: FxHashMap<String, FuncId>,
     runtime: FxHashMap<&'static str, FuncId>,
     strings: FxHashMap<String, DataId>,
@@ -110,8 +145,8 @@ const ALL_RT: [RtFunc; 9] = [
     RtFunc::AllocSum,
 ];
 
-impl<'m> Codegen<'m> {
-    fn new(module: &'m mut JITModule) -> Self {
+impl<'m, M: ClModule> Codegen<'m, M> {
+    fn new(module: &'m mut M) -> Self {
         Self {
             module,
             functions: FxHashMap::default(),
@@ -171,16 +206,63 @@ impl<'m> Codegen<'m> {
         Ok(())
     }
 
-    fn declare_functions(&mut self, mir: &MirModule) -> Result<()> {
+    /// Declare all MIR functions. With `rename_main`, the MIR entry is
+    /// declared under that symbol (object mode, where the conventional
+    /// `main` symbol is taken by the C wrapper); the lookup key stays
+    /// `"main"` either way.
+    fn declare_functions(&mut self, mir: &MirModule, rename_main: Option<&str>) -> Result<()> {
         for f in &mir.functions {
             let params: Vec<MirTy> = f.temps[..f.params as usize].to_vec();
             let sig = self.make_signature(&params, f.ret);
+            let symbol = match rename_main {
+                Some(entry) if f.name == "main" => entry,
+                _ => f.name.as_str(),
+            };
             let id = self
                 .module
-                .declare_function(&f.name, Linkage::Local, &sig)
+                .declare_function(symbol, Linkage::Local, &sig)
                 .with_context(|| format!("declaring `{}`", f.name))?;
             self.functions.insert(f.name.clone(), id);
         }
+        Ok(())
+    }
+
+    /// Emit the exported C entry point for object files:
+    /// `main(argc: i32, argv: ptr) -> i32 { nova_main(); return 0 }`.
+    fn emit_c_main(&mut self) -> Result<()> {
+        let ptr = self.ptr_ty();
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I32));
+        sig.params.push(AbiParam::new(ptr));
+        sig.returns.push(AbiParam::new(types::I32));
+        let main_id = self
+            .module
+            .declare_function("main", Linkage::Export, &sig)
+            .context("declaring C main wrapper")?;
+
+        let nova_main = *self
+            .functions
+            .get("main")
+            .ok_or_else(|| anyhow!("no `main` function in MIR module"))?;
+
+        let mut ctx = self.module.make_context();
+        ctx.func.signature = sig;
+        let mut fb_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        let func_ref = self.module.declare_func_in_func(nova_main, builder.func);
+        builder.ins().call(func_ref, &[]);
+        let zero = builder.ins().iconst(types::I32, 0);
+        builder.ins().return_(&[zero]);
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        self.module
+            .define_function(main_id, &mut ctx)
+            .context("defining C main wrapper")?;
+        self.module.clear_context(&mut ctx);
         Ok(())
     }
 
@@ -286,14 +368,14 @@ impl<'m> Codegen<'m> {
 }
 
 /// Per-function translation state.
-struct Translator<'a, 'm> {
-    cg: &'a mut Codegen<'m>,
+struct Translator<'a, 'm, M: ClModule> {
+    cg: &'a mut Codegen<'m, M>,
     builder: FunctionBuilder<'a>,
     vars: Vec<Option<Variable>>,
     cl_blocks: Vec<cranelift::codegen::ir::Block>,
 }
 
-impl<'a, 'm> Translator<'a, 'm> {
+impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
     fn use_temp(&mut self, t: nova_mir::Temp) -> Result<Value> {
         let var = self.vars[t.0 as usize]
             .ok_or_else(|| anyhow!("attempted to read a unit temp %{}", t.0))?;

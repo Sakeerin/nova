@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 description = "GC and async runtime for Nova (linked into compiled binaries)"
 
+[lib]
+# rlib: linked into the nova CLI for the JIT path (`nova run`).
+# staticlib: linked into standalone executables by `nova build`.
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
 anyhow = { workspace = true }
