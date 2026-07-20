@@ -81,3 +81,50 @@ fn check_passes_on_valid_program() {
         .assert()
         .success();
 }
+
+// === nova build: standalone executables ===
+
+fn build_and_run(source: &str, exe_name: &str) -> String {
+    let dir = std::env::temp_dir().join("nova-build-tests");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let exe = dir.join(format!("{exe_name}{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(repo_root().join(source))
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _ = std::fs::remove_file(&exe);
+    String::from_utf8(out).expect("program output is UTF-8")
+}
+
+#[test]
+fn build_hello_world_standalone() {
+    let out = build_and_run("examples/01-hello-world/src/main.nova", "hello");
+    assert_eq!(out, "Hello, World!\n");
+}
+
+#[test]
+fn build_match_enum_standalone() {
+    let out = build_and_run("tests/runtime/match_enum.nova", "match_enum");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/match_enum.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn build_generics_standalone() {
+    let out = build_and_run("tests/runtime/generics.nova", "generics");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/generics.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}

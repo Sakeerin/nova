@@ -26,6 +26,8 @@ enum Command {
     Parse(cmd::parse::ParseCmd),
     /// Compile and run a Nova program.
     Run(cmd::run::RunCmd),
+    /// Compile a Nova program to a standalone executable.
+    Build(cmd::run::BuildCmd),
     /// Type-check a Nova program without running it.
     Check(cmd::run::CheckCmd),
 }
@@ -42,6 +44,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Parse(cmd) => cmd::parse::run(cmd),
         Command::Run(cmd) => cmd::run::run(cmd),
+        Command::Build(cmd) => cmd::run::build(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
     }
 }

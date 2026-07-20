@@ -12,6 +12,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added (Phase 1 — MVP compiler, in progress)
 - `nova run <file>`: compile and execute Nova programs natively via the
   Cranelift JIT; `nova check <file>`: type-check only
+- `nova build <file> [-o out]`: compile to a standalone native executable —
+  Cranelift object emission with an exported C `main` wrapper, linked
+  against the `nova-runtime` static library via the platform linker
+  (MSVC `link.exe` through cc-rs on Windows, `cc` elsewhere); gate
+  programs produce ~130 KB executables
 - `nova-resolver`: item-level name resolution (functions, sum types,
   variants), builtin prelude (`println`, `print`), E0002 duplicates
 - `nova-typeck` + `nova-hir`: Hindley-Milner inference with occurs check,
@@ -30,8 +35,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was skipped when resuming string mode
 
 ### Remaining for Phase 1 gate completion
-- `nova build` (object emission + linking), LLVM release backend,
-  records, traits, closures, `for` loops, full Maranget exhaustiveness
+- LLVM release backend (`nova build --release`), records, traits,
+  closures, `for` loops, full Maranget exhaustiveness
 
 ## [0.0.0] - 2026-05-10
 

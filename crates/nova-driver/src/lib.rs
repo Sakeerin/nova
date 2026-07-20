@@ -1,11 +1,14 @@
 //! Compilation pipeline orchestration for Nova.
 //!
 //! Drives source → lex → parse → resolve → typecheck → MIR →
-//! Cranelift JIT, rendering diagnostics from every stage through
-//! `nova-diagnostics`. This is the crate behind `nova run` and
-//! `nova check`.
+//! Cranelift (JIT for `nova run`, object emission + native linking for
+//! `nova build`), rendering diagnostics from every stage through
+//! `nova-diagnostics`. This is the crate behind `nova run`,
+//! `nova build`, and `nova check`.
 
-use std::path::Path;
+mod link;
+
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use nova_codegen_cranelift::CompiledProgram;
@@ -34,22 +37,52 @@ pub fn check_file(path: &Path) -> Result<Outcome<()>> {
 
 /// Compile a file to native code via the Cranelift JIT.
 pub fn compile_file(path: &Path) -> Result<Outcome<CompiledProgram>> {
+    let mir = match lower_to_mir(path)? {
+        Outcome::Ok(mir) => mir,
+        Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
+    };
+    let program = nova_codegen_cranelift::compile_jit(&mir)
+        .context("internal codegen error (this is a compiler bug)")?;
+    Ok(Outcome::Ok(program))
+}
+
+/// Compile a file to a standalone native executable (`nova build`).
+///
+/// Emits a Cranelift object file next to `output`, links it with the
+/// `nova-runtime` static library through the platform linker, and removes
+/// the intermediate object on success.
+pub fn build_file(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
+    let mir = match lower_to_mir(path)? {
+        Outcome::Ok(mir) => mir,
+        Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
+    };
+    let bytes = nova_codegen_cranelift::compile_object(&mir)
+        .context("internal codegen error (this is a compiler bug)")?;
+
+    let obj_ext = if cfg!(windows) { "obj" } else { "o" };
+    let obj_path = output.with_extension(obj_ext);
+    std::fs::write(&obj_path, bytes)
+        .with_context(|| format!("failed to write {}", obj_path.display()))?;
+
+    let linked = link::link_executable(&obj_path, output);
+    let _ = std::fs::remove_file(&obj_path);
+    linked?;
+    Ok(Outcome::Ok(output.to_path_buf()))
+}
+
+/// Run the front end and MIR lowering, rendering any diagnostics.
+fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
     let mut ctx = FrontendContext::load(path)?;
     let Some(module) = ctx.check()? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
-
-    let mir = match nova_mir::lower_module(&module) {
-        Ok(mir) => mir,
+    match nova_mir::lower_module(&module) {
+        Ok(mir) => Ok(Outcome::Ok(mir)),
         Err(diags) => {
             ctx.render(&diags);
-            return Ok(Outcome::Failed { errors: ctx.errors });
+            Ok(Outcome::Failed { errors: ctx.errors })
         }
-    };
-
-    let program = nova_codegen_cranelift::compile_jit(&mir)
-        .context("internal codegen error (this is a compiler bug)")?;
-    Ok(Outcome::Ok(program))
+    }
 }
 
 /// Compile and immediately execute a file (`nova run`).
