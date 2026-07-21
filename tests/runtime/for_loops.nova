@@ -1,0 +1,30 @@
+fn main() {
+    let mut sum = 0
+    for i in 0..5 {
+        sum = sum + i
+    }
+    println("sum 0..5 = ${sum}")
+
+    let mut product = 1
+    for i in 1..=5 {
+        product = product * i
+    }
+    println("5! = ${product}")
+
+    // Nested loops.
+    let mut count = 0
+    for i in 0..3 {
+        for j in 0..3 {
+            count = count + 1
+        }
+    }
+    println("3x3 = ${count}")
+
+    // Range bounds from expressions.
+    let n = 4
+    let mut total = 0
+    for k in 0..n * 2 {
+        total = total + 1
+    }
+    println("iterations = ${total}")
+}

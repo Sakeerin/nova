@@ -1028,7 +1028,7 @@ impl<'a> Parser<'a> {
 
     fn parse_assign(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
-        let lhs = self.parse_or(ctx)?;
+        let lhs = self.parse_range(ctx)?;
 
         let op = match self.peek() {
             Token::Eq => Some(AssignOp::Assign),
@@ -1060,6 +1060,30 @@ impl<'a> Parser<'a> {
         } else {
             Some(lhs)
         }
+    }
+
+    /// Range expressions `lo..hi` / `lo..=hi`, just above assignment in
+    /// precedence and non-chainable.
+    fn parse_range(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
+        let start = self.peek_span();
+        let lo = self.parse_or(ctx)?;
+        let inclusive = if self.eat(&Token::DotDotEq).is_some() {
+            true
+        } else if self.eat(&Token::DotDot).is_some() {
+            false
+        } else {
+            return Some(lo);
+        };
+        let hi = self.parse_or(ctx)?;
+        let span = start.merge(hi.span);
+        Some(Spanned::new(
+            Expr::Range {
+                lo: Box::new(lo),
+                hi: Box::new(hi),
+                inclusive,
+            },
+            span,
+        ))
     }
 
     fn parse_or(&mut self, ctx: &str) -> Option<Spanned<Expr>> {

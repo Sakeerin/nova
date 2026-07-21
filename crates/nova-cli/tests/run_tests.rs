@@ -76,6 +76,19 @@ fn records_run() {
 }
 
 #[test]
+fn for_loops_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/for_loops.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/for_loops.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
 fn traits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
         .expect("expected-output fixture exists")
@@ -115,6 +128,27 @@ fn check_passes_on_valid_program() {
         .arg(repo_root().join("examples/02-fibonacci/src/main.nova"))
         .assert()
         .success();
+}
+
+/// `nova check` must reject an unsatisfied trait bound — it runs
+/// monomorphization so its "ok" verdict matches what `nova run` accepts.
+#[test]
+fn check_rejects_unsatisfied_trait_bound() {
+    let dir = std::env::temp_dir().join("nova-check-bound");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("bound.nova");
+    std::fs::write(
+        &file,
+        "record P { v: Int }\n\
+         trait Show { fn name(self) -> String }\n\
+         impl Show for P { fn name(self) -> String { \"p\" } }\n\
+         fn label<T: Show>(x: T) -> String { x.name() }\n\
+         fn main() { println(label(5)) }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0013"), "stderr: {stderr}");
 }
 
 // === nova build: standalone executables ===

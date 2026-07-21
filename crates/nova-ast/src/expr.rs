@@ -35,6 +35,14 @@ pub enum Expr {
         body: Box<Spanned<Block>>,
     },
 
+    /// A range expression `lo..hi` (exclusive) or `lo..=hi` (inclusive).
+    /// Phase 1 supports these only as the iterable of a `for` loop.
+    Range {
+        lo: Box<Spanned<Expr>>,
+        hi: Box<Spanned<Expr>>,
+        inclusive: bool,
+    },
+
     Return(Option<Box<Spanned<Expr>>>),
     Break(Option<Box<Spanned<Expr>>>),
     Continue,

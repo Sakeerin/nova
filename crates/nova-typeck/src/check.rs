@@ -989,10 +989,18 @@ impl<'a> Checker<'a> {
                 ty: Ty::Unit,
                 span,
             },
+            ast::Expr::For {
+                pattern,
+                iter,
+                body,
+            } => self.check_for(fcx, pattern, iter, body, span),
+            ast::Expr::Range { .. } => {
+                self.unsupported(span, "ranges outside a `for` loop");
+                error_expr(span)
+            }
             // --- deferred constructs ---
             ast::Expr::Tuple(_) => self.unsupported_expr(span, "tuple expressions"),
             ast::Expr::Array(_) => self.unsupported_expr(span, "array literals"),
-            ast::Expr::For { .. } => self.unsupported_expr(span, "`for` loops"),
             ast::Expr::Break(_) => self.unsupported_expr(span, "`break`"),
             ast::Expr::Continue => self.unsupported_expr(span, "`continue`"),
             ast::Expr::Closure { .. } => self.unsupported_expr(span, "closures"),
@@ -1378,6 +1386,128 @@ impl<'a> Checker<'a> {
                 def_id: sum_id,
                 args: type_args,
             },
+            span,
+        }
+    }
+
+    /// `for i in lo..hi { body }` desugars to a counter-driven `while`:
+    /// `{ let i = lo; let end = hi; while i < end { body; i = i + 1 } }`
+    /// (`<=` for an inclusive range). Phase 1 iterables are integer ranges.
+    fn check_for(
+        &mut self,
+        fcx: &mut FnCtx,
+        pattern: &Spanned<ast::Pattern>,
+        iter: &Spanned<ast::Expr>,
+        body: &Spanned<ast::Block>,
+        span: Span,
+    ) -> hir::Expr {
+        let ast::Expr::Range { lo, hi, inclusive } = &iter.value else {
+            self.unsupported(
+                iter.span,
+                "`for` loops over anything but an integer range (`a..b`)",
+            );
+            return error_expr(span);
+        };
+
+        let lo = self.check_expr(fcx, lo);
+        self.expect_ty(fcx, &lo, &Ty::Int, "a range bound");
+        let hi = self.check_expr(fcx, hi);
+        self.expect_ty(fcx, &hi, &Ty::Int, "a range bound");
+
+        // The loop variable doubles as the counter; mark it mutable so the
+        // synthesized increment is well-formed at the MIR level.
+        fcx.scopes.push(FxHashMap::default());
+        let (var_name, var_span) = match &pattern.value {
+            ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
+            ast::Pattern::Wildcard => ("_".to_string(), pattern.span),
+            _ => {
+                self.error(
+                    "E0022",
+                    "a `for` loop variable must be a name or `_`",
+                    pattern.span,
+                );
+                ("_".to_string(), pattern.span)
+            }
+        };
+        let i = fcx.new_local(var_name, Ty::Int, true, var_span);
+        let end = fcx.new_local("__end".to_string(), Ty::Int, false, span);
+
+        let body_hir = self.check_block(fcx, &body.value, body.span);
+        fcx.scopes.pop();
+
+        let int = |kind| hir::Expr {
+            kind,
+            ty: Ty::Int,
+            span,
+        };
+        let read_i = || int(hir::ExprKind::Local(i));
+
+        // cond: i < end   (or i <= end for inclusive)
+        let cond = hir::Expr {
+            kind: hir::ExprKind::Binary {
+                op: if *inclusive {
+                    hir::BinOp::Le
+                } else {
+                    hir::BinOp::Lt
+                },
+                lhs: Box::new(read_i()),
+                rhs: Box::new(int(hir::ExprKind::Local(end))),
+            },
+            ty: Ty::Bool,
+            span,
+        };
+        // increment: i = i + 1
+        let incr = hir::Expr {
+            kind: hir::ExprKind::Assign {
+                local: i,
+                value: Box::new(int(hir::ExprKind::Binary {
+                    op: hir::BinOp::Add,
+                    lhs: Box::new(read_i()),
+                    rhs: Box::new(int(hir::ExprKind::IntLit(1))),
+                })),
+            },
+            ty: Ty::Unit,
+            span,
+        };
+        let while_body = hir::Expr {
+            kind: hir::ExprKind::Block {
+                stmts: vec![body_hir, incr],
+                trailing: None,
+            },
+            ty: Ty::Unit,
+            span,
+        };
+        let while_expr = hir::Expr {
+            kind: hir::ExprKind::While {
+                cond: Box::new(cond),
+                body: Box::new(while_body),
+            },
+            ty: Ty::Unit,
+            span,
+        };
+
+        let let_i = hir::Expr {
+            kind: hir::ExprKind::Let {
+                local: i,
+                init: Box::new(lo),
+            },
+            ty: Ty::Unit,
+            span,
+        };
+        let let_end = hir::Expr {
+            kind: hir::ExprKind::Let {
+                local: end,
+                init: Box::new(hi),
+            },
+            ty: Ty::Unit,
+            span,
+        };
+        hir::Expr {
+            kind: hir::ExprKind::Block {
+                stmts: vec![let_i, let_end, while_expr],
+                trailing: None,
+            },
+            ty: Ty::Unit,
             span,
         }
     }
@@ -2999,6 +3129,31 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn for_loop_over_range_ok() {
+        let r = check_src(
+            "fn main() {\n\
+                 let mut s = 0\n\
+                 for i in 0..10 { s = s + i }\n\
+                 for j in 1..=3 { s = s + j }\n\
+                 println(\"${s}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn for_over_non_range_reports_e0900() {
+        let r = check_src("fn main() { for x in 5 { } }");
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn range_outside_for_reports_e0900() {
+        let r = check_src("fn main() { let r = 0..5 }");
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
     }
 
     #[test]
