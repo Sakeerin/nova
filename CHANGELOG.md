@@ -34,9 +34,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (E0015 on ambiguity), generic trait bounds verified at monomorphization
   (E0013), impl conformance (E0070/E0071), static dispatch; string
   interpolation bridges to a user `Display` (`fmt(self) -> String`)
+- For loops over integer ranges (`for i in a..b` / `a..=b`), desugared to
+  a counter-driven `while`
+- Closures (`|x| body`) with by-value capture, and bare functions used as
+  values: both compile to fat pointers `{ code, env }` with an env-first
+  ABI; lifted to standalone functions and monomorphized like generics
 - Gate programs verified end-to-end: hello-world, fibonacci,
-  match-on-enum, generic functions, records, traits (e2e stdout tests
-  under both `nova run` and `nova build`)
+  match-on-enum, generic functions, records, traits, for-loops, closures
+  (e2e stdout tests under both `nova run` and `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
@@ -57,8 +62,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Record literal field initializers now evaluate in source order (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), closures, `for` loops,
-  constants, full Maranget exhaustiveness, generic impls
+- LLVM release backend (`nova build --release`), `break`/`continue`,
+  constants, arrays/indexing, full Maranget exhaustiveness, generic impls
 
 ## [0.0.0] - 2026-05-10
 
