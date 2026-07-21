@@ -135,3 +135,16 @@ fn interpolation_preserves_leading_whitespace_after_close() {
         .collect();
     assert_eq!(parts, vec![" b "]);
 }
+
+#[test]
+fn line_and_block_comments_are_skipped() {
+    // Regression: logos skips comments but the wrapper must not drift into
+    // the comment text when advancing.
+    let toks = tokens("// leading\nfn /* mid */ main() {}\n// trailing");
+    // Expect: Fn Ident("main") LParen RParen LBrace RBrace Eof
+    assert!(matches!(toks[0], Token::Fn), "toks: {toks:?}");
+    assert!(
+        matches!(&toks[1], Token::Ident(n) if n == "main"),
+        "toks: {toks:?}"
+    );
+}

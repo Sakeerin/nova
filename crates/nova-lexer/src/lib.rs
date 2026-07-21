@@ -319,23 +319,31 @@ impl<'src> Lexer<'src> {
                 Ok(None)
             }
             Some(Ok(raw)) => {
-                let slice_start = self.pos;
-                let slice_len = lex.span().len();
-                self.pos += slice_len;
-                let span = self.span(slice_start, self.pos);
+                // `lex.span()` is relative to `remaining` and excludes any
+                // trivia logos skipped (comments, whitespace), so the token
+                // may not start at `self.pos`. Account for the skipped
+                // prefix, otherwise `pos` drifts into the comment text.
+                let tok_span = lex.span();
+                let tok_start = self.pos + tok_span.start;
+                let tok_end = self.pos + tok_span.end;
+                self.pos = tok_end;
+                let span = self.span(tok_start, tok_end);
 
                 // Special case: `}` might close an interpolation.
                 if raw == RawToken::RBrace {
-                    return Ok(self.maybe_close_interp(slice_start));
+                    return Ok(self.maybe_close_interp(tok_start));
                 }
 
                 let tok = raw_to_token(raw, lex.slice());
                 Ok(Some(Spanned::new(tok, span)))
             }
             Some(Err(())) => {
-                let ch = remaining.chars().next().unwrap_or('?');
-                let err_start = self.pos;
-                self.pos += ch.len_utf8();
+                // Skip any trivia before the offending character so the
+                // error span points at the character itself.
+                let err_offset = lex.span().start;
+                let ch = remaining[err_offset..].chars().next().unwrap_or('?');
+                let err_start = self.pos + err_offset;
+                self.pos = err_start + ch.len_utf8();
                 Err(LexError::UnexpectedCharacter(
                     ch,
                     self.span(err_start, self.pos),
