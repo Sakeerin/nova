@@ -26,12 +26,24 @@ pub enum Outcome<T> {
 }
 
 /// Type-check a file, printing diagnostics. `Outcome::Ok(())` means the
-/// program is well-formed.
+/// program is well-formed and would compile.
+///
+/// This also runs monomorphization (MIR lowering), since some checks —
+/// notably trait-bound satisfaction — are performed there per
+/// `12-TYPESYSTEM.md` §5.4. Without it `nova check` would call a program
+/// "well-formed" that `nova run` / `nova build` then reject.
 pub fn check_file(path: &Path) -> Result<Outcome<()>> {
     let mut ctx = FrontendContext::load(path)?;
-    match ctx.check()? {
-        Some(_) => Ok(Outcome::Ok(())),
-        None => Ok(Outcome::Failed { errors: ctx.errors }),
+    let Some(module) = ctx.check()? else {
+        return Ok(Outcome::Failed { errors: ctx.errors });
+    };
+    if let Err(diags) = nova_mir::lower_module(&module) {
+        ctx.render(&diags);
+    }
+    if ctx.errors > 0 {
+        Ok(Outcome::Failed { errors: ctx.errors })
+    } else {
+        Ok(Outcome::Ok(()))
     }
 }
 

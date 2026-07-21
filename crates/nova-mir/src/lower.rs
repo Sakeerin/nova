@@ -441,13 +441,17 @@ impl<'a> Lowerer<'a> {
         let head = self_ty.head();
         let target = head.and_then(|h| self.module.resolve_method(trait_id, method, h));
         let Some(target) = target else {
+            let trait_name = self
+                .module
+                .trait_def(trait_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| format!("trait#{}", trait_id.0));
             self.diagnostics.push(
                 Diagnostic::error(
                     "E0013",
-                    "no matching trait impl for this method call (compiler bug: \
-                     bounds should have caught this)",
+                    format!("no implementation of trait `{trait_name}` for the receiver type"),
                 )
-                .with_primary_label(e.span, "unresolved trait method"),
+                .with_primary_label(e.span, "no matching trait impl"),
             );
             return dst.unwrap_or_else(|| self.unit_temp());
         };

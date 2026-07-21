@@ -60,6 +60,7 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         // Check that each concrete type argument satisfies its generic
         // parameter's trait bounds (spec 12-TYPESYSTEM §5.4: bounds are
         // verified during monomorphization).
+        let mut bounds_ok = true;
         for (i, bounds) in func.bounds.iter().enumerate() {
             let Some(arg) = type_args.get(i) else {
                 continue;
@@ -75,6 +76,7 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
                     })
                     .unwrap_or(false);
                 if !satisfied {
+                    bounds_ok = false;
                     let trait_name = module
                         .trait_def(trait_id)
                         .map(|t| t.name.clone())
@@ -93,6 +95,12 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
                     );
                 }
             }
+        }
+        // Skip lowering an instance with unsatisfied bounds: its body would
+        // fail to resolve the very trait methods the bound guarantees,
+        // producing a duplicate diagnostic for one root cause.
+        if !bounds_ok {
+            continue;
         }
 
         // Specialize the function body for these type arguments.
