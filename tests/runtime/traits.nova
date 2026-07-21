@@ -1,0 +1,57 @@
+record Point { x: Int, y: Int }
+
+// Inherent methods.
+impl Point {
+    fn manhattan(self) -> Int {
+        self.x + self.y
+    }
+
+    fn shifted(self, dx: Int, dy: Int) -> Point {
+        Point { x: self.x + dx, y: self.y + dy }
+    }
+}
+
+// A trait with a required method and a default method.
+trait Describe {
+    fn label(self) -> String
+
+    fn describe(self) -> String {
+        "described: ${self.label()}"
+    }
+}
+
+impl Describe for Point {
+    fn label(self) -> String {
+        "Point(${self.x}, ${self.y})"
+    }
+}
+
+// A user-defined Display, used by string interpolation.
+trait Display {
+    fn fmt(self) -> String
+}
+
+impl Display for Point {
+    fn fmt(self) -> String {
+        "(${self.x}, ${self.y})"
+    }
+}
+
+// A generic function constrained by a trait bound.
+fn announce<T: Describe>(item: T) -> String {
+    item.describe()
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    println("manhattan = ${p.manhattan()}")
+
+    let q = p.shifted(10, 20)
+    println("shifted label = ${q.label()}")
+
+    println(p.describe())
+    println(announce(q))
+
+    // Display via interpolation.
+    println("p as display = ${p}")
+}

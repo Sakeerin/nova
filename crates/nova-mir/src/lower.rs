@@ -232,6 +232,13 @@ impl<'a> Lowerer<'a> {
                 });
                 t
             }
+            K::TraitCall {
+                trait_id,
+                method,
+                self_ty,
+                receiver,
+                args,
+            } => self.lower_trait_call(e, *trait_id, *method, self_ty, receiver, args),
             K::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             K::LogicalAnd { lhs, rhs } => self.lower_logical(lhs, rhs, true),
             K::LogicalOr { lhs, rhs } => self.lower_logical(lhs, rhs, false),
@@ -404,6 +411,65 @@ impl<'a> Lowerer<'a> {
                 });
             }
         }
+        dst.unwrap_or_else(|| self.unit_temp())
+    }
+
+    /// Lower a trait method call. `self_ty` is concrete here (the enclosing
+    /// function was already monomorphized), so we resolve to the impl's
+    /// method and emit a direct, statically-dispatched call.
+    fn lower_trait_call(
+        &mut self,
+        e: &hir::Expr,
+        trait_id: DefId,
+        method: u32,
+        self_ty: &Ty,
+        receiver: &hir::Expr,
+        args: &[hir::Expr],
+    ) -> Temp {
+        let recv = self.lower_expr(receiver);
+        let mut arg_temps = vec![recv];
+        for a in args {
+            arg_temps.push(self.lower_expr(a));
+        }
+
+        let ret_class = mir_ty(&e.ty);
+        let dst = match ret_class {
+            MirTy::Unit => None,
+            other => Some(self.new_temp(other)),
+        };
+
+        let head = self_ty.head();
+        let target = head.and_then(|h| self.module.resolve_method(trait_id, method, h));
+        let Some(target) = target else {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "E0013",
+                    "no matching trait impl for this method call (compiler bug: \
+                     bounds should have caught this)",
+                )
+                .with_primary_label(e.span, "unresolved trait method"),
+            );
+            return dst.unwrap_or_else(|| self.unit_temp());
+        };
+
+        // A default-method body is generic over `Self` (`generics == 1`);
+        // pass the concrete self type so it monomorphizes correctly.
+        let needs_self_arg = self
+            .module
+            .function(target)
+            .map(|f| f.generics == 1)
+            .unwrap_or(false);
+        let type_args = if needs_self_arg {
+            vec![self_ty.clone()]
+        } else {
+            Vec::new()
+        };
+        let callee = self.callee_name(target, &type_args);
+        self.push(Stmt::Call {
+            dst,
+            callee,
+            args: arg_temps,
+        });
         dst.unwrap_or_else(|| self.unit_temp())
     }
 

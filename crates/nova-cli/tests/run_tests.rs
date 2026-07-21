@@ -76,6 +76,28 @@ fn records_run() {
 }
 
 #[test]
+fn traits_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/traits.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn traits_build_standalone() {
+    let out = build_and_run("tests/runtime/traits.nova", "traits");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn check_reports_type_errors_with_code() {
     let dir = std::env::temp_dir().join("nova-check-test");
     std::fs::create_dir_all(&dir).expect("temp dir");

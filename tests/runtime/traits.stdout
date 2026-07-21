@@ -1,0 +1,5 @@
+manhattan = 7
+shifted label = Point(13, 24)
+described: Point(3, 4)
+described: Point(13, 24)
+p as display = (3, 4)

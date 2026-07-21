@@ -2,22 +2,45 @@
 //! desugaring, and minimal exhaustiveness analysis.
 
 use nova_ast as ast;
-use nova_ast::item::TypeDef;
+use nova_ast::item::{TraitItem, TypeDef};
 use nova_diagnostics::{Diagnostic, Span, Spanned};
 use nova_hir as hir;
-use nova_hir::{LocalId, Ty};
-use nova_resolver::{Builtin, DefId, DefKind, Definitions, Res};
+use nova_hir::{LocalId, Ty, TyHead};
+use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, Res};
 use rustc_hash::FxHashMap;
 
 use crate::infer::InferCtx;
 use crate::{display_ty, CheckResult};
 
-/// A collected function signature.
+/// A collected function (or method) signature.
 #[derive(Debug, Clone)]
 struct FnSig {
     generics: u32,
+    /// Trait bounds per generic parameter.
+    bounds: Vec<Vec<DefId>>,
+    /// Parameter types. For methods, `params[0]` is the `self` receiver.
     params: Vec<Ty>,
     ret: Ty,
+}
+
+/// Outcome of resolving a method name against a receiver type.
+enum MethodRes {
+    /// An inherent method (compiled function `DefId`).
+    Inherent(DefId),
+    /// A trait method: `(trait_id, method_index)`.
+    Trait(DefId, u32),
+    /// No method of that name applies.
+    None,
+    /// More than one trait provides the method.
+    Ambiguous,
+}
+
+/// The AST location and flavor of a method to compile.
+#[derive(Debug, Clone, Copy)]
+struct MethodLoc {
+    item_index: usize,
+    method_index: usize,
+    owner: MethodOwner,
 }
 
 /// Type-check a parsed file against its resolved definitions.
@@ -26,12 +49,17 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         file,
         defs,
         sigs: FxHashMap::default(),
+        method_locs: FxHashMap::default(),
         sums: Vec::new(),
         records: Vec::new(),
+        traits: Vec::new(),
+        impls: Vec::new(),
         diagnostics: Vec::new(),
     };
     checker.collect_records();
     checker.collect_sums();
+    checker.collect_traits();
+    checker.collect_impls();
     checker.collect_signatures();
 
     let mut functions = Vec::new();
@@ -41,11 +69,19 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
             functions.push(f);
         }
     }
+    let method_ids: Vec<DefId> = checker.method_locs.keys().copied().collect();
+    for def_id in method_ids {
+        if let Some(f) = checker.check_method(def_id) {
+            functions.push(f);
+        }
+    }
 
     CheckResult {
         module: hir::Module {
             sums: checker.sums,
             records: checker.records,
+            traits: checker.traits,
+            impls: checker.impls,
             functions,
         },
         diagnostics: checker.diagnostics,
@@ -56,8 +92,12 @@ struct Checker<'a> {
     file: &'a ast::File,
     defs: &'a Definitions,
     sigs: FxHashMap<DefId, FnSig>,
+    /// AST location of each method `DefId`, for the compile pass.
+    method_locs: FxHashMap<DefId, MethodLoc>,
     sums: Vec<hir::SumType>,
     records: Vec<hir::RecordType>,
+    traits: Vec<hir::TraitDef>,
+    impls: Vec<hir::ImplInfo>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -68,6 +108,8 @@ struct FnCtx {
     scopes: Vec<FxHashMap<String, LocalId>>,
     /// Generic parameter names of the enclosing function.
     generics: FxHashMap<String, u32>,
+    /// Trait bounds per generic parameter, indexed like `generics` values.
+    param_bounds: Vec<Vec<DefId>>,
     ret_ty: Ty,
 }
 
@@ -157,6 +199,263 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Collect trait declarations and their method signatures. `Self` is
+    /// encoded as `Ty::Param(0)` in stored method signatures.
+    fn collect_traits(&mut self) {
+        // Map (trait item_index, method_index) → default-method DefId.
+        let default_defs: FxHashMap<(usize, usize), DefId> = self
+            .defs
+            .methods()
+            .filter(|(_, _, _, owner)| *owner == MethodOwner::TraitDefault)
+            .map(|(id, ii, mi, _)| ((ii, mi), id))
+            .collect();
+
+        for (i, def) in self.defs.defs().iter().enumerate() {
+            let DefKind::Trait { item_index } = def.kind else {
+                continue;
+            };
+            let ast::Item::Trait(decl) = &self.file.items[item_index].value else {
+                continue;
+            };
+            if !decl.generics.is_empty() {
+                self.unsupported(decl.name.span, "generic traits");
+            }
+            let self_scope = self_generic_scope();
+            let mut methods = Vec::new();
+            for (mi, item) in decl.items.iter().enumerate() {
+                let (name, params, ret, span, is_default) = match item {
+                    TraitItem::Required(sig) => {
+                        (&sig.name, &sig.params, &sig.return_ty, sig.name.span, false)
+                    }
+                    TraitItem::Provided(f) => (&f.name, &f.params, &f.return_ty, f.name.span, true),
+                };
+                let _ = span;
+                let (m_params, m_ret) = self.method_sig_parts(params, ret, &self_scope);
+                let default_def = if is_default {
+                    default_defs.get(&(item_index, mi)).copied()
+                } else {
+                    None
+                };
+                methods.push(hir::TraitMethod {
+                    name: name.value.clone(),
+                    params: m_params,
+                    ret: m_ret,
+                    default_def,
+                });
+            }
+            self.traits.push(hir::TraitDef {
+                def_id: DefId(i as u32),
+                name: def.name.clone(),
+                methods,
+            });
+        }
+
+        // Signatures for default-method function bodies: generic over Self
+        // (`Param(0)`), bounded by the enclosing trait.
+        let trait_items: Vec<(DefId, usize)> = self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d.kind {
+                DefKind::Trait { item_index } => Some((DefId(i as u32), item_index)),
+                _ => None,
+            })
+            .collect();
+        for (trait_id, item_index) in trait_items {
+            let ast::Item::Trait(decl) = &self.file.items[item_index].value else {
+                continue;
+            };
+            let self_scope = self_generic_scope();
+            for (mi, item) in decl.items.iter().enumerate() {
+                let TraitItem::Provided(f) = item else {
+                    continue;
+                };
+                let Some(def_id) = default_defs.get(&(item_index, mi)).copied() else {
+                    continue;
+                };
+                self.reject_method_generics(f);
+                let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &self_scope);
+                // Prepend the `self` receiver typed as `Self` (`Param(0)`).
+                params.insert(0, Ty::Param(0));
+                self.sigs.insert(
+                    def_id,
+                    FnSig {
+                        generics: 1,
+                        bounds: vec![vec![trait_id]],
+                        params,
+                        ret,
+                    },
+                );
+                self.method_locs.insert(
+                    def_id,
+                    MethodLoc {
+                        item_index,
+                        method_index: mi,
+                        owner: MethodOwner::TraitDefault,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Collect impl blocks into the impl table and method signatures.
+    fn collect_impls(&mut self) {
+        let impl_methods: FxHashMap<(usize, usize), DefId> = self
+            .defs
+            .methods()
+            .filter(|(_, _, _, owner)| *owner == MethodOwner::Impl)
+            .map(|(id, ii, mi, _)| ((ii, mi), id))
+            .collect();
+
+        for (item_index, item) in self.file.items.iter().enumerate() {
+            let ast::Item::Impl(block) = &item.value else {
+                continue;
+            };
+            if !block.generics.is_empty() || !block.where_clause.is_empty() {
+                self.unsupported(block.ty.span, "generic impl blocks");
+                continue;
+            }
+            let self_ty = self.convert_ty(&block.ty, &FxHashMap::default());
+            let Some(self_head) = self_ty.head() else {
+                self.error(
+                    "E0010",
+                    "impl blocks are only supported on named types",
+                    block.ty.span,
+                );
+                continue;
+            };
+            let trait_id = match &block.trait_ {
+                Some(tr) => {
+                    let name = tr
+                        .value
+                        .segments
+                        .last()
+                        .map(|s| s.value.as_str())
+                        .unwrap_or("");
+                    match self.defs.resolve_trait(name) {
+                        Some(id) => Some(id),
+                        None => {
+                            self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            let mut methods = Vec::new();
+            for (mi, f) in block.functions.iter().enumerate() {
+                let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
+                    continue;
+                };
+                self.reject_method_generics(f);
+                // Non-self params + ret in terms of the concrete self type.
+                let (mut params, ret) =
+                    self.method_sig_parts(&f.params, &f.return_ty, &FxHashMap::default());
+                params.insert(0, self_ty.clone());
+                self.sigs.insert(
+                    def_id,
+                    FnSig {
+                        generics: 0,
+                        bounds: Vec::new(),
+                        params,
+                        ret,
+                    },
+                );
+                self.method_locs.insert(
+                    def_id,
+                    MethodLoc {
+                        item_index,
+                        method_index: mi,
+                        owner: MethodOwner::Impl,
+                    },
+                );
+                methods.push((f.name.value.clone(), def_id));
+            }
+
+            // Conformance: a trait impl must define exactly the trait's
+            // methods that lack defaults, and nothing foreign.
+            if let Some(tid) = trait_id {
+                self.check_impl_conformance(tid, &methods, block.ty.span);
+            }
+
+            self.impls.push(hir::ImplInfo {
+                trait_id,
+                self_head,
+                methods,
+            });
+        }
+    }
+
+    /// Verify a trait impl provides all required methods and no unknown ones.
+    fn check_impl_conformance(
+        &mut self,
+        trait_id: DefId,
+        provided: &[(String, DefId)],
+        span: Span,
+    ) {
+        let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id).cloned() else {
+            return;
+        };
+        for (name, _) in provided {
+            if !tr.methods.iter().any(|m| &m.name == name) {
+                self.error(
+                    "E0071",
+                    format!("method `{name}` is not a member of trait `{}`", tr.name),
+                    span,
+                );
+            }
+        }
+        let missing: Vec<String> = tr
+            .methods
+            .iter()
+            .filter(|m| m.default_def.is_none() && !provided.iter().any(|(n, _)| n == &m.name))
+            .map(|m| format!("`{}`", m.name))
+            .collect();
+        if !missing.is_empty() {
+            self.error(
+                "E0070",
+                format!(
+                    "impl of trait `{}` is missing method(s): {}",
+                    tr.name,
+                    missing.join(", ")
+                ),
+                span,
+            );
+        }
+    }
+
+    /// Reject method-level generics/async (deferred in Phase 1).
+    fn reject_method_generics(&mut self, f: &ast::Function) {
+        if f.is_async {
+            self.unsupported(f.name.span, "async methods");
+        }
+        if !f.generics.is_empty() {
+            self.unsupported(f.name.span, "generic methods");
+        }
+    }
+
+    /// Convert a method's non-`self` parameter types and return type using
+    /// `scope` (which maps `Self`/generics to `Param` indices).
+    fn method_sig_parts(
+        &mut self,
+        params: &[ast::Param],
+        ret: &Option<Spanned<ast::Type>>,
+        scope: &FxHashMap<String, u32>,
+    ) -> (Vec<Ty>, Ty) {
+        let converted = params
+            .iter()
+            .filter(|p| p.name.value != "self")
+            .map(|p| self.convert_ty(&p.ty, scope))
+            .collect();
+        let ret_ty = ret
+            .as_ref()
+            .map(|t| self.convert_ty(t, scope))
+            .unwrap_or(Ty::Unit);
+        (converted, ret_ty)
+    }
+
     fn collect_signatures(&mut self) {
         let fn_ids: Vec<(DefId, usize)> = self.defs.functions().collect();
         for (def_id, item_index) in fn_ids {
@@ -166,10 +465,11 @@ impl<'a> Checker<'a> {
             if f.is_async {
                 self.unsupported(f.name.span, "async functions");
             }
-            if !f.where_clause.is_empty() || f.generics.iter().any(|g| !g.bounds.is_empty()) {
-                self.unsupported(f.name.span, "trait bounds on generics");
+            if !f.where_clause.is_empty() {
+                self.unsupported(f.name.span, "`where` clauses");
             }
             let generics = generic_scope(&f.generics);
+            let bounds = self.resolve_bounds(&f.generics);
             let params = f
                 .params
                 .iter()
@@ -184,6 +484,7 @@ impl<'a> Checker<'a> {
                 def_id,
                 FnSig {
                     generics: f.generics.len() as u32,
+                    bounds,
                     params,
                     ret,
                 },
@@ -195,6 +496,33 @@ impl<'a> Checker<'a> {
                 self.unsupported(def.span, "constants");
             }
         }
+    }
+
+    /// Resolve each generic parameter's trait bounds to trait `DefId`s.
+    fn resolve_bounds(&mut self, generics: &[ast::TypeParam]) -> Vec<Vec<DefId>> {
+        generics
+            .iter()
+            .map(|g| {
+                g.bounds
+                    .iter()
+                    .filter_map(|b| {
+                        let name = b
+                            .value
+                            .segments
+                            .last()
+                            .map(|s| s.value.as_str())
+                            .unwrap_or("");
+                        match self.defs.resolve_trait(name) {
+                            Some(id) => Some(id),
+                            None => {
+                                self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                                None
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     /// Convert an AST type annotation to a `Ty`, resolving names.
@@ -314,12 +642,55 @@ impl<'a> Checker<'a> {
         let ast::Item::Function(f) = &self.file.items[item_index].value else {
             return None;
         };
+        let generics = generic_scope(&f.generics);
+        self.check_fn_body(def_id, f, generics)
+    }
+
+    /// Compile an impl or trait-default method body.
+    fn check_method(&mut self, def_id: DefId) -> Option<hir::Function> {
+        let loc = *self.method_locs.get(&def_id)?;
+        // `self.file` is a `&'a File`; copy the reference so the method
+        // borrow is tied to `'a`, not to `self` (which we mutate below).
+        let file: &'a ast::File = self.file;
+        let f: &'a ast::Function = match loc.owner {
+            MethodOwner::Impl => {
+                let ast::Item::Impl(block) = &file.items[loc.item_index].value else {
+                    return None;
+                };
+                &block.functions[loc.method_index]
+            }
+            MethodOwner::TraitDefault => {
+                let ast::Item::Trait(decl) = &file.items[loc.item_index].value else {
+                    return None;
+                };
+                match &decl.items[loc.method_index] {
+                    TraitItem::Provided(f) => f,
+                    TraitItem::Required(_) => return None,
+                }
+            }
+        };
+        let generics = match loc.owner {
+            MethodOwner::Impl => FxHashMap::default(),
+            MethodOwner::TraitDefault => self_generic_scope(),
+        };
+        self.check_fn_body(def_id, f, generics)
+    }
+
+    /// Shared body-checking for functions and methods.
+    fn check_fn_body(
+        &mut self,
+        def_id: DefId,
+        f: &ast::Function,
+        generics: FxHashMap<String, u32>,
+    ) -> Option<hir::Function> {
         let sig = self.sigs.get(&def_id)?.clone();
+        let name = self.defs.def(def_id).name.clone();
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
             locals: Vec::new(),
             scopes: vec![FxHashMap::default()],
-            generics: generic_scope(&f.generics),
+            generics,
+            param_bounds: sig.bounds.clone(),
             ret_ty: sig.ret.clone(),
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
@@ -332,8 +703,8 @@ impl<'a> Checker<'a> {
             self.error(
                 "E0010",
                 format!(
-                    "function `{}` should return `{}` but its body has type `{}`",
-                    f.name.value,
+                    "`{}` should return `{}` but its body has type `{}`",
+                    name,
                     self.show(&sig.ret, &fcx),
                     self.show(&body.ty, &fcx),
                 ),
@@ -343,8 +714,9 @@ impl<'a> Checker<'a> {
 
         let mut func = hir::Function {
             def_id,
-            name: f.name.value.clone(),
+            name,
             generics: sig.generics,
+            bounds: sig.bounds,
             params: f.params.len() as u32,
             locals: fcx.locals,
             ret_ty: sig.ret,
@@ -602,15 +974,25 @@ impl<'a> Checker<'a> {
                             });
                         }
                         other => {
-                            self.error(
-                                "E0013",
-                                format!(
-                                    "`{}` cannot be interpolated into a string \
-                                     (Display trait support arrives later in Phase 1)",
-                                    self.show(&other, fcx),
-                                ),
-                                value.span,
-                            );
+                            // Bridge to a user-defined `Display` trait: if the
+                            // value's type has a `fmt(self) -> String` in scope,
+                            // interpolation calls it.
+                            match self.try_display(fcx, value, &other) {
+                                Some(fmt_call) => pieces.push(fmt_call),
+                                None => {
+                                    self.error(
+                                        "E0013",
+                                        format!(
+                                            "`{}` cannot be interpolated into a string; \
+                                             implement `Display` (fmt(self) -> String) for it",
+                                            self.show(&other, fcx),
+                                        ),
+                                        // value was moved into try_display on the
+                                        // Some path; use the interp span here.
+                                        span,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -699,6 +1081,13 @@ impl<'a> Checker<'a> {
         args: &[Spanned<ast::Expr>],
         span: Span,
     ) -> hir::Expr {
+        // Method call: `receiver.method(args)`.
+        if let ast::Expr::Field { target, field } = &callee.value {
+            let receiver = self.check_expr(fcx, target);
+            let checked: Vec<hir::Expr> = args.iter().map(|a| self.check_expr(fcx, a)).collect();
+            return self.check_method_call(fcx, receiver, field, checked, span);
+        }
+
         // Direct-call forms: a path naming a function, variant, or builtin.
         if let ast::Expr::Path(path) = &callee.value {
             if path.segments.len() == 1 {
@@ -1130,6 +1519,251 @@ impl<'a> Checker<'a> {
                 error_expr(span)
             }
         }
+    }
+
+    /// Resolve a method `name` on a receiver of (resolved) type `recv_ty`,
+    /// without emitting diagnostics.
+    fn resolve_method_on(&self, recv_ty: &Ty, fcx: &FnCtx, name: &str) -> MethodRes {
+        match recv_ty {
+            Ty::Param(k) => {
+                let bounds = fcx.param_bounds.get(*k as usize);
+                let matches: Vec<(DefId, u32)> = bounds
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|&tid| self.trait_method_index(tid, name).map(|i| (tid, i)))
+                    .collect();
+                match matches.len() {
+                    0 => MethodRes::None,
+                    1 => MethodRes::Trait(matches[0].0, matches[0].1),
+                    _ => MethodRes::Ambiguous,
+                }
+            }
+            _ => {
+                let Some(head) = recv_ty.head() else {
+                    return MethodRes::None;
+                };
+                // Inherent methods take priority over trait methods.
+                if let Some(def) = self.find_inherent_method(head, name) {
+                    return MethodRes::Inherent(def);
+                }
+                let matches: Vec<(DefId, u32)> = self
+                    .impls
+                    .iter()
+                    .filter(|i| i.self_head == head)
+                    .filter_map(|i| i.trait_id)
+                    .filter_map(|tid| self.trait_method_index(tid, name).map(|idx| (tid, idx)))
+                    .collect();
+                match matches.len() {
+                    0 => MethodRes::None,
+                    1 => MethodRes::Trait(matches[0].0, matches[0].1),
+                    _ => MethodRes::Ambiguous,
+                }
+            }
+        }
+    }
+
+    fn trait_method_index(&self, trait_id: DefId, name: &str) -> Option<u32> {
+        self.traits
+            .iter()
+            .find(|t| t.def_id == trait_id)?
+            .methods
+            .iter()
+            .position(|m| m.name == name)
+            .map(|i| i as u32)
+    }
+
+    fn find_inherent_method(&self, head: TyHead, name: &str) -> Option<DefId> {
+        self.impls
+            .iter()
+            .filter(|i| i.trait_id.is_none() && i.self_head == head)
+            .find_map(|i| i.methods.iter().find(|(n, _)| n == name).map(|(_, d)| *d))
+    }
+
+    fn check_method_call(
+        &mut self,
+        fcx: &mut FnCtx,
+        receiver: hir::Expr,
+        method: &Spanned<String>,
+        args: Vec<hir::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let recv_ty = fcx.icx.apply(&receiver.ty);
+        if matches!(recv_ty, Ty::Error) {
+            return error_expr(span);
+        }
+        if matches!(recv_ty, Ty::Var(_)) {
+            self.error(
+                "E0011",
+                "cannot infer the receiver's type; add a type annotation",
+                receiver.span,
+            );
+            return error_expr(span);
+        }
+        match self.resolve_method_on(&recv_ty, fcx, &method.value) {
+            MethodRes::Inherent(def_id) => {
+                self.emit_inherent_call(fcx, def_id, receiver, args, span)
+            }
+            MethodRes::Trait(trait_id, method_idx) => {
+                self.emit_trait_call(fcx, trait_id, method_idx, receiver, args, span)
+            }
+            MethodRes::Ambiguous => {
+                self.error(
+                    "E0015",
+                    format!(
+                        "ambiguous method call `{}`: more than one trait in scope provides it",
+                        method.value
+                    ),
+                    method.span,
+                );
+                error_expr(span)
+            }
+            MethodRes::None => {
+                self.error(
+                    "E0014",
+                    format!(
+                        "no method `{}` on type `{}`",
+                        method.value,
+                        self.show(&recv_ty, fcx)
+                    ),
+                    method.span,
+                );
+                error_expr(span)
+            }
+        }
+    }
+
+    fn emit_inherent_call(
+        &mut self,
+        fcx: &mut FnCtx,
+        def_id: DefId,
+        receiver: hir::Expr,
+        args: Vec<hir::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let Some(sig) = self.sigs.get(&def_id).cloned() else {
+            return error_expr(span);
+        };
+        // sig.params[0] is `self`; the rest are the declared parameters.
+        let expected_args = sig.params.len().saturating_sub(1);
+        if args.len() != expected_args {
+            self.error(
+                "E0016",
+                format!(
+                    "method takes {expected_args} argument(s) but {} were supplied",
+                    args.len()
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
+        fcx.icx.unify(&receiver.ty, &sig.params[0]);
+        for (arg, param) in args.iter().zip(sig.params[1..].iter()) {
+            if !fcx.icx.unify(&arg.ty, param) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "argument has type `{}` but `{}` was expected",
+                        self.show(&arg.ty, fcx),
+                        self.show(param, fcx),
+                    ),
+                    arg.span,
+                );
+            }
+        }
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        call_args.push(receiver);
+        call_args.extend(args);
+        hir::Expr {
+            kind: hir::ExprKind::Call {
+                func: hir::Callee::Def(def_id),
+                type_args: Vec::new(),
+                args: call_args,
+            },
+            ty: sig.ret,
+            span,
+        }
+    }
+
+    fn emit_trait_call(
+        &mut self,
+        fcx: &mut FnCtx,
+        trait_id: DefId,
+        method_idx: u32,
+        receiver: hir::Expr,
+        args: Vec<hir::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let self_ty = fcx.icx.apply(&receiver.ty);
+        let tm = self.traits[self
+            .traits
+            .iter()
+            .position(|t| t.def_id == trait_id)
+            .expect("trait exists")]
+        .methods[method_idx as usize]
+            .clone();
+        // Substitute `Self` (`Param(0)`) with the receiver type.
+        let subst = [self_ty.clone()];
+        if args.len() != tm.params.len() {
+            self.error(
+                "E0016",
+                format!(
+                    "method `{}` takes {} argument(s) but {} were supplied",
+                    tm.name,
+                    tm.params.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
+        for (arg, param) in args.iter().zip(tm.params.iter()) {
+            let expected = param.subst(&subst);
+            if !fcx.icx.unify(&arg.ty, &expected) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "argument has type `{}` but `{}` was expected",
+                        self.show(&arg.ty, fcx),
+                        self.show(&expected, fcx),
+                    ),
+                    arg.span,
+                );
+            }
+        }
+        hir::Expr {
+            kind: hir::ExprKind::TraitCall {
+                trait_id,
+                method: method_idx,
+                self_ty: self_ty.clone(),
+                receiver: Box::new(receiver),
+                args,
+            },
+            ty: tm.ret.subst(&subst),
+            span,
+        }
+    }
+
+    /// If `recv_ty` has a `Display`-style `fmt(self) -> String` method in
+    /// scope, build the call that produces its string. Used to interpolate
+    /// user types. Returns `None` (leaving `value` consumed) if no such
+    /// method resolves.
+    fn try_display(
+        &mut self,
+        fcx: &mut FnCtx,
+        value: hir::Expr,
+        recv_ty: &Ty,
+    ) -> Option<hir::Expr> {
+        let (trait_id, method_idx) = match self.resolve_method_on(recv_ty, fcx, "fmt") {
+            MethodRes::Trait(t, i) => (t, i),
+            _ => return None,
+        };
+        // The method must take no extra args and return `String`.
+        let tm = &self.traits.iter().find(|t| t.def_id == trait_id)?.methods[method_idx as usize];
+        if !tm.params.is_empty() || tm.ret != Ty::String {
+            return None;
+        }
+        let span = value.span;
+        Some(self.emit_trait_call(fcx, trait_id, method_idx, value, Vec::new(), span))
     }
 
     fn check_binary(
@@ -1775,6 +2409,14 @@ fn generic_scope(generics: &[ast::TypeParam]) -> FxHashMap<String, u32> {
         .collect()
 }
 
+/// The generic scope inside a trait definition / default method: `Self`
+/// maps to `Param(0)`.
+fn self_generic_scope() -> FxHashMap<String, u32> {
+    let mut m = FxHashMap::default();
+    m.insert("Self".to_string(), 0u32);
+    m
+}
+
 fn lit_expr(lit: &ast::Literal, span: Span) -> hir::Expr {
     let (kind, ty) = match lit {
         ast::Literal::Int(v) => (hir::ExprKind::IntLit(*v), Ty::Int),
@@ -1881,6 +2523,21 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         }
         hir::ExprKind::FieldGet { target, .. } => {
             finalize_expr(target, icx, residual);
+        }
+        hir::ExprKind::TraitCall {
+            self_ty,
+            receiver,
+            args,
+            ..
+        } => {
+            *self_ty = icx.apply(self_ty);
+            if self_ty.has_vars() {
+                residual.push(expr.span);
+            }
+            finalize_expr(receiver, icx, residual);
+            for a in args {
+                finalize_expr(a, icx, residual);
+            }
         }
         hir::ExprKind::Binary { lhs, rhs, .. }
         | hir::ExprKind::LogicalAnd { lhs, rhs }
@@ -2164,5 +2821,69 @@ mod tests {
              }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn inherent_method_ok() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             impl Point { fn sum(self) -> Int { self.x + self.y } }\n\
+             fn main() { let p = Point { x: 1, y: 2 }\n println(\"${p.sum()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_impl_and_default_method_ok() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Show { fn name(self) -> String\n fn shout(self) -> String { self.name() } }\n\
+             impl Show for P { fn name(self) -> String { \"p\" } }\n\
+             fn main() { let p = P { v: 1 }\n println(p.shout()) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_bound_ok() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Show { fn name(self) -> String }\n\
+             impl Show for P { fn name(self) -> String { \"p\" } }\n\
+             fn label<T: Show>(x: T) -> String { x.name() }\n\
+             fn main() { println(label(P { v: 1 })) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn no_method_reports_e0014() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let p = P { v: 1 }\n let s = p.missing() }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_missing_required_method_reports_e0070() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Show { fn name(self) -> String }\n\
+             impl Show for P { }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0070"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn method_not_in_trait_reports_e0071() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Show { fn name(self) -> String }\n\
+             impl Show for P { fn name(self) -> String { \"p\" }\n fn extra(self) -> Int { 0 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0071"), "{:?}", r.diagnostics);
     }
 }

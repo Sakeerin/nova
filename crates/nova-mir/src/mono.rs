@@ -57,6 +57,44 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
             continue;
         }
 
+        // Check that each concrete type argument satisfies its generic
+        // parameter's trait bounds (spec 12-TYPESYSTEM §5.4: bounds are
+        // verified during monomorphization).
+        for (i, bounds) in func.bounds.iter().enumerate() {
+            let Some(arg) = type_args.get(i) else {
+                continue;
+            };
+            for &trait_id in bounds {
+                let satisfied = arg
+                    .head()
+                    .map(|h| {
+                        module
+                            .impls
+                            .iter()
+                            .any(|im| im.trait_id == Some(trait_id) && im.self_head == h)
+                    })
+                    .unwrap_or(false);
+                if !satisfied {
+                    let trait_name = module
+                        .trait_def(trait_id)
+                        .map(|t| t.name.clone())
+                        .unwrap_or_else(|| format!("trait#{}", trait_id.0));
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "E0013",
+                            format!(
+                                "trait bound `{}: {}` is not satisfied when instantiating `{}`",
+                                type_name(arg, module),
+                                trait_name,
+                                func.name
+                            ),
+                        )
+                        .with_primary_label(func.span, "required by this generic parameter"),
+                    );
+                }
+            }
+        }
+
         // Specialize the function body for these type arguments.
         let specialized = specialize(func, &type_args);
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
@@ -73,6 +111,27 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     }
 }
 
+/// A short display name for a type in monomorphization diagnostics.
+fn type_name(ty: &Ty, module: &hir::Module) -> String {
+    match ty {
+        Ty::Int => "Int".to_string(),
+        Ty::Float => "Float".to_string(),
+        Ty::Bool => "Bool".to_string(),
+        Ty::Char => "Char".to_string(),
+        Ty::String => "String".to_string(),
+        Ty::Unit => "()".to_string(),
+        Ty::Sum { def_id, .. } => module
+            .sum(*def_id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "?".to_string()),
+        Ty::Record { def_id, .. } => module
+            .record(*def_id)
+            .map(|r| r.name.clone())
+            .unwrap_or_else(|| "?".to_string()),
+        _ => "?".to_string(),
+    }
+}
+
 /// Clone a function with `Param(i)` replaced by `type_args[i]` throughout
 /// locals, signature, and body (including recorded call-site type args).
 fn specialize(func: &hir::Function, type_args: &[Ty]) -> hir::Function {
@@ -80,6 +139,7 @@ fn specialize(func: &hir::Function, type_args: &[Ty]) -> hir::Function {
         def_id: func.def_id,
         name: func.name.clone(),
         generics: 0,
+        bounds: Vec::new(),
         params: func.params,
         locals: func
             .locals
@@ -139,6 +199,19 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
         K::FieldGet { target, index } => K::FieldGet {
             target: Box::new(subst_expr(target, args)),
             index: *index,
+        },
+        K::TraitCall {
+            trait_id,
+            method,
+            self_ty,
+            receiver,
+            args: call_args,
+        } => K::TraitCall {
+            trait_id: *trait_id,
+            method: *method,
+            self_ty: self_ty.subst(args),
+            receiver: Box::new(subst_expr(receiver, args)),
+            args: call_args.iter().map(|a| subst_expr(a, args)).collect(),
         },
         K::Binary { op, lhs, rhs } => K::Binary {
             op: *op,

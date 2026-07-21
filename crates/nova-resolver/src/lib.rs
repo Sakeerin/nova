@@ -57,6 +57,26 @@ pub enum DefKind {
     Record { item_index: usize },
     /// A constant; payload is the item index.
     Const { item_index: usize },
+    /// A trait declaration.
+    Trait { item_index: usize },
+    /// A method: an `ast::Function` living inside an impl block, or a
+    /// trait's default-method body. `method_index` selects it within the
+    /// owner (impl `functions`, or the trait's provided items).
+    Method {
+        item_index: usize,
+        method_index: usize,
+        owner: MethodOwner,
+    },
+}
+
+/// Where a [`DefKind::Method`] lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodOwner {
+    /// A method defined in an `impl` block (`item_index` → the impl item).
+    Impl,
+    /// A default-method body in a `trait` declaration (`item_index` → the
+    /// trait item, `method_index` → its `functions`-style provided list).
+    TraitDefault,
 }
 
 /// One variant of a sum type.
@@ -93,8 +113,10 @@ pub struct Definitions {
     defs: Vec<Def>,
     /// Value namespace: functions, consts, bare variant names, builtins.
     values: FxHashMap<String, Res>,
-    /// Type namespace: sum types (and later records, aliases).
+    /// Type namespace: sum types, records (and later aliases).
     types: FxHashMap<String, DefId>,
+    /// Trait namespace, kept separate from types.
+    traits: FxHashMap<String, DefId>,
 }
 
 impl Definitions {
@@ -116,6 +138,27 @@ impl Definitions {
     /// Resolve a name in *type* position.
     pub fn resolve_type(&self, name: &str) -> Option<DefId> {
         self.types.get(name).copied()
+    }
+
+    /// Resolve a name in *trait* position.
+    pub fn resolve_trait(&self, name: &str) -> Option<DefId> {
+        self.traits.get(name).copied()
+    }
+
+    /// Iterate all method definitions as `(DefId, item_index, method_index,
+    /// owner)`.
+    pub fn methods(&self) -> impl Iterator<Item = (DefId, usize, usize, MethodOwner)> + '_ {
+        self.defs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d.kind {
+                DefKind::Method {
+                    item_index,
+                    method_index,
+                    owner,
+                } => Some((DefId(i as u32), item_index, method_index, owner)),
+                _ => None,
+            })
     }
 
     /// Iterate all function definitions as `(DefId, item_index)`.
@@ -269,16 +312,57 @@ pub fn resolve(file: &File) -> ResolveResult {
                 );
             }
             Item::Trait(t) => {
-                diagnostics.push(unsupported(
-                    t.name.span,
-                    "traits are not supported yet in the Phase 1 compiler",
-                ));
+                let name = t.name.value.clone();
+                let span = t.name.span;
+                let id = definitions.push(Def {
+                    name: name.clone(),
+                    span,
+                    kind: DefKind::Trait { item_index },
+                });
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    definitions.traits.entry(name.clone())
+                {
+                    e.insert(id);
+                } else {
+                    diagnostics.push(
+                        Diagnostic::error("E0002", format!("duplicate trait `{name}`"))
+                            .with_primary_label(span, "redefined here"),
+                    );
+                }
+                // Default-method bodies become their own method defs.
+                for (method_index, ti) in t.items.iter().enumerate() {
+                    if let nova_ast::item::TraitItem::Provided(f) = ti {
+                        definitions.push(Def {
+                            name: format!("{}::{}$default", t.name.value, f.name.value),
+                            span: f.name.span,
+                            kind: DefKind::Method {
+                                item_index,
+                                method_index,
+                                owner: MethodOwner::TraitDefault,
+                            },
+                        });
+                    }
+                }
             }
             Item::Impl(i) => {
-                diagnostics.push(unsupported(
-                    i.ty.span,
-                    "impl blocks are not supported yet in the Phase 1 compiler",
-                ));
+                let self_name = type_head_name(&i.ty.value);
+                for (method_index, f) in i.functions.iter().enumerate() {
+                    let mangled = match &i.trait_ {
+                        Some(tr) => {
+                            format!("{}.{}.{}", self_name, path_tail(&tr.value), f.name.value)
+                        }
+                        None => format!("{}.{}", self_name, f.name.value),
+                    };
+                    definitions.push(Def {
+                        name: mangled,
+                        span: f.name.span,
+                        kind: DefKind::Method {
+                            item_index,
+                            method_index,
+                            owner: MethodOwner::Impl,
+                        },
+                    });
+                }
             }
             Item::Extern(_) => {
                 diagnostics.push(Diagnostic::error(
@@ -343,6 +427,23 @@ fn unsupported(span: Span, msg: &str) -> Diagnostic {
     Diagnostic::error("E0900", msg).with_primary_label(span, "not supported yet")
 }
 
+/// A short textual head for a type, used only to build unique method
+/// symbol names (semantic resolution happens later in the type checker).
+fn type_head_name(ty: &nova_ast::Type) -> String {
+    match ty {
+        nova_ast::Type::Path { path, .. } => path_tail(path),
+        _ => "anon".to_string(),
+    }
+}
+
+/// The last segment of a path (`a::b::c` → `c`).
+fn path_tail(path: &nova_ast::Path) -> String {
+    path.segments
+        .last()
+        .map(|s| s.value.clone())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +493,22 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         let id = r.definitions.resolve_type("Point").expect("Point resolves");
         assert!(matches!(r.definitions.def(id).kind, DefKind::Record { .. }));
+    }
+
+    #[test]
+    fn collects_traits_and_impl_methods() {
+        let r = resolve_src(
+            "record P { v: Int }\n\
+             trait Show { fn name(self) -> String\n fn shout(self) -> String { self.name() } }\n\
+             impl Show for P { fn name(self) -> String { \"p\" } }\n\
+             impl P { fn get(self) -> Int { self.v } }\n\
+             fn main() { }\n",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(r.definitions.resolve_trait("Show").is_some());
+        // One default (shout), one trait-impl method (name), one inherent (get).
+        let methods = r.definitions.methods().count();
+        assert_eq!(methods, 3, "expected 3 method defs");
     }
 
     #[test]

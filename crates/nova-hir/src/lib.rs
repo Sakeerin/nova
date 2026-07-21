@@ -145,6 +145,8 @@ pub struct Local {
 pub struct Module {
     pub sums: Vec<SumType>,
     pub records: Vec<RecordType>,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplInfo>,
     pub functions: Vec<Function>,
 }
 
@@ -159,10 +161,64 @@ impl Module {
         self.records.iter().find(|r| r.def_id == def_id)
     }
 
+    /// Find the trait declared under `def_id`, if any.
+    pub fn trait_def(&self, def_id: DefId) -> Option<&TraitDef> {
+        self.traits.iter().find(|t| t.def_id == def_id)
+    }
+
     /// Find the function declared under `def_id`, if any.
     pub fn function(&self, def_id: DefId) -> Option<&Function> {
         self.functions.iter().find(|f| f.def_id == def_id)
     }
+
+    /// Resolve trait method `method` (index into the trait's methods) for a
+    /// concrete self type `head` to the compiled method function it should
+    /// dispatch to: the impl's own method if provided, else the trait's
+    /// default. Returns `None` if no impl of the trait exists for `head`.
+    pub fn resolve_method(&self, trait_id: DefId, method: u32, head: TyHead) -> Option<DefId> {
+        let tr = self.trait_def(trait_id)?;
+        let method_name = &tr.methods.get(method as usize)?.name;
+        let imp = self
+            .impls
+            .iter()
+            .find(|i| i.trait_id == Some(trait_id) && i.self_head == head)?;
+        if let Some((_, def)) = imp.methods.iter().find(|(n, _)| n == method_name) {
+            Some(*def)
+        } else {
+            tr.methods[method as usize].default_def
+        }
+    }
+}
+
+/// A trait declaration with its method signatures.
+#[derive(Debug, Clone)]
+pub struct TraitDef {
+    pub def_id: DefId,
+    pub name: String,
+    pub methods: Vec<TraitMethod>,
+}
+
+/// One method of a trait. `Ty::Param(0)` denotes `Self` in `params`/`ret`
+/// (Phase 1 traits have no generics of their own, so `Param(0)` is
+/// unambiguous). `self` is the implicit receiver and is not in `params`.
+#[derive(Debug, Clone)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    /// The compiled default-body function (generic over `Self`), if the
+    /// trait provides a default implementation.
+    pub default_def: Option<DefId>,
+}
+
+/// One `impl` block: an inherent impl (`trait_id: None`) or a trait impl.
+#[derive(Debug, Clone)]
+pub struct ImplInfo {
+    pub trait_id: Option<DefId>,
+    pub self_head: TyHead,
+    /// `(method name, compiled method function DefId)` for methods this
+    /// impl defines directly.
+    pub methods: Vec<(String, DefId)>,
 }
 
 /// A record (struct) declaration with typed fields.
@@ -207,6 +263,10 @@ pub struct Function {
     /// Number of generic parameters; generic functions are monomorphized
     /// before codegen.
     pub generics: u32,
+    /// Trait bounds per generic parameter (`bounds[i]` are the trait
+    /// `DefId`s the i-th parameter must satisfy). Checked at
+    /// monomorphization once the concrete type argument is known.
+    pub bounds: Vec<Vec<DefId>>,
     /// The first `params` entries of `locals` are the parameters.
     pub params: u32,
     pub locals: Vec<Local>,
@@ -310,6 +370,17 @@ pub enum ExprKind {
     FieldGet {
         target: Box<Expr>,
         index: u32,
+    },
+    /// A trait method call `receiver.method(args)`, resolved to a concrete
+    /// impl during monomorphization (static dispatch). `self_ty` is the
+    /// receiver's type — concrete for a call on a known type, or `Param(k)`
+    /// inside a generic function until substitution makes it concrete.
+    TraitCall {
+        trait_id: DefId,
+        method: u32,
+        self_ty: Ty,
+        receiver: Box<Expr>,
+        args: Vec<Expr>,
     },
     /// A non-short-circuit binary operation.
     Binary {

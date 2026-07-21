@@ -140,6 +140,48 @@ fn unreferenced_functions_are_not_emitted() {
 }
 
 #[test]
+fn trait_method_dispatches_to_impl() {
+    let mir = mir_for(
+        "record P { v: Int }\n\
+         trait Show { fn name(self) -> String }\n\
+         impl Show for P { fn name(self) -> String { \"p\" } }\n\
+         fn label<T: Show>(x: T) -> String { x.name() }\n\
+         fn main() { println(label(P { v: 1 })) }",
+    );
+    // The impl method function must be emitted and reachable.
+    assert!(
+        mir.functions.iter().any(|f| f.name.contains("name")),
+        "impl method should be monomorphized: {:?}",
+        function_names(&mir)
+    );
+}
+
+fn diagnostics_for(src: &str) -> Vec<String> {
+    let file_id = FileId::DUMMY;
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let ast = ast.expect("no AST");
+    let resolved = resolve(&ast);
+    let checked = check(&ast, &resolved.definitions);
+    match lower_module(&checked.module) {
+        Ok(_) => Vec::new(),
+        Err(diags) => diags.into_iter().map(|d| d.code).collect(),
+    }
+}
+
+#[test]
+fn unsatisfied_trait_bound_reports_e0013() {
+    // `label` requires `T: Show`, but `Q` has no `Show` impl.
+    let codes = diagnostics_for(
+        "record Q { v: Int }\n\
+         trait Show { fn name(self) -> String }\n\
+         fn label<T: Show>(x: T) -> String { \"x\" }\n\
+         fn main() { println(label(Q { v: 1 })) }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
 fn fn_as_value_lowers_to_fnaddr_and_indirect_call() {
     let mir = mir_for(
         "fn double(n: Int) -> Int { n * 2 }\n\
