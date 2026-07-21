@@ -43,6 +43,10 @@ impl InferCtx {
                 def_id,
                 args: args.iter().map(|a| self.apply(a)).collect(),
             },
+            Ty::Record { def_id, args } => Ty::Record {
+                def_id,
+                args: args.iter().map(|a| self.apply(a)).collect(),
+            },
             other => other,
         }
     }
@@ -54,7 +58,9 @@ impl InferCtx {
             Ty::Fn { params, ret } => {
                 params.iter().any(|p| self.occurs(v, p)) || self.occurs(v, &ret)
             }
-            Ty::Sum { args, .. } => args.iter().any(|a| self.occurs(v, a)),
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => {
+                args.iter().any(|a| self.occurs(v, a))
+            }
             _ => false,
         }
     }
@@ -120,6 +126,16 @@ impl InferCtx {
                     args: a1,
                 },
                 Ty::Sum {
+                    def_id: d2,
+                    args: a2,
+                },
+            )
+            | (
+                Ty::Record {
+                    def_id: d1,
+                    args: a1,
+                },
+                Ty::Record {
                     def_id: d2,
                     args: a2,
                 },

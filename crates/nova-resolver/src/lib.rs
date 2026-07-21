@@ -53,6 +53,8 @@ pub enum DefKind {
         item_index: usize,
         variants: Vec<VariantDef>,
     },
+    /// A record (struct) declaration.
+    Record { item_index: usize },
     /// A constant; payload is the item index.
     Const { item_index: usize },
 }
@@ -250,10 +252,21 @@ pub fn resolve(file: &File) -> ResolveResult {
             // Accepted and ignored in Phase 1 single-file compilation.
             Item::Import(_) | Item::Module(_) => {}
             Item::Record(r) => {
-                diagnostics.push(unsupported(
-                    r.name.span,
-                    "records are not supported yet in the Phase 1 compiler",
-                ));
+                let name = r.name.value.clone();
+                let span = r.name.span;
+                let id = definitions.push(Def {
+                    name: name.clone(),
+                    span,
+                    kind: DefKind::Record { item_index },
+                });
+                insert_type(
+                    &mut definitions,
+                    &mut first_type_span,
+                    &mut diagnostics,
+                    name,
+                    span,
+                    id,
+                );
             }
             Item::Trait(t) => {
                 diagnostics.push(unsupported(
@@ -371,6 +384,14 @@ mod tests {
             r.definitions.resolve_value("println"),
             Some(Res::Builtin(Builtin::Println))
         ));
+    }
+
+    #[test]
+    fn collects_records() {
+        let r = resolve_src("record Point { x: Float, y: Float }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let id = r.definitions.resolve_type("Point").expect("Point resolves");
+        assert!(matches!(r.definitions.def(id).kind, DefKind::Record { .. }));
     }
 
     #[test]

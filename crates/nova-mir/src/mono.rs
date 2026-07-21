@@ -129,6 +129,17 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
             variant: *variant,
             args: v_args.iter().map(|a| subst_expr(a, args)).collect(),
         },
+        K::MakeRecord {
+            record,
+            fields: rec_fields,
+        } => K::MakeRecord {
+            record: *record,
+            fields: rec_fields.iter().map(|f| subst_expr(f, args)).collect(),
+        },
+        K::FieldGet { target, index } => K::FieldGet {
+            target: Box::new(subst_expr(target, args)),
+            index: *index,
+        },
         K::Binary { op, lhs, rhs } => K::Binary {
             op: *op,
             lhs: Box::new(subst_expr(lhs, args)),

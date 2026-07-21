@@ -96,8 +96,8 @@ pub enum RtFunc {
     CharToStr,
     /// `(str, str) -> i8`
     StrEq,
-    /// `(size_words) -> ptr` — allocate a sum value.
-    AllocSum,
+    /// `(size_bytes) -> ptr` — allocate a heap value (sum or record).
+    Alloc,
 }
 
 impl RtFunc {
@@ -112,7 +112,7 @@ impl RtFunc {
             RtFunc::BoolToStr => "nova_rt_bool_to_str",
             RtFunc::CharToStr => "nova_rt_char_to_str",
             RtFunc::StrEq => "nova_rt_str_eq",
-            RtFunc::AllocSum => "nova_rt_alloc_sum",
+            RtFunc::Alloc => "nova_rt_alloc",
         }
     }
 
@@ -126,7 +126,7 @@ impl RtFunc {
             RtFunc::BoolToStr => (vec![MirTy::I8], MirTy::Ptr),
             RtFunc::CharToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
-            RtFunc::AllocSum => (vec![MirTy::I64], MirTy::Ptr),
+            RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
         }
     }
 }
@@ -209,6 +209,18 @@ pub enum Stmt {
         index: u32,
         ty: MirTy,
     },
+    /// Allocate and initialize a record value `{ fields... }` (no tag).
+    MakeRecord {
+        dst: Temp,
+        fields: Vec<(Temp, MirTy)>,
+    },
+    /// Load field `index` of a record value.
+    RecordField {
+        dst: Temp,
+        record: Temp,
+        index: u32,
+        ty: MirTy,
+    },
 }
 
 /// Block terminators.
@@ -239,7 +251,9 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         hir::Ty::Int | hir::Ty::Char => MirTy::I64,
         hir::Ty::Float => MirTy::F64,
         hir::Ty::Bool => MirTy::I8,
-        hir::Ty::String | hir::Ty::Fn { .. } | hir::Ty::Sum { .. } => MirTy::Ptr,
+        hir::Ty::String | hir::Ty::Fn { .. } | hir::Ty::Sum { .. } | hir::Ty::Record { .. } => {
+            MirTy::Ptr
+        }
         hir::Ty::Unit | hir::Ty::Never => MirTy::Unit,
         // Post-typeck these should not occur; map defensively.
         hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => MirTy::Unit,
@@ -275,6 +289,14 @@ fn mangle_ty(ty: &hir::Ty) -> String {
             } else {
                 let a: Vec<String> = args.iter().map(mangle_ty).collect();
                 format!("S{}L{}E", def_id.0, a.join(""))
+            }
+        }
+        hir::Ty::Record { def_id, args } => {
+            if args.is_empty() {
+                format!("R{}", def_id.0)
+            } else {
+                let a: Vec<String> = args.iter().map(mangle_ty).collect();
+                format!("R{}L{}E", def_id.0, a.join(""))
             }
         }
         hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => "X".to_string(),

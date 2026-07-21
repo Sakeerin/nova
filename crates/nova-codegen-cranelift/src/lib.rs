@@ -142,7 +142,7 @@ const ALL_RT: [RtFunc; 9] = [
     RtFunc::BoolToStr,
     RtFunc::CharToStr,
     RtFunc::StrEq,
-    RtFunc::AllocSum,
+    RtFunc::Alloc,
 ];
 
 impl<'m, M: ClModule> Codegen<'m, M> {
@@ -517,10 +517,10 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
             Stmt::MakeSum { dst, tag, fields } => {
                 let size = 8 + 8 * fields.len() as i64;
                 let size_val = self.builder.ins().iconst(types::I64, size);
-                let id = self.rt("nova_rt_alloc_sum");
+                let id = self.rt("nova_rt_alloc");
                 let ptr = self
                     .call_func_id(id, &[size_val])?
-                    .ok_or_else(|| anyhow!("alloc_sum returns a value"))?;
+                    .ok_or_else(|| anyhow!("alloc returns a value"))?;
                 let tag_val = self.builder.ins().iconst(types::I64, *tag as i64);
                 self.builder
                     .ins()
@@ -536,6 +536,43 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                         .store(MemFlags::trusted(), v, ptr, offset);
                 }
                 self.def_temp(*dst, ptr);
+            }
+            Stmt::MakeRecord { dst, fields } => {
+                // Records have no tag: fields sit at offsets 8*i.
+                let size = (8 * fields.len().max(1)) as i64;
+                let size_val = self.builder.ins().iconst(types::I64, size);
+                let id = self.rt("nova_rt_alloc");
+                let ptr = self
+                    .call_func_id(id, &[size_val])?
+                    .ok_or_else(|| anyhow!("alloc returns a value"))?;
+                for (i, (field, ty)) in fields.iter().enumerate() {
+                    if *ty == MirTy::Unit {
+                        continue;
+                    }
+                    let v = self.use_temp(*field)?;
+                    let offset = (8 * i) as i32;
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), v, ptr, offset);
+                }
+                self.def_temp(*dst, ptr);
+            }
+            Stmt::RecordField {
+                dst,
+                record,
+                index,
+                ty,
+            } => {
+                let Some(cl_ty) = self.cg.cl_ty(*ty) else {
+                    return Ok(());
+                };
+                let ptr = self.use_temp(*record)?;
+                let offset = (8 * index) as i32;
+                let v = self
+                    .builder
+                    .ins()
+                    .load(cl_ty, MemFlags::trusted(), ptr, offset);
+                self.def_temp(*dst, v);
             }
             Stmt::SumTag { dst, sum } => {
                 let ptr = self.use_temp(*sum)?;

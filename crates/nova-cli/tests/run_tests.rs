@@ -63,6 +63,19 @@ fn gate_4_generic_functions_run() {
 }
 
 #[test]
+fn records_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/records.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/records.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
 fn check_reports_type_errors_with_code() {
     let dir = std::env::temp_dir().join("nova-check-test");
     std::fs::create_dir_all(&dir).expect("temp dir");

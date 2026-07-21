@@ -40,6 +40,11 @@ pub enum Ty {
         def_id: DefId,
         args: Vec<Ty>,
     },
+    /// A user-defined record (struct) type with generic arguments.
+    Record {
+        def_id: DefId,
+        args: Vec<Ty>,
+    },
     /// A generic type parameter of the enclosing item (`T`).
     Param(u32),
     /// An unsolved inference variable (only during type checking).
@@ -64,6 +69,10 @@ impl Ty {
                 def_id: *def_id,
                 args: a.iter().map(|t| t.subst(args)).collect(),
             },
+            Ty::Record { def_id, args: a } => Ty::Record {
+                def_id: *def_id,
+                args: a.iter().map(|t| t.subst(args)).collect(),
+            },
             other => other.clone(),
         }
     }
@@ -73,7 +82,7 @@ impl Ty {
         match self {
             Ty::Param(_) => true,
             Ty::Fn { params, ret } => params.iter().any(Ty::has_params) || ret.has_params(),
-            Ty::Sum { args, .. } => args.iter().any(Ty::has_params),
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_params),
             _ => false,
         }
     }
@@ -83,10 +92,39 @@ impl Ty {
         match self {
             Ty::Var(_) => true,
             Ty::Fn { params, ret } => params.iter().any(Ty::has_vars) || ret.has_vars(),
-            Ty::Sum { args, .. } => args.iter().any(Ty::has_vars),
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
             _ => false,
         }
     }
+
+    /// The nominal head of this type, if it has one — used to key impl
+    /// lookups. Generic arguments do not participate (Phase 1 has no
+    /// overlapping impls per head).
+    pub fn head(&self) -> Option<TyHead> {
+        match self {
+            Ty::Int => Some(TyHead::Int),
+            Ty::Float => Some(TyHead::Float),
+            Ty::Bool => Some(TyHead::Bool),
+            Ty::Char => Some(TyHead::Char),
+            Ty::String => Some(TyHead::String),
+            Ty::Sum { def_id, .. } => Some(TyHead::Sum(*def_id)),
+            Ty::Record { def_id, .. } => Some(TyHead::Record(*def_id)),
+            _ => None,
+        }
+    }
+}
+
+/// The nominal head of a type, used as the key for impl lookups
+/// (spec `12-TYPESYSTEM.md` §5.2, `ImplTable` indexed by trait + type head).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TyHead {
+    Int,
+    Float,
+    Bool,
+    Char,
+    String,
+    Sum(DefId),
+    Record(DefId),
 }
 
 /// A local variable slot within a function (parameters come first).
@@ -102,10 +140,11 @@ pub struct Local {
     pub span: Span,
 }
 
-/// A fully checked module: sum type layouts plus typed functions.
+/// A fully checked module: type layouts plus typed functions.
 #[derive(Debug, Default)]
 pub struct Module {
     pub sums: Vec<SumType>,
+    pub records: Vec<RecordType>,
     pub functions: Vec<Function>,
 }
 
@@ -115,10 +154,32 @@ impl Module {
         self.sums.iter().find(|s| s.def_id == def_id)
     }
 
+    /// Find the record type declared under `def_id`, if any.
+    pub fn record(&self, def_id: DefId) -> Option<&RecordType> {
+        self.records.iter().find(|r| r.def_id == def_id)
+    }
+
     /// Find the function declared under `def_id`, if any.
     pub fn function(&self, def_id: DefId) -> Option<&Function> {
         self.functions.iter().find(|f| f.def_id == def_id)
     }
+}
+
+/// A record (struct) declaration with typed fields.
+#[derive(Debug, Clone)]
+pub struct RecordType {
+    pub def_id: DefId,
+    pub name: String,
+    /// Number of generic parameters.
+    pub generics: u32,
+    pub fields: Vec<RecordField>,
+}
+
+/// One field of a record; the type may reference `Ty::Param`.
+#[derive(Debug, Clone)]
+pub struct RecordField {
+    pub name: String,
+    pub ty: Ty,
 }
 
 /// A sum type declaration with typed variant payloads.
@@ -237,6 +298,18 @@ pub enum ExprKind {
         sum: DefId,
         variant: u32,
         args: Vec<Expr>,
+    },
+    /// Construct a record value. `fields` are in the record's declared
+    /// field order; the expression's `ty` is the `Record { args, .. }`
+    /// instantiation.
+    MakeRecord {
+        record: DefId,
+        fields: Vec<Expr>,
+    },
+    /// Read field `index` of a record value.
+    FieldGet {
+        target: Box<Expr>,
+        index: u32,
     },
     /// A non-short-circuit binary operation.
     Binary {

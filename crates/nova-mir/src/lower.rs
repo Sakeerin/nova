@@ -202,6 +202,36 @@ impl<'a> Lowerer<'a> {
                 });
                 t
             }
+            K::MakeRecord { fields, .. } => {
+                let lowered: Vec<(Temp, MirTy)> = fields
+                    .iter()
+                    .map(|f| {
+                        let t = self.lower_expr(f);
+                        (t, mir_ty(&f.ty))
+                    })
+                    .collect();
+                let t = self.new_temp(MirTy::Ptr);
+                self.push(Stmt::MakeRecord {
+                    dst: t,
+                    fields: lowered,
+                });
+                t
+            }
+            K::FieldGet { target, index } => {
+                let record = self.lower_expr(target);
+                let ty = mir_ty(&e.ty);
+                if ty == MirTy::Unit {
+                    return self.unit_temp();
+                }
+                let t = self.new_temp(ty);
+                self.push(Stmt::RecordField {
+                    dst: t,
+                    record,
+                    index: *index,
+                    ty,
+                });
+                t
+            }
             K::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             K::LogicalAnd { lhs, rhs } => self.lower_logical(lhs, rhs, true),
             K::LogicalOr { lhs, rhs } => self.lower_logical(lhs, rhs, false),

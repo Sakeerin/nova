@@ -117,12 +117,13 @@ pub extern "C" fn nova_rt_char_to_str(v: i64) -> *mut NovaStr {
     leak_str(c.to_string())
 }
 
-/// Allocate `size` bytes (8-aligned) for a sum value `{ tag, fields... }`.
+/// Allocate `size` bytes (8-aligned) for a heap value — a sum
+/// `{ tag, fields... }` or a record `{ fields... }`.
 #[no_mangle]
-pub extern "C" fn nova_rt_alloc_sum(size: i64) -> *mut u8 {
+pub extern "C" fn nova_rt_alloc(size: i64) -> *mut u8 {
     let size = (size.max(8)) as usize;
     // SAFETY: size is non-zero and 8-byte alignment is valid.
-    let layout = Layout::from_size_align(size, 8).expect("valid sum layout");
+    let layout = Layout::from_size_align(size, 8).expect("valid heap layout");
     unsafe { alloc(layout) }
 }
 
@@ -149,7 +150,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
-        ("nova_rt_alloc_sum", nova_rt_alloc_sum as *const u8),
+        ("nova_rt_alloc", nova_rt_alloc as *const u8),
         ("nova_rt_panic", nova_rt_panic as *const u8),
     ]
 }
@@ -192,8 +193,8 @@ mod tests {
     }
 
     #[test]
-    fn alloc_sum_is_writable() {
-        let p = nova_rt_alloc_sum(24);
+    fn alloc_is_writable() {
+        let p = nova_rt_alloc(24);
         assert!(!p.is_null());
         unsafe {
             *(p as *mut i64) = 42;

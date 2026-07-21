@@ -46,7 +46,7 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
                 .join(", ");
             format!("fn({params}) -> {}", display_ty(ret, defs))
         }
-        Ty::Sum { def_id, args } => {
+        Ty::Sum { def_id, args } | Ty::Record { def_id, args } => {
             let name = &defs.def(*def_id).name;
             if args.is_empty() {
                 name.clone()

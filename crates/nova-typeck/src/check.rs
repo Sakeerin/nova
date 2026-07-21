@@ -27,8 +27,10 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         defs,
         sigs: FxHashMap::default(),
         sums: Vec::new(),
+        records: Vec::new(),
         diagnostics: Vec::new(),
     };
+    checker.collect_records();
     checker.collect_sums();
     checker.collect_signatures();
 
@@ -43,6 +45,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     CheckResult {
         module: hir::Module {
             sums: checker.sums,
+            records: checker.records,
             functions,
         },
         diagnostics: checker.diagnostics,
@@ -54,6 +57,7 @@ struct Checker<'a> {
     defs: &'a Definitions,
     sigs: FxHashMap<DefId, FnSig>,
     sums: Vec<hir::SumType>,
+    records: Vec<hir::RecordType>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -94,6 +98,32 @@ impl FnCtx {
 
 impl<'a> Checker<'a> {
     // === Collection ===
+
+    fn collect_records(&mut self) {
+        for (i, def) in self.defs.defs().iter().enumerate() {
+            let DefKind::Record { item_index } = &def.kind else {
+                continue;
+            };
+            let ast::Item::Record(decl) = &self.file.items[*item_index].value else {
+                continue;
+            };
+            let generics = generic_scope(&decl.generics);
+            let fields = decl
+                .fields
+                .iter()
+                .map(|f| hir::RecordField {
+                    name: f.name.value.clone(),
+                    ty: self.convert_ty(&f.ty, &generics),
+                })
+                .collect();
+            self.records.push(hir::RecordType {
+                def_id: DefId(i as u32),
+                name: def.name.clone(),
+                generics: decl.generics.len() as u32,
+                fields,
+            });
+        }
+    }
 
     fn collect_sums(&mut self) {
         for (i, def) in self.defs.defs().iter().enumerate() {
@@ -205,12 +235,20 @@ impl<'a> Checker<'a> {
                     return p;
                 }
                 if let Some(def_id) = self.defs.resolve_type(name) {
-                    let expected = self
-                        .sums
-                        .iter()
-                        .find(|s| s.def_id == def_id)
-                        .map(|s| s.generics)
-                        .unwrap_or(0);
+                    let is_record = matches!(self.defs.def(def_id).kind, DefKind::Record { .. });
+                    let expected = if is_record {
+                        self.records
+                            .iter()
+                            .find(|r| r.def_id == def_id)
+                            .map(|r| r.generics)
+                            .unwrap_or(0)
+                    } else {
+                        self.sums
+                            .iter()
+                            .find(|s| s.def_id == def_id)
+                            .map(|s| s.generics)
+                            .unwrap_or(0)
+                    };
                     let converted: Vec<Ty> =
                         args.iter().map(|a| self.convert_ty(a, generics)).collect();
                     if converted.len() != expected as usize {
@@ -224,9 +262,16 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
-                    return Ty::Sum {
-                        def_id,
-                        args: converted,
+                    return if is_record {
+                        Ty::Record {
+                            def_id,
+                            args: converted,
+                        }
+                    } else {
+                        Ty::Sum {
+                            def_id,
+                            args: converted,
+                        }
                     };
                 }
                 self.error("E0001", format!("cannot find type `{name}`"), ty.span);
@@ -518,9 +563,11 @@ impl<'a> Checker<'a> {
             ast::Expr::Break(_) => self.unsupported_expr(span, "`break`"),
             ast::Expr::Continue => self.unsupported_expr(span, "`continue`"),
             ast::Expr::Closure { .. } => self.unsupported_expr(span, "closures"),
-            ast::Expr::Record { .. } => self.unsupported_expr(span, "record literals"),
+            ast::Expr::Record { path, fields, base } => {
+                self.check_record_literal(fcx, path, fields, base.as_deref(), span)
+            }
             ast::Expr::Index { .. } => self.unsupported_expr(span, "indexing"),
-            ast::Expr::Field { .. } => self.unsupported_expr(span, "field access"),
+            ast::Expr::Field { target, field } => self.check_field(fcx, target, field, span),
             ast::Expr::Try(_) => self.unsupported_expr(span, "the `?` operator"),
             ast::Expr::Await(_) => self.unsupported_expr(span, "`.await`"),
             ast::Expr::Cast { .. } => self.unsupported_expr(span, "`as` casts"),
@@ -882,6 +929,206 @@ impl<'a> Checker<'a> {
                 args: type_args,
             },
             span,
+        }
+    }
+
+    fn check_record_literal(
+        &mut self,
+        fcx: &mut FnCtx,
+        path: &ast::Path,
+        fields: &[ast::FieldInit],
+        base: Option<&Spanned<ast::Expr>>,
+        span: Span,
+    ) -> hir::Expr {
+        if path.segments.len() != 1 {
+            self.unsupported(span, "module-qualified record paths");
+            return error_expr(span);
+        }
+        let name = path.segments[0].value.as_str();
+        let Some(def_id) = self.defs.resolve_type(name) else {
+            self.error("E0001", format!("cannot find record `{name}`"), span);
+            return error_expr(span);
+        };
+        let Some(record) = self.records.iter().find(|r| r.def_id == def_id).cloned() else {
+            self.error("E0010", format!("`{name}` is not a record type"), span);
+            return error_expr(span);
+        };
+        let type_args: Vec<Ty> = (0..record.generics).map(|_| fcx.icx.fresh()).collect();
+        let record_ty = Ty::Record {
+            def_id,
+            args: type_args.clone(),
+        };
+
+        // Type-check each provided field initializer, keyed by field name.
+        let mut provided: FxHashMap<String, hir::Expr> = FxHashMap::default();
+        for init in fields {
+            let fname = init.name.value.clone();
+            let Some(field) = record.fields.iter().find(|f| f.name == fname) else {
+                self.error(
+                    "E0014",
+                    format!("record `{name}` has no field `{fname}`"),
+                    init.name.span,
+                );
+                continue;
+            };
+            let expected = field.ty.subst(&type_args);
+            let value = match &init.value {
+                Some(v) => self.check_expr(fcx, v),
+                // Shorthand `{ x }` binds the local named `x`.
+                None => self.check_path(fcx, &ast::Path::single(init.name.clone()), init.name.span),
+            };
+            if !fcx.icx.unify(&value.ty, &expected) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "field `{fname}` expects `{}` but found `{}`",
+                        self.show(&expected, fcx),
+                        self.show(&value.ty, fcx),
+                    ),
+                    init.name.span,
+                );
+            }
+            if provided.insert(fname.clone(), value).is_some() {
+                self.error(
+                    "E0014",
+                    format!("field `{fname}` specified more than once"),
+                    init.name.span,
+                );
+            }
+        }
+
+        // A `..base` spread fills any fields not given explicitly. Bind the
+        // base to a local so it is evaluated exactly once.
+        let base_local = match base {
+            Some(base_expr) => {
+                let checked = self.check_expr(fcx, base_expr);
+                if !fcx.icx.unify(&checked.ty, &record_ty) {
+                    self.error(
+                        "E0010",
+                        format!(
+                            "the `..` base has type `{}` but `{name}` was expected",
+                            self.show(&checked.ty, fcx),
+                        ),
+                        base_expr.span,
+                    );
+                }
+                let local = fcx.new_local("__base".to_string(), record_ty.clone(), false, span);
+                Some((local, checked))
+            }
+            None => None,
+        };
+
+        // Assemble field values in declared order.
+        let mut ordered = Vec::with_capacity(record.fields.len());
+        let mut missing = Vec::new();
+        for (idx, field) in record.fields.iter().enumerate() {
+            if let Some(value) = provided.remove(&field.name) {
+                ordered.push(value);
+            } else if let Some((local, _)) = &base_local {
+                let field_ty = field.ty.subst(&type_args);
+                ordered.push(hir::Expr {
+                    kind: hir::ExprKind::FieldGet {
+                        target: Box::new(hir::Expr {
+                            kind: hir::ExprKind::Local(*local),
+                            ty: record_ty.clone(),
+                            span,
+                        }),
+                        index: idx as u32,
+                    },
+                    ty: field_ty,
+                    span,
+                });
+            } else {
+                missing.push(format!("`{}`", field.name));
+            }
+        }
+        if !missing.is_empty() {
+            self.error(
+                "E0014",
+                format!("missing field(s) in `{name}`: {}", missing.join(", ")),
+                span,
+            );
+            return error_expr(span);
+        }
+
+        let make = hir::Expr {
+            kind: hir::ExprKind::MakeRecord {
+                record: def_id,
+                fields: ordered,
+            },
+            ty: record_ty.clone(),
+            span,
+        };
+        match base_local {
+            None => make,
+            Some((local, base_value)) => hir::Expr {
+                kind: hir::ExprKind::Block {
+                    stmts: vec![hir::Expr {
+                        kind: hir::ExprKind::Let {
+                            local,
+                            init: Box::new(base_value),
+                        },
+                        ty: Ty::Unit,
+                        span,
+                    }],
+                    trailing: Some(Box::new(make)),
+                },
+                ty: record_ty,
+                span,
+            },
+        }
+    }
+
+    fn check_field(
+        &mut self,
+        fcx: &mut FnCtx,
+        target: &Spanned<ast::Expr>,
+        field: &Spanned<String>,
+        span: Span,
+    ) -> hir::Expr {
+        let recv = self.check_expr(fcx, target);
+        match fcx.icx.apply(&recv.ty) {
+            Ty::Record { def_id, args } => {
+                let record = self
+                    .records
+                    .iter()
+                    .find(|r| r.def_id == def_id)
+                    .expect("record type resolves to a record def");
+                match record.fields.iter().position(|f| f.name == field.value) {
+                    Some(idx) => {
+                        let field_ty = record.fields[idx].ty.subst(&args);
+                        hir::Expr {
+                            kind: hir::ExprKind::FieldGet {
+                                target: Box::new(recv),
+                                index: idx as u32,
+                            },
+                            ty: field_ty,
+                            span,
+                        }
+                    }
+                    None => {
+                        self.error(
+                            "E0014",
+                            format!("no field `{}` on record `{}`", field.value, record.name),
+                            field.span,
+                        );
+                        error_expr(span)
+                    }
+                }
+            }
+            Ty::Error => error_expr(span),
+            other => {
+                self.error(
+                    "E0014",
+                    format!(
+                        "cannot access field `{}` on `{}`",
+                        field.value,
+                        self.show(&other, fcx)
+                    ),
+                    field.span,
+                );
+                error_expr(span)
+            }
         }
     }
 
@@ -1625,10 +1872,15 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
                 }
             }
         }
-        hir::ExprKind::MakeVariant { args, .. } | hir::ExprKind::StrConcat(args) => {
+        hir::ExprKind::MakeVariant { args, .. }
+        | hir::ExprKind::MakeRecord { fields: args, .. }
+        | hir::ExprKind::StrConcat(args) => {
             for a in args {
                 finalize_expr(a, icx, residual);
             }
+        }
+        hir::ExprKind::FieldGet { target, .. } => {
+            finalize_expr(target, icx, residual);
         }
         hir::ExprKind::Binary { lhs, rhs, .. }
         | hir::ExprKind::LogicalAnd { lhs, rhs }
@@ -1848,5 +2100,69 @@ mod tests {
     fn wrong_arity_reports_e0016() {
         let r = check_src("fn f(a: Int) -> Int { a }\nfn main() { let x = f(1, 2) }");
         assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn record_literal_and_field_access_ok() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             fn main() {\n\
+                 let p = Point { x: 3, y: 4 }\n\
+                 println(\"${p.x} ${p.y}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn record_field_type_mismatch_reports_e0010() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             fn main() { let p = Point { x: 3, y: \"no\" } }",
+        );
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn missing_field_reports_e0014() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             fn main() { let p = Point { x: 3 } }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn unknown_field_access_reports_e0014() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             fn main() { let p = Point { x: 3, y: 4 }\n let z = p.z }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_record_instantiates() {
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             fn main() {\n\
+                 let p = Pair { first: 1, second: \"two\" }\n\
+                 println(\"${p.first} ${p.second}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn record_spread_base_ok() {
+        let r = check_src(
+            "record Point { x: Int, y: Int }\n\
+             fn main() {\n\
+                 let p = Point { x: 1, y: 2 }\n\
+                 let q = Point { x: 10, ..p }\n\
+                 println(\"${q.x} ${q.y}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 }

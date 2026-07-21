@@ -1,0 +1,25 @@
+record Point { x: Int, y: Int }
+
+record Pair<A, B> { first: A, second: B }
+
+fn manhattan(p: Point) -> Int {
+    p.x + p.y
+}
+
+fn translate(p: Point, dx: Int, dy: Int) -> Point {
+    Point { x: p.x + dx, y: p.y + dy }
+}
+
+fn main() {
+    let p = Point { x: 3, y: 4 }
+    println("p = (${p.x}, ${p.y}), manhattan = ${manhattan(p)}")
+
+    let q = translate(p, 10, 20)
+    println("q = (${q.x}, ${q.y})")
+
+    let r = Point { x: 100, ..q }
+    println("r = (${r.x}, ${r.y})")
+
+    let pair = Pair { first: 7, second: "seven" }
+    println("pair = (${pair.first}, ${pair.second})")
+}

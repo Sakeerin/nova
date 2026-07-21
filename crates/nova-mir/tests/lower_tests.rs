@@ -91,6 +91,49 @@ fn match_on_enum_lowers_to_switch() {
 }
 
 #[test]
+fn records_lower_to_make_and_field() {
+    let mir = mir_for(
+        "record Point { x: Int, y: Int }\n\
+         fn main() {\n\
+             let p = Point { x: 3, y: 4 }\n\
+             println(\"${p.x}\")\n\
+         }",
+    );
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    let has_make = main.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s, nova_mir::Stmt::MakeRecord { .. }))
+    });
+    let has_field = main.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s, nova_mir::Stmt::RecordField { .. }))
+    });
+    assert!(has_make, "record literal should lower to MakeRecord");
+    assert!(has_field, "field access should lower to RecordField");
+}
+
+#[test]
+fn generic_record_monomorphizes_field_types() {
+    // A generic record used at two element types compiles without error;
+    // the point is that lowering handles Record args after substitution.
+    let mir = mir_for(
+        "record Box<T> { value: T }\n\
+         fn main() {\n\
+             let a = Box { value: 1 }\n\
+             let b = Box { value: \"hi\" }\n\
+             println(\"${a.value} ${b.value}\")\n\
+         }",
+    );
+    assert!(mir.functions.iter().any(|f| f.name == "main"));
+}
+
+#[test]
 fn unreferenced_functions_are_not_emitted() {
     let mir = mir_for("fn unused() { }\nfn main() { }");
     assert_eq!(function_names(&mir), vec!["main"]);
