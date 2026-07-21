@@ -39,9 +39,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Closures (`|x| body`) with by-value capture, and bare functions used as
   values: both compile to fat pointers `{ code, env }` with an env-first
   ABI; lifted to standalone functions and monomorphized like generics
+- `break` and `continue` in `while`/`for` loops (E0080 outside a loop);
+  `continue` in a `for` still advances the counter
 - Gate programs verified end-to-end: hello-world, fibonacci,
-  match-on-enum, generic functions, records, traits, for-loops, closures
-  (e2e stdout tests under both `nova run` and `nova build`)
+  match-on-enum, generic functions, records, traits, for-loops, closures,
+  break/continue (e2e stdout tests under both `nova run` and `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
@@ -72,8 +74,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), `break`/`continue`,
-  constants, arrays/indexing, full Maranget exhaustiveness, generic impls
+- LLVM release backend (`nova build --release`), constants,
+  arrays/indexing, full Maranget exhaustiveness, generic impls
 
 ## [0.0.0] - 2026-05-10
 
