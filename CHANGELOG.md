@@ -60,6 +60,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounds (`E0013`) that previously only `nova run`/`nova build` rejected
   (adversarial review)
 - Record literal field initializers now evaluate in source order (adversarial review)
+- Typeck: closure return type is resolved through inference (closure bodies
+  previously returned `()` and discarded their result)
+- Typeck: closures now capture all referenced enclosing locals — assignment
+  targets and called function values were missed, causing miscompiles or a
+  compiler panic (adversarial review)
+- Typeck: `for` loops use an independent hidden counter (assigning the loop
+  variable is rejected, not silently corrupting the trip count), unscoped
+  counter locals (no name capture), and an overflow-safe inclusive form
+  (an inclusive range ending at `Int::MAX` no longer loops forever)
+  (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), `break`/`continue`,
