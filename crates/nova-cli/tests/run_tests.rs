@@ -89,6 +89,19 @@ fn for_loops_run() {
 }
 
 #[test]
+fn break_continue_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/break_continue.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/break_continue.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
 fn closures_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/closures.stdout"))
         .expect("expected-output fixture exists")

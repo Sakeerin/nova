@@ -176,6 +176,8 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
         K::StrLit(v) => K::StrLit(v.clone()),
         K::CharLit(v) => K::CharLit(*v),
         K::Unit => K::Unit,
+        K::Break => K::Break,
+        K::Continue => K::Continue,
         K::Local(l) => K::Local(*l),
         K::MakeClosure {
             func,

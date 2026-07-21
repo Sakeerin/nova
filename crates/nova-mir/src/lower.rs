@@ -26,6 +26,7 @@ pub(crate) fn lower_function(
         blocks: vec![BlockState::default()],
         current: BlockId(0),
         local_map: vec![Temp(0); func.locals.len()],
+        loop_targets: Vec::new(),
         diagnostics: Vec::new(),
     };
 
@@ -123,6 +124,8 @@ struct Lowerer<'a> {
     current: BlockId,
     /// LocalId index → temp.
     local_map: Vec<Temp>,
+    /// Stack of `(continue_target, break_target)` for enclosing loops.
+    loop_targets: Vec<(BlockId, BlockId)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -354,9 +357,27 @@ impl<'a> Lowerer<'a> {
                     else_: exit,
                 });
                 self.switch_to(body_b);
+                // `continue` → header (re-test), `break` → exit.
+                self.loop_targets.push((header, exit));
                 self.lower_expr(body);
+                self.loop_targets.pop();
                 self.terminate(Terminator::Goto(header));
                 self.switch_to(exit);
+                self.unit_temp()
+            }
+            K::Break | K::Continue => {
+                if let Some(&(cont, brk)) = self.loop_targets.last() {
+                    let target = if matches!(e.kind, K::Break) {
+                        brk
+                    } else {
+                        cont
+                    };
+                    self.terminate(Terminator::Goto(target));
+                }
+                // Code after break/continue is unreachable; continue lowering
+                // into a fresh dead block.
+                let dead = self.new_block();
+                self.switch_to(dead);
                 self.unit_temp()
             }
             K::Match { scrutinee, arms } => self.lower_match(e, scrutinee, arms),

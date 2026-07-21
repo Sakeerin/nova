@@ -1,0 +1,53 @@
+fn main() {
+    // break: stop at the first multiple of 7 above 20.
+    let mut n = 21
+    while true {
+        if n % 7 == 0 {
+            break
+        }
+        n = n + 1
+    }
+    println("first multiple = ${n}")
+
+    // continue: sum only even numbers in 0..10.
+    let mut even_sum = 0
+    for i in 0..10 {
+        if i % 2 == 1 {
+            continue
+        }
+        even_sum = even_sum + i
+    }
+    println("even sum = ${even_sum}")
+
+    // break out of a for loop early.
+    let mut found = -1
+    for i in 0..100 {
+        if i * i > 50 {
+            found = i
+            break
+        }
+    }
+    println("first i with i*i > 50 = ${found}")
+
+    // Nested loops: break only exits the inner loop.
+    let mut pairs = 0
+    for a in 0..3 {
+        for b in 0..3 {
+            if b == 2 {
+                break
+            }
+            pairs = pairs + 1
+        }
+    }
+    println("pairs = ${pairs}")
+
+    // continue in an inclusive range.
+    let mut count = 0
+    for i in 1..=6 {
+        if i % 3 == 0 {
+            continue
+        }
+        count = count + 1
+    }
+    println("non-multiples of 3 in 1..=6 = ${count}")
+}

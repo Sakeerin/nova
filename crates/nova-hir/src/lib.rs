@@ -440,6 +440,10 @@ pub enum ExprKind {
         cond: Box<Expr>,
         body: Box<Expr>,
     },
+    /// Exit the innermost enclosing loop; diverging (`Never`).
+    Break,
+    /// Skip to the next iteration of the innermost loop; diverging.
+    Continue,
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<Arm>,

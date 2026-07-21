@@ -120,6 +120,10 @@ struct FnCtx {
     /// Trait bounds per generic parameter, indexed like `generics` values.
     param_bounds: Vec<Vec<DefId>>,
     ret_ty: Ty,
+    /// Nesting depth of enclosing loops in the *current* function body.
+    /// Reset to 0 inside a closure body (a `break`/`continue` there cannot
+    /// target an outer loop).
+    loop_depth: usize,
     /// Closure / wrapper functions lifted out while checking this function's
     /// body; finalized with this context's `icx` and then emitted.
     pending_closures: Vec<hir::Function>,
@@ -774,6 +778,7 @@ impl<'a> Checker<'a> {
             generics,
             param_bounds: sig.bounds.clone(),
             ret_ty: sig.ret.clone(),
+            loop_depth: 0,
             pending_closures: Vec::new(),
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
@@ -995,7 +1000,9 @@ impl<'a> Checker<'a> {
             ast::Expr::While { cond, body } => {
                 let cond = self.check_expr(fcx, cond);
                 self.expect_ty(fcx, &cond, &Ty::Bool, "a `while` condition");
+                fcx.loop_depth += 1;
                 let body = self.check_block(fcx, &body.value, body.span);
+                fcx.loop_depth -= 1;
                 hir::Expr {
                     kind: hir::ExprKind::While {
                         cond: Box::new(cond),
@@ -1042,11 +1049,35 @@ impl<'a> Checker<'a> {
                 self.unsupported(span, "ranges outside a `for` loop");
                 error_expr(span)
             }
+            ast::Expr::Break(value) => {
+                if value.is_some() {
+                    self.unsupported(span, "`break` with a value");
+                    return error_expr(span);
+                }
+                if fcx.loop_depth == 0 {
+                    self.error("E0080", "`break` outside of a loop", span);
+                    return error_expr(span);
+                }
+                hir::Expr {
+                    kind: hir::ExprKind::Break,
+                    ty: Ty::Never,
+                    span,
+                }
+            }
+            ast::Expr::Continue => {
+                if fcx.loop_depth == 0 {
+                    self.error("E0080", "`continue` outside of a loop", span);
+                    return error_expr(span);
+                }
+                hir::Expr {
+                    kind: hir::ExprKind::Continue,
+                    ty: Ty::Never,
+                    span,
+                }
+            }
             // --- deferred constructs ---
             ast::Expr::Tuple(_) => self.unsupported_expr(span, "tuple expressions"),
             ast::Expr::Array(_) => self.unsupported_expr(span, "array literals"),
-            ast::Expr::Break(_) => self.unsupported_expr(span, "`break`"),
-            ast::Expr::Continue => self.unsupported_expr(span, "`continue`"),
             ast::Expr::Closure { params, ret, body } => {
                 self.check_closure(fcx, params, ret, body, span)
             }
@@ -1476,7 +1507,9 @@ impl<'a> Checker<'a> {
             }
         };
         let i = fcx.new_local(var_name, Ty::Int, false, var_span);
+        fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
+        fcx.loop_depth -= 1;
         fcx.scopes.pop();
 
         let int = |kind| hir::Expr {
@@ -1532,11 +1565,12 @@ impl<'a> Checker<'a> {
                 })
             };
             outer_stmts.push(let_stmt(run, cmp(hir::BinOp::Le)));
-            // body; __run = __i < __end; __i = __i + 1
+            // Advance the counter and run-flag *before* the body so that a
+            // `continue` (which jumps to the loop header) still progresses.
             let update_run = assign(run, cmp(hir::BinOp::Lt));
             let while_body = hir::Expr {
                 kind: hir::ExprKind::Block {
-                    stmts: vec![bind_i, body_hir, update_run, incr],
+                    stmts: vec![bind_i, update_run, incr, body_hir],
                     trailing: None,
                 },
                 ty: Ty::Unit,
@@ -1560,9 +1594,10 @@ impl<'a> Checker<'a> {
                 ty: Ty::Bool,
                 span,
             };
+            // Increment before the body so `continue` still advances.
             let while_body = hir::Expr {
                 kind: hir::ExprKind::Block {
-                    stmts: vec![bind_i, body_hir, incr],
+                    stmts: vec![bind_i, incr, body_hir],
                     trailing: None,
                 },
                 ty: Ty::Unit,
@@ -1622,7 +1657,12 @@ impl<'a> Checker<'a> {
             Some(rt) => self.convert_ty(rt, &generics_scope),
             None => fcx.icx.fresh(),
         };
+        // A `break`/`continue` in the closure body cannot target a loop in
+        // the enclosing function.
+        let saved_loop_depth = fcx.loop_depth;
+        fcx.loop_depth = 0;
         let body_hir = self.check_expr(fcx, body);
+        fcx.loop_depth = saved_loop_depth;
         if !fcx.icx.unify(&body_hir.ty, &ret_ty) {
             self.error(
                 "E0010",
@@ -3012,6 +3052,8 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
         | K::StrLit(_)
         | K::CharLit(_)
         | K::Unit
+        | K::Break
+        | K::Continue
         | K::Local(_) => {}
     }
     out
@@ -3071,6 +3113,8 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
         | K::StrLit(_)
         | K::CharLit(_)
         | K::Unit
+        | K::Break
+        | K::Continue
         | K::Local(_) => {}
     }
     out
@@ -3269,6 +3313,8 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         | hir::ExprKind::StrLit(_)
         | hir::ExprKind::CharLit(_)
         | hir::ExprKind::Unit
+        | hir::ExprKind::Break
+        | hir::ExprKind::Continue
         | hir::ExprKind::Local(_) => {}
     }
 }
@@ -3716,6 +3762,41 @@ mod tests {
              }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn break_and_continue_in_loops_ok() {
+        let r = check_src(
+            "fn main() {\n\
+                 let mut s = 0\n\
+                 while true { if s > 3 { break }\n s = s + 1 }\n\
+                 for i in 0..10 { if i % 2 == 1 { continue }\n s = s + i }\n\
+                 println(\"${s}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn break_outside_loop_reports_e0080() {
+        let r = check_src("fn main() { break }");
+        assert!(error_codes(&r).contains(&"E0080"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn continue_outside_loop_reports_e0080() {
+        let r = check_src("fn main() { continue }");
+        assert!(error_codes(&r).contains(&"E0080"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn break_in_closure_does_not_see_outer_loop() {
+        // A `break` inside a closure body cannot target the enclosing loop.
+        let r = check_src(
+            "fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n\
+             fn main() { while true { let c = |n: Int| { if n > 0 { break }\n n }\n let _ = apply(c, 1) } }",
+        );
+        assert!(error_codes(&r).contains(&"E0080"), "{:?}", r.diagnostics);
     }
 
     #[test]

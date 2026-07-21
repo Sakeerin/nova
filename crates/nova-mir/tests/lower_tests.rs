@@ -213,6 +213,31 @@ fn fn_as_value_lowers_to_closure_and_indirect_call() {
 }
 
 #[test]
+fn break_and_continue_lower_to_gotos() {
+    // A while loop with break and continue lowers without panicking and the
+    // body contains the extra control flow.
+    let mir = mir_for(
+        "fn main() {\n\
+             let mut i = 0\n\
+             while i < 10 {\n\
+                 i = i + 1\n\
+                 if i == 3 { continue }\n\
+                 if i == 7 { break }\n\
+             }\n\
+             println(\"${i}\")\n\
+         }",
+    );
+    let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
+    // A loop produces multiple Goto/Branch terminators; just assert the
+    // function has several blocks (header, body, branches, exit, dead).
+    assert!(
+        main.blocks.len() >= 6,
+        "expected several blocks for break/continue, got {}",
+        main.blocks.len()
+    );
+}
+
+#[test]
 fn closure_lowers_to_env_taking_function() {
     let mir = mir_for(
         "fn main() {\n\
