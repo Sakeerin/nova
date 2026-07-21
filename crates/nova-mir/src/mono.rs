@@ -148,6 +148,8 @@ fn specialize(func: &hir::Function, type_args: &[Ty]) -> hir::Function {
         name: func.name.clone(),
         generics: 0,
         bounds: Vec::new(),
+        takes_env: func.takes_env,
+        capture_count: func.capture_count,
         params: func.params,
         locals: func
             .locals
@@ -175,9 +177,14 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
         K::CharLit(v) => K::CharLit(*v),
         K::Unit => K::Unit,
         K::Local(l) => K::Local(*l),
-        K::FnRef { def, type_args } => K::FnRef {
-            def: *def,
+        K::MakeClosure {
+            func,
+            type_args,
+            captures,
+        } => K::MakeClosure {
+            func: *func,
             type_args: type_args.iter().map(|t| t.subst(args)).collect(),
+            captures: captures.iter().map(|c| subst_expr(c, args)).collect(),
         },
         K::Call {
             func,

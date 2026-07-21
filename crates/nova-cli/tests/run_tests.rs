@@ -89,6 +89,28 @@ fn for_loops_run() {
 }
 
 #[test]
+fn closures_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/closures.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/closures.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn closures_build_standalone() {
+    let out = build_and_run("tests/runtime/closures.nova", "closures");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/closures.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn traits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
         .expect("expected-output fixture exists")

@@ -267,7 +267,18 @@ pub struct Function {
     /// `DefId`s the i-th parameter must satisfy). Checked at
     /// monomorphization once the concrete type argument is known.
     pub bounds: Vec<Vec<DefId>>,
-    /// The first `params` entries of `locals` are the parameters.
+    /// Whether this function is the code of a function value (a closure or
+    /// a bare-fn wrapper). Such functions take a leading environment
+    /// pointer in their ABI: `(env_ptr, params...)`. Normal, directly
+    /// called functions do not.
+    pub takes_env: bool,
+    /// For a closure, the number of leading `locals` that are captured
+    /// variables loaded from the environment at entry (0 for a bare-fn
+    /// wrapper). The captured locals precede the real parameters.
+    pub capture_count: u32,
+    /// The first `params` entries of `locals` are the real parameters
+    /// (after any captures). For a closure the captured locals occupy
+    /// indices `0..capture_count` and the parameters `capture_count..`.
     pub params: u32,
     pub locals: Vec<Local>,
     pub ret_ty: Ty,
@@ -339,11 +350,14 @@ pub enum ExprKind {
     Unit,
     /// Read a local variable.
     Local(LocalId),
-    /// Reference a top-level function as a value (e.g. passed as callback).
-    /// `type_args` instantiate the callee's generics.
-    FnRef {
-        def: DefId,
+    /// Build a function value (fat pointer `{ code, env }`). `func` is the
+    /// code function (a closure body or a bare-fn wrapper), instantiated
+    /// with `type_args`; `captures` are the environment's values in order
+    /// (empty for a bare-fn wrapper).
+    MakeClosure {
+        func: DefId,
         type_args: Vec<Ty>,
+        captures: Vec<Expr>,
     },
     /// Call a function. `type_args` instantiate the callee's generics when
     /// `func` is `Callee::Def`.

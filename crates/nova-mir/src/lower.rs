@@ -25,15 +25,50 @@ pub(crate) fn lower_function(
         temps: Vec::new(),
         blocks: vec![BlockState::default()],
         current: BlockId(0),
-        local_map: Vec::new(),
+        local_map: vec![Temp(0); func.locals.len()],
         diagnostics: Vec::new(),
     };
 
-    // Parameters occupy the first temps; remaining locals get fresh temps.
-    for (i, local) in func.locals.iter().enumerate() {
-        let t = lo.new_temp(mir_ty(&local.ty));
-        debug_assert_eq!(t.0 as usize, i, "params must map to leading temps");
-        lo.local_map.push(t);
+    let capture_count = func.capture_count as usize;
+    if func.takes_env {
+        // ABI: (env_ptr, real_params...). Temp 0 is the env pointer, then
+        // one temp per real parameter; captured locals and body locals get
+        // temps afterwards. Captured locals are loaded from the env at entry.
+        let env = lo.new_temp(MirTy::Ptr);
+        // Real parameters (HIR locals capture_count..capture_count+params).
+        for i in 0..func.params as usize {
+            let local = &func.locals[capture_count + i];
+            lo.local_map[capture_count + i] = lo.new_temp(mir_ty(&local.ty));
+        }
+        // Captured locals: fresh temps, loaded from the env record.
+        for (i, local) in func.locals.iter().take(capture_count).enumerate() {
+            lo.local_map[i] = lo.new_temp(mir_ty(&local.ty));
+        }
+        // Remaining body locals.
+        for i in (capture_count + func.params as usize)..func.locals.len() {
+            let local = &func.locals[i];
+            lo.local_map[i] = lo.new_temp(mir_ty(&local.ty));
+        }
+        // Emit capture loads at entry.
+        for i in 0..capture_count {
+            let ty = mir_ty(&func.locals[i].ty);
+            if ty != MirTy::Unit {
+                let dst = lo.local_map[i];
+                lo.push(Stmt::RecordField {
+                    dst,
+                    record: env,
+                    index: i as u32,
+                    ty,
+                });
+            }
+        }
+    } else {
+        // Normal ABI: parameters occupy the first temps in local order.
+        for (i, local) in func.locals.iter().enumerate() {
+            let t = lo.new_temp(mir_ty(&local.ty));
+            debug_assert_eq!(t.0 as usize, i, "params must map to leading temps");
+            lo.local_map[i] = t;
+        }
     }
 
     let result = lo.lower_expr(&func.body);
@@ -62,6 +97,8 @@ pub(crate) fn lower_function(
     Ok(Function {
         name: mangled.to_string(),
         params: func.params,
+        takes_env: func.takes_env,
+        capture_count: func.capture_count,
         temps: lo.temps,
         ret: mir_ty(&func.ret_ty),
         blocks,
@@ -175,10 +212,25 @@ impl<'a> Lowerer<'a> {
             }
             K::Unit => self.unit_temp(),
             K::Local(l) => self.local_map[l.0 as usize],
-            K::FnRef { def, type_args } => {
-                let callee = self.callee_name(*def, type_args);
+            K::MakeClosure {
+                func,
+                type_args,
+                captures,
+            } => {
+                let code = self.callee_name(*func, type_args);
+                let cap_temps: Vec<(Temp, MirTy)> = captures
+                    .iter()
+                    .map(|c| {
+                        let t = self.lower_expr(c);
+                        (t, mir_ty(&c.ty))
+                    })
+                    .collect();
                 let t = self.new_temp(MirTy::Ptr);
-                self.push(Stmt::FnAddr { dst: t, callee });
+                self.push(Stmt::MakeClosure {
+                    dst: t,
+                    code,
+                    captures: cap_temps,
+                });
                 t
             }
             K::Call {

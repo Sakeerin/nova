@@ -55,8 +55,15 @@ pub struct Module {
 pub struct Function {
     /// Mangled, unique symbol name (e.g. `identity$i`).
     pub name: String,
-    /// The first `params` temps are the parameters.
+    /// Number of real value parameters (the first `params` temps after the
+    /// optional leading environment pointer).
     pub params: u32,
+    /// Whether the ABI has a leading environment pointer (closures and
+    /// bare-fn wrappers). When true, temp 0 is the env pointer, temps
+    /// `1..=params` are the real parameters, and `capture_count` captured
+    /// values are loaded from the environment at entry.
+    pub takes_env: bool,
+    pub capture_count: u32,
     pub temps: Vec<MirTy>,
     pub ret: MirTy,
     pub blocks: Vec<Block>,
@@ -172,7 +179,10 @@ pub enum Stmt {
         callee: String,
         args: Vec<Temp>,
     },
-    /// Indirect call through a function-pointer temp.
+    /// Indirect call through a function value (fat pointer). `callee` is a
+    /// `{ code_ptr, env_ptr }` block; codegen loads both and calls
+    /// `code_ptr(env_ptr, args...)`. `params` are the real parameter
+    /// classes (excluding the leading env).
     CallIndirect {
         dst: Option<Temp>,
         callee: Temp,
@@ -186,10 +196,13 @@ pub enum Stmt {
         func: RtFunc,
         args: Vec<Temp>,
     },
-    /// Materialize the address of a Nova function as a value.
-    FnAddr {
+    /// Build a function value: a 2-word fat pointer `{ code_ptr, env_ptr }`.
+    /// `code` is the mangled callee whose address is `code_ptr`; `captures`
+    /// are stored into a freshly allocated environment (empty → null env).
+    MakeClosure {
         dst: Temp,
-        callee: String,
+        code: String,
+        captures: Vec<(Temp, MirTy)>,
     },
     /// Allocate and initialize a sum value: `{ tag, fields... }`.
     MakeSum {

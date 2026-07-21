@@ -1,0 +1,6 @@
+inc(41) = 42
+add_offset(5) = 105
+apply(add_offset, 7) = 107
+apply_twice(double, 5) = 20
+f(1) = 11
+combine(2) = 10

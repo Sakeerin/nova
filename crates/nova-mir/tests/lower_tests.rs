@@ -182,7 +182,7 @@ fn unsatisfied_trait_bound_reports_e0013() {
 }
 
 #[test]
-fn fn_as_value_lowers_to_fnaddr_and_indirect_call() {
+fn fn_as_value_lowers_to_closure_and_indirect_call() {
     let mir = mir_for(
         "fn double(n: Int) -> Int { n * 2 }\n\
          fn apply_twice<T>(f: fn(T) -> T, x: T) -> T { f(f(x)) }\n\
@@ -191,6 +191,14 @@ fn fn_as_value_lowers_to_fnaddr_and_indirect_call() {
     let names = function_names(&mir);
     assert!(names.contains(&"double"), "names: {names:?}");
     assert!(names.contains(&"apply_twice$i"), "names: {names:?}");
+    // A bare fn used as a value becomes a fat-pointer wrapper (MakeClosure).
+    let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
+    let has_make = main.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s, nova_mir::Stmt::MakeClosure { .. }))
+    });
+    assert!(has_make, "bare-fn value should lower to MakeClosure");
     let apply = mir
         .functions
         .iter()
@@ -202,4 +210,28 @@ fn fn_as_value_lowers_to_fnaddr_and_indirect_call() {
             .any(|s| matches!(s, nova_mir::Stmt::CallIndirect { .. }))
     });
     assert!(has_indirect, "call through fn param should be indirect");
+}
+
+#[test]
+fn closure_lowers_to_env_taking_function() {
+    let mir = mir_for(
+        "fn main() {\n\
+             let base = 10\n\
+             let f = |n| n + base\n\
+             println(\"${f(5)}\")\n\
+         }",
+    );
+    // The lifted closure function takes an env and captures one value.
+    let closure = mir
+        .functions
+        .iter()
+        .find(|f| f.takes_env && f.capture_count == 1)
+        .expect("a closure with one capture was lifted");
+    // Its entry loads the captured value from the environment.
+    let loads_capture = closure.blocks.iter().any(|b| {
+        b.stmts
+            .iter()
+            .any(|s| matches!(s, nova_mir::Stmt::RecordField { .. }))
+    });
+    assert!(loads_capture, "closure should load its capture from env");
 }

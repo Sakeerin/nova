@@ -54,6 +54,8 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         records: Vec::new(),
         traits: Vec::new(),
         impls: Vec::new(),
+        extra_functions: Vec::new(),
+        next_closure_def: defs.defs().len() as u32,
         diagnostics: Vec::new(),
     };
     checker.collect_records();
@@ -75,6 +77,8 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
             functions.push(f);
         }
     }
+    // Closure and bare-fn-wrapper functions synthesized while checking.
+    functions.append(&mut checker.extra_functions);
 
     CheckResult {
         module: hir::Module {
@@ -98,6 +102,11 @@ struct Checker<'a> {
     records: Vec<hir::RecordType>,
     traits: Vec<hir::TraitDef>,
     impls: Vec<hir::ImplInfo>,
+    /// Lifted closure / fn-wrapper functions, appended to the module.
+    extra_functions: Vec<hir::Function>,
+    /// Next synthetic `DefId` for a closure/wrapper (starts past all
+    /// resolver-assigned defs so it never collides).
+    next_closure_def: u32,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -111,6 +120,9 @@ struct FnCtx {
     /// Trait bounds per generic parameter, indexed like `generics` values.
     param_bounds: Vec<Vec<DefId>>,
     ret_ty: Ty,
+    /// Closure / wrapper functions lifted out while checking this function's
+    /// body; finalized with this context's `icx` and then emitted.
+    pending_closures: Vec<hir::Function>,
 }
 
 impl FnCtx {
@@ -753,6 +765,7 @@ impl<'a> Checker<'a> {
             generics,
             param_bounds: sig.bounds.clone(),
             ret_ty: sig.ret.clone(),
+            pending_closures: Vec::new(),
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
             fcx.new_local(p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
@@ -778,6 +791,8 @@ impl<'a> Checker<'a> {
             name,
             generics: sig.generics,
             bounds: sig.bounds,
+            takes_env: false,
+            capture_count: 0,
             params: f.params.len() as u32,
             locals: fcx.locals,
             ret_ty: sig.ret,
@@ -785,13 +800,33 @@ impl<'a> Checker<'a> {
             span: f.name.span,
         };
         self.finalize_function(&mut func, &fcx.icx);
+        // Finalize and emit any closures/wrappers lifted from this body,
+        // using the same inference context so their types resolve.
+        let mut closures = std::mem::take(&mut fcx.pending_closures);
+        for c in &mut closures {
+            self.finalize_function(c, &fcx.icx);
+        }
+        self.extra_functions.append(&mut closures);
         Some(func)
+    }
+
+    /// Allocate a fresh synthetic `DefId` for a closure/wrapper function.
+    fn fresh_closure_def(&mut self) -> DefId {
+        let id = DefId(self.next_closure_def);
+        self.next_closure_def += 1;
+        id
     }
 
     /// Apply the final substitution everywhere and report residual
     /// inference variables as E0011.
     fn finalize_function(&mut self, func: &mut hir::Function, icx: &InferCtx) {
         let mut residual: Vec<Span> = Vec::new();
+        // Resolve the return type — for closures it may be an inference
+        // variable (normal functions carry a concrete signature type).
+        func.ret_ty = icx.apply(&func.ret_ty);
+        if func.ret_ty.has_vars() {
+            residual.push(func.span);
+        }
         for local in &mut func.locals {
             local.ty = icx.apply(&local.ty);
             if local.ty.has_vars() {
@@ -1003,7 +1038,9 @@ impl<'a> Checker<'a> {
             ast::Expr::Array(_) => self.unsupported_expr(span, "array literals"),
             ast::Expr::Break(_) => self.unsupported_expr(span, "`break`"),
             ast::Expr::Continue => self.unsupported_expr(span, "`continue`"),
-            ast::Expr::Closure { .. } => self.unsupported_expr(span, "closures"),
+            ast::Expr::Closure { params, ret, body } => {
+                self.check_closure(fcx, params, ret, body, span)
+            }
             ast::Expr::Record { path, fields, base } => {
                 self.check_record_literal(fcx, path, fields, base.as_deref(), span)
             }
@@ -1113,18 +1150,12 @@ impl<'a> Checker<'a> {
                         return error_expr(span);
                     };
                     let type_args: Vec<Ty> = (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
-                    let ty = Ty::Fn {
-                        params: sig.params.iter().map(|p| p.subst(&type_args)).collect(),
-                        ret: Box::new(sig.ret.subst(&type_args)),
-                    };
-                    hir::Expr {
-                        kind: hir::ExprKind::FnRef {
-                            def: def_id,
-                            type_args,
-                        },
-                        ty,
-                        span,
-                    }
+                    let param_types: Vec<Ty> =
+                        sig.params.iter().map(|p| p.subst(&type_args)).collect();
+                    let ret = sig.ret.subst(&type_args);
+                    // A bare function used as a value becomes a fat pointer to
+                    // a synthesized wrapper `(env, params) { def(params) }`.
+                    self.make_fn_wrapper(fcx, def_id, type_args, param_types, ret, span)
                 }
                 _ => {
                     self.unsupported(span, "referencing this kind of definition as a value");
@@ -1508,6 +1539,208 @@ impl<'a> Checker<'a> {
                 trailing: None,
             },
             ty: Ty::Unit,
+            span,
+        }
+    }
+
+    /// Check a closure literal `|params| body`, lifting it into its own
+    /// function. Free variables referring to enclosing locals are captured
+    /// by value; the closure value is a fat pointer `{ code, env }`.
+    fn check_closure(
+        &mut self,
+        fcx: &mut FnCtx,
+        params: &[ast::Param],
+        ret: &Option<Spanned<ast::Type>>,
+        body: &Spanned<ast::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        // Locals allocated below this index belong to enclosing scopes and
+        // become captures if the body references them.
+        let snapshot = fcx.locals.len() as u32;
+        let generics_scope = fcx.generics.clone();
+
+        fcx.scopes.push(FxHashMap::default());
+        let mut param_locals = Vec::new();
+        let mut param_types = Vec::new();
+        for p in params {
+            let ty = if matches!(p.ty.value, ast::Type::Infer) {
+                fcx.icx.fresh()
+            } else {
+                self.convert_ty(&p.ty, &generics_scope)
+            };
+            let local = fcx.new_local(p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
+            param_locals.push(local);
+            param_types.push(ty);
+        }
+        let ret_ty = match ret {
+            Some(rt) => self.convert_ty(rt, &generics_scope),
+            None => fcx.icx.fresh(),
+        };
+        let body_hir = self.check_expr(fcx, body);
+        if !fcx.icx.unify(&body_hir.ty, &ret_ty) {
+            self.error(
+                "E0010",
+                format!(
+                    "closure body has type `{}` but its declared return type is `{}`",
+                    self.show(&body_hir.ty, fcx),
+                    self.show(&ret_ty, fcx),
+                ),
+                body.span,
+            );
+        }
+        fcx.scopes.pop();
+
+        let closure_ty = Ty::Fn {
+            params: param_types,
+            ret: Box::new(ret_ty.clone()),
+        };
+        self.lift_closure(
+            fcx,
+            snapshot,
+            param_locals.len() as u32,
+            ret_ty,
+            body_hir,
+            closure_ty,
+            span,
+        )
+    }
+
+    /// Extract a checked closure body into a standalone function, remapping
+    /// captured locals to leading env slots and the closure's own locals to
+    /// fresh indices. Returns the `MakeClosure` expression.
+    #[allow(clippy::too_many_arguments)]
+    fn lift_closure(
+        &mut self,
+        fcx: &mut FnCtx,
+        snapshot: u32,
+        param_count: u32,
+        ret_ty: Ty,
+        body: hir::Expr,
+        closure_ty: Ty,
+        span: Span,
+    ) -> hir::Expr {
+        // Captured locals: those referenced by the body with index < snapshot.
+        let mut captures: Vec<LocalId> = Vec::new();
+        collect_captures(&body, snapshot, &mut captures);
+        let capture_count = captures.len() as u32;
+
+        // Remap old local ids to the lifted function's local space:
+        // captures → 0..C, then the closure's own locals (>= snapshot).
+        let mut remap: FxHashMap<u32, u32> = FxHashMap::default();
+        let mut new_locals: Vec<hir::Local> = Vec::new();
+        for (i, cap) in captures.iter().enumerate() {
+            remap.insert(cap.0, i as u32);
+            new_locals.push(fcx.locals[cap.0 as usize].clone());
+        }
+        for old in (snapshot as usize)..fcx.locals.len() {
+            let new_id = capture_count + (old as u32 - snapshot);
+            remap.insert(old as u32, new_id);
+            new_locals.push(fcx.locals[old].clone());
+        }
+
+        let mut lifted_body = body;
+        remap_locals(&mut lifted_body, &remap);
+
+        let generics = fcx.generics.len() as u32;
+        let type_args: Vec<Ty> = (0..generics).map(Ty::Param).collect();
+        let cdef = self.fresh_closure_def();
+        let closure_fn = hir::Function {
+            def_id: cdef,
+            name: format!("closure${}", cdef.0),
+            generics,
+            bounds: fcx.param_bounds.clone(),
+            takes_env: true,
+            capture_count,
+            params: param_count,
+            locals: new_locals,
+            ret_ty,
+            body: lifted_body,
+            span,
+        };
+        fcx.pending_closures.push(closure_fn);
+
+        let capture_exprs: Vec<hir::Expr> = captures
+            .iter()
+            .map(|c| hir::Expr {
+                kind: hir::ExprKind::Local(*c),
+                ty: fcx.locals[c.0 as usize].ty.clone(),
+                span,
+            })
+            .collect();
+        hir::Expr {
+            kind: hir::ExprKind::MakeClosure {
+                func: cdef,
+                type_args,
+                captures: capture_exprs,
+            },
+            ty: closure_ty,
+            span,
+        }
+    }
+
+    /// Synthesize a fat-pointer wrapper for a bare function used as a value:
+    /// `(env, params) { target(params) }`, captured environment empty.
+    fn make_fn_wrapper(
+        &mut self,
+        fcx: &mut FnCtx,
+        target: DefId,
+        target_type_args: Vec<Ty>,
+        param_types: Vec<Ty>,
+        ret: Ty,
+        span: Span,
+    ) -> hir::Expr {
+        let generics = fcx.generics.len() as u32;
+        let type_args: Vec<Ty> = (0..generics).map(Ty::Param).collect();
+        let cdef = self.fresh_closure_def();
+
+        let mut locals = Vec::new();
+        let mut call_args = Vec::new();
+        for (i, pty) in param_types.iter().enumerate() {
+            locals.push(hir::Local {
+                name: format!("__a{i}"),
+                ty: pty.clone(),
+                is_mut: false,
+                span,
+            });
+            call_args.push(hir::Expr {
+                kind: hir::ExprKind::Local(LocalId(i as u32)),
+                ty: pty.clone(),
+                span,
+            });
+        }
+        let body = hir::Expr {
+            kind: hir::ExprKind::Call {
+                func: hir::Callee::Def(target),
+                type_args: target_type_args,
+                args: call_args,
+            },
+            ty: ret.clone(),
+            span,
+        };
+        let wrapper = hir::Function {
+            def_id: cdef,
+            name: format!("fnval${}", cdef.0),
+            generics,
+            bounds: fcx.param_bounds.clone(),
+            takes_env: true,
+            capture_count: 0,
+            params: param_types.len() as u32,
+            locals,
+            ret_ty: ret.clone(),
+            body,
+            span,
+        };
+        fcx.pending_closures.push(wrapper);
+        hir::Expr {
+            kind: hir::ExprKind::MakeClosure {
+                func: cdef,
+                type_args,
+                captures: Vec::new(),
+            },
+            ty: Ty::Fn {
+                params: param_types,
+                ret: Box::new(ret),
+            },
             span,
         }
     }
@@ -2612,6 +2845,174 @@ impl<'a> Checker<'a> {
 
 // === Free helpers ===
 
+/// Walk a closure body and collect the locals it captures — those with an
+/// index below `snapshot` (declared in an enclosing scope) — in first-seen
+/// order, without duplicates.
+fn collect_captures(expr: &hir::Expr, snapshot: u32, out: &mut Vec<LocalId>) {
+    use hir::ExprKind as K;
+    if let K::Local(id) = &expr.kind {
+        if id.0 < snapshot && !out.contains(id) {
+            out.push(*id);
+        }
+    }
+    for child in child_exprs(expr) {
+        collect_captures(child, snapshot, out);
+    }
+}
+
+/// Rewrite every local id in a lifted closure body through `map`.
+fn remap_locals(expr: &mut hir::Expr, map: &FxHashMap<u32, u32>) {
+    use hir::ExprKind as K;
+    let remap = |id: &mut LocalId| {
+        if let Some(&new) = map.get(&id.0) {
+            id.0 = new;
+        }
+    };
+    match &mut expr.kind {
+        K::Local(id) => remap(id),
+        K::Let { local, .. } | K::Assign { local, .. } => remap(local),
+        K::Match { arms, .. } => {
+            for arm in arms.iter_mut() {
+                remap_pattern(&mut arm.pattern, &remap);
+            }
+        }
+        _ => {}
+    }
+    for child in child_exprs_mut(&mut expr.kind) {
+        remap_locals(child, map);
+    }
+}
+
+fn remap_pattern(pat: &mut hir::Pattern, remap: &impl Fn(&mut LocalId)) {
+    match pat {
+        hir::Pattern::Bind(local) => remap(local),
+        hir::Pattern::Variant { binders, .. } => {
+            for b in binders.iter_mut().flatten() {
+                remap(b);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Immutable iterator over an expression's direct sub-expressions.
+fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
+    use hir::ExprKind as K;
+    let mut out: Vec<&hir::Expr> = Vec::new();
+    match &expr.kind {
+        K::MakeClosure { captures, .. } => out.extend(captures.iter()),
+        K::Call { args, .. } => out.extend(args.iter()),
+        K::MakeVariant { args, .. } | K::MakeRecord { fields: args, .. } | K::StrConcat(args) => {
+            out.extend(args.iter())
+        }
+        K::FieldGet { target, .. } => out.push(target),
+        K::TraitCall { receiver, args, .. } => {
+            out.push(receiver);
+            out.extend(args.iter());
+        }
+        K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
+        K::Unary { expr: e, .. } | K::ToStr(e) => out.push(e),
+        K::Let { init, .. } => out.push(init),
+        K::Assign { value, .. } => out.push(value),
+        K::Block { stmts, trailing } => {
+            out.extend(stmts.iter());
+            if let Some(t) = trailing {
+                out.push(t);
+            }
+        }
+        K::If { cond, then, else_ } => {
+            out.push(cond);
+            out.push(then);
+            if let Some(e) = else_ {
+                out.push(e);
+            }
+        }
+        K::While { cond, body } => {
+            out.push(cond);
+            out.push(body);
+        }
+        K::Match { scrutinee, arms } => {
+            out.push(scrutinee);
+            out.extend(arms.iter().map(|a| &a.body));
+        }
+        K::Return(v) => {
+            if let Some(v) = v {
+                out.push(v);
+            }
+        }
+        K::IntLit(_)
+        | K::FloatLit(_)
+        | K::BoolLit(_)
+        | K::StrLit(_)
+        | K::CharLit(_)
+        | K::Unit
+        | K::Local(_) => {}
+    }
+    out
+}
+
+/// Mutable iterator over a kind's direct sub-expressions.
+fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
+    use hir::ExprKind as K;
+    let mut out: Vec<&mut hir::Expr> = Vec::new();
+    match kind {
+        K::MakeClosure { captures, .. } => out.extend(captures.iter_mut()),
+        K::Call { args, .. } => out.extend(args.iter_mut()),
+        K::MakeVariant { args, .. } | K::MakeRecord { fields: args, .. } | K::StrConcat(args) => {
+            out.extend(args.iter_mut())
+        }
+        K::FieldGet { target, .. } => out.push(target),
+        K::TraitCall { receiver, args, .. } => {
+            out.push(receiver);
+            out.extend(args.iter_mut());
+        }
+        K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
+            out.push(lhs);
+            out.push(rhs);
+        }
+        K::Unary { expr: e, .. } | K::ToStr(e) => out.push(e),
+        K::Let { init, .. } => out.push(init),
+        K::Assign { value, .. } => out.push(value),
+        K::Block { stmts, trailing } => {
+            out.extend(stmts.iter_mut());
+            if let Some(t) = trailing {
+                out.push(t);
+            }
+        }
+        K::If { cond, then, else_ } => {
+            out.push(cond);
+            out.push(then);
+            if let Some(e) = else_ {
+                out.push(e);
+            }
+        }
+        K::While { cond, body } => {
+            out.push(cond);
+            out.push(body);
+        }
+        K::Match { scrutinee, arms } => {
+            out.push(scrutinee);
+            out.extend(arms.iter_mut().map(|a| &mut a.body));
+        }
+        K::Return(v) => {
+            if let Some(v) = v {
+                out.push(v);
+            }
+        }
+        K::IntLit(_)
+        | K::FloatLit(_)
+        | K::BoolLit(_)
+        | K::StrLit(_)
+        | K::CharLit(_)
+        | K::Unit
+        | K::Local(_) => {}
+    }
+    out
+}
+
 fn generic_scope(generics: &[ast::TypeParam]) -> FxHashMap<String, u32> {
     generics
         .iter()
@@ -2717,12 +3118,19 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
                 finalize_expr(a, icx, residual);
             }
         }
-        hir::ExprKind::FnRef { type_args, .. } => {
+        hir::ExprKind::MakeClosure {
+            type_args,
+            captures,
+            ..
+        } => {
             for t in type_args.iter_mut() {
                 *t = icx.apply(t);
                 if t.has_vars() {
                     residual.push(expr.span);
                 }
+            }
+            for c in captures {
+                finalize_expr(c, icx, residual);
             }
         }
         hir::ExprKind::MakeVariant { args, .. }
@@ -3140,6 +3548,45 @@ mod tests {
                  for j in 1..=3 { s = s + j }\n\
                  println(\"${s}\")\n\
              }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_no_capture_ok() {
+        let r = check_src("fn main() { let inc = |n| n + 1\n println(\"${inc(41)}\") }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_capturing_local_ok() {
+        let r = check_src(
+            "fn main() {\n\
+                 let base = 10\n\
+                 let f = |n| n + base\n\
+                 println(\"${f(5)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // A closure and a wrapper are lifted; at least one extra function.
+        assert!(r.module.functions.len() >= 2);
+    }
+
+    #[test]
+    fn closure_to_higher_order_ok() {
+        let r = check_src(
+            "fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n\
+             fn main() { let k = 3\n println(\"${apply(|n| n * k, 4)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn bare_fn_as_value_ok() {
+        let r = check_src(
+            "fn dbl(n: Int) -> Int { n * 2 }\n\
+             fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n\
+             fn main() { println(\"${apply(dbl, 5)}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }

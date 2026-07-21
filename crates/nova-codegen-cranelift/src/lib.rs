@@ -169,6 +169,12 @@ impl<'m, M: ClModule> Codegen<'m, M> {
         }
     }
 
+    /// Number of leading ABI parameter temps: the real params plus a
+    /// leading environment pointer for function values (closures/wrappers).
+    fn abi_param_count(f: &nova_mir::Function) -> usize {
+        f.params as usize + if f.takes_env { 1 } else { 0 }
+    }
+
     fn make_signature(&self, params: &[MirTy], ret: MirTy) -> Signature {
         let mut sig = self.module.make_signature();
         for p in params {
@@ -212,7 +218,7 @@ impl<'m, M: ClModule> Codegen<'m, M> {
     /// `"main"` either way.
     fn declare_functions(&mut self, mir: &MirModule, rename_main: Option<&str>) -> Result<()> {
         for f in &mir.functions {
-            let params: Vec<MirTy> = f.temps[..f.params as usize].to_vec();
+            let params: Vec<MirTy> = f.temps[..Self::abi_param_count(f)].to_vec();
             let sig = self.make_signature(&params, f.ret);
             let symbol = match rename_main {
                 Some(entry) if f.name == "main" => entry,
@@ -305,7 +311,8 @@ impl<'m, M: ClModule> Codegen<'m, M> {
         fb_ctx: &mut FunctionBuilderContext,
     ) -> Result<()> {
         let func_id = self.functions[&f.name];
-        let params: Vec<MirTy> = f.temps[..f.params as usize].to_vec();
+        let abi_count = Self::abi_param_count(f);
+        let params: Vec<MirTy> = f.temps[..abi_count].to_vec();
         let sig = self.make_signature(&params, f.ret);
 
         let mut ctx = self.module.make_context();
@@ -336,7 +343,7 @@ impl<'m, M: ClModule> Codegen<'m, M> {
         // Bind incoming parameters to their variables (unit params carry
         // no ABI value, so zip non-unit vars with the block params).
         let entry_params: Vec<Value> = builder.block_params(entry).to_vec();
-        let param_vars = vars.iter().take(f.params as usize).copied().flatten();
+        let param_vars = vars.iter().take(abi_count).copied().flatten();
         for (var, value) in param_vars.zip(entry_params) {
             builder.def_var(var, value);
         }
@@ -490,29 +497,70 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                 ret,
                 args,
             } => {
-                let sig = self.cg.make_signature(params, *ret);
+                // `callee` is a fat pointer `{ code_ptr, env_ptr }`. Load both
+                // and call `code_ptr(env_ptr, args...)`.
+                let ptr_ty = self.cg.ptr_ty();
+                let fat = self.use_temp(*callee)?;
+                let code = self.builder.ins().load(ptr_ty, MemFlags::trusted(), fat, 0);
+                let env = self.builder.ins().load(ptr_ty, MemFlags::trusted(), fat, 8);
+                // Signature: (env, params...) -> ret.
+                let mut sig_params = vec![MirTy::Ptr];
+                sig_params.extend_from_slice(params);
+                let sig = self.cg.make_signature(&sig_params, *ret);
                 let sig_ref = self.builder.import_signature(sig);
-                let callee_val = self.use_temp(*callee)?;
-                let arg_vals = self.arg_values(args)?;
-                let inst = self
-                    .builder
-                    .ins()
-                    .call_indirect(sig_ref, callee_val, &arg_vals);
+                let mut arg_vals = vec![env];
+                arg_vals.extend(self.arg_values(args)?);
+                let inst = self.builder.ins().call_indirect(sig_ref, code, &arg_vals);
                 let result = self.builder.inst_results(inst).first().copied();
                 if let (Some(dst), Some(v)) = (dst, result) {
                     self.def_temp(*dst, v);
                 }
             }
-            Stmt::FnAddr { dst, callee } => {
+            Stmt::MakeClosure {
+                dst,
+                code,
+                captures,
+            } => {
+                let ptr_ty = self.cg.ptr_ty();
+                // Environment record of captured values (null when empty).
+                let env = if captures.is_empty() {
+                    self.builder.ins().iconst(ptr_ty, 0)
+                } else {
+                    let size = (8 * captures.len()) as i64;
+                    let size_val = self.builder.ins().iconst(types::I64, size);
+                    let alloc = self.rt("nova_rt_alloc");
+                    let env = self
+                        .call_func_id(alloc, &[size_val])?
+                        .ok_or_else(|| anyhow!("alloc returns a value"))?;
+                    for (i, (cap, ty)) in captures.iter().enumerate() {
+                        if *ty == MirTy::Unit {
+                            continue;
+                        }
+                        let v = self.use_temp(*cap)?;
+                        self.builder
+                            .ins()
+                            .store(MemFlags::trusted(), v, env, (8 * i) as i32);
+                    }
+                    env
+                };
+                // Fat pointer `{ code_ptr, env_ptr }`.
+                let size_val = self.builder.ins().iconst(types::I64, 16);
+                let alloc = self.rt("nova_rt_alloc");
+                let fat = self
+                    .call_func_id(alloc, &[size_val])?
+                    .ok_or_else(|| anyhow!("alloc returns a value"))?;
                 let id = *self
                     .cg
                     .functions
-                    .get(callee)
-                    .ok_or_else(|| anyhow!("address of undeclared function `{callee}`"))?;
+                    .get(code)
+                    .ok_or_else(|| anyhow!("closure code `{code}` is undeclared"))?;
                 let func_ref = self.cg.module.declare_func_in_func(id, self.builder.func);
-                let ptr_ty = self.cg.ptr_ty();
-                let addr = self.builder.ins().func_addr(ptr_ty, func_ref);
-                self.def_temp(*dst, addr);
+                let code_ptr = self.builder.ins().func_addr(ptr_ty, func_ref);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), code_ptr, fat, 0);
+                self.builder.ins().store(MemFlags::trusted(), env, fat, 8);
+                self.def_temp(*dst, fat);
             }
             Stmt::MakeSum { dst, tag, fields } => {
                 let size = 8 + 8 * fields.len() as i64;

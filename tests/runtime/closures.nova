@@ -1,0 +1,39 @@
+fn apply(f: fn(Int) -> Int, x: Int) -> Int {
+    f(x)
+}
+
+fn apply_twice(f: fn(Int) -> Int, x: Int) -> Int {
+    f(f(x))
+}
+
+fn double(n: Int) -> Int {
+    n * 2
+}
+
+fn main() {
+    // A closure with no captures.
+    let inc = |n| n + 1
+    println("inc(41) = ${inc(41)}")
+
+    // A closure capturing a local by value.
+    let offset = 100
+    let add_offset = |n| n + offset
+    println("add_offset(5) = ${add_offset(5)}")
+
+    // Higher-order function taking a closure.
+    println("apply(add_offset, 7) = ${apply(add_offset, 7)}")
+
+    // A bare function passed as a value (fat-pointer wrapper).
+    println("apply_twice(double, 5) = ${apply_twice(double, 5)}")
+
+    // Capture stays bound to the value at creation time.
+    let base = 10
+    let f = |n| n + base
+    println("f(1) = ${f(1)}")
+
+    // Multiple captures.
+    let a = 3
+    let b = 4
+    let combine = |n| n * a + b
+    println("combine(2) = ${combine(2)}")
+}
