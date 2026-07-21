@@ -134,18 +134,27 @@ impl FnCtx {
     }
 
     fn new_local(&mut self, name: String, ty: Ty, is_mut: bool, span: Span) -> LocalId {
-        let id = LocalId(self.locals.len() as u32);
-        self.locals.push(hir::Local {
-            name: name.clone(),
-            ty,
-            is_mut,
-            span,
-        });
+        let id = self.new_local_unscoped(name.clone(), ty, is_mut, span);
         if name != "_" {
             if let Some(scope) = self.scopes.last_mut() {
                 scope.insert(name, id);
             }
         }
+        id
+    }
+
+    /// Allocate a local that is *not* inserted into the name-resolution
+    /// scope — used for compiler-synthesized temporaries (e.g. a for-loop
+    /// counter) so they cannot be captured by, or collide with, source
+    /// identifiers.
+    fn new_local_unscoped(&mut self, name: String, ty: Ty, is_mut: bool, span: Span) -> LocalId {
+        let id = LocalId(self.locals.len() as u32);
+        self.locals.push(hir::Local {
+            name,
+            ty,
+            is_mut,
+            span,
+        });
         id
     }
 }
@@ -1445,8 +1454,14 @@ impl<'a> Checker<'a> {
         let hi = self.check_expr(fcx, hi);
         self.expect_ty(fcx, &hi, &Ty::Int, "a range bound");
 
-        // The loop variable doubles as the counter; mark it mutable so the
-        // synthesized increment is well-formed at the MIR level.
+        // Hidden counter/bound locals are unscoped so they neither collide
+        // with nor shadow source identifiers, and the counter is separate
+        // from the user's (immutable) loop variable so assigning the loop
+        // variable in the body is rejected (E0060) and cannot corrupt the
+        // trip count.
+        let counter = fcx.new_local_unscoped("__i".to_string(), Ty::Int, true, span);
+        let end = fcx.new_local_unscoped("__end".to_string(), Ty::Int, false, span);
+
         fcx.scopes.push(FxHashMap::default());
         let (var_name, var_span) = match &pattern.value {
             ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
@@ -1460,9 +1475,7 @@ impl<'a> Checker<'a> {
                 ("_".to_string(), pattern.span)
             }
         };
-        let i = fcx.new_local(var_name, Ty::Int, true, var_span);
-        let end = fcx.new_local("__end".to_string(), Ty::Int, false, span);
-
+        let i = fcx.new_local(var_name, Ty::Int, false, var_span);
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.scopes.pop();
 
@@ -1471,71 +1484,104 @@ impl<'a> Checker<'a> {
             ty: Ty::Int,
             span,
         };
-        let read_i = || int(hir::ExprKind::Local(i));
-
-        // cond: i < end   (or i <= end for inclusive)
-        let cond = hir::Expr {
-            kind: hir::ExprKind::Binary {
-                op: if *inclusive {
-                    hir::BinOp::Le
-                } else {
-                    hir::BinOp::Lt
-                },
-                lhs: Box::new(read_i()),
-                rhs: Box::new(int(hir::ExprKind::Local(end))),
-            },
-            ty: Ty::Bool,
-            span,
-        };
-        // increment: i = i + 1
-        let incr = hir::Expr {
+        let read = |local| int(hir::ExprKind::Local(local));
+        let assign = |local, value| hir::Expr {
             kind: hir::ExprKind::Assign {
-                local: i,
-                value: Box::new(int(hir::ExprKind::Binary {
-                    op: hir::BinOp::Add,
-                    lhs: Box::new(read_i()),
-                    rhs: Box::new(int(hir::ExprKind::IntLit(1))),
-                })),
+                local,
+                value: Box::new(value),
             },
             ty: Ty::Unit,
             span,
         };
-        let while_body = hir::Expr {
-            kind: hir::ExprKind::Block {
-                stmts: vec![body_hir, incr],
-                trailing: None,
+        let let_stmt = |local, init| hir::Expr {
+            kind: hir::ExprKind::Let {
+                local,
+                init: Box::new(init),
             },
             ty: Ty::Unit,
             span,
         };
-        let while_expr = hir::Expr {
-            kind: hir::ExprKind::While {
-                cond: Box::new(cond),
-                body: Box::new(while_body),
-            },
-            ty: Ty::Unit,
-            span,
+        // Bind the immutable loop variable to the counter each iteration.
+        let bind_i = let_stmt(i, read(counter));
+        // increment: __i = __i + 1
+        let incr = assign(
+            counter,
+            int(hir::ExprKind::Binary {
+                op: hir::BinOp::Add,
+                lhs: Box::new(read(counter)),
+                rhs: Box::new(int(hir::ExprKind::IntLit(1))),
+            }),
+        );
+
+        let mut outer_stmts = vec![let_stmt(counter, lo), let_stmt(end, hi)];
+
+        let while_expr = if *inclusive {
+            // Inclusive ranges use a run flag so that iterating up to
+            // `Int::MAX` terminates instead of wrapping past the bound.
+            let run = fcx.new_local_unscoped("__run".to_string(), Ty::Bool, true, span);
+            let bool_expr = |kind| hir::Expr {
+                kind,
+                ty: Ty::Bool,
+                span,
+            };
+            let cmp = |op| {
+                bool_expr(hir::ExprKind::Binary {
+                    op,
+                    lhs: Box::new(read(counter)),
+                    rhs: Box::new(read(end)),
+                })
+            };
+            outer_stmts.push(let_stmt(run, cmp(hir::BinOp::Le)));
+            // body; __run = __i < __end; __i = __i + 1
+            let update_run = assign(run, cmp(hir::BinOp::Lt));
+            let while_body = hir::Expr {
+                kind: hir::ExprKind::Block {
+                    stmts: vec![bind_i, body_hir, update_run, incr],
+                    trailing: None,
+                },
+                ty: Ty::Unit,
+                span,
+            };
+            hir::Expr {
+                kind: hir::ExprKind::While {
+                    cond: Box::new(bool_expr(hir::ExprKind::Local(run))),
+                    body: Box::new(while_body),
+                },
+                ty: Ty::Unit,
+                span,
+            }
+        } else {
+            let cond = hir::Expr {
+                kind: hir::ExprKind::Binary {
+                    op: hir::BinOp::Lt,
+                    lhs: Box::new(read(counter)),
+                    rhs: Box::new(read(end)),
+                },
+                ty: Ty::Bool,
+                span,
+            };
+            let while_body = hir::Expr {
+                kind: hir::ExprKind::Block {
+                    stmts: vec![bind_i, body_hir, incr],
+                    trailing: None,
+                },
+                ty: Ty::Unit,
+                span,
+            };
+            hir::Expr {
+                kind: hir::ExprKind::While {
+                    cond: Box::new(cond),
+                    body: Box::new(while_body),
+                },
+                ty: Ty::Unit,
+                span,
+            }
         };
 
-        let let_i = hir::Expr {
-            kind: hir::ExprKind::Let {
-                local: i,
-                init: Box::new(lo),
-            },
-            ty: Ty::Unit,
-            span,
-        };
-        let let_end = hir::Expr {
-            kind: hir::ExprKind::Let {
-                local: end,
-                init: Box::new(hi),
-            },
-            ty: Ty::Unit,
-            span,
-        };
+        outer_stmts.push(while_expr);
         hir::Expr {
             kind: hir::ExprKind::Block {
-                stmts: vec![let_i, let_end, while_expr],
+                stmts: outer_stmts,
                 trailing: None,
             },
             ty: Ty::Unit,
@@ -2850,10 +2896,23 @@ impl<'a> Checker<'a> {
 /// order, without duplicates.
 fn collect_captures(expr: &hir::Expr, snapshot: u32, out: &mut Vec<LocalId>) {
     use hir::ExprKind as K;
-    if let K::Local(id) = &expr.kind {
+    let mut consider = |id: &LocalId| {
         if id.0 < snapshot && !out.contains(id) {
             out.push(*id);
         }
+    };
+    // Every position that *references* an existing local is a capture
+    // candidate: reads, assignment targets, and indirect-call callees. (A
+    // `Let` binder and match binders introduce fresh locals — never < the
+    // snapshot — so they are not candidates.)
+    match &expr.kind {
+        K::Local(id) => consider(id),
+        K::Assign { local, .. } => consider(local),
+        K::Call {
+            func: hir::Callee::Local(id),
+            ..
+        } => consider(id),
+        _ => {}
     }
     for child in child_exprs(expr) {
         collect_captures(child, snapshot, out);
@@ -2871,6 +2930,10 @@ fn remap_locals(expr: &mut hir::Expr, map: &FxHashMap<u32, u32>) {
     match &mut expr.kind {
         K::Local(id) => remap(id),
         K::Let { local, .. } | K::Assign { local, .. } => remap(local),
+        K::Call {
+            func: hir::Callee::Local(id),
+            ..
+        } => remap(id),
         K::Match { arms, .. } => {
             for arm in arms.iter_mut() {
                 remap_pattern(&mut arm.pattern, &remap);
@@ -3587,6 +3650,70 @@ mod tests {
             "fn dbl(n: Int) -> Int { n * 2 }\n\
              fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n\
              fn main() { println(\"${apply(dbl, 5)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_assigns_captured_variable_ok() {
+        // Regression: an assignment-only capture must still be captured
+        // (previously miscompiled / ICE'd because collect_captures ignored
+        // the Assign target).
+        let r = check_src(
+            "fn main() {\n\
+                 let mut acc = 100\n\
+                 let keep = 9\n\
+                 let f = |n: Int| { acc = n\n keep + n }\n\
+                 println(\"${f(5)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_calls_captured_fn_value_ok() {
+        // Regression: a captured fn-value used only as a call target must be
+        // captured and its Callee::Local remapped.
+        let r = check_src(
+            "fn inc(x: Int) -> Int { x + 1 }\n\
+             fn dbl(x: Int) -> Int { x * 2 }\n\
+             fn main() {\n\
+                 let f = inc\n let g = dbl\n\
+                 let compose = |x: Int| f(g(x))\n\
+                 println(\"${compose(5)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn nested_closure_calling_local_ok() {
+        // Regression: a nested closure bound to a local and then called
+        // (Callee::Local) must be remapped when the outer closure is lifted.
+        let r = check_src(
+            "fn main() {\n\
+                 let z = 1\n\
+                 let outer = |a: Int| { let inner = |b: Int| a + b\n inner(100) }\n\
+                 println(\"${outer(7)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn assigning_for_loop_variable_reports_e0060() {
+        let r = check_src("fn main() { for i in 0..5 { i = i + 1 } }");
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn for_loop_does_not_shadow_user_end() {
+        // Hidden counter locals are unscoped, so a user `__end` is unaffected.
+        let r = check_src(
+            "fn main() {\n\
+                 let __end = 100\n\
+                 for i in 0..3 { println(\"${__end}\") }\n\
+             }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }

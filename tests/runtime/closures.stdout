@@ -4,3 +4,6 @@ apply(add_offset, 7) = 107
 apply_twice(double, 5) = 20
 f(1) = 11
 combine(2) = 10
+compose(3) = 12
+use_acc(5) = 14
+acc unchanged = 100

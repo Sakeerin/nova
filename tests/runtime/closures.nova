@@ -36,4 +36,17 @@ fn main() {
     let b = 4
     let combine = |n| n * a + b
     println("combine(2) = ${combine(2)}")
+
+    // Capturing a function value and calling it inside the closure.
+    let g = double
+    let compose = |n| g(g(n))
+    println("compose(3) = ${compose(3)}")
+
+    // A closure that assigns a captured variable (by value: the outer stays).
+    let mut acc = 100
+    let keep = 9
+    let use_acc = |n| { acc = n
+        keep + n }
+    println("use_acc(5) = ${use_acc(5)}")
+    println("acc unchanged = ${acc}")
 }
