@@ -72,6 +72,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counter locals (no name capture), and an overflow-safe inclusive form
   (an inclusive range ending at `Int::MAX` no longer loops forever)
   (adversarial review)
+- Typeck: an `if`/`match` with a diverging branch (`return`/`break`/
+  `continue`) is typed by its non-diverging branch instead of `Never`, and
+  the `while` lowering guards a diverging condition — a `Never`-typed
+  condition (e.g. `while (if c { return x } else { b }) {}`) previously
+  crashed codegen with an internal error (adversarial review)
+- Typeck: `break`/`continue` in a loop's own condition now target that loop
+  (were rejected as "outside a loop" or mis-scoped) (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), constants,
