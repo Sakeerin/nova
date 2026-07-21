@@ -350,15 +350,24 @@ impl<'a> Lowerer<'a> {
                 let exit = self.new_block();
                 self.terminate(Terminator::Goto(header));
                 self.switch_to(header);
+                // `continue` → header (re-test), `break` → exit. Push before
+                // lowering the condition so break/continue *in the condition*
+                // target this loop.
+                self.loop_targets.push((header, exit));
                 let c = self.lower_expr(cond);
+                if diverges(cond) {
+                    // The condition never yields a bool (it breaks/returns);
+                    // control has already left the header. Resume at the exit.
+                    self.loop_targets.pop();
+                    self.switch_to(exit);
+                    return self.unit_temp();
+                }
                 self.terminate(Terminator::Branch {
                     cond: c,
                     then_: body_b,
                     else_: exit,
                 });
                 self.switch_to(body_b);
-                // `continue` → header (re-test), `break` → exit.
-                self.loop_targets.push((header, exit));
                 self.lower_expr(body);
                 self.loop_targets.pop();
                 self.terminate(Terminator::Goto(header));

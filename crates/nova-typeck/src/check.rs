@@ -952,7 +952,13 @@ impl<'a> Checker<'a> {
                 match else_ {
                     Some(else_branch) => {
                         let else_expr = self.check_expr(fcx, else_branch);
-                        if !fcx.icx.unify(&then_expr.ty, &else_expr.ty) {
+                        // The branches' types unify only when neither
+                        // diverges; the `if`'s type is the non-diverging
+                        // branch (a diverging branch imposes no constraint —
+                        // `Never` is the bottom type).
+                        let then_d = matches!(fcx.icx.apply(&then_expr.ty), Ty::Never);
+                        let else_d = matches!(fcx.icx.apply(&else_expr.ty), Ty::Never);
+                        if !then_d && !else_d && !fcx.icx.unify(&then_expr.ty, &else_expr.ty) {
                             self.error(
                                 "E0010",
                                 format!(
@@ -963,7 +969,11 @@ impl<'a> Checker<'a> {
                                 else_expr.span,
                             );
                         }
-                        let ty = then_expr.ty.clone();
+                        let ty = if then_d {
+                            else_expr.ty.clone()
+                        } else {
+                            then_expr.ty.clone()
+                        };
                         hir::Expr {
                             kind: hir::ExprKind::If {
                                 cond: Box::new(cond),
@@ -998,9 +1008,11 @@ impl<'a> Checker<'a> {
                 }
             }
             ast::Expr::While { cond, body } => {
+                // The condition is inside the loop for break/continue targeting
+                // (e.g. `while (if done { break } else { c }) { ... }`).
+                fcx.loop_depth += 1;
                 let cond = self.check_expr(fcx, cond);
                 self.expect_ty(fcx, &cond, &Ty::Bool, "a `while` condition");
-                fcx.loop_depth += 1;
                 let body = self.check_block(fcx, &body.value, body.span);
                 fcx.loop_depth -= 1;
                 hir::Expr {
@@ -2589,7 +2601,12 @@ impl<'a> Checker<'a> {
             }
             let body = self.check_expr(fcx, &arm.body);
             fcx.scopes.pop();
-            if !fcx.icx.unify(&body.ty, &result_ty) {
+            // A diverging arm (`Never`) imposes no constraint on the result
+            // type; only unify arms that actually produce a value, so a
+            // `break`/`return`/`continue` arm does not pin the match to
+            // `Never`.
+            if !matches!(fcx.icx.apply(&body.ty), Ty::Never) && !fcx.icx.unify(&body.ty, &result_ty)
+            {
                 self.error(
                     "E0010",
                     format!(
@@ -2609,6 +2626,13 @@ impl<'a> Checker<'a> {
 
         self.check_exhaustiveness(fcx, &scrut, &covered_variants, saw_catch_all, span);
 
+        // If every arm diverged the result was never constrained; it is then
+        // itself `Never`.
+        let result_ty = if matches!(fcx.icx.apply(&result_ty), Ty::Var(_)) {
+            Ty::Never
+        } else {
+            result_ty
+        };
         hir::Expr {
             kind: hir::ExprKind::Match {
                 scrutinee: Box::new(scrut),
@@ -3773,6 +3797,44 @@ mod tests {
                  for i in 0..10 { if i % 2 == 1 { continue }\n s = s + i }\n\
                  println(\"${s}\")\n\
              }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn if_with_diverging_then_takes_else_type() {
+        // Regression: `if c { return } else { v }` must type as `v`, not
+        // `Never` — otherwise a diverging branch in a condition ICE'd codegen.
+        let r = check_src(
+            "fn f() -> Int {\n\
+                 let x = if true { return 0 } else { 5 }\n\
+                 x + 1\n\
+             }\n\
+             fn main() { println(\"${f()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn break_in_while_condition_ok() {
+        // Regression: break in a while's own condition is accepted and does
+        // not crash later stages.
+        let r = check_src(
+            "fn main() {\n\
+                 let mut n = 0\n\
+                 while (if n > 5 { break } else { true }) { n = n + 1 }\n\
+                 println(\"${n}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn return_in_while_condition_ok() {
+        // Regression: a `Never`-typed while condition (return) must not ICE.
+        let r = check_src(
+            "fn f() -> Int { while (if true { return 1 } else { false }) { }\n 0 }\n\
+             fn main() { println(\"${f()}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }

@@ -50,4 +50,11 @@ fn main() {
         count = count + 1
     }
     println("non-multiples of 3 in 1..=6 = ${count}")
+
+    // break inside the loop's own condition.
+    let mut m = 0
+    while (if m > 3 { break } else { true }) {
+        m = m + 1
+    }
+    println("m = ${m}")
 }
