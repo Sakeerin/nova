@@ -44,6 +44,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Lexer: position drifted into comment text because the logos wrapper
   advanced by the token length, ignoring skipped comment/whitespace
   trivia — any program with a comment failed to parse
+- Lexer: a comment immediately before a string (spurious error cascade)
+  or raw string (silent mis-lex to `Ident("r")` + plain string) — comments
+  are now skipped before literal dispatch (adversarial review)
+- Typeck: a trait impl whose method signature diverged from the trait
+  declaration (arity, parameter, or return type) was accepted and
+  miscompiled — a wrong parameter type was memory-unsafe; now `E0072`
+  (adversarial review)
+- `nova check` now runs monomorphization so it catches unsatisfied trait
+  bounds (`E0013`) that previously only `nova run`/`nova build` rejected
+  (adversarial review)
+- Record literal field initializers now evaluate in source order (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), closures, `for` loops,
