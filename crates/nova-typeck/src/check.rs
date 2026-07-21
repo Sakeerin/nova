@@ -377,7 +377,7 @@ impl<'a> Checker<'a> {
             // Conformance: a trait impl must define exactly the trait's
             // methods that lack defaults, and nothing foreign.
             if let Some(tid) = trait_id {
-                self.check_impl_conformance(tid, &methods, block.ty.span);
+                self.check_impl_conformance(tid, &methods, &self_ty, block.ty.span);
             }
 
             self.impls.push(hir::ImplInfo {
@@ -388,21 +388,82 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Verify a trait impl provides all required methods and no unknown ones.
+    /// Verify a trait impl provides all required methods, no unknown ones,
+    /// and that each provided method's signature matches the trait's
+    /// declaration (with `Self` bound to the impl's self type). Without the
+    /// signature check the call site uses the trait signature while codegen
+    /// dispatches to the impl's method — a mismatch miscompiles or is
+    /// memory-unsafe.
     fn check_impl_conformance(
         &mut self,
         trait_id: DefId,
         provided: &[(String, DefId)],
+        self_ty: &Ty,
         span: Span,
     ) {
         let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id).cloned() else {
             return;
         };
-        for (name, _) in provided {
-            if !tr.methods.iter().any(|m| &m.name == name) {
+        let subst = [self_ty.clone()];
+        for (name, def_id) in provided {
+            let Some(trait_method) = tr.methods.iter().find(|m| &m.name == name) else {
                 self.error(
                     "E0071",
                     format!("method `{name}` is not a member of trait `{}`", tr.name),
+                    span,
+                );
+                continue;
+            };
+            let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
+                continue;
+            };
+            // impl_sig.params[0] is `self`; compare the rest and the return
+            // type against the trait method (with `Self` substituted).
+            let impl_params = &impl_sig.params[1..];
+            let expected: Vec<Ty> = trait_method
+                .params
+                .iter()
+                .map(|p| p.subst(&subst))
+                .collect();
+            if impl_params.len() != expected.len() {
+                self.error(
+                    "E0072",
+                    format!(
+                        "method `{name}` has {} parameter(s) but trait `{}` declares {}",
+                        impl_params.len(),
+                        tr.name,
+                        expected.len()
+                    ),
+                    span,
+                );
+                continue;
+            }
+            for (i, (got, want)) in impl_params.iter().zip(expected.iter()).enumerate() {
+                if got != want {
+                    self.error(
+                        "E0072",
+                        format!(
+                            "parameter {} of method `{name}` has type `{}` but trait `{}` \
+                             declares `{}`",
+                            i + 1,
+                            display_ty(got, self.defs),
+                            tr.name,
+                            display_ty(want, self.defs),
+                        ),
+                        span,
+                    );
+                }
+            }
+            let expected_ret = trait_method.ret.subst(&subst);
+            if impl_sig.ret != expected_ret {
+                self.error(
+                    "E0072",
+                    format!(
+                        "method `{name}` returns `{}` but trait `{}` declares `{}`",
+                        display_ty(&impl_sig.ret, self.defs),
+                        tr.name,
+                        display_ty(&expected_ret, self.defs),
+                    ),
                     span,
                 );
             }
@@ -1348,8 +1409,12 @@ impl<'a> Checker<'a> {
             args: type_args.clone(),
         };
 
-        // Type-check each provided field initializer, keyed by field name.
-        let mut provided: FxHashMap<String, hir::Expr> = FxHashMap::default();
+        // Evaluate initializers into locals in *source order* (then the
+        // base), so their side effects fire left-to-right, consistent with
+        // how function arguments and `let` bindings evaluate. Field slots
+        // are then assembled from these locals in declaration order.
+        let mut stmts: Vec<hir::Expr> = Vec::new();
+        let mut provided: FxHashMap<String, LocalId> = FxHashMap::default();
         for init in fields {
             let fname = init.name.value.clone();
             let Some(field) = record.fields.iter().find(|f| f.name == fname) else {
@@ -1377,7 +1442,17 @@ impl<'a> Checker<'a> {
                     init.name.span,
                 );
             }
-            if provided.insert(fname.clone(), value).is_some() {
+            let value_ty = value.ty.clone();
+            let local = fcx.new_local(format!("__f_{fname}"), value_ty, false, init.name.span);
+            stmts.push(hir::Expr {
+                kind: hir::ExprKind::Let {
+                    local,
+                    init: Box::new(value),
+                },
+                ty: Ty::Unit,
+                span,
+            });
+            if provided.insert(fname.clone(), local).is_some() {
                 self.error(
                     "E0014",
                     format!("field `{fname}` specified more than once"),
@@ -1387,7 +1462,7 @@ impl<'a> Checker<'a> {
         }
 
         // A `..base` spread fills any fields not given explicitly. Bind the
-        // base to a local so it is evaluated exactly once.
+        // base to a local so it is evaluated exactly once, after the fields.
         let base_local = match base {
             Some(base_expr) => {
                 let checked = self.check_expr(fcx, base_expr);
@@ -1402,23 +1477,35 @@ impl<'a> Checker<'a> {
                     );
                 }
                 let local = fcx.new_local("__base".to_string(), record_ty.clone(), false, span);
-                Some((local, checked))
+                stmts.push(hir::Expr {
+                    kind: hir::ExprKind::Let {
+                        local,
+                        init: Box::new(checked),
+                    },
+                    ty: Ty::Unit,
+                    span,
+                });
+                Some(local)
             }
             None => None,
         };
 
-        // Assemble field values in declared order.
+        // Assemble field slots in declaration order from the evaluated locals.
         let mut ordered = Vec::with_capacity(record.fields.len());
         let mut missing = Vec::new();
         for (idx, field) in record.fields.iter().enumerate() {
-            if let Some(value) = provided.remove(&field.name) {
-                ordered.push(value);
-            } else if let Some((local, _)) = &base_local {
-                let field_ty = field.ty.subst(&type_args);
+            let field_ty = field.ty.subst(&type_args);
+            if let Some(local) = provided.get(&field.name) {
+                ordered.push(hir::Expr {
+                    kind: hir::ExprKind::Local(*local),
+                    ty: field_ty,
+                    span,
+                });
+            } else if let Some(base_local) = base_local {
                 ordered.push(hir::Expr {
                     kind: hir::ExprKind::FieldGet {
                         target: Box::new(hir::Expr {
-                            kind: hir::ExprKind::Local(*local),
+                            kind: hir::ExprKind::Local(base_local),
                             ty: record_ty.clone(),
                             span,
                         }),
@@ -1448,23 +1535,17 @@ impl<'a> Checker<'a> {
             ty: record_ty.clone(),
             span,
         };
-        match base_local {
-            None => make,
-            Some((local, base_value)) => hir::Expr {
+        if stmts.is_empty() {
+            make
+        } else {
+            hir::Expr {
                 kind: hir::ExprKind::Block {
-                    stmts: vec![hir::Expr {
-                        kind: hir::ExprKind::Let {
-                            local,
-                            init: Box::new(base_value),
-                        },
-                        ty: Ty::Unit,
-                        span,
-                    }],
+                    stmts,
                     trailing: Some(Box::new(make)),
                 },
                 ty: record_ty,
                 span,
-            },
+            }
         }
     }
 
@@ -2885,5 +2966,49 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0071"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_wrong_param_type_reports_e0072() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait T { fn m(self, x: Int) -> String }\n\
+             impl T for P { fn m(self, x: String) -> String { x } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_wrong_return_type_reports_e0072() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait T { fn m(self) -> Int }\n\
+             impl T for P { fn m(self) -> String { \"x\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_wrong_arity_reports_e0072() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait T { fn m(self, x: Int) -> Int }\n\
+             impl T for P { fn m(self) -> Int { 0 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn conforming_impl_with_args_ok() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait T { fn add(self, x: Int) -> Int }\n\
+             impl T for P { fn add(self, x: Int) -> Int { self.v + x } }\n\
+             fn main() { let p = P { v: 1 }\n println(\"${p.add(2)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 }
