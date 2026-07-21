@@ -148,3 +148,30 @@ fn line_and_block_comments_are_skipped() {
         "toks: {toks:?}"
     );
 }
+
+#[test]
+fn comment_before_string_literal() {
+    // Regression: a comment right before a string must not misdirect the
+    // string/raw-string dispatch.
+    let toks = tokens("let m = /* c */ \"hi\"");
+    assert!(
+        toks.iter()
+            .any(|t| matches!(t, Token::StrPart(s) if s == "hi")),
+        "toks: {toks:?}"
+    );
+    // Raw string after a comment stays a raw string.
+    let raw = tokens("/* c */ r\"a\n\"");
+    assert!(
+        matches!(&raw[0], Token::RawStr(s) if s == "a\n"),
+        "raw: {raw:?}"
+    );
+}
+
+#[test]
+fn doc_comment_is_not_skipped() {
+    let toks = tokens("/// docs\nfn f() {}");
+    assert!(
+        matches!(&toks[0], Token::DocComment(s) if s.contains("docs")),
+        "toks: {toks:?}"
+    );
+}

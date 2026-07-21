@@ -81,6 +81,43 @@ impl<'src> Lexer<'src> {
         Span::new(start as u32, end as u32, self.file)
     }
 
+    /// Advance past whitespace, `//` line comments, and `/* */` block
+    /// comments. A `///` doc comment is *not* trivia — it is left for the
+    /// tokenizer to emit as a `DocComment`.
+    fn skip_trivia(&mut self) {
+        let b = self.source.as_bytes();
+        loop {
+            while self.pos < b.len() {
+                match b[self.pos] {
+                    b' ' | b'\t' | b'\n' | b'\r' => self.pos += 1,
+                    _ => break,
+                }
+            }
+            // Line comment `//...` (but not a `///` doc comment).
+            if self.pos + 1 < b.len()
+                && b[self.pos] == b'/'
+                && b[self.pos + 1] == b'/'
+                && !(self.pos + 2 < b.len() && b[self.pos + 2] == b'/')
+            {
+                while self.pos < b.len() && b[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+                continue;
+            }
+            // Block comment `/* ... */` (non-nesting, matching the grammar).
+            if self.pos + 1 < b.len() && b[self.pos] == b'/' && b[self.pos + 1] == b'*' {
+                self.pos += 2;
+                while self.pos + 1 < b.len() && !(b[self.pos] == b'*' && b[self.pos + 1] == b'/') {
+                    self.pos += 1;
+                }
+                // Consume the closing `*/` (or run to EOF if unterminated).
+                self.pos = (self.pos + 2).min(b.len());
+                continue;
+            }
+            break;
+        }
+    }
+
     fn next_token(&mut self) -> Result<Option<Spanned<Token>>, LexError> {
         // Inside a string (including resuming after `${expr}`) whitespace is
         // significant — dispatch to string-content lexing before any skipping.
@@ -91,15 +128,11 @@ impl<'src> Lexer<'src> {
             return self.lex_string_content();
         }
 
-        // Skip whitespace
-        while self.pos < self.source.len() {
-            let ch = self.source.as_bytes()[self.pos];
-            if ch == b' ' || ch == b'\t' || ch == b'\n' || ch == b'\r' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
+        // Skip whitespace and comments together. Comments must be stripped
+        // here (not only inside `lex_logos`) because string and raw-string
+        // literals are detected before `lex_logos`; a comment sitting right
+        // before a `"`/`r"` would otherwise misdirect the dispatch.
+        self.skip_trivia();
 
         if self.pos >= self.source.len() {
             return Ok(None);
