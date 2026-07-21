@@ -27,16 +27,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `nova-runtime`: C-ABI strings, console output, sum allocation
   (leaking allocator pending GC — ADR 0002)
 - `nova-codegen-cranelift`: MIR → native code via cranelift-jit
+- Records: declarations, literals (explicit fields, shorthand, `..base`
+  spread), field access, generic records; boxed as tagless heap structs
+- Traits: inherent methods, trait declarations with required and default
+  methods, trait impls, method-call resolution by receiver type
+  (E0015 on ambiguity), generic trait bounds verified at monomorphization
+  (E0013), impl conformance (E0070/E0071), static dispatch; string
+  interpolation bridges to a user `Display` (`fmt(self) -> String`)
 - Gate programs verified end-to-end: hello-world, fibonacci,
-  match-on-enum, generic functions (with e2e stdout tests)
+  match-on-enum, generic functions, records, traits (e2e stdout tests
+  under both `nova run` and `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
   was skipped when resuming string mode
+- Lexer: position drifted into comment text because the logos wrapper
+  advanced by the token length, ignoring skipped comment/whitespace
+  trivia — any program with a comment failed to parse
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), records, traits,
-  closures, `for` loops, full Maranget exhaustiveness
+- LLVM release backend (`nova build --release`), closures, `for` loops,
+  constants, full Maranget exhaustiveness, generic impls
 
 ## [0.0.0] - 2026-05-10
 
