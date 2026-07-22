@@ -266,8 +266,13 @@ impl Module {
             .iter()
             .find(|i| i.trait_id == Some(trait_id) && i.self_head == head)?;
         if let Some((_, def)) = imp.methods.iter().find(|(n, _)| n == method_name) {
-            Some((*def, imp.match_args(self_ty)))
+            // The receiver must genuinely fit the impl's self-type pattern, not
+            // merely share its head.
+            Some((*def, imp.match_args(self_ty)?))
         } else {
+            // A default body applies only if the impl (whose head matched) also
+            // matches structurally.
+            imp.match_args(self_ty)?;
             let def = tr.methods[method as usize].default_def?;
             Some((def, vec![self_ty.clone()]))
         }
@@ -317,15 +322,22 @@ pub struct ImplInfo {
 
 impl ImplInfo {
     /// Recover this impl's type arguments (in `Param` order) from a concrete
-    /// self type that matches the impl's head. A parameter the self type does
-    /// not mention resolves to `Ty::Error` (unreachable for well-formed
-    /// impls, whose self type mentions every generic).
-    pub fn match_args(&self, concrete: &Ty) -> Vec<Ty> {
+    /// self type. Returns `None` when the self type does not actually match the
+    /// impl's self-type pattern — sharing a head is not enough, so an impl with
+    /// a repeated (`Pair<T, T>`) or partially-concrete (`Pair<Int, T>`) self
+    /// type only applies to receivers that genuinely fit it. A parameter the
+    /// pattern does not mention resolves to `Ty::Error` (an unconstrained,
+    /// unused impl generic, which never reaches code).
+    pub fn match_args(&self, concrete: &Ty) -> Option<Vec<Ty>> {
         let mut out: Vec<Option<Ty>> = Vec::new();
-        let _ = self.self_ty.match_pattern(concrete, &mut out);
-        (0..self.generics as usize)
-            .map(|i| out.get(i).cloned().flatten().unwrap_or(Ty::Error))
-            .collect()
+        if !self.self_ty.match_pattern(concrete, &mut out) {
+            return None;
+        }
+        Some(
+            (0..self.generics as usize)
+                .map(|i| out.get(i).cloned().flatten().unwrap_or(Ty::Error))
+                .collect(),
+        )
     }
 }
 

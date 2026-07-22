@@ -208,6 +208,19 @@ fn conditional_generic_impl_unsatisfied_reports_e0013() {
     assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
 }
 
+#[test]
+fn repeated_param_trait_impl_mismatch_reports_e0013() {
+    // A trait impl on `Pair<T, T>` must not dispatch for `Pair<Int, String>` —
+    // structural matching, not just head, gates selection.
+    let codes = diagnostics_for(
+        "record Pair<A, B> { first: A, second: B }\n\
+         trait Same { fn same(self) -> Int }\n\
+         impl<T> Same for Pair<T, T> { fn same(self) -> Int { 1 } }\n\
+         fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${p.same()}\") }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
 fn diagnostics_for(src: &str) -> Vec<String> {
     let file_id = FileId::DUMMY;
     let (tokens, _) = lex(src, file_id);

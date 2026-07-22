@@ -2463,7 +2463,22 @@ impl<'a> Checker<'a> {
         // the receiver/args recover them (e.g. `T = Int` from a `Box<Int>`).
         let type_args: Vec<Ty> = (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
         let self_param = sig.params[0].subst(&type_args);
-        fcx.icx.unify(&receiver.ty, &self_param);
+        // The receiver must fit the impl's self-type pattern exactly — for a
+        // repeated/partially-concrete self type (`impl<T> Pair<T, T>`) merely
+        // sharing a head is not enough, and a silent mismatch would dispatch to
+        // a wrongly specialized method.
+        if !fcx.icx.unify(&receiver.ty, &self_param) {
+            let mname = self.defs.def(def_id).name.clone();
+            self.error(
+                "E0014",
+                format!(
+                    "method `{mname}` does not apply to receiver of type `{}`",
+                    self.show(&receiver.ty, fcx),
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
         for (arg, param) in args.iter().zip(sig.params[1..].iter()) {
             let expected = param.subst(&type_args);
             if !fcx.icx.unify(&arg.ty, &expected) {
@@ -4582,6 +4597,29 @@ mod tests {
              fn main() { let b = Box { value: 1 }\n let c = b.dup() }",
         );
         assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn repeated_param_inherent_impl_matches_only_uniform_receiver() {
+        // `impl<T> Pair<T, T>` must apply to `Pair<Int, Int>` but not to
+        // `Pair<Int, String>` — sharing the `Pair` head is not enough.
+        let ok = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             impl<T> Pair<T, T> { fn both(self) -> T { self.first } }\n\
+             fn main() { let p = Pair { first: 1, second: 2 }\n println(\"${p.both()}\") }",
+        );
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+
+        let bad = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             impl<T> Pair<T, T> { fn both(self) -> T { self.first } }\n\
+             fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${p.both()}\") }",
+        );
+        assert!(
+            error_codes(&bad).contains(&"E0014"),
+            "{:?}",
+            bad.diagnostics
+        );
     }
 
     #[test]

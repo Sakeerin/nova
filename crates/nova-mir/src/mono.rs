@@ -134,9 +134,13 @@ fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId, depth: u32) -
         return false;
     };
     if imp.generics == 0 {
-        return true;
+        // A non-generic impl still must match structurally (e.g. an
+        // `impl Foo for Pair<Int, Int>` does not cover `Pair<Int, Bool>`).
+        return imp.match_args(arg).is_some();
     }
-    let impl_args = imp.match_args(arg);
+    let Some(impl_args) = imp.match_args(arg) else {
+        return false;
+    };
     imp.bounds.iter().enumerate().all(|(i, param_bounds)| {
         param_bounds.iter().all(|&bound| {
             impl_args
