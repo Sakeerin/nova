@@ -173,6 +173,28 @@ fn closures_build_standalone() {
 }
 
 #[test]
+fn generic_impls_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/generic_impls.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/generic_impls.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn generic_impls_build_standalone() {
+    let out = build_and_run("tests/runtime/generic_impls.nova", "generic_impls");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/generic_impls.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn traits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
         .expect("expected-output fixture exists")

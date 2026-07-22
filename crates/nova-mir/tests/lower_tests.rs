@@ -156,6 +156,58 @@ fn trait_method_dispatches_to_impl() {
     );
 }
 
+#[test]
+fn generic_impl_method_monomorphizes_per_element_type() {
+    // `impl<T> Box<T> { fn get(self) -> T }` used at Int and String must
+    // produce two distinct monomorphized method instances.
+    let mir = mir_for(
+        "record Box<T> { value: T }\n\
+         impl<T> Box<T> { fn get(self) -> T { self.value } }\n\
+         fn main() {\n\
+             let a = Box { value: 1 }\n\
+             let b = Box { value: \"s\" }\n\
+             println(\"${a.get()} ${b.get()}\")\n\
+         }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().filter(|n| n.contains("get")).count() >= 2,
+        "expected two `get` instances, got {names:?}"
+    );
+}
+
+#[test]
+fn generic_trait_impl_dispatches_to_instance() {
+    // A trait method resolved through a generic impl must reach a
+    // monomorphized impl-method instance.
+    let mir = mir_for(
+        "record Box<T> { value: T }\n\
+         trait Tag { fn tag(self) -> String }\n\
+         impl<T> Tag for Box<T> { fn tag(self) -> String { \"b\" } }\n\
+         fn main() { let b = Box { value: 1 }\n println(b.tag()) }",
+    );
+    assert!(
+        mir.functions.iter().any(|f| f.name.contains("tag")),
+        "impl method should be monomorphized: {:?}",
+        function_names(&mir)
+    );
+}
+
+#[test]
+fn conditional_generic_impl_unsatisfied_reports_e0013() {
+    // `Wrap<Bool>` is not `Show` (Bool is not) even though a generic impl of
+    // Show for Wrap<T> exists — monomorphization must reject it.
+    let codes = diagnostics_for(
+        "trait Show { fn show(self) -> String }\n\
+         record Wrap<T> { inner: T }\n\
+         impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+         impl<T: Show> Show for Wrap<T> { fn show(self) -> String { self.inner.show() } }\n\
+         fn present<X: Show>(x: X) -> String { x.show() }\n\
+         fn main() { println(present(Wrap { inner: true })) }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
 fn diagnostics_for(src: &str) -> Vec<String> {
     let file_id = FileId::DUMMY;
     let (tokens, _) = lex(src, file_id);

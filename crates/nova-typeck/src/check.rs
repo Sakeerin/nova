@@ -343,11 +343,17 @@ impl<'a> Checker<'a> {
             let ast::Item::Impl(block) = &item.value else {
                 continue;
             };
-            if !block.generics.is_empty() || !block.where_clause.is_empty() {
-                self.unsupported(block.ty.span, "generic impl blocks");
+            // `where` clauses on impls (conditional impls beyond inline
+            // `<T: Bound>`) are not supported yet — consistent with functions.
+            if !block.where_clause.is_empty() {
+                self.unsupported(block.ty.span, "`where` clauses on impl blocks");
                 continue;
             }
-            let self_ty = self.convert_ty(&block.ty, &FxHashMap::default());
+            // The impl's generic parameters (`impl<T> …`) are in scope in the
+            // self type and every method signature/body.
+            let impl_generics = generic_scope(&block.generics);
+            let impl_bounds = self.resolve_bounds(&block.generics);
+            let self_ty = self.convert_ty(&block.ty, &impl_generics);
             let Some(self_head) = self_ty.head() else {
                 self.error(
                     "E0010",
@@ -381,15 +387,16 @@ impl<'a> Checker<'a> {
                     continue;
                 };
                 self.reject_method_generics(f);
-                // Non-self params + ret in terms of the concrete self type.
+                // Non-self params + ret in terms of the self type, resolving
+                // the impl's generic parameters.
                 let (mut params, ret) =
-                    self.method_sig_parts(&f.params, &f.return_ty, &FxHashMap::default());
+                    self.method_sig_parts(&f.params, &f.return_ty, &impl_generics);
                 params.insert(0, self_ty.clone());
                 self.sigs.insert(
                     def_id,
                     FnSig {
-                        generics: 0,
-                        bounds: Vec::new(),
+                        generics: block.generics.len() as u32,
+                        bounds: impl_bounds.clone(),
                         params,
                         ret,
                     },
@@ -414,6 +421,9 @@ impl<'a> Checker<'a> {
             self.impls.push(hir::ImplInfo {
                 trait_id,
                 self_head,
+                self_ty,
+                generics: block.generics.len() as u32,
+                bounds: impl_bounds,
                 methods,
             });
         }
@@ -783,7 +793,11 @@ impl<'a> Checker<'a> {
             }
         };
         let generics = match loc.owner {
-            MethodOwner::Impl => FxHashMap::default(),
+            // An impl method sees the impl's generic parameters (`impl<T> …`).
+            MethodOwner::Impl => match &file.items[loc.item_index].value {
+                ast::Item::Impl(block) => generic_scope(&block.generics),
+                _ => FxHashMap::default(),
+            },
             MethodOwner::TraitDefault => self_generic_scope(),
         };
         self.check_fn_body(def_id, f, generics)
@@ -2444,30 +2458,37 @@ impl<'a> Checker<'a> {
             );
             return error_expr(span);
         }
-        fcx.icx.unify(&receiver.ty, &sig.params[0]);
+        // A method on a generic impl (`impl<T> Box<T> { … }`) is generic over
+        // the impl's parameters; instantiate them with fresh inference vars so
+        // the receiver/args recover them (e.g. `T = Int` from a `Box<Int>`).
+        let type_args: Vec<Ty> = (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
+        let self_param = sig.params[0].subst(&type_args);
+        fcx.icx.unify(&receiver.ty, &self_param);
         for (arg, param) in args.iter().zip(sig.params[1..].iter()) {
-            if !fcx.icx.unify(&arg.ty, param) {
+            let expected = param.subst(&type_args);
+            if !fcx.icx.unify(&arg.ty, &expected) {
                 self.error(
                     "E0010",
                     format!(
                         "argument has type `{}` but `{}` was expected",
                         self.show(&arg.ty, fcx),
-                        self.show(param, fcx),
+                        self.show(&expected, fcx),
                     ),
                     arg.span,
                 );
             }
         }
+        let ret = sig.ret.subst(&type_args);
         let mut call_args = Vec::with_capacity(args.len() + 1);
         call_args.push(receiver);
         call_args.extend(args);
         hir::Expr {
             kind: hir::ExprKind::Call {
                 func: hir::Callee::Def(def_id),
-                type_args: Vec::new(),
+                type_args,
                 args: call_args,
             },
-            ty: sig.ret,
+            ty: ret,
             span,
         }
     }
@@ -4473,5 +4494,104 @@ mod tests {
              fn main() { let p = P { v: 1 }\n println(\"${p.add(2)}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    // === Generic impls ===
+
+    #[test]
+    fn generic_inherent_impl_ok() {
+        // A method on `impl<T> Box<T>` returning `T`, used at two element
+        // types, type-checks.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T> Box<T> { fn get(self) -> T { self.value } }\n\
+             fn main() {\n\
+                 let a = Box { value: 1 }\n\
+                 let b = Box { value: \"s\" }\n\
+                 println(\"${a.get()} ${b.get()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_inherent_impl_return_mismatch_reports_e0010() {
+        // `get` claims to return `T` but returns an `Int`, so calling it on a
+        // `Box<String>` and using the result as a String must fail.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T> Box<T> { fn get(self) -> T { 0 } }\n\
+             fn main() { let b = Box { value: \"s\" }\n let x: String = b.get() }",
+        );
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_trait_impl_ok() {
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             trait Tag { fn tag(self) -> String }\n\
+             impl<T> Tag for Box<T> { fn tag(self) -> String { \"b\" } }\n\
+             fn main() { let b = Box { value: 1 }\n println(b.tag()) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn conditional_generic_impl_ok() {
+        // `Wrap<T>: Display` requires `T: Display`; `Int: Display` holds.
+        let r = check_src(
+            "trait Display { fn fmt(self) -> String }\n\
+             record Wrap<T> { inner: T }\n\
+             impl Display for Int { fn fmt(self) -> String { \"i\" } }\n\
+             impl<T: Display> Display for Wrap<T> {\n\
+                 fn fmt(self) -> String { self.inner.fmt() }\n\
+             }\n\
+             fn main() { let w = Wrap { inner: 1 }\n println(w.fmt()) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    // Note: an *unsatisfied* conditional-impl bound (`Wrap<Bool>: Display`
+    // when `Bool` is not `Display`) is reported at monomorphization (E0013),
+    // not by `check` alone — see the `nova-mir` lowering tests. All trait
+    // bounds in Nova are verified during monomorphization.
+
+    #[test]
+    fn generic_impl_body_uses_undeclared_capability_reports_e0014() {
+        // Without a `T: Display` bound the impl body cannot call `fmt` on `T`.
+        let r = check_src(
+            "trait Display { fn fmt(self) -> String }\n\
+             record Wrap<T> { inner: T }\n\
+             impl<T> Display for Wrap<T> {\n\
+                 fn fmt(self) -> String { self.inner.fmt() }\n\
+             }\n\
+             fn main() { let w = Wrap { inner: 1 }\n println(w.fmt()) }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_impl_wrong_self_param_reports_e0072() {
+        // The trait says the method returns `Self` (`Box<T>`), but the impl
+        // declares it returns the bare parameter `T`.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             trait Dup { fn dup(self) -> Self }\n\
+             impl<T> Dup for Box<T> { fn dup(self) -> T { self.value } }\n\
+             fn main() { let b = Box { value: 1 }\n let c = b.dup() }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn where_clause_on_impl_is_unsupported() {
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             trait Tag { fn tag(self) -> String }\n\
+             impl<T> Tag for Box<T> where T: Tag { fn tag(self) -> String { \"b\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
     }
 }

@@ -47,10 +47,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Arrays `[T]`: literals `[a, b, c]`, indexing `arr[i]`, element assignment
   `arr[i] = v` (mutable base required), and `arr.len()`; out-of-bounds
   access aborts with a message (heap layout `{ len, elems… }`)
+- Generic impl blocks: `impl<T> Box<T> { … }` (inherent) and
+  `impl<T> Trait for Box<T> { … }` (trait), with the impl's type parameters
+  usable in method signatures and bodies; a method is monomorphized per
+  instance by recovering the impl's type arguments from the receiver type.
+  Conditional impls `impl<T: Bound> Trait for Box<T>` are supported — the
+  bound on the impl's parameter is verified at monomorphization (E0013),
+  including transitively through nested generic impls (`where` clauses on
+  impls remain unsupported)
 - Gate programs verified end-to-end: hello-world, fibonacci,
   match-on-enum, generic functions, records, traits, for-loops, closures,
-  break/continue, constants, arrays (e2e stdout tests under both
-  `nova run` and `nova build`)
+  break/continue, constants, arrays, generic impls (e2e stdout tests under
+  both `nova run` and `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
@@ -97,7 +105,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), full Maranget
-  exhaustiveness, generic impls
+  exhaustiveness
 
 ## [0.0.0] - 2026-05-10
 

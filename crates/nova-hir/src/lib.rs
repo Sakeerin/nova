@@ -117,6 +117,71 @@ impl Ty {
             _ => None,
         }
     }
+
+    /// One-directional match: treat `self` as a pattern that may contain
+    /// `Param(k)` and match it against the concrete `ground` type, recording
+    /// each `Param(k)` → ground binding into `out` (grown as needed). A
+    /// parameter seen twice must bind to the same type. Returns `false` on a
+    /// structural mismatch. Used to recover a generic impl's type arguments
+    /// from a concrete receiver type (e.g. `Box<T>` vs `Box<Int>` → `T=Int`).
+    pub fn match_pattern(&self, ground: &Ty, out: &mut Vec<Option<Ty>>) -> bool {
+        match (self, ground) {
+            (Ty::Param(k), g) => {
+                let k = *k as usize;
+                if out.len() <= k {
+                    out.resize(k + 1, None);
+                }
+                match &out[k] {
+                    Some(existing) => existing == g,
+                    None => {
+                        out[k] = Some(g.clone());
+                        true
+                    }
+                }
+            }
+            (
+                Ty::Record {
+                    def_id: d1,
+                    args: a1,
+                },
+                Ty::Record {
+                    def_id: d2,
+                    args: a2,
+                },
+            )
+            | (
+                Ty::Sum {
+                    def_id: d1,
+                    args: a1,
+                },
+                Ty::Sum {
+                    def_id: d2,
+                    args: a2,
+                },
+            ) => {
+                d1 == d2
+                    && a1.len() == a2.len()
+                    && a1.iter().zip(a2).all(|(p, g)| p.match_pattern(g, out))
+            }
+            (Ty::Array(e1), Ty::Array(e2)) => e1.match_pattern(e2, out),
+            (
+                Ty::Fn {
+                    params: p1,
+                    ret: r1,
+                },
+                Ty::Fn {
+                    params: p2,
+                    ret: r2,
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1.iter().zip(p2).all(|(a, b)| a.match_pattern(b, out))
+                    && r1.match_pattern(r2, out)
+            }
+            // Primitives, `Unit`, etc.: match iff identical.
+            (a, b) => a == b,
+        }
+    }
 }
 
 /// The nominal head of a type, used as the key for impl lookups
@@ -177,20 +242,34 @@ impl Module {
     }
 
     /// Resolve trait method `method` (index into the trait's methods) for a
-    /// concrete self type `head` to the compiled method function it should
-    /// dispatch to: the impl's own method if provided, else the trait's
-    /// default. Returns `None` if no impl of the trait exists for `head`.
-    pub fn resolve_method(&self, trait_id: DefId, method: u32, head: TyHead) -> Option<DefId> {
+    /// concrete self type to the compiled function it should dispatch to,
+    /// paired with the type arguments that function must be instantiated with:
+    ///
+    /// - if the matching impl provides the method, dispatch to it, instantiated
+    ///   with the impl's own type arguments recovered from `self_ty`
+    ///   (`impl<T> Show for Box<T>` called on `Box<Int>` → `[Int]`);
+    /// - otherwise dispatch to the trait's default body, which is generic over
+    ///   `Self` → `[self_ty]`.
+    ///
+    /// Returns `None` if no impl of the trait exists for `self_ty`'s head.
+    pub fn resolve_method_full(
+        &self,
+        trait_id: DefId,
+        method: u32,
+        self_ty: &Ty,
+    ) -> Option<(DefId, Vec<Ty>)> {
         let tr = self.trait_def(trait_id)?;
         let method_name = &tr.methods.get(method as usize)?.name;
+        let head = self_ty.head()?;
         let imp = self
             .impls
             .iter()
             .find(|i| i.trait_id == Some(trait_id) && i.self_head == head)?;
         if let Some((_, def)) = imp.methods.iter().find(|(n, _)| n == method_name) {
-            Some(*def)
+            Some((*def, imp.match_args(self_ty)))
         } else {
-            tr.methods[method as usize].default_def
+            let def = tr.methods[method as usize].default_def?;
+            Some((def, vec![self_ty.clone()]))
         }
     }
 }
@@ -220,10 +299,34 @@ pub struct TraitMethod {
 #[derive(Debug, Clone)]
 pub struct ImplInfo {
     pub trait_id: Option<DefId>,
+    /// The nominal head of the self type — the impl-table lookup key.
     pub self_head: TyHead,
+    /// The impl's self type, with `Param(k)` standing for the impl's k-th
+    /// generic parameter (e.g. `Box<Param(0)>` for `impl<T> … for Box<T>`).
+    /// A non-generic impl's self type contains no `Param`.
+    pub self_ty: Ty,
+    /// Number of generic parameters the impl introduces.
+    pub generics: u32,
+    /// Trait bounds on each impl generic parameter (`impl<T: Bound>`), indexed
+    /// by parameter position — empty for an unconstrained or non-generic impl.
+    pub bounds: Vec<Vec<DefId>>,
     /// `(method name, compiled method function DefId)` for methods this
     /// impl defines directly.
     pub methods: Vec<(String, DefId)>,
+}
+
+impl ImplInfo {
+    /// Recover this impl's type arguments (in `Param` order) from a concrete
+    /// self type that matches the impl's head. A parameter the self type does
+    /// not mention resolves to `Ty::Error` (unreachable for well-formed
+    /// impls, whose self type mentions every generic).
+    pub fn match_args(&self, concrete: &Ty) -> Vec<Ty> {
+        let mut out: Vec<Option<Ty>> = Vec::new();
+        let _ = self.self_ty.match_pattern(concrete, &mut out);
+        (0..self.generics as usize)
+            .map(|i| out.get(i).cloned().flatten().unwrap_or(Ty::Error))
+            .collect()
+    }
 }
 
 /// A record (struct) declaration with typed fields.

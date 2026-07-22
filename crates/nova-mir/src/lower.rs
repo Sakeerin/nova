@@ -590,9 +590,12 @@ impl<'a> Lowerer<'a> {
             other => Some(self.new_temp(other)),
         };
 
-        let head = self_ty.head();
-        let target = head.and_then(|h| self.module.resolve_method(trait_id, method, h));
-        let Some(target) = target else {
+        // Resolve to the target function and the type arguments it must be
+        // instantiated with — the impl's own generics recovered from the
+        // concrete self type for an impl method, or `[self_ty]` for a
+        // `Self`-generic trait-default body.
+        let Some((target, type_args)) = self.module.resolve_method_full(trait_id, method, self_ty)
+        else {
             let trait_name = self
                 .module
                 .trait_def(trait_id)
@@ -608,18 +611,6 @@ impl<'a> Lowerer<'a> {
             return dst.unwrap_or_else(|| self.unit_temp());
         };
 
-        // A default-method body is generic over `Self` (`generics == 1`);
-        // pass the concrete self type so it monomorphizes correctly.
-        let needs_self_arg = self
-            .module
-            .function(target)
-            .map(|f| f.generics == 1)
-            .unwrap_or(false);
-        let type_args = if needs_self_arg {
-            vec![self_ty.clone()]
-        } else {
-            Vec::new()
-        };
         let callee = self.callee_name(target, &type_args);
         self.push(Stmt::Call {
             dst,

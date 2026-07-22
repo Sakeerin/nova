@@ -1,0 +1,75 @@
+// Generic impl blocks: inherent methods, trait impls, and a conditional
+// impl whose method needs a bound on the impl's own type parameter.
+
+record Box<T> { value: T }
+
+// Generic inherent impl: methods mention the impl's type parameter `T`
+// in both argument and return position.
+impl<T> Box<T> {
+    fn get(self) -> T { self.value }
+    fn replace(self, v: T) -> Box<T> { Box { value: v } }
+}
+
+record Pair<A, B> { first: A, second: B }
+
+// A two-parameter generic inherent impl.
+impl<A, B> Pair<A, B> {
+    fn fst(self) -> A { self.first }
+    fn snd(self) -> B { self.second }
+}
+
+// A trait with a required and a default method, implemented generically for
+// every `Box<T>` regardless of `T`.
+trait Tag {
+    fn tag(self) -> String
+    fn shout(self) -> String { "!" }
+}
+impl<T> Tag for Box<T> {
+    fn tag(self) -> String { "box" }
+}
+
+// A conditional generic impl: `Wrap<T>` is `Display` only when `T` is.
+trait Display { fn fmt(self) -> String }
+record Wrap<T> { inner: T }
+
+impl Display for Int {
+    fn fmt(self) -> String { "${self}" }
+}
+impl<T: Display> Display for Wrap<T> {
+    fn fmt(self) -> String { "Wrap(${self.inner})" }
+}
+
+// A generic function whose bound is satisfied through a generic impl.
+fn describe<T: Display>(x: T) -> String {
+    x.fmt()
+}
+
+fn main() {
+    // Inherent methods on one record instantiated at two element types.
+    let bi = Box { value: 42 }
+    let bs = Box { value: "hi" }
+    println("${bi.get()} ${bs.get()}")
+
+    let r = bi.replace(7)
+    println("${r.get()}")
+
+    // Nested generic instantiation: Box<Box<Int>>.
+    let bb = Box { value: Box { value: 5 } }
+    println("${bb.get().get()}")
+
+    // Two-parameter inherent impl.
+    let p = Pair { first: 1, second: "two" }
+    println("${p.fst()} ${p.snd()}")
+
+    // Trait impl method + inherited default method.
+    println("${bi.tag()}${bi.shout()}")
+
+    // Conditional impl: Wrap<Int> is Display because Int is.
+    let w = Wrap { inner: 9 }
+    println(w.fmt())
+    println(describe(w))
+
+    // Nested conditional impl: Wrap<Wrap<Int>> is Display too.
+    let ww = Wrap { inner: Wrap { inner: 3 } }
+    println(ww.fmt())
+}

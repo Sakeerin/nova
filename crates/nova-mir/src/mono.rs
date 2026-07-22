@@ -66,15 +66,7 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
                 continue;
             };
             for &trait_id in bounds {
-                let satisfied = arg
-                    .head()
-                    .map(|h| {
-                        module
-                            .impls
-                            .iter()
-                            .any(|im| im.trait_id == Some(trait_id) && im.self_head == h)
-                    })
-                    .unwrap_or(false);
+                let satisfied = impl_satisfies(module, arg, trait_id, 0);
                 if !satisfied {
                     bounds_ok = false;
                     let trait_name = module
@@ -117,6 +109,42 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     } else {
         Err(diagnostics)
     }
+}
+
+/// Whether concrete type `arg` implements `trait_id`. A non-generic impl of
+/// the trait for `arg`'s head satisfies it directly; a generic impl
+/// (`impl<T: Bound> Trait for Box<T>`) satisfies it only if the impl's own
+/// generic bounds hold for the type arguments recovered from `arg`.
+///
+/// `depth` guards against a pathological impl-recursion cycle: past the cap we
+/// conservatively return `true`, since an actually-unsatisfiable bound is still
+/// caught when the impl's methods are monomorphized.
+fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId, depth: u32) -> bool {
+    if depth > 16 {
+        return true;
+    }
+    let Some(head) = arg.head() else {
+        return false;
+    };
+    let Some(imp) = module
+        .impls
+        .iter()
+        .find(|im| im.trait_id == Some(trait_id) && im.self_head == head)
+    else {
+        return false;
+    };
+    if imp.generics == 0 {
+        return true;
+    }
+    let impl_args = imp.match_args(arg);
+    imp.bounds.iter().enumerate().all(|(i, param_bounds)| {
+        param_bounds.iter().all(|&bound| {
+            impl_args
+                .get(i)
+                .map(|a| impl_satisfies(module, a, bound, depth + 1))
+                .unwrap_or(false)
+        })
+    })
 }
 
 /// A short display name for a type in monomorphization diagnostics.
