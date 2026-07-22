@@ -7,7 +7,7 @@ use nova_diagnostics::{Diagnostic, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
 use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, Res};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
 use crate::{display_ty, CheckResult};
@@ -77,6 +77,12 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
             functions.push(f);
         }
     }
+    for (def_id, item_index) in checker.const_ids() {
+        if let Some(f) = checker.check_const(def_id, item_index) {
+            functions.push(f);
+        }
+    }
+    checker.check_const_cycles(&functions);
     // Closure and bare-fn-wrapper functions synthesized while checking.
     functions.append(&mut checker.extra_functions);
 
@@ -576,12 +582,36 @@ impl<'a> Checker<'a> {
                 },
             );
         }
-        // Constants are a later Phase 1 step.
-        for def in self.defs.defs() {
-            if let DefKind::Const { .. } = def.kind {
-                self.unsupported(def.span, "constants");
-            }
+        // A constant compiles to a zero-argument function returning its
+        // value; register its signature here.
+        for (def_id, item_index) in self.const_ids() {
+            let ast::Item::Const(c) = &self.file.items[item_index].value else {
+                continue;
+            };
+            let ret = self.convert_ty(&c.ty, &FxHashMap::default());
+            self.sigs.insert(
+                def_id,
+                FnSig {
+                    generics: 0,
+                    bounds: Vec::new(),
+                    params: Vec::new(),
+                    ret,
+                },
+            );
         }
+    }
+
+    /// All constant definitions as `(DefId, item_index)`.
+    fn const_ids(&self) -> Vec<(DefId, usize)> {
+        self.defs
+            .defs()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d.kind {
+                DefKind::Const { item_index } => Some((DefId(i as u32), item_index)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Resolve each generic parameter's trait bounds to trait `DefId`s.
@@ -829,6 +859,95 @@ impl<'a> Checker<'a> {
         let id = DefId(self.next_closure_def);
         self.next_closure_def += 1;
         id
+    }
+
+    /// Compile a constant as a zero-argument function returning its value.
+    fn check_const(&mut self, def_id: DefId, item_index: usize) -> Option<hir::Function> {
+        // Copy the `&'a File` reference so the value borrow outlives `&mut self`.
+        let file: &'a ast::File = self.file;
+        let ast::Item::Const(c) = &file.items[item_index].value else {
+            return None;
+        };
+        let value_ast = &c.value;
+        let sig = self.sigs.get(&def_id)?.clone();
+        let name = self.defs.def(def_id).name.clone();
+        let mut fcx = FnCtx {
+            icx: InferCtx::default(),
+            locals: Vec::new(),
+            scopes: vec![FxHashMap::default()],
+            generics: FxHashMap::default(),
+            param_bounds: Vec::new(),
+            ret_ty: sig.ret.clone(),
+            loop_depth: 0,
+            pending_closures: Vec::new(),
+        };
+        let value = self.check_expr(&mut fcx, value_ast);
+        if !fcx.icx.unify(&value.ty, &sig.ret) {
+            self.error(
+                "E0010",
+                format!(
+                    "constant `{name}` has type `{}` but is declared `{}`",
+                    self.show(&value.ty, &fcx),
+                    self.show(&sig.ret, &fcx),
+                ),
+                value_ast.span,
+            );
+        }
+        let mut func = hir::Function {
+            def_id,
+            name,
+            generics: 0,
+            bounds: Vec::new(),
+            takes_env: false,
+            capture_count: 0,
+            params: 0,
+            locals: fcx.locals,
+            ret_ty: sig.ret,
+            body: value,
+            span: value_ast.span,
+        };
+        self.finalize_function(&mut func, &fcx.icx);
+        let mut closures = std::mem::take(&mut fcx.pending_closures);
+        for cl in &mut closures {
+            self.finalize_function(cl, &fcx.icx);
+        }
+        self.extra_functions.append(&mut closures);
+        Some(func)
+    }
+
+    /// Report `E0081` for a constant defined (transitively) in terms of
+    /// itself — otherwise the generated zero-arg functions would recurse
+    /// forever at run time.
+    fn check_const_cycles(&mut self, functions: &[hir::Function]) {
+        let const_ids: FxHashSet<DefId> = self.const_ids().into_iter().map(|(id, _)| id).collect();
+        // Edges: const → the constants its value references.
+        let mut edges: FxHashMap<DefId, Vec<DefId>> = FxHashMap::default();
+        for f in functions {
+            if !const_ids.contains(&f.def_id) {
+                continue;
+            }
+            let mut callees = Vec::new();
+            collect_const_calls(&f.body, &const_ids, &mut callees);
+            edges.insert(f.def_id, callees);
+        }
+        // A constant is cyclic iff it can reach itself through the edges.
+        let mut cyclic: Vec<DefId> = const_ids
+            .iter()
+            .copied()
+            .filter(|&c| const_reaches_self(c, &edges))
+            .collect();
+        cyclic.sort();
+        for c in cyclic {
+            let name = &self.defs.def(c).name;
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "E0081",
+                    format!("constant `{name}` is defined in terms of itself"),
+                )
+                .with_primary_label(self.defs.def(c).span, "cyclic constant")
+                .with_note("a constant's value cannot depend on its own value".to_string()),
+            );
+        }
     }
 
     /// Apply the final substitution everywhere and report residual
@@ -1208,6 +1327,23 @@ impl<'a> Checker<'a> {
                     // A bare function used as a value becomes a fat pointer to
                     // a synthesized wrapper `(env, params) { def(params) }`.
                     self.make_fn_wrapper(fcx, def_id, type_args, param_types, ret, span)
+                }
+                DefKind::Const { .. } => {
+                    // A constant reference is a call to its zero-arg function.
+                    let ret = self
+                        .sigs
+                        .get(&def_id)
+                        .map(|s| s.ret.clone())
+                        .unwrap_or(Ty::Error);
+                    hir::Expr {
+                        kind: hir::ExprKind::Call {
+                            func: hir::Callee::Def(def_id),
+                            type_args: Vec::new(),
+                            args: Vec::new(),
+                        },
+                        ty: ret,
+                        span,
+                    }
                 }
                 _ => {
                     self.unsupported(span, "referencing this kind of definition as a value");
@@ -2955,6 +3091,42 @@ impl<'a> Checker<'a> {
 
 // === Free helpers ===
 
+/// Collect the constants a constant's body references (calls to zero-arg
+/// const functions), for cycle detection.
+fn collect_const_calls(expr: &hir::Expr, consts: &FxHashSet<DefId>, out: &mut Vec<DefId>) {
+    if let hir::ExprKind::Call {
+        func: hir::Callee::Def(d),
+        ..
+    } = &expr.kind
+    {
+        if consts.contains(d) && !out.contains(d) {
+            out.push(*d);
+        }
+    }
+    for child in child_exprs(expr) {
+        collect_const_calls(child, consts, out);
+    }
+}
+
+/// Whether constant `start` can reach itself through the dependency edges
+/// (i.e. participates in a cycle).
+fn const_reaches_self(start: DefId, edges: &FxHashMap<DefId, Vec<DefId>>) -> bool {
+    let mut stack: Vec<DefId> = edges.get(&start).cloned().unwrap_or_default();
+    let mut seen: FxHashSet<DefId> = FxHashSet::default();
+    while let Some(n) = stack.pop() {
+        if n == start {
+            return true;
+        }
+        if !seen.insert(n) {
+            continue;
+        }
+        if let Some(succ) = edges.get(&n) {
+            stack.extend(succ.iter().copied());
+        }
+    }
+    false
+}
+
 /// Walk a closure body and collect the locals it captures — those with an
 /// index below `snapshot` (declared in an enclosing scope) — in first-seen
 /// order, without duplicates.
@@ -3797,6 +3969,44 @@ mod tests {
                  for i in 0..10 { if i % 2 == 1 { continue }\n s = s + i }\n\
                  println(\"${s}\")\n\
              }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn constants_ok() {
+        let r = check_src(
+            "const MAX: Int = 100\n\
+             const DOUBLE: Int = MAX * 2\n\
+             const NAME: String = \"nova\"\n\
+             fn main() { println(\"${MAX} ${DOUBLE} ${NAME}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn constant_type_mismatch_reports_e0010() {
+        let r = check_src("const X: Int = \"not an int\"\nfn main() { println(\"${X}\") }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn direct_constant_cycle_reports_e0081() {
+        let r = check_src("const A: Int = A + 1\nfn main() { println(\"${A}\") }");
+        assert!(error_codes(&r).contains(&"E0081"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn indirect_constant_cycle_reports_e0081() {
+        let r = check_src("const A: Int = B\nconst B: Int = A\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0081"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_cyclic_constant_chain_ok() {
+        let r = check_src(
+            "const A: Int = 1\nconst B: Int = A + 1\nconst C: Int = B + 1\n\
+             fn main() { println(\"${C}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
