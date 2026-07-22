@@ -2,6 +2,7 @@ const MAX: Int = 100
 const GREETING: String = "hello"
 const DOUBLE_MAX: Int = MAX * 2
 const PI_APPROX: Float = 3.14
+const DOUBLE_FN: fn(Int) -> Int = |n| n * 2
 
 fn scaled(n: Int) -> Int {
     n * MAX
@@ -13,6 +14,7 @@ fn main() {
     println("DOUBLE_MAX = ${DOUBLE_MAX}")
     println("PI_APPROX = ${PI_APPROX}")
     println("scaled(3) = ${scaled(3)}")
+    println("DOUBLE_FN(21) = ${DOUBLE_FN(21)}")
 
     // A constant used in an expression and a condition.
     let mut total = 0

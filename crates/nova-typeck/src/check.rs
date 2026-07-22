@@ -1419,12 +1419,9 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // Indirect call through an fn-typed value (a local).
+        // Indirect call through any fn-typed value expression (a local, a
+        // constant of function type, a field, another call's result, …).
         let callee_expr = self.check_expr(fcx, callee);
-        let hir::ExprKind::Local(local) = callee_expr.kind else {
-            self.unsupported(span, "calling arbitrary expressions");
-            return error_expr(span);
-        };
         let checked: Vec<hir::Expr> = args.iter().map(|a| self.check_expr(fcx, a)).collect();
         let ret = fcx.icx.fresh();
         let expected = Ty::Fn {
@@ -1435,19 +1432,51 @@ impl<'a> Checker<'a> {
             self.error(
                 "E0010",
                 format!(
-                    "`{}` has type `{}` and cannot be called with these arguments",
-                    fcx.locals[local.0 as usize].name,
+                    "this value has type `{}` and cannot be called with these arguments",
                     self.show(&callee_expr.ty, fcx),
                 ),
                 callee_expr.span,
             );
             return error_expr(span);
         }
-        hir::Expr {
+        // Indirect calls dispatch through a local. If the callee is already a
+        // local, use it directly; otherwise bind it to a fresh local first
+        // (evaluated before the arguments, preserving left-to-right order).
+        if let hir::ExprKind::Local(local) = callee_expr.kind {
+            return hir::Expr {
+                kind: hir::ExprKind::Call {
+                    func: hir::Callee::Local(local),
+                    type_args: Vec::new(),
+                    args: checked,
+                },
+                ty: ret,
+                span,
+            };
+        }
+        let callee_ty = callee_expr.ty.clone();
+        let tmp =
+            fcx.new_local_unscoped("__callee".to_string(), callee_ty, false, callee_expr.span);
+        let bind = hir::Expr {
+            kind: hir::ExprKind::Let {
+                local: tmp,
+                init: Box::new(callee_expr),
+            },
+            ty: Ty::Unit,
+            span,
+        };
+        let call = hir::Expr {
             kind: hir::ExprKind::Call {
-                func: hir::Callee::Local(local),
+                func: hir::Callee::Local(tmp),
                 type_args: Vec::new(),
                 args: checked,
+            },
+            ty: ret.clone(),
+            span,
+        };
+        hir::Expr {
+            kind: hir::ExprKind::Block {
+                stmts: vec![bind],
+                trailing: Some(Box::new(call)),
             },
             ty: ret,
             span,
@@ -4000,6 +4029,19 @@ mod tests {
     fn indirect_constant_cycle_reports_e0081() {
         let r = check_src("const A: Int = B\nconst B: Int = A\nfn main() { }");
         assert!(error_codes(&r).contains(&"E0081"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn function_typed_constant_called_directly_ok() {
+        // Regression: a fn-typed const must be callable with call syntax
+        // `CONST(args)`, not only via a local (was a spurious E0900).
+        let r = check_src(
+            "const DOUBLE: fn(Int) -> Int = |n| n * 2\n\
+             fn triple(n: Int) -> Int { n * 3 }\n\
+             const TRIPLE: fn(Int) -> Int = triple\n\
+             fn main() { println(\"${DOUBLE(3)} ${TRIPLE(4)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

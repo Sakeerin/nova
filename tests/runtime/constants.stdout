@@ -3,5 +3,6 @@ GREETING = hello
 DOUBLE_MAX = 200
 PI_APPROX = 3.14
 scaled(3) = 300
+DOUBLE_FN(21) = 42
 total = 500
 total exceeds double max
