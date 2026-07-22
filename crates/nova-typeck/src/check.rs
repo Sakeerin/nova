@@ -737,10 +737,7 @@ impl<'a> Checker<'a> {
                 self.unsupported(ty.span, "reference and pointer types");
                 Ty::Error
             }
-            ast::Type::Array(_) => {
-                self.unsupported(ty.span, "array types");
-                Ty::Error
-            }
+            ast::Type::Array(elem) => Ty::Array(Box::new(self.convert_ty(elem, generics))),
             ast::Type::Optional(_) => {
                 self.unsupported(ty.span, "the `T?` optional sugar");
                 Ty::Error
@@ -1206,16 +1203,16 @@ impl<'a> Checker<'a> {
                     span,
                 }
             }
+            ast::Expr::Array(elems) => self.check_array_literal(fcx, elems, span),
+            ast::Expr::Index { target, index } => self.check_index(fcx, target, index, span),
             // --- deferred constructs ---
             ast::Expr::Tuple(_) => self.unsupported_expr(span, "tuple expressions"),
-            ast::Expr::Array(_) => self.unsupported_expr(span, "array literals"),
             ast::Expr::Closure { params, ret, body } => {
                 self.check_closure(fcx, params, ret, body, span)
             }
             ast::Expr::Record { path, fields, base } => {
                 self.check_record_literal(fcx, path, fields, base.as_deref(), span)
             }
-            ast::Expr::Index { .. } => self.unsupported_expr(span, "indexing"),
             ast::Expr::Field { target, field } => self.check_field(fcx, target, field, span),
             ast::Expr::Try(_) => self.unsupported_expr(span, "the `?` operator"),
             ast::Expr::Await(_) => self.unsupported_expr(span, "`.await`"),
@@ -1640,6 +1637,68 @@ impl<'a> Checker<'a> {
 
     /// `for i in lo..hi { body }` desugars to a counter-driven `while`:
     /// `{ let i = lo; let end = hi; while i < end { body; i = i + 1 } }`
+    fn check_array_literal(
+        &mut self,
+        fcx: &mut FnCtx,
+        elems: &[Spanned<ast::Expr>],
+        span: Span,
+    ) -> hir::Expr {
+        let elem_ty = fcx.icx.fresh();
+        let mut checked = Vec::with_capacity(elems.len());
+        for e in elems {
+            let v = self.check_expr(fcx, e);
+            if !fcx.icx.unify(&v.ty, &elem_ty) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "array elements must share a type: expected `{}`, found `{}`",
+                        self.show(&elem_ty, fcx),
+                        self.show(&v.ty, fcx),
+                    ),
+                    e.span,
+                );
+            }
+            checked.push(v);
+        }
+        hir::Expr {
+            kind: hir::ExprKind::MakeArray { elems: checked },
+            ty: Ty::Array(Box::new(elem_ty)),
+            span,
+        }
+    }
+
+    fn check_index(
+        &mut self,
+        fcx: &mut FnCtx,
+        target: &Spanned<ast::Expr>,
+        index: &Spanned<ast::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let arr = self.check_expr(fcx, target);
+        let idx = self.check_expr(fcx, index);
+        self.expect_ty(fcx, &idx, &Ty::Int, "an array index");
+        let elem_ty = fcx.icx.fresh();
+        if !fcx
+            .icx
+            .unify(&arr.ty, &Ty::Array(Box::new(elem_ty.clone())))
+        {
+            self.error(
+                "E0014",
+                format!("cannot index a value of type `{}`", self.show(&arr.ty, fcx)),
+                target.span,
+            );
+            return error_expr(span);
+        }
+        hir::Expr {
+            kind: hir::ExprKind::Index {
+                target: Box::new(arr),
+                index: Box::new(idx),
+            },
+            ty: elem_ty,
+            span,
+        }
+    }
+
     /// (`<=` for an inclusive range). Phase 1 iterables are integer ranges.
     fn check_for(
         &mut self,
@@ -2306,6 +2365,28 @@ impl<'a> Checker<'a> {
             );
             return error_expr(span);
         }
+        // Built-in array methods.
+        if matches!(recv_ty, Ty::Array(_)) {
+            if method.value == "len" && args.is_empty() {
+                return hir::Expr {
+                    kind: hir::ExprKind::ArrayLen {
+                        target: Box::new(receiver),
+                    },
+                    ty: Ty::Int,
+                    span,
+                };
+            }
+            self.error(
+                "E0014",
+                format!(
+                    "no method `{}` on array type `{}`",
+                    method.value,
+                    self.show(&recv_ty, fcx)
+                ),
+                method.span,
+            );
+            return error_expr(span);
+        }
         match self.resolve_method_on(&recv_ty, fcx, &method.value) {
             MethodRes::Inherent(def_id) => {
                 self.emit_inherent_call(fcx, def_id, receiver, args, span)
@@ -2656,8 +2737,15 @@ impl<'a> Checker<'a> {
         rhs: &Spanned<ast::Expr>,
         span: Span,
     ) -> hir::Expr {
+        // Element assignment `arr[i] = v`.
+        if let ast::Expr::Index { target, index } = &lhs.value {
+            return self.check_index_set(fcx, op, target, index, rhs, span);
+        }
         let ast::Expr::Path(path) = &lhs.value else {
-            self.unsupported(lhs.span, "assignment to anything but a local variable");
+            self.unsupported(
+                lhs.span,
+                "assignment to anything but a local variable or array element",
+            );
             return error_expr(span);
         };
         let name = if path.segments.len() == 1 {
@@ -2727,6 +2815,81 @@ impl<'a> Checker<'a> {
             kind: hir::ExprKind::Assign {
                 local,
                 value: Box::new(final_value),
+            },
+            ty: Ty::Unit,
+            span,
+        }
+    }
+
+    /// Check `arr[index] = value`.
+    fn check_index_set(
+        &mut self,
+        fcx: &mut FnCtx,
+        op: ast::AssignOp,
+        target: &Spanned<ast::Expr>,
+        index: &Spanned<ast::Expr>,
+        rhs: &Spanned<ast::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        if !matches!(op, ast::AssignOp::Assign) {
+            self.unsupported(span, "compound assignment to an array element");
+            return error_expr(span);
+        }
+        // If the array is a plain local, it must be declared `mut`.
+        if let ast::Expr::Path(p) = &target.value {
+            if p.segments.len() == 1 {
+                if let Some(l) = fcx.lookup(&p.segments[0].value) {
+                    if !fcx.locals[l.0 as usize].is_mut {
+                        let name = &p.segments[0].value;
+                        self.error(
+                            "E0060",
+                            format!("cannot assign to an element of immutable `{name}`"),
+                            span,
+                        );
+                        self.diagnostics
+                            .last_mut()
+                            .expect("just pushed")
+                            .notes
+                            .push(format!("declare it as `let mut {name}` to allow mutation"));
+                    }
+                }
+            }
+        }
+        let arr = self.check_expr(fcx, target);
+        let idx = self.check_expr(fcx, index);
+        self.expect_ty(fcx, &idx, &Ty::Int, "an array index");
+        let elem_ty = fcx.icx.fresh();
+        if !fcx
+            .icx
+            .unify(&arr.ty, &Ty::Array(Box::new(elem_ty.clone())))
+        {
+            self.error(
+                "E0014",
+                format!(
+                    "cannot index-assign a value of type `{}`",
+                    self.show(&arr.ty, fcx)
+                ),
+                target.span,
+            );
+            return error_expr(span);
+        }
+        let value = self.check_expr(fcx, rhs);
+        if !fcx.icx.unify(&value.ty, &elem_ty) {
+            self.error(
+                "E0010",
+                format!(
+                    "array element has type `{}` but `{}` was assigned",
+                    self.show(&elem_ty, fcx),
+                    self.show(&value.ty, fcx),
+                ),
+                rhs.span,
+            );
+        }
+        hir::Expr {
+            kind: hir::ExprKind::IndexSet {
+                target: Box::new(arr),
+                index: Box::new(idx),
+                value: Box::new(value),
             },
             ty: Ty::Unit,
             span,
@@ -3230,10 +3393,24 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
     match &expr.kind {
         K::MakeClosure { captures, .. } => out.extend(captures.iter()),
         K::Call { args, .. } => out.extend(args.iter()),
-        K::MakeVariant { args, .. } | K::MakeRecord { fields: args, .. } | K::StrConcat(args) => {
-            out.extend(args.iter())
+        K::MakeVariant { args, .. }
+        | K::MakeRecord { fields: args, .. }
+        | K::MakeArray { elems: args }
+        | K::StrConcat(args) => out.extend(args.iter()),
+        K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
+        K::Index { target, index } => {
+            out.push(target);
+            out.push(index);
         }
-        K::FieldGet { target, .. } => out.push(target),
+        K::IndexSet {
+            target,
+            index,
+            value,
+        } => {
+            out.push(target);
+            out.push(index);
+            out.push(value);
+        }
         K::TraitCall { receiver, args, .. } => {
             out.push(receiver);
             out.extend(args.iter());
@@ -3291,10 +3468,24 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
     match kind {
         K::MakeClosure { captures, .. } => out.extend(captures.iter_mut()),
         K::Call { args, .. } => out.extend(args.iter_mut()),
-        K::MakeVariant { args, .. } | K::MakeRecord { fields: args, .. } | K::StrConcat(args) => {
-            out.extend(args.iter_mut())
+        K::MakeVariant { args, .. }
+        | K::MakeRecord { fields: args, .. }
+        | K::MakeArray { elems: args }
+        | K::StrConcat(args) => out.extend(args.iter_mut()),
+        K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
+        K::Index { target, index } => {
+            out.push(target);
+            out.push(index);
         }
-        K::FieldGet { target, .. } => out.push(target),
+        K::IndexSet {
+            target,
+            index,
+            value,
+        } => {
+            out.push(target);
+            out.push(index);
+            out.push(value);
+        }
         K::TraitCall { receiver, args, .. } => {
             out.push(receiver);
             out.extend(args.iter_mut());
@@ -3467,13 +3658,27 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         }
         hir::ExprKind::MakeVariant { args, .. }
         | hir::ExprKind::MakeRecord { fields: args, .. }
+        | hir::ExprKind::MakeArray { elems: args }
         | hir::ExprKind::StrConcat(args) => {
             for a in args {
                 finalize_expr(a, icx, residual);
             }
         }
-        hir::ExprKind::FieldGet { target, .. } => {
+        hir::ExprKind::FieldGet { target, .. } | hir::ExprKind::ArrayLen { target } => {
             finalize_expr(target, icx, residual);
+        }
+        hir::ExprKind::Index { target, index } => {
+            finalize_expr(target, icx, residual);
+            finalize_expr(index, icx, residual);
+        }
+        hir::ExprKind::IndexSet {
+            target,
+            index,
+            value,
+        } => {
+            finalize_expr(target, icx, residual);
+            finalize_expr(index, icx, residual);
+            finalize_expr(value, icx, residual);
         }
         hir::ExprKind::TraitCall {
             self_ty,
@@ -4000,6 +4205,53 @@ mod tests {
              }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn arrays_literal_index_len_ok() {
+        let r = check_src(
+            "fn main() {\n\
+                 let xs = [10, 20, 30]\n\
+                 let mut ys = [1, 2]\n\
+                 ys[0] = xs[1]\n\
+                 println(\"${xs.len()} ${ys[0]}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn array_param_and_return_ok() {
+        let r = check_src(
+            "fn first(xs: [Int]) -> Int { xs[0] }\n\
+             fn make() -> [Int] { [7, 8, 9] }\n\
+             fn main() { println(\"${first(make())}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn heterogeneous_array_reports_e0010() {
+        let r = check_src("fn main() { let xs = [1, \"two\"] }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_int_index_reports_e0010() {
+        let r = check_src("fn main() { let xs = [1, 2]\n let y = xs[\"a\"] }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn indexing_non_array_reports_e0014() {
+        let r = check_src("fn main() { let x = 5\n let y = x[0] }");
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_immutable_reports_e0060() {
+        let r = check_src("fn main() { let xs = [1, 2]\n xs[0] = 9 }");
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
     }
 
     #[test]

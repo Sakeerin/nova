@@ -127,6 +127,15 @@ pub extern "C" fn nova_rt_alloc(size: i64) -> *mut u8 {
     unsafe { alloc(layout) }
 }
 
+/// Abort if `index` is outside `0..len` (an array bounds violation).
+#[no_mangle]
+pub extern "C" fn nova_rt_check_bounds(index: i64, len: i64) {
+    if index < 0 || index >= len {
+        eprintln!("nova: panic: array index {index} out of bounds for length {len}");
+        std::process::abort();
+    }
+}
+
 /// Abort the program with a panic message.
 ///
 /// # Safety
@@ -151,6 +160,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
+        ("nova_rt_check_bounds", nova_rt_check_bounds as *const u8),
         ("nova_rt_panic", nova_rt_panic as *const u8),
     ]
 }

@@ -1,0 +1,7 @@
+len = 4
+nums[0] = 10
+nums[3] = 40
+sum = 100
+doubled = [2, 4, 6]
+hi there
+pairs[1].a = 3

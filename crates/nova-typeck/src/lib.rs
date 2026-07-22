@@ -59,6 +59,7 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
                 format!("{name}<{args}>")
             }
         }
+        Ty::Array(elem) => format!("[{}]", display_ty(elem, defs)),
         Ty::Param(i) => format!("T{i}"),
         Ty::Var(v) => format!("?{v}"),
         Ty::Never => "!".to_string(),

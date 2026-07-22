@@ -213,6 +213,47 @@ fn fn_as_value_lowers_to_closure_and_indirect_call() {
 }
 
 #[test]
+fn arrays_lower_with_bounds_check() {
+    let mir = mir_for(
+        "fn main() {\n\
+             let mut xs = [1, 2, 3]\n\
+             xs[0] = xs[1]\n\
+             println(\"${xs.len()} ${xs[2]}\")\n\
+         }",
+    );
+    use nova_mir::{RtFunc, Stmt};
+    let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
+    let stmts: Vec<&Stmt> = main.blocks.iter().flat_map(|b| b.stmts.iter()).collect();
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::MakeArray { .. })),
+        "MakeArray"
+    );
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::ArrayGet { .. })),
+        "ArrayGet"
+    );
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::ArraySet { .. })),
+        "ArraySet"
+    );
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::ArrayLen { .. })),
+        "ArrayLen"
+    );
+    // Every index access is preceded by a bounds-check runtime call.
+    assert!(
+        stmts.iter().any(|s| matches!(
+            s,
+            Stmt::CallRuntime {
+                func: RtFunc::CheckBounds,
+                ..
+            }
+        )),
+        "bounds check"
+    );
+}
+
+#[test]
 fn break_and_continue_lower_to_gotos() {
     // A while loop with break and continue lowers without panicking and the
     // body contains the extra control flow.

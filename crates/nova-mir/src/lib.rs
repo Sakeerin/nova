@@ -105,6 +105,8 @@ pub enum RtFunc {
     StrEq,
     /// `(size_bytes) -> ptr` — allocate a heap value (sum or record).
     Alloc,
+    /// `(index, len) -> unit` — abort if `index` is out of `0..len`.
+    CheckBounds,
 }
 
 impl RtFunc {
@@ -120,6 +122,7 @@ impl RtFunc {
             RtFunc::CharToStr => "nova_rt_char_to_str",
             RtFunc::StrEq => "nova_rt_str_eq",
             RtFunc::Alloc => "nova_rt_alloc",
+            RtFunc::CheckBounds => "nova_rt_check_bounds",
         }
     }
 
@@ -134,6 +137,7 @@ impl RtFunc {
             RtFunc::CharToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
+            RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
         }
     }
 }
@@ -234,6 +238,30 @@ pub enum Stmt {
         index: u32,
         ty: MirTy,
     },
+    /// Allocate and initialize an array `{ len, elems... }`.
+    MakeArray {
+        dst: Temp,
+        elems: Vec<(Temp, MirTy)>,
+    },
+    /// Load the length (element count) of an array.
+    ArrayLen {
+        dst: Temp,
+        arr: Temp,
+    },
+    /// Load `arr[index]` (dynamic index; caller has bounds-checked).
+    ArrayGet {
+        dst: Temp,
+        arr: Temp,
+        index: Temp,
+        ty: MirTy,
+    },
+    /// Store `arr[index] = value` (dynamic index; caller has bounds-checked).
+    ArraySet {
+        arr: Temp,
+        index: Temp,
+        value: Temp,
+        ty: MirTy,
+    },
 }
 
 /// Block terminators.
@@ -264,9 +292,11 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         hir::Ty::Int | hir::Ty::Char => MirTy::I64,
         hir::Ty::Float => MirTy::F64,
         hir::Ty::Bool => MirTy::I8,
-        hir::Ty::String | hir::Ty::Fn { .. } | hir::Ty::Sum { .. } | hir::Ty::Record { .. } => {
-            MirTy::Ptr
-        }
+        hir::Ty::String
+        | hir::Ty::Fn { .. }
+        | hir::Ty::Sum { .. }
+        | hir::Ty::Record { .. }
+        | hir::Ty::Array(_) => MirTy::Ptr,
         hir::Ty::Unit | hir::Ty::Never => MirTy::Unit,
         // Post-typeck these should not occur; map defensively.
         hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => MirTy::Unit,
@@ -312,6 +342,7 @@ fn mangle_ty(ty: &hir::Ty) -> String {
                 format!("R{}L{}E", def_id.0, a.join(""))
             }
         }
+        hir::Ty::Array(elem) => format!("A{}E", mangle_ty(elem)),
         hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => "X".to_string(),
     }
 }

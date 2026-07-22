@@ -217,6 +217,25 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
             target: Box::new(subst_expr(target, args)),
             index: *index,
         },
+        K::MakeArray { elems } => K::MakeArray {
+            elems: elems.iter().map(|e| subst_expr(e, args)).collect(),
+        },
+        K::Index { target, index } => K::Index {
+            target: Box::new(subst_expr(target, args)),
+            index: Box::new(subst_expr(index, args)),
+        },
+        K::IndexSet {
+            target,
+            index,
+            value,
+        } => K::IndexSet {
+            target: Box::new(subst_expr(target, args)),
+            index: Box::new(subst_expr(index, args)),
+            value: Box::new(subst_expr(value, args)),
+        },
+        K::ArrayLen { target } => K::ArrayLen {
+            target: Box::new(subst_expr(target, args)),
+        },
         K::TraitCall {
             trait_id,
             method,

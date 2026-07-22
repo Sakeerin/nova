@@ -1,0 +1,32 @@
+fn sum(xs: [Int]) -> Int {
+    let mut total = 0
+    for i in 0..xs.len() {
+        total = total + xs[i]
+    }
+    total
+}
+
+fn main() {
+    let nums = [10, 20, 30, 40]
+    println("len = ${nums.len()}")
+    println("nums[0] = ${nums[0]}")
+    println("nums[3] = ${nums[3]}")
+    println("sum = ${sum(nums)}")
+
+    // Mutable array + element assignment.
+    let mut doubled = [1, 2, 3]
+    for i in 0..doubled.len() {
+        doubled[i] = doubled[i] * 2
+    }
+    println("doubled = [${doubled[0]}, ${doubled[1]}, ${doubled[2]}]")
+
+    // Array of strings.
+    let words = ["hi", "there"]
+    println("${words[0]} ${words[1]}")
+
+    // Array of a record type.
+    let pairs = [Pair { a: 1, b: 2 }, Pair { a: 3, b: 4 }]
+    println("pairs[1].a = ${pairs[1].a}")
+}
+
+record Pair { a: Int, b: Int }

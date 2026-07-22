@@ -89,6 +89,42 @@ fn for_loops_run() {
 }
 
 #[test]
+fn arrays_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/arrays.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/arrays.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn array_out_of_bounds_aborts() {
+    let dir = std::env::temp_dir().join("nova-oob");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("oob.nova");
+    std::fs::write(
+        &file,
+        "fn main() { let a = [1, 2, 3]\n println(\"${a[5]}\") }",
+    )
+    .expect("write");
+    let exe = dir.join(format!("oob{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe).assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(stderr.contains("out of bounds"), "stderr: {stderr}");
+}
+
+#[test]
 fn constants_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/constants.stdout"))
         .expect("expected-output fixture exists")

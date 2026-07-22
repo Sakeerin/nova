@@ -47,6 +47,7 @@ impl InferCtx {
                 def_id,
                 args: args.iter().map(|a| self.apply(a)).collect(),
             },
+            Ty::Array(elem) => Ty::Array(Box::new(self.apply(&elem))),
             other => other,
         }
     }
@@ -61,6 +62,7 @@ impl InferCtx {
             Ty::Sum { args, .. } | Ty::Record { args, .. } => {
                 args.iter().any(|a| self.occurs(v, a))
             }
+            Ty::Array(elem) => self.occurs(v, &elem),
             _ => false,
         }
     }
@@ -148,6 +150,7 @@ impl InferCtx {
                         .zip(a2.clone().iter())
                         .all(|(x, y)| self.unify(x, y))
             }
+            (Ty::Array(e1), Ty::Array(e2)) => self.unify(&e1.clone(), &e2.clone()),
             _ => false,
         }
     }

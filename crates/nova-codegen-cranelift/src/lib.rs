@@ -133,7 +133,7 @@ struct Codegen<'m, M: ClModule> {
     strings: FxHashMap<String, DataId>,
 }
 
-const ALL_RT: [RtFunc; 9] = [
+const ALL_RT: [RtFunc; 10] = [
     RtFunc::Println,
     RtFunc::Print,
     RtFunc::StrConcat,
@@ -143,6 +143,7 @@ const ALL_RT: [RtFunc; 9] = [
     RtFunc::CharToStr,
     RtFunc::StrEq,
     RtFunc::Alloc,
+    RtFunc::CheckBounds,
 ];
 
 impl<'m, M: ClModule> Codegen<'m, M> {
@@ -395,6 +396,16 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
         }
     }
 
+    /// Address of array element `index`: `arr + 8 (len header) + index * 8`
+    /// (all values occupy 8-byte slots). Assumes a 64-bit pointer target.
+    fn array_elem_addr(&mut self, arr: nova_mir::Temp, index: nova_mir::Temp) -> Result<Value> {
+        let base = self.use_temp(arr)?;
+        let idx = self.use_temp(index)?;
+        let byte_off = self.builder.ins().imul_imm(idx, 8);
+        let elem = self.builder.ins().iadd(base, byte_off);
+        Ok(self.builder.ins().iadd_imm(elem, 8))
+    }
+
     fn call_func_id(&mut self, id: FuncId, args: &[Value]) -> Result<Option<Value>> {
         let func_ref = self.cg.module.declare_func_in_func(id, self.builder.func);
         let inst = self.builder.ins().call(func_ref, args);
@@ -621,6 +632,64 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                     .ins()
                     .load(cl_ty, MemFlags::trusted(), ptr, offset);
                 self.def_temp(*dst, v);
+            }
+            Stmt::MakeArray { dst, elems } => {
+                // Layout: { len: i64, elem0, elem1, ... } with 8-byte slots.
+                let size = (8 + 8 * elems.len()) as i64;
+                let size_val = self.builder.ins().iconst(types::I64, size);
+                let alloc = self.rt("nova_rt_alloc");
+                let ptr = self
+                    .call_func_id(alloc, &[size_val])?
+                    .ok_or_else(|| anyhow!("alloc returns a value"))?;
+                let len_val = self.builder.ins().iconst(types::I64, elems.len() as i64);
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), len_val, ptr, 0);
+                for (i, (el, ty)) in elems.iter().enumerate() {
+                    if *ty == MirTy::Unit {
+                        continue;
+                    }
+                    let v = self.use_temp(*el)?;
+                    let offset = (8 + 8 * i) as i32;
+                    self.builder
+                        .ins()
+                        .store(MemFlags::trusted(), v, ptr, offset);
+                }
+                self.def_temp(*dst, ptr);
+            }
+            Stmt::ArrayLen { dst, arr } => {
+                let ptr = self.use_temp(*arr)?;
+                let len = self
+                    .builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), ptr, 0);
+                self.def_temp(*dst, len);
+            }
+            Stmt::ArrayGet {
+                dst,
+                arr,
+                index,
+                ty,
+            } => {
+                let Some(cl_ty) = self.cg.cl_ty(*ty) else {
+                    return Ok(());
+                };
+                let addr = self.array_elem_addr(*arr, *index)?;
+                let v = self.builder.ins().load(cl_ty, MemFlags::trusted(), addr, 0);
+                self.def_temp(*dst, v);
+            }
+            Stmt::ArraySet {
+                arr,
+                index,
+                value,
+                ty,
+            } => {
+                if self.cg.cl_ty(*ty).is_none() {
+                    return Ok(());
+                }
+                let addr = self.array_elem_addr(*arr, *index)?;
+                let v = self.use_temp(*value)?;
+                self.builder.ins().store(MemFlags::trusted(), v, addr, 0);
             }
             Stmt::SumTag { dst, sum } => {
                 let ptr = self.use_temp(*sum)?;

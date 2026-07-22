@@ -45,6 +45,8 @@ pub enum Ty {
         def_id: DefId,
         args: Vec<Ty>,
     },
+    /// A heap array `[T]` with elements of a single type.
+    Array(Box<Ty>),
     /// A generic type parameter of the enclosing item (`T`).
     Param(u32),
     /// An unsolved inference variable (only during type checking).
@@ -73,6 +75,7 @@ impl Ty {
                 def_id: *def_id,
                 args: a.iter().map(|t| t.subst(args)).collect(),
             },
+            Ty::Array(elem) => Ty::Array(Box::new(elem.subst(args))),
             other => other.clone(),
         }
     }
@@ -83,6 +86,7 @@ impl Ty {
             Ty::Param(_) => true,
             Ty::Fn { params, ret } => params.iter().any(Ty::has_params) || ret.has_params(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_params),
+            Ty::Array(elem) => elem.has_params(),
             _ => false,
         }
     }
@@ -93,6 +97,7 @@ impl Ty {
             Ty::Var(_) => true,
             Ty::Fn { params, ret } => params.iter().any(Ty::has_vars) || ret.has_vars(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
+            Ty::Array(elem) => elem.has_vars(),
             _ => false,
         }
     }
@@ -384,6 +389,26 @@ pub enum ExprKind {
     FieldGet {
         target: Box<Expr>,
         index: u32,
+    },
+    /// Construct a heap array `{ len, elems... }`; the expression's `ty`
+    /// is the `Array(elem)` type.
+    MakeArray {
+        elems: Vec<Expr>,
+    },
+    /// Read `target[index]` (bounds-checked). `target` is an array.
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+    },
+    /// Assign `target[index] = value` (bounds-checked); unit-typed.
+    IndexSet {
+        target: Box<Expr>,
+        index: Box<Expr>,
+        value: Box<Expr>,
+    },
+    /// The length of an array (`arr.len()`).
+    ArrayLen {
+        target: Box<Expr>,
     },
     /// A trait method call `receiver.method(args)`, resolved to a concrete
     /// impl during monomorphization (static dispatch). `self_ty` is the

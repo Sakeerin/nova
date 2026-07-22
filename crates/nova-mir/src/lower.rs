@@ -168,6 +168,18 @@ impl<'a> Lowerer<'a> {
         t
     }
 
+    /// Emit a runtime bounds check `check_bounds(index, len(arr))` that
+    /// aborts if `index` is out of range, before an array access.
+    fn bounds_check(&mut self, arr: Temp, index: Temp) {
+        let len = self.new_temp(MirTy::I64);
+        self.push(Stmt::ArrayLen { dst: len, arr });
+        self.push(Stmt::CallRuntime {
+            dst: None,
+            func: RtFunc::CheckBounds,
+            args: vec![index, len],
+        });
+    }
+
     /// Copy `src` into `dst` unless the value class is `Unit` (no data).
     fn copy(&mut self, dst: Temp, src: Temp) {
         if self.temps[dst.0 as usize] != MirTy::Unit {
@@ -286,6 +298,64 @@ impl<'a> Lowerer<'a> {
                     ty,
                 });
                 t
+            }
+            K::MakeArray { elems } => {
+                let lowered: Vec<(Temp, MirTy)> = elems
+                    .iter()
+                    .map(|el| {
+                        let t = self.lower_expr(el);
+                        (t, mir_ty(&el.ty))
+                    })
+                    .collect();
+                let t = self.new_temp(MirTy::Ptr);
+                self.push(Stmt::MakeArray {
+                    dst: t,
+                    elems: lowered,
+                });
+                t
+            }
+            K::ArrayLen { target } => {
+                let arr = self.lower_expr(target);
+                let t = self.new_temp(MirTy::I64);
+                self.push(Stmt::ArrayLen { dst: t, arr });
+                t
+            }
+            K::Index { target, index } => {
+                let arr = self.lower_expr(target);
+                let idx = self.lower_expr(index);
+                self.bounds_check(arr, idx);
+                let ty = mir_ty(&e.ty);
+                if ty == MirTy::Unit {
+                    return self.unit_temp();
+                }
+                let t = self.new_temp(ty);
+                self.push(Stmt::ArrayGet {
+                    dst: t,
+                    arr,
+                    index: idx,
+                    ty,
+                });
+                t
+            }
+            K::IndexSet {
+                target,
+                index,
+                value,
+            } => {
+                let arr = self.lower_expr(target);
+                let idx = self.lower_expr(index);
+                let v = self.lower_expr(value);
+                self.bounds_check(arr, idx);
+                let ty = mir_ty(&value.ty);
+                if ty != MirTy::Unit {
+                    self.push(Stmt::ArraySet {
+                        arr,
+                        index: idx,
+                        value: v,
+                        ty,
+                    });
+                }
+                self.unit_temp()
             }
             K::TraitCall {
                 trait_id,
