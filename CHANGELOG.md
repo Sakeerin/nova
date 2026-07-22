@@ -83,6 +83,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   crashed codegen with an internal error (adversarial review)
 - Typeck: `break`/`continue` in a loop's own condition now target that loop
   (were rejected as "outside a loop" or mis-scoped) (adversarial review)
+- Typeck: a function-typed value that is not a local (e.g. a fn-typed
+  constant `CONST(args)`, or a fn returned from a field/call) can now be
+  called directly instead of erroring with E0900 (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), arrays/indexing,
