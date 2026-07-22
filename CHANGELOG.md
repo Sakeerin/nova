@@ -89,6 +89,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Typeck: a function-typed value that is not a local (e.g. a fn-typed
   constant `CONST(args)`, or a fn returned from a field/call) can now be
   called directly instead of erroring with E0900 (adversarial review)
+- Typeck: element assignment `arr[i] = v` now checks the mutability of the
+  place's root binding, walking through field and nested-index projections —
+  `rec.data[0] = v` and `grid[0][1] = v` on an immutable binding, and
+  `make()[0] = v` on a temporary, were silently accepted and mutated
+  immutable heap storage; now `E0060` (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), full Maranget

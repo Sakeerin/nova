@@ -2821,6 +2821,28 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Classify the root binding of an lvalue place, walking through element
+    /// (`arr[i]`) and field (`rec.f`) projections. The mutability of the base
+    /// binding governs whether the reachable heap storage may be mutated.
+    fn place_root(&self, fcx: &FnCtx, expr: &Spanned<ast::Expr>) -> PlaceRoot {
+        match &expr.value {
+            ast::Expr::Path(p) if p.segments.len() == 1 => {
+                match fcx.lookup(&p.segments[0].value) {
+                    Some(l) if fcx.locals[l.0 as usize].is_mut => PlaceRoot::Mutable,
+                    Some(_) => PlaceRoot::ImmutableLocal(p.segments[0].value.clone()),
+                    // A constant, a multi-segment path, or an unknown name is
+                    // not a mutable place.
+                    None => PlaceRoot::NotAPlace,
+                }
+            }
+            ast::Expr::Index { target, .. } => self.place_root(fcx, target),
+            ast::Expr::Field { target, .. } => self.place_root(fcx, target),
+            // Any other base (call result, literal, block, …) is a temporary
+            // with no assignable root.
+            _ => PlaceRoot::NotAPlace,
+        }
+    }
+
     /// Check `arr[index] = value`.
     fn check_index_set(
         &mut self,
@@ -2835,24 +2857,30 @@ impl<'a> Checker<'a> {
             self.unsupported(span, "compound assignment to an array element");
             return error_expr(span);
         }
-        // If the array is a plain local, it must be declared `mut`.
-        if let ast::Expr::Path(p) = &target.value {
-            if p.segments.len() == 1 {
-                if let Some(l) = fcx.lookup(&p.segments[0].value) {
-                    if !fcx.locals[l.0 as usize].is_mut {
-                        let name = &p.segments[0].value;
-                        self.error(
-                            "E0060",
-                            format!("cannot assign to an element of immutable `{name}`"),
-                            span,
-                        );
-                        self.diagnostics
-                            .last_mut()
-                            .expect("just pushed")
-                            .notes
-                            .push(format!("declare it as `let mut {name}` to allow mutation"));
-                    }
-                }
+        // The array's storage must be reachable through a mutable binding.
+        // Walk the whole index/field chain to its root local — `grid[0][1]`,
+        // `rec.data[0]`, and `make()[0]` all bypass a single-segment check.
+        match self.place_root(fcx, target) {
+            PlaceRoot::Mutable => {}
+            PlaceRoot::ImmutableLocal(name) => {
+                self.error(
+                    "E0060",
+                    format!("cannot assign to an element of immutable `{name}`"),
+                    span,
+                );
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(format!("declare it as `let mut {name}` to allow mutation"));
+            }
+            PlaceRoot::NotAPlace => {
+                self.error(
+                    "E0060",
+                    "cannot assign to an element of a temporary or non-assignable value"
+                        .to_string(),
+                    span,
+                );
             }
         }
         let arr = self.check_expr(fcx, target);
@@ -3571,6 +3599,17 @@ fn error_expr(span: Span) -> hir::Expr {
     }
 }
 
+/// The mutability classification of the root binding of an assignment place.
+enum PlaceRoot {
+    /// Rooted at a mutable local — mutation through it is allowed.
+    Mutable,
+    /// Rooted at an immutable local of the given name.
+    ImmutableLocal(String),
+    /// No assignable root: a temporary (call result, literal), a constant, or
+    /// an unresolved/multi-segment path.
+    NotAPlace,
+}
+
 fn convert_binop(op: ast::BinOp) -> hir::BinOp {
     match op {
         ast::BinOp::Add => hir::BinOp::Add,
@@ -4252,6 +4291,54 @@ mod tests {
     fn index_set_immutable_reports_e0060() {
         let r = check_src("fn main() { let xs = [1, 2]\n xs[0] = 9 }");
         assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_through_immutable_field_reports_e0060() {
+        // Regression: mutating an element reached through a field of an
+        // immutable binding must still be rejected — the base is `Field`, not
+        // a bare `Path`, so the single-segment check used to miss it.
+        let r = check_src(
+            "record Box { data: [Int] }\n\
+             fn main() { let b = Box { data: [1, 2, 3] }\n b.data[0] = 99 }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_through_immutable_nested_array_reports_e0060() {
+        // Regression: `grid[0][1] = v` roots at an immutable local through a
+        // nested `Index`, which the single-segment check used to bypass.
+        let r = check_src("fn main() { let grid = [[1, 2], [3, 4]]\n grid[0][1] = 99 }");
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_on_call_result_reports_e0060() {
+        // A temporary (call result) has no assignable root — mutating an
+        // element of it is meaningless and must be rejected.
+        let r = check_src(
+            "fn make() -> [Int] { [1, 2, 3] }\n\
+             fn main() { make()[0] = 99 }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_through_mutable_field_ok() {
+        // The mirror of the immutable-field case: a `mut` base makes the
+        // reachable array storage assignable.
+        let r = check_src(
+            "record Box { data: [Int] }\n\
+             fn main() { let mut b = Box { data: [1, 2, 3] }\n b.data[0] = 99 }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn index_set_nested_mutable_ok() {
+        let r = check_src("fn main() { let mut grid = [[1, 2], [3, 4]]\n grid[0][1] = 99 }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]
