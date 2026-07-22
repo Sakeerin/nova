@@ -66,7 +66,7 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
                 continue;
             };
             for &trait_id in bounds {
-                let satisfied = impl_satisfies(module, arg, trait_id, 0);
+                let satisfied = impl_satisfies(module, arg, trait_id);
                 if !satisfied {
                     bounds_ok = false;
                     let trait_name = module
@@ -111,18 +111,17 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     }
 }
 
-/// Whether concrete type `arg` implements `trait_id`. A non-generic impl of
-/// the trait for `arg`'s head satisfies it directly; a generic impl
-/// (`impl<T: Bound> Trait for Box<T>`) satisfies it only if the impl's own
-/// generic bounds hold for the type arguments recovered from `arg`.
+/// Whether concrete type `arg` implements `trait_id`. The matching impl's self
+/// type must fit `arg` structurally (so `impl Foo for Pair<Int, Int>` does not
+/// cover `Pair<Int, Bool>`); a generic impl (`impl<T: Bound> Trait for Box<T>`)
+/// additionally requires its own generic bounds to hold for the type arguments
+/// recovered from `arg`.
 ///
-/// `depth` guards against a pathological impl-recursion cycle: past the cap we
-/// conservatively return `true`, since an actually-unsatisfiable bound is still
-/// caught when the impl's methods are monomorphized.
-fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId, depth: u32) -> bool {
-    if depth > 16 {
-        return true;
-    }
+/// This recursion is well-founded and needs no depth cap: each recursive call
+/// checks a bound against a type argument that is a strict sub-term of `arg`
+/// (impl self types are always named constructors, so recovered arguments are
+/// proper components), and a finite type has finite nesting.
+fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId) -> bool {
     let Some(head) = arg.head() else {
         return false;
     };
@@ -133,19 +132,17 @@ fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId, depth: u32) -
     else {
         return false;
     };
-    if imp.generics == 0 {
-        // A non-generic impl still must match structurally (e.g. an
-        // `impl Foo for Pair<Int, Int>` does not cover `Pair<Int, Bool>`).
-        return imp.match_args(arg).is_some();
-    }
+    // `arg` must actually fit the impl's self-type pattern, not merely its head.
     let Some(impl_args) = imp.match_args(arg) else {
         return false;
     };
+    // For a non-generic or unconstrained impl `bounds` is empty, so this is
+    // vacuously true; otherwise every generic parameter's bounds must hold.
     imp.bounds.iter().enumerate().all(|(i, param_bounds)| {
         param_bounds.iter().all(|&bound| {
             impl_args
                 .get(i)
-                .map(|a| impl_satisfies(module, a, bound, depth + 1))
+                .map(|a| impl_satisfies(module, a, bound))
                 .unwrap_or(false)
         })
     })

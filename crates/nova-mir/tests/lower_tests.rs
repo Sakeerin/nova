@@ -210,15 +210,52 @@ fn conditional_generic_impl_unsatisfied_reports_e0013() {
 
 #[test]
 fn repeated_param_trait_impl_mismatch_reports_e0013() {
-    // A trait impl on `Pair<T, T>` must not dispatch for `Pair<Int, String>` —
-    // structural matching, not just head, gates selection.
+    // A trait impl on `Pair<T, T>` must not satisfy a bound for
+    // `Pair<Int, String>` — structural matching, not just head, gates the
+    // monomorphization bound check. (A *direct* call on such a receiver is
+    // rejected earlier at typeck as E0014; here the mismatch reaches mono
+    // through a generic bound.)
     let codes = diagnostics_for(
         "record Pair<A, B> { first: A, second: B }\n\
          trait Same { fn same(self) -> Int }\n\
          impl<T> Same for Pair<T, T> { fn same(self) -> Int { 1 } }\n\
-         fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${p.same()}\") }",
+         fn use_it<X: Same>(x: X) -> Int { x.same() }\n\
+         fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${use_it(p)}\") }",
     );
     assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+/// Build a program that wraps `core` in `depth` layers of `Wrap` and requires
+/// the whole thing to be `Display` (only true if `core`'s type is `Display`).
+fn deep_wrap_program(core: &str, depth: usize) -> String {
+    let mut inner = core.to_string();
+    for _ in 0..depth {
+        inner = format!("Wrap {{ inner: {inner} }}");
+    }
+    format!(
+        "trait Display {{ fn fmt(self) -> String }}\n\
+         record Wrap<T> {{ inner: T }}\n\
+         impl Display for Int {{ fn fmt(self) -> String {{ \"i\" }} }}\n\
+         impl<T: Display> Display for Wrap<T> {{ fn fmt(self) -> String {{ \"w\" }} }}\n\
+         fn describe<T: Display>(x: T) -> String {{ x.fmt() }}\n\
+         fn main() {{ let w = {inner}\n println(describe(w)) }}"
+    )
+}
+
+#[test]
+fn deeply_nested_unsatisfiable_bound_is_rejected() {
+    // Regression: a depth cap in the bound check once accepted this past ~17
+    // levels. `Bool` is never `Display`, so it must be E0013 at any depth.
+    let codes = diagnostics_for(&deep_wrap_program("true", 20));
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
+fn deeply_nested_satisfiable_bound_is_accepted() {
+    // The mirror: an `Int` core is `Display`, so a deep `Wrap` nest must still
+    // compile (the fix must not turn the cap into a false rejection).
+    let codes = diagnostics_for(&deep_wrap_program("0", 20));
+    assert!(codes.is_empty(), "unexpected diagnostics: {codes:?}");
 }
 
 fn diagnostics_for(src: &str) -> Vec<String> {

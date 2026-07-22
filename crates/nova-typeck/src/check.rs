@@ -2322,14 +2322,18 @@ impl<'a> Checker<'a> {
                 let Some(head) = recv_ty.head() else {
                     return MethodRes::None;
                 };
-                // Inherent methods take priority over trait methods.
-                if let Some(def) = self.find_inherent_method(head, name) {
+                // Inherent methods take priority over trait methods — but only
+                // an impl that actually fits the receiver counts. A restricted
+                // inherent impl (`impl<T> Pair<T, T>`) must not shadow an
+                // applicable trait method when the receiver (`Pair<Int, Str>`)
+                // does not fit it.
+                if let Some(def) = self.find_inherent_method(recv_ty, head, name) {
                     return MethodRes::Inherent(def);
                 }
                 let matches: Vec<(DefId, u32)> = self
                     .impls
                     .iter()
-                    .filter(|i| i.self_head == head)
+                    .filter(|i| i.self_head == head && i.match_args(recv_ty).is_some())
                     .filter_map(|i| i.trait_id)
                     .filter_map(|tid| self.trait_method_index(tid, name).map(|idx| (tid, idx)))
                     .collect();
@@ -2352,10 +2356,13 @@ impl<'a> Checker<'a> {
             .map(|i| i as u32)
     }
 
-    fn find_inherent_method(&self, head: TyHead, name: &str) -> Option<DefId> {
+    fn find_inherent_method(&self, recv_ty: &Ty, head: TyHead, name: &str) -> Option<DefId> {
         self.impls
             .iter()
             .filter(|i| i.trait_id.is_none() && i.self_head == head)
+            // The receiver must fit the impl's self-type pattern, not just its
+            // head, so `impl<T> Pair<T, T>` is skipped for `Pair<Int, String>`.
+            .filter(|i| i.match_args(recv_ty).is_some())
             .find_map(|i| i.methods.iter().find(|(n, _)| n == name).map(|(_, d)| *d))
     }
 
@@ -4631,5 +4638,67 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_applicable_inherent_method_does_not_shadow_trait_method() {
+        // A restricted inherent `impl<T> Pair<T, T>` must not block the
+        // applicable trait method for a non-uniform `Pair<Int, String>`;
+        // resolution falls through to the trait impl instead of rejecting.
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             trait Describe { fn describe(self) -> String }\n\
+             impl<T> Pair<T, T> { fn describe(self) -> String { \"same\" } }\n\
+             impl<A, B> Describe for Pair<A, B> { fn describe(self) -> String { \"pair\" } }\n\
+             fn main() {\n\
+                 let p = Pair { first: 1, second: \"x\" }\n\
+                 println(p.describe())\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn applicable_inherent_method_still_takes_priority() {
+        // When the inherent impl *does* fit the receiver, it wins over the
+        // trait method (unchanged precedence).
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             trait Describe { fn describe(self) -> String }\n\
+             impl<T> Pair<T, T> { fn describe(self) -> String { \"same\" } }\n\
+             impl<A, B> Describe for Pair<A, B> { fn describe(self) -> String { \"pair\" } }\n\
+             fn main() {\n\
+                 let q = Pair { first: 1, second: 2 }\n\
+                 println(q.describe())\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_applicable_trait_impl_is_rejected_on_direct_call() {
+        // A trait impl on `Pair<T, T>` does not apply to `Pair<Int, String>`;
+        // a direct call has no other candidate, so it is rejected (E0014).
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             trait Same { fn same(self) -> Int }\n\
+             impl<T> Same for Pair<T, T> { fn same(self) -> Int { 1 } }\n\
+             fn main() { let p = Pair { first: 1, second: \"x\" }\n let n = p.same() }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_applicable_inherent_fmt_does_not_block_display_bridge() {
+        // A non-applicable inherent `fmt` must not block string interpolation
+        // from using the applicable `Display` trait impl.
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             trait Display { fn fmt(self) -> String }\n\
+             impl<T> Pair<T, T> { fn fmt(self) -> String { \"same\" } }\n\
+             impl<A, B> Display for Pair<A, B> { fn fmt(self) -> String { \"pair\" } }\n\
+             fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${p}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 }

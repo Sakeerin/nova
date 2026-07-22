@@ -102,6 +102,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rec.data[0] = v` and `grid[0][1] = v` on an immutable binding, and
   `make()[0] = v` on a temporary, were silently accepted and mutated
   immutable heap storage; now `E0060` (adversarial review)
+- Typeck: a restricted inherent method (`impl<T> Pair<T, T> { … }`) no longer
+  shadows an applicable trait method for a receiver it does not fit (e.g.
+  `Pair<Int, String>`) — method resolution now falls through to the trait impl
+  instead of rejecting the call, and the string-interpolation `Display` bridge
+  is likewise no longer blocked (adversarial review)
+- Monomorphization: the trait-bound satisfaction check no longer has a
+  recursion depth cap that could accept an unsatisfiable bound for a very
+  deeply nested conditional-impl type; the recursion is well-founded on the
+  finite structure of the type, so deep nests are checked exactly
+  (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), full Maranget
