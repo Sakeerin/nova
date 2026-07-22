@@ -44,10 +44,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Top-level `const NAME: T = value` (compiled as a zero-arg function,
   referenced by call); constants may reference other constants; a cyclic
   constant is reported as E0081
+- Arrays `[T]`: literals `[a, b, c]`, indexing `arr[i]`, element assignment
+  `arr[i] = v` (mutable base required), and `arr.len()`; out-of-bounds
+  access aborts with a message (heap layout `{ len, elems… }`)
 - Gate programs verified end-to-end: hello-world, fibonacci,
   match-on-enum, generic functions, records, traits, for-loops, closures,
-  break/continue, constants (e2e stdout tests under both `nova run` and
-  `nova build`)
+  break/continue, constants, arrays (e2e stdout tests under both
+  `nova run` and `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
@@ -88,8 +91,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   called directly instead of erroring with E0900 (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), arrays/indexing,
-  full Maranget exhaustiveness, generic impls
+- LLVM release backend (`nova build --release`), full Maranget
+  exhaustiveness, generic impls
 
 ## [0.0.0] - 2026-05-10
 
