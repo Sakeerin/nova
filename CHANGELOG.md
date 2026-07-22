@@ -41,9 +41,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ABI; lifted to standalone functions and monomorphized like generics
 - `break` and `continue` in `while`/`for` loops (E0080 outside a loop);
   `continue` in a `for` still advances the counter
+- Top-level `const NAME: T = value` (compiled as a zero-arg function,
+  referenced by call); constants may reference other constants; a cyclic
+  constant is reported as E0081
 - Gate programs verified end-to-end: hello-world, fibonacci,
   match-on-enum, generic functions, records, traits, for-loops, closures,
-  break/continue (e2e stdout tests under both `nova run` and `nova build`)
+  break/continue, constants (e2e stdout tests under both `nova run` and
+  `nova build`)
 
 ### Fixed
 - Lexer: leading whitespace in a string segment directly after `${expr}`
@@ -81,8 +85,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (were rejected as "outside a loop" or mis-scoped) (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), constants,
-  arrays/indexing, full Maranget exhaustiveness, generic impls
+- LLVM release backend (`nova build --release`), arrays/indexing,
+  full Maranget exhaustiveness, generic impls
 
 ## [0.0.0] - 2026-05-10
 
