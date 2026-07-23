@@ -2,8 +2,15 @@
 
 ## Status
 
-Accepted (2026-07-19). Revisit before the Phase 1 gate is declared for
-long-running programs, at the latest when `std/collections` lands (Phase 2).
+Accepted (2026-07-19). **Superseded (2026-07-23)** by a conservative
+mark-and-sweep garbage collector in `nova-runtime` (`src/gc.rs`): all heap
+values now route through `gc::alloc` and unreachable objects are reclaimed.
+The bdwgc dependency was avoided — the collector is a self-contained,
+dependency-free Rust implementation that scans the stack plus (via a `setjmp`
+C shim) callee-saved registers for roots, so it needs no codegen support.
+Precise stack bounds are implemented on Windows today; other platforms fall
+back to the original leak-until-exit behavior described below until their
+stack-bounds query is added.
 
 ## Context
 

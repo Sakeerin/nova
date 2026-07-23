@@ -280,6 +280,59 @@ fn build_and_run(source: &str, exe_name: &str) -> String {
     String::from_utf8(out).expect("program output is UTF-8")
 }
 
+/// The GC reclaims garbage: a loop allocating far more than the heap threshold
+/// keeps a bounded live set (rather than accumulating, as the old leaking
+/// allocator did). Verified through the `NOVA_GC_DEBUG` collection log.
+/// Windows-only: precise stack bounds (and thus collection) are currently
+/// implemented there.
+#[cfg(windows)]
+#[test]
+fn gc_reclaims_garbage() {
+    let dir = std::env::temp_dir().join("nova-gc-reclaim");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("garbage.nova");
+    std::fs::write(
+        &file,
+        "record Node { v: Int }\n\
+         fn main() {\n\
+             let mut i = 0\n\
+             while i < 300000 {\n\
+                 let n = Node { v: i }\n\
+                 i = i + 1\n\
+             }\n\
+             println(\"done ${i}\")\n\
+         }",
+    )
+    .expect("write");
+    let assert = nova()
+        .arg("run")
+        .arg(&file)
+        .env("NOVA_GC_DEBUG", "1")
+        .assert()
+        .success()
+        .stdout("done 300000\n");
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova-gc: collection"),
+        "expected at least one collection: {stderr}"
+    );
+    // The live object count reported by every collection must stay small —
+    // proof that garbage is reclaimed rather than accumulated.
+    let mut max_live = 0u64;
+    for line in stderr.lines() {
+        if let Some(i) = line.find(" bytes, ") {
+            let rest = &line[i + " bytes, ".len()..];
+            if let Some(n) = rest.split(' ').next().and_then(|s| s.parse::<u64>().ok()) {
+                max_live = max_live.max(n);
+            }
+        }
+    }
+    assert!(
+        max_live > 0 && max_live < 1000,
+        "live set should stay bounded, saw {max_live} live objects:\n{stderr}"
+    );
+}
+
 /// `nova build --release` with no LLVM toolchain must fail cleanly and leave
 /// the generated IR behind (forcing the no-toolchain path deterministically by
 /// pointing `NOVA_CLANG`/`NOVA_LLC` at a nonexistent program).

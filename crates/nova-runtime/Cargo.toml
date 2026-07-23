@@ -16,3 +16,6 @@ crate-type = ["rlib", "staticlib"]
 nova-diagnostics = { path = "../nova-diagnostics" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }

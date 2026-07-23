@@ -62,6 +62,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bound on the impl's parameter is verified at monomorphization (E0013),
   including transitively through nested generic impls (`where` clauses on
   impls remain unsupported)
+- Garbage collector: `nova-runtime` now reclaims heap memory with a
+  conservative, non-moving mark-and-sweep collector (`gc.rs`), replacing the
+  leaking allocator (supersedes ADR 0002). All heap values — records, sums,
+  arrays, closures, and strings — route through `gc::alloc`; collection is
+  triggered at allocation past a growth threshold. Roots are found by scanning
+  the stack plus callee-saved registers (flushed via a small `setjmp` C shim),
+  and marking is range-based so interior pointers keep their object alive. It
+  needs no codegen support and no external GC library. `NOVA_GC_DEBUG` logs
+  collections; `NOVA_GC_STRESS` collects on every allocation (used to validate
+  root scanning — the whole e2e suite passes under it). Precise stack bounds
+  are implemented on Windows; other platforms retain leak-until-exit for now
 - `nova build --release`: optimizing build through a new LLVM backend
   (`nova-codegen-llvm`) that emits textual LLVM IR from MIR and compiles it
   with a discovered LLVM toolchain (`clang`, or `llc`, at `-O2`; override with
@@ -164,8 +175,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- Real garbage collector (the runtime uses a leaking allocator — see
-  `docs/adr/0002-phase1-leaking-allocator.md`)
+- None — the Phase 1 MVP compiler is feature-complete. Follow-ups: precise GC
+  stack bounds on non-Windows platforms, and string interning / de-dup.
 
 ## [0.0.0] - 2026-05-10
 

@@ -6,12 +6,12 @@
 //! them directly; for `nova run` they are registered as JIT symbols via
 //! [`symbols`].
 //!
-//! **Memory:** Phase 1 allocations are intentionally leaked — the tracing
-//! GC (bdwgc, then MMTk) is integrated later in Phase 1/2 (see
-//! `docs/adr/0002-phase1-leaking-allocator.md`). Runtime values must not
-//! be freed while compiled code may still hold pointers to them.
+//! **Memory:** heap values (records, sums, arrays, closures, and strings) are
+//! managed by a conservative mark-and-sweep garbage collector — see
+//! [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`. All heap allocation
+//! routes through [`gc::alloc`], which reclaims unreachable objects.
 
-use std::alloc::{alloc, Layout};
+mod gc;
 
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
 #[repr(C)]
@@ -20,13 +20,21 @@ pub struct NovaStr {
     pub ptr: *const u8,
 }
 
-/// Leak a Rust string as a `NovaStr` heap value.
-fn leak_str(s: String) -> *mut NovaStr {
-    let bytes = s.into_bytes().leak();
-    Box::into_raw(Box::new(NovaStr {
-        len: bytes.len() as u64,
-        ptr: bytes.as_ptr(),
-    }))
+/// Store a Rust string as a GC-managed `NovaStr` value (its bytes copied into a
+/// GC leaf buffer, the header a scanned object that keeps the buffer alive).
+fn gc_str(s: &str) -> *mut NovaStr {
+    let len = s.len();
+    // A non-traced byte buffer holding the UTF-8 bytes.
+    let buf = gc::alloc(len.max(1), false);
+    // SAFETY: `buf` has `len.max(1)` writable bytes.
+    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), buf, len) };
+    let node = gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
+    // SAFETY: `node` points to a fresh `NovaStr`-sized allocation.
+    unsafe {
+        (*node).len = len as u64;
+        (*node).ptr = buf;
+    }
+    node
 }
 
 /// Read a `NovaStr` back as a `&str`.
@@ -46,7 +54,12 @@ unsafe fn as_str<'a>(s: *const NovaStr) -> &'a str {
 /// (string literal data emitted by codegen).
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_str_new(ptr: *const u8, len: u64) -> *mut NovaStr {
-    Box::into_raw(Box::new(NovaStr { len, ptr }))
+    // The bytes are static string-literal data (never freed); only the header
+    // is GC-managed.
+    let node = gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
+    (*node).len = len;
+    (*node).ptr = ptr;
+    node
 }
 
 /// Print a string followed by a newline to stdout.
@@ -80,7 +93,7 @@ pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr
     let mut s = String::with_capacity((*a).len as usize + (*b).len as usize);
     s.push_str(as_str(a));
     s.push_str(as_str(b));
-    leak_str(s)
+    gc_str(&s)
 }
 
 /// Compare two strings for byte equality.
@@ -95,36 +108,34 @@ pub unsafe extern "C" fn nova_rt_str_eq(a: *const NovaStr, b: *const NovaStr) ->
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
-    leak_str(v.to_string())
+    gc_str(&v.to_string())
 }
 
 /// Format a `Float` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_float_to_str(v: f64) -> *mut NovaStr {
-    leak_str(v.to_string())
+    gc_str(&v.to_string())
 }
 
 /// Format a `Bool` as `true` / `false`.
 #[no_mangle]
 pub extern "C" fn nova_rt_bool_to_str(v: i8) -> *mut NovaStr {
-    leak_str(if v != 0 { "true" } else { "false" }.to_string())
+    gc_str(if v != 0 { "true" } else { "false" })
 }
 
 /// Format a `Char` (Unicode scalar value) as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_char_to_str(v: i64) -> *mut NovaStr {
     let c = char::from_u32(v as u32).unwrap_or(char::REPLACEMENT_CHARACTER);
-    leak_str(c.to_string())
+    gc_str(&c.to_string())
 }
 
-/// Allocate `size` bytes (8-aligned) for a heap value — a sum
-/// `{ tag, fields... }` or a record `{ fields... }`.
+/// Allocate `size` zeroed bytes for a heap value — a sum `{ tag, fields... }`,
+/// record `{ fields... }`, array `{ len, elems... }`, or closure environment.
+/// The result is GC-managed and its slots are traced for further pointers.
 #[no_mangle]
 pub extern "C" fn nova_rt_alloc(size: i64) -> *mut u8 {
-    let size = (size.max(8)) as usize;
-    // SAFETY: size is non-zero and 8-byte alignment is valid.
-    let layout = Layout::from_size_align(size, 8).expect("valid heap layout");
-    unsafe { alloc(layout) }
+    gc::alloc(size.max(8) as usize, true)
 }
 
 /// Abort if `index` is outside `0..len` (an array bounds violation).
