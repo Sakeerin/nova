@@ -6,3 +6,4 @@ box!
 Wrap(9)
 Wrap(9)
 Wrap(Wrap(3))
+int-bool int-int

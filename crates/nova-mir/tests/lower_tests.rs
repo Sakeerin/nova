@@ -258,6 +258,37 @@ fn deeply_nested_satisfiable_bound_is_accepted() {
     assert!(codes.is_empty(), "unexpected diagnostics: {codes:?}");
 }
 
+#[test]
+fn non_overlapping_concrete_impls_lower_to_distinct_functions() {
+    // Two concrete impls of one trait for the same head, both called: each must
+    // become its own monomorphized function. A prior bug named both
+    // `Pair.Foo.foo` (head only), so they collided and one call miscompiled to
+    // the other's body.
+    let mir = mir_for(
+        "record Pair<A, B> { first: A, second: B }\n\
+         trait Foo { fn foo(self) -> String }\n\
+         impl Foo for Pair<Int, Bool> { fn foo(self) -> String { \"b\" } }\n\
+         impl Foo for Pair<Int, Int> { fn foo(self) -> String { \"i\" } }\n\
+         fn main() {\n\
+             let pb = Pair { first: 1, second: true }\n\
+             let pii = Pair { first: 1, second: 2 }\n\
+             println(pb.foo())\n\
+             println(pii.foo())\n\
+         }",
+    );
+    let foo_fns = mir
+        .functions
+        .iter()
+        .filter(|f| f.name.contains("foo"))
+        .count();
+    assert_eq!(
+        foo_fns,
+        2,
+        "both concrete impl methods must be emitted as distinct functions: {:?}",
+        function_names(&mir)
+    );
+}
+
 fn diagnostics_for(src: &str) -> Vec<String> {
     let file_id = FileId::DUMMY;
     let (tokens, _) = lex(src, file_id);

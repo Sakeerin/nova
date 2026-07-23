@@ -345,7 +345,7 @@ pub fn resolve(file: &File) -> ResolveResult {
                 }
             }
             Item::Impl(i) => {
-                let self_name = type_head_name(&i.ty.value);
+                let self_name = type_full_name(&i.ty.value);
                 for (method_index, f) in i.functions.iter().enumerate() {
                     let mangled = match &i.trait_ {
                         Some(tr) => {
@@ -429,9 +429,25 @@ fn unsupported(span: Span, msg: &str) -> Diagnostic {
 
 /// A short textual head for a type, used only to build unique method
 /// symbol names (semantic resolution happens later in the type checker).
-fn type_head_name(ty: &nova_ast::Type) -> String {
+/// A textual name for an impl self type that includes its type arguments, so
+/// that two impls sharing a head but differing in arguments (`Pair<Int, Bool>`
+/// vs `Pair<Int, Int>`) yield distinct method names and never collide when
+/// monomorphized. Uses only `_`/`.`-style separators to stay linker-safe.
+/// A generic parameter contributes its source name (`Box<T>` → `Box_T`); a
+/// concrete instantiation still gets a distinct mangled instance via type
+/// arguments at monomorphization.
+fn type_full_name(ty: &nova_ast::Type) -> String {
     match ty {
-        nova_ast::Type::Path { path, .. } => path_tail(path),
+        nova_ast::Type::Path { path, args } => {
+            let head = path_tail(path);
+            if args.is_empty() {
+                head
+            } else {
+                let parts: Vec<String> = args.iter().map(|a| type_full_name(&a.value)).collect();
+                format!("{head}_{}", parts.join("_"))
+            }
+        }
+        nova_ast::Type::Array(elem) => format!("Arr_{}", type_full_name(&elem.value)),
         _ => "anon".to_string(),
     }
 }

@@ -80,6 +80,21 @@ impl Ty {
         }
     }
 
+    /// Whether this type (transitively) mentions the generic parameter `idx`.
+    pub fn mentions_param(&self, idx: u32) -> bool {
+        match self {
+            Ty::Param(k) => *k == idx,
+            Ty::Fn { params, ret } => {
+                params.iter().any(|p| p.mentions_param(idx)) || ret.mentions_param(idx)
+            }
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => {
+                args.iter().any(|a| a.mentions_param(idx))
+            }
+            Ty::Array(elem) => elem.mentions_param(idx),
+            _ => false,
+        }
+    }
+
     /// Whether this type (transitively) contains any generic `Param`.
     pub fn has_params(&self) -> bool {
         match self {
@@ -251,7 +266,7 @@ impl Module {
     /// - otherwise dispatch to the trait's default body, which is generic over
     ///   `Self` → `[self_ty]`.
     ///
-    /// Returns `None` if no impl of the trait exists for `self_ty`'s head.
+    /// Returns `None` if no impl of the trait fits `self_ty`.
     pub fn resolve_method_full(
         &self,
         trait_id: DefId,
@@ -261,21 +276,141 @@ impl Module {
         let tr = self.trait_def(trait_id)?;
         let method_name = &tr.methods.get(method as usize)?.name;
         let head = self_ty.head()?;
-        let imp = self
+        // Among all impls of this trait for the head, select the one whose
+        // self-type pattern actually fits — not merely the first sharing the
+        // head. Coherence (no overlapping impls) guarantees at most one fits.
+        let (imp, impl_args) = self
             .impls
             .iter()
-            .find(|i| i.trait_id == Some(trait_id) && i.self_head == head)?;
+            .filter(|i| i.trait_id == Some(trait_id) && i.self_head == head)
+            .find_map(|i| i.match_args(self_ty).map(|args| (i, args)))?;
         if let Some((_, def)) = imp.methods.iter().find(|(n, _)| n == method_name) {
-            // The receiver must genuinely fit the impl's self-type pattern, not
-            // merely share its head.
-            Some((*def, imp.match_args(self_ty)?))
+            Some((*def, impl_args))
         } else {
-            // A default body applies only if the impl (whose head matched) also
-            // matches structurally.
-            imp.match_args(self_ty)?;
             let def = tr.methods[method as usize].default_def?;
             Some((def, vec![self_ty.clone()]))
         }
+    }
+}
+
+/// Whether two impl self-type patterns share a common ground instance — i.e.
+/// the impls overlap and one concrete type could match both. `a` uses generic
+/// parameters `0..a_generics`; `b`'s parameters are an independent namespace
+/// `0..b_generics`. Exact: first-order unification with an occurs check, so
+/// genuinely disjoint patterns (`Pair<Int, Bool>` vs `Pair<Int, String>`) are
+/// never reported as overlapping, while a generic and a specific pattern
+/// (`Box<T>` vs `Box<Int>`) are.
+pub fn self_types_overlap(a: &Ty, a_generics: u32, b: &Ty, b_generics: u32) -> bool {
+    // Shift `b`'s parameters into a disjoint range so the two namespaces do not
+    // collide in the shared substitution.
+    let b = shift_params(b, a_generics);
+    let mut subst: Vec<Option<Ty>> = vec![None; (a_generics + b_generics) as usize];
+    unify_patterns(a, &b, &mut subst)
+}
+
+fn shift_params(t: &Ty, by: u32) -> Ty {
+    match t {
+        Ty::Param(k) => Ty::Param(k + by),
+        Ty::Fn { params, ret } => Ty::Fn {
+            params: params.iter().map(|p| shift_params(p, by)).collect(),
+            ret: Box::new(shift_params(ret, by)),
+        },
+        Ty::Sum { def_id, args } => Ty::Sum {
+            def_id: *def_id,
+            args: args.iter().map(|a| shift_params(a, by)).collect(),
+        },
+        Ty::Record { def_id, args } => Ty::Record {
+            def_id: *def_id,
+            args: args.iter().map(|a| shift_params(a, by)).collect(),
+        },
+        Ty::Array(elem) => Ty::Array(Box::new(shift_params(elem, by))),
+        other => other.clone(),
+    }
+}
+
+/// Resolve `t` through the substitution one level (following a bound `Param`).
+fn walk_param(t: &Ty, subst: &[Option<Ty>]) -> Ty {
+    match t {
+        Ty::Param(k) => match subst.get(*k as usize).and_then(|o| o.as_ref()) {
+            Some(bound) => walk_param(bound, subst),
+            None => t.clone(),
+        },
+        _ => t.clone(),
+    }
+}
+
+fn occurs(k: u32, t: &Ty, subst: &[Option<Ty>]) -> bool {
+    match walk_param(t, subst) {
+        Ty::Param(j) => j == k,
+        Ty::Fn { params, ret } => {
+            params.iter().any(|p| occurs(k, p, subst)) || occurs(k, &ret, subst)
+        }
+        Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(|a| occurs(k, a, subst)),
+        Ty::Array(elem) => occurs(k, &elem, subst),
+        _ => false,
+    }
+}
+
+fn unify_patterns(a: &Ty, b: &Ty, subst: &mut Vec<Option<Ty>>) -> bool {
+    let a = walk_param(a, subst);
+    let b = walk_param(b, subst);
+    match (&a, &b) {
+        (Ty::Param(i), Ty::Param(j)) if i == j => true,
+        (Ty::Param(i), _) => {
+            if occurs(*i, &b, subst) {
+                return false;
+            }
+            subst[*i as usize] = Some(b.clone());
+            true
+        }
+        (_, Ty::Param(j)) => {
+            if occurs(*j, &a, subst) {
+                return false;
+            }
+            subst[*j as usize] = Some(a.clone());
+            true
+        }
+        (
+            Ty::Record {
+                def_id: d1,
+                args: a1,
+            },
+            Ty::Record {
+                def_id: d2,
+                args: a2,
+            },
+        )
+        | (
+            Ty::Sum {
+                def_id: d1,
+                args: a1,
+            },
+            Ty::Sum {
+                def_id: d2,
+                args: a2,
+            },
+        ) => {
+            d1 == d2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2).all(|(x, y)| unify_patterns(x, y, subst))
+        }
+        (Ty::Array(e1), Ty::Array(e2)) => unify_patterns(e1, e2, subst),
+        (
+            Ty::Fn {
+                params: p1,
+                ret: r1,
+            },
+            Ty::Fn {
+                params: p2,
+                ret: r2,
+            },
+        ) => {
+            p1.len() == p2.len()
+                && p1.iter().zip(p2).all(|(x, y)| unify_patterns(x, y, subst))
+                && unify_patterns(r1, r2, subst)
+        }
+        // Primitives, `Unit`, `Error`: overlap iff identical.
+        (x, y) => x == y,
     }
 }
 

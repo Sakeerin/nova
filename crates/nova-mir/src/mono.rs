@@ -125,27 +125,27 @@ fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId) -> bool {
     let Some(head) = arg.head() else {
         return false;
     };
-    let Some(imp) = module
+    // Any impl of the trait for this head that both fits `arg` structurally
+    // and whose own generic bounds hold satisfies the requirement. Selecting
+    // by head alone (and committing to the first) would miss a later impl that
+    // actually fits, and coherence guarantees at most one fits anyway.
+    module
         .impls
         .iter()
-        .find(|im| im.trait_id == Some(trait_id) && im.self_head == head)
-    else {
-        return false;
-    };
-    // `arg` must actually fit the impl's self-type pattern, not merely its head.
-    let Some(impl_args) = imp.match_args(arg) else {
-        return false;
-    };
-    // For a non-generic or unconstrained impl `bounds` is empty, so this is
-    // vacuously true; otherwise every generic parameter's bounds must hold.
-    imp.bounds.iter().enumerate().all(|(i, param_bounds)| {
-        param_bounds.iter().all(|&bound| {
-            impl_args
-                .get(i)
-                .map(|a| impl_satisfies(module, a, bound))
-                .unwrap_or(false)
+        .filter(|im| im.trait_id == Some(trait_id) && im.self_head == head)
+        .any(|imp| match imp.match_args(arg) {
+            // For a non-generic or unconstrained impl `bounds` is empty, so
+            // the fit alone suffices; otherwise every parameter's bounds hold.
+            Some(impl_args) => imp.bounds.iter().enumerate().all(|(i, param_bounds)| {
+                param_bounds.iter().all(|&bound| {
+                    impl_args
+                        .get(i)
+                        .map(|a| impl_satisfies(module, a, bound))
+                        .unwrap_or(false)
+                })
+            }),
+            None => false,
         })
-    })
 }
 
 /// A short display name for a type in monomorphization diagnostics.

@@ -112,6 +112,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deeply nested conditional-impl type; the recursion is well-founded on the
   finite structure of the type, so deep nests are checked exactly
   (adversarial review)
+- Impl selection is now structural at every site. `resolve_method_full` (trait
+  dispatch) and the monomorphization bound check selected the *first* impl
+  sharing a type head, so a program with two non-overlapping impls for the same
+  head (`impl Foo for Pair<Int, Bool>` + `impl Foo for Pair<Int, String>`) was
+  accepted or rejected depending on declaration order; both now scan for the
+  impl that structurally fits (adversarial review)
+- Impl methods are mangled by their full self type, not just its head, so two
+  concrete impls sharing a head (`Pair<Int, Bool>` vs `Pair<Int, Int>`) no
+  longer collide to one symbol and miscompile each other's calls (adversarial
+  review)
+- Overlapping implementations are rejected (`E0074`): two trait impls of the
+  same trait whose self types share a ground instance, or two inherent impls
+  that overlap and define the same method (Phase 1 has no specialization);
+  previously dispatch silently depended on declaration order (adversarial
+  review)
+- An impl type parameter that never appears in the self type is rejected
+  (`E0073`) instead of leaking an uninferrable variable that made every method
+  on the impl uncallable (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`), full Maranget

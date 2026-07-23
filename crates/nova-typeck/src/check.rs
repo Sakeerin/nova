@@ -339,6 +339,10 @@ impl<'a> Checker<'a> {
             .map(|(id, ii, mi, _)| ((ii, mi), id))
             .collect();
 
+        // Source span of each collected impl (aligned with `self.impls`), for
+        // the post-collection coherence check.
+        let mut impl_spans: Vec<Span> = Vec::new();
+
         for (item_index, item) in self.file.items.iter().enumerate() {
             let ast::Item::Impl(block) = &item.value else {
                 continue;
@@ -362,6 +366,28 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
+            // Every impl generic parameter must appear in the self type, or its
+            // type argument could never be recovered at a call site (and, for an
+            // inherent method that ignores it, the parameter would leak an
+            // unconstrained inference variable). Cf. Rust's E0207.
+            let mut has_unused = false;
+            for (i, g) in block.generics.iter().enumerate() {
+                if !self_ty.mentions_param(i as u32) {
+                    has_unused = true;
+                    let tystr = display_ty(&self_ty, self.defs);
+                    self.error(
+                        "E0073",
+                        format!(
+                            "impl type parameter `{}` is not used in the self type `{tystr}`",
+                            g.name.value
+                        ),
+                        g.name.span,
+                    );
+                }
+            }
+            if has_unused {
+                continue;
+            }
             let trait_id = match &block.trait_ {
                 Some(tr) => {
                     let name = tr
@@ -426,6 +452,65 @@ impl<'a> Checker<'a> {
                 bounds: impl_bounds,
                 methods,
             });
+            impl_spans.push(block.ty.span);
+        }
+
+        self.check_impl_coherence(&impl_spans);
+    }
+
+    /// Reject overlapping implementations (Phase 1 has no specialization): two
+    /// trait impls of the same trait whose self types share a ground instance
+    /// conflict outright, and two inherent impls that overlap conflict on any
+    /// method they both define. Without this, dispatch would depend on impl
+    /// declaration order.
+    fn check_impl_coherence(&mut self, spans: &[Span]) {
+        let mut conflicts: Vec<(String, Span)> = Vec::new();
+        for (i, a) in self.impls.iter().enumerate() {
+            for (b, &b_span) in self.impls.iter().zip(spans).skip(i + 1) {
+                if a.self_head != b.self_head || a.trait_id != b.trait_id {
+                    continue;
+                }
+                if !hir::self_types_overlap(&a.self_ty, a.generics, &b.self_ty, b.generics) {
+                    continue;
+                }
+                match a.trait_id {
+                    Some(tid) => {
+                        let tname = self
+                            .traits
+                            .iter()
+                            .find(|t| t.def_id == tid)
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| "?".to_string());
+                        conflicts.push((
+                            format!(
+                                "conflicting implementations of trait `{tname}` for \
+                                 overlapping types"
+                            ),
+                            b_span,
+                        ));
+                    }
+                    None => {
+                        let dup = a
+                            .methods
+                            .iter()
+                            .map(|(n, _)| n)
+                            .find(|n| b.methods.iter().any(|(m, _)| m == *n))
+                            .cloned();
+                        if let Some(m) = dup {
+                            conflicts.push((
+                                format!(
+                                    "method `{m}` is defined by multiple overlapping \
+                                     inherent impls"
+                                ),
+                                b_span,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (msg, span) in conflicts {
+            self.error("E0074", msg, span);
         }
     }
 
@@ -4638,6 +4723,74 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn unused_impl_param_reports_e0073() {
+        // `U` is declared but appears nowhere in the self type `Box<T>`.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T, U> Box<T> { fn get(self) -> T { self.value } }\n\
+             fn main() { let b = Box { value: 1 }\n let x = b.get() }",
+        );
+        assert!(error_codes(&r).contains(&"E0073"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn overlapping_trait_impls_report_e0074() {
+        // A generic impl and a specific impl of the same trait for the same
+        // head both cover `Box<Int>` — a coherence conflict (no specialization).
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             trait Kind { fn kind(self) -> String }\n\
+             impl<T> Kind for Box<T> { fn kind(self) -> String { \"g\" } }\n\
+             impl Kind for Box<Int> { fn kind(self) -> String { \"i\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0074"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn overlapping_inherent_impls_sharing_method_report_e0074() {
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T> Box<T> { fn tag(self) -> String { \"g\" } }\n\
+             impl Box<Int> { fn tag(self) -> String { \"i\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0074"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_overlapping_concrete_trait_impls_ok() {
+        // Two concrete impls of one trait for the same head that share no
+        // ground instance are allowed, and the call resolves to the fitting
+        // one regardless of declaration order.
+        let r = check_src(
+            "record Pair<A, B> { first: A, second: B }\n\
+             trait Foo { fn foo(self) -> String }\n\
+             impl Foo for Pair<Int, Bool> { fn foo(self) -> String { \"b\" } }\n\
+             impl Foo for Pair<Int, String> { fn foo(self) -> String { \"s\" } }\n\
+             fn main() { let p = Pair { first: 1, second: \"x\" }\n println(p.foo()) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_overlapping_inherent_impls_ok() {
+        // Distinct concrete inherent impls on the same head do not conflict.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl Box<Int> { fn a(self) -> Int { self.value } }\n\
+             impl Box<Bool> { fn b(self) -> Bool { self.value } }\n\
+             fn main() {\n\
+                 let bi = Box { value: 1 }\n\
+                 let bb = Box { value: true }\n\
+                 let x = bi.a()\n\
+                 let y = bb.b()\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

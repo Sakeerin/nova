@@ -39,6 +39,13 @@ impl<T: Display> Display for Wrap<T> {
     fn fmt(self) -> String { "Wrap(${self.inner})" }
 }
 
+// Several non-overlapping concrete impls of one trait for the same record
+// head. Dispatch picks the impl that actually fits the receiver, independent
+// of declaration order.
+trait Label { fn label(self) -> String }
+impl Label for Pair<Int, Bool> { fn label(self) -> String { "int-bool" } }
+impl Label for Pair<Int, Int> { fn label(self) -> String { "int-int" } }
+
 // A generic function whose bound is satisfied through a generic impl.
 fn describe<T: Display>(x: T) -> String {
     x.fmt()
@@ -72,4 +79,9 @@ fn main() {
     // Nested conditional impl: Wrap<Wrap<Int>> is Display too.
     let ww = Wrap { inner: Wrap { inner: 3 } }
     println(ww.fmt())
+
+    // Non-overlapping concrete impls dispatch by fit, not declaration order.
+    let pb = Pair { first: 1, second: true }
+    let pii = Pair { first: 4, second: 5 }
+    println("${pb.label()} ${pii.label()}")
 }
