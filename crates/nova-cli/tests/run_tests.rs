@@ -288,7 +288,12 @@ fn release_without_toolchain_emits_ir_and_errors() {
     let dir = std::env::temp_dir().join("nova-release-notool");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let exe = dir.join(format!("hello{}", std::env::consts::EXE_SUFFIX));
-    let ll = exe.with_extension("ll");
+    // The intermediate IR is named `<output filename>.nova.ll` so it can never
+    // alias the output path.
+    let ll = exe.with_file_name(format!(
+        "{}.nova.ll",
+        exe.file_name().unwrap().to_string_lossy()
+    ));
     let _ = std::fs::remove_file(&ll);
     let assert = nova()
         .arg("build")
@@ -307,6 +312,33 @@ fn release_without_toolchain_emits_ir_and_errors() {
     let ir = std::fs::read_to_string(&ll).expect("read ir");
     assert!(ir.contains("define i32 @main"), "ir:\n{ir}");
     let _ = std::fs::remove_file(&ll);
+}
+
+/// Regression: intermediate files must never alias the output path, even when
+/// `-o` itself ends in `.ll` (which would otherwise make the IR intermediate
+/// the output file and later delete the built binary).
+#[test]
+fn release_intermediate_never_aliases_output() {
+    let dir = std::env::temp_dir().join("nova-release-alias");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let out = dir.join("prog.ll"); // output deliberately named `.ll`
+    let ir = dir.join("prog.ll.nova.ll"); // the non-aliasing intermediate
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&ir);
+    nova()
+        .arg("build")
+        .arg("--release")
+        .arg(repo_root().join("examples/01-hello-world/src/main.nova"))
+        .arg("-o")
+        .arg(&out)
+        .env("NOVA_CLANG", "nova_no_such_tool_xyz")
+        .env("NOVA_LLC", "nova_no_such_tool_xyz")
+        .assert()
+        .failure();
+    // The IR went to the distinct intermediate, not to the output path.
+    assert!(ir.exists(), "expected IR at {}", ir.display());
+    let _ = std::fs::remove_file(&ir);
+    let _ = std::fs::remove_file(&out);
 }
 
 /// When a real LLVM toolchain is available, `--release` builds and runs an

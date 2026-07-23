@@ -154,6 +154,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   binding, which had masked uncovered cases and produced a spurious
   unreachable-arm warning — matching the `Path`/`TupleStruct` pattern arms
   (adversarial review)
+- LLVM backend: a `match` on a `Bool` emitted `switch i64` over the `i8`
+  scrutinee, producing a type-mismatched module that LLVM rejects (so
+  `--release` failed for any boolean match); the switch now uses the
+  discriminant's own type (adversarial review)
+- `nova build`: intermediate object/IR files are now named so they can never
+  alias the `-o` output path — previously `-o out.ll` (or `-o out.obj`) made an
+  intermediate the output file and deleted the built binary on success
+  (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - Real garbage collector (the runtime uses a leaking allocator — see

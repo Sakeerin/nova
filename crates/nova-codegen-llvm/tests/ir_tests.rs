@@ -112,6 +112,35 @@ fn match_lowers_to_switch_with_trap_default() {
 }
 
 #[test]
+fn bool_match_switches_on_i8_not_i64() {
+    // Regression (adversarial review): a `Bool` scrutinee is an `i8`, so the
+    // `switch` condition and case constants must be `i8`. Spelling it `i64`
+    // (as sum/Int switches are) produced a type-mismatched module LLVM rejects.
+    let ir = ir_for(
+        "fn classify(b: Bool) -> Int { match b { true => 1, false => 0 } }\n\
+         fn main() { println(\"${classify(true)}\") }",
+    );
+    assert!(ir.contains("switch i8 "), "expected i8 switch:\n{ir}");
+    assert!(
+        !ir.contains("switch i64 "),
+        "a bool match must not switch on i64:\n{ir}"
+    );
+    assert_well_formed(&ir);
+}
+
+#[test]
+fn sum_match_still_switches_on_i64() {
+    // The tag discriminant of a sum match is `i64` — this must be unaffected.
+    let ir = ir_for(
+        "type E = | A | B | C\n\
+         fn f(e: E) -> Int { match e { A => 0, B => 1, C => 2 } }\n\
+         fn main() { println(\"${f(B)}\") }",
+    );
+    assert!(ir.contains("switch i64 "), "expected i64 sum switch:\n{ir}");
+    assert_well_formed(&ir);
+}
+
+#[test]
 fn floats_use_hex_constants_and_fp_ops() {
     let ir = ir_for(
         "fn main() {\n\

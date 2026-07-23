@@ -72,7 +72,7 @@ pub fn build_file(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
         .context("internal codegen error (this is a compiler bug)")?;
 
     let obj_ext = if cfg!(windows) { "obj" } else { "o" };
-    let obj_path = output.with_extension(obj_ext);
+    let obj_path = intermediate(output, obj_ext);
     std::fs::write(&obj_path, bytes)
         .with_context(|| format!("failed to write {}", obj_path.display()))?;
 
@@ -80,6 +80,20 @@ pub fn build_file(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
     let _ = std::fs::remove_file(&obj_path);
     linked?;
     Ok(Outcome::Ok(output.to_path_buf()))
+}
+
+/// An intermediate-file path derived from `output` that can never alias it:
+/// the full output file name plus `.nova.<ext>` (so even `-o out.ll` /
+/// `-o out.obj` yield a distinct `out.ll.nova.ll` / `out.obj.nova.obj` and the
+/// final binary is never overwritten or deleted as an intermediate).
+fn intermediate(output: &Path, ext: &str) -> PathBuf {
+    let mut name = output
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("out"));
+    name.push(".nova.");
+    name.push(ext);
+    output.with_file_name(name)
 }
 
 /// Compile a file to an optimized standalone executable via the LLVM backend
@@ -98,12 +112,12 @@ pub fn build_file_release(path: &Path, output: &Path) -> Result<Outcome<PathBuf>
     let ir = nova_codegen_llvm::compile_ir(&mir)
         .context("internal LLVM IR generation error (this is a compiler bug)")?;
 
-    let ll_path = output.with_extension("ll");
+    let ll_path = intermediate(output, "ll");
     std::fs::write(&ll_path, ir.as_bytes())
         .with_context(|| format!("failed to write {}", ll_path.display()))?;
 
     let obj_ext = if cfg!(windows) { "obj" } else { "o" };
-    let obj_path = output.with_extension(obj_ext);
+    let obj_path = intermediate(output, obj_ext);
 
     // Compile IR → object, then link. Keep the `.ll` on failure (for the LLVM
     // toolchain to be pointed at or for inspection); remove it on success.

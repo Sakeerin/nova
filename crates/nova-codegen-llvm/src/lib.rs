@@ -646,13 +646,18 @@ impl<'a> FnEmit<'a> {
                 arms,
                 default,
             } => {
+                // The discriminant carries its own integer class: a sum tag /
+                // `Int` / `Char` switch is `i64`, but a `Bool` match switches
+                // on the `i8` scrutinee directly. The condition and every case
+                // constant must share that type.
+                let ty = llty(self.temp_ty(*disc));
                 let d = self.load(*disc);
                 let mut table = String::new();
                 for (value, block) in arms {
-                    let _ = write!(table, " i64 {value}, label %bb{}", block.0);
+                    let _ = write!(table, " {ty} {value}, label %bb{}", block.0);
                 }
                 self.line(format!(
-                    "  switch i64 {d}, label %bb{} [{table} ]",
+                    "  switch {ty} {d}, label %bb{} [{table} ]",
                     default.0
                 ));
             }
