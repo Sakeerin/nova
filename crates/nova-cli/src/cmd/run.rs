@@ -29,6 +29,12 @@ pub struct BuildCmd {
     /// directory, with the platform executable suffix).
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Optimizing build via the LLVM backend (emits LLVM IR and compiles it
+    /// with a discovered `clang`/`llc`); the default is the fast Cranelift
+    /// backend.
+    #[arg(long)]
+    release: bool,
 }
 
 fn default_file(file: Option<PathBuf>) -> PathBuf {
@@ -55,7 +61,12 @@ pub fn build(cmd: BuildCmd) -> Result<()> {
             .unwrap_or_else(|| "out".to_string());
         PathBuf::from(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
     });
-    match nova_driver::build_file(&file, &output)? {
+    let built = if cmd.release {
+        nova_driver::build_file_release(&file, &output)?
+    } else {
+        nova_driver::build_file(&file, &output)?
+    };
+    match built {
         Outcome::Ok(path) => {
             println!("built {}", path.display());
             Ok(())

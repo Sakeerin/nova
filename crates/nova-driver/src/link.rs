@@ -7,6 +7,55 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+/// Compile textual LLVM IR (`ir`, a `.ll` file) to a native object file using
+/// a discovered LLVM toolchain, optimizing at `-O2`.
+///
+/// Prefers `clang` (via `NOVA_CLANG` or PATH), falling back to `llc` (via
+/// `NOVA_LLC` or PATH). Both emit a host-target object that the platform
+/// linker then combines with the runtime — reusing [`link_executable`].
+pub fn compile_ir_to_object(ir: &Path, object: &Path) -> Result<()> {
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    if tool_available(&clang) {
+        let mut cmd = Command::new(&clang);
+        cmd.arg("-O2").arg("-c").arg(ir).arg("-o").arg(object);
+        return run_tool(cmd, "clang");
+    }
+    let llc = std::env::var("NOVA_LLC").unwrap_or_else(|_| "llc".to_string());
+    if tool_available(&llc) {
+        let mut cmd = Command::new(&llc);
+        cmd.arg("-O2")
+            .arg("-filetype=obj")
+            .arg(ir)
+            .arg("-o")
+            .arg(object);
+        return run_tool(cmd, "llc");
+    }
+    bail!(
+        "no LLVM toolchain found for `--release`: install LLVM (so `clang` or \
+         `llc` is on PATH), or set NOVA_CLANG / NOVA_LLC to one"
+    )
+}
+
+/// Whether a tool can be spawned (probes `<tool> --version`).
+fn tool_available(tool: &str) -> bool {
+    Command::new(tool).arg("--version").output().is_ok()
+}
+
+fn run_tool(mut cmd: Command, name: &str) -> Result<()> {
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to spawn {name}: {:?}", cmd.get_program()))?;
+    if !output.status.success() {
+        bail!(
+            "{name} failed ({}):\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
+    }
+    Ok(())
+}
+
 /// Link a Nova object file and the runtime static library into an
 /// executable at `output`.
 pub fn link_executable(object: &Path, output: &Path) -> Result<()> {

@@ -16,6 +16,7 @@ nova-typeck = { path = "../nova-typeck" }
 nova-hir = { path = "../nova-hir" }
 nova-mir = { path = "../nova-mir" }
 nova-codegen-cranelift = { path = "../nova-codegen-cranelift" }
+nova-codegen-llvm = { path = "../nova-codegen-llvm" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 

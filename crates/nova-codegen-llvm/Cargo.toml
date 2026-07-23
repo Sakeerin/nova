@@ -9,6 +9,13 @@ description = "LLVM codegen backend for Nova (release builds)"
 
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
+nova-hir = { path = "../nova-hir" }
 nova-mir = { path = "../nova-mir" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+nova-lexer = { path = "../nova-lexer" }
+nova-parser = { path = "../nova-parser" }
+nova-resolver = { path = "../nova-resolver" }
+nova-typeck = { path = "../nova-typeck" }

@@ -62,6 +62,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bound on the impl's parameter is verified at monomorphization (E0013),
   including transitively through nested generic impls (`where` clauses on
   impls remain unsupported)
+- `nova build --release`: optimizing build through a new LLVM backend
+  (`nova-codegen-llvm`) that emits textual LLVM IR from MIR and compiles it
+  with a discovered LLVM toolchain (`clang`, or `llc`, at `-O2`; override with
+  `NOVA_CLANG`/`NOVA_LLC`), then links via the same platform linker as the
+  debug build. The IR mirrors the Cranelift backend's layouts and runtime ABI,
+  so a program behaves identically across `nova run`, `nova build`, and
+  `nova build --release`. Requires LLVM ≥ 15 (opaque pointers); with no
+  toolchain found, the generated `.ll` is left in place with a clear message
 - Gate programs verified end-to-end: hello-world, fibonacci,
   match-on-enum, generic functions, records, traits, for-loops, closures,
   break/continue, constants, arrays, generic impls (e2e stdout tests under
@@ -148,7 +156,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`)
+- Real garbage collector (the runtime uses a leaking allocator — see
+  `docs/adr/0002-phase1-leaking-allocator.md`)
 
 ## [0.0.0] - 2026-05-10
 

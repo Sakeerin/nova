@@ -82,6 +82,46 @@ pub fn build_file(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
     Ok(Outcome::Ok(output.to_path_buf()))
 }
 
+/// Compile a file to an optimized standalone executable via the LLVM backend
+/// (`nova build --release`).
+///
+/// Emits textual LLVM IR next to `output`, compiles it to an object file with
+/// a discovered LLVM toolchain (`clang`/`llc`, `-O2`), then links it with the
+/// `nova-runtime` static library through the same platform linker as the debug
+/// build. If no LLVM toolchain is found the generated `.ll` is left in place
+/// and a helpful error is returned.
+pub fn build_file_release(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
+    let mir = match lower_to_mir(path)? {
+        Outcome::Ok(mir) => mir,
+        Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
+    };
+    let ir = nova_codegen_llvm::compile_ir(&mir)
+        .context("internal LLVM IR generation error (this is a compiler bug)")?;
+
+    let ll_path = output.with_extension("ll");
+    std::fs::write(&ll_path, ir.as_bytes())
+        .with_context(|| format!("failed to write {}", ll_path.display()))?;
+
+    let obj_ext = if cfg!(windows) { "obj" } else { "o" };
+    let obj_path = output.with_extension(obj_ext);
+
+    // Compile IR → object, then link. Keep the `.ll` on failure (for the LLVM
+    // toolchain to be pointed at or for inspection); remove it on success.
+    let result = link::compile_ir_to_object(&ll_path, &obj_path)
+        .and_then(|()| link::link_executable(&obj_path, output));
+    let _ = std::fs::remove_file(&obj_path);
+    match result {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&ll_path);
+            Ok(Outcome::Ok(output.to_path_buf()))
+        }
+        Err(e) => Err(e.context(format!(
+            "release build failed; generated LLVM IR left at {}",
+            ll_path.display()
+        ))),
+    }
+}
+
 /// Run the front end and MIR lowering, rendering any diagnostics.
 fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
     let mut ctx = FrontendContext::load(path)?;

@@ -280,6 +280,69 @@ fn build_and_run(source: &str, exe_name: &str) -> String {
     String::from_utf8(out).expect("program output is UTF-8")
 }
 
+/// `nova build --release` with no LLVM toolchain must fail cleanly and leave
+/// the generated IR behind (forcing the no-toolchain path deterministically by
+/// pointing `NOVA_CLANG`/`NOVA_LLC` at a nonexistent program).
+#[test]
+fn release_without_toolchain_emits_ir_and_errors() {
+    let dir = std::env::temp_dir().join("nova-release-notool");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let exe = dir.join(format!("hello{}", std::env::consts::EXE_SUFFIX));
+    let ll = exe.with_extension("ll");
+    let _ = std::fs::remove_file(&ll);
+    let assert = nova()
+        .arg("build")
+        .arg("--release")
+        .arg(repo_root().join("examples/01-hello-world/src/main.nova"))
+        .arg("-o")
+        .arg(&exe)
+        .env("NOVA_CLANG", "nova_no_such_tool_xyz")
+        .env("NOVA_LLC", "nova_no_such_tool_xyz")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("LLVM toolchain"), "stderr: {stderr}");
+    // The IR is left for the user to compile / inspect.
+    assert!(ll.exists(), "expected generated IR at {}", ll.display());
+    let ir = std::fs::read_to_string(&ll).expect("read ir");
+    assert!(ir.contains("define i32 @main"), "ir:\n{ir}");
+    let _ = std::fs::remove_file(&ll);
+}
+
+/// When a real LLVM toolchain is available, `--release` builds and runs an
+/// optimized binary with identical output to the debug build. Skipped where
+/// no `clang` is installed.
+#[test]
+fn release_builds_and_runs_when_clang_available() {
+    let clang_ok = std::process::Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_ok();
+    if !clang_ok {
+        eprintln!("skipping: no clang on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join("nova-release-run");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let exe = dir.join(format!("hello_rel{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg("--release")
+        .arg(repo_root().join("examples/01-hello-world/src/main.nova"))
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(String::from_utf8(out).expect("utf8"), "Hello, World!\n");
+    let _ = std::fs::remove_file(&exe);
+}
+
 #[test]
 fn build_hello_world_standalone() {
     let out = build_and_run("examples/01-hello-world/src/main.nova", "hello");
