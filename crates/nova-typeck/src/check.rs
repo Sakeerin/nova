@@ -1,5 +1,5 @@
 //! AST → typed HIR checking: signature collection, body inference,
-//! desugaring, and minimal exhaustiveness analysis.
+//! desugaring, and Maranget-based exhaustiveness/reachability analysis.
 
 use nova_ast as ast;
 use nova_ast::item::{TraitItem, TypeDef};
@@ -10,6 +10,7 @@ use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, Res};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
+use crate::usefulness;
 use crate::{display_ty, CheckResult};
 
 /// A collected function (or method) signature.
@@ -3062,27 +3063,18 @@ impl<'a> Checker<'a> {
         let scrut = self.check_expr(fcx, scrutinee);
         let result_ty = fcx.icx.fresh();
         let mut hir_arms = Vec::new();
-        let mut saw_catch_all = false;
-        let mut covered_variants: Vec<u32> = Vec::new();
+        // Normalized (pattern, has-guard, span) per arm, for the exhaustiveness
+        // and reachability analysis after all arms are checked.
+        let mut arm_pats: Vec<(usefulness::Pat, bool, Span)> = Vec::new();
 
         for arm in arms {
-            if arm.guard.is_some() {
+            let guarded = arm.guard.is_some();
+            if guarded {
                 self.unsupported(arm.pattern.span, "match guards");
-            }
-            if saw_catch_all {
-                self.diagnostics.push(
-                    Diagnostic::warning("E0021", "unreachable match arm")
-                        .with_primary_label(arm.pattern.span, "this arm is never reached")
-                        .with_note("a previous arm matches all values".to_string()),
-                );
             }
             fcx.scopes.push(FxHashMap::default());
             let pattern = self.check_pattern(fcx, &arm.pattern, &scrut.ty);
-            match &pattern {
-                hir::Pattern::Wildcard | hir::Pattern::Bind(_) => saw_catch_all = true,
-                hir::Pattern::Variant { variant, .. } => covered_variants.push(*variant),
-                _ => {}
-            }
+            let upat = to_useful_pat(&pattern);
             let body = self.check_expr(fcx, &arm.body);
             fcx.scopes.pop();
             // A diverging arm (`Never`) imposes no constraint on the result
@@ -3101,6 +3093,7 @@ impl<'a> Checker<'a> {
                     body.span,
                 );
             }
+            arm_pats.push((upat, guarded, arm.pattern.span));
             hir_arms.push(hir::Arm {
                 pattern,
                 body,
@@ -3108,7 +3101,7 @@ impl<'a> Checker<'a> {
             });
         }
 
-        self.check_exhaustiveness(fcx, &scrut, &covered_variants, saw_catch_all, span);
+        self.check_match_usefulness(fcx, &scrut, &arm_pats, span);
 
         // If every arm diverged the result was never constrained; it is then
         // itself `Never`.
@@ -3127,52 +3120,108 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Minimal exhaustiveness: full decision-tree usefulness analysis
-    /// (Maranget) is a later Phase 1 step; this covers the common cases.
-    fn check_exhaustiveness(
+    /// Exhaustiveness and reachability via Maranget's usefulness algorithm
+    /// (see `usefulness.rs`): an unguarded arm is unreachable when it is not
+    /// useful against the earlier arms (E0021), and the match is non-exhaustive
+    /// when a wildcard row is still useful against all arms — the witnesses
+    /// name the uncovered values (E0020).
+    fn check_match_usefulness(
         &mut self,
         fcx: &mut FnCtx,
         scrut: &hir::Expr,
-        covered_variants: &[u32],
-        saw_catch_all: bool,
+        arm_pats: &[(usefulness::Pat, bool, Span)],
         span: Span,
     ) {
-        if saw_catch_all {
+        let scrut_ty = fcx.icx.apply(&scrut.ty);
+        // A type we cannot yet resolve to constructors carries no useful
+        // signature; skip rather than emit spurious errors.
+        if matches!(scrut_ty, Ty::Var(_) | Ty::Param(_) | Ty::Error | Ty::Never) {
             return;
         }
-        match fcx.icx.apply(&scrut.ty) {
-            Ty::Sum { def_id, .. } => {
-                let Some(sum) = self.sums.iter().find(|s| s.def_id == def_id) else {
-                    return;
-                };
-                let missing: Vec<String> = sum
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| !covered_variants.contains(&(*i as u32)))
-                    .map(|(_, v)| format!("`{}`", v.name))
-                    .collect();
-                if !missing.is_empty() {
-                    self.error(
-                        "E0020",
-                        format!("non-exhaustive match: {} not covered", missing.join(", ")),
-                        span,
-                    );
-                    self.diagnostics
-                        .last_mut()
-                        .expect("just pushed")
-                        .notes
-                        .push("add the missing arms or a `_ => ...` catch-all".to_string());
-                }
+        // Clone the sum table so the analysis context does not hold a borrow of
+        // `self` across the diagnostic calls below.
+        let sums = self.sums.clone();
+        let cx = usefulness::MatchCx::new(&sums);
+        let col = [scrut_ty];
+
+        // Reachability: each unguarded arm must cover a value no earlier
+        // (unguarded) arm does. A guarded arm's match is conditional, so it
+        // neither is reported nor counts toward coverage.
+        let mut prior: Vec<Vec<usefulness::Pat>> = Vec::new();
+        for (pat, guarded, arm_span) in arm_pats {
+            if *guarded {
+                continue;
             }
-            Ty::Error | Ty::Never | Ty::Var(_) | Ty::Param(_) => {}
-            _ => {
-                self.error(
-                    "E0020",
-                    "non-exhaustive match: add a `_ => ...` or binding arm",
-                    span,
+            if cx
+                .usefulness(&prior, std::slice::from_ref(pat), &col)
+                .is_empty()
+            {
+                self.diagnostics.push(
+                    Diagnostic::warning("E0021", "unreachable match arm")
+                        .with_primary_label(*arm_span, "this arm is never reached")
+                        .with_note(
+                            "an earlier arm already matches every value this one would".to_string(),
+                        ),
                 );
             }
+            prior.push(vec![pat.clone()]);
+        }
+
+        // Exhaustiveness: a wildcard must not be useful against all arms.
+        let witnesses = cx.usefulness(&prior, &[usefulness::Pat::Wild], &col);
+        if !witnesses.is_empty() {
+            let mut rendered: Vec<String> = witnesses
+                .iter()
+                .filter_map(|w| w.first())
+                .map(|p| self.render_witness(p))
+                .collect();
+            rendered.dedup();
+            self.error(
+                "E0020",
+                format!(
+                    "non-exhaustive match: pattern{} {} not covered",
+                    if rendered.len() == 1 { "" } else { "s" },
+                    rendered
+                        .iter()
+                        .map(|w| format!("`{w}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                span,
+            );
+            self.diagnostics
+                .last_mut()
+                .expect("just pushed")
+                .notes
+                .push("add the missing arms or a `_ => ...` catch-all".to_string());
+        }
+    }
+
+    /// Render a witness pattern for a non-exhaustiveness diagnostic.
+    fn render_witness(&self, pat: &usefulness::Pat) -> String {
+        match pat {
+            usefulness::Pat::Wild => "_".to_string(),
+            usefulness::Pat::Ctor(ctor, args) => match ctor {
+                usefulness::Ctor::Bool(b) => b.to_string(),
+                usefulness::Ctor::Int(v) => v.to_string(),
+                usefulness::Ctor::Str(s) => format!("{s:?}"),
+                usefulness::Ctor::Variant(sum, vi) => {
+                    let name = self
+                        .sums
+                        .iter()
+                        .find(|s| s.def_id == *sum)
+                        .and_then(|s| s.variants.get(*vi as usize))
+                        .map(|v| v.name.clone())
+                        .unwrap_or_else(|| "?".to_string());
+                    if args.is_empty() {
+                        name
+                    } else {
+                        let inner: Vec<String> =
+                            args.iter().map(|a| self.render_witness(a)).collect();
+                        format!("{name}({})", inner.join(", "))
+                    }
+                }
+            },
         }
     }
 
@@ -3727,6 +3776,27 @@ fn error_expr(span: Span) -> hir::Expr {
     }
 }
 
+/// Normalize a checked HIR pattern into the usefulness-algorithm form.
+/// Bindings and wildcards are both "match anything"; variant payloads are
+/// irrefutable in Phase 1, so each contributes a wildcard sub-pattern.
+fn to_useful_pat(p: &hir::Pattern) -> usefulness::Pat {
+    use usefulness::{Ctor, Pat};
+    match p {
+        hir::Pattern::Wildcard | hir::Pattern::Bind(_) => Pat::Wild,
+        hir::Pattern::LitInt(v) => Pat::Ctor(Ctor::Int(*v), Vec::new()),
+        hir::Pattern::LitBool(v) => Pat::Ctor(Ctor::Bool(*v), Vec::new()),
+        hir::Pattern::LitStr(v) => Pat::Ctor(Ctor::Str(v.clone()), Vec::new()),
+        hir::Pattern::Variant {
+            sum,
+            variant,
+            binders,
+        } => Pat::Ctor(
+            Ctor::Variant(*sum, *variant),
+            vec![Pat::Wild; binders.len()],
+        ),
+    }
+}
+
 /// The mutability classification of the root binding of an assignment place.
 enum PlaceRoot {
     /// Rooted at a mutable local — mutation through it is allowed.
@@ -4048,6 +4118,83 @@ mod tests {
              fn main() { }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    // === Maranget exhaustiveness / reachability ===
+
+    #[test]
+    fn bool_match_true_and_false_is_exhaustive() {
+        // Regression: `true | false` covers `Bool` with no wildcard needed.
+        let r = check_src(
+            "fn f(b: Bool) -> Int { match b { true => 1, false => 0 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn bool_match_missing_false_reports_e0020() {
+        let r = check_src("fn f(b: Bool) -> Int { match b { true => 1 } }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0020"), "{:?}", r.diagnostics);
+        // The witness names the uncovered value.
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("false")),
+            "expected a `false` witness: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn int_match_without_catch_all_reports_e0020() {
+        let r = check_src("fn f(n: Int) -> Int { match n { 0 => 1, 1 => 2 } }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0020"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn int_match_with_catch_all_ok() {
+        let r = check_src("fn f(n: Int) -> Int { match n { 0 => 1, _ => 2 } }\nfn main() { }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn non_exhaustive_witness_names_missing_variant() {
+        let r = check_src(
+            "type Opt = | Some(Int) | None\n\
+             fn f(o: Opt) -> Int { match o { Some(x) => x } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0020"), "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.message.contains("None")),
+            "expected a `None` witness: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn duplicate_variant_arm_is_unreachable_e0021() {
+        // A repeated variant arm is now flagged even without a preceding
+        // catch-all — usefulness detects it directly.
+        let r = check_src(
+            "type Opt = | Some(Int) | None\n\
+             fn f(o: Opt) -> Int { match o { None => 0, Some(x) => x, None => 9 } }\n\
+             fn main() { }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0021"),
+            "expected E0021 unreachable: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn arm_after_catch_all_is_unreachable_e0021() {
+        let r = check_src("fn f(n: Int) -> Int { match n { _ => 0, 1 => 2 } }\nfn main() { }");
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0021"),
+            "expected E0021 unreachable: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]

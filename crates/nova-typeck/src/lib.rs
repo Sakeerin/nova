@@ -2,8 +2,9 @@
 //!
 //! Implements the Phase 1 subset of `nova-spec/12-TYPESYSTEM.md`:
 //! Hindley-Milner style unification with explicit generics at function
-//! boundaries (no let-polymorphism), sum types with minimal exhaustiveness
-//! checking, and desugaring of the AST into typed HIR (`nova-hir`).
+//! boundaries (no let-polymorphism), sum types with Maranget-based
+//! exhaustiveness/reachability checking, and desugaring of the AST into typed
+//! HIR (`nova-hir`).
 //!
 //! Literals are typed concretely (`Int` / `Float`), so the spec's numeric
 //! defaulting step is a no-op in this implementation.
@@ -14,6 +15,7 @@
 
 mod check;
 mod infer;
+mod usefulness;
 
 pub use check::check;
 

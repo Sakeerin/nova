@@ -47,6 +47,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Arrays `[T]`: literals `[a, b, c]`, indexing `arr[i]`, element assignment
   `arr[i] = v` (mutable base required), and `arr.len()`; out-of-bounds
   access aborts with a message (heap layout `{ len, elems… }`)
+- Match exhaustiveness and reachability via Maranget's usefulness algorithm:
+  a `match` is non-exhaustive (`E0020`) when a wildcard row is still useful
+  against the arms, and the diagnostic names witness patterns for the uncovered
+  values (`Some(_)`, `false`, `_`); an arm is unreachable (`E0021`) when it is
+  useless against the earlier arms. This fixes `match` on `Bool` being rejected
+  when both `true` and `false` are covered, and detects redundant arms that the
+  previous catch-all-only check missed
 - Generic impl blocks: `impl<T> Box<T> { … }` (inherent) and
   `impl<T> Trait for Box<T> { … }` (trait), with the impl's type parameters
   usable in method signatures and bodies; a method is monomorphized per
@@ -132,8 +139,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the impl uncallable (adversarial review)
 
 ### Remaining for Phase 1 gate completion
-- LLVM release backend (`nova build --release`), full Maranget
-  exhaustiveness
+- LLVM release backend (`nova build --release`)
 
 ## [0.0.0] - 2026-05-10
 
