@@ -3133,9 +3133,25 @@ impl<'a> Checker<'a> {
         span: Span,
     ) {
         let scrut_ty = fcx.icx.apply(&scrut.ty);
-        // A type we cannot yet resolve to constructors carries no useful
-        // signature; skip rather than emit spurious errors.
+        // A type we cannot yet resolve to constructors (an unresolved inference
+        // variable or generic parameter) carries no enumerable signature, so we
+        // cannot analyze its arms — with one exception: a match with *no* arms
+        // still leaves every value of an inhabited type uncovered. `Never` is
+        // uninhabited (an empty match is fine) and `Error` already reported a
+        // type error, so neither should pile on here.
         if matches!(scrut_ty, Ty::Var(_) | Ty::Param(_) | Ty::Error | Ty::Never) {
+            if arm_pats.is_empty() && matches!(scrut_ty, Ty::Var(_) | Ty::Param(_)) {
+                self.error(
+                    "E0020",
+                    "non-exhaustive match: this match has no arms",
+                    span,
+                );
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push("a `match` on an inhabited type needs at least one arm".to_string());
+            }
             return;
         }
         // Clone the sum table so the analysis context does not hold a borrow of
@@ -3258,6 +3274,16 @@ impl<'a> Checker<'a> {
                     if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
+                    // The name is a known constructor, but of a different type:
+                    // reject it rather than silently binding a catch-all (which
+                    // would mask uncovered cases), mirroring the `Path` and
+                    // `TupleStruct` arms.
+                    self.error(
+                        "E0001",
+                        format!("`{}` is not a variant of the matched type", name.value),
+                        pattern.span,
+                    );
+                    return hir::Pattern::Wildcard;
                 }
                 let local = fcx.new_local(name.value.clone(), scrut_ty.clone(), *is_mut, name.span);
                 hir::Pattern::Bind(local)
@@ -4195,6 +4221,32 @@ mod tests {
             "expected E0021 unreachable: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn empty_match_on_generic_param_reports_e0020() {
+        // Regression (adversarial review): an empty match on a type parameter
+        // was silently accepted (skipped as unanalyzable) and trapped at
+        // runtime; it must be reported non-exhaustive.
+        let r = check_src(
+            "fn oops<T>(x: T) -> Int { match x { } }\n\
+             fn main() { let r = oops(7)\n println(\"${r}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0020"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn foreign_variant_in_ident_pattern_reports_e0001() {
+        // Regression (adversarial review): a bare identifier naming a variant
+        // of a *different* sum type must be rejected, not silently bound as a
+        // catch-all (which masked uncovered cases).
+        let r = check_src(
+            "type A = | Foo | Bar\n\
+             type B = | Baz\n\
+             fn f(a: A) -> Int { match a { Baz => 1, Foo => 2, Bar => 3 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
     }
 
     #[test]

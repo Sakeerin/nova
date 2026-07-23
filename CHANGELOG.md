@@ -137,6 +137,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An impl type parameter that never appears in the self type is rejected
   (`E0073`) instead of leaking an uninferrable variable that made every method
   on the impl uncallable (adversarial review)
+- Exhaustiveness: an empty `match` on a value of generic type (`match x { }`
+  where `x: T`) was silently accepted and trapped at runtime; a match with no
+  arms is now reported non-exhaustive (`E0020`) for any inhabited scrutinee
+  (adversarial review)
+- A bare identifier pattern that names a nullary variant of a *different* sum
+  type is now rejected (`E0001`) rather than silently treated as a catch-all
+  binding, which had masked uncovered cases and produced a spurious
+  unreachable-arm warning — matching the `Path`/`TupleStruct` pattern arms
+  (adversarial review)
 
 ### Remaining for Phase 1 gate completion
 - LLVM release backend (`nova build --release`)
