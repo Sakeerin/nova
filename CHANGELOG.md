@@ -9,7 +9,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added (Phase 1 — MVP compiler, in progress)
+## [0.1.0] - 2026-07-23
+
+Phase 1 (MVP compiler) milestone. Gate verified: all gate programs compile and
+run via `nova run` (Cranelift JIT) and `nova build` (native executables), the
+workspace test suite is green, and `clippy -D warnings` + `cargo fmt --check`
+pass.
+
+### Added (Phase 1 — MVP compiler)
 - `nova run <file>`: compile and execute Nova programs natively via the
   Cranelift JIT; `nova check <file>`: type-check only
 - `nova build <file> [-o out]`: compile to a standalone native executable —
@@ -174,9 +181,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intermediate the output file and deleted the built binary on success
   (adversarial review)
 
-### Remaining for Phase 1 gate completion
-- None — the Phase 1 MVP compiler is feature-complete. Follow-ups: precise GC
-  stack bounds on non-Windows platforms, and string interning / de-dup.
+### Known limitations / follow-ups (not Phase 1 blockers)
+- Precise GC stack bounds are implemented on Windows; other platforms skip
+  collection (leak-until-exit) until their stack-bounds query is added
+- `nova build --release` needs an LLVM toolchain (`clang`/`llc`, ≥ 15) on the
+  machine to produce the final binary from the emitted IR
+- Spec drift to reconcile in Phase 2: chumsky 0.9 (spec calls for 0.10),
+  `salsa` not yet integrated, `fuzz/` targets not yet written
 
 ## [0.0.0] - 2026-05-10
 
