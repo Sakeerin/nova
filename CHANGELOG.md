@@ -53,8 +53,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the C ABI (`"C"` or omitted) and FFI-safe scalar types — `Int`↔`int64_t`,
   `Float`↔`double`, `Bool`↔`_Bool`, and a unit (`void`) return. Non-scalar types
   (String, records, arrays — GC heap values), other ABIs, and generic/async/
-  `where` extern declarations are rejected with `E0900`. (Pointers, strings,
-  variadics, and `link_name` are later increments.)
+  `where` extern declarations are rejected with `E0900`; symbols that collide
+  with the compiler's own (`nova_*`, `main`) are reserved. Note: because `Int`
+  is 64-bit, C functions that use narrower integers (32-bit `int`, e.g. `abs`,
+  `getchar`) cannot be declared correctly yet and will truncate — declare only
+  `int64_t`/`long long`/`double` C functions for now. (Pointers, strings,
+  variadics, `link_name`, and fixed-width C integers are later increments.)
 
 ### Fixed (Phase 2)
 - Cross-module symbol collision: two modules each defining a same-named item
@@ -73,6 +77,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Nested generic type annotations whose closing brackets abut (`Option<Option<
   Int>>`, `Box<Box<Int>>`) now parse: a glued `>>`/`>>>` token is split when
   closing generic argument lists (the `>>` right-shift operator is unaffected).
+- Calling an `extern` function whose C symbol cannot be resolved no longer
+  crashes `nova run` with a Rust panic — the JIT's finalize-time panic is caught
+  and reported as a clean `E0902`, mirroring the `nova build` linker error.
+- Two modules declaring the same C symbol with conflicting signatures now report
+  `E0075` instead of crashing codegen / emitting invalid LLVM IR.
 
 ## [0.1.0] - 2026-07-23
 

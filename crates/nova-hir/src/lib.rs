@@ -234,6 +234,8 @@ pub struct ExternFn {
     pub symbol: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Declaration site, for conflicting-signature diagnostics.
+    pub span: Span,
 }
 
 /// A fully checked module: type layouts plus typed functions.

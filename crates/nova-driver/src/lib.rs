@@ -55,9 +55,28 @@ pub fn compile_file(path: &Path) -> Result<Outcome<CompiledProgram>> {
         Outcome::Ok(mir) => mir,
         Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
     };
-    let program = nova_codegen_cranelift::compile_jit(&mir)
-        .context("internal codegen error (this is a compiler bug)")?;
-    Ok(Outcome::Ok(program))
+    match nova_codegen_cranelift::compile_jit(&mir) {
+        Ok(program) => Ok(Outcome::Ok(program)),
+        Err(e) => {
+            // An unresolvable `extern` symbol is a user error (the symbol isn't
+            // in the C runtime / any loaded library), not a compiler bug — the
+            // JIT can only discover it at finalize time. Report it as a clean
+            // diagnostic, mirroring the `nova build` linker-error path.
+            if let Some(sym) = e.downcast_ref::<nova_codegen_cranelift::UnresolvedExternSymbol>() {
+                let diag = Diagnostic::error(
+                    "E0902",
+                    format!(
+                        "{sym} at run time; an `extern` function must be provided by the \
+                         C runtime or an already-loaded library (a `nova build` executable \
+                         resolves it at link time instead)"
+                    ),
+                );
+                render::emit_all(&FileDb::new(), &[diag]);
+                return Ok(Outcome::Failed { errors: 1 });
+            }
+            Err(e).context("internal codegen error (this is a compiler bug)")
+        }
+    }
 }
 
 /// Compile a file to a standalone native executable (`nova build`).

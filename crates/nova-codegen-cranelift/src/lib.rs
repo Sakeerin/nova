@@ -33,6 +33,20 @@ pub const NOVA_ENTRY_SYMBOL: &str = "nova_main";
 // `mir_ty` is re-exported for driver convenience.
 pub use nova_mir::mangle;
 
+/// An `extern` symbol the JIT could not resolve at run time. This is a user
+/// error (a bad FFI declaration), not a compiler bug, so the driver reports it
+/// as a clean diagnostic rather than an internal error.
+#[derive(Debug)]
+pub struct UnresolvedExternSymbol(pub String);
+
+impl std::fmt::Display for UnresolvedExternSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot resolve external symbol `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnresolvedExternSymbol {}
+
 /// A JIT-compiled Nova program, ready to run in-process.
 pub struct CompiledProgram {
     /// Kept alive for the lifetime of the compiled code.
@@ -71,9 +85,39 @@ pub fn compile_jit(mir: &MirModule) -> Result<CompiledProgram> {
         cg.functions
     };
 
-    module
-        .finalize_definitions()
-        .context("failed to finalize JIT code")?;
+    // Imported extern symbols are resolved *inside* `finalize_definitions`,
+    // where cranelift-jit `panic!`s on a symbol it cannot resolve rather than
+    // returning an `Err`. Catch that unwind (silencing the default hook so no
+    // raw stack trace prints) and turn it into a clean error, so an
+    // unresolvable `extern` becomes a diagnostic instead of a compiler crash —
+    // matching the graceful `nova build` linker-error path.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    // Map the (large) module error to a String inside the closure so the caught
+    // value stays small (clippy::result_large_err) and is unwind-safe.
+    let finalize = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        module.finalize_definitions().map_err(|e| e.to_string())
+    }));
+    std::panic::set_hook(prev_hook);
+    match finalize {
+        Ok(Ok(())) => {}
+        Ok(Err(msg)) => return Err(anyhow!("failed to finalize JIT code: {msg}")),
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown error");
+            // cranelift-jit panics as "can't resolve symbol <name>"; recover the
+            // symbol so the driver can render a clean, user-facing diagnostic.
+            let symbol = detail
+                .strip_prefix("can't resolve symbol ")
+                .unwrap_or(detail)
+                .trim()
+                .to_string();
+            return Err(anyhow::Error::new(UnresolvedExternSymbol(symbol)));
+        }
+    }
 
     let main_id = *functions
         .get("main")

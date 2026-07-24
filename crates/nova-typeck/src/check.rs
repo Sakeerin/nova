@@ -846,6 +846,22 @@ impl<'a> Checker<'a> {
             let ExternItem::Fn(sig) = &block.items[fn_index];
             self.cur_module = self.defs.module_of(item_index);
 
+            // The symbol is emitted raw (unmangled), so it shares a namespace
+            // with the compiler's own symbols. Reserve the `nova_` prefix (the
+            // runtime's `nova_rt_*` and the `nova_main` entry) and `main` so an
+            // extern can't shadow or alias an internal symbol.
+            if sig.name.value == "main" || sig.name.value.starts_with("nova_") {
+                self.error(
+                    "E0900",
+                    format!(
+                        "extern symbol `{}` is reserved by the compiler",
+                        sig.name.value
+                    ),
+                    sig.name.span,
+                );
+                continue;
+            }
+
             // Only the C ABI (explicit `"C"` or omitted) is supported.
             if !matches!(block.abi.as_deref(), None | Some("C")) {
                 let abi = block.abi.clone().unwrap_or_default();
@@ -901,6 +917,7 @@ impl<'a> Checker<'a> {
                 symbol: sig.name.value.clone(),
                 params,
                 ret,
+                span: sig.name.span,
             });
         }
     }
@@ -5409,6 +5426,13 @@ mod tests {
         assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
         // The generic extern short-circuits, so no false "cannot find type `T`".
         assert!(!codes.contains(&"E0001"), "cascade: {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn extern_reserved_symbol_reports_e0900() {
+        // An extern may not shadow/alias a compiler-internal symbol (`nova_*`).
+        let r = check_src("extern \"C\" { fn nova_rt_alloc(x: Int) -> Int }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
     }
 
     #[test]

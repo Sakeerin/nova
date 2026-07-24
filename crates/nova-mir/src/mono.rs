@@ -8,7 +8,7 @@ use nova_resolver::DefId;
 use rustc_hash::FxHashSet;
 
 use crate::lower::lower_function;
-use crate::{mangle, mir_ty, ExternDecl, Module};
+use crate::{mangle, mir_ty, ExternDecl, MirTy, Module};
 
 /// Lower a typed HIR module to monomorphized MIR.
 ///
@@ -41,14 +41,32 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
             // Not a Nova function: if it is an `extern` declaration, record it
             // (a leaf — no body to lower) so codegen imports its raw C symbol.
             // Deduped by symbol via the shared `done` set (raw symbols never
-            // collide with `name.<defid>`-mangled function names).
+            // collide with `name.<defid>`-mangled function names). Two extern
+            // declarations that share a symbol but disagree on signature would
+            // otherwise collapse to one import and miscompile (or crash codegen)
+            // the mismatched caller, so that is rejected here.
             if let Some(ext) = module.extern_fn(def_id) {
+                let params: Vec<MirTy> = ext.params.iter().map(mir_ty).collect();
+                let ret = mir_ty(&ext.ret);
                 if done.insert(ext.symbol.clone()) {
                     mir.externs.push(ExternDecl {
                         symbol: ext.symbol.clone(),
-                        params: ext.params.iter().map(mir_ty).collect(),
-                        ret: mir_ty(&ext.ret),
+                        params,
+                        ret,
                     });
+                } else if let Some(prev) = mir.externs.iter().find(|e| e.symbol == ext.symbol) {
+                    if prev.params != params || prev.ret != ret {
+                        diagnostics.push(
+                            Diagnostic::error(
+                                "E0075",
+                                format!(
+                                    "extern symbol `{}` is declared with conflicting signatures",
+                                    ext.symbol
+                                ),
+                            )
+                            .with_primary_label(ext.span, "conflicting declaration"),
+                        );
+                    }
                 }
             }
             continue;

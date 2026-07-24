@@ -290,6 +290,54 @@ fn extern_ffi_build_standalone() {
 }
 
 #[test]
+fn extern_unresolvable_symbol_is_a_clean_error_not_a_panic() {
+    let dir = std::env::temp_dir().join("nova-extern-unresolvable");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("bad.nova");
+    std::fs::write(
+        &file,
+        "extern \"C\" { fn totally_bogus_symbol_xyz(x: Int) -> Int }\n\
+         fn main() { println(\"${totally_bogus_symbol_xyz(3)}\") }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0902"), "stderr: {stderr}");
+    // Must be a clean diagnostic, not a Rust panic nor a "compiler bug" label.
+    assert!(!stderr.contains("panicked"), "should not panic: {stderr}");
+    assert!(
+        !stderr.contains("compiler bug"),
+        "not a compiler bug: {stderr}"
+    );
+}
+
+#[test]
+fn conflicting_cross_module_extern_signatures_report_e0075() {
+    let dir = std::env::temp_dir().join("nova-extern-conflict");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("mod_a.nova"),
+        "extern \"C\" { fn sqrt(x: Float) -> Float }\npub fn ca() -> Float { sqrt(16.0) }\n",
+    )
+    .expect("write a");
+    std::fs::write(
+        dir.join("mod_b.nova"),
+        "extern \"C\" { fn sqrt(x: Int) -> Int }\npub fn cb() -> Int { sqrt(16) }\n",
+    )
+    .expect("write b");
+    let main = dir.join("main.nova");
+    std::fs::write(
+        &main,
+        "import mod_a::{ca}\nimport mod_b::{cb}\nfn main() { println(\"${ca()} ${cb()}\") }\n",
+    )
+    .expect("write main");
+    let assert = nova().arg("check").arg(&main).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0075"), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "should not panic: {stderr}");
+}
+
+#[test]
 fn modules_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
         .expect("expected-output fixture exists")
