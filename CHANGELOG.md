@@ -39,6 +39,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   monomorphization. A `where` clause may only constrain one of the item's own
   type parameters; constraints on concrete/compound types (`where Box<T>:
   Trait`) and on trait methods are rejected with `E0900`.
+- Prelude (Phase 2.0): `Option<T> = | Some(T) | None` and `Result<T, E> =
+  | Ok(T) | Err(E)` are now built in — available in every module with no import
+  or definition. They are compiled as an implicit module and glob-imported into
+  every user module, so they use the ordinary generic sum-type and
+  monomorphization machinery (and cost nothing when unused). A program may still
+  define its own `Option`/`Result`, which shadows the prelude.
 
 ### Fixed (Phase 2)
 - Cross-module symbol collision: two modules each defining a same-named item

@@ -22,7 +22,7 @@ fn ir_for(src: &str) -> String {
         "resolve: {:?}",
         resolved.diagnostics
     );
-    let checked = nova_typeck::check(&ast, &resolved.definitions);
+    let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
     assert!(
         checked.diagnostics.is_empty(),
         "typeck: {:?}",

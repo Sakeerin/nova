@@ -20,7 +20,7 @@ fn mir_for(src: &str) -> nova_mir::Module {
         "resolve: {:?}",
         resolved.diagnostics
     );
-    let checked = check(&ast, &resolved.definitions);
+    let checked = check(&resolved.file, &resolved.definitions);
     assert!(
         checked.diagnostics.is_empty(),
         "typeck: {:?}",
@@ -360,7 +360,7 @@ fn diagnostics_for(src: &str) -> Vec<String> {
     let (ast, _) = parse(&tokens, file_id);
     let ast = ast.expect("no AST");
     let resolved = resolve(&ast);
-    let checked = check(&ast, &resolved.definitions);
+    let checked = check(&resolved.file, &resolved.definitions);
     match lower_module(&checked.module) {
         Ok(_) => Vec::new(),
         Err(diags) => diags.into_iter().map(|d| d.code).collect(),

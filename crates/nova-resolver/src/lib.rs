@@ -232,10 +232,14 @@ fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
     id
 }
 
-/// Output of [`resolve`]: the namespace table plus any diagnostics.
+/// Output of [`resolve`]: the namespace table, the merged file whose
+/// `item_index`es the definitions refer to (the input plus the implicit
+/// prelude), and any diagnostics. Downstream stages must type-check against
+/// this `file`, not the original input, since `item_index`es index into it.
 #[derive(Debug)]
 pub struct ResolveResult {
     pub definitions: Definitions,
+    pub file: File,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -261,6 +265,7 @@ pub fn resolve(file: &File) -> ResolveResult {
     let prog = resolve_program(&sources);
     ResolveResult {
         definitions: prog.definitions,
+        file: prog.file,
         diagnostics: prog.diagnostics,
     }
 }
@@ -275,10 +280,29 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
+
+    // Compile the built-in prelude as an implicit module so `Option`/`Result`
+    // and their variants get real DefIds and sum layouts (and are then
+    // glob-imported into every module below). It goes *last* so user modules
+    // keep their indices — module 0 stays the first user module.
+    let prelude = prelude_file();
+    let all: Vec<ModuleSource> = modules
+        .iter()
+        .map(|m| ModuleSource {
+            name: m.name.clone(),
+            file: m.file,
+        })
+        .chain(std::iter::once(ModuleSource {
+            name: PRELUDE_NAME.to_string(),
+            file: &prelude,
+        }))
+        .collect();
+    let prelude_mid = all.len() - 1;
+
     let mut exports: Vec<Exports> = Vec::new();
 
     // A scope per module, seeded with the builtin prelude.
-    for m in modules {
+    for m in &all {
         let mut scope = ModuleScope {
             name: m.name.clone(),
             ..Default::default()
@@ -291,7 +315,7 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
     }
 
     // Pass 1: collect each module's own definitions into its scope + exports.
-    for (mid, m) in modules.iter().enumerate() {
+    for (mid, m) in all.iter().enumerate() {
         let mut first_value: IndexMap<String, Span> = IndexMap::new();
         let mut first_type: IndexMap<String, Span> = IndexMap::new();
         for item in &m.file.items {
@@ -311,13 +335,18 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
         }
     }
 
+    // Glob the prelude's public names into every user module, without
+    // overriding a name the module already defines — so a program may still
+    // declare its own `Option`/`Result` and shadow the prelude.
+    import_prelude(&mut definitions, &exports[prelude_mid], prelude_mid);
+
     // Pass 2: resolve `import`s, binding other modules' public names.
-    let by_name: FxHashMap<&str, usize> = modules
+    let by_name: FxHashMap<&str, usize> = all
         .iter()
         .enumerate()
         .map(|(i, m)| (m.name.as_str(), i))
         .collect();
-    for (mid, m) in modules.iter().enumerate() {
+    for (mid, m) in all.iter().enumerate() {
         for item in &m.file.items {
             if let Item::Import(imp) = &item.value {
                 resolve_import(
@@ -336,6 +365,57 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
         file: File { items: merged },
         definitions,
         diagnostics,
+    }
+}
+
+/// The built-in prelude: types available in every module without an `import`.
+const PRELUDE_SRC: &str = "\
+pub type Option<T> = | Some(T) | None\n\
+pub type Result<T, E> = | Ok(T) | Err(E)\n";
+
+/// Module name of the implicit prelude. Not a valid identifier, so it can never
+/// collide with a user module or be named in an `import`.
+const PRELUDE_NAME: &str = "$prelude";
+
+/// Lex and parse the built-in prelude. The source is a fixed constant, so any
+/// failure is a compiler bug.
+fn prelude_file() -> File {
+    let file_id = nova_diagnostics::FileId::DUMMY;
+    let (tokens, lex_errors) = nova_lexer::lex(PRELUDE_SRC, file_id);
+    debug_assert!(lex_errors.is_empty(), "prelude lex errors: {lex_errors:?}");
+    let (ast, parse_errors) = nova_parser::parse(&tokens, file_id);
+    debug_assert!(
+        parse_errors.is_empty(),
+        "prelude parse errors: {parse_errors:?}"
+    );
+    ast.expect("the built-in prelude must parse")
+}
+
+/// Bind the prelude module's public names into every other module's scope,
+/// leaving any name the module already defines untouched (user items shadow
+/// the prelude).
+fn import_prelude(definitions: &mut Definitions, prelude_exports: &Exports, prelude_mid: usize) {
+    let values: Vec<(String, Res)> = prelude_exports
+        .values
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let types: Vec<(String, DefId)> = prelude_exports
+        .types
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    for mid in 0..definitions.modules.len() {
+        if mid == prelude_mid {
+            continue;
+        }
+        let scope = &mut definitions.modules[mid];
+        for (n, r) in &values {
+            scope.values.entry(n.clone()).or_insert(*r);
+        }
+        for (n, id) in &types {
+            scope.types.entry(n.clone()).or_insert(*id);
+        }
     }
 }
 
@@ -944,6 +1024,48 @@ mod tests {
             "{:?}",
             p.diagnostics
         );
+    }
+
+    #[test]
+    fn prelude_option_result_are_in_scope() {
+        // Option/Result and their variants resolve with no import or definition.
+        let r = resolve_src("fn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(r.definitions.resolve_type(ModuleId(0), "Option").is_some());
+        assert!(r.definitions.resolve_type(ModuleId(0), "Result").is_some());
+        assert!(matches!(
+            r.definitions.resolve_value(ModuleId(0), "Some"),
+            Some(Res::Variant(_, 0))
+        ));
+        assert!(matches!(
+            r.definitions.resolve_value(ModuleId(0), "None"),
+            Some(Res::Variant(_, 1))
+        ));
+        assert!(matches!(
+            r.definitions.resolve_value(ModuleId(0), "Ok"),
+            Some(Res::Variant(_, 0))
+        ));
+        assert!(matches!(
+            r.definitions.resolve_value(ModuleId(0), "Err"),
+            Some(Res::Variant(_, 1))
+        ));
+    }
+
+    #[test]
+    fn user_type_shadows_prelude() {
+        // A user-defined `Option` shadows the prelude's without an E0002 clash:
+        // the module's own definition wins over the soft prelude import.
+        let r = resolve_src("type Option<T> = | Present(T) | Absent\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let opt = r
+            .definitions
+            .resolve_type(ModuleId(0), "Option")
+            .expect("Option resolves");
+        // It is the user's two-variant `Option`, not the prelude's.
+        assert!(matches!(
+            r.definitions.def(opt).kind,
+            DefKind::Sum { ref variants, .. } if variants.len() == 2 && variants[0].name == "Present"
+        ));
     }
 
     #[test]

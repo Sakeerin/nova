@@ -4208,7 +4208,9 @@ mod tests {
             "resolve errors: {:?}",
             resolved.diagnostics
         );
-        check(&ast, &resolved.definitions)
+        // Type-check against the merged file (input + implicit prelude), whose
+        // `item_index`es the definitions refer to.
+        check(&resolved.file, &resolved.definitions)
     }
 
     fn error_codes(result: &CheckResult) -> Vec<&str> {

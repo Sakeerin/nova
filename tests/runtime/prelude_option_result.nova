@@ -1,0 +1,29 @@
+// `Option<T>` and `Result<T, E>` (and their variants Some/None/Ok/Err) are in
+// the built-in prelude: available in every module with no import or definition.
+
+fn checked_div(a: Int, b: Int) -> Option<Int> {
+    if b == 0 { None } else { Some(a / b) }
+}
+
+fn describe(r: Result<Int, String>) -> String {
+    match r {
+        Ok(v) => "ok(${v})",
+        Err(e) => "err(${e})",
+    }
+}
+
+fn main() {
+    match checked_div(10, 2) {
+        Some(v) => println("10/2 = ${v}"),
+        None => println("10/2 = undefined"),
+    }
+    match checked_div(1, 0) {
+        Some(v) => println("1/0 = ${v}"),
+        None => println("1/0 = undefined"),
+    }
+
+    let good: Result<Int, String> = Ok(42)
+    let bad: Result<Int, String> = Err("boom")
+    println(describe(good))
+    println(describe(bad))
+}

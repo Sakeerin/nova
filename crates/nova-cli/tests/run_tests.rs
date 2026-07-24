@@ -241,6 +241,33 @@ fn where_clauses_build_standalone() {
 }
 
 #[test]
+fn prelude_option_result_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/prelude_option_result.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/prelude_option_result.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn prelude_option_result_build_standalone() {
+    let out = build_and_run(
+        "tests/runtime/prelude_option_result.nova",
+        "prelude_option_result",
+    );
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/prelude_option_result.stdout"))
+            .expect("fixture")
+            .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn modules_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
         .expect("expected-output fixture exists")

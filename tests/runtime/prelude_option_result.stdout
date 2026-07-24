@@ -1,0 +1,4 @@
+10/2 = 5
+1/0 = undefined
+ok(42)
+err(boom)
