@@ -262,12 +262,31 @@ impl<'a> Checker<'a> {
             let self_scope = self_generic_scope();
             let mut methods = Vec::new();
             for (mi, item) in decl.items.iter().enumerate() {
-                let (name, generics, params, ret, is_default) = match item {
-                    TraitItem::Required(sig) => {
-                        (&sig.name, &sig.generics, &sig.params, &sig.return_ty, false)
-                    }
-                    TraitItem::Provided(f) => (&f.name, &f.generics, &f.params, &f.return_ty, true),
+                let (name, generics, where_clause, params, ret, is_default) = match item {
+                    TraitItem::Required(sig) => (
+                        &sig.name,
+                        &sig.generics,
+                        &sig.where_clause,
+                        &sig.params,
+                        &sig.return_ty,
+                        false,
+                    ),
+                    TraitItem::Provided(f) => (
+                        &f.name,
+                        &f.generics,
+                        &f.where_clause,
+                        &f.params,
+                        &f.return_ty,
+                        true,
+                    ),
                 };
+                if !where_clause.is_empty() {
+                    self.error(
+                        "E0900",
+                        "`where` clauses on trait methods are not supported yet",
+                        name.span,
+                    );
+                }
                 // Trait methods with their own generic parameters (e.g.
                 // `fn map<U>(self, …)`) are not supported yet — only *inherent*
                 // method generics are (see `collect_impls`). Bind the names to
@@ -332,9 +351,10 @@ impl<'a> Checker<'a> {
                 if f.is_async {
                     self.unsupported(f.name.span, "async methods");
                 }
-                // Generic trait methods are rejected in the method-table loop
-                // above; don't build (or later check) a body signature for one.
-                if !f.generics.is_empty() {
+                // Generic trait methods and trait-method `where` clauses are
+                // rejected in the method-table loop above; don't build (or later
+                // check) a body signature for one.
+                if !f.generics.is_empty() || !f.where_clause.is_empty() {
                     continue;
                 }
                 let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &self_scope);
@@ -379,16 +399,11 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
-            // `where` clauses on impls (conditional impls beyond inline
-            // `<T: Bound>`) are not supported yet — consistent with functions.
-            if !block.where_clause.is_empty() {
-                self.unsupported(block.ty.span, "`where` clauses on impl blocks");
-                continue;
-            }
             // The impl's generic parameters (`impl<T> …`) are in scope in the
             // self type and every method signature/body.
             let impl_generics = generic_scope(&block.generics);
-            let impl_bounds = self.resolve_bounds(&block.generics);
+            let mut impl_bounds = self.resolve_bounds(&block.generics);
+            self.apply_where(&mut impl_bounds, &block.where_clause, &impl_generics);
             let self_ty = self.convert_ty(&block.ty, &impl_generics);
             let Some(self_head) = self_ty.head() else {
                 self.error(
@@ -502,6 +517,9 @@ impl<'a> Checker<'a> {
                     bounds.extend(self.resolve_bounds(&f.generics));
                     method_generic_count = f.generics.len() as u32;
                 }
+                // A method's `where` clause may constrain the impl's or its own
+                // type parameters; fold it into the combined bounds.
+                self.apply_where(&mut bounds, &f.where_clause, &scope);
                 // Non-self params + ret in terms of the self type, resolving the
                 // impl's and this method's generic parameters.
                 let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
@@ -735,11 +753,9 @@ impl<'a> Checker<'a> {
             if f.is_async {
                 self.unsupported(f.name.span, "async functions");
             }
-            if !f.where_clause.is_empty() {
-                self.unsupported(f.name.span, "`where` clauses");
-            }
             let generics = generic_scope(&f.generics);
-            let bounds = self.resolve_bounds(&f.generics);
+            let mut bounds = self.resolve_bounds(&f.generics);
+            self.apply_where(&mut bounds, &f.where_clause, &generics);
             let params = f
                 .params
                 .iter()
@@ -818,6 +834,50 @@ impl<'a> Checker<'a> {
                     .collect()
             })
             .collect()
+    }
+
+    /// Fold a `where` clause into a per-parameter bound list (as produced by
+    /// [`Self::resolve_bounds`]). A `where` bound is just an out-of-line spelling
+    /// of an inline `<T: Trait>`: each `T: Trait` must constrain one of the
+    /// item's own type parameters (resolved through `scope`), and its traits
+    /// accumulate on top of any inline bounds. Constraints on concrete or
+    /// compound types (`where Box<T>: Trait`) are not supported yet.
+    fn apply_where(
+        &mut self,
+        bounds: &mut [Vec<DefId>],
+        where_clause: &[ast::WhereBound],
+        scope: &FxHashMap<String, u32>,
+    ) {
+        for wb in where_clause {
+            let idx = match self.convert_ty(&wb.ty, scope) {
+                Ty::Param(i) => i as usize,
+                // `convert_ty` already reported an unknown/invalid type.
+                Ty::Error => continue,
+                _ => {
+                    self.error(
+                        "E0900",
+                        "a `where` clause may only constrain a type parameter",
+                        wb.ty.span,
+                    );
+                    continue;
+                }
+            };
+            let Some(slot) = bounds.get_mut(idx) else {
+                continue;
+            };
+            for b in &wb.bounds {
+                let name = b
+                    .value
+                    .segments
+                    .last()
+                    .map(|s| s.value.as_str())
+                    .unwrap_or("");
+                match self.defs.resolve_trait(self.cur_module, name) {
+                    Some(id) => slot.push(id),
+                    None => self.error("E0001", format!("cannot find trait `{name}`"), b.span),
+                }
+            }
+        }
     }
 
     /// Convert an AST type annotation to a `Ty`, resolving names.
@@ -5094,11 +5154,46 @@ mod tests {
     }
 
     #[test]
-    fn where_clause_on_impl_is_unsupported() {
+    fn where_clause_on_trait_impl_is_accepted() {
+        // A `where` clause on a trait impl is an out-of-line bound: this is the
+        // conditional impl `impl<T: Tag> Tag for Box<T>` and must type-check.
         let r = check_src(
             "record Box<T> { value: T }\n\
              trait Tag { fn tag(self) -> String }\n\
              impl<T> Tag for Box<T> where T: Tag { fn tag(self) -> String { \"b\" } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn where_clause_on_function_enforces_bound() {
+        // `where T: Show` is accepted here (Int: Show) and equivalent to the
+        // inline bound `<T: Show>`.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+             fn label<T>(x: T) -> String where T: Show { x.show() }\n\
+             fn main() { println(label(1)) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn where_clause_on_concrete_type_reports_e0900() {
+        // A `where` clause may only constrain a type parameter.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             fn f<T>(x: T) -> Int where Int: Show { 0 }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn where_clause_on_trait_method_reports_e0900() {
+        let r = check_src(
+            "trait Foo { fn f(self) -> Int where Self: Foo }\n\
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);

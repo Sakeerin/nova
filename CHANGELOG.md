@@ -31,6 +31,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and monomorphization stay uniform. Generic parameters that shadow an impl
   parameter report `E0403`. (Generic *trait* methods remain a later increment,
   reported as `E0900`.)
+- `where` clauses (Phase 2.0): an out-of-line spelling of generic bounds on
+  functions, impl blocks, and inherent methods — `fn label<T>(x: T) -> String
+  where T: Show { … }` is equivalent to the inline `<T: Show>`, and
+  `impl<T> Box<T> where T: Show { … }` is the conditional impl `impl<T: Show>`.
+  Bounds accumulate on top of any inline bounds and are enforced at
+  monomorphization. A `where` clause may only constrain one of the item's own
+  type parameters; constraints on concrete/compound types (`where Box<T>:
+  Trait`) and on trait methods are rejected with `E0900`.
 
 ### Fixed (Phase 2)
 - Cross-module symbol collision: two modules each defining a same-named item

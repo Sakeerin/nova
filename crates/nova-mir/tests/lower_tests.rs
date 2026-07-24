@@ -261,6 +261,19 @@ fn method_generic_bound_unsatisfied_reports_e0013() {
 }
 
 #[test]
+fn where_clause_bound_unsatisfied_reports_e0013() {
+    // A `where`-clause bound is enforced at monomorphization exactly like an
+    // inline bound: `label<T> where T: Show` called with a `Bool` -> E0013.
+    let codes = diagnostics_for(
+        "trait Show { fn show(self) -> String }\n\
+         impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+         fn label<T>(x: T) -> String where T: Show { x.show() }\n\
+         fn main() { println(label(true)) }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
 fn repeated_param_trait_impl_mismatch_reports_e0013() {
     // A trait impl on `Pair<T, T>` must not satisfy a bound for
     // `Pair<Int, String>` — structural matching, not just head, gates the

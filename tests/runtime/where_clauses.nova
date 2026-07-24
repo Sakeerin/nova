@@ -1,0 +1,32 @@
+// `where` clauses: an out-of-line spelling of generic bounds, allowed on
+// functions, impl blocks, and inherent methods. Each `T: Trait` must constrain
+// one of the item's own type parameters.
+
+trait Show { fn show(self) -> String }
+impl Show for Int { fn show(self) -> String { "int(${self})" } }
+impl Show for Bool { fn show(self) -> String { if self { "yes" } else { "no" } } }
+
+record Box<T> { value: T }
+
+// An impl-block `where` clause constrains T across every method in the block.
+impl<T> Box<T> where T: Show {
+    fn describe(self) -> String { self.value.show() }
+
+    // A method-level `where` constrains the method's own generic parameter.
+    fn joined<U>(self, other: U) -> String where U: Show {
+        "${self.value.show()} & ${other.show()}"
+    }
+}
+
+// A free function with a `where` clause (equivalent to `fn label<T: Show>`).
+fn label<T>(x: T) -> String where T: Show {
+    x.show()
+}
+
+fn main() {
+    let b = Box { value: 7 }
+    println(b.describe())
+    println(b.joined(true))
+    println(label(42))
+    println(label(false))
+}

@@ -219,6 +219,28 @@ fn method_generics_build_standalone() {
 }
 
 #[test]
+fn where_clauses_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/where_clauses.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/where_clauses.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn where_clauses_build_standalone() {
+    let out = build_and_run("tests/runtime/where_clauses.nova", "where_clauses");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/where_clauses.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn modules_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
         .expect("expected-output fixture exists")
