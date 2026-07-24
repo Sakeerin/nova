@@ -20,6 +20,7 @@ mod mono;
 pub use mono::lower_module;
 
 use nova_hir as hir;
+use nova_resolver::DefId;
 
 /// A machine-level value class for one MIR temporary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +54,8 @@ pub struct Module {
 /// A monomorphized function.
 #[derive(Debug)]
 pub struct Function {
-    /// Mangled, unique symbol name (e.g. `identity$i`).
+    /// Mangled, unique symbol name (e.g. `identity.7$i`); the entry point is
+    /// the sole exception, emitted under the bare symbol `main`.
     pub name: String,
     /// Number of real value parameters (the first `params` temps after the
     /// optional leading environment pointer).
@@ -303,14 +305,25 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
     }
 }
 
-/// Mangle a function instance name: `name` for non-generic functions,
-/// `name$<args>` for monomorphized instances.
-pub fn mangle(name: &str, type_args: &[hir::Ty]) -> String {
+/// Mangle a function instance into a unique symbol name.
+///
+/// The owning `def_id` is folded in so that same-named items from different
+/// modules (e.g. a private `helper` in each) get distinct symbols instead of
+/// colliding into one at monomorphization; `type_args` further distinguish the
+/// instances of a generic function. A non-generic function mangles to
+/// `name.<def>` and a monomorphized instance to `name.<def>$<args>` (e.g.
+/// `identity.7$i`).
+///
+/// The program entry point is the sole exception: `lower_module` names it with
+/// the bare symbol `main`, which the codegen backends look up by name. It is
+/// never passed here for a non-entry function of the same name, because every
+/// other function carries its DefId suffix and so can never spell `main`.
+pub fn mangle(def_id: DefId, name: &str, type_args: &[hir::Ty]) -> String {
     if type_args.is_empty() {
-        return name.to_string();
+        return format!("{name}.{}", def_id.0);
     }
     let args: Vec<String> = type_args.iter().map(mangle_ty).collect();
-    format!("{name}${}", args.join("_"))
+    format!("{name}.{}${}", def_id.0, args.join("_"))
 }
 
 fn mangle_ty(ty: &hir::Ty) -> String {

@@ -232,6 +232,93 @@ fn import_of_private_item_is_rejected() {
     assert!(stderr.contains("E0001"), "stderr: {stderr}");
 }
 
+/// Two modules each defining a same-named function must lower to distinct
+/// symbols and dispatch to their own definition — not collapse to one at
+/// monomorphization. Regression for the module-merge mangling collision.
+#[test]
+fn modules_same_name_functions_dispatch_correctly() {
+    let dir = std::env::temp_dir().join("nova-mod-collide-fn");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("lib.nova"),
+        "fn helper() -> Int { 200 }\npub fn lib_val() -> Int { helper() }\n",
+    )
+    .expect("write lib");
+    let main = dir.join("main.nova");
+    std::fs::write(
+        &main,
+        "import lib::{lib_val}\n\
+         fn helper() -> Int { 100 }\n\
+         fn main() {\n\
+             println(\"main=${helper()}\")\n\
+             println(\"lib=${lib_val()}\")\n\
+         }\n",
+    )
+    .expect("write main");
+    // main's own helper() is 100; lib_val() calls lib's helper() = 200.
+    nova()
+        .arg("run")
+        .arg(&main)
+        .assert()
+        .success()
+        .stdout("main=100\nlib=200\n");
+}
+
+/// Two modules each defining a same-named record with a same-named inherent
+/// method must dispatch each call to its own method body. Regression for the
+/// impl-method symbol collision across modules.
+#[test]
+fn modules_same_name_methods_dispatch_correctly() {
+    let dir = std::env::temp_dir().join("nova-mod-collide-method");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("lib.nova"),
+        "record Box { v: Int }\n\
+         impl Box { fn get(self) -> Int { self.v + 1000 } }\n\
+         pub fn make_b() -> Int { Box { v: 7 }.get() }\n",
+    )
+    .expect("write lib");
+    let main = dir.join("main.nova");
+    std::fs::write(
+        &main,
+        "import lib::{make_b}\n\
+         record Box { v: Int }\n\
+         impl Box { fn get(self) -> Int { self.v } }\n\
+         fn main() {\n\
+             let a = Box { v: 1 }\n\
+             println(\"main=${a.get()}\")\n\
+             println(\"lib=${make_b()}\")\n\
+         }\n",
+    )
+    .expect("write main");
+    // main's Box.get is `self.v` = 1; lib's Box.get is `self.v + 1000` = 1007.
+    nova()
+        .arg("run")
+        .arg(&main)
+        .assert()
+        .success()
+        .stdout("main=1\nlib=1007\n");
+}
+
+/// A qualified/nested import path (`a::b`) is not supported and must be rejected
+/// explicitly rather than silently binding the last segment's module.
+#[test]
+fn multi_segment_import_is_rejected() {
+    let dir = std::env::temp_dir().join("nova-mod-qualified");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("foo.nova"), "pub fn marker() -> Int { 1 }\n").expect("write foo");
+    std::fs::write(dir.join("bar.nova"), "pub fn marker() -> Int { 2 }\n").expect("write bar");
+    let main = dir.join("main.nova");
+    std::fs::write(
+        &main,
+        "import foo::bar\nfn main() { println(\"${marker()}\") }\n",
+    )
+    .expect("write main");
+    let assert = nova().arg("check").arg(&main).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0900"), "stderr: {stderr}");
+}
+
 #[test]
 fn traits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))

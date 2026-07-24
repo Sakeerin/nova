@@ -251,10 +251,15 @@ impl FrontendContext {
                 continue;
             };
 
-            // Queue imported modules (resolved beside the entry file).
+            // Queue imported modules (resolved beside the entry file). Only
+            // single-segment imports name a module file; qualified/nested paths
+            // (`a::b`) are unsupported and rejected by the resolver, so don't
+            // chase a file for them (which would surface as a confusing error
+            // against an unrelated module).
             for item in &ast.items {
                 if let nova_ast::Item::Import(imp) = &item.value {
-                    if let Some(seg) = imp.path.value.segments.last() {
+                    let segments = &imp.path.value.segments;
+                    if let [seg] = segments.as_slice() {
                         let mod_name = seg.value.clone();
                         if !seen.contains(&mod_name) {
                             let mod_path = dir.join(format!("{mod_name}.nova"));

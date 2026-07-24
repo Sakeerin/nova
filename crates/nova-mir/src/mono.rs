@@ -31,15 +31,23 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         return Err(diagnostics);
     }
 
+    let entry = main.def_id;
     let mut mir = Module::default();
     let mut done: FxHashSet<String> = FxHashSet::default();
-    let mut worklist: Vec<(DefId, Vec<Ty>)> = vec![(main.def_id, Vec::new())];
+    let mut worklist: Vec<(DefId, Vec<Ty>)> = vec![(entry, Vec::new())];
 
     while let Some((def_id, type_args)) = worklist.pop() {
         let Some(func) = module.function(def_id) else {
             continue;
         };
-        let name = mangle(&func.name, &type_args);
+        // The entry point keeps the bare symbol `main` (the backends look it up
+        // by that name); every other function is mangled with its DefId so that
+        // same-named items from different modules never collapse to one symbol.
+        let name = if def_id == entry {
+            "main".to_string()
+        } else {
+            mangle(def_id, &func.name, &type_args)
+        };
         if !done.insert(name.clone()) {
             continue;
         }
@@ -98,7 +106,7 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         // Specialize the function body for these type arguments.
         let specialized = specialize(func, &type_args);
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
-        match lower_function(&specialized, &name, module, &mut request) {
+        match lower_function(&specialized, &name, module, entry, &mut request) {
             Ok(f) => mir.functions.push(f),
             Err(d) => diagnostics.extend(d),
         }

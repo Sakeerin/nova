@@ -49,7 +49,10 @@ fn fibonacci_lowers() {
     );
     let names = function_names(&mir);
     assert!(names.contains(&"main"));
-    assert!(names.contains(&"fib"));
+    assert!(
+        names.iter().any(|n| n.starts_with("fib.")),
+        "names: {names:?}"
+    );
 }
 
 #[test]
@@ -63,8 +66,18 @@ fn generics_monomorphize_per_instance() {
          }",
     );
     let names = function_names(&mir);
-    assert!(names.contains(&"identity$i"), "names: {names:?}");
-    assert!(names.contains(&"identity$s"), "names: {names:?}");
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("identity.") && n.ends_with("$i")),
+        "names: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("identity.") && n.ends_with("$s")),
+        "names: {names:?}"
+    );
     // Two instances + main.
     assert_eq!(mir.functions.len(), 3);
 }
@@ -81,7 +94,7 @@ fn match_on_enum_lowers_to_switch() {
     let area = mir
         .functions
         .iter()
-        .find(|f| f.name == "area")
+        .find(|f| f.name.starts_with("area."))
         .expect("area lowered");
     let has_switch = area
         .blocks
@@ -322,8 +335,16 @@ fn fn_as_value_lowers_to_closure_and_indirect_call() {
          fn main() { println(\"${apply_twice(double, 5)}\") }",
     );
     let names = function_names(&mir);
-    assert!(names.contains(&"double"), "names: {names:?}");
-    assert!(names.contains(&"apply_twice$i"), "names: {names:?}");
+    assert!(
+        names.iter().any(|n| n.starts_with("double.")),
+        "names: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.starts_with("apply_twice.") && n.ends_with("$i")),
+        "names: {names:?}"
+    );
     // A bare fn used as a value becomes a fat-pointer wrapper (MakeClosure).
     let main = mir.functions.iter().find(|f| f.name == "main").unwrap();
     let has_make = main.blocks.iter().any(|b| {
@@ -335,7 +356,7 @@ fn fn_as_value_lowers_to_closure_and_indirect_call() {
     let apply = mir
         .functions
         .iter()
-        .find(|f| f.name == "apply_twice$i")
+        .find(|f| f.name.starts_with("apply_twice.") && f.name.ends_with("$i"))
         .expect("instance exists");
     let has_indirect = apply.blocks.iter().any(|b| {
         b.stmts

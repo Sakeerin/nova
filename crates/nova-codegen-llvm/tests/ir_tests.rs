@@ -88,8 +88,10 @@ fn recursion_and_branch_lower() {
         "fn fib(n: Int) -> Int { if n <= 1 { n } else { fib(n - 1) + fib(n - 2) } }\n\
          fn main() { println(\"${fib(5)}\") }",
     );
-    assert!(ir.contains("define i64 @\"fib\"(i64 %p0)"), "{ir}");
-    assert!(ir.contains("call i64 @\"fib\"(i64"), "{ir}");
+    // `fib` is mangled with its DefId (e.g. `fib.0`) so cross-module
+    // same-named functions can't collide; match the prefix, not the exact id.
+    assert!(ir.contains("define i64 @\"fib."), "{ir}");
+    assert!(ir.contains("call i64 @\"fib."), "{ir}");
     assert!(ir.contains("icmp sle i64"), "{ir}");
     assert!(ir.contains("br i1"), "{ir}");
     assert_well_formed(&ir);

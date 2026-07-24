@@ -17,10 +17,12 @@ pub(crate) fn lower_function(
     func: &hir::Function,
     mangled: &str,
     module: &hir::Module,
+    entry: DefId,
     request: &mut dyn FnMut(DefId, Vec<Ty>),
 ) -> Result<Function, Vec<Diagnostic>> {
     let mut lo = Lowerer {
         module,
+        entry,
         request,
         temps: Vec::new(),
         blocks: vec![BlockState::default()],
@@ -118,6 +120,8 @@ struct BlockState {
 
 struct Lowerer<'a> {
     module: &'a hir::Module,
+    /// DefId of the program entry point, named `main` rather than mangled.
+    entry: DefId,
     request: &'a mut dyn FnMut(DefId, Vec<Ty>),
     temps: Vec<MirTy>,
     blocks: Vec<BlockState>,
@@ -188,13 +192,19 @@ impl<'a> Lowerer<'a> {
     }
 
     fn callee_name(&mut self, def: DefId, type_args: &[Ty]) -> String {
+        (self.request)(def, type_args.to_vec());
+        // Mirror `lower_module`'s entry-naming: a call to the entry point targets
+        // the bare `main` symbol, while every other callee uses its unique
+        // DefId-mangled name so cross-module same-name items never collide.
+        if def == self.entry {
+            return "main".to_string();
+        }
         let name = self
             .module
             .function(def)
             .map(|f| f.name.clone())
             .unwrap_or_else(|| format!("__unknown_{}", def.0));
-        (self.request)(def, type_args.to_vec());
-        mangle(&name, type_args)
+        mangle(def, &name, type_args)
     }
 
     fn lower_expr(&mut self, e: &hir::Expr) -> Temp {

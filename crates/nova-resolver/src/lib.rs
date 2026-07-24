@@ -550,6 +550,18 @@ fn resolve_import(
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let span = imp.path.span;
+    // Only single-segment module imports are supported. A qualified or nested
+    // path (`a::b`) would otherwise silently drop its leading segments and bind
+    // an unrelated module; reject it explicitly like `import ... as`.
+    if imp.path.value.segments.len() > 1 {
+        diagnostics.push(unsupported(
+            span,
+            "qualified or nested import paths (`a::b`) are not supported yet; \
+             import a top-level module by its name",
+        ));
+        return;
+    }
     let target_name = imp
         .path
         .value
@@ -557,7 +569,6 @@ fn resolve_import(
         .last()
         .map(|s| s.value.as_str())
         .unwrap_or("");
-    let span = imp.path.span;
     let Some(&target) = by_name.get(target_name) else {
         diagnostics.push(
             Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
@@ -911,11 +922,28 @@ mod tests {
     #[test]
     fn same_name_in_two_modules_does_not_collide() {
         // Each module has its own `helper`; no duplicate-definition error.
+        // (Codegen keeps them distinct via DefId-mangled symbols; see the
+        // `modules_same_name_functions_dispatch_correctly` CLI test.)
         let p = resolve_two(
             "fn helper() -> Int { 1 }\nfn main() { }\n",
             "pub fn helper() -> Int { 2 }\n",
         );
         assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    }
+
+    #[test]
+    fn qualified_import_path_is_rejected() {
+        // `import lib::extra` is a qualified/nested path; it must be reported,
+        // not silently resolved to the last segment's module.
+        let p = resolve_two(
+            "import lib::extra\nfn main() { }\n",
+            "pub fn add() -> Int { 0 }\n",
+        );
+        assert!(
+            error_codes(&p.diagnostics).contains(&"E0900"),
+            "{:?}",
+            p.diagnostics
+        );
     }
 
     #[test]
