@@ -814,24 +814,29 @@ impl<'a> Checker<'a> {
         generics
             .iter()
             .map(|g| {
-                g.bounds
-                    .iter()
-                    .filter_map(|b| {
-                        let name = b
-                            .value
-                            .segments
-                            .last()
-                            .map(|s| s.value.as_str())
-                            .unwrap_or("");
-                        match self.defs.resolve_trait(self.cur_module, name) {
-                            Some(id) => Some(id),
-                            None => {
-                                self.error("E0001", format!("cannot find trait `{name}`"), b.span);
-                                None
+                let mut ids: Vec<DefId> = Vec::new();
+                for b in &g.bounds {
+                    let name = b
+                        .value
+                        .segments
+                        .last()
+                        .map(|s| s.value.as_str())
+                        .unwrap_or("");
+                    match self.defs.resolve_trait(self.cur_module, name) {
+                        // Deduplicate: `T: Show + Show` means the same as
+                        // `T: Show`. A repeated trait must not later read as two
+                        // distinct method providers (a false E0015 ambiguity).
+                        Some(id) => {
+                            if !ids.contains(&id) {
+                                ids.push(id);
                             }
                         }
-                    })
-                    .collect()
+                        None => {
+                            self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                        }
+                    }
+                }
+                ids
             })
             .collect()
     }
@@ -873,7 +878,13 @@ impl<'a> Checker<'a> {
                     .map(|s| s.value.as_str())
                     .unwrap_or("");
                 match self.defs.resolve_trait(self.cur_module, name) {
-                    Some(id) => slot.push(id),
+                    // Deduplicate against inline and earlier `where` bounds, so a
+                    // trait named twice is not read as two method providers.
+                    Some(id) => {
+                        if !slot.contains(&id) {
+                            slot.push(id);
+                        }
+                    }
                     None => self.error("E0001", format!("cannot find trait `{name}`"), b.span),
                 }
             }
@@ -5197,6 +5208,27 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn redundant_same_trait_bounds_are_not_ambiguous() {
+        // Naming a trait more than once is redundant, not ambiguous: it must not
+        // read as two providers of the method (a false E0015). Covers inline+where
+        // accumulation, a duplicated `where` bound, and a duplicated inline bound.
+        for sig in [
+            "fn label<T: Show>(x: T) -> String where T: Show { x.show() }",
+            "fn label<T>(x: T) -> String where T: Show, T: Show { x.show() }",
+            "fn label<T: Show + Show>(x: T) -> String { x.show() }",
+        ] {
+            let src = format!(
+                "trait Show {{ fn show(self) -> String }}\n\
+                 impl Show for Int {{ fn show(self) -> String {{ \"i\" }} }}\n\
+                 {sig}\n\
+                 fn main() {{ println(label(1)) }}"
+            );
+            let r = check_src(&src);
+            assert!(r.diagnostics.is_empty(), "sig `{sig}`: {:?}", r.diagnostics);
+        }
     }
 
     #[test]
