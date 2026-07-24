@@ -444,6 +444,10 @@ impl<'a> Checker<'a> {
             // trait-impl method must match the (non-generic) trait method.
             let allow_method_generics = trait_id.is_none();
             let mut methods = Vec::new();
+            // Set when a method is rejected as unsupported (a generic method in a
+            // trait impl); conformance is then skipped so an already-invalid impl
+            // doesn't also emit cascading "missing/mismatched method" errors.
+            let mut impl_rejected_method = false;
             for (mi, f) in block.functions.iter().enumerate() {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
                     continue;
@@ -457,6 +461,11 @@ impl<'a> Checker<'a> {
                         "generic methods in trait impls are not supported yet",
                         f.name.span,
                     );
+                    // The method is already rejected; skip building its signature
+                    // (its generic names aren't in scope, which would misreport a
+                    // false E0001 "cannot find type") and skip conformance below.
+                    impl_rejected_method = true;
+                    continue;
                 }
                 // The method's generic scope: the impl's parameters (`impl<T> …`)
                 // at indices [0, impl_count), then the method's own parameters
@@ -468,17 +477,26 @@ impl<'a> Checker<'a> {
                 let mut bounds = impl_bounds.clone();
                 let mut method_generic_count = 0u32;
                 if allow_method_generics {
+                    let mut seen: Vec<&str> = Vec::new();
                     for (j, g) in f.generics.iter().enumerate() {
-                        if impl_generics.contains_key(&g.name.value) {
+                        let gname = g.name.value.as_str();
+                        if impl_generics.contains_key(gname) {
+                            self.error(
+                                "E0403",
+                                format!("the name `{gname}` shadows the impl's generic parameter"),
+                                g.name.span,
+                            );
+                        } else if seen.contains(&gname) {
                             self.error(
                                 "E0403",
                                 format!(
-                                    "the name `{}` shadows the impl's generic parameter",
-                                    g.name.value
+                                    "the name `{gname}` is already used for a generic \
+                                     parameter of this method"
                                 ),
                                 g.name.span,
                             );
                         }
+                        seen.push(gname);
                         scope.insert(g.name.value.clone(), impl_count + j as u32);
                     }
                     bounds.extend(self.resolve_bounds(&f.generics));
@@ -509,9 +527,13 @@ impl<'a> Checker<'a> {
             }
 
             // Conformance: a trait impl must define exactly the trait's
-            // methods that lack defaults, and nothing foreign.
+            // methods that lack defaults, and nothing foreign. Skipped when a
+            // method was already rejected as unsupported, so the sole diagnostic
+            // is that rejection rather than a cascade of conformance errors.
             if let Some(tid) = trait_id {
-                self.check_impl_conformance(tid, &methods, &self_ty, block.ty.span);
+                if !impl_rejected_method {
+                    self.check_impl_conformance(tid, &methods, &self_ty, block.ty.span);
+                }
             }
 
             self.impls.push(hir::ImplInfo {
@@ -4188,6 +4210,43 @@ mod tests {
              fn main() { let a = Box { value: 1 }\n println(\"${a.weird(2)}\") }",
         );
         assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_method_generic_name_reports_e0403() {
+        // Two method generics with the same name — rejected at the declaration,
+        // not left as a silently-uncallable method.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T> Box<T> { fn weird<U, U>(self, a: U, b: U) -> U { a } }\n\
+             fn main() { let a = Box { value: 1 }\n println(\"${a.value}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_trait_impl_method_reports_only_e0900() {
+        // A generic method in a trait impl is rejected with E0900 as the SOLE
+        // diagnostic: no false E0001 for the method's own generic and no
+        // cascading E0072 conformance error.
+        let r = check_src(
+            "trait Mapper { fn remap(self) -> Int }\n\
+             record Box<T> { value: T }\n\
+             impl<T> Mapper for Box<T> { fn remap<U>(self, x: U) -> Int { 0 } }\n\
+             fn main() { }",
+        );
+        let codes = error_codes(&r);
+        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(
+            !codes.contains(&"E0001"),
+            "spurious E0001: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            !codes.contains(&"E0072"),
+            "spurious E0072: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
