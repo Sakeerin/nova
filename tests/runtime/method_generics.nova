@@ -1,0 +1,44 @@
+// Method-level generics: a method introduces its own type parameter(s) on top
+// of the impl's, inferred from the call arguments and checked against bounds.
+
+record Box<T> { value: T }
+
+trait Show { fn show(self) -> String }
+impl Show for Int { fn show(self) -> String { "int(${self})" } }
+impl Show for Bool { fn show(self) -> String { if self { "yes" } else { "no" } } }
+
+impl<T> Box<T> {
+    fn get(self) -> T { self.value }
+
+    // `map` introduces its own `U`, distinct from the impl's `T`; `U` is
+    // recovered from the mapper's return type.
+    fn map<U>(self, f: fn(T) -> U) -> Box<U> {
+        Box { value: f(self.value) }
+    }
+
+    // A bounded method generic, unrelated to the impl's `T`.
+    fn tag<U: Show>(self, extra: U) -> String {
+        extra.show()
+    }
+}
+
+fn double(n: Int) -> Int { n * 2 }
+fn describe(n: Int) -> String { "n=${n}" }
+
+fn main() {
+    let a = Box { value: 5 }
+
+    // map Int -> Int, then Int -> String: two distinct `U` instantiations.
+    let b = a.map(double)
+    let c = b.map(describe)
+    println("b = ${b.get()}")
+    println("c = ${c.get()}")
+
+    // map via a closure literal.
+    let d = a.map(|x| x + 100)
+    println("d = ${d.get()}")
+
+    // the bounded method generic at two different `U` types.
+    println("tag int  = ${a.tag(42)}")
+    println("tag bool = ${a.tag(true)}")
+}

@@ -222,6 +222,45 @@ fn conditional_generic_impl_unsatisfied_reports_e0013() {
 }
 
 #[test]
+fn method_generic_monomorphizes_per_instance() {
+    // `Box<T>::map<U>` used at U=Int and U=String produces two distinct
+    // monomorphized method instances (the method's own generic, not the impl's).
+    let mir = mir_for(
+        "record Box<T> { value: T }\n\
+         impl<T> Box<T> {\n\
+             fn map<U>(self, f: fn(T) -> U) -> Box<U> { Box { value: f(self.value) } }\n\
+         }\n\
+         fn twice(n: Int) -> Int { n * 2 }\n\
+         fn label(n: Int) -> String { \"${n}\" }\n\
+         fn main() {\n\
+             let a = Box { value: 5 }\n\
+             let b = a.map(twice)\n\
+             let c = a.map(label)\n\
+             println(\"${b.value} ${c.value}\")\n\
+         }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().filter(|n| n.contains("map")).count() >= 2,
+        "expected two `map` instances, got {names:?}"
+    );
+}
+
+#[test]
+fn method_generic_bound_unsatisfied_reports_e0013() {
+    // `tag<U: Show>` called with a `Bool` (no `Show for Bool`) — the method's
+    // own generic bound must be checked at monomorphization.
+    let codes = diagnostics_for(
+        "record Box<T> { value: T }\n\
+         trait Show { fn show(self) -> String }\n\
+         impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+         impl<T> Box<T> { fn tag<U: Show>(self, x: U) -> String { x.show() } }\n\
+         fn main() { let a = Box { value: 1 }\n println(a.tag(true)) }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
 fn repeated_param_trait_impl_mismatch_reports_e0013() {
     // A trait impl on `Pair<T, T>` must not satisfy a bound for
     // `Pair<Int, String>` — structural matching, not just head, gates the

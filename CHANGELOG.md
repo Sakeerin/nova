@@ -21,6 +21,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trait) work under both backends. Dangling imports and private-item imports
   report `E0001`. (`import as` aliases and qualified `m::name` paths are later
   increments.)
+- Method-level generics (Phase 2.0): an inherent method may introduce its own
+  generic parameters on top of the impl's — e.g. `impl<T> Box<T> { fn map<U>(self,
+  f: fn(T) -> U) -> Box<U> { … } }`. The method's parameters are inferred from
+  the call arguments (the impl's from the receiver), inline bounds (`<U: Show>`)
+  are enforced at monomorphization, and each concrete instantiation is
+  monomorphized separately. Implemented via a flat generic layout — impl
+  parameters first, method parameters after — so substitution, bound checking,
+  and monomorphization stay uniform. Generic parameters that shadow an impl
+  parameter report `E0403`. (Generic *trait* methods remain a later increment,
+  reported as `E0900`.)
+
+### Fixed (Phase 2)
+- Cross-module symbol collision: two modules each defining a same-named item
+  (function, generic function, or same-named type's inherent method) no longer
+  collapse to one symbol at monomorphization. Symbols are now mangled by their
+  owning `DefId`, fixing silent wrong-dispatch and a memory-unsafe type
+  confusion; qualified/nested import paths (`a::b`) are rejected with `E0900`.
 
 ## [0.1.0] - 2026-07-23
 
