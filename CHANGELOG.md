@@ -52,6 +52,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   collapse to one symbol at monomorphization. Symbols are now mangled by their
   owning `DefId`, fixing silent wrong-dispatch and a memory-unsafe type
   confusion; qualified/nested import paths (`a::b`) are rejected with `E0900`.
+- A generic sum type used as a record field or a sum-variant payload
+  (e.g. `record Slot { tag: Option<Int> }`) no longer gets a spurious `E0012`
+  "expects 0 type arguments": type arity is precomputed, so it no longer depends
+  on collection order (this also fixes forward-referenced generic records).
+- Importing a module that exports a name coinciding with a prelude name
+  (`Option`/`Result`/`Some`/`None`/`Ok`/`Err`) no longer raises a spurious
+  `E0002`: the prelude is glob-imported last, as the lowest-priority binding, so
+  a local definition *or* an import of the same name shadows it.
+- Nested generic type annotations whose closing brackets abut (`Option<Option<
+  Int>>`, `Box<Box<Int>>`) now parse: a glued `>>`/`>>>` token is split when
+  closing generic argument lists (the `>>` right-shift operator is unaffected).
 
 ## [0.1.0] - 2026-07-23
 

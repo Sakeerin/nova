@@ -42,6 +42,28 @@ fn parse_fixture(fixture: &str) -> (bool, Vec<String>) {
 }
 
 #[test]
+fn nested_generics_with_glued_gt_parse() {
+    // Closing angle brackets that abut (`>>`) lex as one token; the parser must
+    // still close nested generic argument lists (regression: Option<Option<T>>).
+    let (_, errs) = parse_file("nested", "fn f() -> Option<Option<Int>> { None }\n");
+    assert_eq!(errs, 0, "Option<Option<Int>> should parse");
+    let (_, e2) = parse_file(
+        "triple",
+        "record Box<T> { value: T }\nfn f(b: Box<Box<Box<Int>>>) -> Int { 0 }\n",
+    );
+    assert_eq!(e2, 0, "Box<Box<Box<Int>>> should parse");
+    let (_, e3) = parse_file("res", "fn f() -> Result<Int, Option<Int>> { Ok(1) }\n");
+    assert_eq!(e3, 0, "Result<Int, Option<Int>> should parse");
+}
+
+#[test]
+fn shift_right_operator_still_parses() {
+    // The nested-generics fix must not break the `>>` right-shift operator.
+    let (_, errs) = parse_file("shr", "fn main() { let x = 256 >> 2 }\n");
+    assert_eq!(errs, 0, "`256 >> 2` should parse");
+}
+
+#[test]
 fn fixture_hello() {
     let (ok, errs) = parse_fixture("hello");
     assert!(ok, "failed to parse hello.nova");

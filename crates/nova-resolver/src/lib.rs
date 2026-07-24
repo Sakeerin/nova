@@ -335,11 +335,6 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
         }
     }
 
-    // Glob the prelude's public names into every user module, without
-    // overriding a name the module already defines — so a program may still
-    // declare its own `Option`/`Result` and shadow the prelude.
-    import_prelude(&mut definitions, &exports[prelude_mid], prelude_mid);
-
     // Pass 2: resolve `import`s, binding other modules' public names.
     let by_name: FxHashMap<&str, usize> = all
         .iter()
@@ -360,6 +355,12 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
             }
         }
     }
+
+    // Glob the prelude's public names into every user module — LAST, so it is
+    // the lowest-priority binding: a name the module already defines or imports
+    // wins (no conflict), and only otherwise-unbound names fall through to the
+    // prelude. A program may thus define or import its own `Option`/`Result`.
+    import_prelude(&mut definitions, &exports[prelude_mid], prelude_mid);
 
     ProgramResolution {
         file: File { items: merged },
@@ -1066,6 +1067,19 @@ mod tests {
             r.definitions.def(opt).kind,
             DefKind::Sum { ref variants, .. } if variants.len() == 2 && variants[0].name == "Present"
         ));
+    }
+
+    #[test]
+    fn importing_a_prelude_name_from_a_module_is_allowed() {
+        // A user module may export a name coinciding with a prelude name; a glob
+        // import of it binds (shadowing the soft prelude), not a spurious E0002.
+        let p = resolve_two(
+            "import lib\nfn main() { }\n",
+            "pub type Status = | Ok | Fail\n",
+        );
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        // `Ok` resolves (to the imported Status variant), not rejected.
+        assert!(p.definitions.resolve_value(ModuleId(0), "Ok").is_some());
     }
 
     #[test]

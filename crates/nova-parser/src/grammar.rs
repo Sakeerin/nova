@@ -33,6 +33,11 @@ struct Parser<'a> {
     /// literal. Set by scrutinee positions (if/while/for/match conditions) to
     /// avoid ambiguity with the following `{ block }`.
     no_struct_literal: bool,
+    /// Count of closing `>` "borrowed" from a `>>` token while closing nested
+    /// generic argument lists (`Option<Option<Int>>`). The lexer glues `>>`
+    /// into one token, so closing an inner list splits it: one `>` closes the
+    /// inner list now, the remainder is recorded here for the enclosing list.
+    pending_gt: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -43,6 +48,7 @@ impl<'a> Parser<'a> {
             file,
             errors: Vec::new(),
             no_struct_literal: false,
+            pending_gt: 0,
         }
     }
 
@@ -859,6 +865,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether the cursor is at a closing `>` for a generic argument list: a
+    /// `>` pending from an earlier split `>>`, or a `>` / `>>` token.
+    fn at_generic_close(&self) -> bool {
+        self.pending_gt > 0 || matches!(self.peek(), Token::Gt | Token::GtGt)
+    }
+
+    /// Consume one closing `>`. A glued `>>` token yields one `>` now and
+    /// records the other in `pending_gt` for the enclosing list, so
+    /// `Option<Option<Int>>` closes correctly. Returns false if not at a `>`.
+    fn eat_generic_close(&mut self) -> bool {
+        if self.pending_gt > 0 {
+            self.pending_gt -= 1;
+            return true;
+        }
+        match self.peek() {
+            Token::Gt => {
+                self.advance();
+                true
+            }
+            Token::GtGt => {
+                self.advance();
+                self.pending_gt += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn parse_generic_args_opt(&mut self, ctx: &str) -> Vec<Spanned<Type>> {
         if !self.check(&Token::Lt) {
             return Vec::new();
@@ -866,23 +900,31 @@ impl<'a> Parser<'a> {
         // Peek ahead: if next after `<` looks like a type, treat as generic args.
         // Otherwise this `<` might be a comparison operator.
         let saved = self.pos;
+        let saved_pending = self.pending_gt;
         self.advance(); // consume `<`
         let mut args = Vec::new();
-        while !self.check(&Token::Gt) && !self.is_at_end() {
+        while !self.at_generic_close() && !self.is_at_end() {
             if let Some(t) = self.parse_type(ctx) {
                 args.push(t);
             } else {
                 // Wasn't a type — roll back
                 self.pos = saved;
+                self.pending_gt = saved_pending;
                 return Vec::new();
+            }
+            // A `>` split from a `>>` now closes this list; a following comma (if
+            // any) belongs to an enclosing list, so stop here.
+            if self.pending_gt > 0 {
+                break;
             }
             if self.eat(&Token::Comma).is_none() {
                 break;
             }
         }
-        if self.eat(&Token::Gt).is_none() {
+        if !self.eat_generic_close() {
             // Didn't close — roll back
             self.pos = saved;
+            self.pending_gt = saved_pending;
             return Vec::new();
         }
         args

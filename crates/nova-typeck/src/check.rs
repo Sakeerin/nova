@@ -58,8 +58,10 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         impls: Vec::new(),
         extra_functions: Vec::new(),
         next_closure_def: defs.defs().len() as u32,
+        type_arity: FxHashMap::default(),
         diagnostics: Vec::new(),
     };
+    checker.collect_type_arities();
     checker.collect_records();
     checker.collect_sums();
     checker.collect_traits();
@@ -118,6 +120,10 @@ struct Checker<'a> {
     /// Next synthetic `DefId` for a closure/wrapper (starts past all
     /// resolver-assigned defs so it never collides).
     next_closure_def: u32,
+    /// Generic-parameter arity of every record/sum type, precomputed so a
+    /// type's arity never depends on collection order (a field or variant may
+    /// reference a type collected later, including the implicit prelude).
+    type_arity: FxHashMap<DefId, u32>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -201,6 +207,32 @@ impl<'a> Checker<'a> {
                 generics: decl.generics.len() as u32,
                 fields,
             });
+        }
+    }
+
+    /// Precompute the generic arity of every record and sum type from the AST,
+    /// before any type is converted. A record field or variant payload may
+    /// mention a type whose `RecordType`/`SumType` entry has not been built yet
+    /// (collection order, or the implicit prelude registered last), so arity
+    /// must not be read from the incrementally-populated tables.
+    fn collect_type_arities(&mut self) {
+        let mut arities: Vec<(DefId, u32)> = Vec::new();
+        for (i, def) in self.defs.defs().iter().enumerate() {
+            let n = match &def.kind {
+                DefKind::Record { item_index } => match &self.file.items[*item_index].value {
+                    ast::Item::Record(r) => r.generics.len() as u32,
+                    _ => continue,
+                },
+                DefKind::Sum { item_index, .. } => match &self.file.items[*item_index].value {
+                    ast::Item::Type(t) => t.generics.len() as u32,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            arities.push((DefId(i as u32), n));
+        }
+        for (id, n) in arities {
+            self.type_arity.insert(id, n);
         }
     }
 
@@ -930,19 +962,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(def_id) = self.defs.resolve_type(self.cur_module, name) {
                     let is_record = matches!(self.defs.def(def_id).kind, DefKind::Record { .. });
-                    let expected = if is_record {
-                        self.records
-                            .iter()
-                            .find(|r| r.def_id == def_id)
-                            .map(|r| r.generics)
-                            .unwrap_or(0)
-                    } else {
-                        self.sums
-                            .iter()
-                            .find(|s| s.def_id == def_id)
-                            .map(|s| s.generics)
-                            .unwrap_or(0)
-                    };
+                    // Arity is precomputed (see `collect_type_arities`) so it is
+                    // independent of whether this type has been collected yet.
+                    let expected = self.type_arity.get(&def_id).copied().unwrap_or(0);
                     let converted: Vec<Ty> =
                         args.iter().map(|a| self.convert_ty(a, generics)).collect();
                     if converted.len() != expected as usize {
@@ -5231,6 +5253,28 @@ mod tests {
             let r = check_src(&src);
             assert!(r.diagnostics.is_empty(), "sig `{sig}`: {:?}", r.diagnostics);
         }
+    }
+
+    #[test]
+    fn generic_sum_in_field_or_payload_typechecks() {
+        // A generic sum used as a record field or a sum-variant payload must not
+        // be mis-read as arity 0 (regression: spurious E0012). Covers the prelude
+        // `Option`/`Result` (collected last) and a forward-referenced record.
+        let r = check_src(
+            "record Slot { tag: Option<Int> }\n\
+             type Wrapper = | W(Result<Int, String>) | Empty\n\
+             fn main() {\n\
+                 let s = Slot { tag: Some(1) }\n\
+                 match s.tag { Some(v) => println(\"${v}\"), None => println(\"n\") }\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let r2 = check_src(
+            "record Slot { b: Box<Int> }\n\
+             record Box<T> { value: T }\n\
+             fn main() { }",
+        );
+        assert!(r2.diagnostics.is_empty(), "{:?}", r2.diagnostics);
     }
 
     #[test]
