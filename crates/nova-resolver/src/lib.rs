@@ -12,7 +12,7 @@
 //! of the pipeline.
 
 use indexmap::IndexMap;
-use nova_ast::item::{Import, ImportKind, TypeDef};
+use nova_ast::item::{ExternItem, Import, ImportKind, TypeDef};
 use nova_ast::{File, Item};
 use nova_diagnostics::{Diagnostic, Span};
 use rustc_hash::FxHashMap;
@@ -67,6 +67,9 @@ pub enum DefKind {
         method_index: usize,
         owner: MethodOwner,
     },
+    /// An `extern` function declaration (a C-ABI import, no Nova body).
+    /// `fn_index` selects the declaration within the extern block's `items`.
+    ExternFn { item_index: usize, fn_index: usize },
 }
 
 /// Where a [`DefKind::Method`] lives.
@@ -207,6 +210,21 @@ impl Definitions {
             .enumerate()
             .filter_map(|(i, d)| match d.kind {
                 DefKind::Fn { item_index } => Some((DefId(i as u32), item_index)),
+                _ => None,
+            })
+    }
+
+    /// Iterate all `extern` function declarations as
+    /// `(DefId, item_index, fn_index)` (fn_index into the extern block's items).
+    pub fn extern_functions(&self) -> impl Iterator<Item = (DefId, usize, usize)> + '_ {
+        self.defs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d.kind {
+                DefKind::ExternFn {
+                    item_index,
+                    fn_index,
+                } => Some((DefId(i as u32), item_index, fn_index)),
                 _ => None,
             })
     }
@@ -611,11 +629,36 @@ fn collect_item(
                 );
             }
         }
-        Item::Extern(_) => {
-            diagnostics.push(Diagnostic::error(
-                "E0900",
-                "extern blocks are not supported yet in the Phase 1 compiler",
-            ));
+        Item::Extern(block) => {
+            // Each declaration binds as a callable value under its (unmangled)
+            // C symbol name. ABI / signature validity is checked in typeck.
+            // Extern fns are module-private (the grammar has no `pub` on them).
+            for (fn_index, ext_item) in block.items.iter().enumerate() {
+                let ExternItem::Fn(sig) = ext_item;
+                let name = sig.name.value.clone();
+                let span = sig.name.span;
+                let id = push_def(
+                    defs,
+                    Def {
+                        name: name.clone(),
+                        span,
+                        kind: DefKind::ExternFn {
+                            item_index,
+                            fn_index,
+                        },
+                    },
+                );
+                insert_value(
+                    scope,
+                    exp,
+                    first_value,
+                    diagnostics,
+                    name,
+                    span,
+                    Res::Def(id),
+                    false,
+                );
+            }
         }
         // `import`s are handled in pass 2; `module` declarations carry no items.
         Item::Import(_) | Item::Module(_) => {}
@@ -1049,6 +1092,19 @@ mod tests {
         assert!(matches!(
             r.definitions.resolve_value(ModuleId(0), "Err"),
             Some(Res::Variant(_, 1))
+        ));
+    }
+
+    #[test]
+    fn extern_fn_resolves_as_callable_extern_def() {
+        let r = resolve_src("extern \"C\" { fn sqrt(x: Float) -> Float }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let Some(Res::Def(id)) = r.definitions.resolve_value(ModuleId(0), "sqrt") else {
+            panic!("sqrt should resolve to a Def");
+        };
+        assert!(matches!(
+            r.definitions.def(id).kind,
+            DefKind::ExternFn { .. }
         ));
     }
 

@@ -268,6 +268,28 @@ fn prelude_option_result_build_standalone() {
 }
 
 #[test]
+fn extern_ffi_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/extern_ffi.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/extern_ffi.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn extern_ffi_build_standalone() {
+    let out = build_and_run("tests/runtime/extern_ffi.nova", "extern_ffi");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/extern_ffi.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn modules_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
         .expect("expected-output fixture exists")

@@ -199,6 +199,10 @@ impl<'a> Lowerer<'a> {
         if def == self.entry {
             return "main".to_string();
         }
+        // An `extern` (FFI) callee is emitted under its raw C symbol, unmangled.
+        if let Some(ext) = self.module.extern_fn(def) {
+            return ext.symbol.clone();
+        }
         let name = self
             .module
             .function(def)

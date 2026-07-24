@@ -65,6 +65,7 @@ pub fn compile_jit(mir: &MirModule) -> Result<CompiledProgram> {
     let functions = {
         let mut cg = Codegen::new(&mut module);
         cg.declare_runtime()?;
+        cg.declare_externs(mir)?;
         cg.declare_functions(mir, None)?;
         cg.define_functions(mir)?;
         cg.functions
@@ -100,6 +101,7 @@ pub fn compile_object(mir: &MirModule) -> Result<Vec<u8>> {
     {
         let mut cg = Codegen::new(&mut module);
         cg.declare_runtime()?;
+        cg.declare_externs(mir)?;
         cg.declare_functions(mir, Some(NOVA_ENTRY_SYMBOL))?;
         cg.define_functions(mir)?;
         cg.emit_c_main()?;
@@ -210,6 +212,22 @@ impl<'m, M: ClModule> Codegen<'m, M> {
             .declare_function("nova_rt_str_new", Linkage::Import, &sig)
             .context("declaring nova_rt_str_new")?;
         self.runtime.insert("nova_rt_str_new", id);
+        Ok(())
+    }
+
+    /// Declare each `extern` (FFI) symbol as an imported function, registered
+    /// by its raw name so a `Stmt::Call` to that name resolves. The symbol is
+    /// satisfied at run time by the JIT's dlsym fallback (`nova run`) or by the
+    /// system linker against the C runtime (`nova build`).
+    fn declare_externs(&mut self, mir: &MirModule) -> Result<()> {
+        for ext in &mir.externs {
+            let sig = self.make_signature(&ext.params, ext.ret);
+            let id = self
+                .module
+                .declare_function(&ext.symbol, Linkage::Import, &sig)
+                .with_context(|| format!("declaring extern `{}`", ext.symbol))?;
+            self.functions.insert(ext.symbol.clone(), id);
+        }
         Ok(())
     }
 

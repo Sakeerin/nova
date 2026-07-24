@@ -45,6 +45,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every user module, so they use the ordinary generic sum-type and
   monomorphization machinery (and cost nothing when unused). A program may still
   define its own `Option`/`Result`, which shadows the prelude.
+- extern / FFI (Phase 2.0): `extern "C" { fn sqrt(x: Float) -> Float }` declares
+  external C functions callable like ordinary functions. Symbols resolve against
+  the C runtime with no extra configuration — the Cranelift JIT's dlsym fallback
+  under `nova run`, and the system linker under `nova build`. The emitted symbol
+  is the raw (unmangled) declared name, imported into both backends. Supported:
+  the C ABI (`"C"` or omitted) and FFI-safe scalar types — `Int`↔`int64_t`,
+  `Float`↔`double`, `Bool`↔`_Bool`, and a unit (`void`) return. Non-scalar types
+  (String, records, arrays — GC heap values), other ABIs, and generic/async/
+  `where` extern declarations are rejected with `E0900`. (Pointers, strings,
+  variadics, and `link_name` are later increments.)
 
 ### Fixed (Phase 2)
 - Cross-module symbol collision: two modules each defining a same-named item

@@ -2,7 +2,7 @@
 //! desugaring, and Maranget-based exhaustiveness/reachability analysis.
 
 use nova_ast as ast;
-use nova_ast::item::{TraitItem, TypeDef};
+use nova_ast::item::{ExternItem, TraitItem, TypeDef};
 use nova_diagnostics::{Diagnostic, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
@@ -59,6 +59,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         extra_functions: Vec::new(),
         next_closure_def: defs.defs().len() as u32,
         type_arity: FxHashMap::default(),
+        externs: Vec::new(),
         diagnostics: Vec::new(),
     };
     checker.collect_type_arities();
@@ -67,6 +68,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     checker.collect_traits();
     checker.collect_impls();
     checker.collect_signatures();
+    checker.collect_externs();
 
     let mut functions = Vec::new();
     let fn_ids: Vec<(DefId, usize)> = defs.functions().collect();
@@ -97,6 +99,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
             traits: checker.traits,
             impls: checker.impls,
             functions,
+            externs: checker.externs,
         },
         diagnostics: checker.diagnostics,
     }
@@ -124,6 +127,8 @@ struct Checker<'a> {
     /// type's arity never depends on collection order (a field or variant may
     /// reference a type collected later, including the implicit prelude).
     type_arity: FxHashMap<DefId, u32>,
+    /// `extern` (FFI) function declarations, collected into the HIR module.
+    externs: Vec<hir::ExternFn>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -824,6 +829,101 @@ impl<'a> Checker<'a> {
                     params: Vec::new(),
                     ret,
                 },
+            );
+        }
+    }
+
+    /// Collect and validate `extern` (FFI) function declarations. Each becomes a
+    /// zero-generic `FnSig` (so calls type-check through the normal path) plus a
+    /// `hir::ExternFn` carrying its raw C symbol for codegen. Only the C ABI and
+    /// FFI-safe scalar types are supported; anything else is a diagnostic.
+    fn collect_externs(&mut self) {
+        let externs: Vec<(DefId, usize, usize)> = self.defs.extern_functions().collect();
+        for (def_id, item_index, fn_index) in externs {
+            let ast::Item::Extern(block) = &self.file.items[item_index].value else {
+                continue;
+            };
+            let ExternItem::Fn(sig) = &block.items[fn_index];
+            self.cur_module = self.defs.module_of(item_index);
+
+            // Only the C ABI (explicit `"C"` or omitted) is supported.
+            if !matches!(block.abi.as_deref(), None | Some("C")) {
+                let abi = block.abi.clone().unwrap_or_default();
+                self.error(
+                    "E0900",
+                    format!("extern ABI `\"{abi}\"` is not supported; only the C ABI is supported"),
+                    sig.name.span,
+                );
+            }
+            if sig.is_async {
+                self.unsupported(sig.name.span, "async extern functions");
+            }
+            if !sig.where_clause.is_empty() {
+                self.unsupported(sig.name.span, "`where` clauses on extern functions");
+            }
+            if !sig.generics.is_empty() {
+                // Skip type conversion: the generic params aren't in scope, which
+                // would cascade a false "cannot find type" on top of this error.
+                self.unsupported(sig.name.span, "generic extern functions");
+                continue;
+            }
+
+            let empty = FxHashMap::default();
+            let params: Vec<Ty> = sig
+                .params
+                .iter()
+                .map(|p| {
+                    let ty = self.convert_ty(&p.ty, &empty);
+                    self.require_ffi_safe(&ty, p.ty.span, false);
+                    ty
+                })
+                .collect();
+            let ret = match &sig.return_ty {
+                Some(t) => {
+                    let ty = self.convert_ty(t, &empty);
+                    self.require_ffi_safe(&ty, t.span, true);
+                    ty
+                }
+                None => Ty::Unit,
+            };
+
+            self.sigs.insert(
+                def_id,
+                FnSig {
+                    generics: 0,
+                    bounds: Vec::new(),
+                    params: params.clone(),
+                    ret: ret.clone(),
+                },
+            );
+            self.externs.push(hir::ExternFn {
+                def_id,
+                symbol: sig.name.value.clone(),
+                params,
+                ret,
+            });
+        }
+    }
+
+    /// Reject a non-FFI-safe type in an `extern` signature. The FFI-safe types
+    /// are the scalars `Int`, `Float`, `Bool` (and, for a return, unit / `void`).
+    fn require_ffi_safe(&mut self, ty: &Ty, span: Span, is_return: bool) {
+        let ok = match ty {
+            Ty::Int | Ty::Float | Ty::Bool => true,
+            Ty::Unit => is_return,
+            // `convert_ty` already reported why this type is unusable.
+            Ty::Error => true,
+            _ => false,
+        };
+        if !ok {
+            self.error(
+                "E0900",
+                format!(
+                    "`{}` is not FFI-safe in an extern signature yet; only Int, Float, and Bool \
+                     (and a unit return) are supported",
+                    display_ty(ty, self.defs)
+                ),
+                span,
             );
         }
     }
@@ -1670,7 +1770,10 @@ impl<'a> Checker<'a> {
                 if fcx.lookup(name).is_none() {
                     match self.defs.resolve_value(self.cur_module, name) {
                         Some(Res::Def(def_id)) => {
-                            if let DefKind::Fn { .. } = self.defs.def(def_id).kind {
+                            if matches!(
+                                self.defs.def(def_id).kind,
+                                DefKind::Fn { .. } | DefKind::ExternFn { .. }
+                            ) {
                                 return self.check_direct_call(fcx, def_id, args, span);
                             }
                         }
@@ -5275,6 +5378,37 @@ mod tests {
              fn main() { }",
         );
         assert!(r2.diagnostics.is_empty(), "{:?}", r2.diagnostics);
+    }
+
+    #[test]
+    fn extern_scalar_signature_is_accepted() {
+        let r = check_src(
+            "extern \"C\" { fn sqrt(x: Float) -> Float\n fn llabs(x: Int) -> Int }\n\
+             fn main() { let r = sqrt(2.0)\n println(\"${r}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(r.module.externs.iter().any(|e| e.symbol == "sqrt"));
+    }
+
+    #[test]
+    fn extern_non_scalar_param_reports_e0900() {
+        let r = check_src("extern \"C\" { fn puts(s: String) -> Int }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn extern_unsupported_abi_reports_e0900() {
+        let r = check_src("extern \"stdcall\" { fn foo() -> Int }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_extern_reports_e0900_without_cascade() {
+        let r = check_src("extern \"C\" { fn id<T>(x: T) -> T }\nfn main() { }");
+        let codes = error_codes(&r);
+        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        // The generic extern short-circuits, so no false "cannot find type `T`".
+        assert!(!codes.contains(&"E0001"), "cascade: {:?}", r.diagnostics);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use nova_resolver::DefId;
 use rustc_hash::FxHashSet;
 
 use crate::lower::lower_function;
-use crate::{mangle, Module};
+use crate::{mangle, mir_ty, ExternDecl, Module};
 
 /// Lower a typed HIR module to monomorphized MIR.
 ///
@@ -38,6 +38,19 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
 
     while let Some((def_id, type_args)) = worklist.pop() {
         let Some(func) = module.function(def_id) else {
+            // Not a Nova function: if it is an `extern` declaration, record it
+            // (a leaf — no body to lower) so codegen imports its raw C symbol.
+            // Deduped by symbol via the shared `done` set (raw symbols never
+            // collide with `name.<defid>`-mangled function names).
+            if let Some(ext) = module.extern_fn(def_id) {
+                if done.insert(ext.symbol.clone()) {
+                    mir.externs.push(ExternDecl {
+                        symbol: ext.symbol.clone(),
+                        params: ext.params.iter().map(mir_ty).collect(),
+                        ret: mir_ty(&ext.ret),
+                    });
+                }
+            }
             continue;
         };
         // The entry point keeps the bare symbol `main` (the backends look it up

@@ -49,6 +49,17 @@ pub struct BlockId(pub u32);
 #[derive(Debug, Default)]
 pub struct Module {
     pub functions: Vec<Function>,
+    /// `extern` (FFI) symbols the program calls, to be declared as imports.
+    pub externs: Vec<ExternDecl>,
+}
+
+/// An imported external (C-ABI) function: its raw symbol and ABI classes.
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    /// The raw C symbol to import and call (never mangled).
+    pub symbol: String,
+    pub params: Vec<MirTy>,
+    pub ret: MirTy,
 }
 
 /// A monomorphized function.

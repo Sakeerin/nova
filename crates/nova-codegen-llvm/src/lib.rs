@@ -57,6 +57,7 @@ pub fn compile_ir(mir: &Module) -> Result<String> {
         .functions
         .iter()
         .map(|f| (f.name.as_str(), f.ret))
+        .chain(mir.externs.iter().map(|e| (e.symbol.as_str(), e.ret)))
         .collect();
 
     let mut strings: Vec<String> = Vec::new();
@@ -82,6 +83,18 @@ pub fn compile_ir(mir: &Module) -> Result<String> {
     for decl in DECLS {
         out.push_str(decl);
         out.push('\n');
+    }
+    // Declare each extern (FFI) symbol; resolved at run time by the system
+    // linker against the C runtime (the call sites spell `@"symbol"`).
+    for ext in &mir.externs {
+        let params: Vec<&str> = ext.params.iter().map(|&t| llty(t)).collect();
+        let _ = writeln!(
+            out,
+            "declare {} @\"{}\"({})",
+            llty(ext.ret),
+            ext.symbol,
+            params.join(", ")
+        );
     }
     out.push('\n');
     out.push_str(&body);

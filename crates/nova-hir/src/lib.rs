@@ -225,6 +225,17 @@ pub struct Local {
     pub span: Span,
 }
 
+/// An `extern` function declaration: a C-ABI import with no Nova body. Only its
+/// signature and (unmangled) C symbol name are needed to declare and call it.
+#[derive(Debug, Clone)]
+pub struct ExternFn {
+    pub def_id: DefId,
+    /// The raw C symbol to import and call (never mangled).
+    pub symbol: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
 /// A fully checked module: type layouts plus typed functions.
 #[derive(Debug, Default)]
 pub struct Module {
@@ -233,9 +244,16 @@ pub struct Module {
     pub traits: Vec<TraitDef>,
     pub impls: Vec<ImplInfo>,
     pub functions: Vec<Function>,
+    /// `extern` (FFI) function declarations reachable in the program.
+    pub externs: Vec<ExternFn>,
 }
 
 impl Module {
+    /// Find the extern function declared under `def_id`, if any.
+    pub fn extern_fn(&self, def_id: DefId) -> Option<&ExternFn> {
+        self.externs.iter().find(|e| e.def_id == def_id)
+    }
+
     /// Find the sum type declared under `def_id`, if any.
     pub fn sum(&self, def_id: DefId) -> Option<&SumType> {
         self.sums.iter().find(|s| s.def_id == def_id)

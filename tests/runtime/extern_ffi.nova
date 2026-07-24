@@ -1,0 +1,16 @@
+// extern / FFI: declare C functions and call them directly. Symbols resolve
+// against the C runtime — via the JIT's dlsym fallback under `nova run`, and
+// via the system linker under `nova build`. Only the C ABI and FFI-safe scalar
+// types (Int -> int64_t, Float -> double, Bool -> _Bool) are supported.
+
+extern "C" {
+    fn sqrt(x: Float) -> Float
+    fn pow(base: Float, exp: Float) -> Float
+    fn llabs(x: Int) -> Int
+}
+
+fn main() {
+    println("sqrt(2) = ${sqrt(2.0)}")
+    println("pow(2, 10) = ${pow(2.0, 10.0)}")
+    println("llabs(-42) = ${llabs(-42)}")
+}
