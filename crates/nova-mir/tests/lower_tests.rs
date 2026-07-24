@@ -274,6 +274,40 @@ fn where_clause_bound_unsatisfied_reports_e0013() {
 }
 
 #[test]
+fn generic_trait_method_monomorphizes_per_instance() {
+    // A generic trait method (here a default body) called at U=Int and U=String
+    // produces two distinct monomorphized instances.
+    let mir = mir_for(
+        "trait Mapper { fn raw(self) -> Int\n \
+             fn remap<U>(self, f: fn(Int) -> U) -> U { f(self.raw()) } }\n\
+         record C { n: Int }\n\
+         impl Mapper for C { fn raw(self) -> Int { self.n } }\n\
+         fn dbl(n: Int) -> Int { n * 2 }\n\
+         fn lbl(n: Int) -> String { \"${n}\" }\n\
+         fn main() { let c = C { n: 1 }\n println(\"${c.remap(dbl)} ${c.remap(lbl)}\") }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().filter(|n| n.contains("remap")).count() >= 2,
+        "expected two `remap` instances, got {names:?}"
+    );
+}
+
+#[test]
+fn generic_trait_method_bound_unsatisfied_reports_e0013() {
+    // A method-generic bound on a trait method is enforced at monomorphization.
+    let codes = diagnostics_for(
+        "trait Show { fn show(self) -> String }\n\
+         impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+         trait Tagger { fn tag<U: Show>(self, x: U) -> String }\n\
+         record T { v: Int }\n\
+         impl Tagger for T { fn tag<U: Show>(self, x: U) -> String { x.show() } }\n\
+         fn main() { let t = T { v: 1 }\n println(t.tag(true)) }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
 fn repeated_param_trait_impl_mismatch_reports_e0013() {
     // A trait impl on `Pair<T, T>` must not satisfy a bound for
     // `Pair<Int, String>` — structural matching, not just head, gates the

@@ -375,9 +375,10 @@ impl<'a> Lowerer<'a> {
                 trait_id,
                 method,
                 self_ty,
+                type_args,
                 receiver,
                 args,
-            } => self.lower_trait_call(e, *trait_id, *method, self_ty, receiver, args),
+            } => self.lower_trait_call(e, *trait_id, *method, self_ty, type_args, receiver, args),
             K::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             K::LogicalAnd { lhs, rhs } => self.lower_logical(lhs, rhs, true),
             K::LogicalOr { lhs, rhs } => self.lower_logical(lhs, rhs, false),
@@ -583,12 +584,14 @@ impl<'a> Lowerer<'a> {
     /// Lower a trait method call. `self_ty` is concrete here (the enclosing
     /// function was already monomorphized), so we resolve to the impl's
     /// method and emit a direct, statically-dispatched call.
+    #[allow(clippy::too_many_arguments)]
     fn lower_trait_call(
         &mut self,
         e: &hir::Expr,
         trait_id: DefId,
         method: u32,
         self_ty: &Ty,
+        method_type_args: &[Ty],
         receiver: &hir::Expr,
         args: &[hir::Expr],
     ) -> Temp {
@@ -608,7 +611,8 @@ impl<'a> Lowerer<'a> {
         // instantiated with — the impl's own generics recovered from the
         // concrete self type for an impl method, or `[self_ty]` for a
         // `Self`-generic trait-default body.
-        let Some((target, type_args)) = self.module.resolve_method_full(trait_id, method, self_ty)
+        let Some((target, mut type_args)) =
+            self.module.resolve_method_full(trait_id, method, self_ty)
         else {
             let trait_name = self
                 .module
@@ -625,6 +629,11 @@ impl<'a> Lowerer<'a> {
             return dst.unwrap_or_else(|| self.unit_temp());
         };
 
+        // Append the trait method's own generic args after the impl/Self args,
+        // so the target is instantiated at the full flat type-arg list that its
+        // signature (impl params then method params, or Self then method params)
+        // expects.
+        type_args.extend(method_type_args.iter().cloned());
         let callee = self.callee_name(target, &type_args);
         self.push(Stmt::Call {
             dst,

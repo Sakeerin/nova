@@ -1,0 +1,29 @@
+// Generic trait methods: a trait method may declare its own generic parameters
+// (distinct from `Self`), inferred per call site and monomorphized separately
+// per concrete type — including default-method bodies.
+
+trait Mapper {
+    fn raw(self) -> Int
+    // `remap` introduces its own `U`, inferred from the mapper's return type.
+    // Provided as a default that dispatches to the required `raw`.
+    fn remap<U>(self, f: fn(Int) -> U) -> U { f(self.raw()) }
+}
+
+record Counter { n: Int }
+
+impl Mapper for Counter {
+    fn raw(self) -> Int { self.n }
+}
+
+fn double(n: Int) -> Int { n * 2 }
+fn label(n: Int) -> String { "count=${n}" }
+
+// Dispatch a generic trait method through a bound on a generic function.
+fn described<T: Mapper>(t: T) -> String { t.remap(label) }
+
+fn main() {
+    let c = Counter { n: 21 }
+    println("${c.remap(double)}") // U = Int    -> 42
+    println(c.remap(label))       // U = String -> count=21
+    println(described(c))         // via T: Mapper bound -> count=21
+}

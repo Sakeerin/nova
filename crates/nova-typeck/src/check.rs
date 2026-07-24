@@ -324,23 +324,14 @@ impl<'a> Checker<'a> {
                         name.span,
                     );
                 }
-                // Trait methods with their own generic parameters (e.g.
-                // `fn map<U>(self, …)`) are not supported yet — only *inherent*
-                // method generics are (see `collect_impls`). Bind the names to
-                // Param indices after `Self` so the signature conversion below
-                // doesn't also cascade an "unknown type" error.
+                // A generic trait method (`fn map<U>(self, …)`) binds `Self` at
+                // Param(0) and its own generic parameters at Param(1..).
                 let mut m_scope = self_scope.clone();
-                if !generics.is_empty() {
-                    self.error(
-                        "E0900",
-                        "generic trait methods are not supported yet",
-                        name.span,
-                    );
-                    for (j, g) in generics.iter().enumerate() {
-                        m_scope.insert(g.name.value.clone(), 1 + j as u32);
-                    }
+                for (j, g) in generics.iter().enumerate() {
+                    m_scope.insert(g.name.value.clone(), 1 + j as u32);
                 }
                 let (m_params, m_ret) = self.method_sig_parts(params, ret, &m_scope);
+                let m_bounds = self.resolve_bounds(generics);
                 let default_def = if is_default {
                     default_defs.get(&(item_index, mi)).copied()
                 } else {
@@ -350,6 +341,8 @@ impl<'a> Checker<'a> {
                     name: name.value.clone(),
                     params: m_params,
                     ret: m_ret,
+                    generics: generics.len() as u32,
+                    bounds: m_bounds,
                     default_def,
                 });
             }
@@ -388,20 +381,28 @@ impl<'a> Checker<'a> {
                 if f.is_async {
                     self.unsupported(f.name.span, "async methods");
                 }
-                // Generic trait methods and trait-method `where` clauses are
-                // rejected in the method-table loop above; don't build (or later
-                // check) a body signature for one.
-                if !f.generics.is_empty() || !f.where_clause.is_empty() {
+                // Trait-method `where` clauses are rejected in the table loop
+                // above; don't build a body signature for one.
+                if !f.where_clause.is_empty() {
                     continue;
                 }
-                let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &self_scope);
+                // `Self` at Param(0), the method's own generics at Param(1..).
+                let mut scope = self_scope.clone();
+                for (j, g) in f.generics.iter().enumerate() {
+                    scope.insert(g.name.value.clone(), 1 + j as u32);
+                }
+                let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
                 // Prepend the `self` receiver typed as `Self` (`Param(0)`).
                 params.insert(0, Ty::Param(0));
+                // One generic for `Self` (bounded by the trait) plus the method's
+                // own generics, at the same flat Param indices.
+                let mut bounds = vec![vec![trait_id]];
+                bounds.extend(self.resolve_bounds(&f.generics));
                 self.sigs.insert(
                     def_id,
                     FnSig {
-                        generics: 1,
-                        bounds: vec![vec![trait_id]],
+                        generics: 1 + f.generics.len() as u32,
+                        bounds,
                         params,
                         ret,
                     },
@@ -492,32 +493,13 @@ impl<'a> Checker<'a> {
             };
 
             let impl_count = block.generics.len() as u32;
-            // Method-level generics are supported on *inherent* methods only; a
-            // trait-impl method must match the (non-generic) trait method.
-            let allow_method_generics = trait_id.is_none();
             let mut methods = Vec::new();
-            // Set when a method is rejected as unsupported (a generic method in a
-            // trait impl); conformance is then skipped so an already-invalid impl
-            // doesn't also emit cascading "missing/mismatched method" errors.
-            let mut impl_rejected_method = false;
             for (mi, f) in block.functions.iter().enumerate() {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
                     continue;
                 };
                 if f.is_async {
                     self.unsupported(f.name.span, "async methods");
-                }
-                if !allow_method_generics && !f.generics.is_empty() {
-                    self.error(
-                        "E0900",
-                        "generic methods in trait impls are not supported yet",
-                        f.name.span,
-                    );
-                    // The method is already rejected; skip building its signature
-                    // (its generic names aren't in scope, which would misreport a
-                    // false E0001 "cannot find type") and skip conformance below.
-                    impl_rejected_method = true;
-                    continue;
                 }
                 // The method's generic scope: the impl's parameters (`impl<T> …`)
                 // at indices [0, impl_count), then the method's own parameters
@@ -527,33 +509,30 @@ impl<'a> Checker<'a> {
                 // checking, and monomorphization uniformly.
                 let mut scope = impl_generics.clone();
                 let mut bounds = impl_bounds.clone();
-                let mut method_generic_count = 0u32;
-                if allow_method_generics {
-                    let mut seen: Vec<&str> = Vec::new();
-                    for (j, g) in f.generics.iter().enumerate() {
-                        let gname = g.name.value.as_str();
-                        if impl_generics.contains_key(gname) {
-                            self.error(
-                                "E0403",
-                                format!("the name `{gname}` shadows the impl's generic parameter"),
-                                g.name.span,
-                            );
-                        } else if seen.contains(&gname) {
-                            self.error(
-                                "E0403",
-                                format!(
-                                    "the name `{gname}` is already used for a generic \
-                                     parameter of this method"
-                                ),
-                                g.name.span,
-                            );
-                        }
-                        seen.push(gname);
-                        scope.insert(g.name.value.clone(), impl_count + j as u32);
+                let mut seen: Vec<&str> = Vec::new();
+                for (j, g) in f.generics.iter().enumerate() {
+                    let gname = g.name.value.as_str();
+                    if impl_generics.contains_key(gname) {
+                        self.error(
+                            "E0403",
+                            format!("the name `{gname}` shadows the impl's generic parameter"),
+                            g.name.span,
+                        );
+                    } else if seen.contains(&gname) {
+                        self.error(
+                            "E0403",
+                            format!(
+                                "the name `{gname}` is already used for a generic \
+                                 parameter of this method"
+                            ),
+                            g.name.span,
+                        );
                     }
-                    bounds.extend(self.resolve_bounds(&f.generics));
-                    method_generic_count = f.generics.len() as u32;
+                    seen.push(gname);
+                    scope.insert(g.name.value.clone(), impl_count + j as u32);
                 }
+                bounds.extend(self.resolve_bounds(&f.generics));
+                let method_generic_count = f.generics.len() as u32;
                 // A method's `where` clause may constrain the impl's or its own
                 // type parameters; fold it into the combined bounds.
                 self.apply_where(&mut bounds, &f.where_clause, &scope);
@@ -582,13 +561,9 @@ impl<'a> Checker<'a> {
             }
 
             // Conformance: a trait impl must define exactly the trait's
-            // methods that lack defaults, and nothing foreign. Skipped when a
-            // method was already rejected as unsupported, so the sole diagnostic
-            // is that rejection rather than a cascade of conformance errors.
+            // methods that lack defaults, and nothing foreign.
             if let Some(tid) = trait_id {
-                if !impl_rejected_method {
-                    self.check_impl_conformance(tid, &methods, &self_ty, block.ty.span);
-                }
+                self.check_impl_conformance(tid, &methods, &self_ty, impl_count, block.ty.span);
             }
 
             self.impls.push(hir::ImplInfo {
@@ -672,12 +647,12 @@ impl<'a> Checker<'a> {
         trait_id: DefId,
         provided: &[(String, DefId)],
         self_ty: &Ty,
+        impl_count: u32,
         span: Span,
     ) {
         let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id).cloned() else {
             return;
         };
-        let subst = [self_ty.clone()];
         for (name, def_id) in provided {
             let Some(trait_method) = tr.methods.iter().find(|m| &m.name == name) else {
                 self.error(
@@ -690,8 +665,31 @@ impl<'a> Checker<'a> {
             let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
                 continue;
             };
+            // The impl method's own generics = its total minus the impl's, and
+            // must match the trait method's generic count.
+            let impl_method_generics = impl_sig.generics.saturating_sub(impl_count);
+            if impl_method_generics != trait_method.generics {
+                self.error(
+                    "E0072",
+                    format!(
+                        "method `{name}` has {impl_method_generics} generic parameter(s) but \
+                         trait `{}` declares {}",
+                        tr.name, trait_method.generics
+                    ),
+                    span,
+                );
+                continue;
+            }
+            // Map the trait method's Param space into the impl's: `Self`
+            // (Param(0)) -> the impl self type; method generic k (Param(1+k)) ->
+            // the impl method's own generic at Param(impl_count + k).
+            let mut subst = Vec::with_capacity(1 + trait_method.generics as usize);
+            subst.push(self_ty.clone());
+            for k in 0..trait_method.generics {
+                subst.push(Ty::Param(impl_count + k));
+            }
             // impl_sig.params[0] is `self`; compare the rest and the return
-            // type against the trait method (with `Self` substituted).
+            // type against the trait method (with the mapping applied).
             let impl_params = &impl_sig.params[1..];
             let expected: Vec<Ty> = trait_method
                 .params
@@ -1175,22 +1173,28 @@ impl<'a> Checker<'a> {
         };
         let generics = match loc.owner {
             // An impl method sees the impl's generic parameters (`impl<T> …`) at
-            // [0, impl_count), then — for an inherent method — its own generic
-            // parameters after them. Must mirror `collect_impls`.
+            // [0, impl_count), then its own generic parameters after them. Must
+            // mirror `collect_impls`.
             MethodOwner::Impl => match &file.items[loc.item_index].value {
                 ast::Item::Impl(block) => {
                     let mut scope = generic_scope(&block.generics);
-                    if block.trait_.is_none() {
-                        let impl_count = block.generics.len() as u32;
-                        for (j, g) in f.generics.iter().enumerate() {
-                            scope.insert(g.name.value.clone(), impl_count + j as u32);
-                        }
+                    let impl_count = block.generics.len() as u32;
+                    for (j, g) in f.generics.iter().enumerate() {
+                        scope.insert(g.name.value.clone(), impl_count + j as u32);
                     }
                     scope
                 }
                 _ => FxHashMap::default(),
             },
-            MethodOwner::TraitDefault => self_generic_scope(),
+            // A trait default body sees `Self` at Param(0), then the method's own
+            // generic parameters at Param(1..). Mirrors `collect_traits`.
+            MethodOwner::TraitDefault => {
+                let mut scope = self_generic_scope();
+                for (j, g) in f.generics.iter().enumerate() {
+                    scope.insert(g.name.value.clone(), 1 + j as u32);
+                }
+                scope
+            }
         };
         self.check_fn_body(def_id, f, generics)
     }
@@ -2928,8 +2932,13 @@ impl<'a> Checker<'a> {
             .expect("trait exists")]
         .methods[method_idx as usize]
             .clone();
-        // Substitute `Self` (`Param(0)`) with the receiver type.
-        let subst = [self_ty.clone()];
+        // Substitution over the trait method's Param space: `Self` (Param(0)) is
+        // the receiver type; the method's own generics (Param(1..)) are fresh
+        // inference vars, recovered from the argument types like a generic fn.
+        let type_args: Vec<Ty> = (0..tm.generics).map(|_| fcx.icx.fresh()).collect();
+        let mut subst = Vec::with_capacity(1 + type_args.len());
+        subst.push(self_ty.clone());
+        subst.extend(type_args.iter().cloned());
         if args.len() != tm.params.len() {
             self.error(
                 "E0016",
@@ -2962,6 +2971,7 @@ impl<'a> Checker<'a> {
                 trait_id,
                 method: method_idx,
                 self_ty: self_ty.clone(),
+                type_args,
                 receiver: Box::new(receiver),
                 args,
             },
@@ -4262,6 +4272,7 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         }
         hir::ExprKind::TraitCall {
             self_ty,
+            type_args,
             receiver,
             args,
             ..
@@ -4269,6 +4280,13 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
             *self_ty = icx.apply(self_ty);
             if self_ty.has_vars() {
                 residual.push(expr.span);
+            }
+            // Resolve the method's own generic args; an uninferable one is E0011.
+            for t in type_args.iter_mut() {
+                *t = icx.apply(t);
+                if t.has_vars() {
+                    residual.push(expr.span);
+                }
             }
             finalize_expr(receiver, icx, residual);
             for a in args {
@@ -4407,14 +4425,28 @@ mod tests {
     }
 
     #[test]
-    fn generic_trait_method_reports_e0900() {
-        // Trait methods with their own generics are deferred (only inherent
-        // method generics are supported).
+    fn generic_trait_method_typechecks() {
+        // A trait method with its own generic parameter, implemented and called.
         let r = check_src(
-            "trait Mapper { fn remap<U>(self, x: U) -> U }\n\
+            "trait Mapper { fn remap<U>(self, f: fn(Int) -> U) -> U }\n\
+             record Thing { v: Int }\n\
+             impl Mapper for Thing { fn remap<U>(self, f: fn(Int) -> U) -> U { f(self.v) } }\n\
+             fn dbl(n: Int) -> Int { n * 2 }\n\
+             fn main() { let t = Thing { v: 21 }\n println(\"${t.remap(dbl)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_trait_method_arity_mismatch_reports_e0072() {
+        // An impl method whose generic arity disagrees with the trait's.
+        let r = check_src(
+            "trait Mapper { fn remap<U>(self, f: fn(Int) -> U) -> U }\n\
+             record Thing { v: Int }\n\
+             impl Mapper for Thing { fn remap(self, f: fn(Int) -> Int) -> Int { f(self.v) } }\n\
              fn main() { }",
         );
-        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
     }
 
     #[test]
@@ -4440,10 +4472,10 @@ mod tests {
     }
 
     #[test]
-    fn generic_trait_impl_method_reports_only_e0900() {
-        // A generic method in a trait impl is rejected with E0900 as the SOLE
-        // diagnostic: no false E0001 for the method's own generic and no
-        // cascading E0072 conformance error.
+    fn generic_impl_method_for_nongeneric_trait_method_reports_e0072() {
+        // A generic method in a trait impl whose trait method is non-generic is
+        // an arity mismatch (the impl declares generics the trait does not), and
+        // must not cascade a false E0001 for the method's own generic.
         let r = check_src(
             "trait Mapper { fn remap(self) -> Int }\n\
              record Box<T> { value: T }\n\
@@ -4451,15 +4483,10 @@ mod tests {
              fn main() { }",
         );
         let codes = error_codes(&r);
-        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(codes.contains(&"E0072"), "{:?}", r.diagnostics);
         assert!(
             !codes.contains(&"E0001"),
             "spurious E0001: {:?}",
-            r.diagnostics
-        );
-        assert!(
-            !codes.contains(&"E0072"),
-            "spurious E0072: {:?}",
             r.diagnostics
         );
     }

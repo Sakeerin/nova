@@ -29,8 +29,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   monomorphized separately. Implemented via a flat generic layout — impl
   parameters first, method parameters after — so substitution, bound checking,
   and monomorphization stay uniform. Generic parameters that shadow an impl
-  parameter report `E0403`. (Generic *trait* methods remain a later increment,
-  reported as `E0900`.)
+  parameter report `E0403`.
+- Generic trait methods (Phase 2.0): a trait method may now declare its own
+  generic parameters — `trait Mapper { fn remap<U>(self, f: fn(Int) -> U) -> U }`
+  — in the trait declaration (required or default-bodied) and in its impls. The
+  method's type arguments are inferred per call site (`Self` at `Param(0)`, the
+  method's generics after) and threaded into monomorphization so each concrete
+  instantiation is compiled separately; inline bounds are enforced at
+  monomorphization (`E0013`). An impl method whose generic arity disagrees with
+  the trait's is rejected (`E0072`). Dispatch works both on concrete receivers
+  and through a `T: Trait` bound in a generic function.
 - `where` clauses (Phase 2.0): an out-of-line spelling of generic bounds on
   functions, impl blocks, and inherent methods — `fn label<T>(x: T) -> String
   where T: Show { … }` is equivalent to the inline `<T: Show>`, and

@@ -312,6 +312,33 @@ fn extern_unresolvable_symbol_is_a_clean_error_not_a_panic() {
 }
 
 #[test]
+fn generic_trait_methods_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/generic_trait_methods.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/generic_trait_methods.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn generic_trait_methods_build_standalone() {
+    let out = build_and_run(
+        "tests/runtime/generic_trait_methods.nova",
+        "generic_trait_methods",
+    );
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/generic_trait_methods.stdout"))
+            .expect("fixture")
+            .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
 fn conflicting_cross_module_extern_signatures_report_e0075() {
     let dir = std::env::temp_dir().join("nova-extern-conflict");
     std::fs::create_dir_all(&dir).expect("temp dir");

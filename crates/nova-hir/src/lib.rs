@@ -442,16 +442,20 @@ pub struct TraitDef {
     pub methods: Vec<TraitMethod>,
 }
 
-/// One method of a trait. `Ty::Param(0)` denotes `Self` in `params`/`ret`
-/// (Phase 1 traits have no generics of their own, so `Param(0)` is
-/// unambiguous). `self` is the implicit receiver and is not in `params`.
+/// One method of a trait. In `params`/`ret`, `Ty::Param(0)` denotes `Self` and
+/// `Ty::Param(1..=generics)` the method's own generic parameters (a generic
+/// method like `fn map<U>(self, …)`). `self` is the implicit receiver and is
+/// not in `params`.
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
     pub name: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
-    /// The compiled default-body function (generic over `Self`), if the
-    /// trait provides a default implementation.
+    /// Number of the method's own generic parameters (not counting `Self`).
+    pub generics: u32,
+    /// Trait bounds per method generic parameter (indexed `0..generics`).
+    pub bounds: Vec<Vec<DefId>>,
+    /// The compiled default-body function, if the trait provides a default.
     pub default_def: Option<DefId>,
 }
 
@@ -688,6 +692,9 @@ pub enum ExprKind {
         trait_id: DefId,
         method: u32,
         self_ty: Ty,
+        /// The method's own generic arguments (`Param(1..)`), inferred per call
+        /// site; empty for a non-generic trait method.
+        type_args: Vec<Ty>,
         receiver: Box<Expr>,
         args: Vec<Expr>,
     },
