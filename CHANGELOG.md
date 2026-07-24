@@ -9,6 +9,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 2 — standard library core, in progress)
+- Module system (Phase 2.0): multi-file programs with `import`. One file is one
+  module (its file stem); `import m` brings all of module `m`'s `pub` items into
+  scope, `import m::{a, b}` brings the named ones, and only `pub` items are
+  importable — private items stay module-local (ADR 0003). The driver loads the
+  entry plus every transitively imported `<name>.nova` beside it; the resolver
+  builds per-module namespaces, enforces visibility, and merges all items into
+  one program so whole-program monomorphization is unchanged. Cross-module
+  records, functions, and traits (including generic bounds over an imported
+  trait) work under both backends. Dangling imports and private-item imports
+  report `E0001`. (`import as` aliases and qualified `m::name` paths are later
+  increments.)
+
 ## [0.1.0] - 2026-07-23
 
 Phase 1 (MVP compiler) milestone. Gate verified: all gate programs compile and

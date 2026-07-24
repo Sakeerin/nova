@@ -195,6 +195,44 @@ fn generic_impls_build_standalone() {
 }
 
 #[test]
+fn modules_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/modules/main.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn modules_build_standalone() {
+    let out = build_and_run("tests/runtime/modules/main.nova", "modules_main");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/modules/main.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn import_of_private_item_is_rejected() {
+    let dir = std::env::temp_dir().join("nova-mod-priv");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("lib.nova"), "fn hidden() -> Int { 1 }\n").expect("write lib");
+    let main = dir.join("app.nova");
+    std::fs::write(
+        &main,
+        "import lib::{hidden}\nfn main() { let x = hidden() }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&main).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0001"), "stderr: {stderr}");
+}
+
+#[test]
 fn traits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/traits.stdout"))
         .expect("expected-output fixture exists")

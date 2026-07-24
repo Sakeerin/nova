@@ -6,7 +6,7 @@ use nova_ast::item::{TraitItem, TypeDef};
 use nova_diagnostics::{Diagnostic, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
-use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, Res};
+use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, ModuleId, Res};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
@@ -49,6 +49,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     let mut checker = Checker {
         file,
         defs,
+        cur_module: ModuleId(0),
         sigs: FxHashMap::default(),
         method_locs: FxHashMap::default(),
         sums: Vec::new(),
@@ -102,6 +103,9 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
 struct Checker<'a> {
     file: &'a ast::File,
     defs: &'a Definitions,
+    /// Module owning the item currently being processed; name resolution is
+    /// performed relative to it. Set at each per-item entry point.
+    cur_module: ModuleId,
     sigs: FxHashMap<DefId, FnSig>,
     /// AST location of each method `DefId`, for the compile pass.
     method_locs: FxHashMap<DefId, MethodLoc>,
@@ -181,6 +185,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Record(decl) = &self.file.items[*item_index].value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(*item_index);
             let generics = generic_scope(&decl.generics);
             let fields = decl
                 .fields
@@ -210,6 +215,7 @@ impl<'a> Checker<'a> {
             let TypeDef::Sum(variants) = &decl.def else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(*item_index);
             let generics = generic_scope(&decl.generics);
             let variants = variants
                 .iter()
@@ -249,6 +255,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Trait(decl) = &self.file.items[item_index].value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(item_index);
             if !decl.generics.is_empty() {
                 self.unsupported(decl.name.span, "generic traits");
             }
@@ -298,6 +305,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Trait(decl) = &self.file.items[item_index].value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(item_index);
             let self_scope = self_generic_scope();
             for (mi, item) in decl.items.iter().enumerate() {
                 let TraitItem::Provided(f) = item else {
@@ -348,6 +356,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Impl(block) = &item.value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(item_index);
             // `where` clauses on impls (conditional impls beyond inline
             // `<T: Bound>`) are not supported yet — consistent with functions.
             if !block.where_clause.is_empty() {
@@ -397,7 +406,7 @@ impl<'a> Checker<'a> {
                         .last()
                         .map(|s| s.value.as_str())
                         .unwrap_or("");
-                    match self.defs.resolve_trait(name) {
+                    match self.defs.resolve_trait(self.cur_module, name) {
                         Some(id) => Some(id),
                         None => {
                             self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
@@ -650,6 +659,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Function(f) = &self.file.items[item_index].value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(item_index);
             if f.is_async {
                 self.unsupported(f.name.span, "async functions");
             }
@@ -684,6 +694,7 @@ impl<'a> Checker<'a> {
             let ast::Item::Const(c) = &self.file.items[item_index].value else {
                 continue;
             };
+            self.cur_module = self.defs.module_of(item_index);
             let ret = self.convert_ty(&c.ty, &FxHashMap::default());
             self.sigs.insert(
                 def_id,
@@ -724,7 +735,7 @@ impl<'a> Checker<'a> {
                             .last()
                             .map(|s| s.value.as_str())
                             .unwrap_or("");
-                        match self.defs.resolve_trait(name) {
+                        match self.defs.resolve_trait(self.cur_module, name) {
                             Some(id) => Some(id),
                             None => {
                                 self.error("E0001", format!("cannot find trait `{name}`"), b.span);
@@ -774,7 +785,7 @@ impl<'a> Checker<'a> {
                     }
                     return p;
                 }
-                if let Some(def_id) = self.defs.resolve_type(name) {
+                if let Some(def_id) = self.defs.resolve_type(self.cur_module, name) {
                     let is_record = matches!(self.defs.def(def_id).kind, DefKind::Record { .. });
                     let expected = if is_record {
                         self.records
@@ -851,6 +862,7 @@ impl<'a> Checker<'a> {
         let ast::Item::Function(f) = &self.file.items[item_index].value else {
             return None;
         };
+        self.cur_module = self.defs.module_of(item_index);
         let generics = generic_scope(&f.generics);
         self.check_fn_body(def_id, f, generics)
     }
@@ -858,6 +870,7 @@ impl<'a> Checker<'a> {
     /// Compile an impl or trait-default method body.
     fn check_method(&mut self, def_id: DefId) -> Option<hir::Function> {
         let loc = *self.method_locs.get(&def_id)?;
+        self.cur_module = self.defs.module_of(loc.item_index);
         // `self.file` is a `&'a File`; copy the reference so the method
         // borrow is tied to `'a`, not to `self` (which we mutate below).
         let file: &'a ast::File = self.file;
@@ -965,6 +978,7 @@ impl<'a> Checker<'a> {
         let ast::Item::Const(c) = &file.items[item_index].value else {
             return None;
         };
+        self.cur_module = self.defs.module_of(item_index);
         let value_ast = &c.value;
         let sig = self.sigs.get(&def_id)?.clone();
         let name = self.defs.def(def_id).name.clone();
@@ -1384,7 +1398,7 @@ impl<'a> Checker<'a> {
             // `Type::Variant` — qualified variant reference.
             let ty_name = path.segments[0].value.as_str();
             let v_name = path.segments[1].value.as_str();
-            if let Some(def_id) = self.defs.resolve_type(ty_name) {
+            if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
                 if let Some(vi) = self.variant_index(def_id, v_name) {
                     return self.make_variant(fcx, def_id, vi, Vec::new(), span);
                 }
@@ -1411,7 +1425,7 @@ impl<'a> Checker<'a> {
                 span,
             };
         }
-        match self.defs.resolve_value(name) {
+        match self.defs.resolve_value(self.cur_module, name) {
             Some(Res::Def(def_id)) => match &self.defs.def(def_id).kind {
                 DefKind::Fn { .. } => {
                     let Some(sig) = self.sigs.get(&def_id).cloned() else {
@@ -1478,7 +1492,7 @@ impl<'a> Checker<'a> {
             if path.segments.len() == 1 {
                 let name = path.segments[0].value.as_str();
                 if fcx.lookup(name).is_none() {
-                    match self.defs.resolve_value(name) {
+                    match self.defs.resolve_value(self.cur_module, name) {
                         Some(Res::Def(def_id)) => {
                             if let DefKind::Fn { .. } = self.defs.def(def_id).kind {
                                 return self.check_direct_call(fcx, def_id, args, span);
@@ -1506,7 +1520,7 @@ impl<'a> Checker<'a> {
                 // `Type::Variant(args)`
                 let ty_name = path.segments[0].value.as_str();
                 let v_name = path.segments[1].value.as_str();
-                if let Some(def_id) = self.defs.resolve_type(ty_name) {
+                if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
                     if let Some(vi) = self.variant_index(def_id, v_name) {
                         let checked: Vec<hir::Expr> =
                             args.iter().map(|a| self.check_expr(fcx, a)).collect();
@@ -2180,7 +2194,7 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         }
         let name = path.segments[0].value.as_str();
-        let Some(def_id) = self.defs.resolve_type(name) else {
+        let Some(def_id) = self.defs.resolve_type(self.cur_module, name) else {
             self.error("E0001", format!("cannot find record `{name}`"), span);
             return error_expr(span);
         };
@@ -3270,7 +3284,9 @@ impl<'a> Checker<'a> {
             ast::Pattern::Ident { is_mut, name } => {
                 // An identifier that names a payload-less variant of the
                 // scrutinee's sum type is a variant pattern, not a binding.
-                if let Some(Res::Variant(sum_id, vi)) = self.defs.resolve_value(&name.value) {
+                if let Some(Res::Variant(sum_id, vi)) =
+                    self.defs.resolve_value(self.cur_module, &name.value)
+                {
                     if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
@@ -3290,7 +3306,9 @@ impl<'a> Checker<'a> {
             }
             ast::Pattern::Path(path) if path.segments.len() == 1 => {
                 let name = &path.segments[0].value;
-                if let Some(Res::Variant(sum_id, vi)) = self.defs.resolve_value(name) {
+                if let Some(Res::Variant(sum_id, vi)) =
+                    self.defs.resolve_value(self.cur_module, name)
+                {
                     if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
@@ -3305,7 +3323,7 @@ impl<'a> Checker<'a> {
             ast::Pattern::Path(path) if path.segments.len() == 2 => {
                 let ty_name = path.segments[0].value.as_str();
                 let v_name = path.segments[1].value.as_str();
-                if let Some(sum_id) = self.defs.resolve_type(ty_name) {
+                if let Some(sum_id) = self.defs.resolve_type(self.cur_module, ty_name) {
                     if let Some(vi) = self.variant_index(sum_id, v_name) {
                         if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
                             return self.variant_pattern(
@@ -3328,13 +3346,16 @@ impl<'a> Checker<'a> {
             }
             ast::Pattern::TupleStruct { path, fields } => {
                 let resolved = if path.segments.len() == 1 {
-                    match self.defs.resolve_value(&path.segments[0].value) {
+                    match self
+                        .defs
+                        .resolve_value(self.cur_module, &path.segments[0].value)
+                    {
                         Some(Res::Variant(sum_id, vi)) => Some((sum_id, vi)),
                         _ => None,
                     }
                 } else if path.segments.len() == 2 {
                     self.defs
-                        .resolve_type(&path.segments[0].value)
+                        .resolve_type(self.cur_module, &path.segments[0].value)
                         .and_then(|sum_id| {
                             self.variant_index(sum_id, &path.segments[1].value)
                                 .map(|vi| (sum_id, vi))

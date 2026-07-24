@@ -1,0 +1,15 @@
+import geometry::{Point, origin, manhattan}
+import shout::{Loud}
+
+record Tag { name: String }
+impl Loud for Tag { fn shout(self) -> String { "${self.name}!" } }
+
+fn describe<T: Loud>(x: T) -> String { x.shout() }
+
+fn main() {
+    let p = Point { x: 3, y: -4 }
+    let o = origin()
+    println("manhattan = ${manhattan(p)}")
+    println("origin = (${o.x}, ${o.y})")
+    println(describe(Tag { name: "hi" }))
+}

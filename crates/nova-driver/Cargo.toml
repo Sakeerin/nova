@@ -9,6 +9,7 @@ description = "Compilation pipeline orchestration for Nova"
 
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
+nova-ast = { path = "../nova-ast" }
 nova-lexer = { path = "../nova-lexer" }
 nova-parser = { path = "../nova-parser" }
 nova-resolver = { path = "../nova-resolver" }

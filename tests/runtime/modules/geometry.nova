@@ -1,0 +1,11 @@
+// A helper module: only `pub` items are visible to importers.
+pub record Point { x: Int, y: Int }
+
+pub fn origin() -> Point { Point { x: 0, y: 0 } }
+
+pub fn manhattan(p: Point) -> Int {
+    abs(p.x) + abs(p.y)
+}
+
+// Private helper — not importable.
+fn abs(n: Int) -> Int { if n < 0 { 0 - n } else { n } }

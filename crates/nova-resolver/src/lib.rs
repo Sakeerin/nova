@@ -12,7 +12,7 @@
 //! of the pipeline.
 
 use indexmap::IndexMap;
-use nova_ast::item::TypeDef;
+use nova_ast::item::{Import, ImportKind, TypeDef};
 use nova_ast::{File, Item};
 use nova_diagnostics::{Diagnostic, Span};
 use rustc_hash::FxHashMap;
@@ -107,16 +107,31 @@ pub enum Res {
     Builtin(Builtin),
 }
 
-/// The item-level namespace of one module.
+/// Index of a module within a compiled program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ModuleId(pub u32);
+
+/// One module's visible namespaces: its own items (public and private), the
+/// prelude, and names it imports. Resolution is performed relative to a module.
+#[derive(Debug, Default)]
+struct ModuleScope {
+    name: String,
+    values: FxHashMap<String, Res>,
+    types: FxHashMap<String, DefId>,
+    traits: FxHashMap<String, DefId>,
+}
+
+/// The item-level namespaces of a whole program (one or more modules).
+///
+/// `defs` and `DefId`s are global; name lookups are **module-relative** — a
+/// name is resolved in the scope of the module that owns the item currently
+/// being checked (see [`Definitions::module_of`]).
 #[derive(Debug, Default)]
 pub struct Definitions {
     defs: Vec<Def>,
-    /// Value namespace: functions, consts, bare variant names, builtins.
-    values: FxHashMap<String, Res>,
-    /// Type namespace: sum types, records (and later aliases).
-    types: FxHashMap<String, DefId>,
-    /// Trait namespace, kept separate from types.
-    traits: FxHashMap<String, DefId>,
+    modules: Vec<ModuleScope>,
+    /// Merged-item-index → owning module.
+    item_module: Vec<u32>,
 }
 
 impl Definitions {
@@ -130,19 +145,43 @@ impl Definitions {
         &self.defs[id.0 as usize]
     }
 
-    /// Resolve a name in *value* position (function call, variant constructor…).
-    pub fn resolve_value(&self, name: &str) -> Option<Res> {
-        self.values.get(name).copied()
+    /// The module that owns the item at `item_index` in the merged file.
+    pub fn module_of(&self, item_index: usize) -> ModuleId {
+        ModuleId(self.item_module.get(item_index).copied().unwrap_or(0))
     }
 
-    /// Resolve a name in *type* position.
-    pub fn resolve_type(&self, name: &str) -> Option<DefId> {
-        self.types.get(name).copied()
+    /// Number of modules in the program.
+    pub fn module_count(&self) -> usize {
+        self.modules.len()
     }
 
-    /// Resolve a name in *trait* position.
-    pub fn resolve_trait(&self, name: &str) -> Option<DefId> {
-        self.traits.get(name).copied()
+    /// The name of a module.
+    pub fn module_name(&self, module: ModuleId) -> &str {
+        self.modules
+            .get(module.0 as usize)
+            .map(|m| m.name.as_str())
+            .unwrap_or("")
+    }
+
+    /// Resolve a name in *value* position, relative to `module`.
+    pub fn resolve_value(&self, module: ModuleId, name: &str) -> Option<Res> {
+        self.modules
+            .get(module.0 as usize)
+            .and_then(|m| m.values.get(name).copied())
+    }
+
+    /// Resolve a name in *type* position, relative to `module`.
+    pub fn resolve_type(&self, module: ModuleId, name: &str) -> Option<DefId> {
+        self.modules
+            .get(module.0 as usize)
+            .and_then(|m| m.types.get(name).copied())
+    }
+
+    /// Resolve a name in *trait* position, relative to `module`.
+    pub fn resolve_trait(&self, module: ModuleId, name: &str) -> Option<DefId> {
+        self.modules
+            .get(module.0 as usize)
+            .and_then(|m| m.traits.get(name).copied())
     }
 
     /// Iterate all method definitions as `(DefId, item_index, method_index,
@@ -171,17 +210,40 @@ impl Definitions {
                 _ => None,
             })
     }
+}
 
-    fn push(&mut self, def: Def) -> DefId {
-        let id = DefId(self.defs.len() as u32);
-        self.defs.push(def);
-        id
-    }
+/// A source module: a parsed file plus its module name (file stem).
+pub struct ModuleSource<'a> {
+    pub name: String,
+    pub file: &'a File,
+}
+
+/// The public exports of one module (its `pub` items), used to resolve imports.
+#[derive(Default)]
+struct Exports {
+    values: FxHashMap<String, Res>,
+    types: FxHashMap<String, DefId>,
+    traits: FxHashMap<String, DefId>,
+}
+
+fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
+    let id = DefId(defs.len() as u32);
+    defs.push(def);
+    id
 }
 
 /// Output of [`resolve`]: the namespace table plus any diagnostics.
 #[derive(Debug)]
 pub struct ResolveResult {
+    pub definitions: Definitions,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Output of [`resolve_program`]: the merged file, its namespaces, and any
+/// diagnostics. The merged file's `item_index`es are what `Definitions` refers
+/// to, so downstream stages consume both together.
+pub struct ProgramResolution {
+    pub file: File,
     pub definitions: Definitions,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -192,147 +254,247 @@ pub struct ResolveResult {
 /// and `module` declarations are accepted but ignored in Phase 1 (single-file
 /// compilation); traits/impls/records are collected in later Phase 1 steps.
 pub fn resolve(file: &File) -> ResolveResult {
+    let sources = [ModuleSource {
+        name: "main".to_string(),
+        file,
+    }];
+    let prog = resolve_program(&sources);
+    ResolveResult {
+        definitions: prog.definitions,
+        diagnostics: prog.diagnostics,
+    }
+}
+
+/// Resolve a multi-module program: collect each module's item namespace,
+/// enforce `pub` visibility across modules, wire up `import`s, and merge all
+/// items into one file for whole-program compilation downstream.
+///
+/// `item_index`es in the returned [`ProgramResolution::file`] are global
+/// (module items concatenated in `modules` order).
+pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
+    let mut merged = Vec::new();
+    let mut exports: Vec<Exports> = Vec::new();
 
-    // Prelude: builtins occupy the value namespace first so user shadowing
-    // of e.g. `println` is reported as a duplicate rather than silently
-    // replacing the builtin.
-    for b in Builtin::ALL {
-        definitions
-            .values
-            .insert(b.name().to_string(), Res::Builtin(b));
+    // A scope per module, seeded with the builtin prelude.
+    for m in modules {
+        let mut scope = ModuleScope {
+            name: m.name.clone(),
+            ..Default::default()
+        };
+        for b in Builtin::ALL {
+            scope.values.insert(b.name().to_string(), Res::Builtin(b));
+        }
+        definitions.modules.push(scope);
+        exports.push(Exports::default());
     }
 
-    // Track first-definition spans for duplicate reporting.
-    let mut first_value_span: IndexMap<String, Span> = IndexMap::new();
-    let mut first_type_span: IndexMap<String, Span> = IndexMap::new();
+    // Pass 1: collect each module's own definitions into its scope + exports.
+    for (mid, m) in modules.iter().enumerate() {
+        let mut first_value: IndexMap<String, Span> = IndexMap::new();
+        let mut first_type: IndexMap<String, Span> = IndexMap::new();
+        for item in &m.file.items {
+            let item_index = merged.len();
+            definitions.item_module.push(mid as u32);
+            collect_item(
+                &mut definitions.defs,
+                &mut definitions.modules[mid],
+                &mut exports[mid],
+                &mut first_value,
+                &mut first_type,
+                &mut diagnostics,
+                item_index,
+                &item.value,
+            );
+            merged.push(item.clone());
+        }
+    }
 
-    for (item_index, item) in file.items.iter().enumerate() {
-        match &item.value {
-            Item::Function(f) => {
-                let name = f.name.value.clone();
-                let span = f.name.span;
-                let id = definitions.push(Def {
+    // Pass 2: resolve `import`s, binding other modules' public names.
+    let by_name: FxHashMap<&str, usize> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.name.as_str(), i))
+        .collect();
+    for (mid, m) in modules.iter().enumerate() {
+        for item in &m.file.items {
+            if let Item::Import(imp) = &item.value {
+                resolve_import(
+                    &mut definitions,
+                    &exports,
+                    &by_name,
+                    mid,
+                    imp,
+                    &mut diagnostics,
+                );
+            }
+        }
+    }
+
+    ProgramResolution {
+        file: File { items: merged },
+        definitions,
+        diagnostics,
+    }
+}
+
+/// Collect one item's definitions into `scope` (and `exp` if `pub`), pushing
+/// global `Def`s into `defs`.
+#[allow(clippy::too_many_arguments)]
+fn collect_item(
+    defs: &mut Vec<Def>,
+    scope: &mut ModuleScope,
+    exp: &mut Exports,
+    first_value: &mut IndexMap<String, Span>,
+    first_type: &mut IndexMap<String, Span>,
+    diagnostics: &mut Vec<Diagnostic>,
+    item_index: usize,
+    item: &Item,
+) {
+    match item {
+        Item::Function(f) => {
+            let name = f.name.value.clone();
+            let span = f.name.span;
+            let id = push_def(
+                defs,
+                Def {
                     name: name.clone(),
                     span,
                     kind: DefKind::Fn { item_index },
-                });
-                insert_value(
-                    &mut definitions,
-                    &mut first_value_span,
-                    &mut diagnostics,
-                    name,
-                    span,
-                    Res::Def(id),
-                );
-            }
-            Item::Type(t) => match &t.def {
-                TypeDef::Sum(variants) => {
-                    let name = t.name.value.clone();
-                    let span = t.name.span;
-                    let variant_defs: Vec<VariantDef> = variants
-                        .iter()
-                        .map(|v| VariantDef {
-                            name: v.name.value.clone(),
-                            span: v.name.span,
-                            arity: v.fields.len(),
-                        })
-                        .collect();
-                    let id = definitions.push(Def {
+                },
+            );
+            insert_value(
+                scope,
+                exp,
+                first_value,
+                diagnostics,
+                name,
+                span,
+                Res::Def(id),
+                is_pub(f.vis),
+            );
+        }
+        Item::Type(t) => match &t.def {
+            TypeDef::Sum(variants) => {
+                let name = t.name.value.clone();
+                let span = t.name.span;
+                let pubv = is_pub(t.vis);
+                let variant_defs: Vec<VariantDef> = variants
+                    .iter()
+                    .map(|v| VariantDef {
+                        name: v.name.value.clone(),
+                        span: v.name.span,
+                        arity: v.fields.len(),
+                    })
+                    .collect();
+                let id = push_def(
+                    defs,
+                    Def {
                         name: name.clone(),
                         span,
                         kind: DefKind::Sum {
                             item_index,
                             variants: variant_defs,
                         },
-                    });
-                    insert_type(
-                        &mut definitions,
-                        &mut first_type_span,
-                        &mut diagnostics,
-                        name,
-                        span,
-                        id,
+                    },
+                );
+                insert_type(scope, exp, first_type, diagnostics, name, span, id, pubv);
+                // Variants live in the value namespace and inherit the type's
+                // visibility, so `Some(x)` / `Circle(1.0)` resolve unprefixed.
+                for (vi, v) in variants.iter().enumerate() {
+                    insert_value(
+                        scope,
+                        exp,
+                        first_value,
+                        diagnostics,
+                        v.name.value.clone(),
+                        v.name.span,
+                        Res::Variant(id, vi),
+                        pubv,
                     );
-                    // Bare variant names live in the value namespace so
-                    // `Some(x)` / `Circle(1.0)` resolve without a type prefix.
-                    for (vi, v) in variants.iter().enumerate() {
-                        insert_value(
-                            &mut definitions,
-                            &mut first_value_span,
-                            &mut diagnostics,
-                            v.name.value.clone(),
-                            v.name.span,
-                            Res::Variant(id, vi),
-                        );
-                    }
                 }
-                TypeDef::Alias(_) => {
-                    diagnostics.push(unsupported(
-                        t.name.span,
-                        "type aliases are not supported yet in the Phase 1 compiler",
-                    ));
-                }
-            },
-            Item::Const(c) => {
-                let name = c.name.value.clone();
-                let span = c.name.span;
-                let id = definitions.push(Def {
+            }
+            TypeDef::Alias(_) => {
+                diagnostics.push(unsupported(
+                    t.name.span,
+                    "type aliases are not supported yet in the Phase 1 compiler",
+                ));
+            }
+        },
+        Item::Const(c) => {
+            let name = c.name.value.clone();
+            let span = c.name.span;
+            let id = push_def(
+                defs,
+                Def {
                     name: name.clone(),
                     span,
                     kind: DefKind::Const { item_index },
-                });
-                insert_value(
-                    &mut definitions,
-                    &mut first_value_span,
-                    &mut diagnostics,
-                    name,
-                    span,
-                    Res::Def(id),
-                );
-            }
-            // Accepted and ignored in Phase 1 single-file compilation.
-            Item::Import(_) | Item::Module(_) => {}
-            Item::Record(r) => {
-                let name = r.name.value.clone();
-                let span = r.name.span;
-                let id = definitions.push(Def {
+                },
+            );
+            insert_value(
+                scope,
+                exp,
+                first_value,
+                diagnostics,
+                name,
+                span,
+                Res::Def(id),
+                is_pub(c.vis),
+            );
+        }
+        Item::Record(r) => {
+            let name = r.name.value.clone();
+            let span = r.name.span;
+            let id = push_def(
+                defs,
+                Def {
                     name: name.clone(),
                     span,
                     kind: DefKind::Record { item_index },
-                });
-                insert_type(
-                    &mut definitions,
-                    &mut first_type_span,
-                    &mut diagnostics,
-                    name,
-                    span,
-                    id,
-                );
-            }
-            Item::Trait(t) => {
-                let name = t.name.value.clone();
-                let span = t.name.span;
-                let id = definitions.push(Def {
+                },
+            );
+            insert_type(
+                scope,
+                exp,
+                first_type,
+                diagnostics,
+                name,
+                span,
+                id,
+                is_pub(r.vis),
+            );
+        }
+        Item::Trait(t) => {
+            let name = t.name.value.clone();
+            let span = t.name.span;
+            let pubv = is_pub(t.vis);
+            let id = push_def(
+                defs,
+                Def {
                     name: name.clone(),
                     span,
                     kind: DefKind::Trait { item_index },
-                });
-                if let std::collections::hash_map::Entry::Vacant(e) =
-                    definitions.traits.entry(name.clone())
-                {
-                    e.insert(id);
-                } else {
-                    diagnostics.push(
-                        Diagnostic::error("E0002", format!("duplicate trait `{name}`"))
-                            .with_primary_label(span, "redefined here"),
-                    );
+                },
+            );
+            if scope.traits.contains_key(&name) {
+                diagnostics.push(
+                    Diagnostic::error("E0002", format!("duplicate trait `{name}`"))
+                        .with_primary_label(span, "redefined here"),
+                );
+            } else {
+                scope.traits.insert(name.clone(), id);
+                if pubv {
+                    exp.traits.insert(name, id);
                 }
-                // Default-method bodies become their own method defs.
-                for (method_index, ti) in t.items.iter().enumerate() {
-                    if let nova_ast::item::TraitItem::Provided(f) = ti {
-                        definitions.push(Def {
+            }
+            // Default-method bodies become their own method defs (global).
+            for (method_index, ti) in t.items.iter().enumerate() {
+                if let nova_ast::item::TraitItem::Provided(f) = ti {
+                    push_def(
+                        defs,
+                        Def {
                             name: format!("{}::{}$default", t.name.value, f.name.value),
                             span: f.name.span,
                             kind: DefKind::Method {
@@ -340,20 +502,23 @@ pub fn resolve(file: &File) -> ResolveResult {
                                 method_index,
                                 owner: MethodOwner::TraitDefault,
                             },
-                        });
-                    }
+                        },
+                    );
                 }
             }
-            Item::Impl(i) => {
-                let self_name = type_full_name(&i.ty.value);
-                for (method_index, f) in i.functions.iter().enumerate() {
-                    let mangled = match &i.trait_ {
-                        Some(tr) => {
-                            format!("{}.{}.{}", self_name, path_tail(&tr.value), f.name.value)
-                        }
-                        None => format!("{}.{}", self_name, f.name.value),
-                    };
-                    definitions.push(Def {
+        }
+        Item::Impl(i) => {
+            // Impls are globally coherent — collected program-wide, resolved by
+            // type rather than by name, so they are not bound into any scope.
+            let self_name = type_full_name(&i.ty.value);
+            for (method_index, f) in i.functions.iter().enumerate() {
+                let mangled = match &i.trait_ {
+                    Some(tr) => format!("{}.{}.{}", self_name, path_tail(&tr.value), f.name.value),
+                    None => format!("{}.{}", self_name, f.name.value),
+                };
+                push_def(
+                    defs,
+                    Def {
                         name: mangled,
                         span: f.name.span,
                         kind: DefKind::Method {
@@ -361,33 +526,150 @@ pub fn resolve(file: &File) -> ResolveResult {
                             method_index,
                             owner: MethodOwner::Impl,
                         },
-                    });
-                }
-            }
-            Item::Extern(_) => {
-                diagnostics.push(Diagnostic::error(
-                    "E0900",
-                    "extern blocks are not supported yet in the Phase 1 compiler",
-                ));
+                    },
+                );
             }
         }
-    }
-
-    ResolveResult {
-        definitions,
-        diagnostics,
+        Item::Extern(_) => {
+            diagnostics.push(Diagnostic::error(
+                "E0900",
+                "extern blocks are not supported yet in the Phase 1 compiler",
+            ));
+        }
+        // `import`s are handled in pass 2; `module` declarations carry no items.
+        Item::Import(_) | Item::Module(_) => {}
     }
 }
 
-fn insert_value(
+/// Bind another module's public names into the importing module's scope.
+fn resolve_import(
     definitions: &mut Definitions,
+    exports: &[Exports],
+    by_name: &FxHashMap<&str, usize>,
+    mid: usize,
+    imp: &Import,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let target_name = imp
+        .path
+        .value
+        .segments
+        .last()
+        .map(|s| s.value.as_str())
+        .unwrap_or("");
+    let span = imp.path.span;
+    let Some(&target) = by_name.get(target_name) else {
+        diagnostics.push(
+            Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
+                .with_primary_label(span, "no such module"),
+        );
+        return;
+    };
+    if target == mid {
+        diagnostics.push(
+            Diagnostic::error("E0001", format!("module `{target_name}` imports itself"))
+                .with_primary_label(span, "self-import"),
+        );
+        return;
+    }
+    match &imp.kind {
+        ImportKind::Simple => {
+            // Glob: bring all of the target module's public names into scope.
+            let names: Vec<(String, Res)> = exports[target]
+                .values
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            for (n, r) in names {
+                bind_value(&mut definitions.modules[mid], diagnostics, n, span, r);
+            }
+            let tys: Vec<(String, DefId)> = exports[target]
+                .types
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            for (n, id) in tys {
+                bind_type(&mut definitions.modules[mid], diagnostics, n, span, id);
+            }
+            let trs: Vec<(String, DefId)> = exports[target]
+                .traits
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
+            for (n, id) in trs {
+                bind_trait(&mut definitions.modules[mid], diagnostics, n, span, id);
+            }
+        }
+        ImportKind::List(names) => {
+            for n in names {
+                let name = &n.value;
+                let mut found = false;
+                if let Some(r) = exports[target].values.get(name).copied() {
+                    bind_value(
+                        &mut definitions.modules[mid],
+                        diagnostics,
+                        name.clone(),
+                        n.span,
+                        r,
+                    );
+                    found = true;
+                }
+                if let Some(id) = exports[target].types.get(name).copied() {
+                    bind_type(
+                        &mut definitions.modules[mid],
+                        diagnostics,
+                        name.clone(),
+                        n.span,
+                        id,
+                    );
+                    found = true;
+                }
+                if let Some(id) = exports[target].traits.get(name).copied() {
+                    bind_trait(
+                        &mut definitions.modules[mid],
+                        diagnostics,
+                        name.clone(),
+                        n.span,
+                        id,
+                    );
+                    found = true;
+                }
+                if !found {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "E0001",
+                            format!("`{name}` is not a public item of module `{target_name}`"),
+                        )
+                        .with_primary_label(n.span, "not found or not `pub`"),
+                    );
+                }
+            }
+        }
+        ImportKind::Alias(_) => {
+            diagnostics.push(unsupported(
+                span,
+                "`import ... as` aliases are not supported yet",
+            ));
+        }
+    }
+}
+
+fn is_pub(vis: nova_ast::item::Visibility) -> bool {
+    matches!(vis, nova_ast::item::Visibility::Pub)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_value(
+    scope: &mut ModuleScope,
+    exp: &mut Exports,
     first: &mut IndexMap<String, Span>,
     diagnostics: &mut Vec<Diagnostic>,
     name: String,
     span: Span,
     res: Res,
+    is_pub: bool,
 ) {
-    if definitions.values.contains_key(&name) {
+    if scope.values.contains_key(&name) {
         let mut diag = Diagnostic::error("E0002", format!("duplicate definition of `{name}`"))
             .with_primary_label(span, "redefined here");
         if let Some(prev) = first.get(&name) {
@@ -399,18 +681,24 @@ fn insert_value(
         return;
     }
     first.insert(name.clone(), span);
-    definitions.values.insert(name, res);
+    if is_pub {
+        exp.values.insert(name.clone(), res);
+    }
+    scope.values.insert(name, res);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_type(
-    definitions: &mut Definitions,
+    scope: &mut ModuleScope,
+    exp: &mut Exports,
     first: &mut IndexMap<String, Span>,
     diagnostics: &mut Vec<Diagnostic>,
     name: String,
     span: Span,
     id: DefId,
+    is_pub: bool,
 ) {
-    if definitions.types.contains_key(&name) {
+    if scope.types.contains_key(&name) {
         let mut diag = Diagnostic::error("E0002", format!("duplicate definition of type `{name}`"))
             .with_primary_label(span, "redefined here");
         if let Some(prev) = first.get(&name) {
@@ -420,7 +708,71 @@ fn insert_type(
         return;
     }
     first.insert(name.clone(), span);
-    definitions.types.insert(name, id);
+    if is_pub {
+        exp.types.insert(name.clone(), id);
+    }
+    scope.types.insert(name, id);
+}
+
+/// Bind an imported name into a module's value namespace, or report a conflict.
+fn bind_value(
+    scope: &mut ModuleScope,
+    diagnostics: &mut Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    res: Res,
+) {
+    if scope.values.contains_key(&name) {
+        diagnostics.push(
+            Diagnostic::error(
+                "E0002",
+                format!("`{name}` is already defined or imported in this module"),
+            )
+            .with_primary_label(span, "conflicting import"),
+        );
+        return;
+    }
+    scope.values.insert(name, res);
+}
+
+fn bind_type(
+    scope: &mut ModuleScope,
+    diagnostics: &mut Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    id: DefId,
+) {
+    if scope.types.contains_key(&name) {
+        diagnostics.push(
+            Diagnostic::error(
+                "E0002",
+                format!("type `{name}` is already defined or imported in this module"),
+            )
+            .with_primary_label(span, "conflicting import"),
+        );
+        return;
+    }
+    scope.types.insert(name, id);
+}
+
+fn bind_trait(
+    scope: &mut ModuleScope,
+    diagnostics: &mut Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    id: DefId,
+) {
+    if scope.traits.contains_key(&name) {
+        diagnostics.push(
+            Diagnostic::error(
+                "E0002",
+                format!("trait `{name}` is already defined or imported in this module"),
+            )
+            .with_primary_label(span, "conflicting import"),
+        );
+        return;
+    }
+    scope.traits.insert(name, id);
 }
 
 fn unsupported(span: Span, msg: &str) -> Diagnostic {
@@ -476,6 +828,96 @@ mod tests {
         resolve(&ast.expect("no AST produced"))
     }
 
+    fn parse_file(src: &str) -> nova_ast::File {
+        let (tokens, _) = lex(src, FileId::DUMMY);
+        let (ast, errs) = parse(&tokens, FileId::DUMMY);
+        assert!(errs.is_empty(), "parse errors: {errs:?}");
+        ast.expect("no AST")
+    }
+
+    /// Resolve a two-module program: `main` plus `lib`.
+    fn resolve_two(main_src: &str, lib_src: &str) -> ProgramResolution {
+        let main = parse_file(main_src);
+        let lib = parse_file(lib_src);
+        let sources = [
+            ModuleSource {
+                name: "main".to_string(),
+                file: &main,
+            },
+            ModuleSource {
+                name: "lib".to_string(),
+                file: &lib,
+            },
+        ];
+        resolve_program(&sources)
+    }
+
+    fn error_codes(diags: &[Diagnostic]) -> Vec<&str> {
+        diags.iter().map(|d| d.code.as_str()).collect()
+    }
+
+    #[test]
+    fn import_binds_public_names_across_modules() {
+        let p = resolve_two(
+            "import lib::{add}\nfn main() { let x = add(1, 2) }\n",
+            "pub fn add(a: Int, b: Int) -> Int { a + b }\nfn secret() -> Int { 0 }\n",
+        );
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        // `add` is visible in module 0 (main) after the import.
+        assert!(matches!(
+            p.definitions.resolve_value(ModuleId(0), "add"),
+            Some(Res::Def(_))
+        ));
+    }
+
+    #[test]
+    fn importing_a_private_item_is_rejected() {
+        let p = resolve_two(
+            "import lib::{secret}\nfn main() { }\n",
+            "pub fn add() -> Int { 0 }\nfn secret() -> Int { 0 }\n",
+        );
+        assert!(
+            error_codes(&p.diagnostics).contains(&"E0001"),
+            "{:?}",
+            p.diagnostics
+        );
+    }
+
+    #[test]
+    fn dangling_import_reports_missing_module() {
+        let p = resolve_two(
+            "import nope::{x}\nfn main() { }\n",
+            "pub fn add() -> Int { 0 }\n",
+        );
+        assert!(
+            error_codes(&p.diagnostics).contains(&"E0001"),
+            "{:?}",
+            p.diagnostics
+        );
+    }
+
+    #[test]
+    fn private_item_is_not_visible_to_other_modules() {
+        let p = resolve_two(
+            "import lib\nfn main() { }\n",
+            "pub fn add() -> Int { 0 }\nfn secret() -> Int { 0 }\n",
+        );
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        // Glob import brings `add` but not `secret`.
+        assert!(p.definitions.resolve_value(ModuleId(0), "add").is_some());
+        assert!(p.definitions.resolve_value(ModuleId(0), "secret").is_none());
+    }
+
+    #[test]
+    fn same_name_in_two_modules_does_not_collide() {
+        // Each module has its own `helper`; no duplicate-definition error.
+        let p = resolve_two(
+            "fn helper() -> Int { 1 }\nfn main() { }\n",
+            "pub fn helper() -> Int { 2 }\n",
+        );
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    }
+
     #[test]
     fn collects_functions_and_sum_types() {
         let r = resolve_src(
@@ -485,20 +927,20 @@ mod tests {
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         assert!(matches!(
-            r.definitions.resolve_value("area"),
+            r.definitions.resolve_value(ModuleId(0), "area"),
             Some(Res::Def(_))
         ));
         assert!(matches!(
-            r.definitions.resolve_value("Circle"),
+            r.definitions.resolve_value(ModuleId(0), "Circle"),
             Some(Res::Variant(_, 0))
         ));
         assert!(matches!(
-            r.definitions.resolve_value("Empty"),
+            r.definitions.resolve_value(ModuleId(0), "Empty"),
             Some(Res::Variant(_, 1))
         ));
-        assert!(r.definitions.resolve_type("Shape").is_some());
+        assert!(r.definitions.resolve_type(ModuleId(0), "Shape").is_some());
         assert!(matches!(
-            r.definitions.resolve_value("println"),
+            r.definitions.resolve_value(ModuleId(0), "println"),
             Some(Res::Builtin(Builtin::Println))
         ));
     }
@@ -507,7 +949,10 @@ mod tests {
     fn collects_records() {
         let r = resolve_src("record Point { x: Float, y: Float }\nfn main() { }\n");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        let id = r.definitions.resolve_type("Point").expect("Point resolves");
+        let id = r
+            .definitions
+            .resolve_type(ModuleId(0), "Point")
+            .expect("Point resolves");
         assert!(matches!(r.definitions.def(id).kind, DefKind::Record { .. }));
     }
 
@@ -521,7 +966,7 @@ mod tests {
              fn main() { }\n",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        assert!(r.definitions.resolve_trait("Show").is_some());
+        assert!(r.definitions.resolve_trait(ModuleId(0), "Show").is_some());
         // One default (shout), one trait-impl method (name), one inherent (get).
         let methods = r.definitions.methods().count();
         assert_eq!(methods, 3, "expected 3 method defs");
