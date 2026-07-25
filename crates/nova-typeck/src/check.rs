@@ -5180,7 +5180,9 @@ mod tests {
     fn hello_world_checks() {
         let r = check_src("fn main() { println(\"hi\") }");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        assert_eq!(r.module.functions.len(), 1);
+        // `functions` is whole-program: this file's one `main`, plus every
+        // method std/core defines on Option/Result (7 + 7, Phase 2.1 Task 8).
+        assert_eq!(r.module.functions.len(), 15);
     }
 
     #[test]
@@ -7482,6 +7484,21 @@ mod tests {
             "fn main() {\n\
                  let o = Some(3)\n\
                  match o { Some(v) => println(\"${v}\"), None => println(\"none\") }\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn std_core_option_result_methods_typecheck() {
+        let r = check_src(
+            "fn dbl(n: Int) -> Int { n * 2 }\n\
+             fn main() {\n\
+                 let a = Some(21).map(dbl).unwrap_or(0)\n\
+                 let b = Some(1).is_some()\n\
+                 let c: Result<Int, String> = Some(2).ok_or(\"none\")\n\
+                 let d = c.map(dbl).unwrap_or(0)\n\
+                 println(\"${a} ${b} ${d}\")\n\
              }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);

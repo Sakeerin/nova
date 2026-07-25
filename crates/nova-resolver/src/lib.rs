@@ -1212,9 +1212,11 @@ mod tests {
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         assert!(r.definitions.resolve_trait(ModuleId(0), "Show").is_some());
-        // One default (shout), one trait-impl method (name), one inherent (get).
+        // `methods()` is whole-program: this source's own 3 (one default
+        // `shout`, one trait-impl `name`, one inherent `get`) plus the 14
+        // std/core now defines on Option/Result (7 + 7, Phase 2.1 Task 8).
         let methods = r.definitions.methods().count();
-        assert_eq!(methods, 3, "expected 3 method defs");
+        assert_eq!(methods, 17, "expected 17 method defs");
     }
 
     #[test]
