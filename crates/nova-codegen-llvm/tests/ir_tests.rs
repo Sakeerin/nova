@@ -199,3 +199,19 @@ fn records_emit_field_addressing() {
     assert!(ir.contains("getelementptr inbounds i8, ptr"), "{ir}");
     assert_well_formed(&ir);
 }
+
+/// `panic` (Phase 2.1) under the LLVM `--release` backend: no toolchain is
+/// available in this environment to assemble/run the emitted IR (see the
+/// clang-gated `release_builds_and_runs_when_clang_available` in
+/// `nova-cli`'s e2e suite), so this pins the IR's *shape* instead — the
+/// runtime declaration is always present (`DECLS` is unconditional), but the
+/// call site only appears when a program actually calls `panic`, which is
+/// the part that would silently go missing if the builtin's MIR lowering
+/// (`Builtin::Panic => RtFunc::Panic`) ever broke.
+#[test]
+fn panic_emits_declaration_and_call() {
+    let ir = ir_for("fn main() { panic(\"boom\") }");
+    assert!(ir.contains("declare void @nova_rt_panic_str(ptr)"), "{ir}");
+    assert!(ir.contains("call void @nova_rt_panic_str("), "{ir}");
+    assert_well_formed(&ir);
+}

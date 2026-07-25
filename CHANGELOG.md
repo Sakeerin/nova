@@ -75,6 +75,75 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `getchar`) cannot be declared correctly yet and will truncate — declare only
   `int64_t`/`long long`/`double` C functions for now. (Pointers, strings,
   variadics, `link_name`, and fixed-width C integers are later increments.)
+- `panic(msg: String)` builtin (Phase 2.1): aborts the process — prints
+  `nova: panic: <msg>` to stderr and calls `std::process::abort()` (no
+  unwinding) — via a new runtime function, `nova_rt_panic_str`. Typed
+  `Never`, so a `panic(...)` call unifies with whatever type its context
+  expects and can stand as a match arm's or `if`-branch's tail expression,
+  e.g. the `None`/`Err` arm of `std/core`'s `unwrap()`. Declared in both
+  codegen backends' runtime-declaration lists (Cranelift's `ALL_RT`, LLVM's
+  `DECLS`).
+- `nova_rt_str_cmp` (Phase 2.1): a runtime function comparing two strings
+  byte-lexicographically and returning `-1`/`0`/`1`. Needed because Nova has
+  no built-in string ordering to write one *in* Nova source — `String` has
+  neither length nor indexing, and `String < String` is `E0013` by design —
+  and `std/core`'s `Ord for String` needs one (below).
+- Associated-function call syntax, `Type::f(args)` (Phase 2.1): a self-less
+  method — one declared with no `self` receiver, in an inherent impl or a
+  trait impl — is now callable as `Type::f(...)`, e.g. `P::new()` for
+  `impl P { fn new() -> P { ... } }`, or `Int::zero()` for
+  `trait Zero { fn zero() -> Self }` + `impl Zero for Int { ... }`. Also
+  dispatches through a generic bound inside a generic function
+  (`fn make<T: Zero>() -> T { T::zero() }` resolves `T::zero()` to whichever
+  concrete impl the call site's `T` turns out to be). `Type` may now also be
+  a primitive (`Int`/`Float`/`Bool`/`Char`/`String`) for both inherent and
+  trait associated functions — primitive type names previously had no entry
+  in the resolver's type namespace at all, so every `Primitive::f()` call
+  fell through to a misleading `E0900: module-qualified paths are not
+  supported yet`. `std/core`'s `Int::default()` (and the equivalent for
+  every other primitive) depends on this.
+- Supertraits, `trait Ord: Eq` (Phase 2.1): a trait declaration may name one
+  or more supertraits; an impl of the subtrait for a type `R` must be paired
+  with an impl of each direct supertrait for that same `R`, or `E0072` names
+  the specific supertrait that is missing. A bound `T: Subtrait` (and a
+  subtrait's own default-method bodies, reaching the supertrait through
+  `Self`) has the supertrait's bounds folded in too, so `std/core`'s
+  `Ord`-bounded code can call `Eq`'s `eq`/`ne` without a function separately
+  requiring `T: Eq`. Diamond and cyclic supertrait graphs are deduplicated
+  and the expansion always terminates. A trait's own `where` clause is now
+  parsed and rejected as `E0900` (previously parsed and silently discarded
+  with no effect at all — `trait B where Self: A` enforced nothing).
+- `std/core`, Nova's first standard-library module (Phase 2.1): real Nova
+  source at `std/core/lib.nova`, embedded into the compiler binary
+  (`include_str!`) and compiled as one more implicit module — appended last
+  and glob-imported into every user module at the lowest priority, so its
+  names need no `import` and a user definition of the same name silently
+  shadows it (`docs/adr/0004-stdlib-compile-model.md` records this compile
+  model and why it is an embed rather than a disk search path or a
+  precompiled artifact). Contents: `Option<T>`/`Result<T, E>` (previously a
+  hardcoded two-line prelude string, now real source checked and diagnosed
+  like any other module) gain full method sets — `Option`: `is_some`,
+  `is_none`, `map`, `and_then`, `unwrap`, `unwrap_or`, `ok_or`; `Result`:
+  `is_ok`, `is_err`, `map`, `map_err`, `and_then`, `unwrap`, `unwrap_or` —
+  plus six core traits, each implemented for all five primitive types
+  (`Int`, `Float`, `Bool`, `Char`, `String`): `Display` and `Debug` (a
+  direct `.fmt()`/`.dbg()` call and a generic `T: Display`/`T: Debug` bound
+  now work uniformly across primitives and user types alike; `Debug`'s
+  `String` impl quotes its content); `Eq` (`eq`, plus a defaulted `ne`);
+  `Ord: Eq` (`cmp(self, other: Self) -> Ordering`; `Bool` orders via
+  `if`/`else` and `String` via the new `str_cmp` builtin above — seeded only
+  into `std/core`'s own module scope, not a globally reserved word, since
+  `String` fails FFI-safety and a `nova_`-prefixed `extern` symbol is
+  reserved, ruling out the two ways a library-level string comparison would
+  normally reach the runtime); `Clone`; and `Default` (including
+  `Default for Char`, `'\0'`).
+- Deferred from `std/core` (Phase 2.1), each needing its own design before
+  it can be added rather than being an incidental extension of what's here:
+  `std/fmt` (richer formatting beyond `Display`/`Debug`), `std/io`,
+  `Iterator` (needs a laziness / `for`-loop-desugaring story), `Hash` (best
+  designed alongside the collection types it would serve), and `Copy`
+  (implicit-copy value semantics, tied to an ownership/move model Nova does
+  not have yet).
 
 ### Fixed (Phase 2)
 - Cross-module symbol collision: two modules each defining a same-named item
@@ -98,6 +167,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and reported as a clean `E0902`, mirroring the `nova build` linker error.
 - Two modules declaring the same C symbol with conflicting signatures now report
   `E0075` instead of crashing codegen / emitting invalid LLVM IR.
+- Self-less methods (Phase 2.1): an impl method declaring no `self` receiver
+  had its parameter types silently shifted by one slot — signature
+  collection unconditionally prepended the receiver's type ahead of every
+  method's declared parameters, even when the method had none. Three
+  independent symptoms followed from the one root cause, all now fixed: a
+  silent miscompile when the shifted types happened not to conflict (a later
+  parameter checked against the wrong declared type, with no diagnostic
+  produced at all); a bogus `E0001: no variant 'f' on type 'Type'` when
+  calling such a method by qualified syntax (a two-segment path was until
+  then understood only as a sum-type variant constructor); and a Cranelift
+  ICE that `nova check` had already accepted — `nova check` reported exit 0
+  for a self-less method called on an instance (`p.make()`), and only `nova
+  run`/`nova build` crashed, with a verifier error ("mismatched argument
+  count: got 1, expected 0") surfaced as "internal codegen error (this is a
+  compiler bug)". Self-less methods are now tracked explicitly, so their
+  signatures are never shifted, and calling one on an instance is a clean
+  `E0014`. The same family of bug existed on the trait-method dispatch path
+  too — a receiver-less trait method called on an instance ICE'd the same
+  way, and a trait/impl pair disagreeing about whether a method takes
+  `self`, in either direction, was accepted with no conformance check at
+  all — now `E0014` and `E0072` respectively, with no ICE either way.
 
 ## [0.1.0] - 2026-07-23
 

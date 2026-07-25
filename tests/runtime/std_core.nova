@@ -1,0 +1,97 @@
+record Point { x: Int, y: Int }
+
+impl Display for Point {
+    fn fmt(self) -> String { "(${self.x}, ${self.y})" }
+}
+
+fn dbl(n: Int) -> Int { n * 2 }
+
+fn shout(e: String) -> String { "shout:${e}" }
+
+fn describe<T: Display>(x: T) -> String { "<${x.fmt()}>" }
+
+fn ord_to_int(o: Ordering) -> Int {
+    match o { Less => -1, Equal => 0, Greater => 1 }
+}
+
+fn main() {
+    // Option method set
+    println("${Some(21).map(dbl).unwrap()}")
+    println("${Some(1).is_some()} ${Some(1).is_none()}")
+    let missing: Option<Int> = None
+    println("${missing.is_some()} ${missing.is_none()}")
+    println("${missing.unwrap_or(99)}")
+    println("${Some(3).and_then(|n| Some(n + 1)).unwrap()}")
+    let none_and_then: Option<Int> = None
+    println("${none_and_then.and_then(|n| Some(n + 1)).unwrap_or(-1)}")
+    let some_ok = Some(5).ok_or("none")
+    println("${some_ok.unwrap()}")
+    let none_val: Option<Int> = None
+    let none_ok = none_val.ok_or("was none")
+    println("${none_ok.unwrap_or(-2)}")
+
+    // Result method set
+    let ok: Result<Int, String> = Ok(4)
+    println("${ok.map(dbl).unwrap()}")
+    println("${ok.is_ok()} ${ok.is_err()}")
+    let bad: Result<Int, String> = Err("nope")
+    println("${bad.unwrap_or(-1)}")
+    println("${bad.is_ok()} ${bad.is_err()}")
+    println("${bad.map(dbl).unwrap_or(-9)}")
+    let shouted = bad.map_err(shout)
+    match shouted {
+        Ok(v) => println("ok ${v}"),
+        Err(e) => println("err ${e}"),
+    }
+    println("${ok.and_then(|n| Ok(n + 1)).unwrap()}")
+    let div0: Result<Int, String> = Err("boom")
+    println("${div0.and_then(|n| Ok(n + 1)).is_err()}")
+
+    // Display: direct, bound, custom-via-interpolation
+    let p = Point { x: 1, y: 2 }
+    println(p.fmt())
+    println((7).fmt())
+    println(describe(7))
+    println(describe(true))
+    println(describe(p))
+    println("${p}")
+
+    // Debug
+    println((7).dbg())
+    println(("hi").dbg())
+
+    // Eq / ne
+    println("${(3).eq(3)} ${(3).eq(4)} ${(3).ne(4)} ${(3).ne(3)}")
+    println("${("hi").eq("hi")} ${("hi").ne("ho")}")
+
+    // Ord: Int, Float, Char
+    println("${ord_to_int((1).cmp(2))} ${ord_to_int((2).cmp(2))} ${ord_to_int((3).cmp(2))}")
+    println("${ord_to_int((1.0).cmp(2.0))} ${ord_to_int((2.0).cmp(2.0))} ${ord_to_int((3.0).cmp(2.0))}")
+    println("${ord_to_int(('a').cmp('b'))} ${ord_to_int(('b').cmp('b'))} ${ord_to_int(('c').cmp('b'))}")
+
+    // Ord: Bool (all four combinations)
+    println("${ord_to_int((false).cmp(false))} ${ord_to_int((false).cmp(true))} ${ord_to_int((true).cmp(false))} ${ord_to_int((true).cmp(true))}")
+
+    // Ord: String (equal, both inequality directions, prefix pairs, empty-vs-nonempty)
+    println("${ord_to_int(("a").cmp("b"))} ${ord_to_int(("b").cmp("a"))} ${ord_to_int(("abc").cmp("abc"))}")
+    println("${ord_to_int(("ab").cmp("abc"))} ${ord_to_int(("abc").cmp("ab"))}")
+    println("${ord_to_int(("").cmp(""))} ${ord_to_int(("").cmp("a"))} ${ord_to_int(("a").cmp(""))}")
+
+    match ("a").cmp("b") {
+        Less => println("less"),
+        Equal => println("equal"),
+        Greater => println("greater"),
+    }
+
+    // Clone
+    println("${(5).clone()}")
+    println("${(2.5).clone()}")
+    println("${(true).clone()}")
+    println("${('z').clone()}")
+    println(("clone-me").clone())
+
+    // Default (including Char)
+    println("${Int::default()} ${Float::default()} ${Bool::default()}")
+    println("${String::default().eq("")}")
+    println("${Char::default().eq('\0')}")
+}

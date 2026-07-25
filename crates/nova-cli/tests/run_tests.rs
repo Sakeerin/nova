@@ -888,6 +888,53 @@ fn build_generics_standalone() {
     assert_eq!(out, expected);
 }
 
+/// `std/core` end-to-end gate (Phase 2.1, Task 10): `Option`/`Result`'s full
+/// method sets, a custom `Display` (direct, through a `T: Display` bound, and
+/// via interpolation), `Debug`, `Eq`/`ne`, `Ord` for every primitive that has
+/// it (including the non-uniform `Bool` and `String` impls), `Clone`, and
+/// `Default` (including `Default for Char`) — round-tripped under `nova run`.
+#[test]
+fn std_core_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/std_core.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/std_core.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Same fixture, compiled to a standalone executable (Cranelift object
+/// backend) rather than JIT-run — the other of the two backends this task's
+/// gate must cover.
+#[test]
+fn std_core_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/std_core.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/std_core.nova", "std_core");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// Same fixture again, this time with `NOVA_GC_STRESS=1` (collect on every
+/// allocation) — the established convention for proving root-scanning stays
+/// correct under heavy `std/core` generic/trait allocation traffic.
+#[test]
+fn std_core_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/std_core.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/std_core.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 #[test]
 fn panic_aborts_with_message() {
     let assert = nova()

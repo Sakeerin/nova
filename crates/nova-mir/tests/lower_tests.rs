@@ -153,6 +153,25 @@ fn unreferenced_functions_are_not_emitted() {
 }
 
 #[test]
+fn unused_std_core_emits_no_symbols() {
+    // `std/core` is compiled into every program as the implicit prelude (ADR
+    // 0004), but a program that uses none of it must not carry any of its
+    // functions into the monomorphized module — otherwise every Nova program
+    // would bloat as std/core grows (already ~20 methods across
+    // Option/Result/Display/Debug/Eq/Ord/Clone/Default, and it grows every
+    // phase). `main` here only calls the `println` builtin, so `main` itself
+    // is the only function reachable — no `Option`/`Result` method, and no
+    // primitive trait impl, should be emitted.
+    let mir = mir_for("fn main() { println(\"hi\") }");
+    let names = function_names(&mir);
+    assert_eq!(
+        names,
+        vec!["main"],
+        "unused std/core leaked into the module: {names:?}"
+    );
+}
+
+#[test]
 fn trait_method_dispatches_to_impl() {
     let mir = mir_for(
         "record P { v: Int }\n\
