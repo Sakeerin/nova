@@ -444,8 +444,11 @@ pub struct TraitDef {
 
 /// One method of a trait. In `params`/`ret`, `Ty::Param(0)` denotes `Self` and
 /// `Ty::Param(1..=generics)` the method's own generic parameters (a generic
-/// method like `fn map<U>(self, …)`). `self` is the implicit receiver and is
-/// not in `params`.
+/// method like `fn map<U>(self, …)`). `params` never itself contains a
+/// `self` entry: when the method declares a `self` receiver it is implicit
+/// rather than stored here, but a trait method need not declare one at all
+/// (e.g. `fn zero() -> Int`), in which case `params` is just its declared
+/// parameters.
 #[derive(Debug, Clone)]
 pub struct TraitMethod {
     pub name: String,

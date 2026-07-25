@@ -311,6 +311,39 @@ fn extern_unresolvable_symbol_is_a_clean_error_not_a_panic() {
     );
 }
 
+/// Regression for the `collect_impls` self-prepend bug (commit c4269ec):
+/// `nova check` used to accept a self-less inherent method called on an
+/// instance, and codegen then died with a Cranelift verifier error and
+/// "internal codegen error (this is a compiler bug)". It must now be
+/// rejected cleanly at type-check time with `E0014`, with no ICE.
+#[test]
+fn selfless_inherent_method_called_on_instance_is_e0014_not_an_ice() {
+    let dir = std::env::temp_dir().join("nova-selfless-inherent-call");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("selfless_call.nova");
+    std::fs::write(
+        &file,
+        "record P { v: Int }\n\
+         impl P { fn make() -> P { P { v: 7 } } }\n\
+         fn main() {\n\
+             let p = P { v: 0 }\n\
+             let q = p.make()\n\
+             println(\"${q.v}\")\n\
+         }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0014"), "stderr: {stderr}");
+    // Must be a clean diagnostic, never the Cranelift verifier dump or the
+    // "compiler bug" label the pre-fix codegen ICE produced.
+    assert!(!stderr.contains("panicked"), "should not panic: {stderr}");
+    assert!(
+        !stderr.contains("compiler bug"),
+        "not a compiler bug: {stderr}"
+    );
+}
+
 #[test]
 fn generic_trait_methods_run() {
     let expected =

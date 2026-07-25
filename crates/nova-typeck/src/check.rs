@@ -588,10 +588,15 @@ impl<'a> Checker<'a> {
                 // For an associated function (`fn new() -> P`) inserting it would
                 // shift every parameter by one against `f.params`, which
                 // `check_fn_body` zips positionally. The predicate mirrors
-                // `method_sig_parts`, which strips *every* param named `self`:
-                // agreeing on the count keeps `sig.params.len()` equal to
-                // `f.params.len()` for every impl method, so the positional zip
-                // and the emitted arity (also `f.params.len()`) cannot disagree.
+                // `method_sig_parts`, which strips *every* param named `self`, so
+                // `sig.params.len()` equals `f.params.len()` for a method with
+                // zero or exactly one `self` parameter — the only shapes this
+                // insert re-aligns. Nothing enforces that shape: a duplicated
+                // receiver (`impl P { fn g(self, self) -> Int { 1 } }`) still
+                // checks `ok`, because `method_sig_parts` strips both `self`s but
+                // only one is re-inserted here, leaving `sig.params` one short of
+                // `f.params` and desynchronising the positional zip again —
+                // calling `p.g()` ICEs in codegen. Pre-existing, not fixed here.
                 let has_self = f.params.iter().any(|p| p.name.value == "self");
                 if has_self {
                     params.insert(0, self_ty.clone());
@@ -5897,6 +5902,39 @@ mod tests {
              fn main() { println(\"ok\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn selfless_method_param_types_are_declared_types() {
+        // `selfless_method_params_are_not_shifted` above only proves there is
+        // no *diagnostic* for a self-less method's parameters — that covers
+        // the false-error symptom, not the silent-miscompile one. Pre-fix,
+        // `impl P { fn f(a: Int, b: Int) -> Int { b } }` type-checked as `ok`
+        // with `a` silently bound to the self type `P` instead of `Int`: the
+        // positional zip in `check_fn_body` paired `a` with the wrongly
+        // prepended self type and `b` with the first declared type (`Int`),
+        // which happened to be the correct type for `b` — no diagnostic ever
+        // compared `a` against anything, so nothing caught it. This pins the
+        // actual bound *types*, not just the absence of errors.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn f(a: Int, b: Int) -> Int { b } }\n\
+             fn main() { println(\"ok\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+
+        let f = r
+            .module
+            .functions
+            .iter()
+            .find(|func| func.name == "P.f")
+            .expect("impl method `f` compiled to a hir::Function");
+        // No phantom leading `self` parameter: exactly the two declared params.
+        assert_eq!(f.params, 2, "expected 2 declared params, none prepended");
+        assert_eq!(f.locals.len(), 2, "no extra locals beyond the two params");
+        // And each keeps its *declared* type rather than being shifted by one.
+        assert_eq!(f.locals[0].ty, Ty::Int, "`a` should be Int, not `P`");
+        assert_eq!(f.locals[1].ty, Ty::Int, "`b` should be Int");
     }
 
     #[test]
