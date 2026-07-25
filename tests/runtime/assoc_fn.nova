@@ -1,0 +1,12 @@
+// Associated-function call syntax (`Type::f(args)`) on a concrete inherent
+// impl: `P::new()` resolves the self-less method `new` on `P` and constructs
+// a value, exercised end-to-end under both the Cranelift JIT (`nova run`)
+// and the Cranelift object backend (`nova build`).
+record P { v: Int }
+
+impl P { fn new() -> P { P { v: 7 } } }
+
+fn main() {
+    let p = P::new()
+    println("${p.v}")
+}

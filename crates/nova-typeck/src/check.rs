@@ -6089,4 +6089,75 @@ mod tests {
         );
         assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn qualified_variant_call_with_args_still_typechecks() {
+        // The single largest regression risk of the associated-function-call
+        // feature: `Type::Variant(args)` and `Type::assoc_fn(args)` share the
+        // same two-segment branch in `check_call`, and the variant lookup must
+        // keep running — and returning early — before the associated-function
+        // lookup is ever tried. No test anywhere exercised the *qualified call*
+        // form with arguments before this: the existing exhaustiveness /
+        // reachability tests only ever construct variants via their bare,
+        // unqualified names (`Circle(r)`, `Some(x)`, ...), never `Type::Variant(args)`.
+        let r = check_src(
+            "type Shape = | Circle(Int) | Square(Int)\n\
+             fn area(s: Shape) -> Int { match s { Circle(r) => r * r, Square(w) => w * w } }\n\
+             fn main() { println(\"${area(Shape::Circle(5))}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn associated_function_on_generic_impl_resolves_type_arg() {
+        // `impl<T> Box<T>` gives an associated function no receiver, so `T`
+        // cannot be recovered the way `emit_inherent_call` recovers it (by
+        // unifying the impl's generics against the receiver's type);
+        // `emit_assoc_call` must instead recover `T` purely from the call's
+        // own argument. Deliberately no `let` annotation on the call site:
+        // `check_block`'s `let` handling overwrites the initializer's
+        // inferred type with the annotation's (`value.ty = annot_ty`)
+        // whenever unification succeeds — and `Ty::Error` unifies with
+        // anything — so an annotated call site would silently paper over a
+        // broken `type_args` substitution rather than exercise it. For the
+        // same reason, asserting only `diagnostics.is_empty()` would not
+        // catch that class of bug either, so this also pins the actual
+        // resolved type of `b`.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T> Box<T> { fn make(v: T) -> Box<T> { Box { value: v } } }\n\
+             fn main() {\n\
+                 let b = Box::make(5)\n\
+                 println(\"${b.value}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let box_def = r
+            .module
+            .records
+            .iter()
+            .find(|rt| rt.name == "Box")
+            .expect("record Box exists")
+            .def_id;
+        let main_fn = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main compiled to a hir::Function");
+        let b_ty = &main_fn
+            .locals
+            .iter()
+            .find(|l| l.name == "b")
+            .expect("`b` is a local in main")
+            .ty;
+        assert_eq!(
+            *b_ty,
+            Ty::Record {
+                def_id: box_def,
+                args: vec![Ty::Int]
+            },
+            "expected `b: Box<Int>`, got {b_ty:?}"
+        );
+    }
 }

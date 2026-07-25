@@ -344,6 +344,31 @@ fn selfless_inherent_method_called_on_instance_is_e0014_not_an_ice() {
     );
 }
 
+/// Associated-function call syntax (`Type::f(args)`, commit 865bff4):
+/// `P::new()` must produce the same value under both backends, mirroring
+/// how every other feature in this file is checked for backend parity.
+#[test]
+fn assoc_fn_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/assoc_fn.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/assoc_fn.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn assoc_fn_build_standalone() {
+    let out = build_and_run("tests/runtime/assoc_fn.nova", "assoc_fn");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/assoc_fn.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
 #[test]
 fn generic_trait_methods_run() {
     let expected =
