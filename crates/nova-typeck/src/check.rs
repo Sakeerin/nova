@@ -5180,9 +5180,28 @@ mod tests {
     fn hello_world_checks() {
         let r = check_src("fn main() { println(\"hi\") }");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        // `functions` is whole-program: this file's one `main`, plus every
-        // method std/core defines on Option/Result (7 + 7, Phase 2.1 Task 8).
-        assert_eq!(r.module.functions.len(), 15);
+        // `functions` is whole-program — it also carries every method
+        // std/core defines on Option/Result — so a total count shifts every
+        // time std/core grows. Assert the relationship this test is actually
+        // about instead: checking produced exactly one `main`, taking no
+        // parameters.
+        let mains: Vec<_> = r
+            .module
+            .functions
+            .iter()
+            .filter(|f| f.name == "main")
+            .collect();
+        assert_eq!(
+            mains.len(),
+            1,
+            "expected exactly one `main`, got {:?}",
+            r.module
+                .functions
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mains[0].params, 0, "main should take no parameters");
     }
 
     #[test]

@@ -1212,11 +1212,17 @@ mod tests {
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         assert!(r.definitions.resolve_trait(ModuleId(0), "Show").is_some());
-        // `methods()` is whole-program: this source's own 3 (one default
-        // `shout`, one trait-impl `name`, one inherent `get`) plus the 14
-        // std/core now defines on Option/Result (7 + 7, Phase 2.1 Task 8).
-        let methods = r.definitions.methods().count();
-        assert_eq!(methods, 17, "expected 17 method defs");
+        // `methods()` is whole-program — it also sees every method std/core
+        // defines on Option/Result — so scope the count to this source's own
+        // module (module 0) rather than asserting a total that shifts every
+        // time std/core grows. This source defines exactly 3: the trait's
+        // default `shout`, the trait-impl `name`, and the inherent `get`.
+        let methods = r
+            .definitions
+            .methods()
+            .filter(|&(_, item_index, _, _)| r.definitions.module_of(item_index) == ModuleId(0))
+            .count();
+        assert_eq!(methods, 3, "expected this module's own 3 method defs");
     }
 
     #[test]
