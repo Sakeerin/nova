@@ -70,10 +70,19 @@ impl<T, E> Result<T, E> {
 // for Bool or String (E0013 for both). Bool is ordered with `if` alone;
 // String has neither length nor indexing in Nova, so it goes through
 // `str_cmp`, a compiler builtin (see `nova-resolver`'s `Builtin` enum) that
-// reaches the runtime's byte-lexicographic `nova_rt_str_cmp` the same way
-// `==` on `String` reaches `nova_rt_str_eq` — internally, not via a
-// user-visible `extern` (String is not FFI-safe, and `nova_`-prefixed
-// extern symbols are reserved by the compiler).
+// reaches the runtime's byte-lexicographic `nova_rt_str_cmp` directly: a
+// named function, resolved specially by the compiler and lowered straight to
+// a runtime call — the same way `println`/`print`/`panic` reach the runtime.
+// This is *not* how `==` on `String` reaches `nova_rt_str_eq`: `==` is a
+// pure operator lowering (`binary_result_ty` permits `Eq`/`Ne` for
+// `Ty::String`; MIR's `lower_binary` intercepts it) that introduces no name
+// in any namespace, so it has no "reserved word" concern to begin with.
+// `str_cmp` does, and unlike `println`/`print`/`panic` it is not meant to be
+// user-visible language surface, so it is seeded only into this module's own
+// scope (`Builtin::STD_CORE_ONLY`), not into every module — a user program
+// may freely define its own `str_cmp` (String is not FFI-safe, and
+// `nova_`-prefixed extern symbols are reserved by the compiler, so a
+// user-visible `extern` was not an option either).
 
 pub type Ordering = | Less | Equal | Greater
 
@@ -105,6 +114,9 @@ impl Debug for Char   { fn dbg(self) -> String { "${self}" } }
 impl Debug for String { fn dbg(self) -> String { "\"${self}\"" } }
 
 impl Eq for Int    { fn eq(self, other: Int) -> Bool { self == other } }
+// Not reflexive for NaN: `NaN == NaN` is `false`, so `eq(NaN, NaN)` is
+// `false` too (NaN is reachable, e.g. via `0.0 / 0.0`). See the `Ord for
+// Float` impl below for the related non-total-order caveat.
 impl Eq for Float  { fn eq(self, other: Float) -> Bool { self == other } }
 impl Eq for Bool   { fn eq(self, other: Bool) -> Bool { self == other } }
 impl Eq for Char   { fn eq(self, other: Char) -> Bool { self == other } }
@@ -116,6 +128,11 @@ impl Ord for Int {
     }
 }
 impl Ord for Float {
+    // Not a total order for NaN: `<` and `==` are both `false` whenever
+    // either operand is NaN, so this falls through to `Greater` for any
+    // comparison involving NaN — including `cmp(NaN, NaN)`, which is
+    // `Greater`, not `Equal`. Ordering NaN is unspecified; do not rely on it
+    // (e.g. for a future sorted collection) until addressed by design.
     fn cmp(self, other: Float) -> Ordering {
         if self < other { Less } else { if self == other { Equal } else { Greater } }
     }

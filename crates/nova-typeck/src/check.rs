@@ -7576,18 +7576,25 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
-    #[test]
-    fn str_cmp_builtin_wrong_arity_reports_e0016() {
-        // `str_cmp` is the compiler builtin backing `impl Ord for String`
-        // (see `std/core`). Its arg-count check is new code, not exercised by
-        // the brief's own test, so it needs direct coverage.
-        let r = check_src("fn main() { let x = str_cmp(\"a\") }");
-        assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
-    }
-
-    #[test]
-    fn str_cmp_builtin_rejects_non_string_argument() {
-        let r = check_src("fn main() { let x = str_cmp(1, \"a\") }");
-        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
-    }
+    // `str_cmp_builtin_wrong_arity_reports_e0016` and
+    // `str_cmp_builtin_rejects_non_string_argument` used to live here,
+    // calling `str_cmp(...)` directly from a *user* module to exercise
+    // `check_builtin_call`'s `Builtin::StrCmp` arity/type-error branches.
+    // They were removed by the Fix 1 review pass (nova-resolver's
+    // `Builtin::STD_CORE_ONLY`): `str_cmp` is no longer seeded into user
+    // module scopes, so `str_cmp(...)` written in a user module no longer
+    // resolves at all — it now fails name resolution with `E0001 cannot find
+    // function 'str_cmp'`, not the `E0016`/`E0010` these tests asserted.
+    // `std/core` is the only remaining caller, and its one call site
+    // (`str_cmp(self, other)` in `impl Ord for String`, above) always passes
+    // exactly two `String` arguments, so the arity/type-error branches are
+    // now defensive-only — unreachable from any Nova program, user or
+    // std/core. Exercising them would require bypassing name resolution
+    // entirely to call `check_builtin_call` with hand-built `Checker`/`FnCtx`
+    // state, which is disproportionate test-harness surgery for dead code
+    // paths, so the tests were dropped rather than repointed. The success
+    // path they didn't cover anyway (`("a").cmp("b")`, i.e. `Ord for String`
+    // dispatching through the builtin) remains covered by
+    // `std_core_traits_and_primitive_impls_typecheck` above, unaffected by
+    // Fix 1 since it calls `.cmp()` as a method, never `str_cmp` by name.
 }

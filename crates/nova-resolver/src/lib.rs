@@ -33,9 +33,18 @@ pub enum Builtin {
     /// `str_cmp(a: String, b: String) -> Int` — byte-lexicographic compare,
     /// returning `-1`, `0`, or `1`. Backs `std/core`'s `impl Ord for String`:
     /// `<` is not defined for `String` (E0013) and `String` is not FFI-safe
-    /// (`require_ffi_safe` in `nova-typeck` only accepts scalars), so this is
-    /// exposed as a builtin — the same mechanism `println`/`print`/`panic`
-    /// use to reach the runtime — instead of a user-visible `extern`.
+    /// (`require_ffi_safe` in `nova-typeck` only accepts scalars), so a
+    /// user-visible `extern` is not an option. Reached the same way
+    /// `println`/`print`/`panic` are — a `Res::Builtin` checked specially by
+    /// `nova-typeck` and lowered straight to a `CallRuntime` in `nova-mir` —
+    /// *not* the way `==` on `String` reaches `nova_rt_str_eq`: that is a
+    /// pure operator lowering (`binary_result_ty` permits `Eq`/`Ne` for
+    /// `Ty::String`, then MIR's `lower_binary` intercepts it) that introduces
+    /// no name in any namespace, whereas `str_cmp` is a named function.
+    /// Unlike `println`/`print`/`panic`, `str_cmp` is *not* part of the
+    /// user-visible language surface: it is seeded only into `std/core`'s own
+    /// module scope (see [`Builtin::STD_CORE_ONLY`]), so it never becomes a
+    /// reserved word in user code.
     StrCmp,
 }
 
@@ -50,13 +59,17 @@ impl Builtin {
         }
     }
 
-    /// All builtins injected into every module's scope.
-    pub const ALL: [Builtin; 4] = [
-        Builtin::Println,
-        Builtin::Print,
-        Builtin::Panic,
-        Builtin::StrCmp,
-    ];
+    /// Builtins injected into *every* module's scope — part of the
+    /// user-visible language surface, and reserved words everywhere.
+    pub const GLOBAL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
+
+    /// Builtins injected only into `std/core`'s own module scope. These are
+    /// implementation details of `std/core`, not user-visible language
+    /// surface: reserving one of these names in *every* module (as
+    /// [`Builtin::GLOBAL`] does) would silently and permanently take the name
+    /// away from user code, just to serve a single `std/core` method.
+    /// Currently just `str_cmp`, which backs `impl Ord for String`.
+    pub const STD_CORE_ONLY: [Builtin; 1] = [Builtin::StrCmp];
 }
 
 /// What kind of definition a [`DefId`] refers to.
@@ -349,14 +362,22 @@ pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> Progr
 
     let mut exports: Vec<Exports> = Vec::new();
 
-    // A scope per module, seeded with the compiler builtins.
-    for m in &all {
+    // A scope per module, seeded with the compiler builtins. `Builtin::GLOBAL`
+    // goes into every module; `Builtin::STD_CORE_ONLY` (currently `str_cmp`)
+    // goes only into std/core's own module, so it never becomes a reserved
+    // word in user code (see the `Builtin` doc comments).
+    for (mid, m) in all.iter().enumerate() {
         let mut scope = ModuleScope {
             name: m.name.clone(),
             ..Default::default()
         };
-        for b in Builtin::ALL {
+        for b in Builtin::GLOBAL {
             scope.values.insert(b.name().to_string(), Res::Builtin(b));
+        }
+        if Some(mid) == std_core_mid {
+            for b in Builtin::STD_CORE_ONLY {
+                scope.values.insert(b.name().to_string(), Res::Builtin(b));
+            }
         }
         definitions.modules.push(scope);
         exports.push(Exports::default());
@@ -1167,6 +1188,47 @@ mod tests {
         assert!(matches!(
             r.definitions.def(opt).kind,
             DefKind::Sum { ref variants, .. } if variants.len() == 2 && variants[0].name == "Present"
+        ));
+    }
+
+    #[test]
+    fn user_trait_shadows_std_core() {
+        // The trait-namespace analogue of `user_type_shadows_std_core`: a
+        // user-defined `Display` shadows std/core's without an E0002 clash,
+        // the module's own trait winning over the soft std/core import. Pins
+        // the `or_insert`-vs-`insert` precedence `import_std_core`'s `traits`
+        // loop relies on (mirrored from the pre-existing `values`/`types`
+        // loops) — the easiest part of that fix to accidentally break later,
+        // since nothing else in this file failed the way it would if this
+        // regressed (std/core's `Display` would silently win instead, and
+        // every method call would still type-check, just against the wrong
+        // trait).
+        let r = resolve_src("trait Display { fn only_here(self) -> Int }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let tr = r
+            .definitions
+            .resolve_trait(ModuleId(0), "Display")
+            .expect("Display resolves");
+        // It is module 0's own trait (declaring `only_here`), not std/core's
+        // `Display` (declaring `fmt`), which lives in a different module.
+        assert!(matches!(
+            r.definitions.def(tr).kind,
+            DefKind::Trait { item_index } if r.definitions.module_of(item_index) == ModuleId(0)
+        ));
+    }
+
+    #[test]
+    fn user_fn_named_str_cmp_is_not_a_reserved_word() {
+        // Regression for the `str_cmp` builtin becoming an accidental
+        // reserved word in every module: `Builtin::STD_CORE_ONLY` (unlike
+        // `Builtin::GLOBAL`) is seeded only into std/core's own module scope,
+        // so a user module defining its own `str_cmp` must compile cleanly —
+        // no E0002 "duplicate definition" / "compiler builtin" diagnostic.
+        let r = resolve_src("fn str_cmp(a: Int, b: Int) -> Int { a + b }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(matches!(
+            r.definitions.resolve_value(ModuleId(0), "str_cmp"),
+            Some(Res::Def(_))
         ));
     }
 
