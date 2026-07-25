@@ -439,6 +439,11 @@ fn unify_patterns(a: &Ty, b: &Ty, subst: &mut Vec<Option<Ty>>) -> bool {
 pub struct TraitDef {
     pub def_id: DefId,
     pub name: String,
+    /// Traits this one requires (`trait Ord: Eq` → `[Eq]`), resolved and
+    /// deduplicated. Direct supertraits only — the transitive closure is taken
+    /// where it is needed, so a cyclic declaration cannot make this list
+    /// infinite.
+    pub supertraits: Vec<DefId>,
     pub methods: Vec<TraitMethod>,
 }
 

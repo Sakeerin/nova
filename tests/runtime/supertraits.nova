@@ -1,0 +1,61 @@
+// Supertraits: `trait Ranked: Named` means every `Ranked` is also a `Named`,
+// so a bound `T: Ranked` may call `Named`'s methods, and an `impl Ranked` is
+// only accepted alongside an `impl Named` for the same type.
+
+trait Named {
+    fn name(self) -> String
+}
+
+trait Ranked: Named {
+    fn rank(self) -> Int
+
+    // A default body reaching the supertrait's method through `Self`'s bound.
+    fn badge(self) -> String {
+        "${self.name()}#${self.rank()}"
+    }
+}
+
+record Player { tag: String, score: Int }
+
+// Declared *after* the `Ranked` impl on purpose: impls have no declaration
+// order, so the supertrait requirement must be checked over the whole file.
+impl Ranked for Player {
+    fn rank(self) -> Int {
+        self.score
+    }
+}
+
+impl Named for Player {
+    fn name(self) -> String {
+        self.tag
+    }
+}
+
+// A wrapper whose impls are *conditional* on the subtrait, so satisfying its
+// `Named` bound at monomorphization recurses through supertrait-derived bounds.
+record Boxed<T> { inner: T }
+
+impl<T: Ranked> Named for Boxed<T> {
+    fn name(self) -> String {
+        "boxed(${self.inner.name()})"
+    }
+}
+
+impl<T: Ranked> Ranked for Boxed<T> {
+    fn rank(self) -> Int {
+        self.inner.rank() + 1
+    }
+}
+
+// `T: Ranked` implies `T: Named`, so both methods resolve here.
+fn report<T: Ranked>(item: T) -> String {
+    "${item.name()} rank=${item.rank()} badge=${item.badge()}"
+}
+
+fn main() {
+    let p = Player { tag: "ada", score: 7 }
+    println(report(p))
+
+    let b = Boxed { inner: p }
+    println(report(b))
+}

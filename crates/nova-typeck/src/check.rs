@@ -58,6 +58,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         selfless: FxHashSet::default(),
         sums: Vec::new(),
         records: Vec::new(),
+        supertraits: FxHashMap::default(),
         traits: Vec::new(),
         impls: Vec::new(),
         extra_functions: Vec::new(),
@@ -69,6 +70,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     checker.collect_type_arities();
     checker.collect_records();
     checker.collect_sums();
+    checker.collect_supertraits();
     checker.collect_traits();
     checker.collect_impls();
     checker.collect_signatures();
@@ -124,6 +126,15 @@ struct Checker<'a> {
     selfless: FxHashSet<DefId>,
     sums: Vec<hir::SumType>,
     records: Vec<hir::RecordType>,
+    /// Direct supertraits of every trait (`trait Ord: Eq` → `Ord ↦ [Eq]`),
+    /// resolved by [`Checker::collect_supertraits`] *before* any bound list is
+    /// built. Expansion cannot read them off the incrementally-populated
+    /// `traits` table: a bound may name a trait declared later in the file, so
+    /// some bound lists would be expanded and others not — and
+    /// `check_impl_conformance` compares a trait method's bound set against the
+    /// impl method's for equality, which a half-expanded table turns into a
+    /// bogus `E0072`.
+    supertraits: FxHashMap<DefId, Vec<DefId>>,
     traits: Vec<hir::TraitDef>,
     impls: Vec<hir::ImplInfo>,
     /// Lifted closure / fn-wrapper functions, appended to the module.
@@ -308,6 +319,103 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Resolve every trait's declared supertraits (`trait B: A`) into
+    /// [`Checker::supertraits`]. Runs before [`Checker::collect_traits`] so the
+    /// whole supertrait graph is known by the time the first bound list is
+    /// expanded, whatever order the traits are declared in.
+    ///
+    /// Deduplicated per trait, mirroring [`Checker::resolve_bounds`]: a repeated
+    /// trait id reads as two providers of the same method and yields a false
+    /// `E0015` "ambiguous method call" at the call site.
+    fn collect_supertraits(&mut self) {
+        // Copy the `&'a File` reference so the item borrow outlives `&mut self`.
+        let file: &'a ast::File = self.file;
+        let traits: Vec<(DefId, usize)> = self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d.kind {
+                DefKind::Trait { item_index } => Some((DefId(i as u32), item_index)),
+                _ => None,
+            })
+            .collect();
+        for (trait_id, item_index) in traits {
+            let Some(item) = file.items.get(item_index) else {
+                continue;
+            };
+            let ast::Item::Trait(decl) = &item.value else {
+                continue;
+            };
+            self.cur_module = self.defs.module_of(item_index);
+            let mut ids: Vec<DefId> = Vec::new();
+            for path in &decl.supertraits {
+                let name = path
+                    .value
+                    .segments
+                    .last()
+                    .map(|s| s.value.as_str())
+                    .unwrap_or("");
+                match self.defs.resolve_trait(self.cur_module, name) {
+                    Some(id) => {
+                        if !ids.contains(&id) {
+                            ids.push(id);
+                        }
+                    }
+                    None => {
+                        self.error("E0001", format!("cannot find trait `{name}`"), path.span);
+                    }
+                }
+            }
+            self.supertraits.insert(trait_id, ids);
+        }
+    }
+
+    /// Expand a bound list with the transitive supertraits of each trait, so a
+    /// bound `T: B` also provides `B`'s supertrait `A`. Deduplicated, because a
+    /// repeated trait id would read as two method providers (a false `E0015`) —
+    /// which a diamond (`C: A + B` with `A: X` and `B: X`) reaches easily.
+    ///
+    /// The walk appends to `out` and never revisits an id already in it, so it
+    /// terminates even on a cyclic `trait A: B` / `trait B: A` declaration. An
+    /// infinite loop here would hang the compiler, which is far worse than the
+    /// missing diagnostic for the cycle itself.
+    fn with_supertraits(&self, bounds: &[DefId]) -> Vec<DefId> {
+        let mut out: Vec<DefId> = Vec::with_capacity(bounds.len());
+        for &id in bounds {
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+        // Breadth-first over `out` itself: the declared bounds keep their source
+        // order and each trait's supertraits follow the traits already queued.
+        let mut i = 0;
+        while let Some(&id) = out.get(i) {
+            i += 1;
+            let Some(supers) = self.supertraits.get(&id) else {
+                continue;
+            };
+            for &s in supers {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// Apply [`Checker::with_supertraits`] to every generic parameter's bound
+    /// list, in place. Called once per declaration *after* all of its bound
+    /// sources (inline bounds and any `where` clause) have been folded in, so the
+    /// expansion sees the complete set. Only the contents of each entry change —
+    /// never its index, which `FnSig.bounds`, `ImplInfo.bounds` and
+    /// `TraitMethod.bounds` all address positionally.
+    fn expand_bounds(&self, bounds: &mut [Vec<DefId>]) {
+        for slot in bounds.iter_mut() {
+            *slot = self.with_supertraits(slot);
+        }
+    }
+
     /// Collect trait declarations and their method signatures. `Self` is
     /// encoded as `Ty::Param(0)` in stored method signatures.
     fn collect_traits(&mut self) {
@@ -374,7 +482,10 @@ impl<'a> Checker<'a> {
                     m_scope.insert(g.name.value.clone(), 1 + j as u32);
                 }
                 let (m_params, m_ret) = self.method_sig_parts(params, ret, &m_scope);
-                let m_bounds = self.resolve_bounds(generics);
+                let mut m_bounds = self.resolve_bounds(generics);
+                // A `where` clause on a trait method is rejected above, so the
+                // inline bounds are the complete set.
+                self.expand_bounds(&mut m_bounds);
                 let default_def = if is_default {
                     default_defs.get(&(item_index, mi)).copied()
                 } else {
@@ -395,9 +506,11 @@ impl<'a> Checker<'a> {
                     default_def,
                 });
             }
+            let def_id = DefId(i as u32);
             self.traits.push(hir::TraitDef {
-                def_id: DefId(i as u32),
+                def_id,
                 name: def.name.clone(),
+                supertraits: self.supertraits.get(&def_id).cloned().unwrap_or_default(),
                 methods,
             });
         }
@@ -454,6 +567,9 @@ impl<'a> Checker<'a> {
                 // own generics, at the same flat Param indices.
                 let mut bounds = vec![vec![trait_id]];
                 bounds.extend(self.resolve_bounds(&f.generics));
+                // `Self`'s bound is the enclosing trait, so expanding it is what
+                // lets a `trait B: A` default body call `self.a()`.
+                self.expand_bounds(&mut bounds);
                 self.sigs.insert(
                     def_id,
                     FnSig {
@@ -499,6 +615,7 @@ impl<'a> Checker<'a> {
             let impl_generics = generic_scope(&block.generics);
             let mut impl_bounds = self.resolve_bounds(&block.generics);
             self.apply_where(&mut impl_bounds, &block.where_clause, &impl_generics);
+            self.expand_bounds(&mut impl_bounds);
             let self_ty = self.convert_ty(&block.ty, &impl_generics);
             let Some(self_head) = self_ty.head() else {
                 self.error(
@@ -593,6 +710,9 @@ impl<'a> Checker<'a> {
                 // A method's `where` clause may constrain the impl's or its own
                 // type parameters; fold it into the combined bounds.
                 self.apply_where(&mut bounds, &f.where_clause, &scope);
+                // The leading `impl_count` entries are already expanded (they are
+                // a clone of `impl_bounds`); re-expanding them is a no-op.
+                self.expand_bounds(&mut bounds);
                 // Non-self params + ret in terms of the self type, resolving the
                 // impl's and this method's generic parameters.
                 let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
@@ -654,6 +774,69 @@ impl<'a> Checker<'a> {
         }
 
         self.check_impl_coherence(&impl_spans);
+        self.check_supertrait_impls(&impl_spans);
+    }
+
+    /// Every trait impl must be accompanied by an impl of each of the trait's
+    /// supertraits for the same self type: `trait B: A` says a `B` *is* an `A`,
+    /// so `impl B for R` without `impl A for R` lets the bound `T: B` promise
+    /// methods no impl provides — the call resolves in the type checker and then
+    /// finds no impl at monomorphization.
+    ///
+    /// Only *direct* supertraits are required here. That is enough transitively:
+    /// the `impl A for R` this pass demands is itself an impl in the table, so it
+    /// is visited too and made to supply `A`'s own supertraits. Checking the
+    /// transitive closure instead would report the same missing impl once per
+    /// subtrait in the chain.
+    ///
+    /// Runs *after* the whole impl table is built, beside
+    /// [`Checker::check_impl_coherence`], rather than from
+    /// [`Checker::check_impl_conformance`]: conformance is called from the middle
+    /// of `collect_impls`, before the impl being checked has even been pushed, so
+    /// it sees only impls from *earlier* items and would reject an `impl B for R`
+    /// written above its `impl A for R`. Nova has no declaration-order rule for
+    /// impls, and `resolve_method_on` does not impose one either.
+    fn check_supertrait_impls(&mut self, spans: &[Span]) {
+        let mut errors: Vec<(String, Span)> = Vec::new();
+        for (imp, &span) in self.impls.iter().zip(spans) {
+            let Some(trait_id) = imp.trait_id else {
+                continue;
+            };
+            let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id) else {
+                continue;
+            };
+            for &super_id in &tr.supertraits {
+                // A generic impl's self type is a pattern, so the supertrait impl
+                // must cover the whole family: `match_args` treats the supertrait
+                // impl's self type as the pattern and this impl's as the ground
+                // term, which an `impl A for W<Int>` fails against
+                // `impl<T> B for W<T>` — as it should, since it leaves every other
+                // `W<T>` without an `A`.
+                let satisfied = self.impls.iter().any(|other| {
+                    other.trait_id == Some(super_id) && other.match_args(&imp.self_ty).is_some()
+                });
+                if satisfied {
+                    continue;
+                }
+                let sname = self
+                    .traits
+                    .iter()
+                    .find(|t| t.def_id == super_id)
+                    .map(|t| t.name.as_str())
+                    .unwrap_or("?");
+                errors.push((
+                    format!(
+                        "the trait `{}` requires `{sname}`, which `{}` does not implement",
+                        tr.name,
+                        display_ty(&imp.self_ty, self.defs),
+                    ),
+                    span,
+                ));
+            }
+        }
+        for (msg, span) in errors {
+            self.error("E0072", msg, span);
+        }
     }
 
     /// Reject overlapping implementations (Phase 1 has no specialization): two
@@ -948,6 +1131,7 @@ impl<'a> Checker<'a> {
             let generics = generic_scope(&f.generics);
             let mut bounds = self.resolve_bounds(&f.generics);
             self.apply_where(&mut bounds, &f.where_clause, &generics);
+            self.expand_bounds(&mut bounds);
             let params = f
                 .params
                 .iter()
@@ -6827,5 +7011,392 @@ mod tests {
              fn main() { let p = P { v: 0 }\n println(\"${p.zero()}\") }",
         );
         assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    // === Supertraits (`trait B: A`) ===
+
+    #[test]
+    fn impl_of_subtrait_without_supertrait_reports_e0072() {
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_of_subtrait_with_supertrait_typechecks() {
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn supertrait_method_callable_through_subtrait_bound() {
+        // `T: B` implies `T: A`, so `a()` is callable. (The receiver is bound to a
+        // local first: a record literal *inside* a `"${…}"` interpolation does not
+        // parse today — its `}` closes the interpolation — a pre-existing
+        // limitation unrelated to supertraits.)
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn sum<T: B>(x: T) -> Int { x.a() + x.b() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${sum(r)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn supertrait_impl_may_be_declared_after_the_subtrait_impl() {
+        // The declaration-order guard that decides *where* the
+        // supertrait-satisfaction check may live. Running it inside
+        // `check_impl_conformance` (called from `collect_impls` *before* the impl
+        // being checked is pushed) only sees impls from earlier items, so this
+        // source — `impl B` first, `impl A` second — would report a bogus E0072.
+        // Nova has no forward-declaration rule for impls; the check therefore has
+        // to be a post-collection pass, like `check_impl_coherence`.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn subtrait_bound_resolves_the_supertrait_method_to_the_supertrait() {
+        // `supertrait_method_callable_through_subtrait_bound` only asserts the
+        // absence of diagnostics, which is weak: `Ty::Error` unifies with
+        // anything, so a mis-resolved call can be silent. Pin the emitted HIR
+        // instead — `x.a()` inside `sum` must be a `TraitCall` naming trait `A`
+        // (not `B`) with `Self` bound to the generic parameter `Param(0)`.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn only_a<T: B>(x: T) -> Int { x.a() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${only_a(r)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let a_id = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "A")
+            .expect("trait A collected")
+            .def_id;
+        let only_a = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "only_a")
+            .expect("`only_a` compiled to a hir::Function");
+        assert_eq!(
+            only_a.bounds,
+            vec![vec![
+                r.module
+                    .traits
+                    .iter()
+                    .find(|t| t.name == "B")
+                    .expect("trait B collected")
+                    .def_id,
+                a_id
+            ]],
+            "the bound `T: B` should expand to `[B, A]`"
+        );
+        let call = child_exprs(&only_a.body)
+            .into_iter()
+            .chain(std::iter::once(&only_a.body))
+            .find(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .expect("`only_a`'s body contains a TraitCall");
+        let hir::ExprKind::TraitCall {
+            trait_id, self_ty, ..
+        } = &call.kind
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(*trait_id, a_id, "`x.a()` should dispatch through trait `A`");
+        assert_eq!(*self_ty, Ty::Param(0), "`Self` should be the parameter `T`");
+        assert_eq!(call.ty, Ty::Int);
+    }
+
+    #[test]
+    fn supertrait_method_callable_from_a_default_body() {
+        // A default body's `Self` is bounded by the enclosing trait alone; if that
+        // bound is not expanded, `self.a()` in `B`'s default body cannot resolve.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int { self.a() + 1 } }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { }\n\
+             fn main() { let x = R { v: 0 }\n println(\"${x.b()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let b_body = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "B::b$default")
+            .expect("`B::b`'s default body compiled to a hir::Function");
+        let a_id = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "A")
+            .expect("trait A collected")
+            .def_id;
+        // `child_exprs` is one level deep, and the call sits under a `Binary`
+        // under the block, so walk the whole tree.
+        fn calls_trait(e: &hir::Expr, tid: DefId) -> bool {
+            if matches!(&e.kind, hir::ExprKind::TraitCall { trait_id, .. } if *trait_id == tid) {
+                return true;
+            }
+            child_exprs(e).into_iter().any(|c| calls_trait(c, tid))
+        }
+        assert!(
+            calls_trait(&b_body.body, a_id),
+            "`self.a()` should resolve to a TraitCall on `A`"
+        );
+        assert_eq!(
+            b_body.bounds,
+            vec![vec![
+                r.module
+                    .traits
+                    .iter()
+                    .find(|t| t.name == "B")
+                    .expect("trait B collected")
+                    .def_id,
+                a_id
+            ]],
+            "the default body's `Self` should be bounded by `B` and its supertrait `A`"
+        );
+    }
+
+    #[test]
+    fn unknown_supertrait_reports_e0001() {
+        let r = check_src(
+            "trait B: Nope { fn b(self) -> Int }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn cyclic_supertraits_do_not_hang() {
+        // `trait A: B` / `trait B: A` is nonsense, but the compiler must
+        // terminate on it rather than loop forever expanding bounds. No
+        // diagnostic is required — only that this test returns.
+        let r = check_src(
+            "trait A: B { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn both<T: A>(x: T) -> Int { x.a() + x.b() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${both(r)}\") }",
+        );
+        // The cycle is satisfiable (each impl exists), so nothing is reported;
+        // the point of the test is that we get here at all.
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn diamond_supertraits_are_not_ambiguous() {
+        // `C: A + B` with `A: X` and `B: X` reaches `X` twice. A duplicated trait
+        // id in the expanded bound set reads as two method providers, which
+        // `resolve_method_on` reports as a false E0015 "ambiguous method call" —
+        // the same trap `resolve_bounds`' dedup exists for.
+        let r = check_src(
+            "trait X { fn x(self) -> Int }\n\
+             trait A: X { fn a(self) -> Int }\n\
+             trait B: X { fn b(self) -> Int }\n\
+             trait C: A + B { fn c(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl X for R { fn x(self) -> Int { 1 } }\n\
+             impl A for R { fn a(self) -> Int { 2 } }\n\
+             impl B for R { fn b(self) -> Int { 3 } }\n\
+             impl C for R { fn c(self) -> Int { 4 } }\n\
+             fn only_x<T: C>(v: T) -> Int { v.x() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${only_x(r)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(
+            !error_codes(&r).contains(&"E0015"),
+            "a diamond must not read as two providers of `x`: {:?}",
+            r.diagnostics
+        );
+        let only_x = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "only_x")
+            .expect("`only_x` compiled to a hir::Function");
+        let bounds = only_x.bounds.first().expect("`T` has bounds");
+        assert_eq!(
+            bounds.len(),
+            4,
+            "expected exactly `[C, A, B, X]` with no repeat, got {bounds:?}"
+        );
+    }
+
+    #[test]
+    fn subtrait_bound_expansion_does_not_break_conformance_bound_sets() {
+        // `check_impl_conformance` compares each method generic's bound set
+        // against the trait's. Both sides must be expanded consistently, and
+        // `M` is declared *before* `B` on purpose: an expansion that reads a
+        // partially-built trait table would leave `M::m`'s `U: B` unexpanded
+        // while the impl's is expanded, producing a bogus E0072.
+        let r = check_src(
+            "trait M { fn m<U: B>(self, u: U) -> Int }\n\
+             trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             record S { w: Int }\n\
+             impl A for S { fn a(self) -> Int { 1 } }\n\
+             impl B for S { fn b(self) -> Int { 2 } }\n\
+             impl M for R { fn m<U: B>(self, u: U) -> Int { u.a() + u.b() } }\n\
+             fn main() {\n\
+                 let r = R { v: 0 }\n\
+                 let s = S { w: 0 }\n\
+                 println(\"${r.m(s)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn supertrait_method_callable_through_an_impl_generic_bound() {
+        // The impl's own generic bound (`impl<T: B> …`) must be expanded too, so
+        // a method body can call the supertrait method on `T`.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             record W<T> { inner: T }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             impl<T: B> W<T> { fn total(self) -> Int { self.inner.a() + self.inner.b() } }\n\
+             fn main() {\n\
+                 let w = W { inner: R { v: 0 } }\n\
+                 println(\"${w.total()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_impl_of_subtrait_without_a_covering_supertrait_impl_reports_e0072() {
+        // `impl<T: B> B for W<T>` needs an `A` impl covering *every* `W<T>`;
+        // an `impl A for W<R>` covers only one instance, so the requirement is
+        // unmet and must be reported at the impl, not silently at some later
+        // instantiation.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             record W<T> { inner: T }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             impl A for W<R> { fn a(self) -> Int { 3 } }\n\
+             impl<T: B> B for W<T> { fn b(self) -> Int { 4 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_impl_of_subtrait_with_a_generic_supertrait_impl_typechecks() {
+        // The companion of the test above: an `impl<T: B> A for W<T>` covers the
+        // whole family, so `impl<T: B> B for W<T>` is satisfied.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             record W<T> { inner: T }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             impl<T: B> A for W<T> { fn a(self) -> Int { self.inner.a() } }\n\
+             impl<T: B> B for W<T> { fn b(self) -> Int { self.inner.b() } }\n\
+             fn main() {\n\
+                 let w = W { inner: R { v: 0 } }\n\
+                 println(\"${w.b()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn hir_trait_def_records_resolved_supertraits() {
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let a_id = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "A")
+            .expect("trait A collected")
+            .def_id;
+        let b = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "B")
+            .expect("trait B collected");
+        assert_eq!(b.supertraits, vec![a_id]);
+        let a = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "A")
+            .expect("trait A collected");
+        assert!(a.supertraits.is_empty());
+    }
+
+    #[test]
+    fn duplicate_supertrait_is_deduplicated() {
+        // `trait B: A + A` must not record `A` twice — a repeat reads as two
+        // providers of `a` and yields a false E0015 at the call site.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A + A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn a(self) -> Int { 1 } }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn only_a<T: B>(x: T) -> Int { x.a() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${only_a(r)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let b = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "B")
+            .expect("trait B collected");
+        assert_eq!(b.supertraits.len(), 1, "supertraits: {:?}", b.supertraits);
     }
 }

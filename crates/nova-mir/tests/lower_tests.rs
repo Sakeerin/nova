@@ -583,3 +583,107 @@ fn closure_lowers_to_env_taking_function() {
     });
     assert!(loads_capture, "closure should load its capture from env");
 }
+
+// === Supertraits (`trait B: A`) at monomorphization ===
+
+#[test]
+fn supertrait_derived_bound_is_discharged() {
+    // A bound `T: B` expands to `[B, A]` in typeck, so monomorphizing `sum` at
+    // `T = R` makes `impl_satisfies` check `A` as well. Typeck's E0072 guarantees
+    // the `impl A for R` that discharges it, and both dispatched methods must
+    // reach monomorphized instances.
+    let mir = mir_for(
+        "trait A { fn a(self) -> Int }\n\
+         trait B: A { fn b(self) -> Int }\n\
+         record R { v: Int }\n\
+         impl A for R { fn a(self) -> Int { 1 } }\n\
+         impl B for R { fn b(self) -> Int { 2 } }\n\
+         fn sum<T: B>(x: T) -> Int { x.a() + x.b() }\n\
+         fn main() { let r = R { v: 0 }\n println(\"${sum(r)}\") }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().any(|n| n.contains("A.a")),
+        "the supertrait method must be monomorphized: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("B.b")),
+        "the subtrait method must be monomorphized: {names:?}"
+    );
+}
+
+#[test]
+fn conditional_impl_discharges_derived_supertrait_bound() {
+    // The case that decides whether `impl_satisfies` needs to know about
+    // supertraits: every impl here is *conditional* (`impl<T: B> … for W<T>`), so
+    // discharging `W<R>: A` recurses into the impl's own bounds — which are
+    // themselves supertrait-expanded to `[B, A]`. If either the outer or the
+    // recursive step could not discharge a supertrait-derived bound, this would
+    // fail with E0013 instead of lowering.
+    let mir = mir_for(
+        "trait A { fn a(self) -> Int }\n\
+         trait B: A { fn b(self) -> Int }\n\
+         record R { v: Int }\n\
+         record W<T> { inner: T }\n\
+         impl A for R { fn a(self) -> Int { 1 } }\n\
+         impl B for R { fn b(self) -> Int { 2 } }\n\
+         impl<T: B> A for W<T> { fn a(self) -> Int { self.inner.a() } }\n\
+         impl<T: B> B for W<T> { fn b(self) -> Int { self.inner.b() } }\n\
+         fn sum<U: B>(x: U) -> Int { x.a() + x.b() }\n\
+         fn main() {\n\
+             let w = W { inner: R { v: 0 } }\n\
+             println(\"${sum(w)}\")\n\
+         }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().filter(|n| n.contains("A.a")).count() >= 2,
+        "`a` should be monomorphized for both `W<R>` and `R`: {names:?}"
+    );
+}
+
+#[test]
+fn supertrait_impl_with_a_narrower_bound_reports_e0013() {
+    // Typeck's supertrait check matches self types structurally, so
+    // `impl<T: Show> A for W<T>` counts as covering `impl<T> B for W<T>` even
+    // though it is conditional on a bound the subtrait impl does not require.
+    // The gap is closed at monomorphization rather than left to miscompile:
+    // `W<Bool>` satisfies `B` but not `A`, which is E0013 (a diagnostic, not an
+    // ICE and not silent acceptance).
+    let codes = diagnostics_for(
+        "trait Show { fn show(self) -> String }\n\
+         trait A { fn a(self) -> Int }\n\
+         trait B: A { fn b(self) -> Int }\n\
+         record W<T> { inner: T }\n\
+         impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+         impl<T: Show> A for W<T> { fn a(self) -> Int { 1 } }\n\
+         impl<T> B for W<T> { fn b(self) -> Int { 2 } }\n\
+         fn sum<U: B>(x: U) -> Int { x.b() }\n\
+         fn main() {\n\
+             let w = W { inner: true }\n\
+             println(\"${sum(w)}\")\n\
+         }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
+#[test]
+fn supertrait_default_body_dispatches_at_monomorphization() {
+    // `B`'s default body calls `self.a()` through the supertrait-expanded `Self`
+    // bound; monomorphizing it at `Self = R` must resolve that call to `impl A
+    // for R`'s method rather than fail to find an impl.
+    let mir = mir_for(
+        "trait A { fn a(self) -> Int }\n\
+         trait B: A { fn b(self) -> Int { self.a() + 1 } }\n\
+         record R { v: Int }\n\
+         impl A for R { fn a(self) -> Int { 1 } }\n\
+         impl B for R { }\n\
+         fn main() { let r = R { v: 0 }\n println(\"${r.b()}\") }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().any(|n| n.contains("A.a")),
+        "the supertrait method called from the default body must be \
+         monomorphized: {names:?}"
+    );
+}

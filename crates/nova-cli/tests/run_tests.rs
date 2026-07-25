@@ -397,6 +397,35 @@ fn trait_assoc_fn_build_standalone() {
     assert_eq!(out, expected);
 }
 
+/// Supertraits (`trait Ranked: Named`): a bound `T: Ranked` calls the
+/// supertrait's methods, a default body reaches them through `Self`, and
+/// conditional impls (`impl<T: Ranked> Named for Boxed<T>`) discharge the
+/// supertrait-derived bounds at monomorphization. Run end-to-end because the
+/// interesting failure is a *dispatch* one: the type checker resolves the
+/// supertrait call against the trait's signature while monomorphization picks
+/// the impl function, so only executing the program proves they agree.
+#[test]
+fn supertraits_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/supertraits.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/supertraits.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn supertraits_build_standalone() {
+    let out = build_and_run("tests/runtime/supertraits.nova", "supertraits");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/supertraits.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
 #[test]
 fn generic_trait_methods_run() {
     let expected =
@@ -636,6 +665,32 @@ fn check_rejects_unsatisfied_trait_bound() {
     let assert = nova().arg("check").arg(&file).assert().failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(stderr.contains("E0013"), "stderr: {stderr}");
+}
+
+/// `nova check` must reject an `impl` of a subtrait whose supertrait is not
+/// implemented for the same type — the whole point of `trait B: A` is that the
+/// bound `T: B` may rely on `A`'s methods existing.
+#[test]
+fn check_rejects_impl_missing_a_supertrait() {
+    let dir = std::env::temp_dir().join("nova-check-supertrait");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("supertrait.nova");
+    std::fs::write(
+        &file,
+        "trait Named { fn name(self) -> String }\n\
+         trait Ranked: Named { fn rank(self) -> Int }\n\
+         record P { v: Int }\n\
+         impl Ranked for P { fn rank(self) -> Int { self.v } }\n\
+         fn main() { }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0072"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("requires `Named`"),
+        "the diagnostic should name the missing supertrait: {stderr}"
+    );
 }
 
 // === nova build: standalone executables ===
