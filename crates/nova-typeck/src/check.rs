@@ -19,7 +19,10 @@ struct FnSig {
     generics: u32,
     /// Trait bounds per generic parameter.
     bounds: Vec<Vec<DefId>>,
-    /// Parameter types. For methods, `params[0]` is the `self` receiver.
+    /// Parameter types. For a method that declares a `self` receiver,
+    /// `params[0]` is that receiver. An associated function (an impl method with
+    /// no `self`, tracked in `Checker::selfless`) holds only its declared
+    /// parameters, so `params` stays positionally aligned with the AST's.
     params: Vec<Ty>,
     ret: Ty,
 }
@@ -52,6 +55,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         cur_module: ModuleId(0),
         sigs: FxHashMap::default(),
         method_locs: FxHashMap::default(),
+        selfless: FxHashSet::default(),
         sums: Vec::new(),
         records: Vec::new(),
         traits: Vec::new(),
@@ -114,6 +118,10 @@ struct Checker<'a> {
     sigs: FxHashMap<DefId, FnSig>,
     /// AST location of each method `DefId`, for the compile pass.
     method_locs: FxHashMap<DefId, MethodLoc>,
+    /// Impl methods that declare no `self` receiver (associated functions).
+    /// Their `sigs` entry holds only the declared parameters — no prepended
+    /// self type — so `check_fn_body`'s params/sig zip stays aligned.
+    selfless: FxHashSet<DefId>,
     sums: Vec<hir::SumType>,
     records: Vec<hir::RecordType>,
     traits: Vec<hir::TraitDef>,
@@ -575,7 +583,21 @@ impl<'a> Checker<'a> {
                 // Non-self params + ret in terms of the self type, resolving the
                 // impl's and this method's generic parameters.
                 let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
-                params.insert(0, self_ty.clone());
+                // `self` is stripped by `method_sig_parts` and re-inserted here as
+                // the receiver — but only for methods that actually declare one.
+                // For an associated function (`fn new() -> P`) inserting it would
+                // shift every parameter by one against `f.params`, which
+                // `check_fn_body` zips positionally. The predicate mirrors
+                // `method_sig_parts`, which strips *every* param named `self`:
+                // agreeing on the count keeps `sig.params.len()` equal to
+                // `f.params.len()` for every impl method, so the positional zip
+                // and the emitted arity (also `f.params.len()`) cannot disagree.
+                let has_self = f.params.iter().any(|p| p.name.value == "self");
+                if has_self {
+                    params.insert(0, self_ty.clone());
+                } else {
+                    self.selfless.insert(def_id);
+                }
                 self.sigs.insert(
                     def_id,
                     FnSig {
@@ -772,9 +794,16 @@ impl<'a> Checker<'a> {
             for k in 0..trait_method.generics {
                 subst.push(Ty::Param(impl_count + k));
             }
-            // impl_sig.params[0] is `self`; compare the rest and the return
-            // type against the trait method (with the mapping applied).
-            let impl_params = &impl_sig.params[1..];
+            // `impl_sig.params[0]` is the `self` receiver — skip it and compare
+            // the declared parameters (and the return type) against the trait
+            // method's, which `method_sig_parts` also stores without `self`. An
+            // associated function has no receiver stored, so there is nothing to
+            // skip (and `[1..]` would panic on its empty parameter list).
+            let impl_params: &[Ty] = if self.selfless.contains(def_id) {
+                &impl_sig.params
+            } else {
+                impl_sig.params.get(1..).unwrap_or_default()
+            };
             let expected: Vec<Ty> = trait_method
                 .params
                 .iter()
@@ -2853,7 +2882,16 @@ impl<'a> Checker<'a> {
             // The receiver must fit the impl's self-type pattern, not just its
             // head, so `impl<T> Pair<T, T>` is skipped for `Pair<Int, String>`.
             .filter(|i| i.match_args(recv_ty).is_some())
-            .find_map(|i| i.methods.iter().find(|(n, _)| n == name).map(|(_, d)| *d))
+            .find_map(|i| {
+                // An associated function has no receiver to bind, so it is not a
+                // candidate for `x.m()`; skipping it here reports the existing
+                // `E0014: no method` instead of dispatching a receiver into a
+                // signature that has no slot for it.
+                i.methods
+                    .iter()
+                    .find(|(n, d)| n == name && !self.selfless.contains(d))
+                    .map(|(_, d)| *d)
+            })
     }
 
     fn check_method_call(
@@ -2939,6 +2977,22 @@ impl<'a> Checker<'a> {
         args: Vec<hir::Expr>,
         span: Span,
     ) -> hir::Expr {
+        // Everything below assumes a receiver at `sig.params[0]`; an associated
+        // function has none, so the arity arithmetic and the receiver unification
+        // would both be off by one. `find_inherent_method` already skips these —
+        // this guard keeps any future caller from reintroducing the codegen ICE.
+        if self.selfless.contains(&def_id) {
+            let mname = self.defs.def(def_id).name.clone();
+            self.error(
+                "E0014",
+                format!(
+                    "`{mname}` is an associated function with no `self` receiver; \
+                     call it as `Type::{mname}(…)`"
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
         let Some(sig) = self.sigs.get(&def_id).cloned() else {
             return error_expr(span);
         };
@@ -5832,5 +5886,41 @@ mod tests {
              fn main() { let p = Pair { first: 1, second: \"x\" }\n println(\"${p}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn selfless_method_params_are_not_shifted() {
+        // `x: Int` must stay Int; a wrongly prepended `self` shifted it to `P`.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn make(x: Int) -> Int { x + 1 } }\n\
+             fn main() { println(\"ok\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn selfless_trait_impl_method_checks_conformance_without_panicking() {
+        // A trait method declared without `self` leaves the impl signature with
+        // no receiver to skip; conformance must compare the declared parameters
+        // as-is rather than slicing past the end of an empty list.
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Zero { fn zero() -> Int }\n\
+             impl Zero for P { fn zero() -> Int { 0 } }\n\
+             fn main() { println(\"ok\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn selfless_method_called_on_instance_reports_e0014() {
+        // Must be a clean diagnostic, never a codegen ICE.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn make() -> P { P { v: 7 } } }\n\
+             fn main() { let p = P { v: 0 }\n let q = p.make()\n println(\"${q.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
     }
 }
