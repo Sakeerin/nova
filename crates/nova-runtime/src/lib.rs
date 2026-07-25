@@ -105,6 +105,19 @@ pub unsafe extern "C" fn nova_rt_str_eq(a: *const NovaStr, b: *const NovaStr) ->
     (as_str(a) == as_str(b)) as i8
 }
 
+/// Byte-lexicographic comparison of two strings: `-1`, `0`, or `1`.
+///
+/// # Safety
+/// `a` and `b` must be valid `NovaStr` pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_cmp(a: *const NovaStr, b: *const NovaStr) -> i64 {
+    match as_str(a).as_bytes().cmp(as_str(b).as_bytes()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -177,6 +190,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_print", nova_rt_print as *const u8),
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
+        ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -194,6 +208,10 @@ mod tests {
 
     unsafe fn to_string(s: *mut NovaStr) -> String {
         as_str(s).to_string()
+    }
+
+    unsafe fn make_str(s: &'static str) -> *mut NovaStr {
+        nova_rt_str_new(s.as_ptr(), s.len() as u64)
     }
 
     #[test]
@@ -232,6 +250,27 @@ mod tests {
         unsafe {
             *(p as *mut i64) = 42;
             assert_eq!(*(p as *const i64), 42);
+        }
+    }
+
+    #[test]
+    fn str_cmp_orders_lexicographically() {
+        unsafe {
+            let a = make_str("abc");
+            let b = make_str("abd");
+            let c = make_str("abc");
+            assert_eq!(nova_rt_str_cmp(a, b), -1);
+            assert_eq!(nova_rt_str_cmp(b, a), 1);
+            assert_eq!(nova_rt_str_cmp(a, c), 0);
+        }
+    }
+
+    #[test]
+    fn str_cmp_prefix_is_less() {
+        unsafe {
+            let a = make_str("ab");
+            let b = make_str("abc");
+            assert_eq!(nova_rt_str_cmp(a, b), -1);
         }
     }
 }

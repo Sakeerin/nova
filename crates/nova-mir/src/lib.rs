@@ -116,6 +116,8 @@ pub enum RtFunc {
     CharToStr,
     /// `(str, str) -> i8`
     StrEq,
+    /// `(str, str) -> i64` — lexicographic compare: -1, 0, or 1.
+    StrCmp,
     /// `(size_bytes) -> ptr` — allocate a heap value (sum or record).
     Alloc,
     /// `(index, len) -> unit` — abort if `index` is out of `0..len`.
@@ -136,6 +138,7 @@ impl RtFunc {
             RtFunc::BoolToStr => "nova_rt_bool_to_str",
             RtFunc::CharToStr => "nova_rt_char_to_str",
             RtFunc::StrEq => "nova_rt_str_eq",
+            RtFunc::StrCmp => "nova_rt_str_cmp",
             RtFunc::Alloc => "nova_rt_alloc",
             RtFunc::CheckBounds => "nova_rt_check_bounds",
             RtFunc::Panic => "nova_rt_panic_str",
@@ -152,6 +155,7 @@ impl RtFunc {
             RtFunc::BoolToStr => (vec![MirTy::I8], MirTy::Ptr),
             RtFunc::CharToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
+            RtFunc::StrCmp => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),

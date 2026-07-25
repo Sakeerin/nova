@@ -179,7 +179,7 @@ struct Codegen<'m, M: ClModule> {
     strings: FxHashMap<String, DataId>,
 }
 
-const ALL_RT: [RtFunc; 11] = [
+const ALL_RT: [RtFunc; 12] = [
     RtFunc::Println,
     RtFunc::Print,
     RtFunc::StrConcat,
@@ -188,6 +188,7 @@ const ALL_RT: [RtFunc; 11] = [
     RtFunc::BoolToStr,
     RtFunc::CharToStr,
     RtFunc::StrEq,
+    RtFunc::StrCmp,
     RtFunc::Alloc,
     RtFunc::CheckBounds,
     RtFunc::Panic,

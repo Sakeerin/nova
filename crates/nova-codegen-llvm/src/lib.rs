@@ -41,6 +41,7 @@ const DECLS: &[&str] = &[
     "declare ptr @nova_rt_bool_to_str(i8)",
     "declare ptr @nova_rt_char_to_str(i64)",
     "declare i8 @nova_rt_str_eq(ptr, ptr)",
+    "declare i64 @nova_rt_str_cmp(ptr, ptr)",
     "declare ptr @nova_rt_alloc(i64)",
     "declare void @nova_rt_check_bounds(i64, i64)",
     "declare ptr @nova_rt_str_new(ptr, i64)",
