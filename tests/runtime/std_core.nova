@@ -56,12 +56,34 @@ fn main() {
     println(describe(p))
     println("${p}")
 
-    // Debug
+    // Display: the remaining primitives. `Display for String` is the only
+    // non-uniform body of the five (`self`, not `"${self}"`), so it is the one
+    // that would not be caught by any other impl's test.
+    println((2.5).fmt())
+    println((false).fmt())
+    println(('q').fmt())
+    println(("plain").fmt())
+
+    // Debug. Char and String quote where Display does not; Char also escapes
+    // the backslash, the quote that delimits it, and the control escapes
+    // `lex_char` accepts, so every line below is a valid Nova char literal.
     println((7).dbg())
+    println((2.5).dbg())
+    println((true).dbg())
+    println(('z').dbg())
+    println(('\\').dbg())
+    println(('\'').dbg())
+    println(('\n').dbg())
+    println(('\t').dbg())
+    println(('\r').dbg())
+    println(('\0').dbg())
     println(("hi").dbg())
 
     // Eq / ne
     println("${(3).eq(3)} ${(3).eq(4)} ${(3).ne(4)} ${(3).ne(3)}")
+    println("${(2.5).eq(2.5)} ${(2.5).eq(1.5)} ${(2.5).ne(1.5)} ${(2.5).ne(2.5)}")
+    println("${(true).eq(true)} ${(true).eq(false)} ${(true).ne(false)} ${(true).ne(true)}")
+    println("${('a').eq('a')} ${('a').eq('b')} ${('a').ne('b')} ${('a').ne('a')}")
     println("${("hi").eq("hi")} ${("hi").ne("ho")}")
 
     // Ord: Int, Float, Char

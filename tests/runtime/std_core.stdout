@@ -20,8 +20,24 @@ true
 <true>
 <(1, 2)>
 (1, 2)
+2.5
+false
+q
+plain
 7
+2.5
+true
+'z'
+'\\'
+'\''
+'\n'
+'\t'
+'\r'
+'\0'
 "hi"
+true false true false
+true false true false
+true false true false
 true false true false
 true true
 -1 0 1

@@ -107,10 +107,41 @@ impl Display for Bool   { fn fmt(self) -> String { "${self}" } }
 impl Display for Char   { fn fmt(self) -> String { "${self}" } }
 impl Display for String { fn fmt(self) -> String { self } }
 
+// `Debug`'s contract is that its output is a *Nova literal* for the value, so
+// `Char` and `String` are quoted where `Display` is not. Nova's lexer accepts
+// `\n \t \r \\ \0 \u{…}` plus `\"` in a string literal and `\'` in a char
+// literal (`nova-lexer`'s string scanner and `lex_char`); `\"` is not valid in
+// a char literal, nor `\'` in a string one, so each form escapes only the
+// quote that delimits it, plus the backslash.
 impl Debug for Int    { fn dbg(self) -> String { "${self}" } }
 impl Debug for Float  { fn dbg(self) -> String { "${self}" } }
 impl Debug for Bool   { fn dbg(self) -> String { "${self}" } }
-impl Debug for Char   { fn dbg(self) -> String { "${self}" } }
+// Backslash is tested first, so the backslash that `\'` and friends introduce
+// is never itself re-escaped. The escaped set is exactly what `lex_char`
+// accepts, so every output here round-trips back through the lexer to `self`.
+// A raw newline/tab/NUL does lex inside `'…'`, but emitting one would put a
+// control character in the middle of debug output, which defeats the purpose.
+impl Debug for Char {
+    fn dbg(self) -> String {
+        if self == '\\' { "'\\\\'" }
+        else if self == '\'' { "'\\''" }
+        else if self == '\n' { "'\\n'" }
+        else if self == '\t' { "'\\t'" }
+        else if self == '\r' { "'\\r'" }
+        else if self == '\0' { "'\\0'" }
+        else { "'${self}'" }
+    }
+}
+// LIMITATION: this cannot escape, so a string containing `"` or `\` debugs to
+// something that is not a valid Nova literal — `("a\"b").dbg()` is `"a"b"`.
+// Escaping needs to inspect the string's contents, and Nova has no way to:
+// `String` has no length, indexing, or iteration, and it is not FFI-safe
+// (`require_ffi_safe` accepts only scalars), so no `extern` can reach it
+// either. Closing this needs a new compiler builtin alongside `str_cmp` (a
+// `str_escape` in `Builtin::STD_CORE_ONLY`, backed by a runtime
+// `nova_rt_str_escape`) — deliberately deferred rather than improvised here,
+// since it adds a runtime ABI symbol. `Char` above escapes correctly because
+// a `Char` *can* be compared, so it needs no such inspection.
 impl Debug for String { fn dbg(self) -> String { "\"${self}\"" } }
 
 impl Eq for Int    { fn eq(self, other: Int) -> Bool { self == other } }
