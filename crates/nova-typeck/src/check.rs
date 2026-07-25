@@ -188,6 +188,30 @@ impl FnCtx {
 impl<'a> Checker<'a> {
     // === Collection ===
 
+    /// Report `E0403` for any generic parameter name that repeats within a
+    /// single declaration — `fn f<U, U>`, `record R<T, T>`, `impl<T, T> …`, a
+    /// trait method `fn m<U, U>`, etc. A silent duplicate leaves the type
+    /// checker's name→index map keeping only the last binding, so the earlier
+    /// parameter becomes a phantom the program can never name. `owner` names the
+    /// declaration kind for the message (e.g. "function", "type", "method").
+    fn check_duplicate_generics(&mut self, generics: &[ast::TypeParam], owner: &str) {
+        let mut seen: Vec<&str> = Vec::new();
+        for g in generics {
+            let name = g.name.value.as_str();
+            if seen.contains(&name) {
+                self.error(
+                    "E0403",
+                    format!(
+                        "the name `{name}` is already used for a generic parameter of this {owner}"
+                    ),
+                    g.name.span,
+                );
+            } else {
+                seen.push(name);
+            }
+        }
+    }
+
     fn collect_records(&mut self) {
         for (i, def) in self.defs.defs().iter().enumerate() {
             let DefKind::Record { item_index } = &def.kind else {
@@ -197,6 +221,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(*item_index);
+            self.check_duplicate_generics(&decl.generics, "type");
             let generics = generic_scope(&decl.generics);
             let fields = decl
                 .fields
@@ -253,6 +278,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(*item_index);
+            self.check_duplicate_generics(&decl.generics, "type");
             let generics = generic_scope(&decl.generics);
             let variants = variants
                 .iter()
@@ -332,6 +358,7 @@ impl<'a> Checker<'a> {
                         name.span,
                     );
                 }
+                self.check_duplicate_generics(generics, "method");
                 // A generic trait method (`fn map<U>(self, …)`) binds `Self` at
                 // Param(0) and its own generic parameters at Param(1..).
                 let mut m_scope = self_scope.clone();
@@ -445,6 +472,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
+            self.check_duplicate_generics(&block.generics, "impl");
             // The impl's generic parameters (`impl<T> …`) are in scope in the
             // self type and every method signature/body.
             let impl_generics = generic_scope(&block.generics);
@@ -844,6 +872,7 @@ impl<'a> Checker<'a> {
             if f.is_async {
                 self.unsupported(f.name.span, "async functions");
             }
+            self.check_duplicate_generics(&f.generics, "function");
             let generics = generic_scope(&f.generics);
             let mut bounds = self.resolve_bounds(&f.generics);
             self.apply_where(&mut bounds, &f.where_clause, &generics);
@@ -4530,6 +4559,63 @@ mod tests {
              fn main() { let a = Box { value: 1 }\n println(\"${a.value}\") }",
         );
         assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_generic_on_free_function_reports_e0403() {
+        // `fn f<U, U>` — the same name twice in a free function's generic list.
+        let r = check_src(
+            "fn f<U, U>(a: U, b: U) -> U { a }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_generic_on_record_reports_e0403() {
+        let r = check_src(
+            "record R<T, T> { a: T }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_generic_on_sum_reports_e0403() {
+        let r = check_src(
+            "type E<T, T> = | A(T) | B\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_generic_on_trait_method_reports_e0403() {
+        let r = check_src(
+            "trait Tr { fn m<U, U>(self, a: U) -> U }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn duplicate_generic_on_impl_block_reports_e0403() {
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl<T, T> Box<T> { fn get(self) -> Int { 0 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0403"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn distinct_generics_are_accepted() {
+        // Guard: distinct names on a function must not trip the duplicate check.
+        let r = check_src(
+            "fn f<T, U>(a: T, b: U) -> T { a }\n\
+             fn main() { let x = f(1, \"s\")\n println(\"${x}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

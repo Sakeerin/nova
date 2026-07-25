@@ -42,6 +42,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither drop nor add a method-generic bound. Dispatch works both on concrete
   receivers and through a `T: Trait` bound in a generic function. `async` on a
   trait-method declaration is rejected (`E0900`) like every other method site.
+- Duplicate generic parameter names are now rejected (`E0403`) at every site a
+  generic list can be written — free functions, records, sum types, trait
+  methods, and `impl` blocks — not only impl methods. A silent duplicate had
+  kept just the last binding, leaving the earlier parameter a phantom the
+  program could never name.
 - `where` clauses (Phase 2.0): an out-of-line spelling of generic bounds on
   functions, impl blocks, and inherent methods — `fn label<T>(x: T) -> String
   where T: Show { … }` is equivalent to the inline `<T: Show>`, and
