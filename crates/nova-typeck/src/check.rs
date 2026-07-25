@@ -1936,14 +1936,21 @@ impl<'a> Checker<'a> {
                     }
                 }
             } else if path.segments.len() == 2 {
-                // `Type::Variant(args)`
+                // `Type::Variant(args)` or `Type::assoc_fn(args)`.
                 let ty_name = path.segments[0].value.as_str();
-                let v_name = path.segments[1].value.as_str();
+                let name = path.segments[1].value.as_str();
                 if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
-                    if let Some(vi) = self.variant_index(def_id, v_name) {
+                    // `Type::Variant(args)` keeps its existing meaning.
+                    if let Some(vi) = self.variant_index(def_id, name) {
                         let checked: Vec<hir::Expr> =
                             args.iter().map(|a| self.check_expr(fcx, a)).collect();
                         return self.make_variant(fcx, def_id, vi, checked, span);
+                    }
+                    // Otherwise: an associated function on an inherent impl.
+                    if let Some(assoc_id) = self.find_assoc_fn(def_id, name) {
+                        let checked: Vec<hir::Expr> =
+                            args.iter().map(|a| self.check_expr(fcx, a)).collect();
+                        return self.emit_assoc_call(fcx, assoc_id, checked, span);
                     }
                 }
             }
@@ -2899,6 +2906,30 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// Find a self-less method named `name` on an inherent impl of the type
+    /// `type_id`. Associated functions have no receiver, so selection is by the
+    /// impl's nominal head only — there is no receiver type to run
+    /// `match_args` against, unlike `find_inherent_method`.
+    fn find_assoc_fn(&self, type_id: DefId, name: &str) -> Option<DefId> {
+        // `type_id` comes from `Definitions::resolve_type`, which only ever
+        // binds `Record`/`Sum` declarations into the type namespace; build the
+        // head the same way `collect_impls` does via `Ty::head()`.
+        let head = match &self.defs.def(type_id).kind {
+            DefKind::Record { .. } => TyHead::Record(type_id),
+            DefKind::Sum { .. } => TyHead::Sum(type_id),
+            _ => return None,
+        };
+        self.impls
+            .iter()
+            .filter(|i| i.trait_id.is_none() && i.self_head == head)
+            .find_map(|i| {
+                i.methods
+                    .iter()
+                    .find(|(n, d)| n == name && self.selfless.contains(d))
+                    .map(|(_, d)| *d)
+            })
+    }
+
     fn check_method_call(
         &mut self,
         fcx: &mut FnCtx,
@@ -3058,6 +3089,64 @@ impl<'a> Checker<'a> {
                 func: hir::Callee::Def(def_id),
                 type_args,
                 args: call_args,
+            },
+            ty: ret,
+            span,
+        }
+    }
+
+    /// Emit a call to an associated function (`Type::f(args)`). Unlike
+    /// `emit_inherent_call`, there is no receiver: `sig.params` holds exactly
+    /// the declared parameters (see `Checker::selfless`), so arity is compared
+    /// directly rather than via `saturating_sub(1)`. The impl's generic
+    /// parameters cannot be recovered from a receiver either, so they become
+    /// fresh inference variables resolved by the surrounding context (e.g. a
+    /// `let` annotation); an unresolved one is reported by the existing
+    /// residual-inference-variable check.
+    fn emit_assoc_call(
+        &mut self,
+        fcx: &mut FnCtx,
+        def_id: DefId,
+        args: Vec<hir::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let Some(sig) = self.sigs.get(&def_id).cloned() else {
+            return error_expr(span);
+        };
+        if args.len() != sig.params.len() {
+            let fname = self.defs.def(def_id).name.clone();
+            self.error(
+                "E0016",
+                format!(
+                    "`{fname}` takes {} argument(s) but {} were supplied",
+                    sig.params.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
+        let type_args: Vec<Ty> = (0..sig.generics).map(|_| fcx.icx.fresh()).collect();
+        for (arg, param) in args.iter().zip(sig.params.iter()) {
+            let expected = param.subst(&type_args);
+            if !fcx.icx.unify(&arg.ty, &expected) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "argument has type `{}` but `{}` was expected",
+                        self.show(&arg.ty, fcx),
+                        self.show(&expected, fcx),
+                    ),
+                    arg.span,
+                );
+            }
+        }
+        let ret = sig.ret.subst(&type_args);
+        hir::Expr {
+            kind: hir::ExprKind::Call {
+                func: hir::Callee::Def(def_id),
+                type_args,
+                args,
             },
             ty: ret,
             span,
@@ -5960,5 +6049,44 @@ mod tests {
              fn main() { let p = P { v: 0 }\n let q = p.make()\n println(\"${q.v}\") }",
         );
         assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn associated_function_call_on_concrete_type() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn new() -> P { P { v: 7 } } }\n\
+             fn main() { let p = P::new()\n println(\"${p.v}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn associated_function_with_args() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn of(x: Int) -> P { P { v: x } } }\n\
+             fn main() { let p = P::of(5)\n println(\"${p.v}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn associated_function_wrong_arity_reports_e0016() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn of(x: Int) -> P { P { v: x } } }\n\
+             fn main() { let p = P::of()\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn unknown_associated_function_still_reports_e0001() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let p = P::nope()\n println(\"x\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
     }
 }
