@@ -299,7 +299,7 @@ impl<'a> Checker<'a> {
             let self_scope = self_generic_scope();
             let mut methods = Vec::new();
             for (mi, item) in decl.items.iter().enumerate() {
-                let (name, generics, where_clause, params, ret, is_default) = match item {
+                let (name, generics, where_clause, params, ret, is_default, is_async) = match item {
                     TraitItem::Required(sig) => (
                         &sig.name,
                         &sig.generics,
@@ -307,6 +307,7 @@ impl<'a> Checker<'a> {
                         &sig.params,
                         &sig.return_ty,
                         false,
+                        sig.is_async,
                     ),
                     TraitItem::Provided(f) => (
                         &f.name,
@@ -315,8 +316,15 @@ impl<'a> Checker<'a> {
                         &f.params,
                         &f.return_ty,
                         true,
+                        f.is_async,
                     ),
                 };
+                // `async` is unsupported at every method site; check it here so
+                // that declaration-only (`Required`) trait methods are covered
+                // too — the default-body pass below only visits `Provided` ones.
+                if is_async {
+                    self.unsupported(name.span, "async methods");
+                }
                 if !where_clause.is_empty() {
                     self.error(
                         "E0900",
@@ -378,11 +386,11 @@ impl<'a> Checker<'a> {
                 let Some(def_id) = default_defs.get(&(item_index, mi)).copied() else {
                     continue;
                 };
+                // `async` and `where` clauses on trait methods are both rejected
+                // in the table loop above; don't build a body signature for one.
                 if f.is_async {
-                    self.unsupported(f.name.span, "async methods");
+                    continue;
                 }
-                // Trait-method `where` clauses are rejected in the table loop
-                // above; don't build a body signature for one.
                 if !f.where_clause.is_empty() {
                     continue;
                 }
@@ -636,6 +644,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Render a set of trait bounds for a diagnostic, e.g. `` `Show + Ord` ``
+    /// or `(none)` when empty.
+    fn render_bound_set(&self, bounds: &[DefId]) -> String {
+        if bounds.is_empty() {
+            return "(none)".to_string();
+        }
+        let names: Vec<String> = bounds
+            .iter()
+            .map(|d| {
+                self.traits
+                    .iter()
+                    .find(|t| t.def_id == *d)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| format!("{d:?}"))
+            })
+            .collect();
+        format!("`{}`", names.join(" + "))
+    }
+
     /// Verify a trait impl provides all required methods, no unknown ones,
     /// and that each provided method's signature matches the trait's
     /// declaration (with `Self` bound to the impl's self type). Without the
@@ -679,6 +706,35 @@ impl<'a> Checker<'a> {
                     span,
                 );
                 continue;
+            }
+            // Each method generic must carry exactly the trait's declared bounds
+            // — neither dropped nor added. The impl method's own generics live at
+            // `impl_sig.bounds[impl_count + k]`, aligned with the trait method's
+            // `bounds[k]`. Without this the trait signature the call site programs
+            // against is not the contract the impl honors: an impl that drops a
+            // bound accepts calls the trait forbids (unsound), and one that adds a
+            // bound rejects trait-valid calls only later, at monomorphization.
+            for k in 0..trait_method.generics as usize {
+                let want = trait_method.bounds[k].as_slice();
+                let got = impl_sig
+                    .bounds
+                    .get(impl_count as usize + k)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if !same_bound_set(want, got) {
+                    let want_str = self.render_bound_set(want);
+                    let got_str = self.render_bound_set(got);
+                    self.error(
+                        "E0072",
+                        format!(
+                            "generic parameter {} of method `{name}` has bound(s) {got_str} \
+                             but trait `{}` declares {want_str}",
+                            k + 1,
+                            tr.name,
+                        ),
+                        span,
+                    );
+                }
             }
             // Map the trait method's Param space into the impl's: `Self`
             // (Param(0)) -> the impl self type; method generic k (Param(1+k)) ->
@@ -4110,6 +4166,11 @@ fn self_generic_scope() -> FxHashMap<String, u32> {
     m
 }
 
+/// Set equality on two trait-bound lists, ignoring order and duplicates.
+fn same_bound_set(a: &[DefId], b: &[DefId]) -> bool {
+    a.iter().all(|d| b.contains(d)) && b.iter().all(|d| a.contains(d))
+}
+
 fn lit_expr(lit: &ast::Literal, span: Span) -> hir::Expr {
     let (kind, ty) = match lit {
         ast::Literal::Int(v) => (hir::ExprKind::IntLit(*v), Ty::Int),
@@ -4489,6 +4550,78 @@ mod tests {
             "spurious E0001: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn impl_dropping_trait_method_bound_reports_e0072() {
+        // The impl drops the trait method's declared generic bound
+        // (`<U: Show>` -> `<U>`). Conformance must reject it (E0072); otherwise
+        // the trait's bound is not a contract the call site can rely on and an
+        // invalid call slips through to run unsoundly.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             trait Tagger { fn tag<U: Show>(self, x: U) -> String }\n\
+             record Thing { v: Int }\n\
+             impl Tagger for Thing { fn tag<U>(self, x: U) -> String { \"no-show\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_adding_undeclared_method_bound_reports_e0072() {
+        // The impl adds a bound the trait does not declare (`<U>` -> `<U: Show>`).
+        // Conformance must reject it up front, rather than letting a valid-per-
+        // trait program fail later at monomorphization with a misattributed span.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             trait Tagger { fn tag<U>(self, x: U) -> String }\n\
+             record Thing { v: Int }\n\
+             impl Tagger for Thing { fn tag<U: Show>(self, x: U) -> String { \"tagged\" } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn faithful_method_bound_impl_typechecks() {
+        // An impl that repeats the trait method's bound exactly must NOT trip the
+        // bound-conformance check.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             trait Tagger { fn tag<U: Show>(self, x: U) -> String }\n\
+             record Thing { v: Int }\n\
+             impl Tagger for Thing { fn tag<U: Show>(self, x: U) -> String { \"ok\" } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn async_trait_method_declaration_reports_e0900() {
+        // `async` on a trait-method *declaration* (no body) must be rejected the
+        // same as on impl methods, default bodies, free fns, and externs.
+        let r = check_src(
+            "trait Foo { async fn bar(self) -> Int }\n\
+             record Thing { v: Int }\n\
+             impl Foo for Thing { fn bar(self) -> Int { self.v } }\n\
+             fn main() { let t = Thing { v: 1 } }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn async_default_trait_method_reports_e0900_once() {
+        // A bodied (default) async trait method is still rejected — exactly once,
+        // not duplicated by both the table and default-body passes.
+        let r = check_src(
+            "trait Foo { async fn bar(self) -> Int { 7 } }\n\
+             record Thing { v: Int }\n\
+             impl Foo for Thing { fn bar(self) -> Int { self.v } }\n\
+             fn main() { let t = Thing { v: 1 } }",
+        );
+        let n = error_codes(&r).iter().filter(|c| **c == "E0900").count();
+        assert_eq!(n, 1, "{:?}", r.diagnostics);
     }
 
     #[test]

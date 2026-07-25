@@ -36,9 +36,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   method's type arguments are inferred per call site (`Self` at `Param(0)`, the
   method's generics after) and threaded into monomorphization so each concrete
   instantiation is compiled separately; inline bounds are enforced at
-  monomorphization (`E0013`). An impl method whose generic arity disagrees with
-  the trait's is rejected (`E0072`). Dispatch works both on concrete receivers
-  and through a `T: Trait` bound in a generic function.
+  monomorphization (`E0013`). An impl method whose generic arity *or* bounds
+  disagree with the trait's is rejected (`E0072`), so the trait method signature
+  the caller programs against is the contract every impl honors — an impl may
+  neither drop nor add a method-generic bound. Dispatch works both on concrete
+  receivers and through a `T: Trait` bound in a generic function. `async` on a
+  trait-method declaration is rejected (`E0900`) like every other method site.
 - `where` clauses (Phase 2.0): an out-of-line spelling of generic bounds on
   functions, impl blocks, and inherent methods — `fn label<T>(x: T) -> String
   where T: Show { … }` is equivalent to the inline `<T: Show>`, and
