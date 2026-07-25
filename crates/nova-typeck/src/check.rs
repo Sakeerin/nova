@@ -384,6 +384,12 @@ impl<'a> Checker<'a> {
                     name: name.value.clone(),
                     params: m_params,
                     ret: m_ret,
+                    // `any`, not `first`: `method_sig_parts` strips *every*
+                    // parameter named `self`, and the parser accepts a misplaced
+                    // receiver (`fn m(x: Int, self)`), so the same predicate must
+                    // decide both or `params` and `has_self` disagree. Mirrors
+                    // `collect_impls`.
+                    has_self: params.iter().any(|p| p.name.value == "self"),
                     generics: generics.len() as u32,
                     bounds: m_bounds,
                     default_def,
@@ -435,8 +441,15 @@ impl<'a> Checker<'a> {
                     scope.insert(g.name.value.clone(), 1 + j as u32);
                 }
                 let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
-                // Prepend the `self` receiver typed as `Self` (`Param(0)`).
-                params.insert(0, Ty::Param(0));
+                // Prepend the `self` receiver typed as `Self` (`Param(0)`) — but
+                // only for a method that declares one. A default-bodied
+                // associated function (`fn zero() -> Self { … }`) has no
+                // receiver, and prepending one would desynchronise `sig.params`
+                // from the AST parameter list that `check_fn_body` zips against
+                // it. Mirrors the same conditional in `collect_impls`.
+                if f.params.iter().any(|p| p.name.value == "self") {
+                    params.insert(0, Ty::Param(0));
+                }
                 // One generic for `Self` (bounded by the trait) plus the method's
                 // own generics, at the same flat Param indices.
                 let mut bounds = vec![vec![trait_id]];
@@ -747,6 +760,31 @@ impl<'a> Checker<'a> {
             let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
                 continue;
             };
+            // The receiver must agree. Nothing below can catch a disagreement:
+            // neither `params` list stores `self`, so an impl that adds or drops
+            // the receiver still compares equal parameter-for-parameter and
+            // return-type-wise. Yet a call site programs against the trait's
+            // signature while codegen dispatches to the impl's function, so the
+            // two differ by exactly one leading argument — Cranelift rejects the
+            // module ("mismatched argument count") and the compiler ICEs on
+            // source that `nova check` accepted.
+            let impl_has_self = !self.selfless.contains(def_id);
+            if impl_has_self != trait_method.has_self {
+                let (want, got) = if trait_method.has_self {
+                    ("a `self` receiver", "none")
+                } else {
+                    ("no `self` receiver", "one")
+                };
+                self.error(
+                    "E0072",
+                    format!(
+                        "method `{name}` has {got} but trait `{}` declares {want}",
+                        tr.name
+                    ),
+                    span,
+                );
+                continue;
+            }
             // The impl method's own generics = its total minus the impl's, and
             // must match the trait method's generic count.
             let impl_method_generics = impl_sig.generics.saturating_sub(impl_count);
@@ -1936,21 +1974,112 @@ impl<'a> Checker<'a> {
                     }
                 }
             } else if path.segments.len() == 2 {
-                // `Type::Variant(args)` or `Type::assoc_fn(args)`.
+                // `Type::Variant(args)`, `Type::assoc_fn(args)`, or `T::assoc_fn(args)`.
                 let ty_name = path.segments[0].value.as_str();
                 let name = path.segments[1].value.as_str();
+                // `T::zero()` where `T` is a generic parameter: dispatch through
+                // its bounds, exactly as a bounded instance method call does.
+                // Checked before the type namespace so a generic parameter
+                // shadows a same-named type, matching `convert_ty`.
+                if let Some(&k) = fcx.generics.get(ty_name) {
+                    let matches: Vec<(DefId, u32)> = fcx
+                        .param_bounds
+                        .get(k as usize)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|&tid| self.trait_assoc_fn_index(tid, name).map(|i| (tid, i)))
+                        .collect();
+                    let checked: Vec<hir::Expr> =
+                        args.iter().map(|a| self.check_expr(fcx, a)).collect();
+                    return match matches.as_slice() {
+                        [(tid, idx)] => {
+                            self.emit_trait_assoc_call(fcx, *tid, *idx, Ty::Param(k), checked, span)
+                        }
+                        [] => {
+                            self.error(
+                                "E0001",
+                                format!(
+                                    "no associated function `{name}` on generic parameter \
+                                     `{ty_name}`; none of its bounds declares one"
+                                ),
+                                callee.span,
+                            );
+                            error_expr(span)
+                        }
+                        _ => {
+                            self.error(
+                                "E0015",
+                                format!(
+                                    "ambiguous associated function `{ty_name}::{name}`: more \
+                                     than one bound of `{ty_name}` provides it"
+                                ),
+                                callee.span,
+                            );
+                            error_expr(span)
+                        }
+                    };
+                }
+                // `Type::Variant(args)` keeps its existing meaning. Only a
+                // nominal type has variants, so this stays on the `resolve_type`
+                // path and is tried before any associated function.
                 if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
-                    // `Type::Variant(args)` keeps its existing meaning.
                     if let Some(vi) = self.variant_index(def_id, name) {
                         let checked: Vec<hir::Expr> =
                             args.iter().map(|a| self.check_expr(fcx, a)).collect();
                         return self.make_variant(fcx, def_id, vi, checked, span);
                     }
-                    // Otherwise: an associated function on an inherent impl.
-                    if let Some(assoc_id) = self.find_assoc_fn(def_id, name) {
+                }
+                // Then an associated function: on an inherent impl first (they
+                // take priority over trait methods, as for instance calls), then
+                // through a trait impl for the qualifier's type. `Int::zero()`
+                // reaches both only via `qualifier_self_ty` — a primitive name is
+                // absent from the resolver's type namespace entirely.
+                if let Some(self_ty) = self.qualifier_self_ty(fcx, ty_name) {
+                    if let Some(assoc_id) = self_ty
+                        .head()
+                        .and_then(|head| self.find_assoc_fn(head, name))
+                    {
                         let checked: Vec<hir::Expr> =
                             args.iter().map(|a| self.check_expr(fcx, a)).collect();
                         return self.emit_assoc_call(fcx, assoc_id, checked, span);
+                    }
+                    let matches = self.find_trait_assoc_fns(&self_ty, name);
+                    match matches.as_slice() {
+                        [(tid, idx)] => {
+                            let (tid, idx) = (*tid, *idx);
+                            let checked: Vec<hir::Expr> =
+                                args.iter().map(|a| self.check_expr(fcx, a)).collect();
+                            return self
+                                .emit_trait_assoc_call(fcx, tid, idx, self_ty, checked, span);
+                        }
+                        [] => {
+                            // A nominal qualifier keeps falling through to
+                            // `check_path`, which reports the pre-existing
+                            // "no variant" / unsupported-path diagnostics. Only a
+                            // primitive is reported here: it is invisible to
+                            // `resolve_type`, so the fall-through would blame
+                            // "module-qualified paths are not supported" for what
+                            // is really a missing associated function.
+                            if self.defs.resolve_type(self.cur_module, ty_name).is_none() {
+                                self.error(
+                                    "E0001",
+                                    format!("no associated function `{name}` on type `{ty_name}`"),
+                                    callee.span,
+                                );
+                                return error_expr(span);
+                            }
+                        }
+                        _ => {
+                            self.error(
+                                "E0015",
+                                format!(
+                                    "ambiguous associated function `{ty_name}::{name}`: more \
+                                     than one trait in scope provides it"
+                                ),
+                                callee.span,
+                            );
+                            return error_expr(span);
+                        }
                     }
                 }
             }
@@ -2877,13 +3006,31 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The index of the trait method `name` that can be *called on a receiver*.
+    /// A receiver-less method is skipped, exactly as `find_inherent_method` skips
+    /// a `selfless` inherent method: there is no receiver slot to bind `x` into,
+    /// so `x.zero()` must report the existing `E0014: no method` rather than
+    /// dispatch a receiver into a signature that has no place for it — which
+    /// lowered to a call with one argument too many and ICEd in codegen.
     fn trait_method_index(&self, trait_id: DefId, name: &str) -> Option<u32> {
         self.traits
             .iter()
             .find(|t| t.def_id == trait_id)?
             .methods
             .iter()
-            .position(|m| m.name == name)
+            .position(|m| m.name == name && m.has_self)
+            .map(|i| i as u32)
+    }
+
+    /// The index of the trait *associated function* (no `self` receiver) named
+    /// `name` — the `Type::name(…)` counterpart of `trait_method_index`.
+    fn trait_assoc_fn_index(&self, trait_id: DefId, name: &str) -> Option<u32> {
+        self.traits
+            .iter()
+            .find(|t| t.def_id == trait_id)?
+            .methods
+            .iter()
+            .position(|m| m.name == name && !m.has_self)
             .map(|i| i as u32)
     }
 
@@ -2906,19 +3053,16 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// Find a self-less method named `name` on an inherent impl of the type
-    /// `type_id`. Associated functions have no receiver, so selection is by the
-    /// impl's nominal head only — there is no receiver type to run
+    /// Find a self-less method named `name` on an inherent impl whose self type
+    /// has the head `head`. Associated functions have no receiver, so selection
+    /// is by the impl's nominal head only — there is no receiver type to run
     /// `match_args` against, unlike `find_inherent_method`.
-    fn find_assoc_fn(&self, type_id: DefId, name: &str) -> Option<DefId> {
-        // `type_id` comes from `Definitions::resolve_type`, which only ever
-        // binds `Record`/`Sum` declarations into the type namespace; build the
-        // head the same way `collect_impls` does via `Ty::head()`.
-        let head = match &self.defs.def(type_id).kind {
-            DefKind::Record { .. } => TyHead::Record(type_id),
-            DefKind::Sum { .. } => TyHead::Sum(type_id),
-            _ => return None,
-        };
+    ///
+    /// Keyed on the head rather than a type `DefId` so that `impl Int { fn … }`
+    /// is reachable: a primitive has no `DefId` at all (it never enters the
+    /// resolver's type namespace), yet `collect_impls` records an impl on one
+    /// under its primitive head just like any other.
+    fn find_assoc_fn(&self, head: TyHead, name: &str) -> Option<DefId> {
         self.impls
             .iter()
             .filter(|i| i.trait_id.is_none() && i.self_head == head)
@@ -2928,6 +3072,66 @@ impl<'a> Checker<'a> {
                     .find(|(n, d)| n == name && self.selfless.contains(d))
                     .map(|(_, d)| *d)
             })
+    }
+
+    /// The self type named by a two-segment path's qualifier (`Int::zero()`,
+    /// `P::new()`, `Box::make(…)`), for associated-function lookup.
+    ///
+    /// A primitive type name never enters the resolver's *type* namespace —
+    /// `insert_type` is only called for `record`/`type` items, so
+    /// `Definitions::resolve_type(module, "Int")` is always `None` — and is
+    /// instead a separate arm of `convert_ty`. Matching those names here produces
+    /// exactly the `Ty` `convert_ty` produces, hence exactly the `TyHead` that
+    /// `collect_impls` recorded as an impl's `self_head`, so `impl Zero for Int`
+    /// is reachable from `Int::zero()`.
+    ///
+    /// A generic nominal type's arguments become fresh inference variables,
+    /// recovered from the call's context the way `emit_assoc_call` recovers an
+    /// impl's generics; an unresolvable one is reported by the residual
+    /// inference-variable check.
+    fn qualifier_self_ty(&self, fcx: &mut FnCtx, name: &str) -> Option<Ty> {
+        match name {
+            "Int" => return Some(Ty::Int),
+            "Float" => return Some(Ty::Float),
+            "Bool" => return Some(Ty::Bool),
+            "Char" => return Some(Ty::Char),
+            "String" => return Some(Ty::String),
+            _ => {}
+        }
+        let def_id = self.defs.resolve_type(self.cur_module, name)?;
+        let arity = self.type_arity.get(&def_id).copied().unwrap_or(0);
+        let args: Vec<Ty> = (0..arity).map(|_| fcx.icx.fresh()).collect();
+        match self.defs.def(def_id).kind {
+            DefKind::Record { .. } => Some(Ty::Record { def_id, args }),
+            DefKind::Sum { .. } => Some(Ty::Sum { def_id, args }),
+            _ => None,
+        }
+    }
+
+    /// Find a receiver-less trait method `name` reachable through a trait impl
+    /// for `self_ty`. Selection mirrors `resolve_method_on`'s trait branch — an
+    /// impl must share the head *and* fit the self type — restricted to methods
+    /// the trait declares without a `self` receiver, since a `Type::name(…)` call
+    /// site has no receiver to pass. Returns every candidate so the caller can
+    /// report ambiguity rather than silently picking one.
+    ///
+    /// A qualifier whose generic arguments are still inference variables
+    /// (`Box::zero()`) only matches an impl whose self type is generic in the
+    /// same positions (`impl<T> Zero for Box<T>`), because `match_args` compares
+    /// structurally: a concrete `impl Zero for Box<Int>` is not found until the
+    /// qualifier's argument is already known, which at a two-segment path it
+    /// never is. Such a call reports "no associated function" rather than
+    /// resolving; concrete and fully-generic self types both work.
+    fn find_trait_assoc_fns(&self, self_ty: &Ty, name: &str) -> Vec<(DefId, u32)> {
+        let Some(head) = self_ty.head() else {
+            return Vec::new();
+        };
+        self.impls
+            .iter()
+            .filter(|i| i.self_head == head && i.match_args(self_ty).is_some())
+            .filter_map(|i| i.trait_id)
+            .filter_map(|tid| self.trait_assoc_fn_index(tid, name).map(|idx| (tid, idx)))
+            .collect()
     }
 
     fn check_method_call(
@@ -3170,6 +3374,24 @@ impl<'a> Checker<'a> {
             .expect("trait exists")]
         .methods[method_idx as usize]
             .clone();
+        // Everything below binds `receiver` as the method's `self`; a trait
+        // associated function has no receiver, and `tm.params` (which never
+        // stores `self`) cannot reveal the mismatch, so the arity check would
+        // pass and MIR would lower one argument too many. `trait_method_index`
+        // already skips these — this guard keeps any future caller from
+        // reintroducing the codegen ICE, mirroring `emit_inherent_call`.
+        if !tm.has_self {
+            self.error(
+                "E0014",
+                format!(
+                    "`{}` is an associated function with no `self` receiver; \
+                     call it as `Type::{}(…)`",
+                    tm.name, tm.name
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
         // Substitution over the trait method's Param space: `Self` (Param(0)) is
         // the receiver type; the method's own generics (Param(1..)) are fresh
         // inference vars, recovered from the argument types like a generic fn.
@@ -3210,7 +3432,77 @@ impl<'a> Checker<'a> {
                 method: method_idx,
                 self_ty: self_ty.clone(),
                 type_args,
-                receiver: Box::new(receiver),
+                receiver: Some(Box::new(receiver)),
+                args,
+            },
+            ty: tm.ret.subst(&subst),
+            span,
+        }
+    }
+
+    /// Emit a call to a trait associated function (no receiver). `self_ty` comes
+    /// from the path qualifier — a concrete type for `Int::zero()`, or `Param(k)`
+    /// when dispatching through a generic parameter's bound (`T::zero()` inside
+    /// `fn f<T: Zero>()`), which monomorphization resolves once `T` is known,
+    /// exactly as it resolves a bounded instance method call.
+    fn emit_trait_assoc_call(
+        &mut self,
+        fcx: &mut FnCtx,
+        trait_id: DefId,
+        method_idx: u32,
+        self_ty: Ty,
+        args: Vec<hir::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let Some(tm) = self
+            .traits
+            .iter()
+            .find(|t| t.def_id == trait_id)
+            .and_then(|t| t.methods.get(method_idx as usize))
+            .cloned()
+        else {
+            return error_expr(span);
+        };
+        // Same flat Param layout `emit_trait_call` establishes: `Self` at
+        // Param(0), the method's own generics at Param(1..).
+        let type_args: Vec<Ty> = (0..tm.generics).map(|_| fcx.icx.fresh()).collect();
+        let mut subst = Vec::with_capacity(1 + type_args.len());
+        subst.push(self_ty.clone());
+        subst.extend(type_args.iter().cloned());
+        if args.len() != tm.params.len() {
+            self.error(
+                "E0016",
+                format!(
+                    "`{}` takes {} argument(s) but {} were supplied",
+                    tm.name,
+                    tm.params.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
+        for (arg, param) in args.iter().zip(tm.params.iter()) {
+            let expected = param.subst(&subst);
+            if !fcx.icx.unify(&arg.ty, &expected) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "argument has type `{}` but `{}` was expected",
+                        self.show(&arg.ty, fcx),
+                        self.show(&expected, fcx),
+                    ),
+                    arg.span,
+                );
+            }
+        }
+        hir::Expr {
+            kind: hir::ExprKind::TraitCall {
+                trait_id,
+                method: method_idx,
+                self_ty,
+                type_args,
+                receiver: None,
                 args,
             },
             ty: tm.ret.subst(&subst),
@@ -4208,7 +4500,8 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
             out.push(value);
         }
         K::TraitCall { receiver, args, .. } => {
-            out.push(receiver);
+            // `None` for a trait associated function — no receiver to visit.
+            out.extend(receiver.iter().map(|r| r.as_ref()));
             out.extend(args.iter());
         }
         K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
@@ -4283,7 +4576,7 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
             out.push(value);
         }
         K::TraitCall { receiver, args, .. } => {
-            out.push(receiver);
+            out.extend(receiver.iter_mut().map(|r| r.as_mut()));
             out.extend(args.iter_mut());
         }
         K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
@@ -4531,7 +4824,9 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
                     residual.push(expr.span);
                 }
             }
-            finalize_expr(receiver, icx, residual);
+            if let Some(receiver) = receiver {
+                finalize_expr(receiver, icx, residual);
+            }
             for a in args {
                 finalize_expr(a, icx, residual);
             }
@@ -6159,5 +6454,255 @@ mod tests {
             },
             "expected `b: Box<Int>`, got {b_ty:?}"
         );
+    }
+
+    #[test]
+    fn trait_associated_function_on_concrete_type() {
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             impl Zero for Int { fn zero() -> Int { 0 } }\n\
+             fn main() { println(\"${Int::zero()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_associated_function_through_bound() {
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             impl Zero for Int { fn zero() -> Int { 0 } }\n\
+             fn make<T: Zero>() -> T { T::zero() }\n\
+             fn main() { let n: Int = make()\n println(\"${n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_self_receiver_disagreeing_with_trait_reports_e0072() {
+        // The trait declares an associated function; the impl gives it a
+        // receiver. That is a signature mismatch, not a silent difference.
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             record R { v: Int }\n\
+             impl Zero for R { fn zero(self) -> R { self } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_omitting_a_self_receiver_the_trait_declares_reports_e0072() {
+        // The mirror of `impl_self_receiver_disagreeing_with_trait_reports_e0072`
+        // and an independent bug: the trait declares `fn zero(self)`, the impl
+        // omits the receiver. Before `has_self`, conformance compared the impl's
+        // *declared* parameters (`selfless` ⇒ nothing to skip) against the
+        // trait's (also none, `self` being implicit) and the return types, so
+        // both agreed and the impl was accepted. A call then type-checked
+        // against the trait's signature and lowered with a receiver argument
+        // into an impl function of arity 0 — Cranelift "mismatched argument
+        // count: got 1, expected 0", i.e. an ICE from `nova check`-clean source.
+        let r = check_src(
+            "record R { v: Int }\n\
+             trait Zero { fn zero(self) -> Int }\n\
+             impl Zero for R { fn zero() -> Int { 0 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0072"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_associated_function_result_type_is_the_qualifier() {
+        // `trait_associated_function_on_concrete_type` above asserts only that
+        // no diagnostic is produced, which is a weak claim: `Ty::Error` unifies
+        // with anything, so a botched `Self` substitution can be silent. Pin the
+        // resolved type instead. Deliberately *no* `let` annotation — an
+        // annotation would have `check_block` overwrite the initializer's
+        // inferred type with the annotation's, hiding exactly the bug this tests.
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             impl Zero for Int { fn zero() -> Int { 0 } }\n\
+             fn main() { let n = Int::zero()\n println(\"${n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let main_fn = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main compiled to a hir::Function");
+        let n_ty = &main_fn
+            .locals
+            .iter()
+            .find(|l| l.name == "n")
+            .expect("`n` is a local in main")
+            .ty;
+        assert_eq!(*n_ty, Ty::Int, "`Int::zero()` should have type `Int`");
+    }
+
+    #[test]
+    fn trait_associated_function_through_bound_has_param_self_ty() {
+        // `trait_associated_function_through_bound` above needs its `let n: Int`
+        // annotation (nothing else can determine `T`), which makes "no
+        // diagnostics" a weak signal. Pin the shape of the emitted call instead:
+        // inside `make`, `T::zero()` must be a receiver-less `TraitCall` whose
+        // `Self` is the *generic parameter* `Param(0)` — that is what lets
+        // monomorphization resolve it per instantiation — and whose result type
+        // is that same parameter, not a stray inference variable or `Error`.
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             impl Zero for Int { fn zero() -> Int { 0 } }\n\
+             fn make<T: Zero>() -> T { T::zero() }\n\
+             fn main() { let n: Int = make()\n println(\"${n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let make_fn = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "make")
+            .expect("`make` compiled to a hir::Function");
+        let call = child_exprs(&make_fn.body)
+            .into_iter()
+            .chain(std::iter::once(&make_fn.body))
+            .find(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .expect("`make`'s body contains a TraitCall");
+        assert_eq!(call.ty, Ty::Param(0), "`T::zero()` should have type `T`");
+        let hir::ExprKind::TraitCall {
+            self_ty, receiver, ..
+        } = &call.kind
+        else {
+            unreachable!("filtered above")
+        };
+        assert_eq!(*self_ty, Ty::Param(0), "`Self` should be the parameter `T`");
+        assert!(receiver.is_none(), "an associated function has no receiver");
+    }
+
+    #[test]
+    fn trait_associated_function_with_default_body_on_concrete_type() {
+        // A receiver-less trait method may carry a default body, which becomes a
+        // `Self`-generic function. `collect_traits` must not prepend the `self`
+        // receiver to that function's signature — the only site exercising the
+        // `has_self` conditional in the default-body signature loop.
+        let r = check_src(
+            "trait Zero { fn zero() -> Int { 5 } }\n\
+             impl Zero for Int { }\n\
+             fn main() { println(\"${Int::zero()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_associated_function_substitutes_self_in_parameters() {
+        // `Self` in a *parameter* must be substituted with the qualifier too,
+        // not just in the return type: the expected type of `true` is `Int`.
+        let r = check_src(
+            "trait Merge { fn combine(a: Self, b: Self) -> Self }\n\
+             impl Merge for Int { fn combine(a: Int, b: Int) -> Int { a + b } }\n\
+             fn main() { println(\"${Int::combine(2, true)}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn ambiguous_trait_associated_function_reports_e0015() {
+        // Two traits in scope provide `Int::zero`; picking one would make
+        // dispatch depend on impl declaration order.
+        let r = check_src(
+            "trait A { fn zero() -> Int }\n\
+             trait B { fn zero() -> Int }\n\
+             impl A for Int { fn zero() -> Int { 1 } }\n\
+             impl B for Int { fn zero() -> Int { 2 } }\n\
+             fn main() { println(\"${Int::zero()}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0015"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_associated_function_wrong_arity_reports_e0016() {
+        let r = check_src(
+            "trait Zero { fn zero() -> Int }\n\
+             impl Zero for Int { fn zero() -> Int { 1 } }\n\
+             fn main() { println(\"${Int::zero(9)}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_param_associated_function_without_a_bound_reports_e0001() {
+        // `T::zero()` where none of `T`'s bounds declares `zero`. Must be a
+        // targeted diagnostic, not the misleading "module-qualified paths are
+        // not supported yet" the pre-existing fall-through produced.
+        let r = check_src(
+            "trait Show { fn fmt(self) -> String }\n\
+             fn make<T: Show>() -> T { T::zero() }\n\
+             fn main() { println(\"hi\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
+        assert!(
+            !error_codes(&r).contains(&"E0900"),
+            "should not blame unsupported module paths: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn inherent_associated_function_on_a_primitive_resolves() {
+        // The other half of teaching the two-segment path gate about primitive
+        // type names: `impl Int { … }` records an inherent impl under the `Int`
+        // head (and an *instance* method on it already dispatched fine), but
+        // `Int::zero()` could not resolve while lookup was keyed on a type
+        // `DefId`, which no primitive has. Keeping only the trait half working
+        // would leave the two kinds of associated function inconsistent.
+        let r = check_src(
+            "impl Int { fn three() -> Int { 3 } }\n\
+             fn main() { let n = Int::three()\n println(\"${n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let main_fn = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main compiled to a hir::Function");
+        let n_ty = &main_fn
+            .locals
+            .iter()
+            .find(|l| l.name == "n")
+            .expect("`n` is a local in main")
+            .ty;
+        assert_eq!(*n_ty, Ty::Int);
+    }
+
+    #[test]
+    fn unknown_associated_function_on_a_primitive_reports_e0001() {
+        // A primitive type name is invisible to `Definitions::resolve_type`, so
+        // before this task every `Primitive::f()` call — resolvable or not — fell
+        // through to `check_path` and reported E0900.
+        let r = check_src("fn main() { println(\"${Int::nope()}\") }");
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
+        assert!(
+            !error_codes(&r).contains(&"E0900"),
+            "should not blame unsupported module paths: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn receiverless_trait_method_called_on_instance_reports_e0014() {
+        // The `selfless_method_called_on_instance_reports_e0014` case for a
+        // *trait* method rather than an inherent one. This impl conforms — the
+        // trait declares no receiver and neither does the impl — so conformance
+        // cannot catch it; resolution must. Before `has_self`, `resolve_method_on`
+        // matched the trait method by name alone, `emit_trait_call` compared the
+        // argument list against `tm.params` (which never holds `self`) and so saw
+        // no arity error, and MIR prepended the receiver to a callee of arity 0:
+        // the same Cranelift ICE, again from source `nova check` accepted.
+        let r = check_src(
+            "record P { v: Int }\n\
+             trait Zero { fn zero() -> Int }\n\
+             impl Zero for P { fn zero() -> Int { 42 } }\n\
+             fn main() { let p = P { v: 0 }\n println(\"${p.zero()}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
     }
 }

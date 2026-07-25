@@ -369,6 +369,34 @@ fn assoc_fn_build_standalone() {
     assert_eq!(out, expected);
 }
 
+/// Trait associated functions (`Type::name(…)` for a trait method with no
+/// `self`), including dispatch through a generic parameter's bound. Checked
+/// end-to-end under both backends because the bug class here is a *codegen*
+/// one: a receiver lowered into a callee that has no `self` parameter type-checks
+/// fine and is only caught by the backend's arity verifier, so no typeck- or
+/// MIR-level test can stand in for actually running the program.
+#[test]
+fn trait_assoc_fn_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/trait_assoc_fn.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/trait_assoc_fn.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn trait_assoc_fn_build_standalone() {
+    let out = build_and_run("tests/runtime/trait_assoc_fn.nova", "trait_assoc_fn");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/trait_assoc_fn.stdout"))
+        .expect("fixture")
+        .replace("\r\n", "\n");
+    assert_eq!(out, expected);
+}
+
 #[test]
 fn generic_trait_methods_run() {
     let expected =

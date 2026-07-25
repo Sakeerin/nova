@@ -316,7 +316,9 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
             method: *method,
             self_ty: self_ty.subst(args),
             type_args: type_args.iter().map(|t| t.subst(args)).collect(),
-            receiver: Box::new(subst_expr(receiver, args)),
+            // `None` for a trait associated function; substitution must not
+            // invent a receiver for one.
+            receiver: receiver.as_ref().map(|r| Box::new(subst_expr(r, args))),
             args: call_args.iter().map(|a| subst_expr(a, args)).collect(),
         },
         K::Binary { op, lhs, rhs } => K::Binary {

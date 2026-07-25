@@ -388,6 +388,48 @@ fn non_overlapping_concrete_impls_lower_to_distinct_functions() {
     );
 }
 
+#[test]
+fn trait_associated_function_through_bound_lowers_without_a_receiver() {
+    // `make<T: Zero>() -> T` at `T = Int` must monomorphize to the `Int` impl's
+    // `zero`, and — the point of the test — the lowered call must pass *no*
+    // receiver argument. `lower_trait_call` unconditionally prepended the
+    // receiver temp, which for a receiver-less callee is the exact shape that
+    // makes Cranelift reject the module ("mismatched argument count: got 1,
+    // expected 0"), so asserting only that the program lowers is not enough.
+    let mir = mir_for(
+        "trait Zero { fn zero() -> Self }\n\
+         impl Zero for Int { fn zero() -> Int { 0 } }\n\
+         fn make<T: Zero>() -> T { T::zero() }\n\
+         fn main() { let n: Int = make()\n println(\"${n}\") }",
+    );
+    let names = function_names(&mir);
+    assert!(
+        names.iter().any(|n| n.contains("zero")),
+        "the Int impl's `zero` must be monomorphized: {names:?}"
+    );
+    // Every call to a `zero` instance, wherever it was lowered, passes no args.
+    let mut zero_calls = 0;
+    for f in &mir.functions {
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let nova_mir::Stmt::Call { callee, args, .. } = s {
+                    if callee.contains("zero") {
+                        zero_calls += 1;
+                        assert!(
+                            args.is_empty(),
+                            "`{callee}` is receiver-less but was called with \
+                             {} argument(s) from `{}`",
+                            args.len(),
+                            f.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(zero_calls, 1, "expected exactly one call to `zero`");
+}
+
 fn diagnostics_for(src: &str) -> Vec<String> {
     let file_id = FileId::DUMMY;
     let (tokens, _) = lex(src, file_id);

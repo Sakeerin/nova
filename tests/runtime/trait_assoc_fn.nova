@@ -1,0 +1,34 @@
+// Trait associated functions — trait methods that declare no `self` receiver,
+// called as `Type::name(…)`. Three shapes, all end-to-end through codegen
+// because the failure mode this guards is not a type error: a receiver lowered
+// into a callee with no `self` parameter passes type-checking and is only
+// rejected by the backend ("mismatched argument count"), i.e. an ICE.
+//
+//   * `Int::zero()`   — a primitive qualifier, which the resolver's type
+//                       namespace does not contain at all
+//   * `P::zero()`     — a nominal qualifier
+//   * `T::zero()`     — dispatch through a generic parameter's bound, here
+//                       instantiated at both `Int` and `P`
+trait Zero {
+    fn zero() -> Self
+}
+
+impl Zero for Int {
+    fn zero() -> Int { 0 }
+}
+
+record P { v: Int }
+
+impl Zero for P {
+    fn zero() -> P { P { v: 7 } }
+}
+
+fn make<T: Zero>() -> T { T::zero() }
+
+fn main() {
+    let direct: Int = Int::zero()
+    let qualified: P = P::zero()
+    let generic_int: Int = make()
+    let generic_rec: P = make()
+    println("${direct} ${qualified.v} ${generic_int} ${generic_rec.v}")
+}

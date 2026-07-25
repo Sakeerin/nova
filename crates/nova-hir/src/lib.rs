@@ -454,6 +454,13 @@ pub struct TraitMethod {
     pub name: String,
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// Whether the method declares a `self` receiver. A method without one is
+    /// an associated function, called as `Type::name(…)` with no receiver —
+    /// never as `value.name(…)`. `params` looks the same either way (`self` is
+    /// never stored in it), so this flag is the only record of the difference,
+    /// and dispatch that ignores it lowers a receiver argument into a callee
+    /// that has no slot for it.
+    pub has_self: bool,
     /// Number of the method's own generic parameters (not counting `Self`).
     pub generics: u32,
     /// Trait bounds per method generic parameter (indexed `0..generics`).
@@ -687,10 +694,10 @@ pub enum ExprKind {
     ArrayLen {
         target: Box<Expr>,
     },
-    /// A trait method call `receiver.method(args)`, resolved to a concrete
-    /// impl during monomorphization (static dispatch). `self_ty` is the
-    /// receiver's type — concrete for a call on a known type, or `Param(k)`
-    /// inside a generic function until substitution makes it concrete.
+    /// A trait method call, resolved to a concrete impl during monomorphization
+    /// (static dispatch). `self_ty` is the `Self` type — concrete for a call on
+    /// a known type, or `Param(k)` inside a generic function (dispatch through
+    /// that parameter's bound) until substitution makes it concrete.
     TraitCall {
         trait_id: DefId,
         method: u32,
@@ -698,7 +705,13 @@ pub enum ExprKind {
         /// The method's own generic arguments (`Param(1..)`), inferred per call
         /// site; empty for a non-generic trait method.
         type_args: Vec<Ty>,
-        receiver: Box<Expr>,
+        /// The receiver of `receiver.method(args)`, or `None` for a trait
+        /// associated function called as `Type::method(args)` — one that
+        /// declares no `self` (see [`TraitMethod::has_self`]). `None` rather
+        /// than a flag beside a placeholder expression so that lowering a
+        /// receiver that does not exist is not representable: there is nothing
+        /// to lower, so no consumer can accidentally pass one.
+        receiver: Option<Box<Expr>>,
         args: Vec<Expr>,
     },
     /// A non-short-circuit binary operation.

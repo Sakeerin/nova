@@ -378,7 +378,15 @@ impl<'a> Lowerer<'a> {
                 type_args,
                 receiver,
                 args,
-            } => self.lower_trait_call(e, *trait_id, *method, self_ty, type_args, receiver, args),
+            } => self.lower_trait_call(
+                e,
+                *trait_id,
+                *method,
+                self_ty,
+                type_args,
+                receiver.as_deref(),
+                args,
+            ),
             K::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             K::LogicalAnd { lhs, rhs } => self.lower_logical(lhs, rhs, true),
             K::LogicalOr { lhs, rhs } => self.lower_logical(lhs, rhs, false),
@@ -593,11 +601,14 @@ impl<'a> Lowerer<'a> {
         method: u32,
         self_ty: &Ty,
         method_type_args: &[Ty],
-        receiver: &hir::Expr,
+        receiver: Option<&hir::Expr>,
         args: &[hir::Expr],
     ) -> Temp {
-        let recv = self.lower_expr(receiver);
-        let mut arg_temps = vec![recv];
+        // `None` for a trait associated function (`Type::zero()`): the callee has
+        // no `self` parameter, so passing one would make the call's arity
+        // disagree with the target's signature and codegen would reject the
+        // module. Evaluate and pass the receiver only when there is one.
+        let mut arg_temps: Vec<Temp> = receiver.map(|r| self.lower_expr(r)).into_iter().collect();
         for a in args {
             arg_temps.push(self.lower_expr(a));
         }
