@@ -2251,13 +2251,34 @@ impl<'a> Checker<'a> {
                 // reaches both only via `qualifier_self_ty` — a primitive name is
                 // absent from the resolver's type namespace entirely.
                 if let Some(self_ty) = self.qualifier_self_ty(fcx, ty_name) {
-                    if let Some(assoc_id) = self_ty
+                    let inherent = self_ty
                         .head()
-                        .and_then(|head| self.find_assoc_fn(head, name))
-                    {
-                        let checked: Vec<hir::Expr> =
-                            args.iter().map(|a| self.check_expr(fcx, a)).collect();
-                        return self.emit_assoc_call(fcx, assoc_id, checked, span);
+                        .map(|head| self.find_assoc_fns(head, name))
+                        .unwrap_or_default();
+                    match inherent.as_slice() {
+                        [assoc_id] => {
+                            let assoc_id = *assoc_id;
+                            let checked: Vec<hir::Expr> =
+                                args.iter().map(|a| self.check_expr(fcx, a)).collect();
+                            return self.emit_assoc_call(fcx, assoc_id, checked, span);
+                        }
+                        [] => {}
+                        // Two inherent impls sharing the head both declare it.
+                        // `check_impl_coherence` lets a *disjoint concrete*
+                        // pair (`impl Box<Int>` / `impl Box<Bool>`) through, so
+                        // this is the only guard against declaration-order
+                        // dispatch here.
+                        _ => {
+                            self.error(
+                                "E0015",
+                                format!(
+                                    "ambiguous associated function `{ty_name}::{name}`: more \
+                                     than one inherent impl of `{ty_name}` provides it"
+                                ),
+                                callee.span,
+                            );
+                            return error_expr(span);
+                        }
                     }
                     let matches = self.find_trait_assoc_fns(&self_ty, name);
                     match matches.as_slice() {
@@ -3338,25 +3359,40 @@ impl<'a> Checker<'a> {
             })
     }
 
-    /// Find a self-less method named `name` on an inherent impl whose self type
-    /// has the head `head`. Associated functions have no receiver, so selection
-    /// is by the impl's nominal head only — there is no receiver type to run
-    /// `match_args` against, unlike `find_inherent_method`.
+    /// Find every self-less method named `name` on an inherent impl whose self
+    /// type has the head `head`. Associated functions have no receiver, so
+    /// selection is by the impl's nominal head only — there is no receiver type
+    /// to run `match_args` against, unlike `find_inherent_method`. That is
+    /// deliberately permissive: `Box::make(5)` must reach
+    /// `impl Box<Int> { fn make(…) }` even though the qualifier's type argument
+    /// is still an inference variable at this point, so filtering by
+    /// `match_args` (which compares structurally, and so cannot line `Int` up
+    /// with a variable) would reject the single-candidate case users want.
+    ///
+    /// The price of that permissiveness is that two *disjoint concrete* impls
+    /// of a generic type — `impl Box<Int>` and `impl Box<Bool>` — are both
+    /// candidates. `check_impl_coherence` does not catch that pair either
+    /// (their self types do not overlap, so there is no `E0074`), so returning
+    /// the first would make dispatch depend on impl declaration order, the
+    /// exact invariant that check exists to protect. Hence every candidate is
+    /// returned and the caller reports `E0015`, mirroring
+    /// `find_trait_assoc_fns`.
     ///
     /// Keyed on the head rather than a type `DefId` so that `impl Int { fn … }`
     /// is reachable: a primitive has no `DefId` at all (it never enters the
     /// resolver's type namespace), yet `collect_impls` records an impl on one
     /// under its primitive head just like any other.
-    fn find_assoc_fn(&self, head: TyHead, name: &str) -> Option<DefId> {
+    fn find_assoc_fns(&self, head: TyHead, name: &str) -> Vec<DefId> {
         self.impls
             .iter()
             .filter(|i| i.trait_id.is_none() && i.self_head == head)
-            .find_map(|i| {
+            .filter_map(|i| {
                 i.methods
                     .iter()
                     .find(|(n, d)| n == name && self.selfless.contains(d))
                     .map(|(_, d)| *d)
             })
+            .collect()
     }
 
     /// The self type named by a two-segment path's qualifier (`Int::zero()`,
@@ -6801,6 +6837,80 @@ mod tests {
             },
             "expected `b: Box<Int>`, got {b_ty:?}"
         );
+    }
+
+    #[test]
+    fn ambiguous_inherent_associated_function_reports_e0015() {
+        // Two *disjoint concrete* inherent impls of one generic type both
+        // declare `tag`. `check_impl_coherence` deliberately allows the pair
+        // (`self_types_overlap(Box<Int>, Box<Bool>)` is false, so no E0074),
+        // and `find_assoc_fns` cannot tell them apart either — the qualifier
+        // `Box` carries no type argument, so neither impl can be selected.
+        // Before this guard, `Box::tag()` silently took whichever impl was
+        // declared first: swapping the two `impl` lines below changed the
+        // program's output from `1` to `2` with no diagnostic at all. That is
+        // exactly the "dispatch would depend on impl declaration order"
+        // failure `check_impl_coherence`'s doc comment names.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl Box<Int> { fn tag() -> Int { 1 } }\n\
+             impl Box<Bool> { fn tag() -> Int { 2 } }\n\
+             fn main() { println(\"${Box::tag()}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0015"), "{:?}", r.diagnostics);
+        // And the pair really is coherent, so E0015 is the *only* thing
+        // standing between this program and order-dependent dispatch.
+        assert!(
+            !error_codes(&r).contains(&"E0074"),
+            "the two impls do not overlap, so coherence must not fire: {:?}",
+            r.diagnostics
+        );
+        // The reverse declaration order must be rejected identically — the
+        // whole point is that order stops mattering.
+        let flipped = check_src(
+            "record Box<T> { value: T }\n\
+             impl Box<Bool> { fn tag() -> Int { 2 } }\n\
+             impl Box<Int> { fn tag() -> Int { 1 } }\n\
+             fn main() { println(\"${Box::tag()}\") }",
+        );
+        assert!(
+            error_codes(&flipped).contains(&"E0015"),
+            "{:?}",
+            flipped.diagnostics
+        );
+    }
+
+    #[test]
+    fn single_concrete_inherent_associated_function_still_resolves() {
+        // The permissive single-candidate case the E0015 guard above must not
+        // regress: one `impl Box<Int>` and a bare `Box::tag()` qualifier whose
+        // type argument is still an inference variable. Selection is by
+        // nominal head alone, so this resolves; asserting the *resolved type*
+        // of `t` rather than only `diagnostics.is_empty()` because `Ty::Error`
+        // unifies with anything, which would make an emptiness-only assertion
+        // silently vacuous.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             impl Box<Int> { fn tag() -> Int { 7 } }\n\
+             fn main() {\n\
+                 let t = Box::tag()\n\
+                 println(\"${t}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let main_fn = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("main compiled to a hir::Function");
+        let t_ty = &main_fn
+            .locals
+            .iter()
+            .find(|l| l.name == "t")
+            .expect("`t` is a local in main")
+            .ty;
+        assert_eq!(*t_ty, Ty::Int, "expected `t: Int`, got {t_ty:?}");
     }
 
     #[test]
