@@ -30,6 +30,13 @@ pub enum Builtin {
     Print,
     /// `panic(msg: String)` — abort the program with a message.
     Panic,
+    /// `str_cmp(a: String, b: String) -> Int` — byte-lexicographic compare,
+    /// returning `-1`, `0`, or `1`. Backs `std/core`'s `impl Ord for String`:
+    /// `<` is not defined for `String` (E0013) and `String` is not FFI-safe
+    /// (`require_ffi_safe` in `nova-typeck` only accepts scalars), so this is
+    /// exposed as a builtin — the same mechanism `println`/`print`/`panic`
+    /// use to reach the runtime — instead of a user-visible `extern`.
+    StrCmp,
 }
 
 impl Builtin {
@@ -39,11 +46,17 @@ impl Builtin {
             Builtin::Println => "println",
             Builtin::Print => "print",
             Builtin::Panic => "panic",
+            Builtin::StrCmp => "str_cmp",
         }
     }
 
     /// All builtins injected into every module's scope.
-    pub const ALL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
+    pub const ALL: [Builtin; 4] = [
+        Builtin::Println,
+        Builtin::Print,
+        Builtin::Panic,
+        Builtin::StrCmp,
+    ];
 }
 
 /// What kind of definition a [`DefId`] refers to.
@@ -448,6 +461,11 @@ fn import_std_core(definitions: &mut Definitions, std_core_exports: &Exports, st
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
+    let traits: Vec<(String, DefId)> = std_core_exports
+        .traits
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     for mid in 0..definitions.modules.len() {
         if mid == std_core_mid {
             continue;
@@ -458,6 +476,9 @@ fn import_std_core(definitions: &mut Definitions, std_core_exports: &Exports, st
         }
         for (n, id) in &types {
             scope.types.entry(n.clone()).or_insert(*id);
+        }
+        for (n, id) in &traits {
+            scope.traits.entry(n.clone()).or_insert(*id);
         }
     }
 }
@@ -1147,6 +1168,24 @@ mod tests {
             r.definitions.def(opt).kind,
             DefKind::Sum { ref variants, .. } if variants.len() == 2 && variants[0].name == "Present"
         ));
+    }
+
+    #[test]
+    fn std_core_traits_are_visible_from_a_user_module() {
+        // Regression test for a gap `import_std_core` had: it merged `values`
+        // and `types` from std/core's exports into every other module's scope,
+        // but not `traits`, so a trait declared in std/core (e.g. `Display`,
+        // `Eq`, `Ord`) could never be named from user code even though its
+        // impls live right there in std/core alongside it. A user module that
+        // declares no trait of its own must still resolve std/core's by name.
+        let r = resolve_src("fn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        for name in ["Display", "Debug", "Eq", "Ord", "Clone", "Default"] {
+            assert!(
+                r.definitions.resolve_trait(ModuleId(0), name).is_some(),
+                "expected std/core's `{name}` trait to resolve from module 0"
+            );
+        }
     }
 
     #[test]

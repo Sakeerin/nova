@@ -2498,6 +2498,44 @@ impl<'a> Checker<'a> {
                     span,
                 }
             }
+            Builtin::StrCmp => {
+                if args.len() != 2 {
+                    self.error(
+                        "E0016",
+                        format!(
+                            "`{}` takes 2 arguments but {} were supplied",
+                            builtin.name(),
+                            args.len()
+                        ),
+                        span,
+                    );
+                    return error_expr(span);
+                }
+                let a = self.check_expr(fcx, &args[0]);
+                let b = self.check_expr(fcx, &args[1]);
+                for arg in [&a, &b] {
+                    if !fcx.icx.unify(&arg.ty, &Ty::String) {
+                        self.error(
+                            "E0010",
+                            format!(
+                                "`{}` expects a `String`, found `{}`",
+                                builtin.name(),
+                                self.show(&arg.ty, fcx),
+                            ),
+                            arg.span,
+                        );
+                    }
+                }
+                hir::Expr {
+                    kind: hir::ExprKind::Call {
+                        func: hir::Callee::Builtin(builtin),
+                        type_args: Vec::new(),
+                        args: vec![a, b],
+                    },
+                    ty: Ty::Int,
+                    span,
+                }
+            }
         }
     }
 
@@ -7521,5 +7559,35 @@ mod tests {
              }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn std_core_traits_and_primitive_impls_typecheck() {
+        let r = check_src(
+            "fn show_all<T: Display>(x: T) -> String { x.fmt() }\n\
+             fn main() {\n\
+                 println(show_all(3))\n\
+                 println(\"${(1).eq(1)}\")\n\
+                 let o = (\"a\").cmp(\"b\")\n\
+                 match o { Less => println(\"less\"), Equal => println(\"eq\"), \
+                           Greater => println(\"gt\") }\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn str_cmp_builtin_wrong_arity_reports_e0016() {
+        // `str_cmp` is the compiler builtin backing `impl Ord for String`
+        // (see `std/core`). Its arg-count check is new code, not exercised by
+        // the brief's own test, so it needs direct coverage.
+        let r = check_src("fn main() { let x = str_cmp(\"a\") }");
+        assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn str_cmp_builtin_rejects_non_string_argument() {
+        let r = check_src("fn main() { let x = str_cmp(1, \"a\") }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
     }
 }

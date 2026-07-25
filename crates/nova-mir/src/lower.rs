@@ -568,6 +568,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::Println => RtFunc::Println,
                     Builtin::Print => RtFunc::Print,
                     Builtin::Panic => RtFunc::Panic,
+                    Builtin::StrCmp => RtFunc::StrCmp,
                 };
                 self.push(Stmt::CallRuntime {
                     dst,

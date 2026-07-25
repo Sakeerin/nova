@@ -63,3 +63,96 @@ impl<T, E> Result<T, E> {
         match self { Ok(v) => v, Err(_) => default }
     }
 }
+
+// Core traits, and their impls for the five primitive types.
+//
+// `Ord` cannot be written uniformly: `<` works for Int/Float/Char but not
+// for Bool or String (E0013 for both). Bool is ordered with `if` alone;
+// String has neither length nor indexing in Nova, so it goes through
+// `str_cmp`, a compiler builtin (see `nova-resolver`'s `Builtin` enum) that
+// reaches the runtime's byte-lexicographic `nova_rt_str_cmp` the same way
+// `==` on `String` reaches `nova_rt_str_eq` — internally, not via a
+// user-visible `extern` (String is not FFI-safe, and `nova_`-prefixed
+// extern symbols are reserved by the compiler).
+
+pub type Ordering = | Less | Equal | Greater
+
+pub trait Display { fn fmt(self) -> String }
+
+pub trait Debug { fn dbg(self) -> String }
+
+pub trait Eq {
+    fn eq(self, other: Self) -> Bool
+    fn ne(self, other: Self) -> Bool { !self.eq(other) }
+}
+
+pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering }
+
+pub trait Clone { fn clone(self) -> Self }
+
+pub trait Default { fn default() -> Self }
+
+impl Display for Int    { fn fmt(self) -> String { "${self}" } }
+impl Display for Float  { fn fmt(self) -> String { "${self}" } }
+impl Display for Bool   { fn fmt(self) -> String { "${self}" } }
+impl Display for Char   { fn fmt(self) -> String { "${self}" } }
+impl Display for String { fn fmt(self) -> String { self } }
+
+impl Debug for Int    { fn dbg(self) -> String { "${self}" } }
+impl Debug for Float  { fn dbg(self) -> String { "${self}" } }
+impl Debug for Bool   { fn dbg(self) -> String { "${self}" } }
+impl Debug for Char   { fn dbg(self) -> String { "${self}" } }
+impl Debug for String { fn dbg(self) -> String { "\"${self}\"" } }
+
+impl Eq for Int    { fn eq(self, other: Int) -> Bool { self == other } }
+impl Eq for Float  { fn eq(self, other: Float) -> Bool { self == other } }
+impl Eq for Bool   { fn eq(self, other: Bool) -> Bool { self == other } }
+impl Eq for Char   { fn eq(self, other: Char) -> Bool { self == other } }
+impl Eq for String { fn eq(self, other: String) -> Bool { self == other } }
+
+impl Ord for Int {
+    fn cmp(self, other: Int) -> Ordering {
+        if self < other { Less } else { if self == other { Equal } else { Greater } }
+    }
+}
+impl Ord for Float {
+    fn cmp(self, other: Float) -> Ordering {
+        if self < other { Less } else { if self == other { Equal } else { Greater } }
+    }
+}
+impl Ord for Char {
+    fn cmp(self, other: Char) -> Ordering {
+        if self < other { Less } else { if self == other { Equal } else { Greater } }
+    }
+}
+impl Ord for Bool {
+    // `<` is not defined for Bool; false sorts before true.
+    fn cmp(self, other: Bool) -> Ordering {
+        if self {
+            if other { Equal } else { Greater }
+        } else {
+            if other { Less } else { Equal }
+        }
+    }
+}
+impl Ord for String {
+    // String has neither length nor indexing in Nova, so ordering comes from
+    // `str_cmp`, a compiler builtin backed by the runtime's byte-lexicographic
+    // compare (see the module-level note above for why not `extern`).
+    fn cmp(self, other: String) -> Ordering {
+        let c = str_cmp(self, other)
+        if c < 0 { Less } else { if c == 0 { Equal } else { Greater } }
+    }
+}
+
+impl Clone for Int    { fn clone(self) -> Int { self } }
+impl Clone for Float  { fn clone(self) -> Float { self } }
+impl Clone for Bool   { fn clone(self) -> Bool { self } }
+impl Clone for Char   { fn clone(self) -> Char { self } }
+impl Clone for String { fn clone(self) -> String { self } }
+
+impl Default for Int    { fn default() -> Int { 0 } }
+impl Default for Float  { fn default() -> Float { 0.0 } }
+impl Default for Bool   { fn default() -> Bool { false } }
+impl Default for Char   { fn default() -> Char { '\0' } }
+impl Default for String { fn default() -> String { "" } }
