@@ -82,7 +82,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   expects and can stand as a match arm's or `if`-branch's tail expression,
   e.g. the `None`/`Err` arm of `std/core`'s `unwrap()`. Declared in both
   codegen backends' runtime-declaration lists (Cranelift's `ALL_RT`, LLVM's
-  `DECLS`).
+  `DECLS`). Like `println`/`print`, `panic` is seeded into *every* module's
+  scope (`Builtin::GLOBAL`), so it is now a reserved word: a user
+  `fn panic(...)` reports `E0002: duplicate definition of 'panic'` with the
+  note "`panic` is a compiler builtin". This is deliberate — `panic` is
+  user-visible language surface — and is the opposite of `str_cmp` below,
+  which is scoped to `std/core` alone precisely so it does *not* reserve a
+  name in user code.
 - `nova_rt_str_cmp` (Phase 2.1): a runtime function comparing two strings
   byte-lexicographically and returning `-1`/`0`/`1`. Needed because Nova has
   no built-in string ordering to write one *in* Nova source — `String` has
@@ -120,7 +126,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   names need no `import` and a user definition of the same name silently
   shadows it (`docs/adr/0004-stdlib-compile-model.md` records this compile
   model and why it is an embed rather than a disk search path or a
-  precompiled artifact). Contents: `Option<T>`/`Result<T, E>` (previously a
+  precompiled artifact). Silent shadowing covers the *item* namespaces only:
+  a user `impl<T> Option<T>` (or `impl<T, E> Result<T, E>`) that redefines a
+  method `std/core` already provides — `map`, `unwrap`, `is_some`, … — is a
+  normal overlapping-inherent-impl conflict and reports `E0074: method 'x' is
+  defined by multiple overlapping inherent impls`; `std/core`'s impls get no
+  immunity from coherence. The method names the six traits claim on the five
+  primitives are likewise not shadowable (see ADR 0004's Consequences).
+  Contents: `Option<T>`/`Result<T, E>` (previously a
   hardcoded two-line prelude string, now real source checked and diagnosed
   like any other module) gain full method sets — `Option`: `is_some`,
   `is_none`, `map`, `and_then`, `unwrap`, `unwrap_or`, `ok_or`; `Result`:
@@ -128,8 +141,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plus six core traits, each implemented for all five primitive types
   (`Int`, `Float`, `Bool`, `Char`, `String`): `Display` and `Debug` (a
   direct `.fmt()`/`.dbg()` call and a generic `T: Display`/`T: Debug` bound
-  now work uniformly across primitives and user types alike; `Debug`'s
-  `String` impl quotes its content); `Eq` (`eq`, plus a defaulted `ne`);
+  now work uniformly across primitives and user types alike; `Debug` quotes
+  where `Display` does not — `String` as `"…"`, `Char` as `'…'`, with `Char`
+  escaping the backslash, the delimiting quote, and the control escapes the
+  lexer accepts, so its output round-trips as a Nova char literal. Known
+  limitation: `Debug for String` cannot escape its content, so a string
+  containing `"` or `\` debugs to something that is not a valid literal —
+  Nova has no way to inspect a string's contents from Nova source, so closing
+  this needs a new `std/core`-scoped builtin); `Eq` (`eq`, plus a defaulted `ne`);
   `Ord: Eq` (`cmp(self, other: Self) -> Ordering`; `Bool` orders via
   `if`/`else` and `String` via the new `str_cmp` builtin above — seeded only
   into `std/core`'s own module scope, not a globally reserved word, since
@@ -188,6 +207,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   way, and a trait/impl pair disagreeing about whether a method takes
   `self`, in either direction, was accepted with no conformance check at
   all — now `E0014` and `E0072` respectively, with no ICE either way.
+- `Type::f()` on an inherent impl no longer dispatches by impl declaration
+  order. An associated function is selected by the impl's nominal head alone
+  (deliberately, so `Box::make(5)` works before the qualifier's type argument
+  is known), so two *disjoint concrete* impls of one generic type —
+  `impl Box<Int> { fn tag() }` and `impl Box<Bool> { fn tag() }` — were both
+  candidates and the first one declared silently won. Coherence does not catch
+  that pair either: their self types do not overlap, so there is no `E0074`.
+  Reordering the two `impl` lines changed the program's output with no
+  diagnostic at all. Now every candidate is collected and an ambiguous
+  qualifier reports `E0015`, mirroring the trait-associated-function path; the
+  single-candidate case is unchanged.
 
 ## [0.1.0] - 2026-07-23
 

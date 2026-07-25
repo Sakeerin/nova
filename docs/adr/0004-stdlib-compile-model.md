@@ -76,16 +76,43 @@ inventing a second mechanism for library code.
 
 ## Consequences
 
-- `std/core`'s public names (`Option`, `Result`, and whatever methods/traits
+- `std/core`'s public names (`Option`, `Result`, and the traits and methods
   Tasks 8-9 add) are visible in every module without an `import`, by design —
-  `std/core` is a prelude in the traditional sense. It occupies a
-  soft-reserved namespace: a name it defines can always be shadowed by a user
-  definition, never must be avoided.
-- Shadowing a *type or free function* name is silent (lowest-priority glob
-  import, no conflict). But a user `impl` adding a method with the same name
-  as one `std/core` defines on `Option`/`Result` is a normal inherent-impl
-  overlap and is reported as `E0074`, exactly as two colliding user impls
-  would be — `std/core`'s own impls get no special immunity from that check.
+  `std/core` is a prelude in the traditional sense.
+- In the three **item** namespaces — values, types, traits — that namespace is
+  genuinely soft-reserved: `import_std_core` merges `std/core`'s exports with
+  `or_insert` for all three, so the module's own definition always wins and the
+  clash is silent. A user `type Option`, `fn map`, or `trait Display` shadows
+  `std/core`'s with no diagnostic (`user_type_shadows_std_core`,
+  `user_trait_shadows_std_core`). Nothing in this namespace must be avoided.
+- **Method names are not soft-reserved, and this is the one place `std/core`
+  does take names away from user code.** Method resolution is impl-table
+  driven, not scope driven, so a second provider of a method name on a type is
+  *ambiguity*, not shadowing — and Nova has no `Trait::method(x)`
+  disambiguation syntax to recover with (the `Type::f()` form added in Phase
+  2.1 is self-less-only, so it cannot pass a receiver). Concretely: `std/core`
+  implements six traits for all five primitives, claiming the seven method
+  names `fmt`, `dbg`, `eq`, `ne`, `cmp`, `clone`, and `default` on `Int`,
+  `Float`, `Bool`, `Char`, and `String`. A user trait declaring any of those
+  names and implemented for one of those types makes *every* call of that name
+  on that type an unrecoverable `E0015: ambiguous method call` — including
+  `ne`, which `std/core` only provides as a defaulted method, and including
+  `default`, where the `Primitive::default()` associated-function path reports
+  the same code. So on the five primitives those seven names are effectively
+  reserved for user *traits*. Two narrow qualifications: the error is raised at
+  the *call site*, so an impl nobody calls still compiles; and a user
+  **inherent** `impl Int { fn eq(…) }` does win, because inherent methods take
+  priority over trait methods — which helps only a user who wanted no trait in
+  the first place.
+- The same names on a user's *own* type are free, because `std/core` implements
+  its traits only for the primitives: a user `trait MyShow { fn fmt(self) … }`
+  implemented for a record resolves fine. It becomes ambiguous only if that
+  same record also has a user `impl Display`, and then both providers are the
+  user's own choice.
+- A user `impl` adding a method with the same name as one `std/core` defines on
+  `Option`/`Result` is a normal inherent-impl overlap and is reported as
+  `E0074`, exactly as two colliding user impls would be — `std/core`'s own
+  impls get no special immunity from that check.
 - The compiler binary embeds the full text of `std/core/lib.nova`, so the
   binary grows with the standard library, and `std/core` must compile
   standalone (it cannot reference any user module). Acceptable at today's
