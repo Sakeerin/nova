@@ -7467,4 +7467,23 @@ mod tests {
             .expect("trait B collected");
         assert_eq!(b.supertraits.len(), 1, "supertraits: {:?}", b.supertraits);
     }
+
+    #[test]
+    fn std_core_parses_and_typechecks_clean() {
+        // The implicit std/core module must itself be error-free; a program that
+        // uses nothing from it must produce no diagnostics.
+        let r = check_src("fn main() { println(\"hi\") }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn std_core_option_is_available_without_import() {
+        let r = check_src(
+            "fn main() {\n\
+                 let o = Some(3)\n\
+                 match o { Some(v) => println(\"${v}\"), None => println(\"none\") }\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
 }

@@ -1,0 +1,9 @@
+// Nova standard library — core.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import`. A user definition of the same name shadows the
+// one here (see docs/adr/0004-stdlib-compile-model.md).
+
+pub type Option<T> = | Some(T) | None
+
+pub type Result<T, E> = | Ok(T) | Err(E)

@@ -299,6 +299,12 @@ impl FrontendContext {
         if self.errors > 0 {
             return Ok(None);
         }
+        // Register the embedded `std/core` source in the `FileDb` so a syntax
+        // error inside it (a compiler bug, since it ships with the compiler)
+        // is reported against a real, named file instead of `FileId::DUMMY`.
+        let std_core_file = self
+            .db
+            .add("<std/core>".to_string(), nova_resolver::STD_CORE_SRC);
         let sources: Vec<ModuleSource> = modules
             .iter()
             .map(|(name, file)| ModuleSource {
@@ -306,7 +312,7 @@ impl FrontendContext {
                 file,
             })
             .collect();
-        let resolved = nova_resolver::resolve_program(&sources);
+        let resolved = nova_resolver::resolve_program(&sources, std_core_file);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {
             return Ok(None);

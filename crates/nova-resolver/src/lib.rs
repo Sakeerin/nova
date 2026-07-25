@@ -14,7 +14,7 @@
 use indexmap::IndexMap;
 use nova_ast::item::{ExternItem, Import, ImportKind, TypeDef};
 use nova_ast::{File, Item};
-use nova_diagnostics::{Diagnostic, Span};
+use nova_diagnostics::{Diagnostic, FileId, Span};
 use rustc_hash::FxHashMap;
 
 /// A stable identifier for a top-level definition within a module.
@@ -42,7 +42,7 @@ impl Builtin {
         }
     }
 
-    /// All builtins injected into the prelude scope.
+    /// All builtins injected into every module's scope.
     pub const ALL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
 }
 
@@ -118,7 +118,8 @@ pub enum Res {
 pub struct ModuleId(pub u32);
 
 /// One module's visible namespaces: its own items (public and private), the
-/// prelude, and names it imports. Resolution is performed relative to a module.
+/// implicit `std/core` module, and names it imports. Resolution is performed
+/// relative to a module.
 #[derive(Debug, Default)]
 struct ModuleScope {
     name: String,
@@ -255,8 +256,9 @@ fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
 
 /// Output of [`resolve`]: the namespace table, the merged file whose
 /// `item_index`es the definitions refer to (the input plus the implicit
-/// prelude), and any diagnostics. Downstream stages must type-check against
-/// this `file`, not the original input, since `item_index`es index into it.
+/// `std/core` module), and any diagnostics. Downstream stages must type-check
+/// against this `file`, not the original input, since `item_index`es index
+/// into it.
 #[derive(Debug)]
 pub struct ResolveResult {
     pub definitions: Definitions,
@@ -283,7 +285,7 @@ pub fn resolve(file: &File) -> ResolveResult {
         name: "main".to_string(),
         file,
     }];
-    let prog = resolve_program(&sources);
+    let prog = resolve_program(&sources, FileId::DUMMY);
     ResolveResult {
         definitions: prog.definitions,
         file: prog.file,
@@ -295,34 +297,46 @@ pub fn resolve(file: &File) -> ResolveResult {
 /// enforce `pub` visibility across modules, wire up `import`s, and merge all
 /// items into one file for whole-program compilation downstream.
 ///
+/// `std_core_file` is the [`FileId`] the caller registered [`STD_CORE_SRC`]
+/// under. Only the driver owns a `FileDb`, so the id cannot be invented here;
+/// threading it through means a syntax error in `std/core` is reported
+/// against a real file instead of [`FileId::DUMMY`]. The single-module
+/// [`resolve`] wrapper passes `FileId::DUMMY` since it has no `FileDb` to
+/// register into.
+///
 /// `item_index`es in the returned [`ProgramResolution::file`] are global
-/// (module items concatenated in `modules` order).
-pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
+/// (module items concatenated in `modules` order, plus the implicit
+/// `std/core` module last).
+pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
 
-    // Compile the built-in prelude as an implicit module so `Option`/`Result`
-    // and their variants get real DefIds and sum layouts (and are then
-    // glob-imported into every module below). It goes *last* so user modules
-    // keep their indices — module 0 stays the first user module.
-    let prelude = prelude_file();
+    // Compile the implicit `std/core` module so `Option`/`Result` and their
+    // variants get real DefIds and sum layouts (and are then glob-imported
+    // into every module below). It goes *last* so user modules keep their
+    // indices — module 0 stays the first user module. `std/core` ships with
+    // the compiler, so a parse failure here is a compiler bug — but it is
+    // reported against a real file so it is debuggable, and `None` means the
+    // implicit module is skipped entirely rather than silently empty.
+    let (std_core, std_core_diags) = std_core_module(std_core_file);
+    diagnostics.extend(std_core_diags);
     let all: Vec<ModuleSource> = modules
         .iter()
         .map(|m| ModuleSource {
             name: m.name.clone(),
             file: m.file,
         })
-        .chain(std::iter::once(ModuleSource {
-            name: PRELUDE_NAME.to_string(),
-            file: &prelude,
+        .chain(std_core.iter().map(|file| ModuleSource {
+            name: STD_CORE_NAME.to_string(),
+            file,
         }))
         .collect();
-    let prelude_mid = all.len() - 1;
+    let std_core_mid = std_core.is_some().then(|| all.len() - 1);
 
     let mut exports: Vec<Exports> = Vec::new();
 
-    // A scope per module, seeded with the builtin prelude.
+    // A scope per module, seeded with the compiler builtins.
     for m in &all {
         let mut scope = ModuleScope {
             name: m.name.clone(),
@@ -377,11 +391,13 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
         }
     }
 
-    // Glob the prelude's public names into every user module — LAST, so it is
+    // Glob `std/core`'s public names into every user module — LAST, so it is
     // the lowest-priority binding: a name the module already defines or imports
-    // wins (no conflict), and only otherwise-unbound names fall through to the
-    // prelude. A program may thus define or import its own `Option`/`Result`.
-    import_prelude(&mut definitions, &exports[prelude_mid], prelude_mid);
+    // wins (no conflict), and only otherwise-unbound names fall through to
+    // `std/core`. A program may thus define or import its own `Option`/`Result`.
+    if let Some(mid) = std_core_mid {
+        import_std_core(&mut definitions, &exports[mid], mid);
+    }
 
     ProgramResolution {
         file: File { items: merged },
@@ -390,45 +406,50 @@ pub fn resolve_program(modules: &[ModuleSource]) -> ProgramResolution {
     }
 }
 
-/// The built-in prelude: types available in every module without an `import`.
-const PRELUDE_SRC: &str = "\
-pub type Option<T> = | Some(T) | None\n\
-pub type Result<T, E> = | Ok(T) | Err(E)\n";
+/// The `std/core` source, compiled as an implicit module. Embedded at build
+/// time so the compiler is self-contained; the path is relative to this file.
+pub const STD_CORE_SRC: &str = include_str!("../../../std/core/lib.nova");
 
-/// Module name of the implicit prelude. Not a valid identifier, so it can never
-/// collide with a user module or be named in an `import`.
-const PRELUDE_NAME: &str = "$prelude";
+/// Module name of the implicit `std/core`. Not a valid identifier, so it can
+/// never collide with a user module or be named in an `import`.
+const STD_CORE_NAME: &str = "$std.core";
 
-/// Lex and parse the built-in prelude. The source is a fixed constant, so any
-/// failure is a compiler bug.
-fn prelude_file() -> File {
-    let file_id = nova_diagnostics::FileId::DUMMY;
-    let (tokens, lex_errors) = nova_lexer::lex(PRELUDE_SRC, file_id);
-    debug_assert!(lex_errors.is_empty(), "prelude lex errors: {lex_errors:?}");
+/// Lex and parse the implicit `std/core` module. Its source ships with the
+/// compiler, so any failure is a compiler bug — but it is reported against
+/// `file_id` so it is debuggable rather than silently dropped. Returns `None`
+/// when parsing fails outright (nothing to merge in as a module); the caller
+/// still gets the diagnostics either way.
+fn std_core_module(file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
+    let (tokens, lex_errors) = nova_lexer::lex(STD_CORE_SRC, file_id);
+    let mut diags: Vec<Diagnostic> = lex_errors
+        .iter()
+        .map(|e| Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here"))
+        .collect();
     let (ast, parse_errors) = nova_parser::parse(&tokens, file_id);
-    debug_assert!(
-        parse_errors.is_empty(),
-        "prelude parse errors: {parse_errors:?}"
+    diags.extend(
+        parse_errors.iter().map(|e| {
+            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here")
+        }),
     );
-    ast.expect("the built-in prelude must parse")
+    (ast, diags)
 }
 
-/// Bind the prelude module's public names into every other module's scope,
-/// leaving any name the module already defines untouched (user items shadow
-/// the prelude).
-fn import_prelude(definitions: &mut Definitions, prelude_exports: &Exports, prelude_mid: usize) {
-    let values: Vec<(String, Res)> = prelude_exports
+/// Bind `std/core`'s public names into every other module's scope, leaving
+/// any name the module already defines untouched (user items shadow
+/// `std/core`).
+fn import_std_core(definitions: &mut Definitions, std_core_exports: &Exports, std_core_mid: usize) {
+    let values: Vec<(String, Res)> = std_core_exports
         .values
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    let types: Vec<(String, DefId)> = prelude_exports
+    let types: Vec<(String, DefId)> = std_core_exports
         .types
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     for mid in 0..definitions.modules.len() {
-        if mid == prelude_mid {
+        if mid == std_core_mid {
             continue;
         }
         let scope = &mut definitions.modules[mid];
@@ -987,7 +1008,7 @@ mod tests {
                 file: &lib,
             },
         ];
-        resolve_program(&sources)
+        resolve_program(&sources, FileId::DUMMY)
     }
 
     fn error_codes(diags: &[Diagnostic]) -> Vec<&str> {
@@ -1074,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn prelude_option_result_are_in_scope() {
+    fn std_core_option_result_are_in_scope() {
         // Option/Result and their variants resolve with no import or definition.
         let r = resolve_src("fn main() { }\n");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
@@ -1112,16 +1133,16 @@ mod tests {
     }
 
     #[test]
-    fn user_type_shadows_prelude() {
-        // A user-defined `Option` shadows the prelude's without an E0002 clash:
-        // the module's own definition wins over the soft prelude import.
+    fn user_type_shadows_std_core() {
+        // A user-defined `Option` shadows std/core's without an E0002 clash:
+        // the module's own definition wins over the soft std/core import.
         let r = resolve_src("type Option<T> = | Present(T) | Absent\nfn main() { }\n");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         let opt = r
             .definitions
             .resolve_type(ModuleId(0), "Option")
             .expect("Option resolves");
-        // It is the user's two-variant `Option`, not the prelude's.
+        // It is the user's two-variant `Option`, not std/core's.
         assert!(matches!(
             r.definitions.def(opt).kind,
             DefKind::Sum { ref variants, .. } if variants.len() == 2 && variants[0].name == "Present"
@@ -1129,9 +1150,10 @@ mod tests {
     }
 
     #[test]
-    fn importing_a_prelude_name_from_a_module_is_allowed() {
-        // A user module may export a name coinciding with a prelude name; a glob
-        // import of it binds (shadowing the soft prelude), not a spurious E0002.
+    fn importing_a_std_core_name_from_a_module_is_allowed() {
+        // A user module may export a name coinciding with a std/core name; a
+        // glob import of it binds (shadowing the soft std/core import), not a
+        // spurious E0002.
         let p = resolve_two(
             "import lib\nfn main() { }\n",
             "pub type Status = | Ok | Fail\n",
