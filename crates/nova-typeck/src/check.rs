@@ -2040,7 +2040,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         match builtin {
-            Builtin::Println | Builtin::Print => {
+            Builtin::Println | Builtin::Print | Builtin::Panic => {
                 if args.len() != 1 {
                     self.error(
                         "E0016",
@@ -2066,13 +2066,18 @@ impl<'a> Checker<'a> {
                         arg.span,
                     );
                 }
+                let ty = if matches!(builtin, Builtin::Panic) {
+                    Ty::Never
+                } else {
+                    Ty::Unit
+                };
                 hir::Expr {
                     kind: hir::ExprKind::Call {
                         func: hir::Callee::Builtin(builtin),
                         type_args: Vec::new(),
                         args: vec![arg],
                     },
-                    ty: Ty::Unit,
+                    ty,
                     span,
                 }
             }
@@ -4694,6 +4699,24 @@ mod tests {
              fn main() { let t = Thing { v: 1 } }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn panic_typechecks_as_never_in_match_arm() {
+        // `panic` diverges, so the match's type comes from the other arm.
+        let r = check_src(
+            "fn get(o: Option<Int>) -> Int {\n\
+                 match o { Some(v) => v, None => panic(\"none\") }\n\
+             }\n\
+             fn main() { println(\"${get(Some(3))}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn panic_rejects_non_string_argument() {
+        let r = check_src("fn main() { panic(7) }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
     }
 
     #[test]

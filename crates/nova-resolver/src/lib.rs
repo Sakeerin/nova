@@ -28,6 +28,8 @@ pub enum Builtin {
     Println,
     /// `print(s: String)` — write to stdout without a trailing newline.
     Print,
+    /// `panic(msg: String)` — abort the program with a message.
+    Panic,
 }
 
 impl Builtin {
@@ -36,11 +38,12 @@ impl Builtin {
         match self {
             Builtin::Println => "println",
             Builtin::Print => "print",
+            Builtin::Panic => "panic",
         }
     }
 
     /// All builtins injected into the prelude scope.
-    pub const ALL: [Builtin; 2] = [Builtin::Println, Builtin::Print];
+    pub const ALL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
 }
 
 /// What kind of definition a [`DefId`] refers to.

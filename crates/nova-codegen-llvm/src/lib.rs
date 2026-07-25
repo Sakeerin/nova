@@ -44,6 +44,7 @@ const DECLS: &[&str] = &[
     "declare ptr @nova_rt_alloc(i64)",
     "declare void @nova_rt_check_bounds(i64, i64)",
     "declare ptr @nova_rt_str_new(ptr, i64)",
+    "declare void @nova_rt_panic_str(ptr)",
 ];
 
 /// Compile a monomorphized MIR module to a textual LLVM IR module.

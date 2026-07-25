@@ -559,6 +559,7 @@ impl<'a> Lowerer<'a> {
                 let rt = match b {
                     Builtin::Println => RtFunc::Println,
                     Builtin::Print => RtFunc::Print,
+                    Builtin::Panic => RtFunc::Panic,
                 };
                 self.push(Stmt::CallRuntime {
                     dst,

@@ -158,6 +158,17 @@ pub unsafe extern "C" fn nova_rt_panic(msg: *const u8, len: u64) -> ! {
     std::process::abort();
 }
 
+/// Abort the program with a panic message given as a Nova string.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_panic_str(s: *const NovaStr) -> ! {
+    let msg = if s.is_null() { "" } else { as_str(s) };
+    eprintln!("nova: panic: {msg}");
+    std::process::abort();
+}
+
 /// All runtime symbols, for registration with the JIT (or a linker map).
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
@@ -173,6 +184,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
         ("nova_rt_check_bounds", nova_rt_check_bounds as *const u8),
         ("nova_rt_panic", nova_rt_panic as *const u8),
+        ("nova_rt_panic_str", nova_rt_panic_str as *const u8),
     ]
 }
 

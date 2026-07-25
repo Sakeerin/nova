@@ -120,6 +120,8 @@ pub enum RtFunc {
     Alloc,
     /// `(index, len) -> unit` — abort if `index` is out of `0..len`.
     CheckBounds,
+    /// `(str) -> !` — abort with a message.
+    Panic,
 }
 
 impl RtFunc {
@@ -136,6 +138,7 @@ impl RtFunc {
             RtFunc::StrEq => "nova_rt_str_eq",
             RtFunc::Alloc => "nova_rt_alloc",
             RtFunc::CheckBounds => "nova_rt_check_bounds",
+            RtFunc::Panic => "nova_rt_panic_str",
         }
     }
 
@@ -151,6 +154,7 @@ impl RtFunc {
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
+            RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),
         }
     }
 }

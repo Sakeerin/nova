@@ -746,3 +746,21 @@ fn build_generics_standalone() {
         .replace("\r\n", "\n");
     assert_eq!(out, expected);
 }
+
+#[test]
+fn panic_aborts_with_message() {
+    let assert = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/panic_unwrap.nova"))
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains('7'), "stdout was {stdout:?}");
+    assert!(
+        stderr.contains("nova: panic: called get on None"),
+        "stderr was {stderr:?}"
+    );
+    assert!(!stdout.contains("unreachable"), "stdout was {stdout:?}");
+}

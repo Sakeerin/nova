@@ -1,0 +1,9 @@
+fn get(o: Option<Int>) -> Int {
+    match o { Some(v) => v, None => panic("called get on None") }
+}
+
+fn main() {
+    println("${get(Some(7))}")
+    let n = get(None)
+    println("unreachable ${n}")
+}
