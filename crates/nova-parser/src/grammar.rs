@@ -519,7 +519,6 @@ impl<'a> Parser<'a> {
             supertraits = self.parse_trait_bounds();
         }
         let where_clause = self.parse_where_clause_opt();
-        let _ = where_clause; // stored in supertraits for now
         self.expect(&Token::LBrace, "trait body")?;
         let mut items = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
@@ -553,6 +552,7 @@ impl<'a> Parser<'a> {
             name,
             generics,
             supertraits,
+            where_clause,
             items,
         })
     }

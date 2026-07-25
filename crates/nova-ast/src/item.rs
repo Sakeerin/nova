@@ -97,6 +97,11 @@ pub struct TraitDecl {
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
     pub supertraits: Vec<Spanned<Path>>,
+    /// A `where` clause on the trait itself (e.g. `trait B where Self: A`), as
+    /// opposed to the `trait B: A` shorthand (stored in `supertraits`). Parsed
+    /// but not otherwise supported yet — `nova-typeck` reports `E0900` for a
+    /// non-empty clause here rather than acting on it.
+    pub where_clause: Vec<WhereBound>,
     pub items: Vec<TraitItem>,
 }
 

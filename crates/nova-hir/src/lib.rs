@@ -443,6 +443,15 @@ pub struct TraitDef {
     /// deduplicated. Direct supertraits only — the transitive closure is taken
     /// where it is needed, so a cyclic declaration cannot make this list
     /// infinite.
+    ///
+    /// The graph formed by these lists **can itself be cyclic**: `trait A: B`
+    /// together with `trait B: A` is accepted (`nova-typeck` only ever
+    /// requires satisfiability, not acyclicity). A transitive walk over this
+    /// field — chasing `supertraits` into each named trait's own
+    /// `supertraits`, and so on — must therefore track which traits it has
+    /// already visited, or it will loop forever on such a declaration. (The
+    /// existing transitive expansion in `nova-typeck` does this by construction:
+    /// it only ever appends an id it has not already recorded.)
     pub supertraits: Vec<DefId>,
     pub methods: Vec<TraitMethod>,
 }

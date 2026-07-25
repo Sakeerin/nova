@@ -438,6 +438,15 @@ impl<'a> Checker<'a> {
             if !decl.generics.is_empty() {
                 self.unsupported(decl.name.span, "generic traits");
             }
+            // `trait B where Self: A` is a second spelling of a supertrait
+            // requirement, distinct from the `trait B: A` shorthand that
+            // `collect_supertraits` resolves. Routing it into the same graph
+            // is a feature addition beyond parsing it, so — like `where`
+            // clauses on trait methods just below — it is rejected outright
+            // rather than silently discarded.
+            if !decl.where_clause.is_empty() {
+                self.unsupported(decl.name.span, "`where` clauses on trait declarations");
+            }
             let self_scope = self_generic_scope();
             let mut methods = Vec::new();
             for (mi, item) in decl.items.iter().enumerate() {
@@ -7138,6 +7147,27 @@ mod tests {
     }
 
     #[test]
+    fn subtrait_redeclaring_supertrait_method_name_is_ambiguous() {
+        // `B: A` re-declaring a method name `A` already declares makes a call
+        // through a `T: B` bound ambiguous: the bound expands to `[B, A]`,
+        // and both traits now provide `same`, so `resolve_method_on` finds
+        // two candidate providers. This is a newly reachable shape of the
+        // pre-existing "ambiguous method call" diagnostic (Rust reports the
+        // analogous conflict too, as E0034 "multiple applicable items in
+        // scope"). Pin the behavior, don't try to make it resolve to `B`.
+        let r = check_src(
+            "trait A { fn same(self) -> Int }\n\
+             trait B: A { fn same(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl A for R { fn same(self) -> Int { 1 } }\n\
+             impl B for R { fn same(self) -> Int { 2 } }\n\
+             fn call_same<T: B>(x: T) -> Int { x.same() }\n\
+             fn main() { let r = R { v: 0 }\n println(\"${call_same(r)}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0015"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
     fn supertrait_method_callable_from_a_default_body() {
         // A default body's `Self` is bounded by the enclosing trait alone; if that
         // bound is not expanded, `self.a()` in `B`'s default body cannot resolve.
@@ -7200,6 +7230,25 @@ mod tests {
     }
 
     #[test]
+    fn where_clause_on_trait_declaration_reports_e0900() {
+        // `trait B where Self: A` is a second spelling of a supertrait
+        // requirement, distinct from the `trait B: A` shorthand that
+        // `collect_supertraits` resolves into the graph. Wiring this spelling
+        // in too is a feature addition, not a fix, so it must be rejected
+        // outright — otherwise declaring a supertrait this way would once
+        // again mean nothing (silently accepted, no `A` impl required),
+        // exactly the bug this feature exists to close for `trait B: A`.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B where Self: A { fn b(self) -> Int }\n\
+             record R { v: Int }\n\
+             impl B for R { fn b(self) -> Int { 2 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
     fn cyclic_supertraits_do_not_hang() {
         // `trait A: B` / `trait B: A` is nonsense, but the compiler must
         // terminate on it rather than loop forever expanding bounds. No
@@ -7237,12 +7286,10 @@ mod tests {
              fn only_x<T: C>(v: T) -> Int { v.x() }\n\
              fn main() { let r = R { v: 0 }\n println(\"${only_x(r)}\") }",
         );
+        // A diamond must not read as two providers of `x` (a false E0015);
+        // `diagnostics.is_empty()` below already covers that and more, so
+        // there is no separate `E0015`-specific assertion here.
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        assert!(
-            !error_codes(&r).contains(&"E0015"),
-            "a diamond must not read as two providers of `x`: {:?}",
-            r.diagnostics
-        );
         let only_x = r
             .module
             .functions
@@ -7273,6 +7320,34 @@ mod tests {
              impl A for S { fn a(self) -> Int { 1 } }\n\
              impl B for S { fn b(self) -> Int { 2 } }\n\
              impl M for R { fn m<U: B>(self, u: U) -> Int { u.a() + u.b() } }\n\
+             fn main() {\n\
+                 let r = R { v: 0 }\n\
+                 let s = S { w: 0 }\n\
+                 println(\"${r.m(s)}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn impl_method_bound_redundantly_spelling_supertrait_typechecks() {
+        // Deliberate behavior change: the trait declares `U: B`, which expands
+        // to `[B, A]`. An impl is now free to spell that same set out in full
+        // (`U: B + A`) instead of just `U: B` — before supertrait expansion
+        // existed, `same_bound_set` would have compared the trait's
+        // unexpanded `[B]` against the impl's `[B, A]` and reported E0072 for
+        // a "mismatched" bound that is in fact redundant (`B + A` is exactly
+        // `B` when `B: A`). Nothing pinned this previously, so it could
+        // silently regress.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             trait M { fn m<U: B>(self, u: U) -> Int }\n\
+             record R { v: Int }\n\
+             record S { w: Int }\n\
+             impl A for S { fn a(self) -> Int { 1 } }\n\
+             impl B for S { fn b(self) -> Int { 2 } }\n\
+             impl M for R { fn m<U: B + A>(self, u: U) -> Int { u.a() + u.b() } }\n\
              fn main() {\n\
                  let r = R { v: 0 }\n\
                  let s = S { w: 0 }\n\
@@ -7354,26 +7429,19 @@ mod tests {
              fn main() { }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        let a_id = r
-            .module
-            .traits
-            .iter()
-            .find(|t| t.name == "A")
-            .expect("trait A collected")
-            .def_id;
-        let b = r
-            .module
-            .traits
-            .iter()
-            .find(|t| t.name == "B")
-            .expect("trait B collected");
-        assert_eq!(b.supertraits, vec![a_id]);
         let a = r
             .module
             .traits
             .iter()
             .find(|t| t.name == "A")
             .expect("trait A collected");
+        let b = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "B")
+            .expect("trait B collected");
+        assert_eq!(b.supertraits, vec![a.def_id]);
         assert!(a.supertraits.is_empty());
     }
 
