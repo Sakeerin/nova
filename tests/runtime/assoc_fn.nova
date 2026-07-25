@@ -6,7 +6,22 @@ record P { v: Int }
 
 impl P { fn new() -> P { P { v: 7 } } }
 
+record Pair { a: Int, b: Int }
+
+impl Pair {
+    // An associated function *with arguments*. A self-less callee has no
+    // receiver to occupy slot 0, so lowering one as if it did shifts every
+    // argument by a slot — the root-cause bug of this feature. Both parameters
+    // are `Int`, so a swapped or shifted slot still type-checks and codegens
+    // cleanly: only running the program and reading back both fields catches
+    // it. The two values are distinct and neither is 0, so a swap, a shift, and
+    // a zeroed slot each produce visibly different output.
+    fn of(a: Int, b: Int) -> Pair { Pair { a: a, b: b } }
+}
+
 fn main() {
     let p = P::new()
     println("${p.v}")
+    let q = Pair::of(11, 22)
+    println("${q.a} ${q.b}")
 }

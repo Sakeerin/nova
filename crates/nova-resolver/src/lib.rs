@@ -1233,6 +1233,33 @@ mod tests {
     }
 
     #[test]
+    fn user_fn_named_panic_is_a_reserved_word() {
+        // The deliberate counterpart of
+        // `user_fn_named_str_cmp_is_not_a_reserved_word`, and the reason that
+        // test needs a sibling: `panic` is in `Builtin::GLOBAL`, so it *is*
+        // seeded into every module's scope and a user `fn panic` is an E0002
+        // clash against a builtin. That is intended — `panic` is user-visible
+        // language surface like `println`/`print` — but it permanently takes
+        // the name away from user code, so which side of the
+        // `GLOBAL`/`STD_CORE_ONLY` split each builtin sits on has to be pinned
+        // in both directions. Moving `Panic` to `STD_CORE_ONLY` would silently
+        // make `panic(...)` unresolvable in user programs while every existing
+        // test still passed.
+        let r = resolve_src("fn panic(msg: String) { }\nfn main() { }\n");
+        let codes: Vec<&str> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"E0002"), "{:?}", r.diagnostics);
+        // Specifically the builtin-clash form of E0002 (no earlier user
+        // definition to point at), not a duplicate-user-definition one.
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.notes.iter().any(|n| n.contains("compiler builtin"))),
+            "expected the `panic` is a compiler builtin note: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
     fn std_core_traits_are_visible_from_a_user_module() {
         // Regression test for a gap `import_std_core` had: it merged `values`
         // and `types` from std/core's exports into every other module's scope,
