@@ -911,11 +911,11 @@ fn std_core_run() {
 /// gate must cover.
 #[test]
 fn std_core_build_standalone() {
+    let out = build_and_run("tests/runtime/std_core.nova", "std_core");
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/std_core.stdout"))
         .expect("expected-output fixture exists")
         .replace("\r\n", "\n");
-    let out = build_and_run("tests/runtime/std_core.nova", "std_core");
-    assert_eq!(out.replace("\r\n", "\n"), expected);
+    assert_eq!(out, expected);
 }
 
 /// Same fixture again, this time with `NOVA_GC_STRESS=1` (collect on every

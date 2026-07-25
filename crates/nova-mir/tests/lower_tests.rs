@@ -153,21 +153,43 @@ fn unreferenced_functions_are_not_emitted() {
 }
 
 #[test]
-fn unused_std_core_emits_no_symbols() {
+fn std_core_types_used_without_methods_emit_no_symbols() {
     // `std/core` is compiled into every program as the implicit prelude (ADR
-    // 0004), but a program that uses none of it must not carry any of its
-    // functions into the monomorphized module — otherwise every Nova program
-    // would bloat as std/core grows (already ~20 methods across
-    // Option/Result/Display/Debug/Eq/Ord/Clone/Default, and it grows every
-    // phase). `main` here only calls the `println` builtin, so `main` itself
-    // is the only function reachable — no `Option`/`Result` method, and no
-    // primitive trait impl, should be emitted.
-    let mir = mir_for("fn main() { println(\"hi\") }");
+    // 0004), and it grows every phase (already ~20 methods across
+    // Option/Result/Display/Debug/Eq/Ord/Clone/Default), so reachability
+    // pruning rooted at `main` (`crates/nova-mir/src/mono.rs`) is the only
+    // reason a Nova binary isn't bloated by the whole standard library.
+    //
+    // This is materially stronger than `hello_world_lowers`: that test's
+    // `main` never mentions `Option`/`Result` at all, so it can't tell "no
+    // std/core symbol leaked" apart from "typeck/lowering never even touched
+    // a std/core generic" — a much easier bar to clear. Here `main` binds a
+    // `None`, a `Some`, an `Ok`, and an `Err` (all four Option/Result
+    // variants) and pattern-matches one of them, so both typeck and MIR
+    // lowering must handle std/core's generic sum types directly.
+    // Constructing a variant lowers to `MakeVariant` and matching lowers to
+    // a `Switch` — neither is a call — and `main` calls none of
+    // `Option`/`Result`'s methods (`is_some`, `is_none`, `map`, `and_then`,
+    // `unwrap`, `unwrap_or`, `ok_or`, `is_ok`, `is_err`, `map_err`, ...), so
+    // pruning must still emit `main` alone.
+    let mir = mir_for(
+        "fn main() {\n\
+             let none_val: Option<Int> = None\n\
+             let some_val = Some(1)\n\
+             let ok_val: Result<Int, String> = Ok(2)\n\
+             let err_val: Result<Int, String> = Err(\"e\")\n\
+             match some_val {\n\
+                 Some(_) => println(\"some\"),\n\
+                 None => println(\"none\"),\n\
+             }\n\
+         }",
+    );
     let names = function_names(&mir);
     assert_eq!(
         names,
         vec!["main"],
-        "unused std/core leaked into the module: {names:?}"
+        "constructing std/core types without calling their methods leaked a \
+         symbol into the module: {names:?}"
     );
 }
 
