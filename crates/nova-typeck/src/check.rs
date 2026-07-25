@@ -1996,14 +1996,37 @@ impl<'a> Checker<'a> {
                             self.emit_trait_assoc_call(fcx, *tid, *idx, Ty::Param(k), checked, span)
                         }
                         [] => {
-                            self.error(
-                                "E0001",
-                                format!(
-                                    "no associated function `{name}` on generic parameter \
-                                     `{ty_name}`; none of its bounds declares one"
-                                ),
-                                callee.span,
-                            );
+                            // A bound may still declare `name` — just as a
+                            // method with a `self` receiver rather than an
+                            // associated function. "none of its bounds
+                            // declares one" would be false in that case, so
+                            // check for it and name the real reason.
+                            let declared_as_method = fcx
+                                .param_bounds
+                                .get(k as usize)
+                                .into_iter()
+                                .flatten()
+                                .any(|&tid| self.trait_method_index(tid, name).is_some());
+                            if declared_as_method {
+                                self.error(
+                                    "E0001",
+                                    format!(
+                                        "no associated function `{name}` on generic parameter \
+                                         `{ty_name}`; its bound declares `{name}` as a method \
+                                         with a `self` receiver, so it must be called on a value"
+                                    ),
+                                    callee.span,
+                                );
+                            } else {
+                                self.error(
+                                    "E0001",
+                                    format!(
+                                        "no associated function `{name}` on generic parameter \
+                                         `{ty_name}`; none of its bounds declares one"
+                                    ),
+                                    callee.span,
+                                );
+                            }
                             error_expr(span)
                         }
                         _ => {
@@ -2053,13 +2076,10 @@ impl<'a> Checker<'a> {
                                 .emit_trait_assoc_call(fcx, tid, idx, self_ty, checked, span);
                         }
                         [] => {
-                            // A nominal qualifier keeps falling through to
-                            // `check_path`, which reports the pre-existing
-                            // "no variant" / unsupported-path diagnostics. Only a
-                            // primitive is reported here: it is invisible to
-                            // `resolve_type`, so the fall-through would blame
-                            // "module-qualified paths are not supported" for what
-                            // is really a missing associated function.
+                            // A primitive is invisible to `resolve_type`, so the
+                            // fall-through below would blame "module-qualified
+                            // paths are not supported" for what is really a
+                            // missing associated function.
                             if self.defs.resolve_type(self.cur_module, ty_name).is_none() {
                                 self.error(
                                     "E0001",
@@ -2068,6 +2088,40 @@ impl<'a> Checker<'a> {
                                 );
                                 return error_expr(span);
                             }
+                            // A nominal qualifier whose type arguments are the
+                            // reason nothing matched: some impl sharing this
+                            // type's head does declare `name` through a trait,
+                            // but `find_trait_assoc_fns` could not select it
+                            // because `self_ty`'s arguments are still unresolved
+                            // inference variables (see that function's doc
+                            // comment) — `match_args` cannot line a concrete
+                            // impl's arguments up with a variable. Name that
+                            // reason here rather than let this fall through to
+                            // `check_path`, which would report a missing
+                            // variant and blame the wrong feature entirely.
+                            if let Some(head) = self_ty.head() {
+                                let head_declares_it = self
+                                    .impls
+                                    .iter()
+                                    .filter(|i| i.self_head == head)
+                                    .filter_map(|i| i.trait_id)
+                                    .any(|tid| self.trait_assoc_fn_index(tid, name).is_some());
+                                if head_declares_it {
+                                    self.error(
+                                        "E0011",
+                                        format!(
+                                            "cannot call `{ty_name}::{name}()`: an impl provides \
+                                             it, but `{ty_name}`'s type arguments could not be \
+                                             determined from the qualifier alone to select it"
+                                        ),
+                                        callee.span,
+                                    );
+                                    return error_expr(span);
+                                }
+                            }
+                            // Otherwise a nominal qualifier keeps falling
+                            // through to `check_path`, which reports the
+                            // pre-existing "no variant" diagnostic.
                         }
                         _ => {
                             self.error(
@@ -3120,8 +3174,10 @@ impl<'a> Checker<'a> {
     /// same positions (`impl<T> Zero for Box<T>`), because `match_args` compares
     /// structurally: a concrete `impl Zero for Box<Int>` is not found until the
     /// qualifier's argument is already known, which at a two-segment path it
-    /// never is. Such a call reports "no associated function" rather than
-    /// resolving; concrete and fully-generic self types both work.
+    /// never is. Concrete and fully-generic self types both work; the caller
+    /// reports the unresolved-argument case as E0011, naming the type
+    /// arguments as the reason rather than reporting a missing associated
+    /// function that in fact exists.
     fn find_trait_assoc_fns(&self, self_ty: &Ty, name: &str) -> Vec<(DefId, u32)> {
         let Some(head) = self_ty.head() else {
             return Vec::new();
@@ -3367,13 +3423,15 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let self_ty = fcx.icx.apply(&receiver.ty);
-        let tm = self.traits[self
+        let Some(tm) = self
             .traits
             .iter()
-            .position(|t| t.def_id == trait_id)
-            .expect("trait exists")]
-        .methods[method_idx as usize]
-            .clone();
+            .find(|t| t.def_id == trait_id)
+            .and_then(|t| t.methods.get(method_idx as usize))
+            .cloned()
+        else {
+            return error_expr(span);
+        };
         // Everything below binds `receiver` as the method's `self`; a trait
         // associated function has no receiver, and `tm.params` (which never
         // stores `self`) cannot reveal the mismatch, so the arity check would
@@ -3525,7 +3583,12 @@ impl<'a> Checker<'a> {
             _ => return None,
         };
         // The method must take no extra args and return `String`.
-        let tm = &self.traits.iter().find(|t| t.def_id == trait_id)?.methods[method_idx as usize];
+        let tm = self
+            .traits
+            .iter()
+            .find(|t| t.def_id == trait_id)?
+            .methods
+            .get(method_idx as usize)?;
         if !tm.params.is_empty() || tm.ret != Ty::String {
             return None;
         }
@@ -6386,6 +6449,38 @@ mod tests {
     }
 
     #[test]
+    fn generic_type_qualifier_with_unresolved_args_reports_e0011() {
+        // `Box::zero()` where only a concrete `impl Zero for Box<Int>` exists:
+        // `find_trait_assoc_fns` cannot select it because the qualifier's type
+        // argument (from `qualifier_self_ty`) is a fresh, still-unresolved
+        // inference variable, and `ImplInfo::match_args` compares structurally
+        // — a documented, deliberate limitation (see `find_trait_assoc_fns`).
+        // Before this fix this fell through silently to `check_path`, which
+        // reported "no variant `zero` on type `Box`" — a diagnostic that blames
+        // the wrong feature, since `zero` is a real associated function on a
+        // real impl, just not one this call can select.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             trait Zero { fn zero() -> Self }\n\
+             impl Zero for Box<Int> { fn zero() -> Box<Int> { Box { value: 0 } } }\n\
+             fn main() { let b: Box<Int> = Box::zero()\n println(\"${b.value}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0011"), "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("type arguments could not be determined")),
+            "expected the message to name the real reason: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            !r.diagnostics.iter().any(|d| d.message.contains("variant")),
+            "should not blame a missing variant: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
     fn qualified_variant_call_with_args_still_typechecks() {
         // The single largest regression risk of the associated-function-call
         // feature: `Type::Variant(args)` and `Type::assoc_fn(args)` share the
@@ -6641,6 +6736,34 @@ mod tests {
         assert!(
             !error_codes(&r).contains(&"E0900"),
             "should not blame unsupported module paths: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn generic_param_bound_declaring_it_as_a_method_reports_that_reason() {
+        // `T::fmt(x)` where `T`'s bound *does* declare `fmt` — just not as an
+        // associated function: as a method with a `self` receiver. The
+        // sibling test above's final clause ("none of its bounds declares
+        // one") would be false here, since a bound does declare `fmt`.
+        let r = check_src(
+            "trait Show { fn fmt(self) -> String }\n\
+             fn make<T: Show>(x: T) -> String { T::fmt(x) }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0001"), "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("as a method with a `self` receiver")),
+            "expected the message to name the real reason: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            !r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("none of its bounds declares one")),
+            "should not claim the bound declares nothing: {:?}",
             r.diagnostics
         );
     }

@@ -1,5 +1,5 @@
 // Trait associated functions — trait methods that declare no `self` receiver,
-// called as `Type::name(…)`. Three shapes, all end-to-end through codegen
+// called as `Type::name(…)`. Five shapes, all end-to-end through codegen
 // because the failure mode this guards is not a type error: a receiver lowered
 // into a callee with no `self` parameter passes type-checking and is only
 // rejected by the backend ("mismatched argument count"), i.e. an ICE.
@@ -9,6 +9,12 @@
 //   * `P::zero()`     — a nominal qualifier
 //   * `T::zero()`     — dispatch through a generic parameter's bound, here
 //                       instantiated at both `Int` and `P`
+//   * `Int::answer()` — a default-bodied trait associated function whose impl
+//                       does not override it: the only thing exercising the
+//                       `has_self` conditional that builds a default body's
+//                       own function signature
+//   * `Int::three()`  — an inherent (non-trait) associated function on a
+//                       primitive, newly reachable through `emit_assoc_call`
 trait Zero {
     fn zero() -> Self
 }
@@ -25,10 +31,22 @@ impl Zero for P {
 
 fn make<T: Zero>() -> T { T::zero() }
 
+trait Answer {
+    fn answer() -> Int { 5 }
+}
+
+impl Answer for Int { }
+
+impl Int {
+    fn three() -> Int { 3 }
+}
+
 fn main() {
     let direct: Int = Int::zero()
     let qualified: P = P::zero()
     let generic_int: Int = make()
     let generic_rec: P = make()
-    println("${direct} ${qualified.v} ${generic_int} ${generic_rec.v}")
+    let default_body: Int = Int::answer()
+    let inherent: Int = Int::three()
+    println("${direct} ${qualified.v} ${generic_int} ${generic_rec.v} ${default_body} ${inherent}")
 }
