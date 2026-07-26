@@ -31,10 +31,46 @@ A record holding an array field has the second shape: the record is one object,
 the array another, and the array's only referent is the record's field slot. So
 growth is "allocate a bigger array, copy, reassign the field" — the record's
 address never changes and nothing any pointer points at ever moves. **The
-conservative, non-moving collector needs no changes.** The collection windows are
-also safe: during growth the old array stays reachable through the record, and the
-new one sits in a stack frame the scanner already covers (`gc::alloc` runs
-`maybe_collect` *before* allocating, when the new block does not yet exist).
+conservative, non-moving collector needs no changes.**
+
+**Why the collection windows inside growth are safe** — and it is *not* "the old
+buffer stays reachable through the record". That holds for `Vec::push`, which
+builds the new array completely before reassigning the field, but it is **false
+for `Map::grow`**: `grow` reassigns `self.keys` *first*, and from that moment the
+old key array is reachable only from a stack local while two more array
+allocations and a per-iteration reinsert allocation all run. Any of those can
+collect.
+
+The real invariant is a property of the **calling convention**, not of the
+record-plus-buffer shape:
+
+> Every collection point is a call into `gc::alloc`. The collector scans the
+> stack from the current frame up to the thread base, **plus the callee-saved
+> registers**, which the `setjmp` shim in `gc_stack.c` spills onto that stack.
+> The C ABI leaves a value that is live across a call in exactly one of those two
+> places — a caller-saved register cannot hold a live root at a call boundary,
+> because the callee is free to clobber it. So **any Nova value still live in the
+> allocating frame or any of its callers is a root**, whether or not anything
+> else refers to it.
+
+Two corollaries worth stating because they are what make the invariant usable:
+marking is **range-based**, so a derived or interior pointer (an
+array-element address the backend computed and kept instead of the base) marks
+its containing object just as well as the base pointer does; and `gc::alloc`
+runs `maybe_collect` *before* it allocates, so the new block never needs to
+survive a collection it does not yet exist for.
+
+The consequence for a future collection author: the condition to check is "is
+the only reference on some frame's stack (or in a callee-saved register) for the
+whole window?", not "is it still reachable from a record". The shape-based
+condition can be satisfied by code that is **not** safe — hand a buffer's only
+reference to a `scan = false` leaf object (string byte buffers are flagged that
+way and are never traced), or to a structure on the Rust side of the FFI
+boundary, and the written condition is met while the buffer is collected out from
+under you. That is why `NOVA_GC_STRESS=1` (collect on *every* allocation) is a
+**gate criterion** for this phase rather than belt-and-braces: it is the only
+thing that actually exercises the multi-allocation window inside `Map::grow`,
+and the failure mode there is silent data loss, not a crash.
 
 **Blockers found:**
 

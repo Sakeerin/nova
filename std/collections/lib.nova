@@ -210,6 +210,22 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // it: `used` is reset to 0 and at most `oldcap` live entries go back in,
     // while the new threshold needs `used + 1 > newcap * 3 / 4`, i.e. more than
     // `1.5 * oldcap`. So the nesting is exactly one level deep.
+    //
+    // GC: this is *not* safe for the reason `Vec::push` is. `push` finishes the
+    // new array before reassigning the field, so the old one stays reachable
+    // through the record the whole time. Here `self.keys` is reassigned on the
+    // very next line, and from then on `oldkeys` is live only in this frame's
+    // locals while two more `[_; newcap]` allocations and one allocation per
+    // reinsert all run — every one of them a collection point. It is safe
+    // because the collector scans the stack from the allocating frame up to the
+    // thread base *plus* the callee-saved registers the `setjmp` shim spills
+    // there, and the ABI leaves anything live across a call in one of those two
+    // places; marking is range-based, so a derived element pointer counts too.
+    // That is a property of the calling convention, not of the record/buffer
+    // shape, which is why this window is what makes `NOVA_GC_STRESS=1`
+    // load-bearing on `tests/runtime/collections.nova` rather than
+    // belt-and-braces — a missed root here loses entries silently instead of
+    // crashing.
     fn grow(mut self, fk: K, fv: V) {
         let oldcap = self.state.len()
         let newcap = oldcap * 2
