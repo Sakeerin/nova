@@ -163,6 +163,152 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   designed alongside the collection types it would serve), and `Copy`
   (implicit-copy value semantics, tied to an ownership/move model Nova does
   not have yet).
+- Record field assignment, `rec.f = v` (Phase 2.2a): records were immutable
+  after construction, which blocked every collection and most future std work.
+  Mutability reuses the existing `place_root` chain walk that array element
+  assignment already used, so `rec.inner.f = v` and `make().f = v` are rejected
+  at the root with `E0060` exactly as `arr[i] = v` is. The store mirrors the
+  field *read*'s `8 * index` offset in both backends — the index/type lookup is
+  now one shared function — so reads and writes cannot disagree about layout.
+  Records are heap objects, so **assignment is alias-visible**: two bindings to
+  the same record see each other's writes (`let mut alias = c` then
+  `alias.n = 99` changes `c.n`), and the same holds through a `mut self` method
+  because the receiver is passed as the same pointer, not copied. That is
+  deliberate reference semantics, not an oversight, and it is executed under
+  both backends by `tests/runtime/field_assign.nova`.
+- The mutable-receiver rule (Phase 2.2a, `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`
+  §1): **calling a method that declares `mut self` now requires a mutable
+  receiver place**, reported as `E0060` with the same ``declare it as `let mut
+  …` `` note the two assignment forms carry. Previously `let v = Vec::new()`
+  followed by `v.push(1)` was accepted while the equivalent `v.len = v.len + 1`
+  was `E0060` — the same effect got two different answers depending on whether
+  it was spelled as a field assignment or wrapped in a one-line method, which
+  reduced `mut` to gating a syntax rather than an effect. The receiver may be
+  any place, not just a bare local (`self.map.insert(k, v)` from inside a
+  `mut self` method resolves through the `self` root — that is how `Set` is
+  built on `Map`), a temporary receiver (`make().bump()`) is rejected as not a
+  place, and the check is a no-op for plain `self` readers, so only the `mut`
+  keyword demands anything of callers. Consequently every mutating std API
+  declares `mut self` and every caller needs `let mut`. **Known gap, documented
+  rather than closed:** trait-method calls are *not* covered — for a generic
+  receiver there is no single impl to consult and `hir::TraitMethod` has no
+  receiver-mutability field, so `impl Tr for P { fn m(mut self) { … } }` called
+  as `p.m()` on an immutable `p` is still accepted. The collections use
+  inherent impls only; ADR 0005 §1 records the three-step migration path and
+  why closing it first needs a conformance rule for an impl whose receiver
+  mutability disagrees with its trait's.
+- Repeat-array literal, `[init; n]` (Phase 2.2a): arrays could only come from
+  element-by-element literals, so there was no way to allocate one of *runtime*
+  length — exactly what a growable collection needs. `init` is a
+  **caller-supplied** value rather than a zero or null fill, which is what
+  keeps a fresh array from ever holding uninitialized memory and is why no
+  `Default` bound is needed anywhere in `std/collections`: `Vec::push` fills
+  with the element being pushed, and `Map` fills its key/value arrays with the
+  pair being inserted (`state`'s `0` filler happens to be exactly the "empty"
+  tag, so a fresh table is empty by construction). The fill loop is emitted in
+  MIR with the existing block machinery, so both backends need only the new
+  `ArrayAlloc` statement. A **negative length aborts** rather than being
+  clamped — `[x; -1]` calls the same `nova_rt_panic_str` path with "array length
+  must not be negative" — following `check_bounds`' abort-on-bad-input
+  precedent, so a clamped-to-zero capacity cannot silently spin a growable
+  collection, and `8 * len` cannot overflow for large negative lengths.
+- A second embedded std module (Phase 2.2a): `std/core` was loaded through a
+  seam that assumed exactly one implicit module. It is now a list, so
+  `std/collections` lives in its own file (`std/collections/lib.nova`) with the
+  same compile model as `std/core` (ADR 0004 — embedded with `include_str!`,
+  appended last, glob-imported at lowest priority, silently shadowable). The
+  driver registers a `FileId` per std module so diagnostics still name a real
+  file, and the std-only builtin gating now asks whether a module is *a* std
+  module rather than *the* std module.
+- `Hash` (Phase 2.2a, ADR 0005 §2): `pub trait Hash { fn hash(self) -> Int }`
+  in `std/core`, with impls for `Int`, `Bool`, `Char` and `String` and the
+  contract that `a.eq(b)` implies `a.hash() == b.hash()`. It is **one-shot**
+  rather than `nova-spec`'s streaming `Hasher` protocol, which Nova cannot
+  express: a hasher must accumulate into a field, needing `mut` on a parameter
+  plus a `mut self` *trait* method — precisely the gap §1 leaves open — and the
+  whole mechanism would then rest on alias visibility rather than on anything
+  the type says. ADR 0005 §2 records that this is a commitment, not a stopgap:
+  `hash` is the trait's only method, so switching shapes would break every impl
+  and call site. Backed by `mix64`, the splitmix64 finalizer (module-private, so
+  it enters no user namespace) for `Int`/`Bool`/`Char`, and two std-only
+  builtins: `str_hash` (over the runtime's new FNV-1a `nova_rt_str_hash`,
+  because `String` has no length, indexing or iteration and is not FFI-safe, so
+  Nova cannot walk its bytes) and `char_to_int` (Nova has no `as` casts and no
+  other `Char` → `Int` conversion; it is the first builtin with no runtime
+  function at all, since `Char` and `Int` are both `MirTy::I64` and `nova-mir`
+  lowers it to a register move). Being std-scoped rather than global, neither
+  becomes a reserved word. **Mask a hash; never shift one and never read its
+  high bits** — `hash & (cap - 1)` over a power-of-two capacity is the only
+  supported way to get a bucket index, because a hash spans the full `Int`
+  range including negatives (so `hash % cap` can be a negative index), the high
+  bits are not an independent second hash, and `mix64`'s guarantees are stated
+  over its whole 64-bit result. **There is deliberately no `Hash for Float`**, a
+  documented deviation from `20-STDLIB.md`: NaN never equals itself, so a NaN
+  key would be inserted and then unfindable even by the expression that
+  produced it, and `0.0 == -0.0` while their bit patterns differ, so any
+  bitwise hash would break the `eq` ⇒ equal-hash contract. That needs a NaN
+  decision belonging with the `Ord for Float` caveat, and `float_has_no_hash_impl`
+  pins the absence so re-adding it is a deliberate act.
+- `std/collections`, Nova's second standard-library module — `Vec`, `Map` and
+  `Set`, written **in Nova** (Phase 2.2a):
+  - `Vec<T>`: `new`, `len`, `is_empty`, `push`, `pop`, `get`, `set`, `clear`.
+    Growth doubles from 4 by allocating `[x; newcap]` with the pushed element
+    as the filler and copying the existing elements back; the record object's
+    address never changes and the array's only referent is that field, so the
+    conservative non-moving collector needs no special handling. `get` returns
+    `Option<T>` *by value* rather than the spec's `Option<&T>` — Nova has no
+    references, and for heap types the value is the pointer, so it still
+    behaves referentially. `set` out of range panics.
+  - `Map<K, V>` for `K: Hash + Eq`: `new`, `len`, `is_empty`, `insert`, `get`,
+    `contains_key`, `remove`. Open addressing with linear probing over a
+    power-of-two capacity, so a bucket is `hash & (cap - 1)`. Removal leaves a
+    **tombstone**, which is what keeps probe chains intact across a deletion —
+    including chains that wrap past the end of the table — and tombstones count
+    toward the 3/4 load threshold, so a remove-heavy workload cannot degrade
+    into an all-tombstone scan. `insert` probes *past* a tombstone to either the
+    key itself or an empty slot before storing back into the first tombstone it
+    passed, so a replacement can never leave a second, permanently shadowed
+    copy behind the hole. Growth doubles and reinserts only the live entries,
+    which is also what clears the tombstones. `insert` returns the previous
+    value; `remove` returns the removed one.
+  - `Set<T>` for `T: Hash + Eq`: `new`, `len`, `is_empty`, `insert`,
+    `contains`, `remove`, backed by a `Map<T, Bool>` so the probing, tombstone
+    and growth logic lives in exactly one place. `insert` and `remove` report
+    whether the set changed.
+  - The bound sits on each `impl`, not on the record's generic parameters as
+    `20-STDLIB.md` writes it, because **a bound on a record's generic parameter
+    parses but is silently dropped** by the current compiler — on the impl it is
+    real, and a non-`Hash` key is `E0013` at monomorphization. Reachability
+    pruning rooted at `main` keeps a program that touches no collection from
+    paying for any of it.
+  - The whole module is exercised end-to-end by `tests/runtime/collections.nova`
+    under `nova run`, `nova build` **and `NOVA_GC_STRESS=1`** (collect on every
+    allocation): `Vec` across three growths, `Map` through two rehashes with the
+    load-factor arithmetic visible, mid-chain and wrapping-chain removals with
+    lookups past the hole, tombstone reuse, replacement-behind-tombstones with
+    no shadowed duplicate, a user record as a key/element with its own `Hash`
+    and `Eq`, `Map<String, Int>` through the runtime hash, negative `Int` keys,
+    and `Set` dedup.
+- Deferred from `std/collections` (Phase 2.2a), each blocked on a language
+  feature rather than on effort:
+  - **Iteration on any collection** — `iter()` and `for x in coll`. Needs
+    `Iterator` *plus* associated types (`type Item`), which Nova does not have;
+    `for` currently works only over integer ranges. Iterating a `Map`'s pairs
+    additionally needs tuples, which Nova also lacks, so even
+    `for (k, v) in m` has no expressible element type. This is the single
+    biggest gap: today a collection can only be read back through the keys or
+    indices the caller already holds.
+  - `Queue` / `Deque` — a ring buffer is expressible, but its `pop_front` would
+    want the same iteration story to be useful, and `20-STDLIB.md`'s shape is
+    not settled.
+  - `Vec::with_capacity` — it would need a `T` to fill the reserved slots with,
+    and Nova cannot express reserved-but-uninitialized capacity at all (which is
+    the same reason `[init; n]` takes a caller-supplied filler).
+  - `Hash for Float` — see the `Hash` entry above; it needs a NaN decision.
+  - `std/strings` — string operations beyond `Eq`/`Ord`/`Display`. `String` has
+    no length, indexing or iteration from Nova source, so every operation needs
+    a new std-scoped builtin plus a runtime function; that is a module-sized
+    design, not an increment on this one.
 
 ### Fixed (Phase 2)
 - A `${…}` string-interpolation hole now ends at the `}` matching its `${`
