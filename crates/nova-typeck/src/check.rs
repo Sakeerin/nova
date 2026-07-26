@@ -39,6 +39,27 @@ enum MethodRes {
     Ambiguous,
 }
 
+/// How a trait call names its `Self` type — the *only* difference between a
+/// method call (`x.cmp(y)`) and an associated-function call (`Int::default()`).
+///
+/// Bundling the receiver together with the `Self` type it determines is what
+/// lets [`Checker::emit_trait_call`] be the single emitter for both: there is
+/// no way to pass a receiver without `Self` being derived from it, no way to
+/// pass both a receiver and an unrelated `Self`, and no way to pass neither.
+/// Two sibling emitters instead had to keep the flat `Param` substitution
+/// layout (`[Self] ++ method generics`) in step by hand, and a divergence there
+/// silently dispatches to a wrongly specialized function.
+enum TraitCallSelf {
+    /// `receiver.name(args)`: `Self` is the receiver's resolved type and the
+    /// receiver becomes the callee's `self` argument. Valid only for a method
+    /// the trait declares *with* a `self` receiver ([`hir::TraitMethod::has_self`]).
+    Receiver(hir::Expr),
+    /// `Type::name(args)` or `T::name(args)`: `Self` comes from the path
+    /// qualifier and there is no receiver. Valid only for a receiver-less
+    /// method (a trait associated function).
+    Qualifier(Ty),
+}
+
 /// The AST location and flavor of a method to compile.
 #[derive(Debug, Clone, Copy)]
 struct MethodLoc {
@@ -2185,9 +2206,14 @@ impl<'a> Checker<'a> {
                     let checked: Vec<hir::Expr> =
                         args.iter().map(|a| self.check_expr(fcx, a)).collect();
                     return match matches.as_slice() {
-                        [(tid, idx)] => {
-                            self.emit_trait_assoc_call(fcx, *tid, *idx, Ty::Param(k), checked, span)
-                        }
+                        [(tid, idx)] => self.emit_trait_call(
+                            fcx,
+                            *tid,
+                            *idx,
+                            TraitCallSelf::Qualifier(Ty::Param(k)),
+                            checked,
+                            span,
+                        ),
                         [] => {
                             // A bound may still declare `name` — just as a
                             // method with a `self` receiver rather than an
@@ -2286,8 +2312,14 @@ impl<'a> Checker<'a> {
                             let (tid, idx) = (*tid, *idx);
                             let checked: Vec<hir::Expr> =
                                 args.iter().map(|a| self.check_expr(fcx, a)).collect();
-                            return self
-                                .emit_trait_assoc_call(fcx, tid, idx, self_ty, checked, span);
+                            return self.emit_trait_call(
+                                fcx,
+                                tid,
+                                idx,
+                                TraitCallSelf::Qualifier(self_ty),
+                                checked,
+                                span,
+                            );
                         }
                         [] => {
                             // A primitive is invisible to `resolve_type`, so the
@@ -3503,9 +3535,14 @@ impl<'a> Checker<'a> {
             MethodRes::Inherent(def_id) => {
                 self.emit_inherent_call(fcx, def_id, receiver, args, span)
             }
-            MethodRes::Trait(trait_id, method_idx) => {
-                self.emit_trait_call(fcx, trait_id, method_idx, receiver, args, span)
-            }
+            MethodRes::Trait(trait_id, method_idx) => self.emit_trait_call(
+                fcx,
+                trait_id,
+                method_idx,
+                TraitCallSelf::Receiver(receiver),
+                args,
+                span,
+            ),
             MethodRes::Ambiguous => {
                 self.error(
                     "E0015",
@@ -3562,10 +3599,14 @@ impl<'a> Checker<'a> {
         // sig.params[0] is `self`; the rest are the declared parameters.
         let expected_args = sig.params.len().saturating_sub(1);
         if args.len() != expected_args {
+            // One wording for every arity error in this family (see also
+            // `emit_assoc_call`, `emit_trait_call`, and the free-function call in
+            // `check_call`), so the same mistake always reads the same way.
+            let mname = self.defs.def(def_id).name.clone();
             self.error(
                 "E0016",
                 format!(
-                    "method takes {expected_args} argument(s) but {} were supplied",
+                    "`{mname}` takes {expected_args} argument(s) but {} were supplied",
                     args.len()
                 ),
                 span,
@@ -3680,16 +3721,26 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Emit a trait method call — the sole constructor of
+    /// [`hir::ExprKind::TraitCall`]. `dispatch` says where `Self` comes from and
+    /// so distinguishes a receiver call (`x.cmp(y)`) from an associated-function
+    /// call (`Int::default()`, or `T::default()` inside a generic function);
+    /// everything else — the `has_self`/receiver agreement check, the flat
+    /// substitution, arity, argument unification, the result type — is shared,
+    /// which is the point. For [`TraitCallSelf::Qualifier`], `Self` is a concrete
+    /// type for `Int::zero()` or `Param(k)` when dispatching through a generic
+    /// parameter's bound (`T::zero()` inside `fn f<T: Zero>()`), which
+    /// monomorphization resolves once `T` is known, exactly as it resolves a
+    /// bounded instance method call.
     fn emit_trait_call(
         &mut self,
         fcx: &mut FnCtx,
         trait_id: DefId,
         method_idx: u32,
-        receiver: hir::Expr,
+        dispatch: TraitCallSelf,
         args: Vec<hir::Expr>,
         span: Span,
     ) -> hir::Expr {
-        let self_ty = fcx.icx.apply(&receiver.ty);
         let Some(tm) = self
             .traits
             .iter()
@@ -3699,97 +3750,50 @@ impl<'a> Checker<'a> {
         else {
             return error_expr(span);
         };
-        // Everything below binds `receiver` as the method's `self`; a trait
-        // associated function has no receiver, and `tm.params` (which never
-        // stores `self`) cannot reveal the mismatch, so the arity check would
-        // pass and MIR would lower one argument too many. `trait_method_index`
-        // already skips these — this guard keeps any future caller from
-        // reintroducing the codegen ICE, mirroring `emit_inherent_call`.
-        if !tm.has_self {
-            self.error(
-                "E0014",
-                format!(
-                    "`{}` is an associated function with no `self` receiver; \
-                     call it as `Type::{}(…)`",
-                    tm.name, tm.name
-                ),
-                span,
-            );
-            return error_expr(span);
-        }
-        // Substitution over the trait method's Param space: `Self` (Param(0)) is
-        // the receiver type; the method's own generics (Param(1..)) are fresh
-        // inference vars, recovered from the argument types like a generic fn.
-        let type_args: Vec<Ty> = (0..tm.generics).map(|_| fcx.icx.fresh()).collect();
-        let mut subst = Vec::with_capacity(1 + type_args.len());
-        subst.push(self_ty.clone());
-        subst.extend(type_args.iter().cloned());
-        if args.len() != tm.params.len() {
-            self.error(
-                "E0016",
-                format!(
-                    "method `{}` takes {} argument(s) but {} were supplied",
-                    tm.name,
-                    tm.params.len(),
-                    args.len()
-                ),
-                span,
-            );
-            return error_expr(span);
-        }
-        for (arg, param) in args.iter().zip(tm.params.iter()) {
-            let expected = param.subst(&subst);
-            if !fcx.icx.unify(&arg.ty, &expected) {
+        // The receiver's presence must agree with what the trait declares.
+        // `tm.params` never stores `self`, so it cannot reveal a mismatch: the
+        // arity check below would pass and MIR would lower one argument too many
+        // (or too few), which is the Cranelift "mismatched argument count" ICE in
+        // one direction or the other. `trait_method_index` and
+        // `trait_assoc_fn_index` already partition candidates by `has_self`, so
+        // neither arm is reachable today — this keeps any future caller from
+        // reintroducing the ICE, mirroring `emit_inherent_call`, and being one
+        // check covering both directions it cannot rot on only one side.
+        let (self_ty, receiver) = match dispatch {
+            TraitCallSelf::Receiver(_) if !tm.has_self => {
                 self.error(
-                    "E0010",
+                    "E0014",
                     format!(
-                        "argument has type `{}` but `{}` was expected",
-                        self.show(&arg.ty, fcx),
-                        self.show(&expected, fcx),
+                        "`{}` is an associated function with no `self` receiver; \
+                         call it as `Type::{}(…)`",
+                        tm.name, tm.name
                     ),
-                    arg.span,
+                    span,
                 );
+                return error_expr(span);
             }
-        }
-        hir::Expr {
-            kind: hir::ExprKind::TraitCall {
-                trait_id,
-                method: method_idx,
-                self_ty: self_ty.clone(),
-                type_args,
-                receiver: Some(Box::new(receiver)),
-                args,
-            },
-            ty: tm.ret.subst(&subst),
-            span,
-        }
-    }
-
-    /// Emit a call to a trait associated function (no receiver). `self_ty` comes
-    /// from the path qualifier — a concrete type for `Int::zero()`, or `Param(k)`
-    /// when dispatching through a generic parameter's bound (`T::zero()` inside
-    /// `fn f<T: Zero>()`), which monomorphization resolves once `T` is known,
-    /// exactly as it resolves a bounded instance method call.
-    fn emit_trait_assoc_call(
-        &mut self,
-        fcx: &mut FnCtx,
-        trait_id: DefId,
-        method_idx: u32,
-        self_ty: Ty,
-        args: Vec<hir::Expr>,
-        span: Span,
-    ) -> hir::Expr {
-        let Some(tm) = self
-            .traits
-            .iter()
-            .find(|t| t.def_id == trait_id)
-            .and_then(|t| t.methods.get(method_idx as usize))
-            .cloned()
-        else {
-            return error_expr(span);
+            // `Self` is the receiver's type; deriving it here rather than taking
+            // it from the caller is what makes the two impossible to disagree.
+            TraitCallSelf::Receiver(recv) => (fcx.icx.apply(&recv.ty), Some(Box::new(recv))),
+            TraitCallSelf::Qualifier(_) if tm.has_self => {
+                self.error(
+                    "E0014",
+                    format!(
+                        "`{}` is a method with a `self` receiver; \
+                         call it on a value as `value.{}(…)`",
+                        tm.name, tm.name
+                    ),
+                    span,
+                );
+                return error_expr(span);
+            }
+            TraitCallSelf::Qualifier(ty) => (ty, None),
         };
-        // Same flat Param layout `emit_trait_call` establishes: `Self` at
-        // Param(0), the method's own generics at Param(1..).
+        // Substitution over the trait method's flat Param space: `Self` is
+        // Param(0); the method's own generics are Param(1..) and become fresh
+        // inference vars, recovered from the argument types like a generic fn.
+        // `hir::TraitMethod::bounds` is indexed by that same flat position, so
+        // this order is not a convention but a requirement.
         let type_args: Vec<Ty> = (0..tm.generics).map(|_| fcx.icx.fresh()).collect();
         let mut subst = Vec::with_capacity(1 + type_args.len());
         subst.push(self_ty.clone());
@@ -3827,7 +3831,7 @@ impl<'a> Checker<'a> {
                 method: method_idx,
                 self_ty,
                 type_args,
-                receiver: None,
+                receiver,
                 args,
             },
             ty: tm.ret.subst(&subst),
@@ -3860,7 +3864,14 @@ impl<'a> Checker<'a> {
             return None;
         }
         let span = value.span;
-        Some(self.emit_trait_call(fcx, trait_id, method_idx, value, Vec::new(), span))
+        Some(self.emit_trait_call(
+            fcx,
+            trait_id,
+            method_idx,
+            TraitCallSelf::Receiver(value),
+            Vec::new(),
+            span,
+        ))
     }
 
     fn check_binary(
@@ -7082,6 +7093,209 @@ mod tests {
              fn main() { println(\"${Int::zero(9)}\") }",
         );
         assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn trait_call_substitution_puts_self_before_the_methods_own_generics() {
+        // The binding invariant of `emit_trait_call`: the substitution is
+        // `[Self] ++ method_type_args`, because a trait method's Param space is
+        // flat — `Self` is Param(0) and the method's own generics follow at
+        // Param(1..), which is also how `hir::TraitMethod::bounds` is indexed.
+        // Get the order wrong and a call silently dispatches to a wrongly
+        // specialized function.
+        //
+        // Both shapes are checked because they used to be two functions that had
+        // to build this vector identically by hand. A swapped order is only
+        // observable when the method has generics of its own (with `generics ==
+        // 0` the two orders coincide), so it needs a `<U>` method and a `Self`
+        // return: under a swap, `u`'s expected type becomes `Self` and the
+        // `Bool` argument stops type-checking.
+        for (src, shape) in [
+            (
+                "trait Tag { fn tag<U>(self, u: U) -> Self }\n\
+                 impl Tag for Int { fn tag<U>(self, u: U) -> Int { 1 } }\n\
+                 fn main() { let n = 5\n let m: Int = n.tag(true)\n println(\"${m}\") }",
+                "receiver",
+            ),
+            (
+                "trait Make { fn make<U>(u: U) -> Self }\n\
+                 impl Make for Int { fn make<U>(u: U) -> Int { 1 } }\n\
+                 fn main() { let m: Int = Int::make(true)\n println(\"${m}\") }",
+                "qualifier",
+            ),
+        ] {
+            let r = check_src(src);
+            assert!(
+                r.diagnostics.is_empty(),
+                "{shape} dispatch: {:?}",
+                r.diagnostics
+            );
+            let main_fn = r
+                .module
+                .functions
+                .iter()
+                .find(|f| f.name == "main")
+                .expect("main compiled to a hir::Function");
+            let m_ty = &main_fn
+                .locals
+                .iter()
+                .find(|l| l.name == "m")
+                .expect("`m` is a local in main")
+                .ty;
+            // `-> Self` must resolve through Param(0), i.e. to the qualifier /
+            // receiver type, not to the method's own generic.
+            assert_eq!(*m_ty, Ty::Int, "{shape} dispatch: `Self` return");
+        }
+    }
+
+    #[test]
+    fn every_trait_call_agrees_with_its_callees_has_self() {
+        // `emit_trait_call` is the sole emitter of `TraitCall`, and it refuses to
+        // build one whose receiver-ness disagrees with the trait method's
+        // `has_self` — a mismatch in either direction lowers a `self` argument
+        // into a callee with no slot for it, or omits one from a callee that has
+        // it, both of which Cranelift rejects as "mismatched argument count".
+        // The two guard arms are unreachable from source today (see the emitter's
+        // comment), so instead of a test that cannot fail, assert the invariant
+        // they protect over every call a real program produces: any future
+        // emitter path that got this wrong would break here even if the guard
+        // itself were deleted.
+        //
+        // `check_src` merges the implicit prelude, so `module.functions` also
+        // carries all of std/core — every `Ord`/`Eq`/`Display` call in it is
+        // covered for free, on top of the receiver and receiver-less trait calls
+        // the source below adds.
+        let r = check_src(
+            "trait Zero { fn zero() -> Self }\n\
+             trait Widen { fn widen(self, k: Int) -> Int }\n\
+             impl Zero for Int { fn zero() -> Int { 0 } }\n\
+             impl Widen for Int { fn widen(self, k: Int) -> Int { k } }\n\
+             fn make<T: Zero>() -> T { T::zero() }\n\
+             fn main() {\n\
+                 let n: Int = make()\n\
+                 let m: Int = Int::zero()\n\
+                 println(\"${n.widen(1)}${m}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+
+        fn walk<'e>(e: &'e hir::Expr, out: &mut Vec<&'e hir::Expr>) {
+            out.push(e);
+            for c in child_exprs(e) {
+                walk(c, out);
+            }
+        }
+        let mut seen_with_receiver = 0;
+        let mut seen_without_receiver = 0;
+        for f in &r.module.functions {
+            let mut exprs = Vec::new();
+            walk(&f.body, &mut exprs);
+            for e in exprs {
+                let hir::ExprKind::TraitCall {
+                    trait_id,
+                    method,
+                    receiver,
+                    ..
+                } = &e.kind
+                else {
+                    continue;
+                };
+                let tm = r
+                    .module
+                    .traits
+                    .iter()
+                    .find(|t| t.def_id == *trait_id)
+                    .and_then(|t| t.methods.get(*method as usize))
+                    .expect("a TraitCall names an existing trait method");
+                assert_eq!(
+                    receiver.is_some(),
+                    tm.has_self,
+                    "`{}` (has_self = {}) got receiver.is_some() = {} in `{}`",
+                    tm.name,
+                    tm.has_self,
+                    receiver.is_some(),
+                    f.name
+                );
+                if receiver.is_some() {
+                    seen_with_receiver += 1;
+                } else {
+                    seen_without_receiver += 1;
+                }
+            }
+        }
+        // Both flavors must actually be present, or the loop above proves nothing.
+        assert!(seen_with_receiver > 0, "no receiver trait call was emitted");
+        assert!(
+            seen_without_receiver > 0,
+            "no receiver-less trait call was emitted"
+        );
+    }
+
+    #[test]
+    fn arity_errors_name_the_callee_uniformly() {
+        // E0016 is raised from five places — a free function (`check_call`), an
+        // inherent method and an inherent associated function
+        // (`emit_inherent_call` / `emit_assoc_call`), and a trait method called
+        // both ways (`emit_trait_call`) — and the wording had drifted three ways
+        // across them: one said "method `f` takes …", one "`f` takes …", and the
+        // inherent-method one "method takes …" with no name at all. The same
+        // mistake must read the same way whichever dispatch path found the
+        // callee, so pin the shared phrasing rather than only the code. Two of
+        // these sites had no arity test at all before this, which is how the
+        // drift went unnoticed.
+        //
+        // What is unified is the phrasing, not the spelling of the name: an impl
+        // method's `Def` name is impl-qualified (`P.of`), while a trait dispatch
+        // site only ever has the trait's declared method name — `Self` may still
+        // be a generic parameter there, so there is no impl to qualify with.
+        // Each path therefore names the callee with the only name it has.
+        let cases: [(&str, &str); 5] = [
+            // Free function.
+            (
+                "fn f(a: Int) -> Int { a }\nfn main() { let x = f(1, 2) }",
+                "`f` takes 1 argument(s) but 2 were supplied",
+            ),
+            // Inherent associated function (no receiver).
+            (
+                "record P { v: Int }\n\
+                 impl P { fn of(x: Int) -> P { P { v: x } } }\n\
+                 fn main() { let p = P::of()\n println(\"${p.v}\") }",
+                "`P.of` takes 1 argument(s) but 0 were supplied",
+            ),
+            // Inherent method (receiver at sig.params[0], so the expected count
+            // is one less than the signature's length).
+            (
+                "record P { v: Int }\n\
+                 impl P { fn bump(self, k: Int) -> Int { k } }\n\
+                 fn main() { let p = P { v: 1 }\n println(\"${p.bump()}\") }",
+                "`P.bump` takes 1 argument(s) but 0 were supplied",
+            ),
+            // Trait method through a receiver.
+            (
+                "trait Widen { fn widen(self, k: Int) -> Int }\n\
+                 impl Widen for Int { fn widen(self, k: Int) -> Int { k } }\n\
+                 fn main() { let n = 5\n println(\"${n.widen()}\") }",
+                "`widen` takes 1 argument(s) but 0 were supplied",
+            ),
+            // Trait associated function through a qualifier — the same emitter as
+            // the case above, reached with no receiver.
+            (
+                "trait Zero { fn zero() -> Int }\n\
+                 impl Zero for Int { fn zero() -> Int { 1 } }\n\
+                 fn main() { println(\"${Int::zero(9)}\") }",
+                "`zero` takes 0 argument(s) but 1 were supplied",
+            ),
+        ];
+        for (src, expected) in cases {
+            let r = check_src(src);
+            let msgs: Vec<&str> = r
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "E0016")
+                .map(|d| d.message.as_str())
+                .collect();
+            assert_eq!(msgs, vec![expected], "for source:\n{src}");
+        }
     }
 
     #[test]
