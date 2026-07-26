@@ -610,15 +610,30 @@ impl<'a> Lowerer<'a> {
                     // Unicode scalar value at runtime), so the conversion is a
                     // register move. Giving it a runtime symbol would mean
                     // adding an ABI function whose body is the identity —
-                    // permanent surface area for nothing. `dst` is `Some` and
-                    // there is exactly one argument for any well-typed call
-                    // (`check_builtin_call` returns an error expression
-                    // otherwise, and MIR is only reached for a program with no
-                    // diagnostics), so the fallthrough emits nothing rather
-                    // than panicking.
+                    // permanent surface area for nothing.
+                    //
+                    // The `Copy` is not optional and must not be skipped:
+                    // `dst` was allocated above and is returned below, so
+                    // emitting nothing would leave every later reader of the
+                    // result reading an *unassigned* temp — a miscompile, not
+                    // an error. `builtin_signature` types this builtin as one
+                    // argument returning `Int`, so `dst` is always `Some` and
+                    // `arg_temps` always has length 1; the assertions state
+                    // that rather than letting an impossible shape pass
+                    // quietly (the whole suite runs in debug, so a violation
+                    // fails immediately and visibly).
                     None => {
-                        if let (Some(dst), Some(&src)) = (dst, arg_temps.first()) {
-                            self.push(Stmt::Copy { dst, src });
+                        debug_assert!(
+                            dst.is_some() && arg_temps.len() == 1,
+                            "`{}` must lower with a dst and exactly one argument \
+                             (got dst={:?}, {} args), or its result temp is left \
+                             unassigned",
+                            b.name(),
+                            dst,
+                            arg_temps.len(),
+                        );
+                        if let (Some(dst), [src]) = (dst, arg_temps.as_slice()) {
+                            self.push(Stmt::Copy { dst, src: *src });
                         }
                     }
                 }

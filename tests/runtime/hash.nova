@@ -63,15 +63,46 @@ fn main() {
     println("")
     println("buckets reached ${used} of 8 (identity hashing would reach 1)")
 
-    // Every xor-shift stage clears the sign bit under Nova's arithmetic `>>`,
-    // so `mix64` never returns a negative Int and `hash % cap` would be safe
-    // for these keys too. String hashes have no such guarantee — only
-    // `hash & (cap - 1)` is safe for every impl.
+    // COMPLEMENT PAIRS. This is the regression that matters most, and the one
+    // every histogram above is blind to because they all sample a single sign.
+    // Nova's `>>` is arithmetic, and arithmetic shift commutes with complement,
+    // so an unmasked `x ^ (x >> k)` returns the same value for `x` and for
+    // `!x == -1 - x`. Every later stage is a function of that, so an unmasked
+    // mix64 folded 2-to-1: `mix64(x) == mix64(-1 - x)` *identically*, meaning
+    // each pair shares a bucket at every capacity and no resize can separate
+    // them. `mix64`'s shift masks are what stop this; these lines fail loudly
+    // if a mask is ever dropped.
+    println("h(0) != h(-1): ${(0).hash() != (-1).hash()}")
+    let mut folded = 0
+    let mut p = 0
+    while p < 64 {
+        if (p).hash() == (-1 - p).hash() { folded = folded + 1 }
+        p = p + 1
+    }
+    println("complement collisions over 0..63: ${folded}")
+
+    // Keys spanning BOTH signs, over 256 buckets. 128 distinct keys into 256
+    // buckets uniformly is ~101 distinct buckets; the unmasked mixer reached
+    // only 58, because 64 of the 128 keys were complement pairs of the others.
+    let mut seen = [0; 256]
+    let mut distinct = 0
+    let mut q = -64
+    while q < 64 {
+        let b = (q).hash() & 255
+        if seen[b] == 0 { distinct = distinct + 1 }
+        seen[b] = 1
+        q = q + 1
+    }
+    println("keys -64..63 reach ${distinct} of 256 buckets (unmasked reached 58)")
+
+    // A hash spans the full Int range, both signs — so `hash % cap` could
+    // produce a negative index and `hash >> k` is not a usable tag. Bucket
+    // selection must mask; see the rule on `Hash` in std/core.
     let mut neg = 0
     let mut n = 0
     while n < 256 {
         if (n).hash() < 0 { neg = neg + 1 }
         n = n + 1
     }
-    println("negative Int hashes: ${neg}")
+    println("Int hashes of 0..255 that are negative: ${neg} (masking is mandatory)")
 }

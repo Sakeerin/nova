@@ -1018,6 +1018,14 @@ fn std_core_under_gc_stress() {
 /// histograms in the fixture were computed independently from splitmix64's
 /// finalizer, so they are an oracle rather than a recording of whatever the
 /// implementation happened to print.
+///
+/// The fixture also carries the complement-pair regression. Because Nova's
+/// `>>` is arithmetic, an unmasked `x ^ (x >> k)` yields the same value for
+/// `x` and `-1 - x`, which made `mix64` fold 2-to-1 with *identical* hashes —
+/// pairs that share a bucket at every capacity, so no resize separates them.
+/// Every single-sign sample (consecutive keys, multiples of 8, all-negative)
+/// looked textbook-uniform through it, which is exactly why
+/// `h(0) != h(-1)` and the both-signs bucket count are in there.
 #[test]
 fn hash_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/hash.stdout"))

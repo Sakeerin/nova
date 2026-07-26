@@ -8,4 +8,7 @@ char/int agree true true
 keys 0..255 &7: 34 28 30 30 30 38 28 38
 multiples of 8 &7: 11 8 6 6 10 10 5 8
 buckets reached 8 of 8 (identity hashing would reach 1)
-negative Int hashes: 0
+h(0) != h(-1): true
+complement collisions over 0..63: 0
+keys -64..63 reach 100 of 256 buckets (unmasked reached 58)
+Int hashes of 0..255 that are negative: 132 (masking is mandatory)

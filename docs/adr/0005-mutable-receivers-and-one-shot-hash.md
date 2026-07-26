@@ -249,34 +249,62 @@ with impls for `Int`, `Bool`, `Char` and `String`, and the contract that
   `MirTy::I64`, so `nova-mir` lowers it to a register move rather than adding
   a permanent runtime ABI symbol whose body would be the identity function.
 
-Two properties of `mix64` under Nova's semantics were verified rather than
-assumed, since both would have silently produced a broken hash:
+`Int` has neither the unsigned type nor the logical shift the canonical
+splitmix64 is written against, so `mix64` needs two workarounds. Both are
+load-bearing, and the second was originally got *wrong* in a way no
+single-sign test could see — recorded here because the failure mode is
+instructive, not merely historical:
 
 - The constants `0xbf58476d1ce4e5b9` and `0x94d049bb133111eb` exceed `Int`'s
   range and are written as the two's-complement negatives of those bit
-  patterns. The lexer accepts them (each is `-` applied to a literal below
-  `i64::MAX`) and `*` wraps rather than trapping, so the arithmetic agrees
-  with the canonical version modulo 2^64.
-- Nova's `>>` is **arithmetic**, and there is no `>>>`, so this is splitmix64's
-  finalizer with arithmetic shifts — not bit-identical to the canonical version
-  wherever an intermediate goes negative. Since the low bits are the only ones
-  bucket selection reads, they are *measured* rather than argued: the histograms
-  in `tests/runtime/hash.nova` are the evidence, and they were computed from an
-  independent model of the same function rather than recorded from a run. A
-  second consequence is that every `x ^ (x >> k)` clears the sign bit, so
-  `mix64` is not a bijection: it loses at most 3 bits of range, and always
-  returns a non-negative `Int`.
+  patterns. Hex would be the obvious spelling and does not work: the lexer's
+  `lex_hex_int` parses with `i64::from_str_radix`, so `0xbf58476d1ce4e5b9`
+  silently fails to lex. Each negative *is* `-` applied to a decimal literal
+  below `i64::MAX`, which lexes, and `*` wraps rather than trapping, so the
+  arithmetic agrees modulo 2^64.
+- Nova's `>>` is **arithmetic** and there is no `>>>`, so **each shift is
+  masked** to clear the sign extension: `& (2^(64-k) - 1)`. This is not a
+  refinement, it is the difference between a hash function and a broken one.
+  Arithmetic shift commutes with complement (`!(x >> k) == (!x) >> k`) and XOR
+  is invariant under complementing both operands, so unmasked,
+  `x ^ (x >> k) == !x ^ ((!x) >> k)`: stage 1 is exactly 2-to-1 under
+  `x ↔ !x == -1 - x`, and since every later stage is a function of stage 1's
+  output, the whole finalizer collapsed with
+  **`mix64(x) == mix64(-1 - x)` identically**. Identically, not congruently —
+  so each pair would share a bucket at *every* capacity, and resizing, which
+  is a hash map's only answer to collisions, could never separate them.
+  With the masks, `mix64` is bit-identical to canonical splitmix64 (verified
+  against an independent implementation, including for negative keys) and
+  therefore a bijection.
+
+The lesson for anyone adding a hash impl here: **the defect was invisible to
+every single-sign test.** Consecutive keys, multiples of the capacity, and an
+all-negative sample all showed textbook-uniform low bits (chi² ≈ df), because
+each sample contained at most one member of any complement pair. What exposed
+it is one line — `(0).hash() != (-1).hash()` — plus a bucket count over keys
+spanning both signs, which the unmasked mixer failed 58-of-256 where uniform
+is ~101. Both are now in `tests/runtime/hash.nova`.
 
 ### Consequences
 
 - **A composite type's `Hash` must combine children by hand**, e.g.
-  `fn hash(self) -> Int { mix64(self.x.hash() ^ (self.y.hash() * 31)) }`.
-  There is no derive and no accumulator; that is the cost of the shape.
-- **Bucket selection must mask, not take a remainder.** `mix64` is
-  non-negative but `str_hash` reinterprets a `u64` as `i64`, so a `String`
-  hash may be negative and `hash % cap` could yield a negative index.
-  `hash & (cap - 1)` is non-negative for every `i64` and is what `Map` will
-  use.
+  `fn hash(self) -> Int { self.x.hash() ^ (self.y.hash() * 31) }`. There is no
+  derive and no accumulator; that is the cost of the shape. Note the combiner
+  cannot call `mix64`, which is module-private to `std/core` on purpose — it is
+  an implementation detail of the primitive impls, not a published utility, and
+  publishing it would make its exact definition a compatibility surface.
+- **Mask a hash. Never shift one, and never read its high bits.**
+  `hash & (cap - 1)` over a power-of-two capacity is the only supported way to
+  derive a bucket index, and the rule is stated beside `Hash` in
+  `std/core/lib.nova` because that is where `Map`'s author will look. Three
+  independent reasons: a hash spans the full `Int` range including negatives
+  (both `mix64` and `str_hash`, the latter reinterpreting an unsigned FNV-1a
+  result), so `hash % cap` can be a negative index, whereas `&` with a positive
+  mask is non-negative for every `i64`; the high bits are not an independent
+  second hash, so a `hash >> 57` tag byte is not uncorrelated with the bucket
+  it accompanies, and for a negative `str_hash` the sign extension shrinks such
+  a tag's range on exactly the keys it exists to distinguish; and `mix64`'s
+  guarantees are stated over the whole 64-bit result, not over any slice of it.
 - **Hashes are not randomized per process**, so a `Map` is HashDoS-attackable
   by adversarial keys. FNV-1a is not collision-resistant and neither is
   `mix64`. Acceptable for Phase 2.2a; a seeded hasher is a `Hasher`-shaped
@@ -284,7 +312,10 @@ assumed, since both would have silently produced a broken hash:
 - **Hashes must be backend-independent.** `tests/runtime/hash.nova` runs under
   both the JIT and the object backend against the same fixture, whose expected
   bucket histograms were computed independently from splitmix64's finalizer
-  rather than recorded from a run.
+  rather than recorded from a run. That fixture is also where the
+  complement-pair and both-signs regressions live, so a future change to
+  `mix64` that reintroduces a structural fold fails there rather than in
+  `Map`'s probe chains.
 - **`Hash for Float` is deliberately absent**, a second deviation from
   `20-STDLIB.md`, which lists `Float` among the primitives that implement
   `Hash`. NaN never equals itself, so a

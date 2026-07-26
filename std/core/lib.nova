@@ -116,6 +116,22 @@ pub trait Default { fn default() -> Self }
 // and `0.0`/`-0.0` are `==` but would hash differently.
 //
 // An implementor's contract: if `a.eq(b)` then `a.hash() == b.hash()`.
+//
+// HOW TO USE A HASH: **mask it. Never shift it, and never read its high
+// bits.** `hash & (cap - 1)` over a power-of-two capacity is the only
+// supported way to turn a hash into a bucket index, for three separate
+// reasons:
+//
+//   - `hash % cap` can be *negative*: `str_hash` reinterprets an unsigned
+//     FNV-1a result as `Int`, and `mix64` spans the full `Int` range too, so a
+//     remainder inherits the sign. `&` with a positive mask is non-negative
+//     for every `Int`.
+//   - The high bits are not a usable second hash. A `hash >> 57`-style tag
+//     byte is *not* independent of the low bits used for the bucket, and for
+//     `str_hash` a negative hash sign-extends into any such tag, so the tag
+//     loses half its range on exactly the keys that need distinguishing.
+//   - `mix64`'s guarantees are stated over its whole 64-bit result; nothing
+//     promises that any particular slice of it is uniform on its own.
 pub trait Hash { fn hash(self) -> Int }
 
 impl Display for Int    { fn fmt(self) -> String { "${self}" } }
@@ -226,31 +242,35 @@ impl Default for String { fn default() -> String { "" } }
 // buckets with `hash & (cap - 1)`, so it is the *low* bits that must be
 // spread; `fn hash(self) -> Int { self }` would send every multiple of the
 // capacity to bucket 0. A known-good mixer is used rather than an invented
-// one.
+// one, and this is bit-identical to the canonical splitmix64 finalizer.
 //
-// Two deliberate deviations from the canonical C, both verified rather than
-// assumed:
+// Getting there needs two workarounds for what `Int` cannot express, and both
+// are load-bearing rather than cosmetic:
 //
 //   - The constants are `0xbf58476d1ce4e5b9` and `0x94d049bb133111eb`, which
-//     exceed `Int`'s range; they are written here as the two's-complement
-//     negatives of those bit patterns. Nova's lexer takes them (each is
-//     `-` applied to a literal below `i64::MAX`), and `*` wraps rather than
-//     trapping, so the arithmetic is the same modulo 2^64.
-//   - Nova's `>>` is arithmetic and there is no `>>>`, so this is the
-//     splitmix64 finalizer with *arithmetic* shifts — for a negative
-//     intermediate the sign extension changes the result, so it is not
-//     bit-identical to the canonical version. What matters is the low-bit
-//     distribution, and that is measured rather than assumed: see the bucket
-//     histograms in `tests/runtime/hash.nova`. One further consequence is
-//     that every `x ^ (x >> k)` clears the sign bit, so `mix64` is not a
-//     bijection (at most 3 bits of range lost) and always returns a
-//     non-negative `Int`.
+//     exceed `Int`'s range, so they are written as the two's-complement
+//     negatives of those bit patterns. Hex is not an option — the lexer's
+//     `lex_hex_int` parses as `i64`, so `0xbf58…` silently fails to lex — but
+//     each negative *is* `-` applied to a decimal literal below `i64::MAX`,
+//     which lexes, and `*` wraps rather than trapping, so the arithmetic
+//     agrees modulo 2^64.
+//   - Nova's `>>` is **arithmetic** and there is no `>>>`, so each shift is
+//     masked to clear the sign extension: `& (2^(64-k) - 1)`, i.e.
+//     `17179869183` for `>> 30`, `137438953471` for `>> 27`, `8589934591`
+//     for `>> 31`. The mask is not optional. Without it, arithmetic shift
+//     commutes with complement (`!(x >> k) == (!x) >> k`) and XOR is
+//     invariant under complementing both operands, so `x ^ (x >> k)` returns
+//     the *same value* for `x` and `!x == -1 - x`. Every later stage is a
+//     function of that output, so the whole finalizer folded 2-to-1 with
+//     `mix64(x) == mix64(-1 - x)` — identical hashes, not merely congruent
+//     ones, so each pair shared a bucket at *every* capacity and no resize
+//     could ever separate them. Pinned by `tests/runtime/hash.nova`.
 fn mix64(x: Int) -> Int {
-    let a = x ^ (x >> 30)
+    let a = x ^ ((x >> 30) & 17179869183)
     let b = a * -4658895280553007687
-    let c = b ^ (b >> 27)
+    let c = b ^ ((b >> 27) & 137438953471)
     let d = c * -7723592293110705685
-    d ^ (d >> 31)
+    d ^ ((d >> 31) & 8589934591)
 }
 
 impl Hash for Int    { fn hash(self) -> Int { mix64(self) } }
@@ -259,7 +279,7 @@ impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1) } else { mix64(
 // codepoint. `char_to_int` is a compiler builtin because Nova has no `as`
 // casts and `Char` has no other conversion.
 impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self)) } }
-// FNV-1a over the bytes, in the runtime (see the module note above). Unlike
-// `mix64` this may return a negative `Int`, so bucket selection must mask
-// rather than take a remainder.
+// FNV-1a over the bytes, in the runtime (see the module note above), with its
+// unsigned result reinterpreted as `Int` — so it is the impl most obviously
+// able to return a negative hash. See the masking rule on `Hash` above.
 impl Hash for String { fn hash(self) -> Int { str_hash(self) } }
