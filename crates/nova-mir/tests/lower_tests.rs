@@ -527,6 +527,31 @@ fn unsatisfied_trait_bound_reports_e0013() {
     assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
 }
 
+/// `Map`'s key contract is `K: Hash + Eq`, and a record implementing neither
+/// cannot be a key. The bound lives on the *inherent* `impl<K: Hash + Eq, V>
+/// Map<K, V>` in `std/collections`, so this also pins that an impl-level bound
+/// on an inherent impl is discharged at all.
+///
+/// This is the pipeline stage that enforces it: `nova-typeck`'s `check` reports
+/// nothing for this program, because every trait bound in Nova is verified
+/// during monomorphization (`12-TYPESYSTEM.md` §5.4). `diagnostics_for` runs
+/// `check` + `lower_module`, which is exactly the pair `nova check` runs
+/// (`nova_driver::check_file`), so the code asserted here is the code a user
+/// actually sees.
+#[test]
+fn map_key_without_hash_reports_e0013() {
+    let codes = diagnostics_for(
+        "record Unhashable { v: Int }\n\
+         fn main() {\n\
+             let mut m = Map::new()\n\
+             let k = Unhashable { v: 1 }\n\
+             let p = m.insert(k, 1)\n\
+             println(\"${m.len()}\")\n\
+         }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}
+
 #[test]
 fn fn_as_value_lowers_to_closure_and_indirect_call() {
     let mir = mir_for(

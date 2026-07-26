@@ -58,3 +58,175 @@ impl<T> Vec<T> {
 
     pub fn clear(mut self) { self.len = 0 }
 }
+
+// A hash map with open addressing and linear probing.
+//
+// Capacity is a power of two, so a bucket index is `hash & (cap - 1)` — never
+// `hash % cap`. A hash may be negative (`mix64` spans the whole `Int` range and
+// `str_hash` reinterprets an unsigned FNV-1a result), and `%` inherits that
+// sign while `&` with a positive mask does not. The high bits are not read at
+// all: Nova's `>>` is arithmetic with no `>>>`, so a negative hash
+// sign-extends. See the masking rule on `pub trait Hash` in std/core.
+//
+// The three arrays are allocated together on the first insert, using the
+// inserted key and value as fillers, so no slot is ever uninitialized and no
+// `Default` bound is needed. `state` is filled with 0, which is exactly the
+// "empty" tag, so a fresh table is empty by construction. Slot states are
+// `0` empty, `1` occupied, `2` tombstone.
+//
+// `len` counts live entries only. `used` counts occupied *plus* tombstones and
+// is what the load threshold reads, so a remove-heavy workload cannot degrade
+// into an all-tombstone scan.
+//
+// The `K: Hash + Eq` contract lives on the `impl` below, not on this record's
+// generic parameters as `20-STDLIB.md` writes it. A bound on a *record*
+// parameter parses but is silently dropped — `nova-hir`'s `RecordType` keeps
+// only a generic count, and `nova-mir`'s `mono` checks bounds solely against a
+// function's own `bounds` — so `record Map<K: Hash + Eq, V>` would advertise a
+// guarantee nothing enforces. On the impl it is real: instantiating any method
+// with a key that is not `Hash + Eq` is E0013 at monomorphization, which is
+// pinned by `map_key_without_hash_reports_e0013` in nova-mir's lowering tests.
+pub record Map<K, V> { len: Int, used: Int, keys: [K], vals: [V], state: [Int] }
+
+impl<K: Hash + Eq, V> Map<K, V> {
+    // An empty map. No storage is allocated until the first `insert`.
+    pub fn new() -> Map<K, V> {
+        Map { len: 0, used: 0, keys: [], vals: [], state: [] }
+    }
+
+    // Number of live entries; unaffected by tombstones.
+    pub fn len(self) -> Int { self.len }
+
+    pub fn is_empty(self) -> Bool { self.len == 0 }
+
+    // Bucket for `k` in a table of capacity `cap` (a power of two). `cap` must
+    // be positive: at `cap == 0` the mask would be `-1` and the result the raw
+    // hash, so every caller checks for the unallocated table first.
+    fn slot_of(self, k: K, cap: Int) -> Int { k.hash() & (cap - 1) }
+
+    // Insert, returning the previous value for `k` if there was one.
+    //
+    // The probe never stops at a tombstone: it runs on to either `k` itself (a
+    // replacement) or an empty slot (a genuine absence), and only then stores
+    // into the *first* tombstone it passed. Stopping early would let a second
+    // copy of `k` appear behind the tombstone; not reusing the tombstone at all
+    // would let a churn workload grow without bound.
+    pub fn insert(mut self, k: K, v: V) -> Option<V> {
+        if self.state.len() == 0 {
+            self.keys = [k; 8]
+            self.vals = [v; 8]
+            self.state = [0; 8]
+        } else {
+            // Grow above 3/4 load, counting tombstones.
+            if (self.used + 1) * 4 > self.state.len() * 3 { self.grow(k, v) }
+        }
+        // After that check `used + 1 <= cap * 3 / 4 < cap`, so at least one slot
+        // is still empty and the scan below always terminates at `st == 0`
+        // before `probes` runs out. The `panic` is unreachable.
+        let cap = self.state.len()
+        let mut i = self.slot_of(k, cap)
+        let mut first_free = -1
+        let mut probes = 0
+        while probes < cap {
+            let st = self.state[i]
+            if st == 0 {
+                let at = if first_free >= 0 { first_free } else { i }
+                self.keys[at] = k
+                self.vals[at] = v
+                self.state[at] = 1
+                self.len = self.len + 1
+                // A reused tombstone was already counted in `used`.
+                if first_free < 0 { self.used = self.used + 1 }
+                return None
+            }
+            if st == 1 {
+                if self.keys[i].eq(k) {
+                    let old = self.vals[i]
+                    self.vals[i] = v
+                    return Some(old)
+                }
+            } else {
+                if first_free < 0 { first_free = i }
+            }
+            i = (i + 1) & (cap - 1)
+            probes = probes + 1
+        }
+        panic("Map::insert found no free slot")
+    }
+
+    pub fn get(self, k: K) -> Option<V> {
+        let cap = self.state.len()
+        if cap == 0 { return None }
+        let mut i = self.slot_of(k, cap)
+        let mut probes = 0
+        while probes < cap {
+            let st = self.state[i]
+            // Only an empty slot ends the chain; a tombstone is walked past, so
+            // removing from the middle of a chain leaves later keys reachable.
+            if st == 0 { return None }
+            if st == 1 {
+                if self.keys[i].eq(k) { return Some(self.vals[i]) }
+            }
+            i = (i + 1) & (cap - 1)
+            probes = probes + 1
+        }
+        None
+    }
+
+    pub fn contains_key(self, k: K) -> Bool {
+        match self.get(k) { Some(_) => true, None => false }
+    }
+
+    // Remove `k`, leaving a tombstone so later probes still reach entries that
+    // were inserted past this slot. `len` drops; `used` does not, because the
+    // slot is still unusable to a probe walking through it.
+    pub fn remove(mut self, k: K) -> Option<V> {
+        let cap = self.state.len()
+        if cap == 0 { return None }
+        let mut i = self.slot_of(k, cap)
+        let mut probes = 0
+        while probes < cap {
+            let st = self.state[i]
+            if st == 0 { return None }
+            if st == 1 {
+                if self.keys[i].eq(k) {
+                    let old = self.vals[i]
+                    self.state[i] = 2
+                    self.len = self.len - 1
+                    return Some(old)
+                }
+            }
+            i = (i + 1) & (cap - 1)
+            probes = probes + 1
+        }
+        None
+    }
+
+    // Double the capacity and reinsert the live entries, which is also what
+    // clears the tombstones. `fk`/`fv` are fillers for the fresh arrays, so no
+    // slot is uninitialized; `state`'s 0 filler makes the new table empty.
+    //
+    // Reached only from `insert`'s pre-check, and the reinserts cannot re-enter
+    // it: `used` is reset to 0 and at most `oldcap` live entries go back in,
+    // while the new threshold needs `used + 1 > newcap * 3 / 4`, i.e. more than
+    // `1.5 * oldcap`. So the nesting is exactly one level deep.
+    fn grow(mut self, fk: K, fv: V) {
+        let oldcap = self.state.len()
+        let newcap = oldcap * 2
+        let oldkeys = self.keys
+        let oldvals = self.vals
+        let oldstate = self.state
+        self.keys = [fk; newcap]
+        self.vals = [fv; newcap]
+        self.state = [0; newcap]
+        self.len = 0
+        self.used = 0
+        for j in 0..oldcap {
+            if oldstate[j] == 1 {
+                // Reinserting a key the fresh table cannot already hold always
+                // returns `None`, so the result is discarded.
+                let _ = self.insert(oldkeys[j], oldvals[j])
+            }
+        }
+    }
+}

@@ -8645,6 +8645,72 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
+    #[test]
+    fn map_methods_typecheck() {
+        let r = check_src(
+            "fn main() {\n\
+                 let mut m = Map::new()\n\
+                 let prev = m.insert(1, \"one\")\n\
+                 println(\"${m.len()} ${m.contains_key(1)}\")\n\
+                 match m.get(1) { Some(s) => println(s), None => println(\"none\") }\n\
+                 match m.remove(1) { Some(s) => println(s), None => println(\"none\") }\n\
+                 println(\"${m.len()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Not vacuous. `Ty::Error` unifies with anything, so an empty
+        // diagnostic list alone would still hold if every one of these calls had
+        // collapsed to an error expression — and `Map::new()`'s `K`/`V` are
+        // fixed only by inference from the later calls, so a wrong signature
+        // surfaces as an error type rather than as a diagnostic. Pin what the
+        // checker actually built. `Ty::Unit` drops the `println`s, which are also
+        // `Call`s; what remains is every `Map` method in the program, in source
+        // order. `Option`'s and `Map`'s `DefId`s are matched structurally rather
+        // than by number, but the type *arguments* are exact: `Map<Int, String>`
+        // from `new`, and `Option<String>` — not `Option<_>` — from the three
+        // that return one.
+        let map_ty = |t: &Ty| matches!(t, Ty::Record { args, .. } if args.as_slice() == [Ty::Int, Ty::String]);
+        let opt_str = |t: &Ty| matches!(t, Ty::Sum { args, .. } if args.as_slice() == [Ty::String]);
+        let calls: Vec<Ty> = exprs_in(&r.module, "main")
+            .into_iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::Call { .. }) && e.ty != Ty::Unit)
+            .map(|e| e.ty.clone())
+            .collect();
+        assert_eq!(calls.len(), 7, "seven non-unit `Map` calls: {calls:?}");
+        assert!(
+            map_ty(&calls[0]),
+            "`Map::new()` is `Map<Int, String>`: {calls:?}"
+        );
+        assert!(
+            opt_str(&calls[1]),
+            "`insert` returns `Option<String>`: {calls:?}"
+        );
+        assert_eq!(calls[2], Ty::Int, "`len` returns `Int`: {calls:?}");
+        assert_eq!(
+            calls[3],
+            Ty::Bool,
+            "`contains_key` returns `Bool`: {calls:?}"
+        );
+        assert!(
+            opt_str(&calls[4]),
+            "`get` returns `Option<String>`: {calls:?}"
+        );
+        assert!(
+            opt_str(&calls[5]),
+            "`remove` returns `Option<String>`: {calls:?}"
+        );
+        assert_eq!(calls[6], Ty::Int, "`len` returns `Int`: {calls:?}");
+    }
+
+    // `Map`'s key contract is `K: Hash + Eq`, and a key satisfying neither must
+    // be rejected. That test is *not* here: like every trait bound in Nova
+    // (`12-TYPESYSTEM.md` §5.4) it is discharged at monomorphization, so `check`
+    // alone reports nothing at all for `Map<Unhashable, Int>` — the same reason
+    // the conditional-impl note above gives. It lives in `nova-mir`'s
+    // `map_key_without_hash_reports_e0013`, whose helper runs
+    // `check` + `lower_module`, which is exactly what `nova check` runs
+    // (`nova_driver::check_file`).
+
     /// `check_builtin_call` reads its arity and argument types out of
     /// `builtin_signature`, so this table *is* the typing rule for every
     /// builtin — including the `Builtin::STD_CORE_ONLY` ones whose call sites
