@@ -8636,6 +8636,24 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
+    #[test]
+    fn vec_methods_typecheck() {
+        let r = check_src(
+            "fn main() {\n\
+                 let mut v = Vec::new()\n\
+                 v.push(1)\n\
+                 v.push(2)\n\
+                 println(\"${v.len()}\")\n\
+                 match v.get(0) { Some(x) => println(\"${x}\"), None => println(\"none\") }\n\
+                 match v.pop() { Some(x) => println(\"${x}\"), None => println(\"none\") }\n\
+                 v.set(0, 9)\n\
+                 v.clear()\n\
+                 println(\"${v.len()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
     // `str_cmp_builtin_wrong_arity_reports_e0016` and
     // `str_cmp_builtin_rejects_non_string_argument` used to live here,
     // calling `str_cmp(...)` directly from a *user* module to exercise

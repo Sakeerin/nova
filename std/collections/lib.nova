@@ -9,3 +9,52 @@
 // the conservative non-moving collector needs no special handling.
 
 pub record Vec<T> { len: Int, data: [T] }
+
+impl<T> Vec<T> {
+    // An empty vector. No storage is allocated until the first `push`.
+    pub fn new() -> Vec<T> { Vec { len: 0, data: [] } }
+
+    pub fn len(self) -> Int { self.len }
+
+    pub fn is_empty(self) -> Bool { self.len == 0 }
+
+    // Append `x`, growing if full.
+    //
+    // Growth allocates `[x; newcap]` — using the pushed element as the filler,
+    // so no slot is ever uninitialized and no `Default` bound is needed — then
+    // copies the existing elements back. Slot `self.len` is then already `x`,
+    // so the append needs no further store on the growth path.
+    pub fn push(mut self, x: T) {
+        if self.len == self.data.len() {
+            let newcap = if self.len == 0 { 4 } else { self.len * 2 }
+            let mut grown = [x; newcap]
+            for i in 0..self.len { grown[i] = self.data[i] }
+            self.data = grown
+        } else {
+            self.data[self.len] = x
+        }
+        self.len = self.len + 1
+    }
+
+    pub fn pop(mut self) -> Option<T> {
+        if self.len == 0 {
+            None
+        } else {
+            let last = self.data[self.len - 1]
+            self.len = self.len - 1
+            Some(last)
+        }
+    }
+
+    pub fn get(self, i: Int) -> Option<T> {
+        if i < 0 { None } else { if i >= self.len { None } else { Some(self.data[i]) } }
+    }
+
+    pub fn set(mut self, i: Int, v: T) {
+        if i < 0 { panic("Vec::set index out of range") }
+        if i >= self.len { panic("Vec::set index out of range") }
+        self.data[i] = v
+    }
+
+    pub fn clear(mut self) { self.len = 0 }
+}
