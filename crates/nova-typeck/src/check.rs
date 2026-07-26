@@ -77,6 +77,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         sigs: FxHashMap::default(),
         method_locs: FxHashMap::default(),
         selfless: FxHashSet::default(),
+        mut_self: FxHashSet::default(),
         sums: Vec::new(),
         records: Vec::new(),
         supertraits: FxHashMap::default(),
@@ -145,6 +146,12 @@ struct Checker<'a> {
     /// Their `sigs` entry holds only the declared parameters — no prepended
     /// self type — so `check_fn_body`'s params/sig zip stays aligned.
     selfless: FxHashSet<DefId>,
+    /// Methods whose `self` receiver is declared `mut`. Calling one requires a
+    /// mutable receiver place at the call site, so `mut` keeps the meaning it
+    /// already has for `arr[i] = v` and `rec.f = v` (see ADR 0005). Populated
+    /// for **inherent** impl methods only — see [`Checker::check_method_call`]
+    /// for why the trait-dispatch path is not covered.
+    mut_self: FxHashSet<DefId>,
     sums: Vec<hir::SumType>,
     records: Vec<hir::RecordType>,
     /// Direct supertraits of every trait (`trait Ord: Eq` → `Ord ↦ [Eq]`),
@@ -765,6 +772,14 @@ impl<'a> Checker<'a> {
                     params.insert(0, self_ty.clone());
                 } else {
                     self.selfless.insert(def_id);
+                }
+                // `mut self` makes the method a mutator, which its callers must
+                // opt into with a mutable receiver (ADR 0005). `any`, for the
+                // same reason `has_self` uses it: `method_sig_parts` strips a
+                // `self` at *any* position, so both predicates must scan the
+                // whole list or they can disagree about the same parameter.
+                if f.params.iter().any(|p| p.name.value == "self" && p.is_mut) {
+                    self.mut_self.insert(def_id);
                 }
                 self.sigs.insert(
                     def_id,
@@ -2152,7 +2167,10 @@ impl<'a> Checker<'a> {
         if let ast::Expr::Field { target, field } = &callee.value {
             let receiver = self.check_expr(fcx, target);
             let checked: Vec<hir::Expr> = args.iter().map(|a| self.check_expr(fcx, a)).collect();
-            return self.check_method_call(fcx, receiver, field, checked, span);
+            // `target` (the receiver's *AST*) rides along because the mutable-
+            // receiver rule needs `place_root`, which walks AST projections; the
+            // checked `hir::Expr` has already lost that shape.
+            return self.check_method_call(fcx, receiver, target, field, checked, span);
         }
 
         // Direct-call forms: a path naming a function, variant, or builtin.
@@ -3508,10 +3526,23 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
+    /// Check `receiver.method(args)`. `receiver` is the already-checked HIR;
+    /// `receiver_ast` is the same expression before checking, needed because the
+    /// mutable-receiver rule below classifies it with `place_root`.
+    ///
+    /// **The rule covers inherent methods only.** A trait method's `mut self`
+    /// is declared on the *trait*, not on the impl, and trait dispatch here
+    /// resolves to `(trait_id, method_index)` — for a generic receiver
+    /// (`fn f<T: Tr>(x: T) { x.m() }`) there is no single impl to read the
+    /// receiver's mutability off. Enforcing it there needs a `mut_self` flag on
+    /// `hir::TraitMethod` beside `has_self`, plus a conformance rule keeping the
+    /// impl's receiver in step with the trait's. Deliberately deferred; ADR 0005
+    /// records it as a known gap.
     fn check_method_call(
         &mut self,
         fcx: &mut FnCtx,
         receiver: hir::Expr,
+        receiver_ast: &Spanned<ast::Expr>,
         method: &Spanned<String>,
         args: Vec<hir::Expr>,
         span: Span,
@@ -3552,6 +3583,7 @@ impl<'a> Checker<'a> {
         }
         match self.resolve_method_on(&recv_ty, fcx, &method.value) {
             MethodRes::Inherent(def_id) => {
+                self.check_mutable_receiver(fcx, def_id, receiver_ast, span);
                 self.emit_inherent_call(fcx, def_id, receiver, args, span)
             }
             MethodRes::Trait(trait_id, method_idx) => self.emit_trait_call(
@@ -3584,6 +3616,50 @@ impl<'a> Checker<'a> {
                     method.span,
                 );
                 error_expr(span)
+            }
+        }
+    }
+
+    /// A method declaring `mut self` mutates its receiver, so the receiver must
+    /// be reachable through a mutable binding — the same requirement, and the
+    /// same `place_root` walk, as `arr[i] = v` and `rec.f = v`. Without it
+    /// `v.push(x)` would mutate `v` after `let v = …` while `v.field = x` on the
+    /// same binding was rejected: one operation, two answers (ADR 0005).
+    ///
+    /// A no-op for any method that does not declare `mut self`, so a plain
+    /// `self` reader still works on an immutable binding.
+    fn check_mutable_receiver(
+        &mut self,
+        fcx: &FnCtx,
+        def_id: DefId,
+        receiver_ast: &Spanned<ast::Expr>,
+        span: Span,
+    ) {
+        if !self.mut_self.contains(&def_id) {
+            return;
+        }
+        match self.place_root(fcx, receiver_ast) {
+            PlaceRoot::Mutable => {}
+            PlaceRoot::ImmutableLocal(name) => {
+                let mname = self.defs.def(def_id).name.clone();
+                self.error(
+                    "E0060",
+                    format!("`{mname}` mutates its receiver, but `{name}` is immutable"),
+                    span,
+                );
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(format!("declare it as `let mut {name}` to allow mutation"));
+            }
+            PlaceRoot::NotAPlace => {
+                let mname = self.defs.def(def_id).name.clone();
+                self.error(
+                    "E0060",
+                    format!("`{mname}` mutates its receiver, which cannot be a temporary"),
+                    span,
+                );
             }
         }
     }
@@ -6455,6 +6531,185 @@ mod tests {
              fn main() { let mut p = P { v: 1 }\n p.v += 1\n println(\"${p.v}\") }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_on_immutable_receiver_reports_e0060() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() { let p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_on_mutable_receiver_typechecks() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() { let mut p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn plain_self_method_on_immutable_receiver_still_typechecks() {
+        // Guard: only `mut self` demands a mutable receiver.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn get(self) -> Int { self.v } }\n\
+             fn main() { let p = P { v: 1 }\n println(\"${p.get()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_is_a_mutable_root_inside_the_method_body() {
+        // The receiver rule is only useful if `mut self` also *permits* the
+        // mutation it advertises: `place_root` must classify `self` as
+        // `Mutable` inside the body. Asserting the compiled `FieldSet` rather
+        // than the absence of diagnostics, because an empty diagnostic list
+        // would also hold if the body had silently not been compiled at all.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() { let mut p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(
+            // An inherent method's `hir::Function` carries the resolver's
+            // mangled `Type.method` name.
+            field_sets_in(&r.module, "P.bump").len(),
+            1,
+            "`mut self` body compiled its store"
+        );
+    }
+
+    #[test]
+    fn plain_self_method_assigning_a_field_reports_e0060() {
+        // The mirror of the above, and what makes the `mut` in `mut self` load-
+        // bearing rather than decorative: a plain `self` receiver is an
+        // immutable binding like any other, so its fields are read-only.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(self) { self.v = self.v + 1 } }\n\
+             fn main() { let p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_called_on_a_field_of_mut_self_typechecks() {
+        // The shape `std/collections`' `Set` uses: `self.map.insert(…)` from a
+        // `mut self` method. `place_root` walks the field chain to `self`, so a
+        // `mut self` root makes the nested receiver mutable too.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             record Outer { inner: Inner }\n\
+             impl Inner { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             impl Outer { fn bump_inner(mut self) { self.inner.bump() } }\n\
+             fn main() {\n\
+                 let mut o = Outer { inner: Inner { v: 1 } }\n\
+                 o.bump_inner()\n\
+                 println(\"${o.inner.v}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_called_on_field_of_immutable_root_reports_e0060() {
+        // The mirror: the receiver is a field projection, so the whole chain
+        // must be walked to the root binding — a single-segment check would
+        // accept `o.inner.bump()` on an immutable `o`.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             record Outer { inner: Inner }\n\
+             impl Inner { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() {\n\
+                 let o = Outer { inner: Inner { v: 1 } }\n\
+                 o.inner.bump()\n\
+             }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_on_temporary_reports_e0060() {
+        // A call result has no assignable root, so mutating it is meaningless —
+        // rejected exactly as `make().v = 7` is.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn make() -> P { P { v: 1 } }\n\
+             fn main() { make().bump() }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_called_from_a_plain_self_method_reports_e0060() {
+        // The mistake a std author actually makes: an outer method forgets its
+        // own `mut` and then delegates to a mutator. `self` is a parameter like
+        // any other, so a plain `self` receiver is an immutable root and the
+        // rule catches it at the inner call — not later, at the store.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             record Outer { inner: Inner }\n\
+             impl Inner { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             impl Outer { fn bump_inner(self) { self.inner.bump() } }\n\
+             fn main() {\n\
+                 let mut o = Outer { inner: Inner { v: 1 } }\n\
+                 o.bump_inner()\n\
+             }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn misplaced_mut_self_receiver_is_still_a_mutator() {
+        // `mut_self` must use the same `.any(…)` scan as `has_self`, because
+        // `method_sig_parts` strips a `self` at *any* position and the parser
+        // accepts a misplaced receiver. A `params[0]`-shaped predicate would
+        // classify this method as a non-mutator while the signature machinery
+        // still treated it as having a receiver — the two disagreeing about the
+        // same parameter. Everything else about this shape is pre-existing
+        // garbage (`self` ends up typed `Int`), so only the E0060 is asserted.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn odd(x: Int, mut self) -> Int { x } }\n\
+             fn main() { let p = P { v: 1 }\n println(\"${p.odd(1)}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_method_on_immutable_receiver_suggests_let_mut() {
+        // The note is the actionable half of the diagnostic; pin it so a
+        // refactor cannot quietly drop it (`check_field_set` carries the same).
+        // The message names the callee by its impl-qualified `Def` name, the
+        // spelling `arity_errors_name_the_callee_uniformly` already pins for the
+        // other inherent-method diagnostics.
+        let r = check_src(
+            "record P { v: Int }\n\
+             impl P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() { let p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0060")
+            .expect("an E0060 was reported");
+        assert_eq!(
+            d.message,
+            "`P.bump` mutates its receiver, but `p` is immutable"
+        );
+        assert!(
+            d.notes.iter().any(|n| n.contains("let mut p")),
+            "{:?}",
+            d.notes
+        );
     }
 
     #[test]

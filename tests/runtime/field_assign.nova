@@ -1,5 +1,13 @@
 record Counter { n: Int, label: String }
 
+impl Counter {
+    // `mut` on the receiver is what lets this body assign through `self`, and
+    // what obliges every caller to hold a `mut` binding (ADR 0005).
+    fn bump(mut self) {
+        self.n = self.n + 1
+    }
+}
+
 fn main() {
     let mut c = Counter { n: 0, label: "hits" }
     c.n = c.n + 1
@@ -15,4 +23,12 @@ fn main() {
     // A field holding a heap value.
     c.label = "misses"
     println("${c.label}")
+
+    // A `mut self` method stores through the receiver pointer, so the write is
+    // visible to the caller's binding and to every alias of it — the same
+    // reference semantics a direct `c.n = …` has, not a copy.
+    c.bump()
+    c.bump()
+    println("bumped: ${c.n}")
+    println("alias sees it: ${alias.n}")
 }

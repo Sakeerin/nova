@@ -1,3 +1,5 @@
 hits=2
 alias visible: 99
 misses
+bumped: 101
+alias sees it: 101
