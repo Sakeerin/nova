@@ -1051,6 +1051,91 @@ fn hash_build_standalone() {
     assert_eq!(out.replace("\r\n", "\n"), expected);
 }
 
+/// `std/collections` end-to-end gate (Phase 2.2a, Task 9). The behaviour this
+/// pins is *runtime* behaviour that no type-level or MIR-level test can reach:
+/// probe chains, tombstones and the load-factor arithmetic are all values
+/// computed while the program runs.
+///
+/// What the fixture covers, and why each item is in there rather than left to
+/// a throwaway program:
+///
+/// - **Removal from the middle of a probe chain**, then a successful lookup
+///   *past* the hole — including a chain that **wraps** off the end of the
+///   table and continues at index 0. This is the single most likely bug in the
+///   whole increment and it is invisible without a targeted test: a `remove`
+///   that marks the slot empty instead of tombstoned passes every other
+///   assertion here while silently losing every key inserted past it.
+/// - **Tombstone reuse**: an insert after a removal must land in the freed slot
+///   with `used` (occupied *plus* tombstones) unchanged, so a churn workload
+///   cannot grow the table without bound.
+/// - **No shadowed duplicate**: re-inserting a key that lives *behind* one or
+///   more tombstones replaces it in place — verified by removing it once
+///   afterwards and confirming it is then absent, which a second buried copy
+///   would fail.
+/// - The **load-factor arithmetic** and two rehashes, with the live count and
+///   every lookup correct across them. The printed capacity sequence also
+///   shows no doubling skips a power of two, which is what re-entrant growth
+///   would look like.
+/// - A **user record as a `Map` key and a `Set` element**, with its own `Hash`
+///   and `Eq` impls — the case that proves a user type can flow through the
+///   `K: Hash + Eq` bound at all, where only `Int` and `String` had been used.
+/// - `Map<String, Int>` for the runtime hash path (`str_hash`/FNV-1a) and
+///   **negative `Int` keys**, where `% cap` instead of `& (cap - 1)` would
+///   produce a negative bucket index.
+/// - `Vec` across three growths (0 → 4 → 8 → 16) with `pop`, `set`, `clear`
+///   and `get` both in and out of range, plus `is_empty`'s `false` branch for
+///   `Vec`, `Map` and `Set`.
+///
+/// Nothing in here panics: `panic` aborts the process, which would truncate
+/// the remaining output. `Vec::set` out of range and `unwrap` on the wrong
+/// variant have their own committed tests.
+#[test]
+fn collections_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/collections.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/collections.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through the object-file backend. `Map` bucket indices are
+/// derived from `Hash`, so a backend that computed a hash differently would
+/// build different probe chains — the state-array assertions in the fixture
+/// would then diverge here but not under the JIT.
+#[test]
+fn collections_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/collections.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/collections.nova", "collections");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
+/// allocation) — the reason this gate exists. `Vec::push` and `Map::grow`
+/// allocate a larger buffer and copy into it, and during `grow`'s window the
+/// old key/value/state arrays are reachable *only* through its locals while
+/// two further allocations happen. That is exactly where a conservative
+/// non-moving collector fails if its root scan misses a stack slot, and the
+/// symptom would be silent data loss rather than a crash.
+#[test]
+fn collections_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/collections.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/collections.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// A record literal *inside* a `"${…}"` interpolation, end-to-end. The lexer
 /// balances a hole's braces, so the literal's `}` no longer terminates the hole
 /// (which used to fail with "expected `}` (in record literal), found `}`").

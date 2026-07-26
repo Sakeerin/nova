@@ -1,0 +1,234 @@
+// `std/collections` end-to-end (Phase 2.2a Task 9) — the phase's gate.
+//
+// Run three ways: `nova run` (JIT), `nova build` (object backend), and
+// `NOVA_GC_STRESS=1`. The stress run is the point. Growth allocates three fresh
+// arrays and reinserts through them, and during that window the *old* arrays
+// are reachable only through `grow`'s locals while two further allocations
+// happen — exactly where a conservative non-moving collector fails if its root
+// scan is wrong.
+//
+// `Key` hashes to its own id, so every bucket index below is `id & (cap - 1)`
+// and each probe chain is hand-computable. It is also the case that proves a
+// *user* record can flow through `K: Hash + Eq` at all — only `Int` and
+// `String` keys were ever exercised before.
+record Key { id: Int }
+
+impl Hash for Key { fn hash(self) -> Int { self.id } }
+impl Eq for Key { fn eq(self, other: Key) -> Bool { self.id == other.id } }
+
+// A `Map`'s raw slot states, one digit per slot: 0 empty, 1 occupied,
+// 2 tombstone. Nova has no field privacy, so `Map`'s fields are readable from
+// here — which is what lets these assertions pin the tombstone *layout*
+// directly instead of inferring it from behaviour.
+fn state_str(m: Map<Key, Int>) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < m.state.len() {
+        out = "${out}${m.state[i]}"
+        i = i + 1
+    }
+    out
+}
+
+fn main() {
+    // `unwrap_or`'s sentinel. Bound to a local because a line starting with `-`
+    // after a block is absorbed as binary subtraction.
+    let miss = 0 - 1
+
+    // === Vec: three growths (0 -> 4 -> 8 -> 16), set/pop/clear/get ===
+    let mut v = Vec::new()
+    println("vec fresh len=${v.len()} empty=${v.is_empty()}")
+    for i in 0..10 { v.push(i * i) }
+    // Two doublings behind us: push 1 allocated 4, push 5 doubled to 8, push 9
+    // doubled to 16. `is_empty` here is its `false` branch.
+    println("vec len=${v.len()} empty=${v.is_empty()}")
+    println("vec get 0=${v.get(0).unwrap_or(miss)} 9=${v.get(9).unwrap_or(miss)} 10=${v.get(10).unwrap_or(miss)} -1=${v.get(miss).unwrap_or(miss)}")
+    v.set(0, 100)
+    v.set(9, 900)
+    println("vec set 0=${v.get(0).unwrap_or(miss)} 9=${v.get(9).unwrap_or(miss)}")
+    let popped = v.pop()
+    // `get(9)` is now out of range: `pop` lowers `len`, so the slot is logically
+    // gone even though the buffer still holds the value.
+    println("vec pop=${popped.unwrap_or(miss)} len=${v.len()} get9=${v.get(9).unwrap_or(miss)}")
+    v.push(999)
+    println("vec repush len=${v.len()} get9=${v.get(9).unwrap_or(miss)}")
+    v.clear()
+    println("vec cleared len=${v.len()} empty=${v.is_empty()} get0=${v.get(0).unwrap_or(miss)}")
+    let empty_pop = v.pop()
+    println("vec pop empty=${empty_pop.unwrap_or(miss)} len=${v.len()}")
+    v.push(7)
+    println("vec after clear len=${v.len()} get0=${v.get(0).unwrap_or(miss)}")
+
+    // === Map<Int, Int>: the load-factor arithmetic, and two rehashes ===
+    // Growth fires when `(used + 1) * 4 > cap * 3`, i.e. above 3/4 load. From
+    // cap 8 that is the 7th insert (used 6, 28 > 24); from 16, the 13th
+    // (used 12, 52 > 48). So the sequence over 20 inserts is six 8s, six 16s
+    // and eight 32s — each transition lands exactly on the 3/4 point, and a
+    // doubling never skips a power of two (which is what re-entrant growth
+    // would look like).
+    let mut m = Map::new()
+    print("map caps:")
+    for i in 0..20 {
+        let _ = m.insert(i, i * 10)
+        print(" ${m.state.len()}")
+    }
+    println("")
+    println("map len=${m.len()} used=${m.used} cap=${m.state.len()} empty=${m.is_empty()}")
+    println("map get 0=${m.get(0).unwrap_or(miss)} 19=${m.get(19).unwrap_or(miss)} 20=${m.get(20).unwrap_or(miss)}")
+    let mut bad = 0
+    for i in 0..20 {
+        if m.get(i).unwrap_or(miss) != i * 10 { bad = bad + 1 }
+    }
+    println("map all 20 live across both rehashes mismatches=${bad}")
+    let replaced = m.insert(3, 333)
+    println("map replace 3 old=${replaced.unwrap_or(miss)} now=${m.get(3).unwrap_or(miss)} len=${m.len()} used=${m.used}")
+    let removed = m.remove(7)
+    println("map remove 7=${removed.unwrap_or(miss)} has7=${m.contains_key(7)} len=${m.len()} used=${m.used}")
+    // Re-inserting 7 must land in the tombstone its own removal left: `len`
+    // climbs back to 20 while `used` — occupied *plus* tombstones — stays at
+    // 20 and the capacity is untouched. Appending instead would push `used` to
+    // 21 and eventually rehash a table that has room.
+    let reinserted = m.insert(7, 777)
+    println("map tombstone reuse new=${reinserted.is_none()} get7=${m.get(7).unwrap_or(miss)} len=${m.len()} used=${m.used} cap=${m.state.len()}")
+
+    // === Forced collisions: mid-chain removal, tombstone reuse, no duplicate
+    // Identity hashing at cap 8 puts ids 1, 9, 17 and 25 all in home bucket 1,
+    // so they occupy buckets 1-4: a probe chain of length 4. Five live entries
+    // at most, so the capacity stays 8 throughout.
+    let k1 = Key { id: 1 }
+    let k9 = Key { id: 9 }
+    let k17 = Key { id: 17 }
+    let k25 = Key { id: 25 }
+    let k33 = Key { id: 33 }
+    let mut c: Map<Key, Int> = Map::new()
+    let _ = c.insert(k1, 100)
+    let _ = c.insert(k9, 900)
+    let _ = c.insert(k17, 1700)
+    let _ = c.insert(k25, 2500)
+    println("chain built len=${c.len()} used=${c.used} cap=${c.state.len()} state=${state_str(c)}")
+
+    // 9 sits at bucket 2, in the *middle* of the chain. Its removal must leave
+    // a tombstone (state 2), not an empty slot: 17 and 25 were inserted past
+    // it, and marking it empty would end their probe. `used` does not drop —
+    // the slot is still unusable to a probe walking through it.
+    let rm9 = c.remove(k9)
+    println("chain rm mid 9=${rm9.unwrap_or(miss)} len=${c.len()} used=${c.used} state=${state_str(c)}")
+    println("chain past the hole 17=${c.get(k17).unwrap_or(miss)} 25=${c.get(k25).unwrap_or(miss)} 1=${c.get(k1).unwrap_or(miss)} has9=${c.contains_key(k9)}")
+
+    // 33's home bucket is 1 too, so its probe walks the bucket-2 tombstone,
+    // finds 17 and 25 are not 33, reaches the empty bucket 5, and then stores
+    // back into the hole. `len` rises 3 -> 4; `used` and the capacity do not
+    // move at all.
+    let new33 = c.insert(k33, 3300)
+    println("chain reuse hole new=${new33.is_none()} len=${c.len()} used=${c.used} cap=${c.state.len()} state=${state_str(c)}")
+
+    // Now bury 17: removing 1 and 33 leaves tombstones at buckets 1 and 2,
+    // with 17 still live at bucket 3 and its home bucket still 1.
+    let rm1 = c.remove(k1)
+    let rm33 = c.remove(k33)
+    println("chain rm 1=${rm1.unwrap_or(miss)} rm 33=${rm33.unwrap_or(miss)} len=${c.len()} used=${c.used} state=${state_str(c)}")
+    println("chain past two holes 17=${c.get(k17).unwrap_or(miss)} 25=${c.get(k25).unwrap_or(miss)}")
+
+    // Re-inserting a key that lives behind tombstones must return the old
+    // value and replace it *in place*. Storing into the first hole it walked
+    // over instead would leave a second, permanently shadowed copy — and the
+    // state array would change, which it must not.
+    let dup = c.insert(k17, 1701)
+    println("chain reinsert behind holes old=${dup.unwrap_or(miss)} len=${c.len()} used=${c.used} state=${state_str(c)}")
+    // The decisive check. One removal makes it absent; a shadowed duplicate
+    // would still answer here.
+    let rm17 = c.remove(k17)
+    println("chain removed once=${rm17.unwrap_or(miss)} still there=${c.contains_key(k17)} len=${c.len()} state=${state_str(c)}")
+
+    // === Wraparound: a chain that runs off the end and continues at index 0
+    // Ids 6, 14, 22 and 30 all have home bucket 6 at cap 8, so the chain
+    // occupies buckets 6, 7, 0, 1.
+    let w6 = Key { id: 6 }
+    let w14 = Key { id: 14 }
+    let w22 = Key { id: 22 }
+    let w30 = Key { id: 30 }
+    let w38 = Key { id: 38 }
+    let mut w: Map<Key, Int> = Map::new()
+    let _ = w.insert(w6, 60)
+    let _ = w.insert(w14, 140)
+    let _ = w.insert(w22, 220)
+    let _ = w.insert(w30, 300)
+    println("wrap built len=${w.len()} used=${w.used} cap=${w.state.len()} state=${state_str(w)}")
+
+    // Remove 14 — the last slot before the wrap. Reaching 22 and 30 now needs
+    // a walk over a tombstone *and then* a wrap to index 0, which is where an
+    // `i + 1` that forgot to mask would run off the end instead.
+    let rmw14 = w.remove(w14)
+    println("wrap rm mid 14=${rmw14.unwrap_or(miss)} len=${w.len()} used=${w.used} state=${state_str(w)}")
+    println("wrap across 22=${w.get(w22).unwrap_or(miss)} 30=${w.get(w30).unwrap_or(miss)} 6=${w.get(w6).unwrap_or(miss)} has14=${w.contains_key(w14)}")
+
+    // A second mid-chain removal, this one on the far side of the wrap.
+    let rmw22 = w.remove(w22)
+    println("wrap rm past wrap 22=${rmw22.unwrap_or(miss)} then 30=${w.get(w30).unwrap_or(miss)} state=${state_str(w)}")
+
+    // 38's home bucket is 6 as well, so it must take the *first* tombstone in
+    // probe order — bucket 7, before the wrap — not the one at bucket 0.
+    let new38 = w.insert(w38, 380)
+    println("wrap reuse new=${new38.is_none()} 38=${w.get(w38).unwrap_or(miss)} len=${w.len()} used=${w.used} state=${state_str(w)}")
+
+    // === Map<String, Int>: the runtime hash path (str_hash, FNV-1a) ===
+    let mut sm = Map::new()
+    let _ = sm.insert("alpha", 1)
+    let _ = sm.insert("beta", 2)
+    let _ = sm.insert("", 0)
+    println("str len=${sm.len()} alpha=${sm.get("alpha").unwrap_or(miss)} beta=${sm.get("beta").unwrap_or(miss)} empty key=${sm.get("").unwrap_or(miss)} gamma=${sm.get("gamma").unwrap_or(miss)}")
+    // 30 heap-allocated keys through three rehashes (8 -> 16 -> 32 -> 64),
+    // allocating a fresh String per key on both the insert and the lookup.
+    let mut sb = Map::new()
+    for i in 0..30 { let _ = sb.insert("k${i}", i) }
+    let mut sbad = 0
+    for i in 0..30 {
+        if sb.get("k${i}").unwrap_or(miss) != i { sbad = sbad + 1 }
+    }
+    println("str rehash len=${sb.len()} cap=${sb.state.len()} mismatches=${sbad} absent=${sb.contains_key("nope")}")
+
+    // === Negative Int keys: where `hash % cap` would index out the bottom ===
+    // `mix64` spans the whole `Int` range, so many of these keys hash negative;
+    // `hash & (cap - 1)` is non-negative for every `Int` while `%` inherits the
+    // sign. The count is a hand-checkable constant, computed independently from
+    // canonical splitmix64 rather than read off a run.
+    let mut nm = Map::new()
+    let mut neg_hashes = 0
+    for i in 0..16 {
+        let k = i - 8
+        if k.hash() < 0 { neg_hashes = neg_hashes + 1 }
+        let _ = nm.insert(k, k * 3)
+    }
+    let mut nbad = 0
+    for i in 0..16 {
+        let k = i - 8
+        if nm.get(k).unwrap_or(12345) != k * 3 { nbad = nbad + 1 }
+    }
+    println("neg keys len=${nm.len()} cap=${nm.state.len()} negative hashes=${neg_hashes} mismatches=${nbad}")
+
+    // === Set: dedup, both is_empty branches, and a record element ===
+    let mut s = Set::new()
+    println("set fresh len=${s.len()} empty=${s.is_empty()}")
+    let mut added = 0
+    for i in 0..10 { if s.insert(i % 4) { added = added + 1 } }
+    println("set len=${s.len()} added=${added} empty=${s.is_empty()} has3=${s.contains(3)} has4=${s.contains(4)}")
+    let srm = s.remove(0)
+    let srm2 = s.remove(0)
+    println("set remove=${srm} again=${srm2} len=${s.len()} has0=${s.contains(0)}")
+    let sre = s.insert(0)
+    println("set readd new=${sre} len=${s.len()} has0=${s.contains(0)}")
+
+    // A user record as the element type, reaching `T: Hash + Eq` through
+    // `Set` -> `Map` -> the `Key` impls above.
+    let a6 = Key { id: 6 }
+    let a14 = Key { id: 14 }
+    let a22 = Key { id: 22 }
+    let mut ks = Set::new()
+    let n6 = ks.insert(a6)
+    let n14 = ks.insert(a14)
+    let d6 = ks.insert(a6)
+    println("keyset new6=${n6} new14=${n14} dup6=${d6} len=${ks.len()} empty=${ks.is_empty()}")
+    let krm = ks.remove(a14)
+    let krm2 = ks.remove(a14)
+    println("keyset has22=${ks.contains(a22)} rm14=${krm} again=${krm2} len=${ks.len()} has6=${ks.contains(a6)}")
+}

@@ -224,6 +224,78 @@ fn std_core_types_used_without_methods_emit_no_symbols() {
     );
 }
 
+/// The `std/collections` half of the same guarantee (Phase 2.2a, Task 9).
+/// `std/collections` is compiled into every program alongside `std/core`, and
+/// it is now ~20 methods across `Vec`/`Map`/`Set` — plus, through `Map`, the
+/// `Hash`/`Eq` impls and `mix64` those pull in from `std/core`. Reachability
+/// pruning rooted at `main` (`crates/nova-mir/src/mono.rs`) is the only reason
+/// a program that never touches a collection does not pay for all of it.
+///
+/// The program below is deliberately *not* trivial: it uses a repeat-array
+/// literal (`[0; n]`, the feature `Vec` and `Map` are built on), a record with
+/// an inherent method, a generic function, and an `Option` it matches on. So
+/// typeck and MIR lowering both run over the same machinery the collections
+/// use — it is only the collections themselves that are absent.
+///
+/// The marker list is checked for non-vacuity in the same test: a second
+/// program that *does* use `Vec`, `Map` and `Set` must contain every marker.
+/// Without that control, a typo'd marker (or a mangling-scheme change) would
+/// make the first assertion pass for the wrong reason. Together they are what
+/// makes this test fail if pruning broke: were the whole std module emitted,
+/// the first program's symbols would look like the second's.
+#[test]
+fn std_collections_unused_emit_no_symbols() {
+    // Every collection symbol is mangled from its impl's nominal head, so
+    // these four substrings cover the module: `Vec_T.*`, `Map_K_V.*`,
+    // `Set_T.*`, and `Map`'s private `mix64` dependency in std/core.
+    const MARKERS: [&str; 4] = ["Vec_T", "Map_K_V", "Set_T", "mix64"];
+
+    let mir = mir_for(
+        "record P { v: Int }\n\
+         impl P { fn scaled(self, k: Int) -> Int { self.v * k } }\n\
+         fn first<T>(xs: [T], fallback: T) -> T {\n\
+             if xs.len() == 0 { fallback } else { xs[0] }\n\
+         }\n\
+         fn main() {\n\
+             let n = 3\n\
+             let a = [7; n]\n\
+             let p = P { v: first(a, 0) + a.len() }\n\
+             let o: Option<Int> = Some(p.scaled(2))\n\
+             match o { Some(x) => println(\"${x}\"), None => println(\"none\"), }\n\
+         }",
+    );
+    let names = function_names(&mir);
+    for marker in MARKERS {
+        assert!(
+            !names.iter().any(|n| n.contains(marker)),
+            "a program that touches no collection emitted a `{marker}` symbol — \
+             std/collections is no longer pruned and every Nova binary just \
+             grew: {names:?}"
+        );
+    }
+
+    // Control: the markers are real, so the assertion above is not vacuous.
+    let used = mir_for(
+        "fn main() {\n\
+             let mut v = Vec::new()\n\
+             v.push(1)\n\
+             let mut m = Map::new()\n\
+             let _ = m.insert(1, 2)\n\
+             let mut s = Set::new()\n\
+             let _ = s.insert(3)\n\
+             println(\"${v.len()} ${m.len()} ${s.len()}\")\n\
+         }",
+    );
+    let used_names = function_names(&used);
+    for marker in MARKERS {
+        assert!(
+            used_names.iter().any(|n| n.contains(marker)),
+            "marker `{marker}` matches no symbol even when the collections are \
+             used, so the pruning assertion above proves nothing: {used_names:?}"
+        );
+    }
+}
+
 #[test]
 fn trait_method_dispatches_to_impl() {
     let mir = mir_for(

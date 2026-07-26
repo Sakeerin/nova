@@ -1,0 +1,38 @@
+vec fresh len=0 empty=true
+vec len=10 empty=false
+vec get 0=0 9=81 10=-1 -1=-1
+vec set 0=100 9=900
+vec pop=900 len=9 get9=-1
+vec repush len=10 get9=999
+vec cleared len=0 empty=true get0=-1
+vec pop empty=-1 len=0
+vec after clear len=1 get0=7
+map caps: 8 8 8 8 8 8 16 16 16 16 16 16 32 32 32 32 32 32 32 32
+map len=20 used=20 cap=32 empty=false
+map get 0=0 19=190 20=-1
+map all 20 live across both rehashes mismatches=0
+map replace 3 old=30 now=333 len=20 used=20
+map remove 7=70 has7=false len=19 used=20
+map tombstone reuse new=true get7=777 len=20 used=20 cap=32
+chain built len=4 used=4 cap=8 state=01111000
+chain rm mid 9=900 len=3 used=4 state=01211000
+chain past the hole 17=1700 25=2500 1=100 has9=false
+chain reuse hole new=true len=4 used=4 cap=8 state=01111000
+chain rm 1=100 rm 33=3300 len=2 used=4 state=02211000
+chain past two holes 17=1700 25=2500
+chain reinsert behind holes old=1700 len=2 used=4 state=02211000
+chain removed once=1701 still there=false len=1 state=02221000
+wrap built len=4 used=4 cap=8 state=11000011
+wrap rm mid 14=140 len=3 used=4 state=11000012
+wrap across 22=220 30=300 6=60 has14=false
+wrap rm past wrap 22=220 then 30=300 state=21000012
+wrap reuse new=true 38=380 len=3 used=4 state=21000011
+str len=3 alpha=1 beta=2 empty key=0 gamma=-1
+str rehash len=30 cap=64 mismatches=0 absent=false
+neg keys len=16 cap=32 negative hashes=9 mismatches=0
+set fresh len=0 empty=true
+set len=4 added=4 empty=false has3=true has4=false
+set remove=true again=false len=3 has0=false
+set readd new=true len=4 has0=true
+keyset new6=true new14=true dup6=false len=2 empty=false
+keyset has22=false rm14=true again=false len=1 has6=true
