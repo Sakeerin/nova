@@ -283,8 +283,8 @@ impl<'a> Checker<'a> {
     /// Precompute the generic arity of every record and sum type from the AST,
     /// before any type is converted. A record field or variant payload may
     /// mention a type whose `RecordType`/`SumType` entry has not been built yet
-    /// (collection order, or the implicit prelude registered last), so arity
-    /// must not be read from the incrementally-populated tables.
+    /// (collection order, or the implicit prelude — `std/core` — registered
+    /// last), so arity must not be read from the incrementally-populated tables.
     fn collect_type_arities(&mut self) {
         let mut arities: Vec<(DefId, u32)> = Vec::new();
         for (i, def) in self.defs.defs().iter().enumerate() {
@@ -5247,8 +5247,9 @@ mod tests {
             "resolve errors: {:?}",
             resolved.diagnostics
         );
-        // Type-check against the merged file (input + implicit prelude), whose
-        // `item_index`es the definitions refer to.
+        // Type-check against the merged file (input + the implicit prelude,
+        // which is `std/core` — see ADR 0004), whose `item_index`es the
+        // definitions refer to.
         check(&resolved.file, &resolved.definitions)
     }
 
