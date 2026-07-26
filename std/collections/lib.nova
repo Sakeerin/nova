@@ -230,3 +230,37 @@ impl<K: Hash + Eq, V> Map<K, V> {
         }
     }
 }
+
+// A hash set, backed by a `Map` with a placeholder value. Reusing `Map` keeps
+// the probing, tombstone and growth logic in exactly one place.
+//
+// As with `Map` (see the note above it), the `T: Hash + Eq` contract lives on
+// the `impl`, not on this record's generic parameter: a bound on a record
+// parameter parses but is silently dropped by the current compiler.
+pub record Set<T> { map: Map<T, Bool> }
+
+impl<T: Hash + Eq> Set<T> {
+    // An empty set. No storage is allocated until the first `insert`.
+    pub fn new() -> Set<T> { Set { map: Map::new() } }
+
+    // Number of elements; unaffected by tombstones (see `Map::len`).
+    pub fn len(self) -> Int { self.map.len() }
+
+    pub fn is_empty(self) -> Bool { self.map.len() == 0 }
+
+    // Add `v`, returning whether it was newly added. `Map::insert` returns
+    // `Some(old)` when `v` was already a key, so "newly added" is exactly the
+    // `None` case — the inverse of what `Map::insert` reports.
+    pub fn insert(mut self, v: T) -> Bool {
+        match self.map.insert(v, true) { Some(_) => false, None => true }
+    }
+
+    pub fn contains(self, v: T) -> Bool { self.map.contains_key(v) }
+
+    // Remove `v`, returning whether it was present. `Map::remove` returns
+    // `Some(old)` when `v` was there, so "was present" is exactly the
+    // `Some` case — the inverse of what `Map::remove` reports.
+    pub fn remove(mut self, v: T) -> Bool {
+        match self.map.remove(v) { Some(_) => true, None => false }
+    }
+}

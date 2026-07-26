@@ -8711,6 +8711,66 @@ mod tests {
     // `check` + `lower_module`, which is exactly what `nova check` runs
     // (`nova_driver::check_file`).
 
+    #[test]
+    fn set_methods_typecheck() {
+        let r = check_src(
+            "fn main() {\n\
+                 let mut s = Set::new()\n\
+                 println(\"${s.insert(1)} ${s.insert(1)}\")\n\
+                 println(\"${s.len()} ${s.contains(1)} ${s.contains(2)}\")\n\
+                 println(\"${s.remove(1)} ${s.len()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Not vacuous, as `map_methods_typecheck` above notes: `Ty::Error`
+        // unifies with anything, and `Set::new()`'s `T` is fixed only by
+        // inference from the later calls, so a wrong signature would surface
+        // as an error type rather than as a diagnostic. Pin what the checker
+        // actually built. `Ty::Unit` drops the `println`s, which are also
+        // `Call`s; what remains is every `Set` method call, in source order.
+        // `Set`'s own `DefId` is looked up rather than assumed, because `Vec`
+        // is also a single-type-argument record and `args == [Ty::Int]` alone
+        // would not tell the two apart.
+        let set_def_id = r
+            .module
+            .records
+            .iter()
+            .find(|rt| rt.name == "Set")
+            .expect("Set is defined")
+            .def_id;
+        let set_int = |t: &Ty| matches!(t, Ty::Record { def_id, args } if *def_id == set_def_id && args.as_slice() == [Ty::Int]);
+        let calls: Vec<Ty> = exprs_in(&r.module, "main")
+            .into_iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::Call { .. }) && e.ty != Ty::Unit)
+            .map(|e| e.ty.clone())
+            .collect();
+        assert_eq!(calls.len(), 8, "eight non-unit `Set` calls: {calls:?}");
+        assert!(set_int(&calls[0]), "`Set::new()` is `Set<Int>`: {calls:?}");
+        assert_eq!(
+            calls[1],
+            Ty::Bool,
+            "first `insert` returns `Bool`: {calls:?}"
+        );
+        assert_eq!(
+            calls[2],
+            Ty::Bool,
+            "second `insert` returns `Bool`: {calls:?}"
+        );
+        assert_eq!(calls[3], Ty::Int, "`len` returns `Int`: {calls:?}");
+        assert_eq!(
+            calls[4],
+            Ty::Bool,
+            "first `contains` returns `Bool`: {calls:?}"
+        );
+        assert_eq!(
+            calls[5],
+            Ty::Bool,
+            "second `contains` returns `Bool`: {calls:?}"
+        );
+        assert_eq!(calls[6], Ty::Bool, "`remove` returns `Bool`: {calls:?}");
+        assert_eq!(calls[7], Ty::Int, "final `len` returns `Int`: {calls:?}");
+    }
+
     /// `check_builtin_call` reads its arity and argument types out of
     /// `builtin_signature`, so this table *is* the typing rule for every
     /// builtin — including the `Builtin::STD_CORE_ONLY` ones whose call sites
