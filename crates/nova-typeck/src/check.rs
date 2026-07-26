@@ -6640,6 +6640,82 @@ mod tests {
     }
 
     #[test]
+    fn record_literal_in_an_interpolation_reaches_both_interp_paths() {
+        // Now that a hole's braces balance, a record literal can sit directly
+        // in one. `check_interp` has two arms and this exercises both from that
+        // position: `${R { … }.v}` is an `Int`, converted natively without
+        // consulting any `fmt`, while `${R { … }}` is a nominal type and goes
+        // through the `Display` bridge.
+        let r = check_src(
+            "record R { v: Int }\n\
+             trait Display { fn fmt(self) -> String }\n\
+             impl Display for R { fn fmt(self) -> String { \"r=${self.v}\" } }\n\
+             fn main() { println(\"${R { v: 1 }.v} ${R { v: 2 }}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Both pieces really are the two different lowerings, not one path
+        // twice: the native `ToStr` for the `Int` field, and a call for the
+        // record. (Plus the `StrLit` for the literal space between them.)
+        let main = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("`main` compiled to a hir::Function");
+        let concat = find_str_concat(&main.body).expect("main interpolates");
+        let kinds: Vec<&str> = concat
+            .iter()
+            .map(|p| match &p.kind {
+                hir::ExprKind::ToStr(_) => "ToStr",
+                hir::ExprKind::StrLit(_) => "StrLit",
+                hir::ExprKind::TraitCall { .. } => "TraitCall",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["ToStr", "StrLit", "TraitCall"],
+            "the Int field converts natively and the record goes through the \
+             Display bridge"
+        );
+        // The record really is built inside the hole, not read from a local.
+        let record_arg = match &concat[2].kind {
+            hir::ExprKind::TraitCall {
+                receiver: Some(r), ..
+            } => r,
+            other => panic!("expected a Display TraitCall with a receiver, got {other:?}"),
+        };
+        // A record literal lowers to a block that binds its field values to
+        // temporaries and then builds the record.
+        let builds_record = match &record_arg.kind {
+            hir::ExprKind::MakeRecord { .. } => true,
+            hir::ExprKind::Block {
+                trailing: Some(t), ..
+            } => matches!(t.kind, hir::ExprKind::MakeRecord { .. }),
+            _ => false,
+        };
+        assert!(
+            builds_record,
+            "receiver should be the record literal itself, got {:?}",
+            record_arg.kind
+        );
+    }
+
+    /// The first `StrConcat` inside `e`, searched through the expression forms
+    /// an interpolation can be nested in here (a block, and `println`'s args).
+    fn find_str_concat(e: &hir::Expr) -> Option<&Vec<hir::Expr>> {
+        match &e.kind {
+            hir::ExprKind::StrConcat(pieces) => Some(pieces),
+            hir::ExprKind::Call { args, .. } => args.iter().find_map(find_str_concat),
+            hir::ExprKind::Block { stmts, trailing } => stmts
+                .iter()
+                .chain(trailing.as_deref())
+                .find_map(find_str_concat),
+            _ => None,
+        }
+    }
+
+    #[test]
     fn selfless_method_params_are_not_shifted() {
         // `x: Int` must stay Int; a wrongly prepended `self` shifted it to `P`.
         let r = check_src(
@@ -7434,10 +7510,7 @@ mod tests {
 
     #[test]
     fn supertrait_method_callable_through_subtrait_bound() {
-        // `T: B` implies `T: A`, so `a()` is callable. (The receiver is bound to a
-        // local first: a record literal *inside* a `"${…}"` interpolation does not
-        // parse today — its `}` closes the interpolation — a pre-existing
-        // limitation unrelated to supertraits.)
+        // `T: B` implies `T: A`, so `a()` is callable.
         let r = check_src(
             "trait A { fn a(self) -> Int }\n\
              trait B: A { fn b(self) -> Int }\n\
@@ -7445,7 +7518,7 @@ mod tests {
              impl A for R { fn a(self) -> Int { 1 } }\n\
              impl B for R { fn b(self) -> Int { 2 } }\n\
              fn sum<T: B>(x: T) -> Int { x.a() + x.b() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${sum(r)}\") }",
+             fn main() { println(\"${sum(R { v: 0 })}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
@@ -7484,7 +7557,7 @@ mod tests {
              impl A for R { fn a(self) -> Int { 1 } }\n\
              impl B for R { fn b(self) -> Int { 2 } }\n\
              fn only_a<T: B>(x: T) -> Int { x.a() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${only_a(r)}\") }",
+             fn main() { println(\"${only_a(R { v: 0 })}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         let a_id = r
@@ -7545,7 +7618,7 @@ mod tests {
              impl A for R { fn same(self) -> Int { 1 } }\n\
              impl B for R { fn same(self) -> Int { 2 } }\n\
              fn call_same<T: B>(x: T) -> Int { x.same() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${call_same(r)}\") }",
+             fn main() { println(\"${call_same(R { v: 0 })}\") }",
         );
         assert!(error_codes(&r).contains(&"E0015"), "{:?}", r.diagnostics);
     }
@@ -7643,7 +7716,7 @@ mod tests {
              impl A for R { fn a(self) -> Int { 1 } }\n\
              impl B for R { fn b(self) -> Int { 2 } }\n\
              fn both<T: A>(x: T) -> Int { x.a() + x.b() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${both(r)}\") }",
+             fn main() { println(\"${both(R { v: 0 })}\") }",
         );
         // The cycle is satisfiable (each impl exists), so nothing is reported;
         // the point of the test is that we get here at all.
@@ -7667,7 +7740,7 @@ mod tests {
              impl B for R { fn b(self) -> Int { 3 } }\n\
              impl C for R { fn c(self) -> Int { 4 } }\n\
              fn only_x<T: C>(v: T) -> Int { v.x() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${only_x(r)}\") }",
+             fn main() { println(\"${only_x(R { v: 0 })}\") }",
         );
         // A diamond must not read as two providers of `x` (a false E0015);
         // `diagnostics.is_empty()` below already covers that and more, so
@@ -7839,7 +7912,7 @@ mod tests {
              impl A for R { fn a(self) -> Int { 1 } }\n\
              impl B for R { fn b(self) -> Int { 2 } }\n\
              fn only_a<T: B>(x: T) -> Int { x.a() }\n\
-             fn main() { let r = R { v: 0 }\n println(\"${only_a(r)}\") }",
+             fn main() { println(\"${only_a(R { v: 0 })}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         let b = r

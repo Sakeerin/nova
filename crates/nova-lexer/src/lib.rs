@@ -4,6 +4,12 @@
 //! the core token recognition and a hand-written state machine wrapper for
 //! string interpolation (`"Hello, ${name}!"`).
 //!
+//! An interpolation hole is lexed *inline* — its tokens go straight into the
+//! one stream, bracketed by `InterpOpen`/`InterpClose` — rather than being
+//! captured as a span and re-lexed. The hole therefore ends at the `}` that
+//! matches its `${`, which the lexer tracks with a per-hole brace counter so
+//! that `"${f(R { v: 1 })}"` works.
+//!
 //! # Usage
 //!
 //! ```
@@ -33,6 +39,16 @@ pub fn lex(source: &str, file: FileId) -> (Vec<Spanned<Token>>, Vec<LexError>) {
     lexer.tokenize()
 }
 
+/// One open `${…}` interpolation hole.
+struct InterpFrame {
+    /// Byte offset of the `$` in the `${` that opened this hole, for the
+    /// unterminated-hole diagnostic.
+    open: usize,
+    /// How many `{` opened *inside* this hole are still unmatched. A `}` only
+    /// ends the hole once this reaches zero.
+    braces: usize,
+}
+
 /// Stateful lexer that wraps the `logos`-generated token recognizer and adds
 /// string-interpolation tracking.
 pub struct Lexer<'src> {
@@ -40,8 +56,9 @@ pub struct Lexer<'src> {
     file: FileId,
     // Current byte position in source.
     pos: usize,
-    // Stack depth of `${...}` nesting inside strings.
-    interp_depth: usize,
+    // Open `${...}` holes, innermost last. Each frame counts its own unmatched
+    // `{` so a hole ends at the `}` matching its `${`, not at the first `}`.
+    interp: Vec<InterpFrame>,
     // Whether we are currently inside a string literal (between delimiters).
     in_string: bool,
 }
@@ -52,7 +69,7 @@ impl<'src> Lexer<'src> {
             source,
             file,
             pos: 0,
-            interp_depth: 0,
+            interp: Vec::new(),
             in_string: false,
         }
     }
@@ -67,6 +84,16 @@ impl<'src> Lexer<'src> {
                 Ok(None) => {}
                 Err(e) => errors.push(e),
             }
+        }
+
+        // A hole still open at EOF never found its `}`. Report the innermost
+        // one — the first the author has to close — rather than letting the
+        // parser guess at a stream that just stops mid-expression.
+        if let Some(frame) = self.interp.last() {
+            let end = (frame.open + 2).min(self.source.len());
+            errors.push(LexError::UnterminatedInterpolation(
+                self.span(frame.open, end),
+            ));
         }
 
         tokens.push(Spanned::new(
@@ -185,7 +212,10 @@ impl<'src> Lexer<'src> {
         if self.pos + 1 < src.len() && src[self.pos] == b'$' && src[self.pos + 1] == b'{' {
             self.pos += 2;
             self.in_string = false; // switch to expression mode
-            self.interp_depth += 1;
+            self.interp.push(InterpFrame {
+                open: start,
+                braces: 0,
+            });
             return Ok(Some(Spanned::new(
                 Token::InterpOpen,
                 self.span(start, self.pos),
@@ -329,14 +359,25 @@ impl<'src> Lexer<'src> {
         )))
     }
 
-    /// Handle `}` that closes a string interpolation.
-    fn maybe_close_interp(&mut self, start: usize) -> Option<Spanned<Token>> {
-        if self.interp_depth > 0 {
-            self.interp_depth -= 1;
-            self.in_string = true;
-            Some(Spanned::new(Token::InterpClose, self.span(start, self.pos)))
-        } else {
-            Some(Spanned::new(Token::RBrace, self.span(start, self.pos)))
+    /// Decide what a `}` means. It closes the innermost `${…}` hole only when
+    /// that hole has no unmatched `{` of its own; otherwise it is the ordinary
+    /// `RBrace` closing one of those (a record literal, a block, …).
+    ///
+    /// `}` inside a nested string/raw string/char literal never reaches here:
+    /// those are recognised before `lex_logos` runs, so their braces are text.
+    fn maybe_close_interp(&mut self, start: usize) -> Spanned<Token> {
+        let span = self.span(start, self.pos);
+        match self.interp.last_mut() {
+            Some(frame) if frame.braces > 0 => {
+                frame.braces -= 1;
+                Spanned::new(Token::RBrace, span)
+            }
+            Some(_) => {
+                self.interp.pop();
+                self.in_string = true;
+                Spanned::new(Token::InterpClose, span)
+            }
+            None => Spanned::new(Token::RBrace, span),
         }
     }
 
@@ -362,9 +403,17 @@ impl<'src> Lexer<'src> {
                 self.pos = tok_end;
                 let span = self.span(tok_start, tok_end);
 
-                // Special case: `}` might close an interpolation.
-                if raw == RawToken::RBrace {
-                    return Ok(self.maybe_close_interp(tok_start));
+                // Braces are the one pair that interacts with interpolation:
+                // a `{` opened inside a hole has to be matched before that
+                // hole's own `}` is reached.
+                match raw {
+                    RawToken::LBrace => {
+                        if let Some(frame) = self.interp.last_mut() {
+                            frame.braces += 1;
+                        }
+                    }
+                    RawToken::RBrace => return Ok(Some(self.maybe_close_interp(tok_start))),
+                    _ => {}
                 }
 
                 let tok = raw_to_token(raw, lex.slice());

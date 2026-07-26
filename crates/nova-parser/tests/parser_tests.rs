@@ -169,6 +169,61 @@ fn describe(n: Int) -> String {
 }
 
 #[test]
+fn record_literal_inside_a_string_interpolation_parses() {
+    // The lexer balances braces inside a `${…}` hole, so the record literal's
+    // `}` no longer ends the hole. Before that, this reported two nonsense
+    // errors, the first being "expected `}` (in record literal), found `}`".
+    let (ok, errs) = parse_file(
+        "interp_record.nova",
+        "record R { v: Int }\nfn f(r: R) -> Int { r.v }\nfn main() { println(\"${f(R { v: 1 })}\") }\n",
+    );
+    assert!(ok);
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+
+    // Nested a further level, and a block expression in a hole.
+    let (ok, errs) = parse_file(
+        "interp_nested.nova",
+        "record R { v: G }\nrecord G { w: Int }\n\
+         fn main() { println(\"${R { v: G { w: 1 } }.v.w}\") }\n",
+    );
+    assert!(ok);
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+
+    let (ok, errs) = parse_file(
+        "interp_block.nova",
+        "fn main() { let a = true\n println(\"${if a { 1 } else { 2 }}\") }\n",
+    );
+    assert!(ok);
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+}
+
+#[test]
+fn record_literal_in_an_interpolation_parses_in_a_no_struct_literal_position() {
+    // `if`/`while`/`for`/`match` scrutinees suppress `Ident {` record literals
+    // to keep the following `{ block }` unambiguous. A `${…}` hole is delimited
+    // by its own `InterpClose`, so the suppression must not reach inside it.
+    let source = "record R { v: Int }\n\
+                  fn f(r: R) -> Int { r.v }\n\
+                  fn main() {\n\
+                      if \"${f(R { v: 1 })}\" == \"1\" { println(\"y\") }\n\
+                      while \"${f(R { v: 2 })}\" == \"\" { println(\"n\") }\n\
+                      match \"${f(R { v: 3 })}\" { _ => println(\"m\") }\n\
+                  }\n";
+    let (ok, errs) = parse_file("interp_no_struct.nova", source);
+    assert!(ok);
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+
+    // The suppression still applies to the scrutinee itself, outside any hole:
+    // `if r == R { v: 1 } { }` must not swallow the block as a record literal.
+    let (ok, errs) = parse_file(
+        "no_struct_still_on.nova",
+        "record R { v: Int }\nfn main() { let r = R { v: 1 }\n if r == r { println(\"y\") } }\n",
+    );
+    assert!(ok);
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+}
+
+#[test]
 fn async_function() {
     let source = r#"async fn f() -> Int { 42 }"#;
     let (ok, errs) = parse_file("f.nova", source);

@@ -935,6 +935,82 @@ fn std_core_under_gc_stress() {
         .stdout(expected);
 }
 
+/// A record literal *inside* a `"${…}"` interpolation, end-to-end. The lexer
+/// balances a hole's braces, so the literal's `}` no longer terminates the hole
+/// (which used to fail with "expected `}` (in record literal), found `}`").
+/// Run rather than merely checked because the payoff is that the value is
+/// actually constructed and formatted: through interpolation's native
+/// primitive conversion, through a `Display` impl, nested one level deeper,
+/// and with a hole in a `no_struct_literal` position (an `if` condition).
+#[test]
+fn record_literal_inside_an_interpolation_runs() {
+    let dir = std::env::temp_dir().join("nova-interp-record");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("interp_record.nova");
+    std::fs::write(
+        &file,
+        "record R { v: Int }\n\
+         record G { w: R }\n\
+         trait Display { fn fmt(self) -> String }\n\
+         impl Display for R { fn fmt(self) -> String { \"R(${self.v})\" } }\n\
+         fn f(r: R) -> Int { r.v }\n\
+         fn main() {\n\
+             println(\"${f(R { v: 1 })}\")\n\
+             println(\"${R { v: 2 }}\")\n\
+             println(\"${G { w: R { v: 3 } }.w.v}\")\n\
+             println(\"${if true { R { v: 4 }.v } else { 0 }}\")\n\
+             if \"${f(R { v: 5 })}\" == \"5\" { println(\"cond\") }\n\
+         }\n",
+    )
+    .expect("write");
+    let expected = "1\nR(2)\n3\n4\ncond\n";
+    nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(expected);
+
+    // Same program through the object-file backend, the other of the two.
+    let exe = dir.join(format!("interp_record{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    Command::new(&exe).assert().success().stdout(expected);
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// An interpolation hole that never closes must be a clean diagnostic naming
+/// the unterminated interpolation — not a panic, and not a hang.
+#[test]
+fn unterminated_interpolation_hole_is_a_clean_error() {
+    let dir = std::env::temp_dir().join("nova-interp-unterminated");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("unterminated.nova");
+    std::fs::write(
+        &file,
+        "record R { v: Int }\n\
+         fn f(r: R) -> Int { r.v }\n\
+         fn main() { println(\"${f(R { v: 1 }\") }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("unterminated string interpolation"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("panicked"), "should not panic: {stderr}");
+    assert!(
+        !stderr.contains("compiler bug"),
+        "not a compiler bug: {stderr}"
+    );
+}
+
 #[test]
 fn panic_aborts_with_message() {
     let assert = nova()

@@ -61,6 +61,18 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Run `f` with `no_struct_literal = false`, then restore the previous
+    /// value. Used for a `${…}` interpolation hole: the ambiguity that motivates
+    /// the flag cannot arise there, because the hole's own `}` is a distinct
+    /// `InterpClose` token and no `{ block }` can follow it.
+    fn in_struct_ok_ctx<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.no_struct_literal;
+        self.no_struct_literal = false;
+        let result = f(self);
+        self.no_struct_literal = prev;
+        result
+    }
+
     // --- Token access ---
 
     fn peek(&self) -> &Token {
@@ -1702,7 +1714,12 @@ impl<'a> Parser<'a> {
                 }
                 Token::InterpOpen => {
                     self.advance();
-                    if let Some(expr) = self.parse_expr("string interpolation") {
+                    // A hole is delimited, so a record literal inside it is
+                    // unambiguous even when the string itself sits in a
+                    // no-struct-literal position (`if "${R { v: 1 }}" == s {`).
+                    if let Some(expr) =
+                        self.in_struct_ok_ctx(|p| p.parse_expr("string interpolation"))
+                    {
                         parts.push(StringPart::Expr(expr));
                     }
                     self.expect(&Token::InterpClose, "string interpolation")?;

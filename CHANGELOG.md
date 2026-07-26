@@ -165,6 +165,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not have yet).
 
 ### Fixed (Phase 2)
+- A `${…}` string-interpolation hole now ends at the `}` matching its `${`
+  rather than at the first `}`, so an expression containing braces works inside
+  one — most visibly a record literal (`"${f(R { v: 1 })}"`), nested to any
+  depth, and a block expression (`"${if a { 1 } else { 2 }}"`). Previously these
+  produced two confusing errors, the first being "expected `}` (in record
+  literal), found `}`", and every affected call site had to bind the value to a
+  local first. A `}` inside a nested string, char, or raw-string literal within
+  the hole is text, not structure (`"${g("}")}"`). A hole left unclosed is now
+  reported as "unterminated string interpolation" instead of cascading into
+  parse errors. A record literal in a hole also parses where the enclosing
+  string sits in an `if`/`while`/`for`/`match` scrutinee.
 - Cross-module symbol collision: two modules each defining a same-named item
   (function, generic function, or same-named type's inherent method) no longer
   collapse to one symbol at monomorphization. Symbols are now mangled by their

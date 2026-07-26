@@ -12,6 +12,9 @@ pub enum LexError {
     #[error("unterminated string literal")]
     UnterminatedString(Span),
 
+    #[error("unterminated string interpolation: this `${{` has no matching `}}`")]
+    UnterminatedInterpolation(Span),
+
     #[error("unterminated block comment")]
     UnterminatedBlockComment(Span),
 
@@ -32,6 +35,7 @@ impl LexError {
     pub fn span(&self) -> Span {
         match self {
             LexError::UnterminatedString(s) => *s,
+            LexError::UnterminatedInterpolation(s) => *s,
             LexError::UnterminatedBlockComment(s) => *s,
             LexError::InvalidEscapeSequence(_, s) => *s,
             LexError::InvalidUnicodeEscape(s) => *s,
