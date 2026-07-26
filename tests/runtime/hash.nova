@@ -1,0 +1,77 @@
+// `Hash` end-to-end (ADR 0005 §2, Phase 2.2a Task 6).
+//
+// Three things this pins that no type-level test can. That every primitive
+// `Hash` impl actually runs. That `Hash for Char` recovers the codepoint —
+// its `char_to_int` builtin lowers to a register move, so a wrong temp would
+// still type-check and only a run would notice. And that the **low** bits of
+// an `Int` hash are spread, because `Map` selects buckets with
+// `hash & (cap - 1)`: a weakly-mixed hash is not merely ugly there, it
+// collapses whole key families onto one bucket.
+
+fn hash_of<T: Hash>(x: T) -> Int { x.hash() }
+
+fn main() {
+    // Deterministic, and distinguishing, for each of the four impls.
+    println("Int    same=${(7).hash() == (7).hash()} diff=${(7).hash() != (8).hash()}")
+    println("Bool   same=${(true).hash() == (true).hash()} diff=${(true).hash() != (false).hash()}")
+    println("Char   same=${('a').hash() == ('a').hash()} diff=${('a').hash() != ('b').hash()}")
+    println("String same=${("hello").hash() == ("hello").hash()} diff=${("hello").hash() != ("world").hash()}")
+    println("String empty=${("").hash() == ("").hash()} diff=${("").hash() != ("a").hash()}")
+
+    // Reached through a `T: Hash` bound — the shape `Map`/`Set` will use.
+    println("bound  ${hash_of(7) == (7).hash()} ${hash_of('a') == ('a').hash()} ${hash_of("hello") == ("hello").hash()}")
+
+    // `Hash for Char` hashes the codepoint, so it agrees with `Hash for Int`
+    // on that codepoint ('a' is 97). This is what proves `char_to_int`
+    // yielded the codepoint rather than an unrelated register.
+    println("char/int agree ${('a').hash() == (97).hash()} ${('\0').hash() == (0).hash()}")
+
+    // Low-bit spread over 256 consecutive keys: 8 buckets, ~32 each.
+    let mut counts = [0; 8]
+    let mut i = 0
+    while i < 256 {
+        let b = (i).hash() & 7
+        counts[b] = counts[b] + 1
+        i = i + 1
+    }
+    print("keys 0..255 &7:")
+    let mut c = 0
+    while c < 8 {
+        print(" ${counts[c]}")
+        c = c + 1
+    }
+    println("")
+
+    // The case identity hashing gets catastrophically wrong: 64 keys that are
+    // all multiples of 8. `fn hash(self) -> Int { self }` puts every one of
+    // them in bucket 0 of an 8-bucket table.
+    let mut mcounts = [0; 8]
+    let mut used = 0
+    let mut k = 0
+    while k < 64 {
+        let b = (k * 8).hash() & 7
+        if mcounts[b] == 0 { used = used + 1 }
+        mcounts[b] = mcounts[b] + 1
+        k = k + 1
+    }
+    print("multiples of 8 &7:")
+    let mut d = 0
+    while d < 8 {
+        print(" ${mcounts[d]}")
+        d = d + 1
+    }
+    println("")
+    println("buckets reached ${used} of 8 (identity hashing would reach 1)")
+
+    // Every xor-shift stage clears the sign bit under Nova's arithmetic `>>`,
+    // so `mix64` never returns a negative Int and `hash % cap` would be safe
+    // for these keys too. String hashes have no such guarantee — only
+    // `hash & (cap - 1)` is safe for every impl.
+    let mut neg = 0
+    let mut n = 0
+    while n < 256 {
+        if (n).hash() < 0 { neg = neg + 1 }
+        n = n + 1
+    }
+    println("negative Int hashes: ${neg}")
+}

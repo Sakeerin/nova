@@ -821,3 +821,51 @@ fn supertrait_default_body_dispatches_at_monomorphization() {
          monomorphized: {names:?}"
     );
 }
+
+/// The two std-only builtins behind `Hash` lower differently on purpose:
+/// `str_hash` becomes a runtime call, `char_to_int` becomes no call at all —
+/// `Char` and `Int` are both `MirTy::I64`, so the conversion is a register
+/// move (`lower_call`'s `None` arm). Pinned here because nothing else
+/// distinguishes "lowered to a move" from "lowered to a call that the linker
+/// happens to resolve": the end-to-end fixture would pass either way, and the
+/// difference is a permanent runtime ABI symbol.
+#[test]
+fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
+    use nova_mir::{RtFunc, Stmt};
+    let mir = mir_for("fn main() { println(\"${('a').hash()} ${(\"s\").hash()}\") }");
+    let find = |prefix: &str| {
+        mir.functions
+            .iter()
+            .find(|f| f.name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}*`: {:?}", function_names(&mir)))
+    };
+    let rt_calls = |f: &nova_mir::Function| -> Vec<RtFunc> {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .filter_map(|s| match s {
+                Stmt::CallRuntime { func, .. } => Some(*func),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        rt_calls(find("String.Hash.hash")),
+        vec![RtFunc::StrHash],
+        "`impl Hash for String` reaches the runtime exactly once"
+    );
+    let char_hash = find("Char.Hash.hash");
+    assert!(
+        rt_calls(char_hash).is_empty(),
+        "`impl Hash for Char` must reach no runtime function: {:?}",
+        rt_calls(char_hash)
+    );
+    assert!(
+        char_hash
+            .blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .any(|s| matches!(s, Stmt::Copy { .. })),
+        "`char_to_int` lowers to a `Copy`"
+    );
+}

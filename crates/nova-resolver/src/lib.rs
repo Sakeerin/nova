@@ -46,6 +46,23 @@ pub enum Builtin {
     /// scopes (see [`Builtin::STD_CORE_ONLY`]), so it never becomes a
     /// reserved word in user code.
     StrCmp,
+    /// `str_hash(s: String) -> Int` — FNV-1a over the string's bytes. Backs
+    /// `std/core`'s `impl Hash for String`, and exists for the same reason
+    /// [`Builtin::StrCmp`] does: Nova cannot walk a string's bytes (`String`
+    /// has no length, indexing or iteration) and cannot reach the runtime
+    /// through an `extern` either (`String` is not FFI-safe). Std-only, so
+    /// `str_hash` is not a reserved word in user code.
+    StrHash,
+    /// `char_to_int(c: Char) -> Int` — a `Char`'s Unicode scalar value.
+    /// Backs `std/core`'s `impl Hash for Char`. Nova has no other `Char` →
+    /// `Int` conversion: `as` casts are unsupported (`E0900`), `Char` has no
+    /// methods beyond its trait impls, and no arithmetic operator accepts a
+    /// `Char`. Unlike every other builtin this is *not* a runtime call —
+    /// `Char` and `Int` are both `MirTy::I64`, so `nova-mir` lowers it to a
+    /// register move (see `lower_call`) rather than adding a runtime ABI
+    /// symbol whose body would be the identity function. Std-only, so
+    /// `char_to_int` is not a reserved word in user code.
+    CharToInt,
 }
 
 impl Builtin {
@@ -56,6 +73,8 @@ impl Builtin {
             Builtin::Print => "print",
             Builtin::Panic => "panic",
             Builtin::StrCmp => "str_cmp",
+            Builtin::StrHash => "str_hash",
+            Builtin::CharToInt => "char_to_int",
         }
     }
 
@@ -68,9 +87,10 @@ impl Builtin {
     /// details of the standard library, not user-visible language surface:
     /// reserving one of these names in *every* module (as [`Builtin::GLOBAL`]
     /// does) would silently and permanently take the name away from user
-    /// code, just to serve a single std method. Currently just `str_cmp`,
-    /// which backs `std/core`'s `impl Ord for String`.
-    pub const STD_CORE_ONLY: [Builtin; 1] = [Builtin::StrCmp];
+    /// code, just to serve a single std method. `str_cmp` backs `std/core`'s
+    /// `impl Ord for String`; `str_hash` and `char_to_int` back its
+    /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2).
+    pub const STD_CORE_ONLY: [Builtin; 3] = [Builtin::StrCmp, Builtin::StrHash, Builtin::CharToInt];
 }
 
 /// What kind of definition a [`DefId`] refers to.
@@ -395,9 +415,10 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
     let mut exports: Vec<Exports> = Vec::new();
 
     // A scope per module, seeded with the compiler builtins. `Builtin::GLOBAL`
-    // goes into every module; `Builtin::STD_CORE_ONLY` (currently `str_cmp`)
-    // goes only into an std module's own scope, so it never becomes a
-    // reserved word in user code (see the `Builtin` doc comments).
+    // goes into every module; `Builtin::STD_CORE_ONLY` (`str_cmp`, `str_hash`,
+    // `char_to_int`) goes only into an std module's own scope, so none of them
+    // ever becomes a reserved word in user code (see the `Builtin` doc
+    // comments).
     for (mid, m) in all.iter().enumerate() {
         let mut scope = ModuleScope {
             name: m.name.clone(),
@@ -1279,6 +1300,53 @@ mod tests {
             r.definitions.resolve_value(ModuleId(0), "str_cmp"),
             Some(Res::Def(_))
         ));
+    }
+
+    /// Same property as `user_fn_named_str_cmp_is_not_a_reserved_word`, for
+    /// every other member of `Builtin::STD_CORE_ONLY`. Written as a loop over
+    /// the constant so that adding a builtin to it without deciding this
+    /// question cannot happen: a new std-only builtin is covered here the
+    /// moment it joins the list.
+    #[test]
+    fn no_std_only_builtin_is_a_reserved_word() {
+        for b in Builtin::STD_CORE_ONLY {
+            let name = b.name();
+            let src = format!("fn {name}(a: Int, b: Int) -> Int {{ a + b }}\nfn main() {{ }}\n");
+            let r = resolve_src(&src);
+            assert!(r.diagnostics.is_empty(), "`{name}`: {:?}", r.diagnostics);
+            assert!(
+                matches!(
+                    r.definitions.resolve_value(ModuleId(0), name),
+                    Some(Res::Def(_))
+                ),
+                "`{name}` should resolve to the user's own definition"
+            );
+        }
+    }
+
+    /// The other half of the std-only contract: each of these names *is*
+    /// visible inside an std module, so `std/core` can call it. Without this,
+    /// dropping a builtin from `STD_CORE_ONLY` altogether would still leave
+    /// `no_std_only_builtin_is_a_reserved_word` passing.
+    #[test]
+    fn std_only_builtins_are_visible_inside_std_modules() {
+        let r = resolve_src("fn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Module 0 is the single user module; the std modules follow it, one
+        // per `STD_MODULES` entry, in order (ADR 0004). *Every* one of them
+        // gets these builtins, not only `$std.core`.
+        for mid in 1..=STD_MODULES.len() {
+            for b in Builtin::STD_CORE_ONLY {
+                assert!(
+                    matches!(
+                        r.definitions.resolve_value(ModuleId(mid as u32), b.name()),
+                        Some(Res::Builtin(seen)) if seen == b
+                    ),
+                    "`{}` must resolve to its builtin inside std module {mid}",
+                    b.name()
+                );
+            }
+        }
     }
 
     #[test]

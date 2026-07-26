@@ -1009,6 +1009,40 @@ fn std_core_under_gc_stress() {
         .stdout(expected);
 }
 
+/// `Hash` end-to-end (Phase 2.2a Task 6, ADR 0005 §2). Run rather than merely
+/// type-checked because the payoffs are all runtime ones: the mixer's large
+/// two's-complement constants must actually wrap rather than trap, the
+/// `char_to_int` builtin lowers to a register move that no type could catch
+/// being wrong, and the **low** bits of an `Int` hash must be spread because
+/// `Map` will select buckets with `hash & (cap - 1)`. The expected bucket
+/// histograms in the fixture were computed independently from splitmix64's
+/// finalizer, so they are an oracle rather than a recording of whatever the
+/// implementation happened to print.
+#[test]
+fn hash_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/hash.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/hash.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through the object-file backend: a hash must not depend on
+/// which backend compiled it, or a `Map` built by one and read by the other
+/// would disagree about buckets.
+#[test]
+fn hash_build_standalone() {
+    let out = build_and_run("tests/runtime/hash.nova", "hash");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/hash.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
 /// A record literal *inside* a `"${…}"` interpolation, end-to-end. The lexer
 /// balances a hole's braces, so the literal's `}` no longer terminates the hole
 /// (which used to fail with "expected `}` (in record literal), found `}`").

@@ -2528,86 +2528,55 @@ impl<'a> Checker<'a> {
         args: &[Spanned<ast::Expr>],
         span: Span,
     ) -> hir::Expr {
-        match builtin {
+        let (params, ret) = builtin_signature(builtin);
+        if args.len() != params.len() {
+            self.error(
+                "E0016",
+                format!(
+                    "`{}` takes {} argument{} but {} were supplied",
+                    builtin.name(),
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                span,
+            );
+            return error_expr(span);
+        }
+        // The print family's hint is specific to it: passing a non-`String`
+        // there is nearly always a missing interpolation, whereas the std-only
+        // builtins are called from one hand-written std/core site each.
+        let hint = match builtin {
             Builtin::Println | Builtin::Print | Builtin::Panic => {
-                if args.len() != 1 {
-                    self.error(
-                        "E0016",
-                        format!(
-                            "`{}` takes 1 argument but {} were supplied",
-                            builtin.name(),
-                            args.len()
-                        ),
-                        span,
-                    );
-                    return error_expr(span);
-                }
-                let arg = self.check_expr(fcx, &args[0]);
-                if !fcx.icx.unify(&arg.ty, &Ty::String) {
-                    self.error(
-                        "E0010",
-                        format!(
-                            "`{}` expects a `String`, found `{}` \
-                             (use string interpolation: \"${{value}}\")",
-                            builtin.name(),
-                            self.show(&arg.ty, fcx),
-                        ),
-                        arg.span,
-                    );
-                }
-                let ty = if matches!(builtin, Builtin::Panic) {
-                    Ty::Never
-                } else {
-                    Ty::Unit
-                };
-                hir::Expr {
-                    kind: hir::ExprKind::Call {
-                        func: hir::Callee::Builtin(builtin),
-                        type_args: Vec::new(),
-                        args: vec![arg],
-                    },
-                    ty,
-                    span,
-                }
+                " (use string interpolation: \"${value}\")"
             }
-            Builtin::StrCmp => {
-                if args.len() != 2 {
-                    self.error(
-                        "E0016",
-                        format!(
-                            "`{}` takes 2 arguments but {} were supplied",
-                            builtin.name(),
-                            args.len()
-                        ),
-                        span,
-                    );
-                    return error_expr(span);
-                }
-                let a = self.check_expr(fcx, &args[0]);
-                let b = self.check_expr(fcx, &args[1]);
-                for arg in [&a, &b] {
-                    if !fcx.icx.unify(&arg.ty, &Ty::String) {
-                        self.error(
-                            "E0010",
-                            format!(
-                                "`{}` expects a `String`, found `{}`",
-                                builtin.name(),
-                                self.show(&arg.ty, fcx),
-                            ),
-                            arg.span,
-                        );
-                    }
-                }
-                hir::Expr {
-                    kind: hir::ExprKind::Call {
-                        func: hir::Callee::Builtin(builtin),
-                        type_args: Vec::new(),
-                        args: vec![a, b],
-                    },
-                    ty: Ty::Int,
-                    span,
-                }
+            Builtin::StrCmp | Builtin::StrHash | Builtin::CharToInt => "",
+        };
+        let mut checked = Vec::with_capacity(args.len());
+        for (arg, param) in args.iter().zip(&params) {
+            let arg = self.check_expr(fcx, arg);
+            if !fcx.icx.unify(&arg.ty, param) {
+                self.error(
+                    "E0010",
+                    format!(
+                        "`{}` expects a `{}`, found `{}`{hint}",
+                        builtin.name(),
+                        self.show(param, fcx),
+                        self.show(&arg.ty, fcx),
+                    ),
+                    arg.span,
+                );
             }
+            checked.push(arg);
+        }
+        hir::Expr {
+            kind: hir::ExprKind::Call {
+                func: hir::Callee::Builtin(builtin),
+                type_args: Vec::new(),
+                args: checked,
+            },
+            ty: ret,
+            span,
         }
     }
 
@@ -5230,6 +5199,28 @@ fn error_expr(span: Span) -> hir::Expr {
         kind: hir::ExprKind::Unit,
         ty: Ty::Error,
         span,
+    }
+}
+
+/// Every builtin's parameter types and result type — the whole of what
+/// `check_builtin_call` needs to know about one, so that arity and argument
+/// checking is a single shared code path rather than an arm per builtin.
+///
+/// It has to be a table rather than per-builtin code because most of these
+/// are *not callable from a user program*: `Builtin::STD_CORE_ONLY` members
+/// (`str_cmp`, `str_hash`, `char_to_int`) are seeded only into std modules'
+/// scopes, so their arity/type diagnostics are unreachable from any Nova
+/// source and cannot be tested through it. Sharing one checking path means
+/// the reachable builtins (`println`/`print`/`panic`) exercise it, and this
+/// function's own table is directly unit-testable — see
+/// `builtin_signatures_are_what_the_std_call_sites_use`.
+fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
+    match builtin {
+        Builtin::Println | Builtin::Print => (vec![Ty::String], Ty::Unit),
+        Builtin::Panic => (vec![Ty::String], Ty::Never),
+        Builtin::StrCmp => (vec![Ty::String, Ty::String], Ty::Int),
+        Builtin::StrHash => (vec![Ty::String], Ty::Int),
+        Builtin::CharToInt => (vec![Ty::Char], Ty::Int),
     }
 }
 
@@ -8654,6 +8645,129 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
+    /// `check_builtin_call` reads its arity and argument types out of
+    /// `builtin_signature`, so this table *is* the typing rule for every
+    /// builtin — including the `Builtin::STD_CORE_ONLY` ones whose call sites
+    /// live in `std/core` and whose diagnostics no Nova program can reach.
+    #[test]
+    fn builtin_signatures_are_what_the_std_call_sites_use() {
+        assert_eq!(
+            builtin_signature(Builtin::StrHash),
+            (vec![Ty::String], Ty::Int),
+            "`str_hash(self)` in `impl Hash for String`"
+        );
+        assert_eq!(
+            builtin_signature(Builtin::CharToInt),
+            (vec![Ty::Char], Ty::Int),
+            "`char_to_int(self)` in `impl Hash for Char`"
+        );
+        assert_eq!(
+            builtin_signature(Builtin::StrCmp),
+            (vec![Ty::String, Ty::String], Ty::Int),
+            "`str_cmp(self, other)` in `impl Ord for String`"
+        );
+        // `panic` diverges; the other two print families are statements.
+        assert_eq!(
+            builtin_signature(Builtin::Panic),
+            (vec![Ty::String], Ty::Never)
+        );
+        assert_eq!(
+            builtin_signature(Builtin::Println),
+            (vec![Ty::String], Ty::Unit)
+        );
+    }
+
+    /// The shared arity/argument path all builtins now go through, exercised
+    /// via the one family a *user* program can call. Before these, nothing in
+    /// the suite reached `check_builtin_call`'s error branches at all.
+    #[test]
+    fn builtin_call_with_wrong_arity_reports_e0016() {
+        let r = check_src("fn main() { println(\"a\", \"b\") }");
+        assert!(error_codes(&r).contains(&"E0016"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn builtin_call_with_a_non_string_argument_reports_e0010() {
+        let r = check_src("fn main() { println(7) }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+        // The print family keeps its interpolation hint; the std-only builtins
+        // deliberately have none.
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.message.contains("use string interpolation")),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn hash_impls_typecheck_for_primitives() {
+        let r = check_src(
+            "fn h<T: Hash>(x: T) -> Int { x.hash() }\n\
+             fn main() {\n\
+                 println(\"${h(7)} ${h(true)} ${h('c')} ${h(\"s\")}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Not vacuous: `Ty::Error` unifies with anything, so an empty
+        // diagnostic list alone would still hold if `x.hash()` had collapsed
+        // to an error expression. Pin what the checker actually built — a
+        // `TraitCall` dispatching through `T`'s bound, typed `Int`.
+        let call = exprs_in(&r.module, "h")
+            .into_iter()
+            .find(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .expect("`x.hash()` is a trait-method call");
+        assert_eq!(
+            call.ty,
+            Ty::Int,
+            "`hash()` must be typed `Int`, not an error type"
+        );
+    }
+
+    /// The companion the generic test above cannot be: inside `h`, `self_ty` is
+    /// `Param(0)` and the bound is only discharged at monomorphization, so
+    /// `hash_impls_typecheck_for_primitives` would still pass with `trait Hash`
+    /// declared and *no* impls at all. Calling `.hash()` on each concrete
+    /// primitive resolves against the impl itself (`E0014 no method 'hash' on
+    /// type 'Int'` otherwise), which is what pins all four impls existing —
+    /// including `Hash for Char`, whose `Char`→`Int` conversion needed the
+    /// `char_to_int` builtin.
+    #[test]
+    fn hash_dispatches_on_each_concrete_primitive() {
+        let r = check_src(
+            "fn main() {\n\
+                 println(\"${(7).hash()} ${true.hash()} ${'c'.hash()} ${(\"s\").hash()}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let tys: Vec<&Ty> = exprs_in(&r.module, "main")
+            .into_iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .map(|e| &e.ty)
+            .collect();
+        assert_eq!(tys.len(), 4, "four `.hash()` calls: {tys:?}");
+        assert!(
+            tys.iter().all(|t| **t == Ty::Int),
+            "every `hash()` is typed `Int`, not an error type: {tys:?}"
+        );
+    }
+
+    /// `Hash for Float` is deliberately absent (ADR 0005 §2): NaN never equals
+    /// itself, so a NaN key would be unreachable in any hash map, and
+    /// `0.0`/`-0.0` compare equal but would hash differently. Pinned as a
+    /// diagnostic so re-adding it is a deliberate act with a test to change,
+    /// not an accident.
+    #[test]
+    fn float_has_no_hash_impl() {
+        let r = check_src("fn main() { println(\"${(1.5).hash()}\") }");
+        assert!(
+            error_codes(&r).contains(&"E0014"),
+            "expected E0014 no method `hash` on `Float`: {:?}",
+            r.diagnostics
+        );
+    }
+
     // `str_cmp_builtin_wrong_arity_reports_e0016` and
     // `str_cmp_builtin_rejects_non_string_argument` used to live here,
     // calling `str_cmp(...)` directly from a *user* module to exercise
@@ -8675,4 +8789,15 @@ mod tests {
     // dispatching through the builtin) remains covered by
     // `std_core_traits_and_primitive_impls_typecheck` above, unaffected by
     // Fix 1 since it calls `.cmp()` as a method, never `str_cmp` by name.
+    //
+    // `Builtin::StrHash` and `Builtin::CharToInt` (ADR 0005 §2) joined the
+    // same std-only list and are unreachable for the same reason. Rather than
+    // add two more untestable copies of the arity/type logic,
+    // `check_builtin_call` was collapsed onto one shared path driven by
+    // `builtin_signature`: the two error branches are now exercised by
+    // `println`, which a user program *can* misuse
+    // (`builtin_call_with_wrong_arity_reports_e0016` /
+    // `builtin_call_with_a_non_string_argument_reports_e0010`), and the part
+    // that is genuinely per-builtin — the signature itself — is unit-tested
+    // directly by `builtin_signatures_are_what_the_std_call_sites_use`.
 }

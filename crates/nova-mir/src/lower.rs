@@ -588,17 +588,40 @@ impl<'a> Lowerer<'a> {
                 });
             }
             hir::Callee::Builtin(b) => {
+                // Exhaustive rather than a `_` fallback so a new builtin has to
+                // decide here whether it is a runtime call; `None` is not
+                // "unhandled" but "handled without one".
                 let rt = match b {
-                    Builtin::Println => RtFunc::Println,
-                    Builtin::Print => RtFunc::Print,
-                    Builtin::Panic => RtFunc::Panic,
-                    Builtin::StrCmp => RtFunc::StrCmp,
+                    Builtin::Println => Some(RtFunc::Println),
+                    Builtin::Print => Some(RtFunc::Print),
+                    Builtin::Panic => Some(RtFunc::Panic),
+                    Builtin::StrCmp => Some(RtFunc::StrCmp),
+                    Builtin::StrHash => Some(RtFunc::StrHash),
+                    Builtin::CharToInt => None,
                 };
-                self.push(Stmt::CallRuntime {
-                    dst,
-                    func: rt,
-                    args: arg_temps,
-                });
+                match rt {
+                    Some(func) => self.push(Stmt::CallRuntime {
+                        dst,
+                        func,
+                        args: arg_temps,
+                    }),
+                    // `char_to_int` is a representation-level no-op: `Ty::Char`
+                    // and `Ty::Int` are both `MirTy::I64` (a Char *is* its
+                    // Unicode scalar value at runtime), so the conversion is a
+                    // register move. Giving it a runtime symbol would mean
+                    // adding an ABI function whose body is the identity —
+                    // permanent surface area for nothing. `dst` is `Some` and
+                    // there is exactly one argument for any well-typed call
+                    // (`check_builtin_call` returns an error expression
+                    // otherwise, and MIR is only reached for a program with no
+                    // diagnostics), so the fallthrough emits nothing rather
+                    // than panicking.
+                    None => {
+                        if let (Some(dst), Some(&src)) = (dst, arg_temps.first()) {
+                            self.push(Stmt::Copy { dst, src });
+                        }
+                    }
+                }
             }
             hir::Callee::Local(l) => {
                 let callee = self.local_map[l.0 as usize];

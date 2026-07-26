@@ -84,6 +84,15 @@ impl<T, E> Result<T, E> {
 // `nova_`-prefixed extern symbols are reserved by the compiler, so a
 // user-visible `extern` was not an option either).
 
+// `Hash` reaches the runtime the same way, through two more std-only
+// builtins: `str_hash` (`String` has no length, indexing or iteration, so
+// Nova cannot walk its bytes) and `char_to_int` (Nova has no `as` casts and
+// no other `Char` -> `Int` conversion). `char_to_int` is the one builtin that
+// is *not* a runtime call — `Char` and `Int` are the same machine class, so
+// nova-mir lowers it to a register move. See ADR 0005 section 2 for why
+// `Hash` is one-shot (`fn hash(self) -> Int`) rather than streaming, and why
+// there is deliberately no `Hash for Float`.
+
 pub type Ordering = | Less | Equal | Greater
 
 pub trait Display { fn fmt(self) -> String }
@@ -100,6 +109,14 @@ pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering }
 pub trait Clone { fn clone(self) -> Self }
 
 pub trait Default { fn default() -> Self }
+
+// One-shot hashing: a value's hash is a single `Int`, not a stream folded into
+// a `Hasher` (ADR 0005 section 2). There is no `Hash for Float` on purpose:
+// NaN never equals itself, so a NaN key would be unreachable in a hash map,
+// and `0.0`/`-0.0` are `==` but would hash differently.
+//
+// An implementor's contract: if `a.eq(b)` then `a.hash() == b.hash()`.
+pub trait Hash { fn hash(self) -> Int }
 
 impl Display for Int    { fn fmt(self) -> String { "${self}" } }
 impl Display for Float  { fn fmt(self) -> String { "${self}" } }
@@ -204,3 +221,45 @@ impl Default for Float  { fn default() -> Float { 0.0 } }
 impl Default for Bool   { fn default() -> Bool { false } }
 impl Default for Char   { fn default() -> Char { '\0' } }
 impl Default for String { fn default() -> String { "" } }
+
+// The splitmix64 finalizer: three xor-shift/multiply rounds. `Map` selects
+// buckets with `hash & (cap - 1)`, so it is the *low* bits that must be
+// spread; `fn hash(self) -> Int { self }` would send every multiple of the
+// capacity to bucket 0. A known-good mixer is used rather than an invented
+// one.
+//
+// Two deliberate deviations from the canonical C, both verified rather than
+// assumed:
+//
+//   - The constants are `0xbf58476d1ce4e5b9` and `0x94d049bb133111eb`, which
+//     exceed `Int`'s range; they are written here as the two's-complement
+//     negatives of those bit patterns. Nova's lexer takes them (each is
+//     `-` applied to a literal below `i64::MAX`), and `*` wraps rather than
+//     trapping, so the arithmetic is the same modulo 2^64.
+//   - Nova's `>>` is arithmetic and there is no `>>>`, so this is the
+//     splitmix64 finalizer with *arithmetic* shifts — for a negative
+//     intermediate the sign extension changes the result, so it is not
+//     bit-identical to the canonical version. What matters is the low-bit
+//     distribution, and that is measured rather than assumed: see the bucket
+//     histograms in `tests/runtime/hash.nova`. One further consequence is
+//     that every `x ^ (x >> k)` clears the sign bit, so `mix64` is not a
+//     bijection (at most 3 bits of range lost) and always returns a
+//     non-negative `Int`.
+fn mix64(x: Int) -> Int {
+    let a = x ^ (x >> 30)
+    let b = a * -4658895280553007687
+    let c = b ^ (b >> 27)
+    let d = c * -7723592293110705685
+    d ^ (d >> 31)
+}
+
+impl Hash for Int    { fn hash(self) -> Int { mix64(self) } }
+impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1) } else { mix64(0) } } }
+// Hashes the Unicode scalar value, so it agrees with `Hash for Int` on that
+// codepoint. `char_to_int` is a compiler builtin because Nova has no `as`
+// casts and `Char` has no other conversion.
+impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self)) } }
+// FNV-1a over the bytes, in the runtime (see the module note above). Unlike
+// `mix64` this may return a negative `Int`, so bucket selection must mask
+// rather than take a remainder.
+impl Hash for String { fn hash(self) -> Int { str_hash(self) } }

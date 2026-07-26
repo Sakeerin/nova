@@ -5,8 +5,9 @@ They share a file because both answer the same question — what a collection's
 methods are allowed to assume about the values handed to them — from opposite
 ends: section 1 is about the *receiver*, section 2 about the *keys*.
 
-Section 1 is accepted. Section 2 is a placeholder, filled in when the `Hash`
-decision is made.
+Both sections are accepted. They are not independent in one direction: the
+streaming `Hash` that section 2 rejects would need exactly the trait-method
+receiver mutability that section 1 leaves as its open gap.
 
 ---
 
@@ -177,5 +178,146 @@ would be new rules layered over `place_root`, not replacements for it.
 
 ## 2. One-shot hashing
 
-_Placeholder. To be written when the `Hash` decision is made (Phase 2.2a
-Task 6); no part of section 1 depends on it._
+### Status
+
+Accepted (2026-07-26). Phase 2.2a Task 6, immediately before `Map` and `Set`,
+which cannot be written without it. `Hash` was deferred from Phase 2.1, where
+`std/core`'s other traits landed.
+
+### Context
+
+`nova-spec` specifies `Hash` in the shape Rust uses:
+
+```nova
+trait Hash { fn hash<H: Hasher>(self, h: H) }
+```
+
+A value *writes itself into* a hasher, which accumulates state and is asked
+for a digest at the end. That shape is what lets a composite hash without
+allocating (a record feeds each field to the same hasher), and it lets the
+hasher be swapped per map (SipHash for HashDoS resistance, FxHash for speed).
+
+Nova cannot express it. A `Hasher` has to accumulate, and the only mutation
+Nova has is a field write through a binding with the `mut` permission — which
+section 1 makes explicit is a permission attached to a *place*, not a claim
+about ownership. So a streaming hasher must be a record whose state field the
+`hash` body assigns:
+
+```nova
+fn hash<H: Hasher>(self, mut h: H) { h.write_int(self.x) }
+```
+
+which needs (a) `mut` on a *parameter*, (b) `write_int` to be a `mut self`
+trait method — precisely the case section 1 records as an open gap, since
+`hir::TraitMethod` has no receiver-mutability field — and (c) the caller to
+observe the accumulated state afterwards, which works only because records
+are reference values (section 1's alias-visible note), i.e. the whole
+mechanism would rest on aliasing rather than on anything the type says. It is
+also viral: `Hasher` becomes a second public trait with a method per primitive
+type, every `Hash` impl gets a type parameter, and every call site has to
+build a hasher and finish it.
+
+What a hash map actually needs from `Hash` is one integer per key.
+
+### Decision
+
+**`Hash` is one-shot**, in `std/core/lib.nova` beside the other core traits:
+
+```nova
+pub trait Hash { fn hash(self) -> Int }
+```
+
+with impls for `Int`, `Bool`, `Char` and `String`, and the contract that
+`a.eq(b)` implies `a.hash() == b.hash()`. Supporting pieces:
+
+- **`mix64`, the splitmix64 finalizer** (module-private, so it enters no user
+  namespace) backs `Int`, `Bool` and `Char`. It is not decoration: `Map` selects
+  buckets with `hash & (cap - 1)` over a power-of-two capacity, so only the
+  **low** bits of a hash are consulted, and `fn hash(self) -> Int { self }`
+  would put every multiple of the capacity in bucket 0. A known-good mixer is
+  used rather than an invented one.
+- **`str_hash`, a std-only compiler builtin** (`Builtin::STD_CORE_ONLY`,
+  beside `str_cmp`) backed by the runtime's FNV-1a `nova_rt_str_hash`, because
+  Nova cannot walk a string's bytes: `String` has no length, indexing or
+  iteration, and is not FFI-safe, so no `extern` can reach it either. Being
+  std-only rather than `Builtin::GLOBAL`, it does not become a reserved word —
+  a user program may still define `fn str_hash`.
+- **`char_to_int`, a second std-only builtin**, because `Hash for Char` needs
+  the codepoint and Nova has no `Char` → `Int` conversion at all (`as` casts
+  are unsupported, and `Char` has no methods beyond its trait impls). Unlike
+  every other builtin it is *not* a runtime call: `Char` and `Int` are both
+  `MirTy::I64`, so `nova-mir` lowers it to a register move rather than adding
+  a permanent runtime ABI symbol whose body would be the identity function.
+
+Two properties of `mix64` under Nova's semantics were verified rather than
+assumed, since both would have silently produced a broken hash:
+
+- The constants `0xbf58476d1ce4e5b9` and `0x94d049bb133111eb` exceed `Int`'s
+  range and are written as the two's-complement negatives of those bit
+  patterns. The lexer accepts them (each is `-` applied to a literal below
+  `i64::MAX`) and `*` wraps rather than trapping, so the arithmetic agrees
+  with the canonical version modulo 2^64.
+- Nova's `>>` is **arithmetic**, and there is no `>>>`, so this is splitmix64's
+  finalizer with arithmetic shifts — not bit-identical to the canonical version
+  wherever an intermediate goes negative. Since the low bits are the only ones
+  bucket selection reads, they are *measured* rather than argued: the histograms
+  in `tests/runtime/hash.nova` are the evidence, and they were computed from an
+  independent model of the same function rather than recorded from a run. A
+  second consequence is that every `x ^ (x >> k)` clears the sign bit, so
+  `mix64` is not a bijection: it loses at most 3 bits of range, and always
+  returns a non-negative `Int`.
+
+### Consequences
+
+- **A composite type's `Hash` must combine children by hand**, e.g.
+  `fn hash(self) -> Int { mix64(self.x.hash() ^ (self.y.hash() * 31)) }`.
+  There is no derive and no accumulator; that is the cost of the shape.
+- **Bucket selection must mask, not take a remainder.** `mix64` is
+  non-negative but `str_hash` reinterprets a `u64` as `i64`, so a `String`
+  hash may be negative and `hash % cap` could yield a negative index.
+  `hash & (cap - 1)` is non-negative for every `i64` and is what `Map` will
+  use.
+- **Hashes are not randomized per process**, so a `Map` is HashDoS-attackable
+  by adversarial keys. FNV-1a is not collision-resistant and neither is
+  `mix64`. Acceptable for Phase 2.2a; a seeded hasher is a `Hasher`-shaped
+  question, i.e. it is the migration below.
+- **Hashes must be backend-independent.** `tests/runtime/hash.nova` runs under
+  both the JIT and the object backend against the same fixture, whose expected
+  bucket histograms were computed independently from splitmix64's finalizer
+  rather than recorded from a run.
+- **`Hash for Float` is deliberately absent**, a second deviation from
+  `20-STDLIB.md`, which lists `Float` among the primitives that implement
+  `Hash`. NaN never equals itself, so a
+  NaN key would be unreachable — inserted and then not findable, including by
+  the very expression that produced it, since `Eq for Float` is already
+  documented as non-reflexive there. And `0.0 == -0.0` while their bit patterns
+  differ, so any bitwise hash would break the `eq` ⇒ equal-hash contract unless
+  the impl normalized both first. A `Float` key needs a decision about NaN
+  (reject, normalize to a canonical NaN, or total-order it) that belongs with
+  the `Ord for Float` caveat, not smuggled in with hashing. Pinned by
+  `float_has_no_hash_impl`, so re-adding it is a deliberate act with a test to
+  change.
+
+### Migration path
+
+This is a **commitment, not a stopgap**: `hash` is `Hash`'s only method, so
+moving to the streaming shape changes the trait's entire surface and therefore
+*every* impl and every call site — in std and in user code alike. There is no
+version of that which is source-compatible, and no adapter that helps: a
+one-shot impl cannot be driven by a hasher (it has nowhere to write), and a
+streaming impl cannot answer `hash()` without a hasher to hand it. So the
+switch, if it ever happens, is a breaking change with a deprecation cycle, and
+it should happen only if a concrete need appears that one-shot cannot serve —
+per-map hasher choice, or HashDoS resistance via a seed.
+
+The prerequisites are all in section 1's territory, which is why the two
+decisions share a file: `mut` on parameters, receiver mutability declared on
+`hir::TraitMethod` (section 1's Migration path steps 1–2), and `mut self` trait
+methods checked at the call site (step 3). Until those exist, the streaming
+shape is not merely inconvenient in Nova — it is not writable.
+
+Cheaper changes that this decision does *not* foreclose, because none of them
+touch `Hash`'s signature: replacing FNV-1a inside `nova_rt_str_hash`, replacing
+`mix64`'s constants or rounds, and seeding either from a process-start value.
+The one-shot shape fixes what a hash *is* (one `Int` per value), not how it is
+computed.

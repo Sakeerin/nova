@@ -118,6 +118,31 @@ pub unsafe extern "C" fn nova_rt_str_cmp(a: *const NovaStr, b: *const NovaStr) -
     }
 }
 
+/// FNV-1a hash of a Nova string's bytes, as an `i64`.
+///
+/// Nova cannot walk a string's bytes itself (`String` has no length, indexing
+/// or iteration, and is not FFI-safe), so `std/core`'s `impl Hash for String`
+/// reaches this through the `str_hash` builtin. FNV-1a rather than something
+/// stronger because it is small, well known, and adequate for a hash map's
+/// bucket selection; it is *not* collision-resistant and must not be used for
+/// anything security-sensitive.
+///
+/// The `u64 -> i64` reinterpretation at the end means the result may be
+/// negative, so a caller selecting buckets must mask (`hash & (cap - 1)`,
+/// which is non-negative for any `i64`) rather than take a remainder.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_hash(s: *const NovaStr) -> i64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in as_str(s).as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h as i64
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -180,6 +205,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
+        ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -259,6 +285,26 @@ mod tests {
             let a = make_str("ab");
             let b = make_str("abc");
             assert_eq!(nova_rt_str_cmp(a, b), -1);
+        }
+    }
+
+    #[test]
+    fn str_hash_is_deterministic_and_distinguishes() {
+        unsafe {
+            let a = make_str("hello");
+            let b = make_str("hello");
+            let c = make_str("world");
+            assert_eq!(nova_rt_str_hash(a), nova_rt_str_hash(b));
+            assert_ne!(nova_rt_str_hash(a), nova_rt_str_hash(c));
+        }
+    }
+
+    #[test]
+    fn str_hash_handles_empty() {
+        unsafe {
+            let e = make_str("");
+            // Must not panic and must be stable.
+            assert_eq!(nova_rt_str_hash(e), nova_rt_str_hash(make_str("")));
         }
     }
 }
