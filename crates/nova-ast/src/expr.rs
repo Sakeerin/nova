@@ -11,7 +11,15 @@ pub enum Expr {
     Path(Path),
     Tuple(Vec<Spanned<Expr>>),
     Array(Vec<Spanned<Expr>>),
-    /// `[init; n]` — an array of `n` copies of `init`, `n` evaluated at runtime.
+    /// `[init; n]` — an `n`-slot array whose every slot is `init`, with both
+    /// `init` and `n` evaluated once at runtime.
+    ///
+    /// `init` is **not** copied per slot: it is evaluated a single time and that
+    /// one value goes into every slot, so for a heap element type all `n` slots
+    /// refer to the same object (`[Cell { n: 0 }; 3]` is one `Cell` seen three
+    /// times, and `a[0].n = 42` shows through `a[1]` and `a[2]`). Nova has
+    /// reference semantics throughout and no `Copy`, so there is no per-slot
+    /// clone to perform.
     ArrayRepeat {
         init: Box<Spanned<Expr>>,
         len: Box<Spanned<Expr>>,

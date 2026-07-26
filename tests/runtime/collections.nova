@@ -171,6 +171,66 @@ fn main() {
     let new38 = w.insert(w38, 380)
     println("wrap reuse new=${new38.is_none()} 38=${w.get(w38).unwrap_or(miss)} len=${w.len()} used=${w.used} state=${state_str(w)}")
 
+    // === Growth off tombstones alone: what `used` is actually for ===
+    // Every key here has a *distinct* home bucket, so no removal's tombstone
+    // ever sits on a later insert's probe path and none is ever reused: each
+    // insert takes a fresh empty slot and pushes `used` up while `len` falls
+    // straight back to 1. Six inserts and five removals later the table holds
+    // *one* live entry and five tombstones, and `used` is 6 of 8 — exactly the
+    // 3/4 threshold, since `(6 + 1) * 4 > 8 * 3`.
+    //
+    // Everything else in this file grows with `len == used`, which leaves the
+    // choice of counter untested. Here the two disagree by five, and a
+    // threshold read off `len` would never fire at all: the table would keep
+    // filling with tombstones until no slot was empty, and `insert` would reach
+    // the "found no free slot" panic its own comment calls unreachable — an
+    // unreachability argued *from* `used`.
+    let t0 = Key { id: 0 }
+    let t1 = Key { id: 1 }
+    let t2 = Key { id: 2 }
+    let t3 = Key { id: 3 }
+    let t4 = Key { id: 4 }
+    let t5 = Key { id: 5 }
+    let t6 = Key { id: 6 }
+    let t7 = Key { id: 7 }
+    let t8 = Key { id: 8 }
+    let mut t: Map<Key, Int> = Map::new()
+    let _ = t.insert(t0, 1000)
+    let _ = t.insert(t1, 1001)
+    let _ = t.remove(t0)
+    let _ = t.insert(t2, 1002)
+    let _ = t.remove(t2)
+    let _ = t.insert(t3, 1003)
+    let _ = t.remove(t3)
+    let _ = t.insert(t4, 1004)
+    let _ = t.remove(t4)
+    let _ = t.insert(t5, 1005)
+    let _ = t.remove(t5)
+    println("churn at threshold len=${t.len()} used=${t.used} cap=${t.state.len()} state=${state_str(t)}")
+
+    // The insert that grows. The rehash is driven entirely by tombstones, and
+    // clearing them is the whole point: only live entries are reinserted, so
+    // `used` drops back to `len`, the state array holds no 2 anywhere, and the
+    // capacity doubles once (not twice — `grow`'s reinserts must not re-enter
+    // it).
+    let grew = t.insert(t6, 1006)
+    println("grew off tombstones new=${grew.is_none()} len=${t.len()} used=${t.used} cap=${t.state.len()} state=${state_str(t)}")
+
+    // A tombstoned slot still holds its old key and value, so a `grow` that
+    // reinserted every slot which is merely *not empty*, rather than exactly
+    // occupied, would bring all five deleted keys back to life — with `len`
+    // jumping to match. Both halves are asserted: the live entries survived,
+    // and the removed ones stayed removed.
+    println("after rehash live 1=${t.get(t1).unwrap_or(miss)} 6=${t.get(t6).unwrap_or(miss)}")
+    println("after rehash removed 0=${t.contains_key(t0)} 2=${t.contains_key(t2)} 3=${t.contains_key(t3)} 4=${t.contains_key(t4)} 5=${t.contains_key(t5)}")
+
+    // Two more fresh home buckets. Had the growth above not happened, the table
+    // would still be cap 8 with every one of its slots non-empty by now, and
+    // this pair would exhaust all 8 probes and panic.
+    let _ = t.insert(t7, 1007)
+    let _ = t.insert(t8, 1008)
+    println("churn tail len=${t.len()} used=${t.used} cap=${t.state.len()} state=${state_str(t)}")
+
     // === Map<String, Int>: the runtime hash path (str_hash, FNV-1a) ===
     let mut sm = Map::new()
     let _ = sm.insert("alpha", 1)

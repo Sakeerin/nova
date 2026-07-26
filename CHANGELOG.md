@@ -175,11 +175,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `alias.n = 99` changes `c.n`), and the same holds through a `mut self` method
   because the receiver is passed as the same pointer, not copied. That is
   deliberate reference semantics, not an oversight, and it is executed under
-  both backends by `tests/runtime/field_assign.nova`.
+  both backends by `tests/runtime/field_assign.nova`. The `E0900` fallback for
+  an assignment target that is none of the assignable forms now names all three
+  ("a local variable, array element, or record field") instead of only the two
+  that predated this change.
 - The mutable-receiver rule (Phase 2.2a, `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`
   §1): **calling a method that declares `mut self` now requires a mutable
   receiver place**, reported as `E0060` with the same ``declare it as `let mut
-  …` `` note the two assignment forms carry. Previously `let v = Vec::new()`
+  …` `` note the two assignment forms carry — except when the immutable root is
+  a method's own receiver, where the note says to declare it as `mut self`,
+  since `let mut self` is not Nova syntax and the advice would be
+  unfollowable. All three forms (`arr[i] = v`, `rec.f = v`, and a `mut self`
+  call) now share one `require_mutable_place` helper, so the classification, the
+  code and the note exist once. Previously `let v = Vec::new()`
   followed by `v.push(1)` was accepted while the equivalent `v.len = v.len + 1`
   was `E0060` — the same effect got two different answers depending on whether
   it was spelled as a field assignment or wrapped in a one-line method, which
@@ -205,13 +213,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Default` bound is needed anywhere in `std/collections`: `Vec::push` fills
   with the element being pushed, and `Map` fills its key/value arrays with the
   pair being inserted (`state`'s `0` filler happens to be exactly the "empty"
-  tag, so a fresh table is empty by construction). The fill loop is emitted in
-  MIR with the existing block machinery, so both backends need only the new
-  `ArrayAlloc` statement. A **negative length aborts** rather than being
-  clamped — `[x; -1]` calls the same `nova_rt_panic_str` path with "array length
-  must not be negative" — following `check_bounds`' abort-on-bad-input
-  precedent, so a clamped-to-zero capacity cannot silently spin a growable
-  collection, and `8 * len` cannot overflow for large negative lengths.
+  tag, so a fresh table is empty by construction). `init` is evaluated
+  **once**, and that one value is stored into every slot — these are *not* `n`
+  copies, so for a heap element type all `n` slots are the same object:
+  `[Cell { n: 0 }; 3]` is one `Cell` seen three times and `a[0].n = 42` shows
+  through `a[1]` and `a[2]`, and `[Vec::new(); rows]` is one `Vec`, not `rows`
+  of them. That is the same deliberate reference semantics as field assignment
+  above (Nova has no `Copy` and so no per-slot clone to insert), and
+  `tests/runtime/array_repeat.nova` executes the record case under both
+  backends. The fill loop is emitted in MIR with the existing block machinery,
+  so both backends need only the new `ArrayAlloc` statement. **Both ends of the
+  length range abort** rather than being clamped — `[x; -1]` and
+  `[x; 1 << 60]` both call the same `nova_rt_panic_str` path, with "array
+  length must not be negative" and "array length is too large" — following
+  `check_bounds`' abort-on-bad-input precedent. Both bounds are memory safety,
+  because the backends compute the allocation size as `8 * len + 8` with
+  *wrapping* arithmetic: a large negative length overflows the multiplication,
+  and a length above `(i64::MAX - 8) / 8` wraps the size back to negative,
+  which `gc::alloc`'s `size.max(8)` clamps to an 8-byte block that the
+  deliberately unchecked fill loop then runs off the end of. A clamp instead of
+  an abort would also let a clamped-to-zero capacity silently spin a growable
+  collection.
 - A second embedded std module (Phase 2.2a): `std/core` was loaded through a
   seam that assumed exactly one implicit module. It is now a list, so
   `std/collections` lives in its own file (`std/collections/lib.nova`) with the

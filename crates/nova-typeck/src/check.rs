@@ -2667,9 +2667,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `[init; n]` — an array of `n` copies of `init`. The element type comes
-    /// from `init` (so no `Default` bound is needed and a fresh array is never
-    /// uninitialized), and `n` must be an `Int` evaluated at runtime.
+    /// `[init; n]` — an `n`-slot array whose every slot is `init`. The element
+    /// type comes from `init` (so no `Default` bound is needed and a fresh array
+    /// is never uninitialized), and `n` must be an `Int` evaluated at runtime.
+    ///
+    /// `init` is evaluated once and the same value goes into every slot, so for
+    /// a heap element type the slots are one object, not `n` of them — see
+    /// `hir::ExprKind::ArrayRepeat`.
     fn check_array_repeat(
         &mut self,
         fcx: &mut FnCtx,
@@ -3632,30 +3636,8 @@ impl<'a> Checker<'a> {
         if !self.mut_self.contains(&def_id) {
             return;
         }
-        match self.place_root(fcx, receiver_ast) {
-            PlaceRoot::Mutable => {}
-            PlaceRoot::ImmutableLocal(name) => {
-                let mname = self.defs.def(def_id).name.clone();
-                self.error(
-                    "E0060",
-                    format!("`{mname}` mutates its receiver, but `{name}` is immutable"),
-                    span,
-                );
-                self.diagnostics
-                    .last_mut()
-                    .expect("just pushed")
-                    .notes
-                    .push(format!("declare it as `let mut {name}` to allow mutation"));
-            }
-            PlaceRoot::NotAPlace => {
-                let mname = self.defs.def(def_id).name.clone();
-                self.error(
-                    "E0060",
-                    format!("`{mname}` mutates its receiver, which cannot be a temporary"),
-                    span,
-                );
-            }
-        }
+        let mname = self.defs.def(def_id).name.clone();
+        self.require_mutable_place(fcx, receiver_ast, span, MutTarget::Receiver(mname));
     }
 
     fn emit_inherent_call(
@@ -4155,9 +4137,12 @@ impl<'a> Checker<'a> {
             return self.check_field_set(fcx, op, target, field, rhs, span);
         }
         let ast::Expr::Path(path) = &lhs.value else {
+            // `arr[i] = v` and `rec.f = v` are handled above, so what is left is
+            // a target with no assignable place at all (a call result, a
+            // literal, a parenthesized expression, …).
             self.unsupported(
                 lhs.span,
-                "assignment to anything but a local variable or array element",
+                "assignments to anything but a local variable, array element, or record field",
             );
             return error_expr(span);
         };
@@ -4256,6 +4241,48 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Require that `target`'s storage be reachable through a mutable binding,
+    /// reporting `E0060` if it is not.
+    ///
+    /// The one place all three mutation forms share: `arr[i] = v`,
+    /// `rec.f = v`, and a call to a method declaring `mut self`. They differ
+    /// only in how the diagnostic names what is being mutated (`what`), so the
+    /// `place_root` classification, the error code, and — crucially — the
+    /// actionable note live here rather than in three hand-maintained copies.
+    fn require_mutable_place(
+        &mut self,
+        fcx: &FnCtx,
+        target: &Spanned<ast::Expr>,
+        span: Span,
+        what: MutTarget,
+    ) {
+        match self.place_root(fcx, target) {
+            PlaceRoot::Mutable => {}
+            PlaceRoot::ImmutableLocal(name) => {
+                self.error("E0060", what.immutable_message(&name), span);
+                // `let mut self` is not Nova syntax — a receiver's mutability is
+                // declared in the signature, so a `self` root needs the other
+                // advice entirely. `place_root` hands back the root's *name*,
+                // which is all it takes to tell the two apart; `self` is only
+                // ever bound as a method receiver.
+                let note = if name == "self" {
+                    "declare the enclosing method's receiver as `mut self` to allow mutation"
+                        .to_string()
+                } else {
+                    format!("declare it as `let mut {name}` to allow mutation")
+                };
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(note);
+            }
+            PlaceRoot::NotAPlace => {
+                self.error("E0060", what.not_a_place_message(), span);
+            }
+        }
+    }
+
     /// Check `arr[index] = value`.
     fn check_index_set(
         &mut self,
@@ -4273,29 +4300,7 @@ impl<'a> Checker<'a> {
         // The array's storage must be reachable through a mutable binding.
         // Walk the whole index/field chain to its root local — `grid[0][1]`,
         // `rec.data[0]`, and `make()[0]` all bypass a single-segment check.
-        match self.place_root(fcx, target) {
-            PlaceRoot::Mutable => {}
-            PlaceRoot::ImmutableLocal(name) => {
-                self.error(
-                    "E0060",
-                    format!("cannot assign to an element of immutable `{name}`"),
-                    span,
-                );
-                self.diagnostics
-                    .last_mut()
-                    .expect("just pushed")
-                    .notes
-                    .push(format!("declare it as `let mut {name}` to allow mutation"));
-            }
-            PlaceRoot::NotAPlace => {
-                self.error(
-                    "E0060",
-                    "cannot assign to an element of a temporary or non-assignable value"
-                        .to_string(),
-                    span,
-                );
-            }
-        }
+        self.require_mutable_place(fcx, target, span, MutTarget::Element);
         let arr = self.check_expr(fcx, target);
         let idx = self.check_expr(fcx, index);
         self.expect_ty(fcx, &idx, &Ty::Int, "an array index");
@@ -4355,28 +4360,7 @@ impl<'a> Checker<'a> {
         // Walk the whole field/index chain to its root local — `rec.inner.f`
         // and `make().f` both bypass a single-segment check. Records have no
         // per-field `mut`, so mutability is a property of the binding.
-        match self.place_root(fcx, target) {
-            PlaceRoot::Mutable => {}
-            PlaceRoot::ImmutableLocal(name) => {
-                self.error(
-                    "E0060",
-                    format!("cannot assign to a field of immutable `{name}`"),
-                    span,
-                );
-                self.diagnostics
-                    .last_mut()
-                    .expect("just pushed")
-                    .notes
-                    .push(format!("declare it as `let mut {name}` to allow mutation"));
-            }
-            PlaceRoot::NotAPlace => {
-                self.error(
-                    "E0060",
-                    "cannot assign to a field of a temporary or non-assignable value".to_string(),
-                    span,
-                );
-            }
-        }
+        self.require_mutable_place(fcx, target, span, MutTarget::Field);
         let rec = self.check_expr(fcx, target);
         let recv_ty = fcx.icx.apply(&rec.ty);
         // A broken receiver already reported its own error; another one here
@@ -5242,6 +5226,48 @@ fn to_useful_pat(p: &hir::Pattern) -> usefulness::Pat {
             Ctor::Variant(*sum, *variant),
             vec![Pat::Wild; binders.len()],
         ),
+    }
+}
+
+/// What `require_mutable_place` is being asked to mutate — the only thing that
+/// differs between the three callers, and so the only thing that varies in the
+/// `E0060` they report.
+enum MutTarget {
+    /// `arr[i] = v`.
+    Element,
+    /// `rec.f = v`.
+    Field,
+    /// A call to a method declaring `mut self`; carries the callee's
+    /// impl-qualified `Def` name, the spelling every other inherent-method
+    /// diagnostic uses.
+    Receiver(String),
+}
+
+impl MutTarget {
+    /// The message when the place is rooted at an immutable local named `name`.
+    fn immutable_message(&self, name: &str) -> String {
+        match self {
+            MutTarget::Element => format!("cannot assign to an element of immutable `{name}`"),
+            MutTarget::Field => format!("cannot assign to a field of immutable `{name}`"),
+            MutTarget::Receiver(m) => {
+                format!("`{m}` mutates its receiver, but `{name}` is immutable")
+            }
+        }
+    }
+
+    /// The message when the place has no assignable root at all.
+    fn not_a_place_message(&self) -> String {
+        match self {
+            MutTarget::Element => {
+                "cannot assign to an element of a temporary or non-assignable value".to_string()
+            }
+            MutTarget::Field => {
+                "cannot assign to a field of a temporary or non-assignable value".to_string()
+            }
+            MutTarget::Receiver(m) => {
+                format!("`{m}` mutates its receiver, which cannot be a temporary")
+            }
+        }
     }
 }
 
@@ -6788,6 +6814,83 @@ mod tests {
             d.notes.iter().any(|n| n.contains("let mut p")),
             "{:?}",
             d.notes
+        );
+    }
+
+    #[test]
+    fn immutable_self_root_is_advised_to_use_mut_self_not_let_mut_self() {
+        // All three mutation forms route through `require_mutable_place`, and
+        // when the immutable root is a method's own receiver the uniform
+        // ``declare it as `let mut {name}` `` note would read `let mut self` —
+        // which Nova cannot parse, so the advice would be unfollowable. A
+        // receiver's mutability is declared in the signature instead.
+        //
+        // `Set::insert` delegating to `Map::insert` is exactly the receiver
+        // shape here, so this is the note a std author is most likely to be
+        // handed.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             impl Inner { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             record Outer { inner: Inner, data: [Int] }\n\
+             impl Outer {\n\
+                 fn call_mutator(self) { self.inner.bump() }\n\
+                 fn set_elem(self) { self.data[0] = 1 }\n\
+                 fn set_field(self) { self.inner.v = 1 }\n\
+             }\n\
+             fn main() { }",
+        );
+        let notes: Vec<&str> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "E0060")
+            .flat_map(|d| d.notes.iter().map(|n| n.as_str()))
+            .collect();
+        // One per mutation form: the `mut self` call, the element store, and the
+        // field store.
+        assert_eq!(notes.len(), 3, "{:?}", r.diagnostics);
+        for n in &notes {
+            assert_eq!(
+                *n, "declare the enclosing method's receiver as `mut self` to allow mutation",
+                "{notes:?}"
+            );
+        }
+        // The primary messages keep their per-form wording; only the note
+        // changes for a `self` root.
+        let messages: Vec<&str> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "E0060")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert!(
+            messages.contains(&"`Inner.bump` mutates its receiver, but `self` is immutable"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&"cannot assign to an element of immutable `self`"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&"cannot assign to a field of immutable `self`"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn assignment_to_a_non_place_target_reports_e0900() {
+        // `arr[i] = v` and `rec.f = v` are both handled before this fallback, so
+        // its message must name record fields among the supported forms — this
+        // is the wording that went stale when field assignment landed.
+        let r = check_src("fn f() -> Int { 1 }\nfn main() { f() = 2 }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("an E0900 was reported");
+        assert_eq!(
+            d.message,
+            "assignments to anything but a local variable, array element, or record field \
+             are not supported yet"
         );
     }
 

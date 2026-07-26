@@ -743,6 +743,51 @@ fn repeat_array_lowers_to_alloc_plus_fill_loop() {
     );
 }
 
+/// Both ends of the length range are guarded, not just the negative one.
+///
+/// Both backends compute the allocation size as `8 * len + 8` with *wrapping*
+/// arithmetic, so at `len = 2^60` the size wraps to `i64::MIN + 8`,
+/// `gc::alloc`'s `size.max(8)` clamps that to an **8-byte** block, the huge
+/// length is stored into that block's header, and the fill loop — which carries
+/// no bounds check by design — writes far past the end. Before the upper guard
+/// existed, `[7; 1 << 60]` segfaulted (exit 139) with no output at all.
+#[test]
+fn repeat_array_guards_both_ends_of_the_length_range() {
+    use nova_mir::{Stmt, MAX_ARRAY_LEN};
+    let mir = mir_for("fn main() { let n = 3\n let a = [7; n]\n println(\"${a[0]}\") }");
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main exists");
+    let stmts: Vec<&Stmt> = main.blocks.iter().flat_map(|b| b.stmts.iter()).collect();
+    let messages: Vec<&str> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::ConstStr(_, m) => Some(m.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        messages.contains(&"array length must not be negative"),
+        "expected the negative-length message, got {messages:?}"
+    );
+    assert!(
+        messages.contains(&"array length is too large"),
+        "expected the overlong-length message, got {messages:?}"
+    );
+    // The threshold is the exact largest `len` whose `8 * len + 8` still fits in
+    // an `i64`; pin both the constant and the fact that the guard compares
+    // against it, so neither can drift without this failing.
+    assert_eq!(MAX_ARRAY_LEN, 1_152_921_504_606_846_974);
+    assert!(
+        stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::ConstInt(_, v) if *v == MAX_ARRAY_LEN)),
+        "expected the guard to materialize MAX_ARRAY_LEN"
+    );
+}
+
 #[test]
 fn static_array_literal_still_lowers_without_a_loop() {
     // The repeat form's fill loop must not leak into the static literal path:

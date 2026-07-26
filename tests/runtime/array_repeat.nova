@@ -16,6 +16,16 @@ fn main() {
     let s = ["hi"; 2]
     println("${s[0]} ${s[1]}")
 
+    // `init` is evaluated *once* and the same value goes into every slot, so a
+    // heap filler is shared rather than copied: mutating through one slot is
+    // visible through all of them. Strings are immutable, so the `["hi"; 2]`
+    // case above cannot show this; a record can. Per-slot re-evaluation would
+    // print `42 0 0`, so this line is what keeps that change from happening
+    // silently.
+    let mut cells = [Cell { n: 0 }; 3]
+    cells[0].n = 42
+    println("shared: ${cells[0].n} ${cells[1].n} ${cells[2].n}")
+
     // A repeat array inside a generic function, monomorphized per element
     // type — this is what a growable collection allocates with.
     let g = filled(9, 3)
@@ -27,3 +37,5 @@ fn main() {
 fn filled<T>(x: T, n: Int) -> [T] {
     [x; n]
 }
+
+record Cell { n: Int }

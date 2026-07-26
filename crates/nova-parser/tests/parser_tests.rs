@@ -259,7 +259,8 @@ impl Display for Point {
 
 #[test]
 fn parses_repeat_array_literal() {
-    // `[init; n]` — an array of `n` copies of `init`, `n` evaluated at runtime.
+    // `[init; n]` — an `n`-slot array whose every slot is `init`, both evaluated
+    // once at runtime.
     let (ok, errs) = parse_file("repeat", "fn main() { let n = 3\n let a = [0; n] }\n");
     assert!(ok, "`[0; n]` should parse");
     assert_eq!(errs, 0, "expected no parse errors, got {}", errs);

@@ -701,10 +701,19 @@ pub enum ExprKind {
     MakeArray {
         elems: Vec<Expr>,
     },
-    /// `[init; len]` — a heap array of `len` copies of `init`, where `len` is a
-    /// runtime `Int`. Unlike `MakeArray` the element count is not known
-    /// statically, so MIR lowering allocates and then fills with a loop. The
-    /// expression's `ty` is the `Array(elem)` type.
+    /// `[init; len]` — a heap array of `len` slots, every one holding `init`,
+    /// where `len` is a runtime `Int`. Unlike `MakeArray` the element count is
+    /// not known statically, so MIR lowering allocates and then fills with a
+    /// loop. The expression's `ty` is the `Array(elem)` type.
+    ///
+    /// `init` is evaluated **once**, and that single value is stored into every
+    /// slot — these are not `len` copies. For a heap element type the slots are
+    /// therefore one object rather than `len` objects: `[Vec::new(); 2]` is a
+    /// single `Vec` in both slots, so a `push` through one is visible through
+    /// the other. That follows from Nova's reference semantics (there is no
+    /// `Copy` and no clone to insert per slot), and
+    /// `tests/runtime/array_repeat.nova` executes the case so a change to
+    /// per-slot evaluation cannot happen silently.
     ArrayRepeat {
         init: Box<Expr>,
         len: Box<Expr>,

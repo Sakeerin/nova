@@ -7,6 +7,7 @@ use nova_resolver::{Builtin, DefId};
 
 use crate::{
     mangle, mir_ty, Block, BlockId, Function, MirTy, OperandClass, RtFunc, Stmt, Temp, Terminator,
+    MAX_ARRAY_LEN,
 };
 
 /// Lower a specialized (generic-free) HIR function to MIR.
@@ -856,53 +857,49 @@ impl<'a> Lowerer<'a> {
     /// grows a loop emitter:
     ///
     /// ```text
-    ///   guard:  neg = len < 0;  branch neg -> panic, alloc
+    ///   guard:  neg = len < 0;  branch neg -> panic, guard2
     ///   panic:  call nova_rt_panic_str("…");  trap
+    ///   guard2: big = len > MAX_ARRAY_LEN;  branch big -> panic2, alloc
+    ///   panic2: call nova_rt_panic_str("…");  trap
     ///   alloc:  ArrayAlloc { dst: arr, len };  i = 0;  goto header
     ///   header: more = i < len;  branch more -> body, exit
     ///   body:   arr[i] = init;  i = i + 1;  goto header
     ///   exit:   arr
     /// ```
+    ///
+    /// `init` is lowered **once**, into a single temp that is stored into every
+    /// slot. For a heap element type every slot therefore holds the same
+    /// pointer — see `hir::ExprKind::ArrayRepeat`.
     fn lower_array_repeat(&mut self, init: &hir::Expr, len: &hir::Expr) -> Temp {
         let init_t = self.lower_expr(init);
         let len_t = self.lower_expr(len);
         let elem_ty = mir_ty(&init.ty);
         let arr = self.new_temp(MirTy::Ptr);
 
-        // A negative length must never reach `ArrayAlloc`. Abort with a message
-        // rather than clamping to an empty array: a clamp would hide the mistake
-        // here and surface it later as a confusing out-of-bounds abort somewhere
-        // that looks fine, and a clamped-to-zero capacity can make a growable
-        // collection spin (grow → still full → grow) instead of failing. Same
-        // abort-on-bad-input policy as the existing `check_bounds`. A large
-        // negative length would also overflow the backends' `8 * len` into a
-        // wild allocation size.
+        // Only a length in `0..=MAX_ARRAY_LEN` may reach `ArrayAlloc`. Abort with
+        // a message rather than clamping into range: a clamp would hide the
+        // mistake here and surface it later as a confusing out-of-bounds abort
+        // somewhere that looks fine, and a clamped-to-zero capacity can make a
+        // growable collection spin (grow → still full → grow) instead of
+        // failing. Same abort-on-bad-input policy as the existing
+        // `check_bounds`.
+        //
+        // Both ends are memory safety, not just hygiene, because the backends'
+        // `8 * len + 8` size arithmetic *wraps*: a large-magnitude negative
+        // length overflows the multiplication into a wild size, and a length
+        // above `MAX_ARRAY_LEN` wraps the size back to negative, which
+        // `gc::alloc`'s `size.max(8)` clamps to an 8-byte block that the
+        // deliberately unchecked fill loop then runs off the end of.
         let zero = self.new_temp(MirTy::I64);
         self.push(Stmt::ConstInt(zero, 0));
         let negative = self.bin_i64(hir::BinOp::Lt, len_t, zero, MirTy::I8);
-        let panic_b = self.new_block();
-        let alloc_b = self.new_block();
-        self.terminate(Terminator::Branch {
-            cond: negative,
-            then_: panic_b,
-            else_: alloc_b,
-        });
+        self.panic_if(negative, "array length must not be negative");
 
-        self.switch_to(panic_b);
-        let msg = self.new_temp(MirTy::Ptr);
-        self.push(Stmt::ConstStr(
-            msg,
-            "array length must not be negative".to_string(),
-        ));
-        self.push(Stmt::CallRuntime {
-            dst: None,
-            func: RtFunc::Panic,
-            args: vec![msg],
-        });
-        // `nova_rt_panic_str` aborts, so control never returns here.
-        self.terminate(Terminator::Trap);
+        let max = self.new_temp(MirTy::I64);
+        self.push(Stmt::ConstInt(max, MAX_ARRAY_LEN));
+        let too_long = self.bin_i64(hir::BinOp::Gt, len_t, max, MirTy::I8);
+        self.panic_if(too_long, "array length is too large");
 
-        self.switch_to(alloc_b);
         self.push(Stmt::ArrayAlloc {
             dst: arr,
             len: len_t,
@@ -944,6 +941,33 @@ impl<'a> Lowerer<'a> {
 
         self.switch_to(exit);
         arr
+    }
+
+    /// `if bad { nova_rt_panic_str(msg) }`, continuing in a fresh block.
+    ///
+    /// Shared by `[init; n]`'s two length guards so both abort through exactly
+    /// one code path, with only the message differing.
+    fn panic_if(&mut self, bad: Temp, msg: &str) {
+        let panic_b = self.new_block();
+        let ok_b = self.new_block();
+        self.terminate(Terminator::Branch {
+            cond: bad,
+            then_: panic_b,
+            else_: ok_b,
+        });
+
+        self.switch_to(panic_b);
+        let m = self.new_temp(MirTy::Ptr);
+        self.push(Stmt::ConstStr(m, msg.to_string()));
+        self.push(Stmt::CallRuntime {
+            dst: None,
+            func: RtFunc::Panic,
+            args: vec![m],
+        });
+        // `nova_rt_panic_str` aborts, so control never returns here.
+        self.terminate(Terminator::Trap);
+
+        self.switch_to(ok_b);
     }
 
     /// An `Int`-class binary op on two temps, yielding a fresh temp of `result`.

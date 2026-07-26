@@ -235,6 +235,13 @@ mod rt_func_tests {
     }
 }
 
+/// The largest element count `ArrayAlloc` may be handed.
+///
+/// Both backends compute the allocation size as `8*len + 8` in wrapping `i64`
+/// arithmetic, so any longer array would wrap the size — see `ArrayAlloc`. This
+/// is the exact largest `len` for which `8*len + 8` still fits in an `i64`.
+pub const MAX_ARRAY_LEN: i64 = (i64::MAX - 8) / 8;
+
 /// A single 3-address statement.
 #[derive(Debug)]
 pub enum Stmt {
@@ -349,14 +356,23 @@ pub enum Stmt {
     /// with its own loop (see `lower_array_repeat`), so neither backend needs a
     /// loop emitter.
     ///
-    /// `len` must be non-negative; the lowering guarantees that by emitting a
-    /// guard that aborts first. A small negative `len` is not itself a
-    /// memory-safety problem — `gc::alloc` clamps every request with
-    /// `size.max(8)`, so `8 + 8*(-1) = 0` still yields a block the 8-byte length
-    /// store fits in — but a large-magnitude negative `len` can overflow the
-    /// `8 * len` multiplication into a genuinely wild size, and storing a
-    /// negative length would leave an array whose every access fails. Aborting
-    /// up front reports the mistake where it was made instead.
+    /// `len` must be in `0..=MAX_ARRAY_LEN`; the lowering guarantees that by
+    /// emitting guards that abort first. Both bounds are memory-safety
+    /// requirements, because both backends compute the size as `8*len + 8` with
+    /// *wrapping* arithmetic:
+    ///
+    /// - A small negative `len` is harmless on its own — `gc::alloc` clamps
+    ///   every request with `size.max(8)`, so `8 + 8*(-1) = 0` still yields a
+    ///   block the 8-byte length store fits in — but storing a negative length
+    ///   would leave an array whose every access fails, and a large-magnitude
+    ///   negative `len` overflows the `8 * len` multiplication into a wild size.
+    /// - A `len` above `MAX_ARRAY_LEN` wraps `8*len + 8` back to a *negative*
+    ///   size (at `len = 2^60` it is exactly `i64::MIN + 8`), which the same
+    ///   `size.max(8)` clamp turns into an 8-byte block. The huge length is then
+    ///   stored into that block's header and the fill loop — which carries no
+    ///   bounds check by design — writes far past its end.
+    ///
+    /// Aborting up front reports the mistake where it was made instead.
     ArrayAlloc {
         dst: Temp,
         len: Temp,

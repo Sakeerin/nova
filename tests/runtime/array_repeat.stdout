@@ -3,5 +3,6 @@
 0 5
 empty: 0
 hi hi
+shared: 42 42 42
 generic: 3 9
 generic: 2 hi

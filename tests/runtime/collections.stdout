@@ -27,6 +27,11 @@ wrap rm mid 14=140 len=3 used=4 state=11000012
 wrap across 22=220 30=300 6=60 has14=false
 wrap rm past wrap 22=220 then 30=300 state=21000012
 wrap reuse new=true 38=380 len=3 used=4 state=21000011
+churn at threshold len=1 used=6 cap=8 state=21222200
+grew off tombstones new=true len=2 used=2 cap=16 state=0100001000000000
+after rehash live 1=1001 6=1006
+after rehash removed 0=false 2=false 3=false 4=false 5=false
+churn tail len=4 used=4 cap=16 state=0100001110000000
 str len=3 alpha=1 beta=2 empty key=0 gamma=-1
 str rehash len=30 cap=64 mismatches=0 absent=false
 neg keys len=16 cap=32 negative hashes=9 mismatches=0

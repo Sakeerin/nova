@@ -198,6 +198,51 @@ fn repeat_array_negative_length_aborts() {
     );
 }
 
+/// An *overlong* repeat length is guarded too — and unlike the negative case
+/// this one was memory-unsafe, not merely confusing. Both backends compute the
+/// allocation size as `8 * len + 8` with wrapping arithmetic, so at
+/// `len = 2^60` the size wraps to `i64::MIN + 8`, `gc::alloc`'s `size.max(8)`
+/// clamps it to an **8-byte** block, the huge length is written into that
+/// block's header, and the fill loop (deliberately unchecked) then writes far
+/// past the end. This program used to exit 139 (SIGSEGV) with no output.
+///
+/// `[init; n]` is the only way to allocate a runtime-length array, so `n` is by
+/// design a computed value and this is reachable from ordinary code.
+#[test]
+fn repeat_array_overlong_length_aborts_instead_of_segfaulting() {
+    let dir = std::env::temp_dir().join("nova-huge-len");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("huge_len.nova");
+    // `1 << 60`, written as a shift so no literal-overflow question arises.
+    std::fs::write(
+        &file,
+        "fn main() { let n = 1 << 60\n let a = [7; n]\n println(\"${a.len()}\") }",
+    )
+    .expect("write");
+    let exe = dir.join(format!("huge_len{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe).assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("array length is too large"),
+        "stderr: {stderr}"
+    );
+    // The JIT path shares the lowering, but assert it too: a segfault there
+    // would take the compiler process down rather than a child.
+    let assert = nova().arg("run").arg(&file).assert().failure();
+    let jit_stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        jit_stderr.contains("array length is too large"),
+        "stderr: {jit_stderr}"
+    );
+}
+
 #[test]
 fn constants_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/constants.stdout"))
@@ -1068,6 +1113,20 @@ fn hash_build_standalone() {
 /// - **Tombstone reuse**: an insert after a removal must land in the freed slot
 ///   with `used` (occupied *plus* tombstones) unchanged, so a churn workload
 ///   cannot grow the table without bound.
+/// - **A growth driven by tombstones alone**, which is the only thing that
+///   tests `used` at all. Everywhere else in the fixture `len == used` at the
+///   growth points, so the load threshold would behave identically read off
+///   either field. The churn block drives `used` to 6 of 8 while `len` stays at
+///   1 — six inserts on six distinct home buckets, five of them removed, so no
+///   tombstone is ever on a later probe path and none is reused — and then
+///   asserts that the rehash drops `used` back to `len`, leaves no `2` in the
+///   state array, keeps both live keys, and **resurrects none of the five
+///   removed ones**. A `len`-keyed threshold never fires there and the table
+///   fills until `insert` hits the "found no free slot" panic its own comment
+///   calls unreachable; a `grow` that reinserted every not-empty slot instead
+///   of every occupied one brings all five deleted keys back (a tombstoned slot
+///   still holds its old key and value). Both single-token mutations left the
+///   pre-churn fixture byte-identical.
 /// - **No shadowed duplicate**: re-inserting a key that lives *behind* one or
 ///   more tombstones replaces it in place — verified by removing it once
 ///   afterwards and confirming it is then absent, which a second buried copy
