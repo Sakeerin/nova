@@ -831,12 +831,14 @@ impl<'a> Lowerer<'a> {
         let elem_ty = mir_ty(&init.ty);
         let arr = self.new_temp(MirTy::Ptr);
 
-        // A negative length must never reach `ArrayAlloc`: `8 + 8*len` would be
-        // smaller than the 8-byte length header, and storing the length through
-        // it would corrupt the heap. Abort with a message rather than clamping
-        // to an empty array — a clamp would hide the mistake here and surface it
-        // later as a confusing out-of-bounds abort somewhere that looks fine.
-        // Same policy as the existing `check_bounds` on a bad index.
+        // A negative length must never reach `ArrayAlloc`. Abort with a message
+        // rather than clamping to an empty array: a clamp would hide the mistake
+        // here and surface it later as a confusing out-of-bounds abort somewhere
+        // that looks fine, and a clamped-to-zero capacity can make a growable
+        // collection spin (grow → still full → grow) instead of failing. Same
+        // abort-on-bad-input policy as the existing `check_bounds`. A large
+        // negative length would also overflow the backends' `8 * len` into a
+        // wild allocation size.
         let zero = self.new_temp(MirTy::I64);
         self.push(Stmt::ConstInt(zero, 0));
         let negative = self.bin_i64(hir::BinOp::Lt, len_t, zero, MirTy::I8);

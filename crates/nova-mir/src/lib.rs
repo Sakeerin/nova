@@ -345,10 +345,14 @@ pub enum Stmt {
     /// with its own loop (see `lower_array_repeat`), so neither backend needs a
     /// loop emitter.
     ///
-    /// `len` must be non-negative. The lowering guarantees that by emitting a
-    /// guard that aborts first, which is what keeps the allocation size and the
-    /// stored length in agreement — a negative `len` would compute a block
-    /// smaller than the 8-byte length header and then store through it.
+    /// `len` must be non-negative; the lowering guarantees that by emitting a
+    /// guard that aborts first. A small negative `len` is not itself a
+    /// memory-safety problem — `gc::alloc` clamps every request with
+    /// `size.max(8)`, so `8 + 8*(-1) = 0` still yields a block the 8-byte length
+    /// store fits in — but a large-magnitude negative `len` can overflow the
+    /// `8 * len` multiplication into a genuinely wild size, and storing a
+    /// negative length would leave an array whose every access fails. Aborting
+    /// up front reports the mistake where it was made instead.
     ArrayAlloc {
         dst: Temp,
         len: Temp,

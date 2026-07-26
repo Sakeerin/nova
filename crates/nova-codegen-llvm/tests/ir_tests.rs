@@ -257,14 +257,6 @@ fn field_assignment_emits_store_at_field_offset() {
     assert_well_formed(&ir);
 }
 
-/// `panic` (Phase 2.1) under the LLVM `--release` backend: no toolchain is
-/// available in this environment to assemble/run the emitted IR (see the
-/// clang-gated `release_builds_and_runs_when_clang_available` in
-/// `nova-cli`'s e2e suite), so this pins the IR's *shape* instead — the
-/// runtime declaration is always present (`DECLS` is unconditional), but the
-/// call site only appears when a program actually calls `panic`, which is
-/// the part that would silently go missing if the builtin's MIR lowering
-/// (`Builtin::Panic => RtFunc::Panic`) ever broke.
 /// `[init; n]`'s `ArrayAlloc` under the LLVM `--release` backend. No toolchain
 /// is available here to assemble and run the emitted IR (the Cranelift path
 /// covers execution in `nova-cli`'s `array_repeat_*` e2e tests), so this pins
@@ -275,29 +267,58 @@ fn field_assignment_emits_store_at_field_offset() {
 fn repeat_array_emits_runtime_length_alloc() {
     let ir = ir_for("fn main() { let n = 3\n let a = [7; n]\n println(\"${a[0]}\") }");
     let body: Vec<&str> = ir.lines().map(|l| l.trim()).collect();
-    // Size arithmetic: multiply the length by the 8-byte slot size, then add
-    // the 8-byte length header.
-    let mul = body
+
+    // Every assertion below chains backwards from the allocation call, so it
+    // binds to `ArrayAlloc`'s own registers. Matching on shape alone would be
+    // close to vacuous here: `let n = 3` emits `store i64 3, ptr %t2.slot`,
+    // which looks exactly like a length store, and the fill loop's
+    // element-address arithmetic emits its own `mul …, 8` / `add …, 8` pair.
+    let defining = |reg: &str, op: &str| -> String {
+        let prefix = format!("{reg} = {op} ");
+        body.iter()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("expected `{prefix}…` in:\n{ir}"))
+            .to_string()
+    };
+    // `<len>, 8` → `<len>`: the operand a `mul`/`add` scales by 8.
+    let scaled_operand = |line: &str, op: &str| -> String {
+        line.split_once(&format!(" = {op} "))
+            .and_then(|(_, rhs)| rhs.strip_suffix(", 8"))
+            .unwrap_or_else(|| panic!("expected `{op} <reg>, 8`, got `{line}` in:\n{ir}"))
+            .to_string()
+    };
+
+    let call = body
         .iter()
-        .find(|l| l.contains(" = mul i64 ") && l.ends_with(", 8"))
-        .expect("expected `mul i64 <len>, 8` for the element bytes");
-    let mul_dst = mul.split(" = ").next().expect("the mul has a destination");
+        .find(|l| l.contains(" = call ptr @nova_rt_alloc(i64 "))
+        .unwrap_or_else(|| panic!("expected an `@nova_rt_alloc(i64 …)` call in:\n{ir}"));
+    let alloc_dst = call
+        .split(" = ")
+        .next()
+        .expect("the alloc call line has a destination register");
+    let size_reg = call
+        .rsplit_once("(i64 ")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("expected a register size argument in `{call}`"));
+
+    // The size passed to the allocator must be the computed `8 + 8*n`, not the
+    // raw length: the `add` that defines it adds the 8-byte length header, and
+    // the `mul` feeding that `add` scales the length by the 8-byte slot size.
+    let add = defining(size_reg, "add i64");
+    let bytes_reg = scaled_operand(&add, "add i64");
+    let mul = defining(&bytes_reg, "mul i64");
+    let len_reg = scaled_operand(&mul, "mul i64");
+
+    // The length is stored at offset 0 — straight through the pointer *this*
+    // allocation returned, with no getelementptr — and the value stored is the
+    // same register the size arithmetic consumed.
+    let len_store = format!("store i64 {len_reg}, ptr {alloc_dst}");
     assert!(
-        body.iter()
-            .any(|l| l.contains(" = add i64 ") && l.contains(mul_dst) && l.ends_with(", 8")),
-        "expected `add i64 {mul_dst}, 8` for the length header in:\n{ir}"
+        body.contains(&len_store.as_str()),
+        "expected `{len_store}` (the length stored at offset 0 through the \
+         allocation's own pointer) in:\n{ir}"
     );
-    assert!(
-        body.iter().any(|l| l.contains("call ptr @nova_rt_alloc(")),
-        "expected the allocation call in:\n{ir}"
-    );
-    // The length is stored at offset 0, i.e. straight through the block pointer
-    // with no getelementptr.
-    assert!(
-        body.iter()
-            .any(|l| l.starts_with("store i64 ") && !l.contains("getelementptr")),
-        "expected the length store at offset 0 in:\n{ir}"
-    );
+
     // The fill loop is lowered in MIR, so it reaches the backend as ordinary
     // blocks and branches rather than anything array-specific.
     assert!(
@@ -311,6 +332,14 @@ fn repeat_array_emits_runtime_length_alloc() {
     assert_well_formed(&ir);
 }
 
+/// `panic` (Phase 2.1) under the LLVM `--release` backend: no toolchain is
+/// available in this environment to assemble/run the emitted IR (see the
+/// clang-gated `release_builds_and_runs_when_clang_available` in
+/// `nova-cli`'s e2e suite), so this pins the IR's *shape* instead — the
+/// runtime declaration is always present (`DECLS` is unconditional), but the
+/// call site only appears when a program actually calls `panic`, which is
+/// the part that would silently go missing if the builtin's MIR lowering
+/// (`Builtin::Panic => RtFunc::Panic`) ever broke.
 #[test]
 fn panic_emits_declaration_and_call() {
     let ir = ir_for("fn main() { panic(\"boom\") }");
