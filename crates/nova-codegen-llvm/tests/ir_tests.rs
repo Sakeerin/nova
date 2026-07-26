@@ -215,3 +215,42 @@ fn panic_emits_declaration_and_call() {
     assert!(ir.contains("call void @nova_rt_panic_str("), "{ir}");
     assert_well_formed(&ir);
 }
+
+/// Regression for the bug class this backend used to be exposed to: the
+/// declaration list (`DECLS`) used to be a hand-written array of raw
+/// strings with no compile-time tie to `RtFunc` at all, so a new variant
+/// could be added and its declaration forgotten — the crate still compiled
+/// clean, and `nova build --release` would silently emit a call to an
+/// undeclared symbol (invalid LLVM IR). Declarations are unconditional
+/// (emitted regardless of whether the tiny program below calls them), so
+/// this asserts every `RtFunc` variant's exact `declare` line — spelled out
+/// independently here via `signature()`, not by calling the backend's own
+/// generator — is present in the emitted IR.
+#[test]
+fn every_rt_func_is_declared_with_its_real_signature() {
+    fn llty(ty: nova_mir::MirTy) -> &'static str {
+        match ty {
+            nova_mir::MirTy::I64 => "i64",
+            nova_mir::MirTy::F64 => "double",
+            nova_mir::MirTy::I8 => "i8",
+            nova_mir::MirTy::Ptr => "ptr",
+            nova_mir::MirTy::Unit => "void",
+        }
+    }
+
+    let ir = ir_for("fn main() {}");
+    for rt in nova_mir::RtFunc::ALL {
+        let (params, ret) = rt.signature();
+        let params: Vec<&str> = params.iter().map(|&p| llty(p)).collect();
+        let expected = format!(
+            "declare {} @{}({})",
+            llty(ret),
+            rt.symbol(),
+            params.join(", ")
+        );
+        assert!(
+            ir.lines().any(|l| l == expected),
+            "missing declaration for RtFunc::{rt:?}: expected line `{expected}` in IR:\n{ir}"
+        );
+    }
+}

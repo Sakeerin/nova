@@ -21,7 +21,7 @@
 
 use anyhow::{bail, Result};
 use nova_hir::BinOp;
-use nova_mir::{Function, MirTy, Module, OperandClass, Stmt, Temp, Terminator};
+use nova_mir::{Function, MirTy, Module, OperandClass, RtFunc, Stmt, Temp, Terminator};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -29,24 +29,37 @@ use std::fmt::Write as _;
 /// name for the exported C entry wrapper (matching the Cranelift object path).
 pub const NOVA_ENTRY_SYMBOL: &str = "nova_main";
 
-/// Runtime function declarations, plus the string constructor used by
-/// `ConstStr` and the trap intrinsic used by `Trap`.
-const DECLS: &[&str] = &[
-    "declare void @llvm.trap()",
-    "declare void @nova_rt_println(ptr)",
-    "declare void @nova_rt_print(ptr)",
-    "declare ptr @nova_rt_str_concat(ptr, ptr)",
-    "declare ptr @nova_rt_int_to_str(i64)",
-    "declare ptr @nova_rt_float_to_str(double)",
-    "declare ptr @nova_rt_bool_to_str(i8)",
-    "declare ptr @nova_rt_char_to_str(i64)",
-    "declare i8 @nova_rt_str_eq(ptr, ptr)",
-    "declare i64 @nova_rt_str_cmp(ptr, ptr)",
-    "declare ptr @nova_rt_alloc(i64)",
-    "declare void @nova_rt_check_bounds(i64, i64)",
-    "declare ptr @nova_rt_str_new(ptr, i64)",
-    "declare void @nova_rt_panic_str(ptr)",
-];
+/// The LLVM trap intrinsic used by `Terminator::Trap`. Not `RtFunc`-driven:
+/// it's an LLVM builtin, not a Nova runtime symbol.
+const TRAP_DECL: &str = "declare void @llvm.trap()";
+
+/// The string constructor used by `ConstStr`, called directly by its raw
+/// symbol (never through `Stmt::CallRuntime`), so it has no `RtFunc` variant
+/// to generate a declaration from.
+const STR_NEW_DECL: &str = "declare ptr @nova_rt_str_new(ptr, i64)";
+
+/// The LLVM declaration for one `RtFunc`, generated from `symbol()` +
+/// `signature()` rather than hand-written. This is the actual fix for the
+/// bug class this backend used to be exposed to: previously `DECLS` was a
+/// hand-copied string list with no compile-time tie to `RtFunc` at all, so
+/// a new variant could be added and its declaration forgotten here — the
+/// crate still compiled clean, and `CallRuntime`'s `call {ret} @{symbol}`
+/// (driven directly by `RtFunc::signature`/`symbol`) would then reference an
+/// undeclared function, which is invalid LLVM IR. Generating the
+/// declaration from the same `signature()`/`symbol()` the call site uses
+/// makes that impossible: the two can never disagree. See the `nova-mir`
+/// module docs on `RtFunc::ALL` for how the variant list itself is kept
+/// exhaustive.
+fn rt_func_decl(rt: RtFunc) -> String {
+    let (params, ret) = rt.signature();
+    let params: Vec<&str> = params.iter().map(|&p| llty(p)).collect();
+    format!(
+        "declare {} @{}({})",
+        llty(ret),
+        rt.symbol(),
+        params.join(", ")
+    )
+}
 
 /// Compile a monomorphized MIR module to a textual LLVM IR module.
 pub fn compile_ir(mir: &Module) -> Result<String> {
@@ -82,10 +95,14 @@ pub fn compile_ir(mir: &Module) -> Result<String> {
     let mut out = String::new();
     out.push_str("; LLVM IR emitted by the Nova compiler (release backend).\n");
     out.push_str("; Requires LLVM >= 15 (opaque pointers).\n\n");
-    for decl in DECLS {
-        out.push_str(decl);
+    out.push_str(TRAP_DECL);
+    out.push('\n');
+    for rt in RtFunc::ALL {
+        out.push_str(&rt_func_decl(rt));
         out.push('\n');
     }
+    out.push_str(STR_NEW_DECL);
+    out.push('\n');
     // Declare each extern (FFI) symbol; resolved at run time by the system
     // linker against the C runtime (the call sites spell `@"symbol"`).
     for ext in &mir.externs {

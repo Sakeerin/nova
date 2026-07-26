@@ -179,21 +179,6 @@ struct Codegen<'m, M: ClModule> {
     strings: FxHashMap<String, DataId>,
 }
 
-const ALL_RT: [RtFunc; 12] = [
-    RtFunc::Println,
-    RtFunc::Print,
-    RtFunc::StrConcat,
-    RtFunc::IntToStr,
-    RtFunc::FloatToStr,
-    RtFunc::BoolToStr,
-    RtFunc::CharToStr,
-    RtFunc::StrEq,
-    RtFunc::StrCmp,
-    RtFunc::Alloc,
-    RtFunc::CheckBounds,
-    RtFunc::Panic,
-];
-
 impl<'m, M: ClModule> Codegen<'m, M> {
     fn new(module: &'m mut M) -> Self {
         Self {
@@ -238,7 +223,7 @@ impl<'m, M: ClModule> Codegen<'m, M> {
     }
 
     fn declare_runtime(&mut self) -> Result<()> {
-        for rt in ALL_RT {
+        for rt in RtFunc::ALL {
             let (params, ret) = rt.signature();
             let sig = self.make_signature(&params, ret);
             let id = self
