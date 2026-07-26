@@ -724,6 +724,23 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                 }
                 self.def_temp(*dst, ptr);
             }
+            Stmt::ArrayAlloc { dst, len } => {
+                // Same layout as `MakeArray`, but the element count is only
+                // known at runtime: `8 + 8*len` bytes with `len` at offset 0.
+                // The MIR lowering has already guaranteed `len >= 0`, and the
+                // allocator zeroes, so the elements start valid and are then
+                // filled by the lowering's own loop.
+                let n = self.use_temp(*len)?;
+                let eight = self.builder.ins().iconst(types::I64, 8);
+                let bytes = self.builder.ins().imul(n, eight);
+                let size = self.builder.ins().iadd(bytes, eight);
+                let alloc = self.rt("nova_rt_alloc");
+                let ptr = self
+                    .call_func_id(alloc, &[size])?
+                    .ok_or_else(|| anyhow!("alloc returns a value"))?;
+                self.builder.ins().store(MemFlags::trusted(), n, ptr, 0);
+                self.def_temp(*dst, ptr);
+            }
             Stmt::ArrayLen { dst, arr } => {
                 let ptr = self.use_temp(*arr)?;
                 let len = self

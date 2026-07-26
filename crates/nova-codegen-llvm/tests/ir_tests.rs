@@ -265,6 +265,52 @@ fn field_assignment_emits_store_at_field_offset() {
 /// call site only appears when a program actually calls `panic`, which is
 /// the part that would silently go missing if the builtin's MIR lowering
 /// (`Builtin::Panic => RtFunc::Panic`) ever broke.
+/// `[init; n]`'s `ArrayAlloc` under the LLVM `--release` backend. No toolchain
+/// is available here to assemble and run the emitted IR (the Cranelift path
+/// covers execution in `nova-cli`'s `array_repeat_*` e2e tests), so this pins
+/// the IR's *shape*: the runtime-length size arithmetic (`8 + 8*n`), the
+/// allocation, and the length store at offset 0 — the parts that would silently
+/// go missing or go wrong if this arm broke.
+#[test]
+fn repeat_array_emits_runtime_length_alloc() {
+    let ir = ir_for("fn main() { let n = 3\n let a = [7; n]\n println(\"${a[0]}\") }");
+    let body: Vec<&str> = ir.lines().map(|l| l.trim()).collect();
+    // Size arithmetic: multiply the length by the 8-byte slot size, then add
+    // the 8-byte length header.
+    let mul = body
+        .iter()
+        .find(|l| l.contains(" = mul i64 ") && l.ends_with(", 8"))
+        .expect("expected `mul i64 <len>, 8` for the element bytes");
+    let mul_dst = mul.split(" = ").next().expect("the mul has a destination");
+    assert!(
+        body.iter()
+            .any(|l| l.contains(" = add i64 ") && l.contains(mul_dst) && l.ends_with(", 8")),
+        "expected `add i64 {mul_dst}, 8` for the length header in:\n{ir}"
+    );
+    assert!(
+        body.iter().any(|l| l.contains("call ptr @nova_rt_alloc(")),
+        "expected the allocation call in:\n{ir}"
+    );
+    // The length is stored at offset 0, i.e. straight through the block pointer
+    // with no getelementptr.
+    assert!(
+        body.iter()
+            .any(|l| l.starts_with("store i64 ") && !l.contains("getelementptr")),
+        "expected the length store at offset 0 in:\n{ir}"
+    );
+    // The fill loop is lowered in MIR, so it reaches the backend as ordinary
+    // blocks and branches rather than anything array-specific.
+    assert!(
+        body.iter().any(|l| l.starts_with("br i1 ")),
+        "expected the fill loop's conditional branch in:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @nova_rt_panic_str("),
+        "expected the negative-length guard's panic call in:\n{ir}"
+    );
+    assert_well_formed(&ir);
+}
+
 #[test]
 fn panic_emits_declaration_and_call() {
     let ir = ir_for("fn main() { panic(\"boom\") }");

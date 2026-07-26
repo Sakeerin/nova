@@ -1,0 +1,29 @@
+fn main() {
+    let n = 4
+    let a = [7; n]
+    println("${a.len()}")
+    println("${a[0]} ${a[3]}")
+
+    let mut b = [0; n]
+    b[2] = 5
+    println("${b[1]} ${b[2]}")
+
+    // A zero length is valid and allocates an empty array.
+    let e = [1; 0]
+    println("empty: ${e.len()}")
+
+    // The filler may be a heap value.
+    let s = ["hi"; 2]
+    println("${s[0]} ${s[1]}")
+
+    // A repeat array inside a generic function, monomorphized per element
+    // type — this is what a growable collection allocates with.
+    let g = filled(9, 3)
+    println("generic: ${g.len()} ${g[2]}")
+    let gs = filled("hi", 2)
+    println("generic: ${gs.len()} ${gs[1]}")
+}
+
+fn filled<T>(x: T, n: Int) -> [T] {
+    [x; n]
+}

@@ -2001,6 +2001,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ast::Expr::Array(elems) => self.check_array_literal(fcx, elems, span),
+            ast::Expr::ArrayRepeat { init, len } => self.check_array_repeat(fcx, init, len, span),
             ast::Expr::Index { target, index } => self.check_index(fcx, target, index, span),
             // --- deferred constructs ---
             ast::Expr::Tuple(_) => self.unsupported_expr(span, "tuple expressions"),
@@ -2692,6 +2693,30 @@ impl<'a> Checker<'a> {
         }
         hir::Expr {
             kind: hir::ExprKind::MakeArray { elems: checked },
+            ty: Ty::Array(Box::new(elem_ty)),
+            span,
+        }
+    }
+
+    /// `[init; n]` — an array of `n` copies of `init`. The element type comes
+    /// from `init` (so no `Default` bound is needed and a fresh array is never
+    /// uninitialized), and `n` must be an `Int` evaluated at runtime.
+    fn check_array_repeat(
+        &mut self,
+        fcx: &mut FnCtx,
+        init: &Spanned<ast::Expr>,
+        len: &Spanned<ast::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        let init_hir = self.check_expr(fcx, init);
+        let len_hir = self.check_expr(fcx, len);
+        self.expect_ty(fcx, &len_hir, &Ty::Int, "an array length");
+        let elem_ty = fcx.icx.apply(&init_hir.ty);
+        hir::Expr {
+            kind: hir::ExprKind::ArrayRepeat {
+                init: Box::new(init_hir),
+                len: Box::new(len_hir),
+            },
             ty: Ty::Array(Box::new(elem_ty)),
             span,
         }
@@ -5017,6 +5042,10 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
             out.push(target);
             out.push(value);
         }
+        K::ArrayRepeat { init, len } => {
+            out.push(init);
+            out.push(len);
+        }
         K::Index { target, index } => {
             out.push(target);
             out.push(index);
@@ -5096,6 +5125,10 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
         K::FieldSet { target, value, .. } => {
             out.push(target);
             out.push(value);
+        }
+        K::ArrayRepeat { init, len } => {
+            out.push(init);
+            out.push(len);
         }
         K::Index { target, index } => {
             out.push(target);
@@ -5332,6 +5365,10 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
             finalize_expr(target, icx, residual);
             finalize_expr(value, icx, residual);
         }
+        hir::ExprKind::ArrayRepeat { init, len } => {
+            finalize_expr(init, icx, residual);
+            finalize_expr(len, icx, residual);
+        }
         hir::ExprKind::Index { target, index } => {
             finalize_expr(target, icx, residual);
             finalize_expr(index, icx, residual);
@@ -5460,10 +5497,10 @@ mod tests {
             .collect()
     }
 
-    /// Every `FieldSet` in the named function, for tests that need to inspect
-    /// the store the checker actually built rather than trust the absence of
-    /// diagnostics.
-    fn field_sets_in<'m>(module: &'m hir::Module, fn_name: &str) -> Vec<&'m hir::Expr> {
+    /// Every expression in the named function's body, outermost first, for
+    /// tests that need to inspect what the checker actually built rather than
+    /// trust the absence of diagnostics.
+    fn exprs_in<'m>(module: &'m hir::Module, fn_name: &str) -> Vec<&'m hir::Expr> {
         fn walk<'e>(e: &'e hir::Expr, out: &mut Vec<&'e hir::Expr>) {
             out.push(e);
             for c in child_exprs(e) {
@@ -5478,6 +5515,13 @@ mod tests {
         let mut exprs = Vec::new();
         walk(&f.body, &mut exprs);
         exprs
+    }
+
+    /// Every `FieldSet` in the named function, for tests that need to inspect
+    /// the store the checker actually built rather than trust the absence of
+    /// diagnostics.
+    fn field_sets_in<'m>(module: &'m hir::Module, fn_name: &str) -> Vec<&'m hir::Expr> {
+        exprs_in(module, fn_name)
             .into_iter()
             .filter(|e| matches!(e.kind, hir::ExprKind::FieldSet { .. }))
             .collect()
@@ -6296,6 +6340,50 @@ mod tests {
     #[test]
     fn non_int_index_reports_e0010() {
         let r = check_src("fn main() { let xs = [1, 2]\n let y = xs[\"a\"] }");
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn repeat_array_typechecks_and_has_array_type() {
+        let r =
+            check_src("fn main() { let n = 3\n let a = [7; n]\n println(\"${a.len()} ${a[0]}\") }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // An empty diagnostic list alone is a weak assertion: `Ty::Error`
+        // unifies with anything, so a broken arm could report nothing and
+        // still have inferred a useless type. Pin what was actually built.
+        let repeat = exprs_in(&r.module, "main")
+            .into_iter()
+            .find(|e| matches!(e.kind, hir::ExprKind::ArrayRepeat { .. }))
+            .expect("the checker built an `ArrayRepeat`");
+        assert!(
+            matches!(&repeat.ty, Ty::Array(elem) if **elem == Ty::Int),
+            "`[7; n]` should have type `[Int]`, got {:?}",
+            repeat.ty
+        );
+    }
+
+    #[test]
+    fn repeat_array_elem_type_follows_the_init_expression() {
+        // The element type comes from `init`, so a heap filler yields
+        // `[String]` — and it must satisfy a `[String]` annotation.
+        let r = check_src(
+            "fn main() { let n = 2\n let a: [String] = [\"hi\"; n]\n println(\"${a[0]}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let repeat = exprs_in(&r.module, "main")
+            .into_iter()
+            .find(|e| matches!(e.kind, hir::ExprKind::ArrayRepeat { .. }))
+            .expect("the checker built an `ArrayRepeat`");
+        assert!(
+            matches!(&repeat.ty, Ty::Array(elem) if **elem == Ty::String),
+            "`[\"hi\"; n]` should have type `[String]`, got {:?}",
+            repeat.ty
+        );
+    }
+
+    #[test]
+    fn repeat_array_non_int_length_reports_e0010() {
+        let r = check_src("fn main() { let a = [7; \"three\"]\n println(\"${a[0]}\") }");
         assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
     }
 

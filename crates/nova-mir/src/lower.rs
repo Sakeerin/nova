@@ -351,6 +351,7 @@ impl<'a> Lowerer<'a> {
                 });
                 t
             }
+            K::ArrayRepeat { init, len } => self.lower_array_repeat(init, len),
             K::ArrayLen { target } => {
                 let arr = self.lower_expr(target);
                 let t = self.new_temp(MirTy::I64);
@@ -807,6 +808,115 @@ impl<'a> Lowerer<'a> {
 
         self.switch_to(join);
         result
+    }
+
+    /// `[init; n]` → allocate `n` slots, then fill every one with `init`.
+    ///
+    /// The fill loop is built here rather than in codegen, reusing the same
+    /// `new_block`/`terminate`/`switch_to` machinery as the `while` arm above,
+    /// so both backends need only the new `ArrayAlloc` statement and neither
+    /// grows a loop emitter:
+    ///
+    /// ```text
+    ///   guard:  neg = len < 0;  branch neg -> panic, alloc
+    ///   panic:  call nova_rt_panic_str("…");  trap
+    ///   alloc:  ArrayAlloc { dst: arr, len };  i = 0;  goto header
+    ///   header: more = i < len;  branch more -> body, exit
+    ///   body:   arr[i] = init;  i = i + 1;  goto header
+    ///   exit:   arr
+    /// ```
+    fn lower_array_repeat(&mut self, init: &hir::Expr, len: &hir::Expr) -> Temp {
+        let init_t = self.lower_expr(init);
+        let len_t = self.lower_expr(len);
+        let elem_ty = mir_ty(&init.ty);
+        let arr = self.new_temp(MirTy::Ptr);
+
+        // A negative length must never reach `ArrayAlloc`: `8 + 8*len` would be
+        // smaller than the 8-byte length header, and storing the length through
+        // it would corrupt the heap. Abort with a message rather than clamping
+        // to an empty array — a clamp would hide the mistake here and surface it
+        // later as a confusing out-of-bounds abort somewhere that looks fine.
+        // Same policy as the existing `check_bounds` on a bad index.
+        let zero = self.new_temp(MirTy::I64);
+        self.push(Stmt::ConstInt(zero, 0));
+        let negative = self.bin_i64(hir::BinOp::Lt, len_t, zero, MirTy::I8);
+        let panic_b = self.new_block();
+        let alloc_b = self.new_block();
+        self.terminate(Terminator::Branch {
+            cond: negative,
+            then_: panic_b,
+            else_: alloc_b,
+        });
+
+        self.switch_to(panic_b);
+        let msg = self.new_temp(MirTy::Ptr);
+        self.push(Stmt::ConstStr(
+            msg,
+            "array length must not be negative".to_string(),
+        ));
+        self.push(Stmt::CallRuntime {
+            dst: None,
+            func: RtFunc::Panic,
+            args: vec![msg],
+        });
+        // `nova_rt_panic_str` aborts, so control never returns here.
+        self.terminate(Terminator::Trap);
+
+        self.switch_to(alloc_b);
+        self.push(Stmt::ArrayAlloc {
+            dst: arr,
+            len: len_t,
+        });
+        // A unit element has no runtime representation, so there is nothing to
+        // store and the loop would spin to no effect. The allocation still
+        // carries the right length. Same rule as `MakeArray`/`IndexSet`.
+        if elem_ty == MirTy::Unit {
+            return arr;
+        }
+        let i = self.new_temp(MirTy::I64);
+        self.push(Stmt::ConstInt(i, 0));
+
+        let header = self.new_block();
+        let body_b = self.new_block();
+        let exit = self.new_block();
+        self.terminate(Terminator::Goto(header));
+
+        self.switch_to(header);
+        let more = self.bin_i64(hir::BinOp::Lt, i, len_t, MirTy::I8);
+        self.terminate(Terminator::Branch {
+            cond: more,
+            then_: body_b,
+            else_: exit,
+        });
+
+        self.switch_to(body_b);
+        self.push(Stmt::ArraySet {
+            arr,
+            index: i,
+            value: init_t,
+            ty: elem_ty,
+        });
+        let one = self.new_temp(MirTy::I64);
+        self.push(Stmt::ConstInt(one, 1));
+        let next = self.bin_i64(hir::BinOp::Add, i, one, MirTy::I64);
+        self.push(Stmt::Copy { dst: i, src: next });
+        self.terminate(Terminator::Goto(header));
+
+        self.switch_to(exit);
+        arr
+    }
+
+    /// An `Int`-class binary op on two temps, yielding a fresh temp of `result`.
+    fn bin_i64(&mut self, op: hir::BinOp, lhs: Temp, rhs: Temp, result: MirTy) -> Temp {
+        let dst = self.new_temp(result);
+        self.push(Stmt::Bin {
+            dst,
+            op,
+            class: OperandClass::Int,
+            lhs,
+            rhs,
+        });
+        dst
     }
 
     fn lower_match(&mut self, e: &hir::Expr, scrutinee: &hir::Expr, arms: &[hir::Arm]) -> Temp {

@@ -1566,14 +1566,35 @@ impl<'a> Parser<'a> {
                 Some(Spanned::new(Expr::Tuple(elems), start.merge(end)))
             }
 
-            // Array literal
+            // Array literal — either `[a, b, c]` or the repeat form `[init; n]`
             Token::LBracket => {
                 self.advance();
                 let mut elems = Vec::new();
+                let mut first = true;
                 while !self.check(&Token::RBracket) && !self.is_at_end() {
                     if let Some(e) = self.parse_expr(ctx) {
+                        // `[init; n]`: a `;` after the *first* element switches
+                        // to the repeat form, whose second operand is a length
+                        // rather than another element.
+                        if first && self.eat(&Token::Semicolon).is_some() {
+                            let len = self.parse_expr(ctx)?;
+                            self.expect(&Token::RBracket, "repeat array literal")?;
+                            let end = self
+                                .tokens
+                                .get(self.pos.saturating_sub(1))
+                                .map(|s| s.span)
+                                .unwrap_or(start);
+                            return Some(Spanned::new(
+                                Expr::ArrayRepeat {
+                                    init: Box::new(e),
+                                    len: Box::new(len),
+                                },
+                                start.merge(end),
+                            ));
+                        }
                         elems.push(e);
                     }
+                    first = false;
                     if self.eat(&Token::Comma).is_none() {
                         break;
                     }

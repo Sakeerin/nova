@@ -701,6 +701,14 @@ pub enum ExprKind {
     MakeArray {
         elems: Vec<Expr>,
     },
+    /// `[init; len]` — a heap array of `len` copies of `init`, where `len` is a
+    /// runtime `Int`. Unlike `MakeArray` the element count is not known
+    /// statically, so MIR lowering allocates and then fills with a loop. The
+    /// expression's `ty` is the `Array(elem)` type.
+    ArrayRepeat {
+        init: Box<Expr>,
+        len: Box<Expr>,
+    },
     /// Read `target[index]` (bounds-checked). `target` is an array.
     Index {
         target: Box<Expr>,

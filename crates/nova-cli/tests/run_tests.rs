@@ -147,6 +147,58 @@ fn array_out_of_bounds_aborts() {
 }
 
 #[test]
+fn array_repeat_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/array_repeat.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/array_repeat.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn array_repeat_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/array_repeat.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/array_repeat.nova", "array_repeat");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// A negative repeat length is guarded, not clamped: `[x; -1]` aborts at the
+/// allocation with a message naming the problem, rather than silently yielding
+/// an empty array whose first index then fails somewhere that looks fine.
+/// Mirrors `array_out_of_bounds_aborts`, the same abort-on-bad-input policy.
+#[test]
+fn repeat_array_negative_length_aborts() {
+    let dir = std::env::temp_dir().join("nova-neg-len");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("neg_len.nova");
+    std::fs::write(
+        &file,
+        "fn main() { let n = 0 - 1\n let a = [7; n]\n println(\"${a.len()}\") }",
+    )
+    .expect("write");
+    let exe = dir.join(format!("neg_len{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe).assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("array length must not be negative"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn constants_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/constants.stdout"))
         .expect("expected-output fixture exists")

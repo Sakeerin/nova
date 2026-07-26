@@ -257,6 +257,25 @@ impl Display for Point {
     assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
 }
 
+#[test]
+fn parses_repeat_array_literal() {
+    // `[init; n]` — an array of `n` copies of `init`, `n` evaluated at runtime.
+    let (ok, errs) = parse_file("repeat", "fn main() { let n = 3\n let a = [0; n] }\n");
+    assert!(ok, "`[0; n]` should parse");
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+}
+
+#[test]
+fn plain_and_empty_array_literals_still_parse() {
+    // The repeat form must not disturb the comma-separated and empty forms.
+    let (ok, errs) = parse_file(
+        "arrays",
+        "fn main() { let a = [1, 2, 3]\n let e = []\n let t = [1,] }\n",
+    );
+    assert!(ok, "plain array literals should parse");
+    assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
+}
+
 // Property test: parse never panics
 #[cfg(test)]
 mod prop {

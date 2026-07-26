@@ -11,6 +11,11 @@ pub enum Expr {
     Path(Path),
     Tuple(Vec<Spanned<Expr>>),
     Array(Vec<Spanned<Expr>>),
+    /// `[init; n]` — an array of `n` copies of `init`, `n` evaluated at runtime.
+    ArrayRepeat {
+        init: Box<Spanned<Expr>>,
+        len: Box<Spanned<Expr>>,
+    },
     Block(Block),
 
     If {

@@ -608,6 +608,68 @@ fn arrays_lower_with_bounds_check() {
 }
 
 #[test]
+fn repeat_array_lowers_to_alloc_plus_fill_loop() {
+    use nova_mir::{RtFunc, Stmt};
+    let mir = mir_for("fn main() { let n = 3\n let a = [7; n]\n println(\"${a[0]}\") }");
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main exists");
+    let stmts: Vec<&Stmt> = main.blocks.iter().flat_map(|b| b.stmts.iter()).collect();
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::ArrayAlloc { .. })),
+        "expected an ArrayAlloc"
+    );
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::ArraySet { .. })),
+        "expected the fill loop's ArraySet"
+    );
+    // The fill loop needs more than one block, unlike a static array literal.
+    assert!(
+        main.blocks.len() > 1,
+        "expected a loop, got {} block(s)",
+        main.blocks.len()
+    );
+    // A negative length is guarded, not clamped: the lowering emits a
+    // comparison and a `panic` call it can branch to, so `[x; -1]` aborts at
+    // the allocation rather than silently producing an empty array.
+    assert!(
+        stmts.iter().any(|s| matches!(
+            s,
+            Stmt::CallRuntime {
+                func: RtFunc::Panic,
+                ..
+            }
+        )),
+        "expected the negative-length guard's panic call"
+    );
+}
+
+#[test]
+fn static_array_literal_still_lowers_without_a_loop() {
+    // The repeat form's fill loop must not leak into the static literal path:
+    // `[1, 2, 3]` stays a single `MakeArray` in one block.
+    use nova_mir::Stmt;
+    let mir = mir_for("fn main() { let a = [1, 2, 3]\n println(\"${a[0]}\") }");
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main exists");
+    let stmts: Vec<&Stmt> = main.blocks.iter().flat_map(|b| b.stmts.iter()).collect();
+    assert!(
+        stmts.iter().any(|s| matches!(s, Stmt::MakeArray { .. })),
+        "expected a MakeArray"
+    );
+    assert!(
+        !stmts.iter().any(|s| matches!(s, Stmt::ArrayAlloc { .. })),
+        "a static literal should not use the runtime-length ArrayAlloc"
+    );
+    assert_eq!(main.blocks.len(), 1, "a static literal needs no branching");
+}
+
+#[test]
 fn break_and_continue_lower_to_gotos() {
     // A while loop with break and continue lowers without panicking and the
     // body contains the extra control flow.

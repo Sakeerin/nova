@@ -297,6 +297,10 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
         K::MakeArray { elems } => K::MakeArray {
             elems: elems.iter().map(|e| subst_expr(e, args)).collect(),
         },
+        K::ArrayRepeat { init, len } => K::ArrayRepeat {
+            init: Box::new(subst_expr(init, args)),
+            len: Box::new(subst_expr(len, args)),
+        },
         K::Index { target, index } => K::Index {
             target: Box::new(subst_expr(target, args)),
             index: Box::new(subst_expr(index, args)),

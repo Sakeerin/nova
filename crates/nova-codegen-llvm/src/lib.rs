@@ -535,6 +535,22 @@ impl<'a> FnEmit<'a> {
                 }
                 self.store(*dst, &ptr);
             }
+            Stmt::ArrayAlloc { dst, len } => {
+                // Same layout as `MakeArray`, but the element count is only
+                // known at runtime: `8 + 8*len` bytes with `len` at offset 0.
+                // The MIR lowering has already guaranteed `len >= 0`, and the
+                // allocator zeroes, so the elements start valid and are then
+                // filled by the lowering's own loop.
+                let n = self.load(*len);
+                let bytes = self.fresh();
+                self.line(format!("  {bytes} = mul i64 {n}, 8"));
+                let size = self.fresh();
+                self.line(format!("  {size} = add i64 {bytes}, 8"));
+                let ptr = self.fresh();
+                self.line(format!("  {ptr} = call ptr @nova_rt_alloc(i64 {size})"));
+                self.line(format!("  store i64 {n}, ptr {ptr}"));
+                self.store(*dst, &ptr);
+            }
             Stmt::ArrayLen { dst, arr } => {
                 let p = self.load(*arr);
                 let r = self.fresh();

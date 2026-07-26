@@ -340,6 +340,19 @@ pub enum Stmt {
         dst: Temp,
         elems: Vec<(Temp, MirTy)>,
     },
+    /// Allocate an array of `len` elements: `8 + 8*len` zeroed bytes with `len`
+    /// stored at offset 0. Elements are left zeroed — the lowering fills them
+    /// with its own loop (see `lower_array_repeat`), so neither backend needs a
+    /// loop emitter.
+    ///
+    /// `len` must be non-negative. The lowering guarantees that by emitting a
+    /// guard that aborts first, which is what keeps the allocation size and the
+    /// stored length in agreement — a negative `len` would compute a block
+    /// smaller than the 8-byte length header and then store through it.
+    ArrayAlloc {
+        dst: Temp,
+        len: Temp,
+    },
     /// Load the length (element count) of an array.
     ArrayLen {
         dst: Temp,
