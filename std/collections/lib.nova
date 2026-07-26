@@ -1,0 +1,11 @@
+// Nova standard library — collections.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import`. A user definition of the same name shadows the
+// one here (see docs/adr/0004-stdlib-compile-model.md).
+//
+// `Vec` grows by allocating a larger `[T]` and reassigning the field: the record
+// object's address never changes and the array's only referent is that field, so
+// the conservative non-moving collector needs no special handling.
+
+pub record Vec<T> { len: Int, data: [T] }

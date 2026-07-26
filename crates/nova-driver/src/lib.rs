@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use nova_codegen_cranelift::CompiledProgram;
-use nova_diagnostics::{render, Diagnostic, FileDb, Severity};
+use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity};
 use nova_resolver::ModuleSource;
 
 /// Outcome of a pipeline invocation that may fail with user errors.
@@ -299,12 +299,18 @@ impl FrontendContext {
         if self.errors > 0 {
             return Ok(None);
         }
-        // Register the embedded `std/core` source in the `FileDb` so a syntax
-        // error inside it (a compiler bug, since it ships with the compiler)
-        // is reported against a real, named file instead of `FileId::DUMMY`.
-        let std_core_file = self
-            .db
-            .add("<std/core>".to_string(), nova_resolver::STD_CORE_SRC);
+        // Register each embedded std module's source in the `FileDb` so a
+        // syntax error inside one (a compiler bug, since they ship with the
+        // compiler) is reported against a real, named file instead of
+        // `FileId::DUMMY`. One id per `nova_resolver::STD_MODULES` entry, in
+        // order — e.g. `$std.core` names `<std/core>`.
+        let std_files: Vec<FileId> = nova_resolver::STD_MODULES
+            .iter()
+            .map(|&(name, src)| {
+                let short = name.strip_prefix("$std.").unwrap_or(name);
+                self.db.add(format!("<std/{short}>"), src)
+            })
+            .collect();
         let sources: Vec<ModuleSource> = modules
             .iter()
             .map(|(name, file)| ModuleSource {
@@ -312,7 +318,7 @@ impl FrontendContext {
                 file,
             })
             .collect();
-        let resolved = nova_resolver::resolve_program(&sources, std_core_file);
+        let resolved = nova_resolver::resolve_program(&sources, &std_files);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {
             return Ok(None);

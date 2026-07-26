@@ -42,8 +42,8 @@ pub enum Builtin {
     /// `Ty::String`, then MIR's `lower_binary` intercepts it) that introduces
     /// no name in any namespace, whereas `str_cmp` is a named function.
     /// Unlike `println`/`print`/`panic`, `str_cmp` is *not* part of the
-    /// user-visible language surface: it is seeded only into `std/core`'s own
-    /// module scope (see [`Builtin::STD_CORE_ONLY`]), so it never becomes a
+    /// user-visible language surface: it is seeded only into std modules' own
+    /// scopes (see [`Builtin::STD_CORE_ONLY`]), so it never becomes a
     /// reserved word in user code.
     StrCmp,
 }
@@ -63,12 +63,13 @@ impl Builtin {
     /// user-visible language surface, and reserved words everywhere.
     pub const GLOBAL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
 
-    /// Builtins injected only into `std/core`'s own module scope. These are
-    /// implementation details of `std/core`, not user-visible language
-    /// surface: reserving one of these names in *every* module (as
-    /// [`Builtin::GLOBAL`] does) would silently and permanently take the name
-    /// away from user code, just to serve a single `std/core` method.
-    /// Currently just `str_cmp`, which backs `impl Ord for String`.
+    /// Builtins injected only into an std module's own scope (any module in
+    /// [`STD_MODULES`], not only `std/core`). These are implementation
+    /// details of the standard library, not user-visible language surface:
+    /// reserving one of these names in *every* module (as [`Builtin::GLOBAL`]
+    /// does) would silently and permanently take the name away from user
+    /// code, just to serve a single std method. Currently just `str_cmp`,
+    /// which backs `std/core`'s `impl Ord for String`.
     pub const STD_CORE_ONLY: [Builtin; 1] = [Builtin::StrCmp];
 }
 
@@ -311,7 +312,11 @@ pub fn resolve(file: &File) -> ResolveResult {
         name: "main".to_string(),
         file,
     }];
-    let prog = resolve_program(&sources, FileId::DUMMY);
+    // No `FileDb` to register the embedded std modules into here, so every
+    // one of them gets the same `FileId::DUMMY` sentinel used throughout the
+    // test suite — one per `STD_MODULES` entry, in order.
+    let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+    let prog = resolve_program(&sources, &std_files);
     ResolveResult {
         definitions: prog.definitions,
         file: prog.file,
@@ -323,49 +328,76 @@ pub fn resolve(file: &File) -> ResolveResult {
 /// enforce `pub` visibility across modules, wire up `import`s, and merge all
 /// items into one file for whole-program compilation downstream.
 ///
-/// `std_core_file` is the [`FileId`] the caller registered [`STD_CORE_SRC`]
-/// under. Only the driver owns a `FileDb`, so the id cannot be invented here;
-/// threading it through means a syntax error in `std/core` is reported
+/// `std_files` are the [`FileId`]s the caller registered each of
+/// [`STD_MODULES`]'s sources under, one per entry, in the same order. Only the
+/// driver owns a `FileDb`, so the ids cannot be invented here; threading them
+/// through means a syntax error inside an embedded std module is reported
 /// against a real file instead of [`FileId::DUMMY`]. The single-module
-/// [`resolve`] wrapper passes `FileId::DUMMY` since it has no `FileDb` to
-/// register into.
+/// [`resolve`] wrapper passes `FileId::DUMMY` for each, since it has no
+/// `FileDb` to register into. Entries beyond `std_files`'s length are simply
+/// not compiled in (the driver always supplies one id per `STD_MODULES`
+/// entry, so this is not expected to happen).
 ///
 /// `item_index`es in the returned [`ProgramResolution::file`] are global
-/// (module items concatenated in `modules` order, plus the implicit
-/// `std/core` module last).
-pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> ProgramResolution {
+/// (module items concatenated in `modules` order, plus the implicit std
+/// modules last, in [`STD_MODULES`] order).
+pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
 
-    // Compile the implicit `std/core` module so `Option`/`Result` and their
-    // variants get real DefIds and sum layouts (and are then glob-imported
-    // into every module below). It goes *last* so user modules keep their
-    // indices — module 0 stays the first user module. `std/core` ships with
-    // the compiler, so a parse failure here is a compiler bug — but it is
-    // reported against a real file so it is debuggable, and `None` means the
-    // implicit module is skipped entirely rather than silently empty.
-    let (std_core, std_core_diags) = std_core_module(std_core_file);
-    diagnostics.extend(std_core_diags);
+    // Compile each implicit std module (in `STD_MODULES` order) so their
+    // public types/traits/values get real DefIds and layouts (and are then
+    // glob-imported into every other module below). Each ships with the
+    // compiler, so a parse failure here is a compiler bug — but it is
+    // reported against a real file so it is debuggable, and a module that
+    // fails to parse outright is skipped entirely (`None`) rather than
+    // silently merged in as empty.
+    let std_modules: Vec<Option<File>> = STD_MODULES
+        .iter()
+        .zip(std_files.iter())
+        .map(|((_, src), &file_id)| {
+            let (ast, diags) = std_module(src, file_id);
+            diagnostics.extend(diags);
+            ast
+        })
+        .collect();
+
+    // They go *after* all user modules, so user module indices are
+    // unaffected — module 0 stays the first user module.
+    let user_count = modules.len();
     let all: Vec<ModuleSource> = modules
         .iter()
         .map(|m| ModuleSource {
             name: m.name.clone(),
             file: m.file,
         })
-        .chain(std_core.iter().map(|file| ModuleSource {
-            name: STD_CORE_NAME.to_string(),
-            file,
-        }))
+        .chain(
+            STD_MODULES
+                .iter()
+                .zip(std_modules.iter())
+                .filter_map(|((name, _), file)| {
+                    file.as_ref().map(|file| ModuleSource {
+                        name: (*name).to_string(),
+                        file,
+                    })
+                }),
+        )
         .collect();
-    let std_core_mid = std_core.is_some().then(|| all.len() - 1);
+
+    // The std modules that parsed successfully are exactly the contiguous
+    // range after the user modules — nothing else is appended after them —
+    // so "is `mid` *a* std module" (rather than checking against one stored
+    // "the std module" index) is this one range check.
+    let std_start = user_count;
+    let is_std_module = |mid: usize| mid >= std_start;
 
     let mut exports: Vec<Exports> = Vec::new();
 
     // A scope per module, seeded with the compiler builtins. `Builtin::GLOBAL`
     // goes into every module; `Builtin::STD_CORE_ONLY` (currently `str_cmp`)
-    // goes only into std/core's own module, so it never becomes a reserved
-    // word in user code (see the `Builtin` doc comments).
+    // goes only into an std module's own scope, so it never becomes a
+    // reserved word in user code (see the `Builtin` doc comments).
     for (mid, m) in all.iter().enumerate() {
         let mut scope = ModuleScope {
             name: m.name.clone(),
@@ -374,7 +406,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> Progr
         for b in Builtin::GLOBAL {
             scope.values.insert(b.name().to_string(), Res::Builtin(b));
         }
-        if Some(mid) == std_core_mid {
+        if is_std_module(mid) {
             for b in Builtin::STD_CORE_ONLY {
                 scope.values.insert(b.name().to_string(), Res::Builtin(b));
             }
@@ -425,12 +457,16 @@ pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> Progr
         }
     }
 
-    // Glob `std/core`'s public names into every user module — LAST, so it is
-    // the lowest-priority binding: a name the module already defines or imports
-    // wins (no conflict), and only otherwise-unbound names fall through to
-    // `std/core`. A program may thus define or import its own `Option`/`Result`.
-    if let Some(mid) = std_core_mid {
-        import_std_core(&mut definitions, &exports[mid], mid);
+    // Glob each std module's public names into every *other* module — LAST,
+    // so it is the lowest-priority binding: a name the module already defines
+    // or imports wins (no conflict), and only otherwise-unbound names fall
+    // through to a std module. A program may thus define or import its own
+    // `Option`/`Result`/`Vec`. This also runs std-into-std — std/core's
+    // exports glob into std/collections's scope exactly as they would into a
+    // user module's, which is what lets std/collections use
+    // `Option`/`Some`/`None` with no `import` of its own.
+    for (mid, std_exports) in exports.iter().enumerate().skip(std_start) {
+        import_std_module(&mut definitions, std_exports, mid);
     }
 
     ProgramResolution {
@@ -440,21 +476,30 @@ pub fn resolve_program(modules: &[ModuleSource], std_core_file: FileId) -> Progr
     }
 }
 
-/// The `std/core` source, compiled as an implicit module. Embedded at build
-/// time so the compiler is self-contained; the path is relative to this file.
-pub const STD_CORE_SRC: &str = include_str!("../../../std/core/lib.nova");
+/// The embedded standard-library modules, compiled as implicit modules and
+/// glob-imported into every user module. Order is significant only in that it
+/// fixes module indices; user modules always come first, then these in the
+/// order listed here — `std/core` stays first so its module index is
+/// unchanged from when it was the only embedded module. Each is embedded at
+/// build time (`include_str!`, paths relative to this file) so the compiler
+/// stays a single self-contained executable. Each name is `$std.*`, not a
+/// valid identifier, so it can never collide with a user module name or be
+/// named in an `import`.
+pub const STD_MODULES: [(&str, &str); 2] = [
+    ("$std.core", include_str!("../../../std/core/lib.nova")),
+    (
+        "$std.collections",
+        include_str!("../../../std/collections/lib.nova"),
+    ),
+];
 
-/// Module name of the implicit `std/core`. Not a valid identifier, so it can
-/// never collide with a user module or be named in an `import`.
-const STD_CORE_NAME: &str = "$std.core";
-
-/// Lex and parse the implicit `std/core` module. Its source ships with the
-/// compiler, so any failure is a compiler bug — but it is reported against
-/// `file_id` so it is debuggable rather than silently dropped. Returns `None`
-/// when parsing fails outright (nothing to merge in as a module); the caller
-/// still gets the diagnostics either way.
-fn std_core_module(file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
-    let (tokens, lex_errors) = nova_lexer::lex(STD_CORE_SRC, file_id);
+/// Lex and parse one embedded std module. Its source ships with the compiler,
+/// so any failure is a compiler bug — but it is reported against `file_id` so
+/// it is debuggable rather than silently dropped. Returns `None` when parsing
+/// fails outright (nothing to merge in as a module); the caller still gets
+/// the diagnostics either way.
+fn std_module(src: &str, file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
+    let (tokens, lex_errors) = nova_lexer::lex(src, file_id);
     let mut diags: Vec<Diagnostic> = lex_errors
         .iter()
         .map(|e| Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here"))
@@ -468,27 +513,30 @@ fn std_core_module(file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
     (ast, diags)
 }
 
-/// Bind `std/core`'s public names into every other module's scope, leaving
-/// any name the module already defines untouched (user items shadow
-/// `std/core`).
-fn import_std_core(definitions: &mut Definitions, std_core_exports: &Exports, std_core_mid: usize) {
-    let values: Vec<(String, Res)> = std_core_exports
+/// Bind one std module's public names into every *other* module's scope,
+/// leaving any name a module already defines or imports untouched (a user —
+/// or another std module's own — item shadows a std one). Called once per
+/// entry in [`STD_MODULES`], so this also runs std-into-std (e.g. std/core's
+/// `Option` into std/collections's scope), which is what lets std/collections
+/// use `Option`/`Some`/`None` with no `import` of its own.
+fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_mid: usize) {
+    let values: Vec<(String, Res)> = std_exports
         .values
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    let types: Vec<(String, DefId)> = std_core_exports
+    let types: Vec<(String, DefId)> = std_exports
         .types
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    let traits: Vec<(String, DefId)> = std_core_exports
+    let traits: Vec<(String, DefId)> = std_exports
         .traits
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     for mid in 0..definitions.modules.len() {
-        if mid == std_core_mid {
+        if mid == std_mid {
             continue;
         }
         let scope = &mut definitions.modules[mid];
@@ -1050,7 +1098,8 @@ mod tests {
                 file: &lib,
             },
         ];
-        resolve_program(&sources, FileId::DUMMY)
+        let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+        resolve_program(&sources, &std_files)
     }
 
     fn error_codes(diags: &[Diagnostic]) -> Vec<&str> {
@@ -1196,7 +1245,7 @@ mod tests {
         // The trait-namespace analogue of `user_type_shadows_std_core`: a
         // user-defined `Display` shadows std/core's without an E0002 clash,
         // the module's own trait winning over the soft std/core import. Pins
-        // the `or_insert`-vs-`insert` precedence `import_std_core`'s `traits`
+        // the `or_insert`-vs-`insert` precedence `import_std_module`'s `traits`
         // loop relies on (mirrored from the pre-existing `values`/`types`
         // loops) — the easiest part of that fix to accidentally break later,
         // since nothing else in this file failed the way it would if this
@@ -1261,7 +1310,7 @@ mod tests {
 
     #[test]
     fn std_core_traits_are_visible_from_a_user_module() {
-        // Regression test for a gap `import_std_core` had: it merged `values`
+        // Regression test for a gap `import_std_module` had: it merged `values`
         // and `types` from std/core's exports into every other module's scope,
         // but not `traits`, so a trait declared in std/core (e.g. `Display`,
         // `Eq`, `Ord`) could never be named from user code even though its
@@ -1275,6 +1324,17 @@ mod tests {
                 "expected std/core's `{name}` trait to resolve from module 0"
             );
         }
+    }
+
+    #[test]
+    fn std_collections_module_is_compiled_and_visible() {
+        // A name defined in std/collections must resolve from a user module,
+        // exactly as std/core's names do.
+        let r = resolve_src("fn main() { }");
+        assert!(
+            r.definitions.resolve_type(ModuleId(0), "Vec").is_some(),
+            "Vec should be visible from a user module"
+        );
     }
 
     #[test]
