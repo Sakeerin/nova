@@ -63,6 +63,23 @@ fn main() {
     println("")
     println("buckets reached ${used} of 8 (identity hashing would reach 1)")
 
+    // CANONICAL VECTORS. `mix64` is the splitmix64 finalizer, which has
+    // published test vectors: splitmix64 seeded at 0 emits the finalizer
+    // applied to successive multiples of the gamma constant
+    // 0x9E3779B97F4A7C15. Two of those pairs pin all three of `mix64`'s shift
+    // masks at once — which nothing else in this fixture does, see the scope
+    // note on the complement pairs below.
+    //
+    //   x1 = 0x9E3779B97F4A7C15 -> 0xE220A8397B1DCDAF   pins masks 1 and 3
+    //   x3 = 0xDAA66D2C7DDF743F -> 0x06C45D188009454F   pins masks 1 and 2
+    //
+    // Each is blind to one mask because the shift that mask covers happens not
+    // to sign-extend for that input (x1's stage-2 input is non-negative, x3's
+    // stage-3 input is), so both are needed. Written as signed decimals
+    // because `Int` has no unsigned literals and the lexer's hex path parses
+    // as i64, so `0x9e37…` does not lex.
+    println("splitmix64 canonical x1=${(-7046029254386353131).hash() == -2152535657050944081} x3=${(-2691343689449507777).hash() == 487617019471545679}")
+
     // COMPLEMENT PAIRS. This is the regression that matters most, and the one
     // every histogram above is blind to because they all sample a single sign.
     // Nova's `>>` is arithmetic, and arithmetic shift commutes with complement,
@@ -70,8 +87,20 @@ fn main() {
     // `!x == -1 - x`. Every later stage is a function of that, so an unmasked
     // mix64 folded 2-to-1: `mix64(x) == mix64(-1 - x)` *identically*, meaning
     // each pair shares a bucket at every capacity and no resize can separate
-    // them. `mix64`'s shift masks are what stop this; these lines fail loudly
-    // if a mask is ever dropped.
+    // them.
+    //
+    // Scope, because this is easy to overstate: the two lines below pin the
+    // FIRST mask, `(x >> 30) & 17179869183` — the only one whose absence makes
+    // stage 1 itself 2-to-1 under `x <-> !x`. They are blind to the other two.
+    // Masking a shift by `k` alters only bits at positions >= 64 - k, and a
+    // multiply carries low bits upward, never high bits down, so dropping the
+    // third mask cannot move `hash & 255` at all; dropping the second leaves
+    // stage 1 intact, so complement pairs no longer collide. What does catch
+    // those two: without the second mask the both-signs bucket count below
+    // moves 100 -> 107, and without the third the negative-hash count moves
+    // 132 -> 0 (an unmasked final shift makes every hash non-negative, since
+    // the sign bit XORs with its own copy). Those two plus the canonical
+    // vectors above cover all three masks; these two lines alone do not.
     println("h(0) != h(-1): ${(0).hash() != (-1).hash()}")
     let mut folded = 0
     let mut p = 0
