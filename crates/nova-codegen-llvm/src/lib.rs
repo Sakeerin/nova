@@ -504,6 +504,22 @@ impl<'a> FnEmit<'a> {
                 self.line(format!("  {r} = load {}, ptr {addr}", llty(*ty)));
                 self.store(*dst, &r);
             }
+            Stmt::SetField {
+                record,
+                index,
+                value,
+                ty,
+            } => {
+                // A unit-typed field has no machine representation to store.
+                if *ty == MirTy::Unit {
+                    return Ok(());
+                }
+                let v = self.load(*value);
+                let p = self.load(*record);
+                // The same `8 * index` offset `RecordField` loads from.
+                let addr = self.gep_byte(&p, (8 * index) as i64);
+                self.line(format!("  store {} {v}, ptr {addr}", llty(*ty)));
+            }
             Stmt::MakeArray { dst, elems } => {
                 let size = 8 + 8 * elems.len();
                 let ptr = self.fresh();

@@ -682,6 +682,24 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                     .load(cl_ty, MemFlags::trusted(), ptr, offset);
                 self.def_temp(*dst, v);
             }
+            Stmt::SetField {
+                record,
+                index,
+                value,
+                ty,
+            } => {
+                // A unit-typed field has no machine representation to store.
+                if self.cg.cl_ty(*ty).is_none() {
+                    return Ok(());
+                }
+                let ptr = self.use_temp(*record)?;
+                let v = self.use_temp(*value)?;
+                // The same `8 * index` offset `RecordField` loads from.
+                let offset = (8 * index) as i32;
+                self.builder
+                    .ins()
+                    .store(MemFlags::trusted(), v, ptr, offset);
+            }
             Stmt::MakeArray { dst, elems } => {
                 // Layout: { len: i64, elem0, elem1, ... } with 8-byte slots.
                 let size = (8 + 8 * elems.len()) as i64;

@@ -285,6 +285,15 @@ fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
             target: Box::new(subst_expr(target, args)),
             index: *index,
         },
+        K::FieldSet {
+            target,
+            index,
+            value,
+        } => K::FieldSet {
+            target: Box::new(subst_expr(target, args)),
+            index: *index,
+            value: Box::new(subst_expr(value, args)),
+        },
         K::MakeArray { elems } => K::MakeArray {
             elems: elems.iter().map(|e| subst_expr(e, args)).collect(),
         },

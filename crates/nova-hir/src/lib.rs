@@ -688,6 +688,14 @@ pub enum ExprKind {
         target: Box<Expr>,
         index: u32,
     },
+    /// Store `record.field = value`. `index` is the field's position, so the
+    /// store offset is `8 * index` — the same layout `FieldGet` reads.
+    /// Unit-typed.
+    FieldSet {
+        target: Box<Expr>,
+        index: u32,
+        value: Box<Expr>,
+    },
     /// Construct a heap array `{ len, elems... }`; the expression's `ty`
     /// is the `Array(elem)` type.
     MakeArray {

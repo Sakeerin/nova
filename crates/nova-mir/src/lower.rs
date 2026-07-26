@@ -313,6 +313,29 @@ impl<'a> Lowerer<'a> {
                 });
                 t
             }
+            K::FieldSet {
+                target,
+                index,
+                value,
+            } => {
+                // Left-to-right, as `IndexSet` does: the record expression is
+                // evaluated before the value expression.
+                let record = self.lower_expr(target);
+                let v = self.lower_expr(value);
+                let ty = mir_ty(&value.ty);
+                // A unit-typed field has no runtime representation, so there is
+                // nothing to store — but the value still had to be evaluated
+                // for its side effects. Same rule as `IndexSet`/`FieldGet`.
+                if ty != MirTy::Unit {
+                    self.push(Stmt::SetField {
+                        record,
+                        index: *index,
+                        value: v,
+                        ty,
+                    });
+                }
+                self.unit_temp()
+            }
             K::MakeArray { elems } => {
                 let lowered: Vec<(Temp, MirTy)> = elems
                     .iter()

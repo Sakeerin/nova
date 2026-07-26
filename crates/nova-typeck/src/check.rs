@@ -3254,49 +3254,68 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let recv = self.check_expr(fcx, target);
-        match fcx.icx.apply(&recv.ty) {
-            Ty::Record { def_id, args } => {
-                let record = self
-                    .records
-                    .iter()
-                    .find(|r| r.def_id == def_id)
-                    .expect("record type resolves to a record def");
-                match record.fields.iter().position(|f| f.name == field.value) {
-                    Some(idx) => {
-                        let field_ty = record.fields[idx].ty.subst(&args);
-                        hir::Expr {
-                            kind: hir::ExprKind::FieldGet {
-                                target: Box::new(recv),
-                                index: idx as u32,
-                            },
-                            ty: field_ty,
-                            span,
-                        }
-                    }
-                    None => {
-                        self.error(
-                            "E0014",
-                            format!("no field `{}` on record `{}`", field.value, record.name),
-                            field.span,
-                        );
-                        error_expr(span)
-                    }
-                }
-            }
-            Ty::Error => error_expr(span),
-            other => {
-                self.error(
-                    "E0014",
-                    format!(
-                        "cannot access field `{}` on `{}`",
-                        field.value,
-                        self.show(&other, fcx)
-                    ),
-                    field.span,
-                );
-                error_expr(span)
-            }
+        let recv_ty = fcx.icx.apply(&recv.ty);
+        if let Some((index, field_ty)) = self.record_field_index_and_ty(fcx, &recv_ty, &field.value)
+        {
+            return hir::Expr {
+                kind: hir::ExprKind::FieldGet {
+                    target: Box::new(recv),
+                    index,
+                },
+                ty: field_ty,
+                span,
+            };
         }
+        // A broken receiver already reported its own error; another one here
+        // would just cascade.
+        if matches!(recv_ty, Ty::Error) {
+            return error_expr(span);
+        }
+        // Name the record when the receiver is one, otherwise describe the type.
+        let record_name = match &recv_ty {
+            Ty::Record { def_id, .. } => self
+                .records
+                .iter()
+                .find(|r| r.def_id == *def_id)
+                .map(|r| r.name.clone()),
+            _ => None,
+        };
+        let message = match record_name {
+            Some(record_name) => {
+                format!("no field `{}` on record `{record_name}`", field.value)
+            }
+            None => format!(
+                "cannot access field `{}` on `{}`",
+                field.value,
+                self.show(&recv_ty, fcx)
+            ),
+        };
+        self.error("E0014", message, field.span);
+        error_expr(span)
+    }
+
+    /// Resolve a field name on a record type to its `(index, substituted type)`.
+    /// Shared by the field read and field write paths so they cannot disagree
+    /// about layout or generic substitution.
+    ///
+    /// Emits no diagnostics: a `None` means "no such field on this type", and
+    /// each caller phrases that in its own terms.
+    fn record_field_index_and_ty(
+        &mut self,
+        fcx: &mut FnCtx,
+        recv_ty: &Ty,
+        field: &str,
+    ) -> Option<(u32, Ty)> {
+        let Ty::Record { def_id, args } = fcx.icx.apply(recv_ty) else {
+            return None;
+        };
+        let record = self.records.iter().find(|r| r.def_id == def_id)?;
+        let index = record.fields.iter().position(|f| f.name == field)?;
+        // The field's declared type is written in terms of the record's own
+        // type parameters, so it must be substituted with this instantiation's
+        // arguments before it means anything to the caller.
+        let field_ty = record.fields.get(index)?.ty.subst(&args);
+        Some((index as u32, field_ty))
     }
 
     /// Resolve a method `name` on a receiver of (resolved) type `recv_ty`,
@@ -4061,6 +4080,10 @@ impl<'a> Checker<'a> {
         if let ast::Expr::Index { target, index } = &lhs.value {
             return self.check_index_set(fcx, op, target, index, rhs, span);
         }
+        // Field assignment `rec.field = v`.
+        if let ast::Expr::Field { target, field } = &lhs.value {
+            return self.check_field_set(fcx, op, target, field, rhs, span);
+        }
         let ast::Expr::Path(path) = &lhs.value else {
             self.unsupported(
                 lhs.span,
@@ -4237,6 +4260,93 @@ impl<'a> Checker<'a> {
             kind: hir::ExprKind::IndexSet {
                 target: Box::new(arr),
                 index: Box::new(idx),
+                value: Box::new(value),
+            },
+            ty: Ty::Unit,
+            span,
+        }
+    }
+
+    /// Check `target.field = value`.
+    fn check_field_set(
+        &mut self,
+        fcx: &mut FnCtx,
+        op: ast::AssignOp,
+        target: &Spanned<ast::Expr>,
+        field: &Spanned<String>,
+        rhs: &Spanned<ast::Expr>,
+        span: Span,
+    ) -> hir::Expr {
+        if !matches!(op, ast::AssignOp::Assign) {
+            self.unsupported(span, "compound assignment to a record field");
+            return error_expr(span);
+        }
+        // The record's storage must be reachable through a mutable binding.
+        // Walk the whole field/index chain to its root local — `rec.inner.f`
+        // and `make().f` both bypass a single-segment check. Records have no
+        // per-field `mut`, so mutability is a property of the binding.
+        match self.place_root(fcx, target) {
+            PlaceRoot::Mutable => {}
+            PlaceRoot::ImmutableLocal(name) => {
+                self.error(
+                    "E0060",
+                    format!("cannot assign to a field of immutable `{name}`"),
+                    span,
+                );
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(format!("declare it as `let mut {name}` to allow mutation"));
+            }
+            PlaceRoot::NotAPlace => {
+                self.error(
+                    "E0060",
+                    "cannot assign to a field of a temporary or non-assignable value".to_string(),
+                    span,
+                );
+            }
+        }
+        let rec = self.check_expr(fcx, target);
+        let recv_ty = fcx.icx.apply(&rec.ty);
+        // A broken receiver already reported its own error; another one here
+        // would just cascade, as it would on the read path.
+        if matches!(recv_ty, Ty::Error) {
+            return error_expr(span);
+        }
+        // Resolve the field to its index and declared type through the same
+        // lookup `FieldGet` uses for reads, so reads and writes cannot disagree
+        // about layout.
+        let Some((index, field_ty)) = self.record_field_index_and_ty(fcx, &recv_ty, &field.value)
+        else {
+            self.error(
+                "E0014",
+                format!(
+                    "no field `{}` on type `{}`",
+                    field.value,
+                    self.show(&recv_ty, fcx)
+                ),
+                field.span,
+            );
+            return error_expr(span);
+        };
+        let value = self.check_expr(fcx, rhs);
+        if !fcx.icx.unify(&value.ty, &field_ty) {
+            self.error(
+                "E0010",
+                format!(
+                    "field `{}` has type `{}` but `{}` was assigned",
+                    field.value,
+                    self.show(&field_ty, fcx),
+                    self.show(&value.ty, fcx),
+                ),
+                rhs.span,
+            );
+        }
+        hir::Expr {
+            kind: hir::ExprKind::FieldSet {
+                target: Box::new(rec),
+                index,
                 value: Box::new(value),
             },
             ty: Ty::Unit,
@@ -4827,6 +4937,10 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
         | K::MakeArray { elems: args }
         | K::StrConcat(args) => out.extend(args.iter()),
         K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
+        K::FieldSet { target, value, .. } => {
+            out.push(target);
+            out.push(value);
+        }
         K::Index { target, index } => {
             out.push(target);
             out.push(index);
@@ -4903,6 +5017,10 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
         | K::MakeArray { elems: args }
         | K::StrConcat(args) => out.extend(args.iter_mut()),
         K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
+        K::FieldSet { target, value, .. } => {
+            out.push(target);
+            out.push(value);
+        }
         K::Index { target, index } => {
             out.push(target);
             out.push(index);
@@ -5134,6 +5252,10 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         hir::ExprKind::FieldGet { target, .. } | hir::ExprKind::ArrayLen { target } => {
             finalize_expr(target, icx, residual);
         }
+        hir::ExprKind::FieldSet { target, value, .. } => {
+            finalize_expr(target, icx, residual);
+            finalize_expr(value, icx, residual);
+        }
         hir::ExprKind::Index { target, index } => {
             finalize_expr(target, icx, residual);
             finalize_expr(index, icx, residual);
@@ -5259,6 +5381,29 @@ mod tests {
             .iter()
             .filter(|d| d.severity == nova_diagnostics::Severity::Error)
             .map(|d| d.code.as_str())
+            .collect()
+    }
+
+    /// Every `FieldSet` in the named function, for tests that need to inspect
+    /// the store the checker actually built rather than trust the absence of
+    /// diagnostics.
+    fn field_sets_in<'m>(module: &'m hir::Module, fn_name: &str) -> Vec<&'m hir::Expr> {
+        fn walk<'e>(e: &'e hir::Expr, out: &mut Vec<&'e hir::Expr>) {
+            out.push(e);
+            for c in child_exprs(e) {
+                walk(c, out);
+            }
+        }
+        let f = module
+            .functions
+            .iter()
+            .find(|f| f.name == fn_name)
+            .expect("the named function exists");
+        let mut exprs = Vec::new();
+        walk(&f.body, &mut exprs);
+        exprs
+            .into_iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::FieldSet { .. }))
             .collect()
     }
 
@@ -6136,6 +6281,180 @@ mod tests {
     fn index_set_nested_mutable_ok() {
         let r = check_src("fn main() { let mut grid = [[1, 2], [3, 4]]\n grid[0][1] = 99 }");
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_typechecks() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.v = 7\n println(\"${p.v}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Absence of diagnostics alone is not enough: `error_expr` is silent and
+        // `Ty::Error` unifies with anything, so a store that never got built
+        // would still look clean here. Pin the node, its field index, and its
+        // unit type.
+        let sets = field_sets_in(&r.module, "main");
+        assert_eq!(sets.len(), 1, "exactly one FieldSet in `main`");
+        let hir::ExprKind::FieldSet { index, value, .. } = &sets[0].kind else {
+            unreachable!("filtered to FieldSet")
+        };
+        assert_eq!(*index, 0, "`v` is field 0, so the store offset is 8*0");
+        assert_eq!(value.ty, Ty::Int, "the stored value keeps its `Int` type");
+        assert_eq!(sets[0].ty, Ty::Unit, "a field store is unit-typed");
+    }
+
+    #[test]
+    fn field_assignment_picks_the_declared_field_index() {
+        // The store offset is `8 * index`, so writing the *second* field must
+        // resolve to index 1. A helper that always returned 0 would still pass
+        // a single-field test.
+        let r = check_src(
+            "record P { a: Int, b: String }\n\
+             fn main() { let mut p = P { a: 1, b: \"x\" }\n p.b = \"y\"\n println(\"${p.b}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let sets = field_sets_in(&r.module, "main");
+        assert_eq!(sets.len(), 1, "exactly one FieldSet in `main`");
+        let hir::ExprKind::FieldSet { index, value, .. } = &sets[0].kind else {
+            unreachable!("filtered to FieldSet")
+        };
+        assert_eq!(*index, 1, "`b` is the second field");
+        assert_eq!(value.ty, Ty::String);
+    }
+
+    #[test]
+    fn field_assignment_on_generic_record_substitutes_the_field_type() {
+        // The shared lookup substitutes the record's type arguments into the
+        // field's declared type. This is the path `Vec<T>`/`Map<K, V>` depend
+        // on, so assert the *resolved* type rather than just the absence of
+        // errors — `Ty::Error` unifies with anything and would hide a failure.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             fn main() { let mut b = Box { value: 1 }\n b.value = 7\n println(\"${b.value}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let sets = field_sets_in(&r.module, "main");
+        assert_eq!(sets.len(), 1, "exactly one FieldSet in `main`");
+        let hir::ExprKind::FieldSet { index, value, .. } = &sets[0].kind else {
+            unreachable!("filtered to FieldSet")
+        };
+        assert_eq!(*index, 0);
+        assert_eq!(
+            value.ty,
+            Ty::Int,
+            "`T` was instantiated to `Int`, so the stored value is an `Int`"
+        );
+    }
+
+    #[test]
+    fn field_assignment_on_generic_record_mismatch_reports_e0010() {
+        // The mirror of the above: substitution must also *reject* the wrong
+        // type, rather than leaving the field type as an unconstrained `T`
+        // that unifies with anything.
+        let r = check_src(
+            "record Box<T> { value: T }\n\
+             fn main() { let mut b = Box { value: 1 }\n b.value = \"s\"\n println(\"${b.value}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_to_immutable_reports_e0060() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let p = P { v: 1 }\n p.v = 7\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_type_mismatch_reports_e0010() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.v = \"s\"\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0010"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn assignment_to_unknown_field_reports_e0014() {
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.nope = 7\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_on_non_record_reports_e0014() {
+        // A mutable binding is not enough — the receiver has to *have* fields.
+        let r = check_src("fn main() { let mut n = 1\n n.v = 2\n println(\"${n}\") }");
+        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_through_broken_receiver_does_not_cascade() {
+        // `p.nope` is already an error on the read path; the write path must not
+        // add a second E0014 for the unknown field of an error-typed receiver.
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.nope.deeper = 7\n println(\"${p.v}\") }",
+        );
+        let n = error_codes(&r).iter().filter(|c| **c == "E0014").count();
+        assert_eq!(n, 1, "expected exactly one E0014, got {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_on_temporary_reports_e0060() {
+        // A call result has no assignable root, so mutating its field is
+        // meaningless — rejected at the root exactly as `make()[0] = v` is.
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn make() -> P { P { v: 1 } }\n\
+             fn main() { make().v = 7 }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_through_immutable_nested_record_reports_e0060() {
+        // `outer.inner.v = 7` roots at an immutable local through two `Field`
+        // projections; `place_root` walks the whole chain.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             record Outer { inner: Inner }\n\
+             fn main() { let o = Outer { inner: Inner { v: 1 } }\n o.inner.v = 7 }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_assignment_through_mutable_nested_record_ok() {
+        // The mirror of the above: a `mut` root makes the reachable record
+        // storage assignable, however deep the chain.
+        let r = check_src(
+            "record Inner { v: Int }\n\
+             record Outer { inner: Inner }\n\
+             fn main() {\n\
+                 let mut o = Outer { inner: Inner { v: 1 } }\n\
+                 o.inner.v = 7\n\
+                 println(\"${o.inner.v}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(field_sets_in(&r.module, "main").len(), 1);
+    }
+
+    #[test]
+    fn compound_assignment_to_field_reports_e0900() {
+        // `+=` on a field would have to read-modify-write; not supported yet,
+        // mirroring compound assignment to an array element.
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.v += 1\n println(\"${p.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
     }
 
     #[test]

@@ -200,6 +200,63 @@ fn records_emit_field_addressing() {
     assert_well_formed(&ir);
 }
 
+/// `rec.field = v` must emit a *store* through the field address, at the same
+/// `8 * index` offset `RecordField` loads from. No LLVM toolchain is available
+/// here to run the IR (the Cranelift `nova run`/`nova build` e2e tests cover
+/// execution), so this is the only guard on the `--release` backend's store:
+/// without it the arm could silently go missing or use the wrong offset and
+/// every test would still pass.
+#[test]
+fn field_assignment_emits_store_at_field_offset() {
+    let ir = ir_for(
+        "record Point { x: Int, y: Int }\n\
+         fn main() {\n\
+             let mut p = Point { x: 3, y: 4 }\n\
+             p.y = 5\n\
+             println(\"${p.y}\")\n\
+         }",
+    );
+    // Scope to the user's `main` (`@main` is a thin wrapper around it).
+    let body: Vec<&str> = ir
+        .lines()
+        .map(str::trim)
+        .skip_while(|l| !l.starts_with("define void @\"nova_main\"("))
+        .take_while(|l| *l != "}")
+        .collect();
+    assert!(!body.is_empty(), "no @nova_main body in:\n{ir}");
+    // The record literal *also* initializes field 1, through a store at the
+    // very same offset — so "a store at base+8 exists" would pass even if the
+    // `SetField` arm emitted nothing at all. The assignment is distinguished by
+    // its base pointer: the literal writes through the fresh `nova_rt_alloc`
+    // result, while the assignment reloads the record from its local slot.
+    let alloc_reg = body
+        .iter()
+        .find_map(|l| l.strip_suffix(" = call ptr @nova_rt_alloc(i64 16)"))
+        .unwrap_or_else(|| panic!("no 16-byte record allocation in:\n{ir}"));
+    // `y` is field 1, so its address is the record pointer + 8.
+    let reloaded_field1: Vec<&str> = body
+        .iter()
+        .filter_map(|l| {
+            let (dst, rest) = l.split_once(" = getelementptr inbounds i8, ptr ")?;
+            let base = rest.strip_suffix(", i64 8")?;
+            (base != alloc_reg).then_some(dst)
+        })
+        .collect();
+    assert!(
+        !reloaded_field1.is_empty(),
+        "no field-1 address off a reloaded record pointer in:\n{ir}"
+    );
+    // At least one of those addresses must be *stored* through, not just read
+    // (the `println("${p.y}")` read computes one of these addresses too).
+    assert!(
+        reloaded_field1.iter().any(|addr| body
+            .iter()
+            .any(|l| l.starts_with("store i64 ") && l.ends_with(&format!("ptr {addr}")))),
+        "expected an i64 store through a reloaded field-1 address in:\n{ir}"
+    );
+    assert_well_formed(&ir);
+}
+
 /// `panic` (Phase 2.1) under the LLVM `--release` backend: no toolchain is
 /// available in this environment to assemble/run the emitted IR (see the
 /// clang-gated `release_builds_and_runs_when_clang_available` in

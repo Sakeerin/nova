@@ -1,0 +1,18 @@
+record Counter { n: Int, label: String }
+
+fn main() {
+    let mut c = Counter { n: 0, label: "hits" }
+    c.n = c.n + 1
+    c.n = c.n + 1
+    println("${c.label}=${c.n}")
+
+    // Records are heap objects, so assignment through one binding is visible
+    // through another. This is deliberate reference semantics (ADR 0005).
+    let mut alias = c
+    alias.n = 99
+    println("alias visible: ${c.n}")
+
+    // A field holding a heap value.
+    c.label = "misses"
+    println("${c.label}")
+}

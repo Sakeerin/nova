@@ -132,6 +132,37 @@ fn records_lower_to_make_and_field() {
 }
 
 #[test]
+fn field_assignment_lowers_to_set_field() {
+    let mir = mir_for(
+        "record Point { x: Int, y: Int }\n\
+         fn main() {\n\
+             let mut p = Point { x: 3, y: 4 }\n\
+             p.y = 5\n\
+             println(\"${p.y}\")\n\
+         }",
+    );
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    let stmts: Vec<&nova_mir::Stmt> = main.blocks.iter().flat_map(|b| b.stmts.iter()).collect();
+    let sets: Vec<&nova_mir::Stmt> = stmts
+        .iter()
+        .copied()
+        .filter(|s| matches!(s, nova_mir::Stmt::SetField { .. }))
+        .collect();
+    assert_eq!(sets.len(), 1, "one field store, got {sets:?}");
+    let nova_mir::Stmt::SetField { index, ty, .. } = sets[0] else {
+        unreachable!("filtered to SetField")
+    };
+    // `y` is the second field, so the store offset is 8*1 — the same offset
+    // `RecordField` loads it from.
+    assert_eq!(*index, 1);
+    assert_eq!(*ty, nova_mir::MirTy::I64);
+}
+
+#[test]
 fn generic_record_monomorphizes_field_types() {
     // A generic record used at two element types compiles without error;
     // the point is that lowering handles Record args after substitution.

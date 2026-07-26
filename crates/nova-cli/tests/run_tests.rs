@@ -76,6 +76,28 @@ fn records_run() {
 }
 
 #[test]
+fn field_assign_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/field_assign.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/field_assign.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn field_assign_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/field_assign.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/field_assign.nova", "field_assign");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+#[test]
 fn for_loops_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/for_loops.stdout"))
         .expect("expected-output fixture exists")

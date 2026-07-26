@@ -327,6 +327,14 @@ pub enum Stmt {
         index: u32,
         ty: MirTy,
     },
+    /// Store field `index` of a record. Mirrors `RecordField`'s `8 * index`
+    /// offset, so reads and writes stay in the same layout.
+    SetField {
+        record: Temp,
+        index: u32,
+        value: Temp,
+        ty: MirTy,
+    },
     /// Allocate and initialize an array `{ len, elems... }`.
     MakeArray {
         dst: Temp,
