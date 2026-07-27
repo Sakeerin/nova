@@ -1496,7 +1496,8 @@ git commit -m "fix(std): escape string contents in Debug for String"
 Create `tests/runtime/strings.nova` covering **every** numbered item of the spec's §7 and **every row** of its §4.2 table. Nothing in it may panic — a panic aborts the process and truncates the remaining output, so the panic paths stay in their own `#[test]`s from S4 and S7. Cover at minimum:
 
 1. Byte length ≠ codepoint length: `"café".len()` is 4, `"日本語".len()` is 3, plus a 4-byte scalar (`"🦀".len()` is 1).
-2. `"Straße".to_upper()` is `STRASSE`, and `"ß".to_upper().len()` is 2.
+2. `"Straße".to_upper()` is `STRASSE`, and `"ß".to_upper().len()` is 2. Also `"".to_lower()` — Task 8's review found `to_upper("")` asserted in two places while **`to_lower("")` is asserted nowhere**, an assumed-not-tested gap inherited from that task's brief. Assert both directions on the empty string here.
+   Note on why this task's three run modes matter more than they look: Task 8's review traced `nova_runtime::symbols()` to a single call site, `compile_jit` — used only by `nova run`. The `nova build` path links against `nova_runtime.lib` at the OS linker level by the real `#[no_mangle]` name and never consults that table. So an error confined to `symbols()` would make `nova run` and `nova build` disagree on the *same program*, and only running the fixture through **both** backends can see it. That is what `strings_run` plus `strings_build_standalone` are for — not redundancy.
 3. `("a\"b").dbg()` and a backslash case.
 4. Round-trip: for ASCII, accented, CJK and emoji input, `str_from_chars(str_chars(s))` equals `s` — exercised through Nova as `s.chars()` rebuilt via `"".join` of single-char slices, or by comparing `s.slice(0, s.len())` to `s`.
 5. `chars()`'s array read back: `.len()` and individual elements.
