@@ -117,6 +117,13 @@ builtins! {
     /// `String` (`E0013`), so building a result any other way would mean
     /// quadratic interpolation. Std-only.
     StrFromChars,
+    /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs
+    /// `std/strings`' `String::to_upper`. Whole-string rather than
+    /// `Char` → `Char` because `ß` → `SS` is not 1:1. Std-only.
+    StrToUpper,
+    /// `str_to_lower(s: String) -> String` — full Unicode lowercase, for the
+    /// same reason as [`Builtin::StrToUpper`]. Std-only.
+    StrToLower,
 }
 
 impl Builtin {
@@ -132,6 +139,8 @@ impl Builtin {
             Builtin::StrLenChars => "str_len_chars",
             Builtin::StrChars => "str_chars",
             Builtin::StrFromChars => "str_from_chars",
+            Builtin::StrToUpper => "str_to_upper",
+            Builtin::StrToLower => "str_to_lower",
         }
     }
 
@@ -152,14 +161,17 @@ impl Builtin {
     /// call sites in `std/strings`: its private `chars_to_string` helper
     /// (itself called by `String::slice`), and `String::reverse`, which
     /// calls `str_from_chars` directly rather than going through
-    /// `chars_to_string`.
-    pub const STD_ONLY: [Builtin; 6] = [
+    /// `chars_to_string`; `str_to_upper` and `str_to_lower` back
+    /// `std/strings`' `String::to_upper` and `String::to_lower`.
+    pub const STD_ONLY: [Builtin; 8] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
         Builtin::StrLenChars,
         Builtin::StrChars,
         Builtin::StrFromChars,
+        Builtin::StrToUpper,
+        Builtin::StrToLower,
     ];
 }
 

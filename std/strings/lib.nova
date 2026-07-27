@@ -312,4 +312,10 @@ impl String {
         }
         str_from_chars(out)
     }
+
+    // Full Unicode case mapping, so the result may be LONGER than the input
+    // in codepoints: `"ß".to_upper()` is `"SS"`.
+    pub fn to_upper(self) -> String { str_to_upper(self) }
+
+    pub fn to_lower(self) -> String { str_to_lower(self) }
 }

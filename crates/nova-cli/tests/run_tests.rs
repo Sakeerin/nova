@@ -1826,3 +1826,28 @@ fn string_trim_start_and_trim_end_pinned_on_all_whitespace() {
         .success()
         .stdout("[][]\n[][]\n");
 }
+
+/// Case mapping is WHOLE-STRING, not `Char -> Char`, because `ß` uppercases
+/// to the two characters `SS`. A `Char -> Char` implementation cannot express
+/// that and would silently corrupt such input — so `"ß".to_upper().len()`
+/// being 2 is the assertion that proves the signature choice.
+#[test]
+fn string_case_mapping_is_whole_string_not_per_char() {
+    let src = "fn main() {\n\
+               println(\"${\"Straße\".to_upper()} ${\"ß\".to_upper().len()}\")\n\
+               println(\"${\"HÉLLO WÖRLD\".to_lower()} ${\"\".to_upper()}|\")\n\
+               println(\"${\"İ\".to_lower().len()} ${\"abc123\".to_upper()}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-case");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("STRASSE 2\nhéllo wörld |\n2 ABC123\n");
+}

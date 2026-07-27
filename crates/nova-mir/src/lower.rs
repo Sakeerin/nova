@@ -602,6 +602,8 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrLenChars => Some(RtFunc::StrLenChars),
                     Builtin::StrChars => Some(RtFunc::StrChars),
                     Builtin::StrFromChars => Some(RtFunc::StrFromChars),
+                    Builtin::StrToUpper => Some(RtFunc::StrToUpper),
+                    Builtin::StrToLower => Some(RtFunc::StrToLower),
                 };
                 match rt {
                     Some(func) => self.push(Stmt::CallRuntime {

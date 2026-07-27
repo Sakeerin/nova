@@ -211,6 +211,29 @@ pub unsafe extern "C" fn nova_rt_str_from_chars(cs: *const u8) -> *mut NovaStr {
     gc_str(&out)
 }
 
+/// Uppercase `s` with full Unicode case mapping.
+///
+/// Whole-string rather than `Char` → `Char` because the mapping is not 1:1 —
+/// `ß` uppercases to `SS` — so a per-character signature could not express it
+/// and would silently corrupt such input.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_to_upper(s: *const NovaStr) -> *mut NovaStr {
+    gc_str(&as_str(s).to_uppercase())
+}
+
+/// Lowercase `s` with full Unicode case mapping. Whole-string for the same
+/// reason as [`nova_rt_str_to_upper`].
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_to_lower(s: *const NovaStr) -> *mut NovaStr {
+    gc_str(&as_str(s).to_lowercase())
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -283,6 +306,8 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_str_from_chars",
             nova_rt_str_from_chars as *const u8,
         ),
+        ("nova_rt_str_to_upper", nova_rt_str_to_upper as *const u8),
+        ("nova_rt_str_to_lower", nova_rt_str_to_lower as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -433,6 +458,59 @@ mod tests {
             *block.add(1) = 0xD800;
             let s = nova_rt_str_from_chars(block as *const u8);
             assert_eq!(as_str(s), "\u{FFFD}");
+        }
+    }
+
+    #[test]
+    fn case_mapping_handles_the_non_one_to_one_cases() {
+        unsafe {
+            assert_eq!(as_str(nova_rt_str_to_upper(make_str("Straße"))), "STRASSE");
+            assert_eq!(as_str(nova_rt_str_to_lower(make_str("HÉLLO"))), "héllo");
+            assert_eq!(as_str(nova_rt_str_to_upper(make_str(""))), "");
+        }
+    }
+
+    /// `case_mapping_handles_the_non_one_to_one_cases` only proves the two
+    /// directions are each individually *correct*; it does not by itself
+    /// prove that `nova_rt_str_to_upper` and `nova_rt_str_to_lower` are
+    /// distinguishable from EACH OTHER or from an identity function that
+    /// just returns its input. Both are real mutations a one-character typo
+    /// could introduce (swapping which `.to_*case()` call a body makes, or
+    /// dropping the case-mapping call entirely), and neither would be caught
+    /// by a test that only checks the "forward" direction of each function in
+    /// isolation if a caller isn't careful to pick inputs that actually
+    /// change under the wrong operation too. Every input below is chosen so
+    /// upper/lower/identity all disagree, so any of the three mutations
+    /// produces a visibly wrong string here.
+    #[test]
+    fn case_mapping_is_distinguishable_from_identity_and_from_each_other() {
+        unsafe {
+            let straße_upper = as_str(nova_rt_str_to_upper(make_str("Straße")));
+            assert_eq!(straße_upper, "STRASSE");
+            assert_ne!(straße_upper, "Straße"); // rules out identity
+            assert_ne!(
+                straße_upper,
+                as_str(nova_rt_str_to_lower(make_str("Straße")))
+            ); // rules out the swap
+
+            let hello_lower = as_str(nova_rt_str_to_lower(make_str("HÉLLO")));
+            assert_eq!(hello_lower, "héllo");
+            assert_ne!(hello_lower, "HÉLLO"); // rules out identity
+            assert_ne!(hello_lower, as_str(nova_rt_str_to_upper(make_str("HÉLLO")))); // rules out the swap
+
+            // A string with no cased characters at all (distinct from a
+            // mixed string like "abc123", which still has letters to
+            // transform) is unchanged by either direction — the identity
+            // outcome is *correct* here, so this specifically exercises that
+            // neither wrapper corrupts input it has nothing to do to.
+            assert_eq!(
+                as_str(nova_rt_str_to_upper(make_str("123 456!"))),
+                "123 456!"
+            );
+            assert_eq!(
+                as_str(nova_rt_str_to_lower(make_str("123 456!"))),
+                "123 456!"
+            );
         }
     }
 }
