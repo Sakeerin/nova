@@ -79,7 +79,7 @@ impl<T, E> Result<T, E> {
 // in any namespace, so it has no "reserved word" concern to begin with.
 // `str_cmp` does, and unlike `println`/`print`/`panic` it is not meant to be
 // user-visible language surface, so it is seeded only into this module's own
-// scope (`Builtin::STD_CORE_ONLY`), not into every module — a user program
+// scope (`Builtin::STD_ONLY`), not into every module — a user program
 // may freely define its own `str_cmp` (String is not FFI-safe, and
 // `nova_`-prefixed extern symbols are reserved by the compiler, so a
 // user-visible `extern` was not an option either).
@@ -171,7 +171,7 @@ impl Debug for Char {
 // `String` has no length, indexing, or iteration, and it is not FFI-safe
 // (`require_ffi_safe` accepts only scalars), so no `extern` can reach it
 // either. Closing this needs a new compiler builtin alongside `str_cmp` (a
-// `str_escape` in `Builtin::STD_CORE_ONLY`, backed by a runtime
+// `str_escape` in `Builtin::STD_ONLY`, backed by a runtime
 // `nova_rt_str_escape`) — deliberately deferred rather than improvised here,
 // since it adds a runtime ABI symbol. `Char` above escapes correctly because
 // a `Char` *can* be compared, so it needs no such inspection.

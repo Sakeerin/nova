@@ -43,7 +43,7 @@ pub enum Builtin {
     /// no name in any namespace, whereas `str_cmp` is a named function.
     /// Unlike `println`/`print`/`panic`, `str_cmp` is *not* part of the
     /// user-visible language surface: it is seeded only into std modules' own
-    /// scopes (see [`Builtin::STD_CORE_ONLY`]), so it never becomes a
+    /// scopes (see [`Builtin::STD_ONLY`]), so it never becomes a
     /// reserved word in user code.
     StrCmp,
     /// `str_hash(s: String) -> Int` — FNV-1a over the string's bytes. Backs
@@ -90,7 +90,7 @@ impl Builtin {
     /// code, just to serve a single std method. `str_cmp` backs `std/core`'s
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
     /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2).
-    pub const STD_CORE_ONLY: [Builtin; 3] = [Builtin::StrCmp, Builtin::StrHash, Builtin::CharToInt];
+    pub const STD_ONLY: [Builtin; 3] = [Builtin::StrCmp, Builtin::StrHash, Builtin::CharToInt];
 }
 
 /// What kind of definition a [`DefId`] refers to.
@@ -165,8 +165,8 @@ pub enum Res {
 pub struct ModuleId(pub u32);
 
 /// One module's visible namespaces: its own items (public and private), the
-/// implicit `std/core` module, and names it imports. Resolution is performed
-/// relative to a module.
+/// implicit std modules (see [`STD_MODULES`]), and names it imports.
+/// Resolution is performed relative to a module.
 #[derive(Debug, Default)]
 struct ModuleScope {
     name: String,
@@ -302,10 +302,10 @@ fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
 }
 
 /// Output of [`resolve`]: the namespace table, the merged file whose
-/// `item_index`es the definitions refer to (the input plus the implicit
-/// `std/core` module), and any diagnostics. Downstream stages must type-check
-/// against this `file`, not the original input, since `item_index`es index
-/// into it.
+/// `item_index`es the definitions refer to (the input plus the implicit std
+/// modules, see [`STD_MODULES`]), and any diagnostics. Downstream stages must
+/// type-check against this `file`, not the original input, since
+/// `item_index`es index into it.
 #[derive(Debug)]
 pub struct ResolveResult {
     pub definitions: Definitions,
@@ -415,7 +415,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
     let mut exports: Vec<Exports> = Vec::new();
 
     // A scope per module, seeded with the compiler builtins. `Builtin::GLOBAL`
-    // goes into every module; `Builtin::STD_CORE_ONLY` (`str_cmp`, `str_hash`,
+    // goes into every module; `Builtin::STD_ONLY` (`str_cmp`, `str_hash`,
     // `char_to_int`) goes only into an std module's own scope, so none of them
     // ever becomes a reserved word in user code (see the `Builtin` doc
     // comments).
@@ -428,7 +428,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
             scope.values.insert(b.name().to_string(), Res::Builtin(b));
         }
         if is_std_module(mid) {
-            for b in Builtin::STD_CORE_ONLY {
+            for b in Builtin::STD_ONLY {
                 scope.values.insert(b.name().to_string(), Res::Builtin(b));
             }
         }
@@ -1290,8 +1290,8 @@ mod tests {
     #[test]
     fn user_fn_named_str_cmp_is_not_a_reserved_word() {
         // Regression for the `str_cmp` builtin becoming an accidental
-        // reserved word in every module: `Builtin::STD_CORE_ONLY` (unlike
-        // `Builtin::GLOBAL`) is seeded only into std/core's own module scope,
+        // reserved word in every module: `Builtin::STD_ONLY` (unlike
+        // `Builtin::GLOBAL`) is seeded only into an std module's own scope,
         // so a user module defining its own `str_cmp` must compile cleanly —
         // no E0002 "duplicate definition" / "compiler builtin" diagnostic.
         let r = resolve_src("fn str_cmp(a: Int, b: Int) -> Int { a + b }\nfn main() { }\n");
@@ -1303,13 +1303,13 @@ mod tests {
     }
 
     /// Same property as `user_fn_named_str_cmp_is_not_a_reserved_word`, for
-    /// every other member of `Builtin::STD_CORE_ONLY`. Written as a loop over
+    /// every other member of `Builtin::STD_ONLY`. Written as a loop over
     /// the constant so that adding a builtin to it without deciding this
     /// question cannot happen: a new std-only builtin is covered here the
     /// moment it joins the list.
     #[test]
     fn no_std_only_builtin_is_a_reserved_word() {
-        for b in Builtin::STD_CORE_ONLY {
+        for b in Builtin::STD_ONLY {
             let name = b.name();
             let src = format!("fn {name}(a: Int, b: Int) -> Int {{ a + b }}\nfn main() {{ }}\n");
             let r = resolve_src(&src);
@@ -1326,7 +1326,7 @@ mod tests {
 
     /// The other half of the std-only contract: each of these names *is*
     /// visible inside an std module, so `std/core` can call it. Without this,
-    /// dropping a builtin from `STD_CORE_ONLY` altogether would still leave
+    /// dropping a builtin from `STD_ONLY` altogether would still leave
     /// `no_std_only_builtin_is_a_reserved_word` passing.
     #[test]
     fn std_only_builtins_are_visible_inside_std_modules() {
@@ -1336,7 +1336,7 @@ mod tests {
         // per `STD_MODULES` entry, in order (ADR 0004). *Every* one of them
         // gets these builtins, not only `$std.core`.
         for mid in 1..=STD_MODULES.len() {
-            for b in Builtin::STD_CORE_ONLY {
+            for b in Builtin::STD_ONLY {
                 assert!(
                     matches!(
                         r.definitions.resolve_value(ModuleId(mid as u32), b.name()),
@@ -1358,8 +1358,8 @@ mod tests {
         // clash against a builtin. That is intended — `panic` is user-visible
         // language surface like `println`/`print` — but it permanently takes
         // the name away from user code, so which side of the
-        // `GLOBAL`/`STD_CORE_ONLY` split each builtin sits on has to be pinned
-        // in both directions. Moving `Panic` to `STD_CORE_ONLY` would silently
+        // `GLOBAL`/`STD_ONLY` split each builtin sits on has to be pinned
+        // in both directions. Moving `Panic` to `STD_ONLY` would silently
         // make `panic(...)` unresolvable in user programs while every existing
         // test still passed.
         let r = resolve_src("fn panic(msg: String) { }\nfn main() { }\n");

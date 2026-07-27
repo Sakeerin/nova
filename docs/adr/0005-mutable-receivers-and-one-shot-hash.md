@@ -236,7 +236,7 @@ with impls for `Int`, `Bool`, `Char` and `String`, and the contract that
   **low** bits of a hash are consulted, and `fn hash(self) -> Int { self }`
   would put every multiple of the capacity in bucket 0. A known-good mixer is
   used rather than an invented one.
-- **`str_hash`, a std-only compiler builtin** (`Builtin::STD_CORE_ONLY`,
+- **`str_hash`, a std-only compiler builtin** (`Builtin::STD_ONLY`,
   beside `str_cmp`) backed by the runtime's FNV-1a `nova_rt_str_hash`, because
   Nova cannot walk a string's bytes: `String` has no length, indexing or
   iteration, and is not FFI-safe, so no `extern` can reach it either. Being
