@@ -599,6 +599,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrCmp => Some(RtFunc::StrCmp),
                     Builtin::StrHash => Some(RtFunc::StrHash),
                     Builtin::CharToInt => None,
+                    Builtin::StrLenChars => Some(RtFunc::StrLenChars),
                 };
                 match rt {
                     Some(func) => self.push(Stmt::CallRuntime {

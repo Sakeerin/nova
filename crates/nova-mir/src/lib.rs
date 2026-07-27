@@ -157,6 +157,8 @@ rt_funcs! {
     StrCmp,
     /// `(str) -> i64` — FNV-1a hash of the bytes (may be negative).
     StrHash,
+    /// `(str) -> i64` — count of Unicode scalar values.
+    StrLenChars,
     /// `(size_bytes) -> ptr` — allocate a heap value (sum or record).
     Alloc,
     /// `(index, len) -> unit` — abort if `index` is out of `0..len`.
@@ -179,6 +181,7 @@ impl RtFunc {
             RtFunc::StrEq => "nova_rt_str_eq",
             RtFunc::StrCmp => "nova_rt_str_cmp",
             RtFunc::StrHash => "nova_rt_str_hash",
+            RtFunc::StrLenChars => "nova_rt_str_len_chars",
             RtFunc::Alloc => "nova_rt_alloc",
             RtFunc::CheckBounds => "nova_rt_check_bounds",
             RtFunc::Panic => "nova_rt_panic_str",
@@ -197,6 +200,7 @@ impl RtFunc {
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::StrCmp => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::StrHash => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::StrLenChars => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),

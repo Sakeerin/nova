@@ -63,6 +63,13 @@ pub enum Builtin {
     /// symbol whose body would be the identity function. Std-only, so
     /// `char_to_int` is not a reserved word in user code.
     CharToInt,
+    /// `str_len_chars(s: String) -> Int` — the number of Unicode scalar
+    /// values in `s`. Backs `std/strings`' `String::len`. Nova cannot walk a
+    /// string (`String` has no length, indexing or iteration) and cannot
+    /// reach the runtime through an `extern` either (`String` is not
+    /// FFI-safe). Separate from `str_chars` so a length query allocates
+    /// nothing. Std-only, so it is not a reserved word in user code.
+    StrLenChars,
 }
 
 impl Builtin {
@@ -75,6 +82,7 @@ impl Builtin {
             Builtin::StrCmp => "str_cmp",
             Builtin::StrHash => "str_hash",
             Builtin::CharToInt => "char_to_int",
+            Builtin::StrLenChars => "str_len_chars",
         }
     }
 
@@ -89,8 +97,14 @@ impl Builtin {
     /// does) would silently and permanently take the name away from user
     /// code, just to serve a single std method. `str_cmp` backs `std/core`'s
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
-    /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2).
-    pub const STD_ONLY: [Builtin; 3] = [Builtin::StrCmp, Builtin::StrHash, Builtin::CharToInt];
+    /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
+    /// `str_len_chars` backs `std/strings`' `String::len`.
+    pub const STD_ONLY: [Builtin; 4] = [
+        Builtin::StrCmp,
+        Builtin::StrHash,
+        Builtin::CharToInt,
+        Builtin::StrLenChars,
+    ];
 }
 
 /// What kind of definition a [`DefId`] refers to.

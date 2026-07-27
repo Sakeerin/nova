@@ -1368,3 +1368,23 @@ fn std_strings_module_is_loaded() {
         .success()
         .stdout("true false\n");
 }
+
+/// `String::len` counts CODEPOINTS, not bytes — the whole point of Phase 2.2b.
+/// `café` is 5 UTF-8 bytes but 4 codepoints; each CJK character here is 3
+/// bytes. A byte-based implementation prints `5` and `9`.
+#[test]
+fn string_len_counts_codepoints_not_bytes() {
+    let src = "fn main() { println(\"${\"café\".len()} ${\"日本語\".len()} ${\"\".len()}\") }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-len");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("4 3 0\n");
+}

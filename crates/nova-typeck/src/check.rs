@@ -2603,7 +2603,7 @@ impl<'a> Checker<'a> {
             Builtin::Println | Builtin::Print | Builtin::Panic => {
                 " (use string interpolation: \"${value}\")"
             }
-            Builtin::StrCmp | Builtin::StrHash | Builtin::CharToInt => "",
+            Builtin::StrCmp | Builtin::StrHash | Builtin::CharToInt | Builtin::StrLenChars => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -5273,11 +5273,11 @@ fn error_expr(span: Span) -> hir::Expr {
 ///
 /// It has to be a table rather than per-builtin code because most of these
 /// are *not callable from a user program*: `Builtin::STD_ONLY` members
-/// (`str_cmp`, `str_hash`, `char_to_int`) are seeded only into std modules'
-/// scopes, so their arity/type diagnostics are unreachable from any Nova
-/// source and cannot be tested through it. Sharing one checking path means
-/// the reachable builtins (`println`/`print`/`panic`) exercise it, and this
-/// function's own table is directly unit-testable — see
+/// (`str_cmp`, `str_hash`, `char_to_int`, `str_len_chars`) are seeded only
+/// into std modules' scopes, so their arity/type diagnostics are unreachable
+/// from any Nova source and cannot be tested through it. Sharing one checking
+/// path means the reachable builtins (`println`/`print`/`panic`) exercise it,
+/// and this function's own table is directly unit-testable — see
 /// `builtin_signatures_are_what_the_std_call_sites_use`.
 fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
     match builtin {
@@ -5286,6 +5286,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrCmp => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::StrHash => (vec![Ty::String], Ty::Int),
         Builtin::CharToInt => (vec![Ty::Char], Ty::Int),
+        Builtin::StrLenChars => (vec![Ty::String], Ty::Int),
     }
 }
 

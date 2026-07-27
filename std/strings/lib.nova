@@ -26,4 +26,7 @@ impl String {
     // Not `self.len() == 0`: `len()` decodes the whole string, while `==` on
     // `String` compares byte lengths first in the runtime.
     pub fn is_empty(self) -> Bool { self == "" }
+
+    // Codepoints, not bytes. O(n): the runtime walks the UTF-8.
+    pub fn len(self) -> Int { str_len_chars(self) }
 }

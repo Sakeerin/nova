@@ -143,6 +143,18 @@ pub unsafe extern "C" fn nova_rt_str_hash(s: *const NovaStr) -> i64 {
     h as i64
 }
 
+/// Number of Unicode scalar values in `s`.
+///
+/// Separate from [`nova_rt_str_chars`] so that asking a string's length does
+/// not allocate an array of its characters.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_len_chars(s: *const NovaStr) -> i64 {
+    as_str(s).chars().count() as i64
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -209,6 +221,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
+        ("nova_rt_str_len_chars", nova_rt_str_len_chars as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -308,6 +321,17 @@ mod tests {
             let e = make_str("");
             // Must not panic and must be stable.
             assert_eq!(nova_rt_str_hash(e), nova_rt_str_hash(make_str("")));
+        }
+    }
+
+    #[test]
+    fn str_len_chars_counts_scalars_not_bytes() {
+        unsafe {
+            assert_eq!(nova_rt_str_len_chars(make_str("café")), 4);
+            assert_eq!(nova_rt_str_len_chars(make_str("日本語")), 3);
+            assert_eq!(nova_rt_str_len_chars(make_str("")), 0);
+            // A 4-byte scalar outside the BMP is still one character.
+            assert_eq!(nova_rt_str_len_chars(make_str("🦀")), 1);
         }
     }
 }
