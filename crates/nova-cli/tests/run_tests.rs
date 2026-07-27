@@ -1516,3 +1516,73 @@ fn string_slice_start_after_end_panics() {
         "stderr: {stderr}"
     );
 }
+
+/// Search is codepoint-indexed, and an empty needle matches at position 0
+/// (spec §4.2). `index_of` on "héllo wörld" must report 6 for "wörld", not a
+/// byte offset — a byte-based implementation reports 7.
+#[test]
+fn string_search_is_codepoint_indexed_and_empty_needle_matches() {
+    let src = "fn main() {\n\
+               let s = \"héllo wörld\"\n\
+               println(\"${s.index_of(\"wörld\").unwrap_or(0 - 1)} \
+               ${s.index_of(\"zzz\").unwrap_or(0 - 1)} \
+               ${s.index_of(\"\").unwrap_or(0 - 1)}\")\n\
+               println(\"${s.starts_with(\"hé\")} ${s.starts_with(\"x\")} \
+               ${s.ends_with(\"rld\")} ${s.ends_with(\"x\")}\")\n\
+               println(\"${s.contains(\"ö\")} ${s.contains(\"q\")} \
+               ${s.contains(\"\")} ${s.starts_with(\"\")} ${s.ends_with(\"\")}\")\n\
+               println(\"${\"\".index_of(\"a\").unwrap_or(0 - 1)} \
+               ${\"aaa\".index_of(\"aa\").unwrap_or(0 - 1)} \
+               ${\"abc\".starts_with(\"abcd\")}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-search");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("6 -1 0\ntrue false true false\ntrue false true true true\n-1 0 false\n");
+}
+
+/// Mutation-coverage gap the brief's own test above leaves open (same shape
+/// as the Task 3 `char_at` and Task 4 `slice` lessons): every `ends_with` and
+/// `index_of` call above compares a haystack STRICTLY LONGER than the needle,
+/// so the pre-guards `n.len() > h.len()` (in both `ends_with` and
+/// `index_of`) survive being mutated to `>=` — that mutant would wrongly
+/// reject the same-length case (`n.len() == h.len()`) as "too long" — because
+/// no assertion above ever has `n.len() == h.len()`. `"abc".ends_with("abc")`
+/// and `"abc".index_of("abc")` (a full-string, same-length match) close that
+/// gap; `"ab".ends_with("abc")` and `"ab".index_of("abc")` (needle strictly
+/// LONGER than a nonempty haystack) pin the guard from the other side.
+/// `"abcde".index_of("de")` is a plain-ASCII match at the very last valid
+/// position (`last == h.len() - n.len() == 3`), independent of the Unicode
+/// case above, so it kills both an `at <= last` → `at < last`/`>= last` typo
+/// in the search loop's bound and an `at = at + 1` → `at = at + 2` typo in
+/// its step (an every-other-position skip would jump straight over index 3
+/// and miss the match).
+#[test]
+fn string_search_same_length_and_last_position_boundaries() {
+    let src = "fn main() {\n\
+               println(\"${\"abc\".ends_with(\"abc\")} ${\"ab\".ends_with(\"abc\")}\")\n\
+               println(\"${\"abc\".index_of(\"abc\").unwrap_or(0 - 1)} \
+               ${\"ab\".index_of(\"abc\").unwrap_or(0 - 1)} \
+               ${\"abcde\".index_of(\"de\").unwrap_or(0 - 1)}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-search-boundary");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("true false\n0 -1 3\n");
+}

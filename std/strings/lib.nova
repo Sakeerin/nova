@@ -43,6 +43,21 @@ fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
     str_from_chars(out)
 }
 
+// Whether `n` occurs in `h` starting exactly at `at`. A needle that would run
+// past the end of `h` does not match; an empty needle matches at any `at`
+// within `h`, including `h.len()`. Private: the four search methods below are
+// its only callers.
+fn chars_match_at(h: [Char], n: [Char], at: Int) -> Bool {
+    if at < 0 { return false }
+    if at + n.len() > h.len() { return false }
+    let mut k = 0
+    while k < n.len() {
+        if h[at + k] != n[k] { return false }
+        k = k + 1
+    }
+    true
+}
+
 impl String {
     // Not `self.len() == 0`: `len()` decodes the whole string, while `==` on
     // `String` compares byte lengths first in the runtime.
@@ -92,4 +107,42 @@ impl String {
         for i in 0..n { out[i] = cs[n - 1 - i] }
         str_from_chars(out)
     }
+
+    // Whether `self` begins with `prefix`, codepoint-for-codepoint. An empty
+    // `prefix` always matches: `chars_match_at` accepts `at == 0` trivially
+    // when `n` is empty.
+    pub fn starts_with(self, prefix: String) -> Bool {
+        chars_match_at(str_chars(self), str_chars(prefix), 0)
+    }
+
+    // Whether `self` ends with `suffix`, codepoint-for-codepoint. Guards
+    // `n.len() > h.len()` before subtracting so `h.len() - n.len()` never
+    // goes negative; an empty `suffix` still matches, since the subtraction
+    // then lands on `h.len()` itself, which `chars_match_at` accepts.
+    pub fn ends_with(self, suffix: String) -> Bool {
+        let h = str_chars(self)
+        let n = str_chars(suffix)
+        if n.len() > h.len() { return false }
+        chars_match_at(h, n, h.len() - n.len())
+    }
+
+    // Codepoint index of the FIRST occurrence, or `None`. An empty needle
+    // occurs at every position, so it reports `Some(0)`.
+    pub fn index_of(self, needle: String) -> Option<Int> {
+        let h = str_chars(self)
+        let n = str_chars(needle)
+        if n.len() == 0 { return Some(0) }
+        if n.len() > h.len() { return None }
+        let last = h.len() - n.len()
+        let mut at = 0
+        while at <= last {
+            if chars_match_at(h, n, at) { return Some(at) }
+            at = at + 1
+        }
+        None
+    }
+
+    // Whether `needle` occurs anywhere in `self`. An empty `needle` always
+    // matches, since `index_of` reports `Some(0)` for it.
+    pub fn contains(self, needle: String) -> Bool { self.index_of(needle).is_some() }
 }
