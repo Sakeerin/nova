@@ -1502,7 +1502,7 @@ Create `tests/runtime/strings.nova` covering **every** numbered item of the spec
 5. `chars()`'s array read back: `.len()` and individual elements.
 6. Empty and single-codepoint cases for every scanning method: `"".split(",")`, `"".trim()`, `"".reverse()`, `slice(0, 0)`, `repeat(0)`, `",".join([])`.
 7. `split` with a separator absent / leading / trailing / repeated / equal to the whole string / empty.
-8. `slice`'s half-open boundary at both ends: `slice(0, 0)`, `slice(0, len)`, `slice(len, len)`.
+8. `slice`'s half-open boundary at both ends: `slice(0, 0)`, `slice(0, len)`, `slice(len, len)`, **and at least one slice with a nonzero `start` that is not a boundary** — e.g. `"héllo wörld".slice(6, 11) == "wörld"`. Every case listed here before this addition had `start == 0` or a degenerate span, which meant the `start` offset itself was unexercised: dropping it entirely (`cs[start + i]` → `cs[i]`) passed the whole suite. A mid-string slice with a multi-byte prefix is what makes the offset load-bearing, and it also proves the offset is in codepoints rather than bytes.
 
 - [ ] **Step 2: Generate the expected output, then read it critically**
 
