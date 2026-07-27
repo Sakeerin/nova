@@ -1,0 +1,44 @@
+len café=4 日本語=3 empty=0 crab=1
+is_empty empty=true x=false
+chars len=3 0=a 1=→ 2=🦀
+chars empty len=0
+char_at 0=h 4=o 5=? neg=?
+slice 00=[] 0len=[héllo] lenlen=[] mid=[wörld]
+roundtrip ascii true n=5 value=hello
+roundtrip accented true n=4 value=café
+roundtrip cjk true n=3 value=日本語
+roundtrip emoji true n=2 value=🦀🦀
+split present len=3 [a][b][c]
+split absent len=1 [abc]
+split leading_trailing len=3 [][a][]
+split adjacent len=3 [a][][b]
+split whole_string len=2 [][]
+split empty_sep len=3 [a][b][c]
+split both_empty len=0
+split empty_string_nonempty_sep len=1 []
+split self_overlap len=3 [][][]
+split overlap_trailing len=2 [][ab]
+split multi_codepoint len=3 [a][b][c]
+join comma=[a,b,c] empty_sep=[abc] none=[] arrow=[a->b->c] solo=[solo]
+search index wörld=6 zzz=-1 empty=0
+search prefix hé=true x=false suffix rld=true x=false
+search contains ö=true q=false empty=true startsempty=true endsempty=true
+search empty_haystack=-1 repeat_needle=0 longneedle=false
+search samelen abc_ends_abc=true ab_ends_abc=false
+search samelen abc_idx_abc=0 ab_idx_abc=-1 abcde_idx_de=3
+trim main=[héllo] start=[héllo	
+] end=[  héllo]
+trim allws=[] empty=[] none=[x]
+trim_start allws_space=[] allws_tab=[]
+trim_end allws_space=[] allws_tab=[]
+trim unicode=[mid]
+repeat ab3=[ababab] ab0=[] empty5=[] arrow2=[→→]
+reverse mixed=🦀→a empty=[] single=x
+case straße=STRASSE ß_len=2
+case lower=héllo wörld upper_empty=[] lower_empty=[]
+case i_dot_len=2 alnum=ABC123
+case distinguish upper=AB lower=ab
+dbg quote="a\"b"
+dbg backslash="back\\slash"
+dbg tab="tab\there"
+dbg empty="" unicode="é→"

@@ -331,6 +331,77 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     no length, indexing or iteration from Nova source, so every operation needs
     a new std-scoped builtin plus a runtime function; that is a module-sized
     design, not an increment on this one.
+- `std/strings`, Nova's third standard-library module — five new runtime-backed
+  intrinsics plus 18 inherent `String` methods, written in Nova (Phase 2.2b):
+  - Five new std-only builtins (`Builtin::STD_ONLY` grows from `[Builtin; 3]` to
+    `[Builtin; 8]`, so none becomes a reserved word in user code): `str_len_chars`,
+    `str_chars` (`String -> [Char]`), `str_from_chars` (`[Char] -> String`),
+    `str_to_upper` and `str_to_lower`, each backed by its own `nova_rt_str_*`
+    runtime function. `str_chars` is the first intrinsic to construct a Nova
+    array from the runtime (`{ len, elem0, elem1, … }`, scanned, matching
+    codegen's own array layout byte-for-byte) — a layout mistake there would be
+    a silent miscompile, not a crash, so it is pinned by a Nova-level test that
+    reads `.len()` back and indexes elements, not by inspecting the Rust code.
+  - `std/strings/lib.nova`, the third embedded std module (same compile model as
+    `std/core` and `std/collections`: `include_str!`, appended last, glob-imported
+    at lowest priority, silently shadowable — ADR 0004), holding the language's
+    first inherent `impl String` block, with 18 methods: `len`, `is_empty`,
+    `chars`, `char_at`, `slice`, `contains`, `starts_with`, `ends_with`,
+    `index_of`, `split`, `trim`, `trim_start`, `trim_end`, `to_upper`, `to_lower`,
+    `repeat`, `reverse`, `join`. **Every index and length is in codepoints
+    (Unicode scalar values), never bytes** — `"café".len()` is 4 though its UTF-8
+    is 5 bytes, and `"日本語".len()` is 3. Consequently these 18 names are now
+    reserved on `String`, but by *shadowing* rather than by conflict: an
+    inherent method wins by priority over a same-named trait method, so a user
+    trait implementing e.g. `trim` for `String` still compiles and `s.trim()`
+    silently resolves to the std method instead — gentler than the `E0015`
+    ambiguity a second *trait* impl would cause, but still a permanent
+    commitment.
+  - Error-handling shape follows the `std/collections` precedent: `char_at`
+    returns `Option<Char>` (`None` for an out-of-range *or* negative index,
+    matching `Vec::get`); `slice(start, end)` panics on an invalid range
+    (`start < 0`, `end > len`, or `start > end` — `start == end` is valid and
+    yields `""`), matching `Vec::set`; `index_of` returns `Option<Int>` rather
+    than encoding absence as `-1`. `split`'s pinned semantics: a missing
+    separator yields a one-element array holding the whole string, never an
+    empty one; adjacent/leading/trailing separators produce empty pieces with
+    no collapsing; an empty separator splits into single codepoints (the
+    JavaScript behaviour — Rust adds boundary empties, Python raises, so there
+    is no consensus to inherit) and `"".split("")` is `[]`. `join` hangs off the
+    separator (`",".join(parts)`, Python-style) rather than being a free
+    function, so it does not take the name `join` away from every module via
+    glob import. Case mapping (`to_upper`/`to_lower`) is whole-string, not
+    `Char -> Char`, because it is not always 1-to-1: `"ß".to_upper()` is `"SS"`
+    (2 codepoints, longer than the input) and `"İ".to_lower()` is `"i"` plus a
+    combining dot-above (2 codepoints).
+  - Deliberate limitations, accepted for this increment rather than overlooked:
+    the `trim` family's whitespace test is an explicit list (space, `\t`, `\n`,
+    `\r`, and four common Unicode spaces), not Unicode's full `White_Space`
+    property; every inspecting method (`starts_with`, `contains`, `index_of`,
+    `split`, the `trim` family) decodes the whole string to a `[Char]` first, so
+    each call is O(n) allocation — a 1 MB haystack allocates roughly 8 MB —
+    accepted because the Nova-level API is unchanged if a `str_find` fast path
+    is ever added underneath it; and there is no `replace`, no `pad_start`/
+    `pad_end`, no `split_once`, and no `String -> Int`/`Float` parsing.
+  - The whole module is exercised end-to-end by `tests/runtime/strings.nova`
+    under `nova run`, `nova build` **and `NOVA_GC_STRESS=1`**: byte-vs-codepoint
+    length, `chars()`'s array read back from Nova, both `char_at` boundaries,
+    `slice`'s half-open boundary plus a nonzero-`start` offset with a
+    multi-byte prefix, a round-trip through `slice`+`join` for ASCII/accented/
+    CJK/emoji input, every pinned `split` row including a self-overlapping
+    separator, search boundaries (empty needle, same-length haystack/needle),
+    the trim family's own all-whitespace fallback and non-ASCII whitespace,
+    `repeat`, `reverse`, and whole-string case mapping including both
+    directions on `""`.
+- Deferred from `std/strings` (Phase 2.2b), each blocked on a language feature
+  or a scope decision rather than on effort: `replace`, `pad_start`/`pad_end`,
+  `split_once`; `String -> Int`/`Float` parsing (needed by `std/json` later, but
+  it raises its own questions — radix, overflow, leading `+`, surrounding
+  whitespace — that would widen this increment); grapheme-cluster segmentation
+  (Nova's `Char` is a Unicode scalar value, not a grapheme); an exact
+  `char::is_whitespace` intrinsic (the approximate list above stands in for
+  it); and `nova_rt_str_find`/other fast paths for the O(n)-per-call cost
+  noted above.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
@@ -446,6 +517,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`a[i] = undefined_fn()`) already behaved. The cascade guard for a receiver
   that is already `Ty::Error` is unchanged — it still reports exactly one
   error, not two.
+- `Debug for String` now escapes its contents into a valid Nova literal
+  (Phase 2.2b): `("a\"b").dbg()` previously produced `"a"b"`, which is not
+  valid Nova source — noted as a known limitation in the `std/core` entry
+  above. The fix reuses `Debug for Char`'s existing per-character escape
+  table (`\\`, `\n`, `\t`, `\r`, `\0`) through one shared private helper,
+  decoding the string with the new `str_chars` builtin (see `std/strings`
+  above) rather than the dedicated `nova_rt_str_escape` that `std/core`'s
+  stale comment had predicted — so the fix needed no new ABI symbol.
+  `String` escapes `"` where `Char` escapes `'`, and both round-trip back
+  through the lexer to the original value.
 
 ## [0.1.0] - 2026-07-23
 

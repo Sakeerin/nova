@@ -1958,3 +1958,127 @@ fn debug_for_char_and_string_escape_only_their_own_quote() {
 "#,
     );
 }
+
+/// `std/strings` end-to-end gate (Phase 2.2b, Task 10). Every index in the
+/// module is a codepoint, so a byte-based regression shows up as a wrong
+/// number here. Covers every numbered item of the design doc's §7 and every
+/// row of its §4.2 table across all 18 methods: byte-vs-codepoint length,
+/// `chars()`'s array layout read back from Nova, both `char_at` boundaries,
+/// `slice`'s half-open boundary plus a nonzero-`start` offset with a
+/// multi-byte prefix, a round-trip through `slice`+`join` for ASCII/
+/// accented/CJK/emoji input (the only way to exercise
+/// `str_from_chars(str_chars(s)) == s` from a user module, since neither
+/// builtin is itself callable outside an std module), every pinned `split`
+/// row including a self-overlapping separator, `join`'s separator-hangs-off-
+/// the-receiver shape, search boundaries (empty needle, same-length
+/// haystack/needle), the trim family including each of `trim_start`/
+/// `trim_end`'s own all-whitespace fallback and non-ASCII whitespace,
+/// `repeat`, `reverse`, whole-string case mapping (`ß` -> `SS`, both
+/// directions on `""`), and `Debug for String`'s escaping fix. See
+/// `tests/runtime/strings.nova`'s header for the full item-by-item map.
+#[test]
+fn strings_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/strings.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through the object-file backend. Not redundant with
+/// `strings_run`: Task 8's review traced `nova_runtime::symbols()` to a
+/// single caller, `compile_jit`, used only by `nova run` — `nova build`
+/// links `nova_runtime.lib` at the OS linker level by the real `#[no_mangle]`
+/// export name and never consults that table. An error confined to
+/// `symbols()` would make the two backends disagree about the same program,
+/// and only running the fixture through both can see it.
+#[test]
+fn strings_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/strings.nova", "strings");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation) —
+/// the reason this gate exists. `str_chars` and `str_from_chars` introduce
+/// two new allocation shapes reachable from a builtin: a scanned array of
+/// scalars, and a leaf byte buffer plus a scanned header. Every method built
+/// on them (`slice`, `split`, `join`, the trim family, `repeat`, `reverse`,
+/// `to_upper`/`to_lower`) decodes to an intermediate `[Char]` and then
+/// allocates again to build the result string, and that intermediate array
+/// must stay live across the second allocation. A missed root here is
+/// silently wrong text, not a crash.
+#[test]
+fn strings_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/strings.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `Vec::set` past the end aborts with its own message rather than
+/// corrupting memory. The collections gate's doc comment (`collections_run`,
+/// above) has claimed since Phase 2.2a that this test exists; it did not —
+/// `git grep` finds only the comment — so the path was uncovered. Modelled on
+/// `panic_aborts_with_message`, the file's actual idiom for a
+/// process-aborting program. The message is read verbatim out of
+/// `std/collections/lib.nova`'s `Vec::set` (both its `i < 0` and `i >=
+/// self.len` guards share one message), not guessed.
+#[test]
+fn vec_set_out_of_range_aborts_with_message() {
+    let dir = std::env::temp_dir().join("nova-collections-setoob");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(
+        &path,
+        "fn main() {\n\
+         let mut v: Vec<Int> = Vec::new()\n\
+         v.push(1)\n\
+         v.set(5, 9)\n\
+         }",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: Vec::set index out of range"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `unwrap` on a `None` aborts with its own message. Same provenance as
+/// `vec_set_out_of_range_aborts_with_message` above — claimed by
+/// `collections_run`'s doc comment since Phase 2.2a, never written. The
+/// message is read verbatim out of `std/core/lib.nova`'s `Option::unwrap`.
+#[test]
+fn unwrap_on_the_wrong_variant_aborts_with_message() {
+    let dir = std::env::temp_dir().join("nova-collections-unwrap");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(
+        &path,
+        "fn main() {\n\
+         let o: Option<Int> = None\n\
+         println(\"${o.unwrap()}\")\n\
+         }",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: called `unwrap` on a `None` value"),
+        "stderr: {stderr}"
+    );
+}

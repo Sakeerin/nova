@@ -1,0 +1,152 @@
+// `std/strings` end-to-end (Phase 2.2b Task 10) — the phase's gate.
+//
+// Run three ways: `nova run` (JIT), `nova build` (object backend), and
+// `NOVA_GC_STRESS=1`. The stress run is the point, same reason as
+// `collections.nova`: `str_chars` allocates a scanned `[Char]` array, and
+// every method that then rebuilds a `String` (`slice`, `split`, `join`,
+// `trim`/`trim_start`/`trim_end`, `repeat`, `reverse`, `to_upper`,
+// `to_lower`) calls `str_from_chars` afterward — so the intermediate
+// `[Char]` must stay live across that second allocation. A missed root here
+// is silently wrong text, not a crash.
+//
+// EVERY index and length below is in CODEPOINTS, never bytes — see the
+// module header at `std/strings/lib.nova`. Nothing in this file may panic: a
+// panic aborts the process and truncates the remaining output, so the three
+// `String::slice` panics and `String::repeat`'s negative-count panic each
+// stay in their own `#[test]` in `crates/nova-cli/tests/run_tests.rs`
+// (`string_slice_negative_start_panics`, `string_slice_end_past_len_panics`,
+// `string_slice_start_after_end_panics`, `string_repeat_negative_count_panics`).
+//
+// Maps to the design doc's §7 gate list item by item:
+//   1. byte length != codepoint length          -> LEN
+//   2. ß -> SS through to_upper; both directions
+//      on the empty string                      -> CASE
+//   3. ("a\"b").dbg() and a backslash case       -> DEBUG
+//   4. round-trip over ASCII/accented/CJK/emoji  -> ROUNDTRIP
+//   5. chars()'s array read back                 -> CHARS
+//   6. empty / single-codepoint edge cases       -> scattered, noted inline
+//   7. split's six pinned rows                   -> SPLIT
+//   8. slice's half-open boundary + nonzero start -> SLICE
+
+// Neither `str_chars` nor `str_from_chars` is callable from user code (both
+// are `Builtin::STD_ONLY`), so the only way to exercise
+// `str_from_chars(str_chars(s)) == s` from a user module is through public
+// methods that call them internally: `slice(i, i + 1)` decodes and re-encodes
+// one codepoint at a time, and `"".join(...)` re-encodes the pieces back
+// into a single string through its own separate `str_chars`/`str_from_chars`
+// pair. Together they round-trip every codepoint of `s` through both
+// builtins without ever naming either.
+fn roundtrip(s: String) -> String {
+    let n = s.len()
+    let mut pieces = [""; n]
+    for i in 0..n { pieces[i] = s.slice(i, i + 1) }
+    let rebuilt = "".join(pieces)
+    "${rebuilt == s} n=${n} value=${rebuilt}"
+}
+
+fn main() {
+    // === LEN / IS_EMPTY — item 1: byte length != codepoint length ===
+    // "café" is 5 UTF-8 bytes but 4 codepoints (é is 2 bytes, 1 scalar);
+    // "日本語" is 9 bytes but 3 codepoints (each ideograph is 3 bytes); "🦀"
+    // is a single 4-byte-UTF-8 scalar and still `len() == 1`.
+    println("len café=${"café".len()} 日本語=${"日本語".len()} empty=${"".len()} crab=${"🦀".len()}")
+    println("is_empty empty=${"".is_empty()} x=${"x".is_empty()}")
+
+    // === CHARS — item 5: the array read back, len() and indexing ===
+    let cs = "a→🦀".chars()
+    println("chars len=${cs.len()} 0=${cs[0]} 1=${cs[1]} 2=${cs[2]}")
+    let ecs = "".chars()
+    println("chars empty len=${ecs.len()}")
+
+    // === CHAR_AT — both boundaries (i == 0, i == len), i > len, and a
+    // negative index. "héllo" is 5 codepoints (h é l l o), so index 4 is the
+    // last valid one and 5 is exactly `len()` — the boundary the contract is
+    // actually about, not merely an interior index.
+    println("char_at 0=${"héllo".char_at(0).unwrap_or('?')} 4=${"héllo".char_at(4).unwrap_or('?')} 5=${"héllo".char_at(5).unwrap_or('?')} neg=${"héllo".char_at(0 - 1).unwrap_or('?')}")
+
+    // === SLICE — item 8: half-open boundary at both ends, plus a nonzero
+    // `start` that is not a boundary. "héllo wörld" is 11 codepoints; index 6
+    // is `w` (h é l l o SPACE w ö r l d), so `slice(6, 11)` proves the
+    // `start` offset is load-bearing (dropping it regresses to "héllo") and
+    // that it counts codepoints, not bytes (é/ö are each 1 codepoint but 2
+    // bytes, so a byte offset would land mid-character).
+    println("slice 00=[${"héllo".slice(0, 0)}] 0len=[${"héllo".slice(0, 5)}] lenlen=[${"héllo".slice(5, 5)}] mid=[${"héllo wörld".slice(6, 11)}]")
+
+    // === ROUND-TRIP — item 4, over ASCII, accented, CJK and emoji ===
+    println("roundtrip ascii ${roundtrip("hello")}")
+    println("roundtrip accented ${roundtrip("café")}")
+    println("roundtrip cjk ${roundtrip("日本語")}")
+    println("roundtrip emoji ${roundtrip("🦀🦀")}")
+
+    // === SPLIT — item 7 / spec §4.2's rows, plus item 6's two empty cases
+    // and the self-overlap / multi-codepoint mutation-coverage cases from
+    // Task 6's review.
+    let s1 = "a,b,c".split(",")
+    println("split present len=${s1.len()} [${s1[0]}][${s1[1]}][${s1[2]}]")
+    let s2 = "abc".split(",")
+    println("split absent len=${s2.len()} [${s2[0]}]")
+    let s3 = ",a,".split(",")
+    println("split leading_trailing len=${s3.len()} [${s3[0]}][${s3[1]}][${s3[2]}]")
+    let s4 = "a,,b".split(",")
+    println("split adjacent len=${s4.len()} [${s4[0]}][${s4[1]}][${s4[2]}]")
+    let s5 = "xx".split("xx")
+    println("split whole_string len=${s5.len()} [${s5[0]}][${s5[1]}]")
+    let s6 = "abc".split("")
+    println("split empty_sep len=${s6.len()} [${s6[0]}][${s6[1]}][${s6[2]}]")
+    println("split both_empty len=${"".split("").len()}")
+    let s7 = "".split(",")
+    println("split empty_string_nonempty_sep len=${s7.len()} [${s7[0]}]")
+    // Self-overlapping separator: stepping the search by 1 codepoint instead
+    // of by `s.len()` after a match would count 4 pieces here instead of 3.
+    let s8 = "aaaa".split("aa")
+    println("split self_overlap len=${s8.len()} [${s8[0]}][${s8[1]}][${s8[2]}]")
+    let s9 = "ababab".split("abab")
+    println("split overlap_trailing len=${s9.len()} [${s9[0]}][${s9[1]}]")
+    let s10 = "a→b→c".split("→")
+    println("split multi_codepoint len=${s10.len()} [${s10[0]}][${s10[1]}][${s10[2]}]")
+
+    // === JOIN — the separator hangs off the receiver; item 6's ",".join([]) ===
+    println("join comma=[${",".join(s1)}] empty_sep=[${"".join(s6)}] none=[${",".join([])}] arrow=[${"->".join(["a", "b", "c"])}] solo=[${",".join(["solo"])}]")
+
+    // === SEARCH: contains / starts_with / ends_with / index_of ===
+    let s = "héllo wörld"
+    println("search index wörld=${s.index_of("wörld").unwrap_or(0 - 1)} zzz=${s.index_of("zzz").unwrap_or(0 - 1)} empty=${s.index_of("").unwrap_or(0 - 1)}")
+    println("search prefix hé=${s.starts_with("hé")} x=${s.starts_with("x")} suffix rld=${s.ends_with("rld")} x=${s.ends_with("x")}")
+    println("search contains ö=${s.contains("ö")} q=${s.contains("q")} empty=${s.contains("")} startsempty=${s.starts_with("")} endsempty=${s.ends_with("")}")
+    println("search empty_haystack=${"".index_of("a").unwrap_or(0 - 1)} repeat_needle=${"aaa".index_of("aa").unwrap_or(0 - 1)} longneedle=${"abc".starts_with("abcd")}")
+    // Same-length boundary (Task 5's review finding): `n.len() > h.len()` vs
+    // `>=` only diverges when the needle and haystack are exactly the same
+    // length.
+    println("search samelen abc_ends_abc=${"abc".ends_with("abc")} ab_ends_abc=${"ab".ends_with("abc")}")
+    println("search samelen abc_idx_abc=${"abc".index_of("abc").unwrap_or(0 - 1)} ab_idx_abc=${"ab".index_of("abc").unwrap_or(0 - 1)} abcde_idx_de=${"abcde".index_of("de").unwrap_or(0 - 1)}")
+
+    // === TRIM / REPEAT ===
+    let t = "  héllo\t\n"
+    println("trim main=[${t.trim()}] start=[${t.trim_start()}] end=[${t.trim_end()}]")
+    println("trim allws=[${"   ".trim()}] empty=[${"".trim()}] none=[${"x".trim()}]")
+    // trim_start/trim_end's OWN all-whitespace fallback (Task 7's review
+    // finding): every other all-whitespace input in this file goes through
+    // `trim()`, whose two-sided composition self-heals a wrong
+    // trim_start_index/trim_end_index fallback. These two calls bypass
+    // `trim()` entirely, on both a space-only and a tab-only input.
+    println("trim_start allws_space=[${"   ".trim_start()}] allws_tab=[${"\t\t".trim_start()}]")
+    println("trim_end allws_space=[${"   ".trim_end()}] allws_tab=[${"\t\t".trim_end()}]")
+    println("trim unicode=[${"\u{00A0}\u{2002}\u{2003}\u{3000}mid\u{3000}\u{2003}\u{2002}\u{00A0}".trim()}]")
+    println("repeat ab3=[${"ab".repeat(3)}] ab0=[${"ab".repeat(0)}] empty5=[${"".repeat(5)}] arrow2=[${"→".repeat(2)}]")
+
+    // === REVERSE — item 6's "".reverse(), plus a multi-codepoint and a
+    // single-codepoint case ===
+    println("reverse mixed=${"a→🦀".reverse()} empty=[${"".reverse()}] single=${"x".reverse()}")
+
+    // === TO_UPPER / TO_LOWER — item 2: ß -> SS, and BOTH directions on "" ===
+    println("case straße=${"Straße".to_upper()} ß_len=${"ß".to_upper().len()}")
+    println("case lower=${"HÉLLO WÖRLD".to_lower()} upper_empty=[${"".to_upper()}] lower_empty=[${"".to_lower()}]")
+    println("case i_dot_len=${"İ".to_lower().len()} alnum=${"abc123".to_upper()}")
+    println("case distinguish upper=${"aB".to_upper()} lower=${"aB".to_lower()}")
+
+    // === DEBUG — item 3: the defect that motivated the phase ===
+    println("dbg quote=${("a\"b").dbg()}")
+    println("dbg backslash=${("back\\slash").dbg()}")
+    println("dbg tab=${("tab\there").dbg()}")
+    println("dbg empty=${("").dbg()} unicode=${("é→").dbg()}")
+}
