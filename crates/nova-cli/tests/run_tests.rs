@@ -1353,10 +1353,14 @@ fn panic_aborts_with_message() {
 /// the five intrinsics the rest of the surface needs.
 #[test]
 fn std_strings_module_is_loaded() {
-    let src = "fn main() { println(\"${\"\".is_empty()} ${\"x\".is_empty()}\") }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
-    std::fs::write(&path, src).expect("write");
+    let dir = std::env::temp_dir().join("nova-strings-scaffold");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(
+        &path,
+        "fn main() { println(\"${\"\".is_empty()} ${\"x\".is_empty()}\") }",
+    )
+    .expect("write test file");
     nova()
         .arg("run")
         .arg(&path)
