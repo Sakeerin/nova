@@ -498,9 +498,62 @@ Add `Builtin::StrChars` to `STD_ONLY` (now `[Builtin; 5]`) and to the `hint` mat
     }
 ```
 
+- [ ] **Step 6b: Make the signature-table test impossible to forget**
+
+`builtin_signatures_are_what_the_std_call_sites_use` (`crates/nova-typeck/src/check.rs:~9226`) is a hand-written list of `assert_eq!`s, one per builtin. Task 2 added `Builtin::StrLenChars` and did **not** add an entry — nothing caught it, and `builtin_signature`'s own doc comment claims that test covers the table. Four more builtins arrive in this task and Tasks 4 and 8, so the list will keep drifting.
+
+Convert it so omission is a **compile error**, which is how this repo already protects its other builtin tables (three separate `match`es are deliberately exhaustive for exactly this reason, and `no_std_only_builtin_is_a_reserved_word` loops `STD_ONLY` so "adding a builtin to it without deciding this question cannot happen"). Rewrite the test body as an exhaustive `match` over `Builtin` that names each variant's expected signature, then assert `builtin_signature(b)` equals it:
+
+```rust
+    /// Written as an exhaustive `match` rather than a list of `assert_eq!`s so
+    /// that adding a `Builtin` without stating its expected signature does not
+    /// compile. The previous hand-written list silently missed `StrLenChars`.
+    #[test]
+    fn builtin_signatures_are_what_the_std_call_sites_use() {
+        // The site each signature has to satisfy, so a mismatch names the
+        // caller it would break rather than only the types.
+        fn expected(b: Builtin) -> ((Vec<Ty>, Ty), &'static str) {
+            match b {
+                Builtin::Println | Builtin::Print => {
+                    ((vec![Ty::String], Ty::Unit), "`println(s)` / `print(s)`")
+                }
+                Builtin::Panic => ((vec![Ty::String], Ty::Never), "`panic(msg)` diverges"),
+                Builtin::StrCmp => (
+                    (vec![Ty::String, Ty::String], Ty::Int),
+                    "`str_cmp(self, other)` in `impl Ord for String`",
+                ),
+                Builtin::StrHash => (
+                    (vec![Ty::String], Ty::Int),
+                    "`str_hash(self)` in `impl Hash for String`",
+                ),
+                Builtin::CharToInt => (
+                    (vec![Ty::Char], Ty::Int),
+                    "`char_to_int(self)` in `impl Hash for Char`",
+                ),
+                Builtin::StrLenChars => (
+                    (vec![Ty::String], Ty::Int),
+                    "`str_len_chars(self)` in `String::len`",
+                ),
+                Builtin::StrChars => (
+                    (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
+                    "`str_chars(self)` in `String::chars`",
+                ),
+            }
+        }
+        for b in ALL_BUILTINS {
+            let (sig, site) = expected(b);
+            assert_eq!(builtin_signature(b), sig, "{}: {site}", b.name());
+        }
+    }
+```
+
+This needs a list of every variant to iterate. `Builtin` has no `ALL` constant today — check first whether one exists; if not, add `pub const ALL: [Builtin; N]` to `impl Builtin` in `crates/nova-resolver/src/lib.rs` beside `GLOBAL` and `STD_ONLY`, and use `Builtin::ALL` instead of a test-local `ALL_BUILTINS`. **A length-typed array plus the exhaustive `match` together mean a new variant cannot be added without stating its signature.** Add a short doc comment on `ALL` saying that is its purpose.
+
+Then correct `builtin_signature`'s doc comment if it now overstates or understates what the test covers.
+
 - [ ] **Step 7: Run the tests**
 
-Run: `cargo build -p nova-cli`, then `cargo test -p nova-cli --test run_tests str_chars_array_matches_codegen_layout`, `cargo test -p nova-runtime str_chars`, then `cargo test --workspace --no-fail-fast`
+Run: `cargo build -p nova-cli`, then `cargo test -p nova-cli --test run_tests str_chars_array_matches_codegen_layout`, `cargo test -p nova-runtime str_chars`, `cargo test -p nova-typeck builtin_signatures`, then `cargo test --workspace --no-fail-fast`
 Expected: all PASS.
 
 - [ ] **Step 8: Prove the layout test actually bites**
