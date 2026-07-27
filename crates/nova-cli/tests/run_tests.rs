@@ -1784,3 +1784,45 @@ fn string_trim_covers_non_ascii_whitespace() {
         .success()
         .stdout("[mid]\n");
 }
+
+/// Mutation-coverage gap found in review, distinct from the non-ASCII gap
+/// above: `trim_start` and `trim_end` are each called exactly once in
+/// `string_trim_family_and_repeat`, both on `"  héllo\t\n"` — never
+/// all-whitespace — so neither method's own all-whitespace fallback
+/// (`trim_start_index`'s `cs.len()` fallback at `lib.nova:100`;
+/// `trim_end_index`'s `floor` fallback at `lib.nova:110`) is ever reached
+/// through them directly. Every all-whitespace input in the suite goes
+/// through `trim()` instead, and `trim()`'s composition SELF-HEALS a wrong
+/// `trim_start_index` result: whatever `a` it returns is fed straight back
+/// in as `trim_end_index(cs, a)`'s `floor`, and for an all-whitespace string
+/// `trim_end_index` always bottoms out at exactly `floor` (the whole range
+/// is whitespace, so the scan never finds a reason to stop early) — so
+/// `chars_to_string(cs, a, a)` always hits the `n <= 0` guard and yields ""
+/// regardless of what `a` was. That makes "`trim`, `trim_start` and
+/// `trim_end` are mutually distinguishable" (true, via the one asymmetric
+/// string above) a DIFFERENT, weaker property than "each is independently
+/// correct at the boundary where the whole string is whitespace" — which is
+/// exactly where `trim_start`/`trim_end` diverge from `trim`'s
+/// self-correcting composition. This test pins that boundary directly, on
+/// each method's own call, bypassing `trim()` entirely. A tab-only case is
+/// included since it costs nothing and confirms the fallback bug is not
+/// specifically an ASCII-space artifact.
+#[test]
+fn string_trim_start_and_trim_end_pinned_on_all_whitespace() {
+    let src = "fn main() {\n\
+               println(\"[${\"   \".trim_start()}][${\"   \".trim_end()}]\")\n\
+               println(\"[${\"\\t\\t\".trim_start()}][${\"\\t\\t\".trim_end()}]\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-trim-start-end-all-ws");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("[][]\n[][]\n");
+}
