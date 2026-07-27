@@ -26,12 +26,17 @@ search contains ö=true q=false empty=true startsempty=true endsempty=true
 search empty_haystack=-1 repeat_needle=0 longneedle=false
 search samelen abc_ends_abc=true ab_ends_abc=false
 search samelen abc_idx_abc=0 ab_idx_abc=-1 abcde_idx_de=3
+search anchored rld_starts=false héllo_ends=false
+search odd_index_reject starts_hx=false
+search odd_index_reject axbab_idx_ab=3
 trim main=[héllo] start=[héllo	
 ] end=[  héllo]
 trim allws=[] empty=[] none=[x]
 trim_start allws_space=[] allws_tab=[]
 trim_end allws_space=[] allws_tab=[]
 trim unicode=[mid]
+trim odd_run start=[x] end=[x]
+trim cr len=1
 repeat ab3=[ababab] ab0=[] empty5=[] arrow2=[→→]
 reverse mixed=🦀→a empty=[] single=x
 case straße=STRASSE ß_len=2

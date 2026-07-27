@@ -119,6 +119,30 @@ fn main() {
     // length.
     println("search samelen abc_ends_abc=${"abc".ends_with("abc")} ab_ends_abc=${"ab".ends_with("abc")}")
     println("search samelen abc_idx_abc=${"abc".index_of("abc").unwrap_or(0 - 1)} ab_idx_abc=${"ab".index_of("abc").unwrap_or(0 - 1)} abcde_idx_de=${"abcde".index_of("de").unwrap_or(0 - 1)}")
+    // ANCHORING (review finding): a needle occurring ELSEWHERE in the
+    // haystack must not make starts_with/ends_with true just because it
+    // occurs somewhere. "rld" sits at codepoint index 8 (the tail of
+    // "wörld"), not 0, so `s.starts_with("rld")` must be false; "héllo" sits
+    // at index 0, not the tail, so `s.ends_with("héllo")` must be false.
+    // Neither call may degrade to an unanchored `self.index_of(x).is_some()`
+    // — every other starts_with/ends_with case above pairs a matching
+    // prefix/suffix with either a needle absent everywhere ("x") or the
+    // empty needle, so an anchor check and a plain `contains` agree on all
+    // of them; this is the only line in the file where they disagree.
+    println("search anchored rld_starts=${s.starts_with("rld")} héllo_ends=${s.ends_with("héllo")}")
+    // chars_match_at's comparison loop must inspect EVERY codepoint of the
+    // needle, not just the even-indexed ones. "hx" agrees with "héllo
+    // wörld" at index 0 ('h') and must be REJECTED at index 1 ('é' vs 'x') —
+    // every needle of length >= 2 used elsewhere in this file either matches
+    // in full or fails at index 0, so nothing else requires an odd-indexed
+    // comparison to reject a candidate.
+    println("search odd_index_reject starts_hx=${s.starts_with("hx")}")
+    // Same defect, a different call site (index_of, not starts_with) and a
+    // nonzero `at`: "axbab" (a x b a b) contains "ab" only at index 3 — the
+    // candidate at index 0 matches at k=0 ('a') but must be rejected at k=1
+    // ('x' vs 'b'). Skipping every other comparison would accept index 0
+    // and report `Some(0)` instead of the correct `Some(3)`.
+    println("search odd_index_reject axbab_idx_ab=${"axbab".index_of("ab").unwrap_or(0 - 1)}")
 
     // === TRIM / REPEAT ===
     let t = "  héllo\t\n"
@@ -132,6 +156,22 @@ fn main() {
     println("trim_start allws_space=[${"   ".trim_start()}] allws_tab=[${"\t\t".trim_start()}]")
     println("trim_end allws_space=[${"   ".trim_end()}] allws_tab=[${"\t\t".trim_end()}]")
     println("trim unicode=[${"\u{00A0}\u{2002}\u{2003}\u{3000}mid\u{3000}\u{2003}\u{2002}\u{00A0}".trim()}]")
+    // trim_start_index/trim_end_index's scan-by-1 step, pinned with an
+    // ODD-length whitespace run (review finding): every run above is even
+    // (2, 3, 2, 4+4 codepoints), so stepping the scan by 2 instead of 1
+    // would still land exactly on the whitespace/non-whitespace boundary by
+    // coincidence. A single leading or trailing space — the shortest odd
+    // run, and the overwhelmingly common real input — is not.
+    println("trim odd_run start=[${" x".trim_start()}] end=[${"x ".trim_end()}]")
+    // char_is_whitespace's `\r` branch (review finding): no other input in
+    // this file contains a bare `\r`, so deleting that branch outright would
+    // still pass every other assertion here. Checked via `.len()` rather
+    // than printing the trimmed text directly: a raw `\r` landing right
+    // before this println's own trailing `\n` would form a literal `\r\n`
+    // pair, and the test harness's `.replace("\r\n", "\n")` CRLF
+    // normalisation would silently collapse exactly that pair — hiding the
+    // one byte this line exists to pin. A length assertion has no such risk.
+    println("trim cr len=${"\rx\r".trim().len()}")
     println("repeat ab3=[${"ab".repeat(3)}] ab0=[${"ab".repeat(0)}] empty5=[${"".repeat(5)}] arrow2=[${"→".repeat(2)}]")
 
     // === REVERSE — item 6's "".reverse(), plus a multi-codepoint and a

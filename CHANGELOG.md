@@ -377,22 +377,29 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Deliberate limitations, accepted for this increment rather than overlooked:
     the `trim` family's whitespace test is an explicit list (space, `\t`, `\n`,
     `\r`, and four common Unicode spaces), not Unicode's full `White_Space`
-    property; every inspecting method (`starts_with`, `contains`, `index_of`,
-    `split`, the `trim` family) decodes the whole string to a `[Char]` first, so
-    each call is O(n) allocation — a 1 MB haystack allocates roughly 8 MB —
-    accepted because the Nova-level API is unchanged if a `str_find` fast path
-    is ever added underneath it; and there is no `replace`, no `pad_start`/
-    `pad_end`, no `split_once`, and no `String -> Int`/`Float` parsing.
+    property; every method that decodes the string at all — `char_at` (the one
+    the module's own header flags as the quadratic hazard when called in a
+    loop), `slice`, `starts_with`, `ends_with` (which decodes twice, once per
+    operand), `contains`, `index_of`, `split`, the `trim` family, `reverse`,
+    `repeat`, `join`, and `std/core`'s `Debug for String` — decodes the whole
+    string to a `[Char]` first, so each call is O(n) allocation — a 1 MB
+    haystack allocates roughly 8 MB — accepted because the Nova-level API is
+    unchanged if a `str_find` fast path is ever added underneath it; and there
+    is no `replace`, no `pad_start`/`pad_end`, no `split_once`, and no
+    `String -> Int`/`Float` parsing.
   - The whole module is exercised end-to-end by `tests/runtime/strings.nova`
     under `nova run`, `nova build` **and `NOVA_GC_STRESS=1`**: byte-vs-codepoint
     length, `chars()`'s array read back from Nova, both `char_at` boundaries,
     `slice`'s half-open boundary plus a nonzero-`start` offset with a
     multi-byte prefix, a round-trip through `slice`+`join` for ASCII/accented/
     CJK/emoji input, every pinned `split` row including a self-overlapping
-    separator, search boundaries (empty needle, same-length haystack/needle),
-    the trim family's own all-whitespace fallback and non-ASCII whitespace,
-    `repeat`, `reverse`, and whole-string case mapping including both
-    directions on `""`.
+    separator, search boundaries (an anchored vs. merely-occurring-somewhere
+    needle, an odd-index mismatch inside the shared `chars_match_at`
+    primitive that backs `starts_with`/`ends_with`/`index_of`/`contains`/
+    `split`, empty needle, same-length haystack/needle), the trim family's
+    own all-whitespace fallback, an odd-length whitespace run, non-ASCII
+    whitespace and `\r`, `repeat`, `reverse`, and whole-string case mapping
+    including both directions on `""`.
 - Deferred from `std/strings` (Phase 2.2b), each blocked on a language feature
   or a scope decision rather than on effort: `replace`, `pad_start`/`pad_end`,
   `split_once`; `String -> Int`/`Float` parsing (needed by `std/json` later, but

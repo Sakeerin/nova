@@ -1962,20 +1962,29 @@ fn debug_for_char_and_string_escape_only_their_own_quote() {
 /// `std/strings` end-to-end gate (Phase 2.2b, Task 10). Every index in the
 /// module is a codepoint, so a byte-based regression shows up as a wrong
 /// number here. Covers every numbered item of the design doc's §7 and every
-/// row of its §4.2 table across all 18 methods: byte-vs-codepoint length,
-/// `chars()`'s array layout read back from Nova, both `char_at` boundaries,
-/// `slice`'s half-open boundary plus a nonzero-`start` offset with a
-/// multi-byte prefix, a round-trip through `slice`+`join` for ASCII/
-/// accented/CJK/emoji input (the only way to exercise
-/// `str_from_chars(str_chars(s)) == s` from a user module, since neither
-/// builtin is itself callable outside an std module), every pinned `split`
-/// row including a self-overlapping separator, `join`'s separator-hangs-off-
-/// the-receiver shape, search boundaries (empty needle, same-length
+/// row of its §4.2 table **that does not panic** — nothing in the fixture
+/// may panic (a panic aborts the process and truncates the remaining
+/// output), so §7 item 8's three `slice` panics and §4.2's `slice`/`repeat`
+/// panic rows are deliberately excluded here and live in their own
+/// `#[test]`s instead (`string_slice_negative_start_panics`,
+/// `string_slice_end_past_len_panics`, `string_slice_start_after_end_panics`,
+/// `string_repeat_negative_count_panics`) — across all 18 methods:
+/// byte-vs-codepoint length, `chars()`'s array layout read back from Nova,
+/// both `char_at` boundaries, `slice`'s half-open boundary plus a
+/// nonzero-`start` offset with a multi-byte prefix, a round-trip through
+/// `slice`+`join` for ASCII/accented/CJK/emoji input (the only way to
+/// exercise `str_from_chars(str_chars(s)) == s` from a user module, since
+/// neither builtin is itself callable outside an std module), every pinned
+/// `split` row including a self-overlapping separator, `join`'s
+/// separator-hangs-off-the-receiver shape, search boundaries (an anchored
+/// vs. merely-occurring-somewhere needle, an odd-index mismatch inside the
+/// shared `chars_match_at` primitive, empty needle, same-length
 /// haystack/needle), the trim family including each of `trim_start`/
-/// `trim_end`'s own all-whitespace fallback and non-ASCII whitespace,
-/// `repeat`, `reverse`, whole-string case mapping (`ß` -> `SS`, both
-/// directions on `""`), and `Debug for String`'s escaping fix. See
-/// `tests/runtime/strings.nova`'s header for the full item-by-item map.
+/// `trim_end`'s own all-whitespace fallback, an odd-length whitespace run,
+/// non-ASCII whitespace and `\r`, `repeat`, `reverse`, whole-string case
+/// mapping (`ß` -> `SS`, both directions on `""`), and `Debug for String`'s
+/// escaping fix. See `tests/runtime/strings.nova`'s header for the full
+/// item-by-item map.
 #[test]
 fn strings_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
@@ -2047,6 +2056,37 @@ fn vec_set_out_of_range_aborts_with_message() {
          let mut v: Vec<Int> = Vec::new()\n\
          v.push(1)\n\
          v.set(5, 9)\n\
+         }",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: Vec::set index out of range"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `Vec::set`'s OTHER guard: a negative index. The test above only trips
+/// `std/collections/lib.nova:55`'s `i >= self.len` guard — deleting line 54's
+/// separate `i < 0` guard entirely still passes it, since a negative index
+/// then falls straight through to `self.data[i] = v`'s own array-bounds
+/// check, which aborts with a *different*, generic message ("array index -1
+/// out of bounds for length ...") rather than `Vec::set`'s named one. This
+/// pins the negative-index guard on its own terms, in its own temp dir so
+/// this and the test above (which run in parallel threads) never share a
+/// `main.nova`.
+#[test]
+fn vec_set_negative_index_aborts_with_message() {
+    let dir = std::env::temp_dir().join("nova-collections-setoob-neg");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(
+        &path,
+        "fn main() {\n\
+         let mut v: Vec<Int> = Vec::new()\n\
+         v.push(1)\n\
+         v.set(0 - 1, 9)\n\
          }",
     )
     .expect("write");
