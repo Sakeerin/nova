@@ -434,6 +434,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diagnostic at all. Now every candidate is collected and an ambiguous
   qualifier reports `E0015`, mirroring the trait-associated-function path; the
   single-candidate case is unchanged.
+- Record field *assignment* diagnostics now match the field *read* path's
+  wording: an unknown field on a record reports "no field `x` on record `P`"
+  (it used to say "no field `x` on type `P`"), and a receiver that is not a
+  record at all now gets its own "cannot access field `x` on `Int`" message
+  instead of being folded into the unknown-field one — the distinction the
+  read path already made. `check_field_set` also no longer drops an
+  independent mistake on the right-hand side when the field name itself is
+  wrong: `p.nope = undefined_fn()` now reports `undefined_fn` as unresolved
+  too, rather than only the unknown-field error, matching how the array path
+  (`a[i] = undefined_fn()`) already behaved. The cascade guard for a receiver
+  that is already `Ty::Error` is unchanged — it still reports exactly one
+  error, not two.
 
 ## [0.1.0] - 2026-07-23
 

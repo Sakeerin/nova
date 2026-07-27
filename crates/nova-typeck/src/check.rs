@@ -3340,8 +3340,25 @@ impl<'a> Checker<'a> {
         if matches!(recv_ty, Ty::Error) {
             return error_expr(span);
         }
-        // Name the record when the receiver is one, otherwise describe the type.
-        let record_name = match &recv_ty {
+        self.error(
+            "E0014",
+            self.no_field_message(fcx, &recv_ty, &field.value),
+            field.span,
+        );
+        error_expr(span)
+    }
+
+    /// The "no such field" message for a resolved, non-`Error` receiver type
+    /// that failed `record_field_index_and_ty`: names the record when the
+    /// receiver is one, otherwise describes the type. Shared by the field
+    /// read and write paths (`check_field`, `check_field_set`) for the same
+    /// reason `record_field_index_and_ty` itself is shared — so the two
+    /// cannot independently drift on how the same mistake is phrased, which
+    /// is exactly what had happened before this was pulled out (the write
+    /// path said "no field `x` on type `P`" and had no separate wording for a
+    /// non-record receiver at all).
+    fn no_field_message(&self, fcx: &FnCtx, recv_ty: &Ty, field_name: &str) -> String {
+        let record_name = match recv_ty {
             Ty::Record { def_id, .. } => self
                 .records
                 .iter()
@@ -3349,18 +3366,13 @@ impl<'a> Checker<'a> {
                 .map(|r| r.name.clone()),
             _ => None,
         };
-        let message = match record_name {
-            Some(record_name) => {
-                format!("no field `{}` on record `{record_name}`", field.value)
-            }
+        match record_name {
+            Some(record_name) => format!("no field `{field_name}` on record `{record_name}`"),
             None => format!(
-                "cannot access field `{}` on `{}`",
-                field.value,
-                self.show(&recv_ty, fcx)
+                "cannot access field `{field_name}` on `{}`",
+                self.show(recv_ty, fcx)
             ),
-        };
-        self.error("E0014", message, field.span);
-        error_expr(span)
+        }
     }
 
     /// Resolve a field name on a record type to its `(index, substituted type)`.
@@ -4426,15 +4438,22 @@ impl<'a> Checker<'a> {
         // about layout.
         let Some((index, field_ty)) = self.record_field_index_and_ty(fcx, &recv_ty, &field.value)
         else {
+            // Same wording as the read path (`no_field_message`), including
+            // its separate not-a-record case.
             self.error(
                 "E0014",
-                format!(
-                    "no field `{}` on type `{}`",
-                    field.value,
-                    self.show(&recv_ty, fcx)
-                ),
+                self.no_field_message(fcx, &recv_ty, &field.value),
                 field.span,
             );
+            // The field name being wrong is an independent mistake from
+            // whatever the RHS says, so check it anyway rather than dropping
+            // it silently — `p.nope = undefined_fn()` must still name
+            // `undefined_fn` as unresolved, the way `a[i] = undefined_fn()`
+            // already does on the array path. This is distinct from the
+            // `Ty::Error`-receiver return above: that one guards against a
+            // *second* diagnostic about the same already-reported mistake,
+            // and stays a bare early return.
+            self.check_expr(fcx, rhs);
             return error_expr(span);
         };
         let value = self.check_expr(fcx, rhs);
@@ -5244,7 +5263,7 @@ fn error_expr(span: Span) -> hir::Expr {
 /// checking is a single shared code path rather than an arm per builtin.
 ///
 /// It has to be a table rather than per-builtin code because most of these
-/// are *not callable from a user program*: `Builtin::STD_CORE_ONLY` members
+/// are *not callable from a user program*: `Builtin::STD_ONLY` members
 /// (`str_cmp`, `str_hash`, `char_to_int`) are seeded only into std modules'
 /// scopes, so their arity/type diagnostics are unreachable from any Nova
 /// source and cannot be tested through it. Sharing one checking path means
@@ -6617,20 +6636,64 @@ mod tests {
             "record P { v: Int }\n\
              fn main() { let mut p = P { v: 1 }\n p.nope = 7\n println(\"${p.v}\") }",
         );
-        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+        // Same wording as the read path's `unknown_field_access_reports_e0014`
+        // shape: named as a record, not "on type `P`" — the two used to say
+        // different things for the identical mistake.
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0014")
+            .expect("an E0014 was reported");
+        assert_eq!(d.message, "no field `nope` on record `P`");
     }
 
     #[test]
     fn field_assignment_on_non_record_reports_e0014() {
         // A mutable binding is not enough — the receiver has to *have* fields.
         let r = check_src("fn main() { let mut n = 1\n n.v = 2\n println(\"${n}\") }");
-        assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+        // The write path used to collapse this into the same "no field `v` on
+        // type `Int`" wording as the wrong-field-name case; it must now match
+        // the read path's separate not-a-record message.
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0014")
+            .expect("an E0014 was reported");
+        assert_eq!(d.message, "cannot access field `v` on `Int`");
+    }
+
+    #[test]
+    fn field_assignment_with_unknown_field_still_checks_the_rhs() {
+        // `check_field_set`'s "no field" branch used to return before checking
+        // the RHS at all, so an independent mistake there (`undefined_fn` is
+        // not defined) was silently dropped — only the wrong-field-name E0014
+        // was ever reported. The array path (`a[i] = undefined_fn()`) does not
+        // drop it, and the field path must not either.
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.nope = undefined_fn() }",
+        );
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"E0014"),
+            "expected the unknown-field error: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            codes.contains(&"E0001"),
+            "expected `undefined_fn`'s own error to still surface: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
     fn field_assignment_through_broken_receiver_does_not_cascade() {
         // `p.nope` is already an error on the read path; the write path must not
         // add a second E0014 for the unknown field of an error-typed receiver.
+        // This is the `Ty::Error` early return, deliberately kept as a bare
+        // return with no RHS check — unlike the "no field" branch above, there
+        // is no *new* mistake to report here, only the one the read path
+        // already did.
         let r = check_src(
             "record P { v: Int }\n\
              fn main() { let mut p = P { v: 1 }\n p.nope.deeper = 7\n println(\"${p.v}\") }",
@@ -6926,6 +6989,42 @@ mod tests {
         assert!(
             messages.contains(&"cannot assign to a field of immutable `self`"),
             "{messages:?}"
+        );
+    }
+
+    /// **Documents a known gap, not a desired behaviour.** ADR 0005 §1
+    /// ("Consequences" / "Migration path") records that the mutable-receiver
+    /// rule covers inherent methods only: `check_method_call`'s
+    /// `MethodRes::Trait` arm dispatches straight to `emit_trait_call` with no
+    /// call to `check_mutable_receiver` at all, because a generic receiver's
+    /// trait dispatch has no single impl method whose `mut self` could be read
+    /// off — closing it needs a `mut_self` flag on `hir::TraitMethod` plus an
+    /// impl/trait conformance check, neither of which exists yet.
+    ///
+    /// So a trait method declaring `mut self`, called through an *immutable*
+    /// receiver, typechecks clean today — the same operation on an *inherent*
+    /// method is `mut_self_method_on_immutable_receiver_reports_e0060` a few
+    /// tests up, and reports E0060. This test pins today's accepted behaviour
+    /// the same way `float_has_no_hash_impl` pins a deliberate absence: so
+    /// that half-closing the gap, or adding a `mut self` trait method
+    /// anywhere in `std/`, cannot happen silently. If this test starts
+    /// failing, that is the gap closing (at least partially) — update it
+    /// deliberately, with reference to ADR 0005 §1's Migration path, rather
+    /// than just making it pass again.
+    #[test]
+    fn trait_method_mut_self_is_not_enforced_on_immutable_receiver_known_gap() {
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record P { v: Int }\n\
+             impl Bump for P { fn bump(mut self) { self.v = self.v + 1 } }\n\
+             fn main() { let p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "known gap (ADR 0005 §1): trait-dispatched `mut self` methods are \
+             not yet checked against the receiver's mutability, so this is \
+             expected to compile clean today: {:?}",
+            r.diagnostics
         );
     }
 
@@ -9019,7 +9118,7 @@ mod tests {
 
     /// `check_builtin_call` reads its arity and argument types out of
     /// `builtin_signature`, so this table *is* the typing rule for every
-    /// builtin — including the `Builtin::STD_CORE_ONLY` ones whose call sites
+    /// builtin — including the `Builtin::STD_ONLY` ones whose call sites
     /// live in `std/core` and whose diagnostics no Nova program can reach.
     #[test]
     fn builtin_signatures_are_what_the_std_call_sites_use() {
@@ -9145,7 +9244,7 @@ mod tests {
     // calling `str_cmp(...)` directly from a *user* module to exercise
     // `check_builtin_call`'s `Builtin::StrCmp` arity/type-error branches.
     // They were removed by the Fix 1 review pass (nova-resolver's
-    // `Builtin::STD_CORE_ONLY`): `str_cmp` is no longer seeded into user
+    // `Builtin::STD_ONLY`): `str_cmp` is no longer seeded into user
     // module scopes, so `str_cmp(...)` written in a user module no longer
     // resolves at all — it now fails name resolution with `E0001 cannot find
     // function 'str_cmp'`, not the `E0016`/`E0010` these tests asserted.
