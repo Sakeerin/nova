@@ -333,6 +333,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     design, not an increment on this one.
 
 ### Fixed (Phase 2)
+- An allocation whose size is too large to *describe* now aborts with a Nova
+  diagnostic instead of a Rust panic and backtrace. `gc::alloc` built its
+  `Layout` with `Layout::from_size_align(size, ALIGN).expect("valid heap
+  layout")`; at `ALIGN = 16` a size that rounds up past `isize::MAX` makes that
+  call fail, and the `expect` ended the process with "thread caused
+  non-unwinding panic" — an `expect` on a path reachable from user input, which
+  the repo convention forbids. It was reachable at the very top of the *legal*
+  array-length range: `[x; MAX_ARRAY_LEN]` asks for `8 * len + 8` =
+  9223372036854775800 bytes, which both length guards accept and `ALIGN` rounds
+  8 bytes too far. The check now lives in `gc::alloc`, the choke point every
+  allocation site in the language funnels through (records, strings, closures,
+  sum construction, `Vec`/`Map`/`Set` growth), rather than in one lowering, and
+  it asks `Layout::from_size_align` whether the size is legal rather than
+  restating its rule. The message names both the request and the limit
+  ("allocation of N bytes exceeds the maximum object size of M bytes"), so it
+  is distinguishable from a genuine out-of-memory, which still reports
+  "memory allocation of N bytes failed" through `handle_alloc_error` and is
+  what a merely-too-big length such as `2^40` produces. The neighbouring
+  behaviours are unchanged: `[x; -1]` and `[x; 1 << 60]` still abort in the
+  lowering's own guards, since those exist to stop a *different* bug (the
+  wrapping `8 * len + 8` size arithmetic collapsing to a tiny block).
 - A trait bound on a **record** or **sum type** type parameter
   (`record Keyed<K: Hash, V>`, `type Wrap<T: Hash> = …`) is now rejected with
   `E0900` instead of being silently discarded. It parsed and then enforced

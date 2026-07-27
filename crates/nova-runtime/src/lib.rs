@@ -171,6 +171,9 @@ pub extern "C" fn nova_rt_char_to_str(v: i64) -> *mut NovaStr {
 /// Allocate `size` zeroed bytes for a heap value — a sum `{ tag, fields... }`,
 /// record `{ fields... }`, array `{ len, elems... }`, or closure environment.
 /// The result is GC-managed and its slots are traced for further pointers.
+///
+/// Never returns null: a size too large to describe as a heap layout, and one
+/// the system allocator cannot satisfy, both abort (see [`gc::alloc`]).
 #[no_mangle]
 pub extern "C" fn nova_rt_alloc(size: i64) -> *mut u8 {
     gc::alloc(size.max(8) as usize, true)

@@ -243,6 +243,64 @@ fn repeat_array_overlong_length_aborts_instead_of_segfaulting() {
     );
 }
 
+/// The very top of the *legal* length range is a clean Nova abort, not a Rust
+/// one. `MAX_ARRAY_LEN` is the largest length whose `8 * len + 8` size still fits
+/// in an `i64`, so the lowering's guards both pass — but at `ALIGN = 16` that
+/// size rounds up 8 bytes past `isize::MAX`, so `Layout::from_size_align` cannot
+/// describe it. That used to reach an `expect` in `gc::alloc` and end the
+/// process with "thread caused non-unwinding panic" plus a Rust backtrace.
+///
+/// The check happens before any allocation is attempted, so this test costs
+/// nothing in memory. `gc::alloc` is shared by every allocation site in the
+/// language, so this covers records, strings, closures and collection growth
+/// too — arrays are just the one path that can name such a size in one line.
+#[test]
+fn undescribable_allocation_size_aborts_cleanly() {
+    let dir = std::env::temp_dir().join("nova-max-len");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("max_len.nova");
+    // `(1 << 60) - 2` is exactly `MAX_ARRAY_LEN`, written as a shift so no
+    // literal-overflow question arises.
+    std::fs::write(
+        &file,
+        "fn main() { let n = (1 << 60) - 2\n let a = [7; n]\n println(\"${a.len()}\") }",
+    )
+    .expect("write");
+    let exe = dir.join(format!("max_len{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let out = Command::new(&exe).assert().failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: allocation of 9223372036854775800 bytes exceeds the maximum object size of 9223372036854775792 bytes"),
+        "stderr: {stderr}"
+    );
+    // The point of the fix: a Nova diagnostic instead of a Rust panic. Also
+    // distinct from the genuine out-of-memory wording ("memory allocation of N
+    // bytes failed"), which a merely-too-big length still produces.
+    assert!(
+        !stderr.contains("panicked at") && !stderr.contains("non-unwinding"),
+        "expected no Rust panic, stderr: {stderr}"
+    );
+    // The JIT shares `gc::alloc`, but assert it too: the abort happens inside
+    // the compiler process there.
+    let assert = nova().arg("run").arg(&file).assert().failure();
+    let jit_stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        jit_stderr.contains("exceeds the maximum object size"),
+        "stderr: {jit_stderr}"
+    );
+    assert!(
+        !jit_stderr.contains("panicked at"),
+        "expected no Rust panic, stderr: {jit_stderr}"
+    );
+}
+
 #[test]
 fn constants_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/constants.stdout"))

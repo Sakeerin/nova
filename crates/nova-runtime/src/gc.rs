@@ -33,6 +33,16 @@ use std::sync::OnceLock;
 /// returned pointer well-aligned for every value class.
 const ALIGN: usize = 16;
 
+/// The largest object [`alloc`] can describe. A bigger request cannot be
+/// expressed as a [`Layout`] at [`ALIGN`] at all: rounding it up to the
+/// alignment would pass `isize::MAX`, which `Layout` rejects.
+///
+/// This constant exists only so the diagnostic can name the limit — the
+/// *decision* is always `Layout`'s own (see [`heap_layout`]), never a
+/// re-derivation of its rule. `max_heap_object_is_the_largest_describable_size`
+/// pins the two together so they cannot disagree.
+const MAX_HEAP_OBJECT: usize = (isize::MAX as usize) - (ALIGN - 1);
+
 /// Collect once this many bytes have been allocated since the last cycle
 /// (grows with the live set afterward).
 const INITIAL_THRESHOLD: usize = 1 << 20; // 1 MiB
@@ -97,12 +107,45 @@ fn debug() -> bool {
     *D.get_or_init(|| std::env::var_os("NOVA_GC_DEBUG").is_some())
 }
 
+/// The layout of a `size`-byte heap object, or `None` if no such object can
+/// exist because `size` is too large to describe.
+///
+/// `Layout::from_size_align` is the authority on which sizes are legal, so this
+/// asks it rather than restating its rule (`size` rounded up to `ALIGN` must not
+/// pass `isize::MAX`) — a restatement could drift out of agreement with it. It
+/// is a pure arithmetic check: nothing is allocated, so the decision is
+/// testable at any size.
+fn heap_layout(size: usize) -> Option<Layout> {
+    Layout::from_size_align(size, ALIGN).ok()
+}
+
 /// Allocate `size` zeroed bytes as a GC-managed object. `scan` selects whether
 /// the collector traces the object's contents for pointers.
+///
+/// Aborts the process with a `nova: panic:` diagnostic if `size` exceeds
+/// [`MAX_HEAP_OBJECT`], which is unsatisfiable rather than merely unavailable;
+/// a size that is describable but unavailable goes to `handle_alloc_error`.
 pub fn alloc(size: usize, scan: bool) -> *mut u8 {
     let size = size.max(8);
+    // Reject an undescribable size before doing any work. This is *not* an
+    // out-of-memory condition — no allocator could ever satisfy the request,
+    // because there is no `Layout` for it — so it does not go through
+    // `handle_alloc_error` (which would need the very layout that failed).
+    // Instead it is a deliberate runtime abort in the style of
+    // `nova_rt_panic_str` and `nova_rt_check_bounds`.
+    //
+    // It is reachable from ordinary Nova source: `[x; n]` with `n` at the top
+    // of the legal length range asks for `8 * n + 8` bytes, and at
+    // `n = MAX_ARRAY_LEN` that is 8 bytes past what `ALIGN` lets `Layout`
+    // express. Every allocation site in the language funnels through here, so
+    // any computed size can land on it.
+    let Some(layout) = heap_layout(size) else {
+        eprintln!(
+            "nova: panic: allocation of {size} bytes exceeds the maximum object size of {MAX_HEAP_OBJECT} bytes"
+        );
+        std::process::abort();
+    };
     maybe_collect(size);
-    let layout = Layout::from_size_align(size, ALIGN).expect("valid heap layout");
     // Zeroed so unwritten slots (e.g. skipped unit fields) read as null and are
     // never mistaken for pointers.
     let p = unsafe { alloc_zeroed(layout) };
@@ -205,7 +248,10 @@ fn collect_with_roots(roots: &[usize]) {
                 i += 1;
             } else {
                 let o = h.objects.swap_remove(i);
-                let layout = Layout::from_size_align(o.size, ALIGN).expect("valid heap layout");
+                // Infallible, and not a user-input path: a tracked object's
+                // size is one `alloc` already built a layout from.
+                let layout = heap_layout(o.size)
+                    .expect("a live object's size was accepted by heap_layout at allocation");
                 // SAFETY: `addr`/`size` are from this object's own allocation.
                 unsafe { dealloc(o.addr as *mut u8, layout) };
                 freed += o.size;
@@ -303,7 +349,7 @@ mod tests {
         HEAP.with(|h| {
             let mut h = h.borrow_mut();
             for o in h.objects.drain(..) {
-                let layout = Layout::from_size_align(o.size, ALIGN).unwrap();
+                let layout = heap_layout(o.size).expect("tracked size is describable");
                 unsafe { dealloc(o.addr as *mut u8, layout) };
             }
             h.alloc_since_gc = 0;
@@ -353,6 +399,37 @@ mod tests {
         // A pointer into the middle of the object still keeps it alive.
         collect_with_roots(&[a + 16]);
         assert_eq!(count(), 1);
+    }
+
+    /// The size an ordinary object asks for is describable, and the layout
+    /// carries the size and alignment `alloc` will hand the system allocator.
+    #[test]
+    fn heap_layout_describes_ordinary_sizes() {
+        let layout = heap_layout(24).expect("24 bytes is describable");
+        assert_eq!(layout.size(), 24);
+        assert_eq!(layout.align(), ALIGN);
+    }
+
+    /// A size no `Layout` can express is reported as such rather than reaching
+    /// the allocator. Checked on the exact size that used to abort the process
+    /// with a Rust panic: `[x; MAX_ARRAY_LEN]` asks `nova_rt_alloc` for
+    /// `8 * 1152921504606846974 + 8` bytes, which `ALIGN` rounds up 8 bytes past
+    /// `isize::MAX`.
+    ///
+    /// Deciding this never allocates, so the extreme is testable directly —
+    /// calling `alloc` with it would (correctly) abort the test process.
+    #[test]
+    fn heap_layout_rejects_undescribable_sizes() {
+        assert!(heap_layout(9_223_372_036_854_775_800).is_none());
+        assert!(heap_layout(usize::MAX).is_none());
+    }
+
+    /// The limit the diagnostic quotes is exactly the limit `Layout` enforces.
+    /// Without this the message could name a number the code does not use.
+    #[test]
+    fn max_heap_object_is_the_largest_describable_size() {
+        assert!(heap_layout(MAX_HEAP_OBJECT).is_some());
+        assert!(heap_layout(MAX_HEAP_OBJECT + 1).is_none());
     }
 
     #[test]
