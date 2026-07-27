@@ -29,9 +29,9 @@
 // literal, the `0..0` loop is vacuous, and `str_from_chars` of an empty
 // array is already ""), so that half is only a fast path skipping the
 // allocation. The `n < 0` half is defensive rather than load-bearing today —
-// `slice` is this helper's only caller and already guarantees `start <= end`
-// itself — kept here in case a future caller of this module-private helper
-// does not validate as carefully.
+// `slice` and `split` are this helper's only callers, and both already
+// guarantee `start <= end` themselves — kept here in case a future caller of
+// this module-private helper does not validate as carefully.
 fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
     let n = end - start
     if n <= 0 { return "" }
@@ -45,9 +45,16 @@ fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
 
 // Whether `n` occurs in `h` starting exactly at `at`. A needle that would run
 // past the end of `h` does not match; an empty needle matches at any `at`
-// within `h`, including `h.len()`. Private: the four search methods below are
-// its only callers.
+// within `h`, including `h.len()`. Private: `starts_with`, `ends_with`,
+// `index_of` and `split` are its only callers.
 fn chars_match_at(h: [Char], n: [Char], at: Int) -> Bool {
+    // Every call site already guarantees `at >= 0` — `starts_with` passes the
+    // literal `0`; `ends_with` passes `h.len() - n.len()` only after checking
+    // `n.len() <= h.len()`; `index_of` and `split` only ever step `at`/`i`/`j`
+    // upward starting from `0` — so this guard is currently unreachable. It
+    // is defensive rather than load-bearing today, kept in case a future
+    // caller of this module-private helper does not validate as carefully,
+    // matching `chars_to_string`'s analogous `n < 0` guard above.
     if at < 0 { return false }
     if at + n.len() > h.len() { return false }
     let mut k = 0
@@ -145,4 +152,80 @@ impl String {
     // Whether `needle` occurs anywhere in `self`. An empty `needle` always
     // matches, since `index_of` reports `Some(0)` for it.
     pub fn contains(self, needle: String) -> Bool { self.index_of(needle).is_some() }
+
+    // Split on every non-overlapping occurrence of `sep`, left to right.
+    //
+    // No separator found yields a ONE-element array holding the whole string,
+    // never an empty array. Adjacent, leading and trailing separators each
+    // produce an empty piece — nothing is collapsed or trimmed. An EMPTY
+    // separator splits into single codepoints (the JavaScript behaviour;
+    // Rust adds boundary empties and Python raises, so there is no consensus
+    // to inherit), and `"".split("")` is `[]`.
+    pub fn split(self, sep: String) -> [String] {
+        let h = str_chars(self)
+        let s = str_chars(sep)
+        if s.len() == 0 {
+            if h.len() == 0 { return [] }
+            let mut single = [""; h.len()]
+            for i in 0..h.len() { single[i] = chars_to_string(h, i, i + 1) }
+            return single
+        }
+        // Pass 1: count the pieces. One more piece than separators found.
+        let mut pieces = 1
+        let mut i = 0
+        while i + s.len() <= h.len() {
+            if chars_match_at(h, s, i) {
+                pieces = pieces + 1
+                i = i + s.len()
+            } else {
+                i = i + 1
+            }
+        }
+        // Pass 2: fill, walking the same way so the two passes agree.
+        let mut out = [""; pieces]
+        let mut w = 0
+        let mut start = 0
+        let mut j = 0
+        while j + s.len() <= h.len() {
+            if chars_match_at(h, s, j) {
+                out[w] = chars_to_string(h, start, j)
+                w = w + 1
+                j = j + s.len()
+                start = j
+            } else {
+                j = j + 1
+            }
+        }
+        out[w] = chars_to_string(h, start, h.len())
+        out
+    }
+
+    // Join `parts` with `self` between them: `",".join(parts)`. The separator
+    // is the receiver rather than this being a free `join(parts, sep)`,
+    // because a top-level `pub fn` is glob-imported into every module and
+    // would take the name `join` from all user code.
+    pub fn join(self, parts: [String]) -> String {
+        if parts.len() == 0 { return "" }
+        let sep = str_chars(self)
+        let mut total = sep.len() * (parts.len() - 1)
+        for i in 0..parts.len() { total = total + str_len_chars(parts[i]) }
+        if total == 0 { return "" }
+        // Filler is overwritten in full below; `total > 0` here.
+        let mut out = [' '; total]
+        let mut w = 0
+        for i in 0..parts.len() {
+            if i > 0 {
+                for k in 0..sep.len() {
+                    out[w] = sep[k]
+                    w = w + 1
+                }
+            }
+            let p = str_chars(parts[i])
+            for k in 0..p.len() {
+                out[w] = p[k]
+                w = w + 1
+            }
+        }
+        str_from_chars(out)
+    }
 }

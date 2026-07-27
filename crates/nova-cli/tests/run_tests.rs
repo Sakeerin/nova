@@ -1586,3 +1586,93 @@ fn string_search_same_length_and_last_position_boundaries() {
         .success()
         .stdout("true false\n0 -1 3\n");
 }
+
+/// `split`'s pinned semantics (spec §4.2): a missing separator yields a
+/// one-element array and NEVER an empty one; adjacent, leading and trailing
+/// separators produce empty strings with no collapsing; and an EMPTY
+/// separator splits into single codepoints — the JavaScript behaviour, chosen
+/// because Rust adds boundary empties and Python raises, so there is no
+/// consensus to inherit. `join` hangs off the separator, not the parts.
+#[test]
+fn string_split_and_join_match_the_pinned_semantics() {
+    let src = "fn main() {\n\
+               let a = \"a,b,c\".split(\",\")\n\
+               println(\"${a.len()} ${a[0]}${a[1]}${a[2]}\")\n\
+               let b = \"abc\".split(\",\")\n\
+               println(\"${b.len()} ${b[0]}\")\n\
+               let c = \",a,\".split(\",\")\n\
+               println(\"${c.len()} [${c[0]}][${c[1]}][${c[2]}]\")\n\
+               let d = \"a,,b\".split(\",\")\n\
+               println(\"${d.len()} [${d[0]}][${d[1]}][${d[2]}]\")\n\
+               let e = \"a→b\".split(\"→\")\n\
+               println(\"${e.len()} ${e[0]}${e[1]}\")\n\
+               let f = \"abc\".split(\"\")\n\
+               println(\"${f.len()} ${f[0]}|${f[1]}|${f[2]}\")\n\
+               println(\"${\"\".split(\"\").len()} ${\"\".split(\",\").len()}\")\n\
+               let g = \"xx\".split(\"xx\")\n\
+               println(\"${g.len()} [${g[0]}][${g[1]}]\")\n\
+               println(\"[${\",\".join(a)}] [${\"\".join(f)}] [${\"-\".join([])}]\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-split");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova().arg("run").arg(&path).assert().success().stdout(
+        "3 abc\n1 abc\n3 [][a][]\n3 [a][][b]\n2 ab\n3 a|b|c\n0 1\n2 [][]\n\
+             [a,b,c] [abc] []\n",
+    );
+}
+
+/// Mutation-coverage gap the brief's own test above leaves open (same shape
+/// as the Task 3/4/5 lessons): every `join` call above uses a separator that
+/// is either a single codepoint (`","`) or empty (`""`), and every `split`
+/// separator is either one codepoint (`","`/`"→"`) or spans the WHOLE
+/// haystack (`"xx"` in `"xx"`). That leaves gaps a one-character mutation
+/// could hide in:
+///
+/// 1. `join`'s inner copy loop (`for k in 0..sep.len() { out[w] = sep[k] ...
+///    }`) mutated to hardcode `sep[0]` instead of indexing by `k` is
+///    invisible with `","` (length 1, so `sep[0]` and `sep[k]` never
+///    differ) or `""` (the loop never runs zero times either way).
+///    `"->".join(["a", "b", "c"])` uses a two-codepoint separator with
+///    DIFFERENT characters at each position, so the hardcoded version writes
+///    `"--"` where the real one writes `"->"`.
+/// 2. `join`'s guard `if parts.len() == 0 { return "" }` mutated to
+///    `parts.len() == 1` still gets caught by `"-".join([])` in the brief's
+///    test above — but only by accident, via a negative-length array crash
+///    on the UNRELATED zero-part call. The mutant's actual, intended effect
+///    (silently returning `""` for a genuine one-part call) is never pinned
+///    on its own terms. `",".join(["solo"])` does that directly: the answer
+///    must be `"solo"`, unchanged, with no separator on either side.
+/// 3. `split`'s count/fill arithmetic is only ever exercised with a
+///    one-codepoint separator repeated inside a longer haystack, or a
+///    multi-codepoint separator spanning the ENTIRE haystack (`"xx"`) with
+///    no room for a second match. `"a::b::c".split("::")` is a
+///    two-codepoint separator occurring twice INSIDE a seven-codepoint
+///    haystack (non-overlapping, neither match at either boundary), a
+///    combination none of the brief's cases cover.
+#[test]
+fn string_split_and_join_cover_multi_codepoint_separators_and_one_part_join() {
+    let src = "fn main() {\n\
+               let s = \"a::b::c\".split(\"::\")\n\
+               println(\"${s.len()} ${s[0]}|${s[1]}|${s[2]}\")\n\
+               let parts = [\"a\", \"b\", \"c\"]\n\
+               println(\"${\"->\".join(parts)}\")\n\
+               let one = [\"solo\"]\n\
+               println(\"${\",\".join(one)}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-split-join-boundary");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("3 a|b|c\na->b->c\nsolo\n");
+}
