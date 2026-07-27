@@ -1573,6 +1573,43 @@ Drop the `expected_clone` dance if `stdout(expected)` compiles directly, as it d
 Run: `cargo test -p nova-cli --test run_tests strings_ --no-fail-fast`
 Expected: all three PASS. If `strings_under_gc_stress` fails while `strings_run` passes, that is a **collector** finding — an intermediate `[Char]` is being collected while still live. Report it; do not paper over it by restructuring the fixture.
 
+- [ ] **Step 4b: Write the two `std/collections` panic tests that a comment already claims exist**
+
+Not strings work, but it belongs here because this is the task that touches `run_tests.rs`, and leaving it means the next reader trusts a false statement.
+
+`crates/nova-cli/tests/run_tests.rs:1207-1208` says, of the collections gate: "Nothing in here panics: `panic` aborts the process, which would truncate the remaining output. **`Vec::set` out of range and `unwrap` on the wrong variant have their own committed tests.**" Those tests **do not exist** — `git grep` finds only that comment. Phase 2.2a shipped a comment vouching for coverage that was never written, which is exactly the documented-but-unenforced pattern the preceding branch existed to eliminate. Two real panic paths in `std/collections` therefore have zero coverage.
+
+Write them, rather than weakening the comment to match reality — the comment names the right tests, they were just never added. Model both on `panic_aborts_with_message` (`crates/nova-cli/tests/run_tests.rs:1333`), which is the file's actual idiom for a process-aborting program, and give each its own temp directory (`nova-collections-setoob`, `nova-collections-unwrap`).
+
+```rust
+/// `Vec::set` past the end aborts with its own message rather than
+/// corrupting memory. The collections gate's doc comment has claimed this
+/// test exists since Phase 2.2a; it did not, so the path was uncovered.
+#[test]
+fn vec_set_out_of_range_aborts_with_message() {
+    let src = "fn main() {\n\
+               let mut v: Vec<Int> = Vec::new()\n\
+               v.push(1)\n\
+               v.set(5, 9)\n\
+               }";
+    // … house temp-dir idiom, then assert failure() and that stderr
+    // contains "Vec::set index out of range"
+}
+
+/// `unwrap` on a `None` aborts with its own message. Same provenance as
+/// above — claimed by a comment, never written.
+#[test]
+fn unwrap_on_the_wrong_variant_aborts_with_message() {
+    let src = "fn main() {\n\
+               let o: Option<Int> = None\n\
+               println(\"${o.unwrap()}\")\n\
+               }";
+    // … assert failure() and the message std/core's `unwrap` actually panics with
+}
+```
+
+**Read the real panic messages out of `std/collections/lib.nova` and `std/core/lib.nova` before asserting them** — do not guess the wording, and do not change the messages to match a guess. If either path turns out **not** to panic (for instance if `Vec::set`'s guard is missing, or `unwrap`'s message differs from what the comment implies), that is a genuine finding in previously shipped code: report it rather than adjusting the test to pass.
+
 - [ ] **Step 5: Update the CHANGELOG**
 
 Under `[Unreleased]`, record: the five new intrinsics and that they are std-only; `std/strings` as the third embedded std module with its 18 methods; that `String` now has **18 inherent methods that shadow same-named user trait methods on `String`** (not an error — inherent wins by priority — but permanent); the codepoint-not-bytes contract; the `Debug for String` escaping fix; and the deliberate limitations (approximate whitespace set, O(n) allocation per inspection, no `replace`/padding/parsing).
