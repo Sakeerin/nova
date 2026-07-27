@@ -154,23 +154,42 @@ impl<K: Hash + Eq, V> Map<K, V> {
         panic("Map::insert found no free slot")
     }
 
-    pub fn get(self, k: K) -> Option<V> {
+    // The slot index of a live entry for `k`, or `-1` if there is none. Shared
+    // by `get` and `remove`, which differ only in what they do with the slot
+    // once found — `get` reads it, `remove` writes a tombstone into it — so
+    // the probe scan itself lives in exactly one place, as the module doc
+    // above promises, instead of two copies that can drift.
+    //
+    // `cap == 0` (an unallocated table) reports absence without indexing
+    // anything. Only an empty slot ends the chain; a tombstone is walked
+    // past, so a key inserted past a tombstone stays reachable — removing
+    // from the middle of a chain must not break the chain for keys further
+    // along it.
+    fn find(self, k: K) -> Int {
         let cap = self.state.len()
-        if cap == 0 { return None }
+        if cap == 0 { return -1 }
         let mut i = self.slot_of(k, cap)
         let mut probes = 0
         while probes < cap {
             let st = self.state[i]
-            // Only an empty slot ends the chain; a tombstone is walked past, so
-            // removing from the middle of a chain leaves later keys reachable.
-            if st == 0 { return None }
+            if st == 0 { return -1 }
             if st == 1 {
-                if self.keys[i].eq(k) { return Some(self.vals[i]) }
+                if self.keys[i].eq(k) { return i }
             }
             i = (i + 1) & (cap - 1)
             probes = probes + 1
         }
-        None
+        // Not a bare trailing `-1`: a line starting with `-` right after a
+        // `}`-closed block is absorbed as binary subtraction against the
+        // `while` above (which types `Unit`), not read as a fresh statement —
+        // the same trap `tests/runtime/collections.nova` binds `miss` to
+        // avoid. `return` makes this an unambiguous statement.
+        return -1
+    }
+
+    pub fn get(self, k: K) -> Option<V> {
+        let i = self.find(k)
+        if i < 0 { None } else { Some(self.vals[i]) }
     }
 
     pub fn contains_key(self, k: K) -> Bool {
@@ -181,25 +200,15 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // were inserted past this slot. `len` drops; `used` does not, because the
     // slot is still unusable to a probe walking through it.
     pub fn remove(mut self, k: K) -> Option<V> {
-        let cap = self.state.len()
-        if cap == 0 { return None }
-        let mut i = self.slot_of(k, cap)
-        let mut probes = 0
-        while probes < cap {
-            let st = self.state[i]
-            if st == 0 { return None }
-            if st == 1 {
-                if self.keys[i].eq(k) {
-                    let old = self.vals[i]
-                    self.state[i] = 2
-                    self.len = self.len - 1
-                    return Some(old)
-                }
-            }
-            i = (i + 1) & (cap - 1)
-            probes = probes + 1
+        let i = self.find(k)
+        if i < 0 {
+            None
+        } else {
+            let old = self.vals[i]
+            self.state[i] = 2
+            self.len = self.len - 1
+            Some(old)
         }
-        None
     }
 
     // Double the capacity and reinsert the live entries, which is also what
@@ -262,7 +271,7 @@ impl<T: Hash + Eq> Set<T> {
     // Number of elements; unaffected by tombstones (see `Map::len`).
     pub fn len(self) -> Int { self.map.len() }
 
-    pub fn is_empty(self) -> Bool { self.map.len() == 0 }
+    pub fn is_empty(self) -> Bool { self.map.is_empty() }
 
     // Add `v`, returning whether it was newly added. `Map::insert` returns
     // `Some(old)` when `v` was already a key, so "newly added" is exactly the
