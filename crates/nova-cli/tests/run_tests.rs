@@ -1430,12 +1430,22 @@ fn str_chars_array_matches_codegen_layout() {
 /// Round-trip and the half-open slice boundary. Per spec §4.2, `slice` is
 /// `start` inclusive / `end` exclusive, `start == end` is valid and yields
 /// "", and `reverse` reverses codepoints.
+///
+/// `"héllo wörld".slice(6, 11)` (`"wörld"`) is not decorative: every other
+/// `slice` call anywhere in this test uses `start == 0`, so without a
+/// nonzero-`start` case, `chars_to_string`'s `cs[start + i]` could regress to
+/// `cs[i]` (dropping the offset) and every test here would still pass — see
+/// the mutation-testing note in the Task 4 fix report. The multi-byte prefix
+/// (`é` inside `"héllo"`, both in the source before offset 6) also proves the
+/// offset is counted in codepoints, not bytes: a byte-based offset would land
+/// mid-character and either panic or produce garbage.
 #[test]
 fn str_from_chars_round_trips_and_slice_is_half_open() {
     let src = "fn main() {\n\
                println(\"${\"a→🦀é\".chars().len()}\")\n\
                println(\"${\"héllo wörld\".slice(0, 5)}|${\"héllo\".slice(0, 0)}|\
-               ${\"héllo\".slice(5, 5)}|${\"héllo\".slice(0, 5)}\")\n\
+               ${\"héllo\".slice(5, 5)}|${\"héllo\".slice(0, 5)}|\
+               ${\"héllo wörld\".slice(6, 11)}\")\n\
                println(\"${\"a→🦀\".reverse()} ${\"\".reverse()}\")\n\
                }";
     // House idiom for a temp Nova source in this file — see
@@ -1449,7 +1459,7 @@ fn str_from_chars_round_trips_and_slice_is_half_open() {
         .arg(&path)
         .assert()
         .success()
-        .stdout("4\nhéllo|||héllo\n🦀→a \n");
+        .stdout("4\nhéllo|||héllo|wörld\n🦀→a \n");
 }
 
 /// `String::slice`'s first panic: a negative `start`. Modelled on

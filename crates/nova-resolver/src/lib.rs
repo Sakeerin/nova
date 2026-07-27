@@ -148,9 +148,11 @@ impl Builtin {
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
     /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
     /// `str_len_chars` backs `std/strings`' `String::len`; `str_chars` backs
-    /// `std/strings`' `String::chars`; `str_from_chars` backs `std/strings`'
-    /// private `chars_to_string` helper, which in turn backs `String::slice`
-    /// and `String::reverse`.
+    /// `std/strings`' `String::chars`; `str_from_chars` backs two separate
+    /// call sites in `std/strings`: its private `chars_to_string` helper
+    /// (itself called by `String::slice`), and `String::reverse`, which
+    /// calls `str_from_chars` directly rather than going through
+    /// `chars_to_string`.
     pub const STD_ONLY: [Builtin; 6] = [
         Builtin::StrCmp,
         Builtin::StrHash,

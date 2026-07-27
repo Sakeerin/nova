@@ -23,7 +23,15 @@
 // are std/core's trait methods on `String` and would be silently shadowed.
 
 // The codepoints `start..end` of `cs` as a string. `end` is exclusive.
-// Callers have already validated the range.
+// Callers have already validated the range. Neither half of the `n <= 0`
+// guard is strictly needed for correctness: at `n == 0` the general path
+// below already produces "" on its own (`[' '; 0]` is a legal repeat
+// literal, the `0..0` loop is vacuous, and `str_from_chars` of an empty
+// array is already ""), so that half is only a fast path skipping the
+// allocation. The `n < 0` half is defensive rather than load-bearing today —
+// `slice` is this helper's only caller and already guarantees `start <= end`
+// itself — kept here in case a future caller of this module-private helper
+// does not validate as carefully.
 fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
     let n = end - start
     if n <= 0 { return "" }
@@ -70,6 +78,12 @@ impl String {
     // Reverses CODEPOINTS, so a combining accent detaches from the character
     // it modifies. That is inherent to codepoint-level operations and is why
     // this module is not grapheme-aware (see the design doc, decision D1).
+    //
+    // The `n == 0` guard is not required for correctness — the general path
+    // below already produces "" for empty input on its own (`[' '; 0]` is a
+    // legal repeat literal, the `0..n` loop is then vacuous, and
+    // `str_from_chars` of an empty array is already "") — it exists purely
+    // as a fast path that skips the allocation for the empty string.
     pub fn reverse(self) -> String {
         let cs = str_chars(self)
         let n = cs.len()
