@@ -428,6 +428,7 @@ impl<K: Hash + Eq, V> Map<K, V> {
     pub fn contains_key(self, key: K) -> Bool
     pub fn len(self) -> Int
     pub fn iter(self) -> impl Iterator<Item = (&K, &V)>
+    // ... etc
 }
 
 pub record Set<T> { /* opaque */ }
@@ -445,8 +446,14 @@ not on the record's own type parameters. A trait bound on a *record* (or sum)
 type parameter is rejected with `E0900`: bounds are discharged at
 monomorphization, which walks function and impl instances, so a bound in that
 position would enforce nothing. Writing it on the `impl` is not a workaround but
-the enforced spelling — it is what `std/collections` does, and it is what makes
-`Map<NotHashable, V>` a compile error rather than a silently accepted type.
+the enforced spelling — it is what `std/collections` does.
+
+The enforcement is per method instantiation, not on the type itself. Nova has
+no field privacy, so a record literal reaches the type without going through
+any method: `let m: Map<NotHashable, Int> = Map { len: 0, used: 0, keys: [],
+vals: [], state: [] }` compiles and runs. What the bound on the `impl` actually
+rejects, with `E0013` at monomorphization, is instantiating a *method* —
+`Map::new()`, `insert`, `get`, … — with a key that is not `Hash + Eq`.
 
 ---
 

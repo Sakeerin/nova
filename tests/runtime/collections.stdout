@@ -7,6 +7,10 @@ vec repush len=10 get9=999
 vec cleared len=0 empty=true get0=-1
 vec pop empty=-1 len=0
 vec after clear len=1 get0=7
+fresh map get=-1 contains=false
+fresh map remove=-1 len=0
+fresh set contains=false
+fresh set remove=false len=0
 map caps: 8 8 8 8 8 8 16 16 16 16 16 16 32 32 32 32 32 32 32 32
 map len=20 used=20 cap=32 empty=false
 map get 0=0 19=190 20=-1
@@ -41,3 +45,5 @@ set remove=true again=false len=3 has0=false
 set readd new=true len=4 has0=true
 keyset new6=true new14=true dup6=false len=2 empty=false
 keyset has22=false rm14=true again=false len=1 has6=true
+empty-by-removal map len=0 used=1 is_empty=true state=00200000
+empty-by-removal set len=0 used=1 is_empty=true state=00200000

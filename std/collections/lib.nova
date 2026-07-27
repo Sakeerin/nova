@@ -79,13 +79,14 @@ impl<T> Vec<T> {
 // into an all-tombstone scan.
 //
 // The `K: Hash + Eq` contract lives on the `impl` below, not on this record's
-// generic parameters as `20-STDLIB.md` writes it. A bound on a *record*
-// parameter parses but is silently dropped — `nova-hir`'s `RecordType` keeps
-// only a generic count, and `nova-mir`'s `mono` checks bounds solely against a
-// function's own `bounds` — so `record Map<K: Hash + Eq, V>` would advertise a
-// guarantee nothing enforces. On the impl it is real: instantiating any method
-// with a key that is not `Hash + Eq` is E0013 at monomorphization, which is
-// pinned by `map_key_without_hash_reports_e0013` in nova-mir's lowering tests.
+// own generic parameters: a bound on a *record*'s type parameter is a hard
+// error, `E0900` — `record Map<K: Hash + Eq, V>` does not compile, because
+// `nova-hir`'s `RecordType` keeps only a generic count and `nova-mir`'s `mono`
+// checks bounds solely against a function's own `bounds`, so that position has
+// no way to enforce anything. On the impl it is real: instantiating any
+// method with a key that is not `Hash + Eq` is E0013 at monomorphization,
+// which is pinned by `map_key_without_hash_reports_e0013` in nova-mir's
+// lowering tests.
 pub record Map<K, V> { len: Int, used: Int, keys: [K], vals: [V], state: [Int] }
 
 impl<K: Hash + Eq, V> Map<K, V> {
@@ -157,16 +158,25 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // The slot index of a live entry for `k`, or `-1` if there is none. Shared
     // by `get` and `remove`, which differ only in what they do with the slot
     // once found — `get` reads it, `remove` writes a tombstone into it — so
-    // the probe scan itself lives in exactly one place, as the module doc
-    // above promises, instead of two copies that can drift.
+    // this scan now lives in one place instead of the two separate copies
+    // `get` and `remove` used to carry. `insert` (above) cannot share it: it
+    // has to track the first tombstone it passes (`first_free`) so a fresh
+    // key reuses that slot, and must keep scanning past a tombstone to tell a
+    // replacement (the key turns up further on) from a genuine insertion (an
+    // empty slot reached with no match) — a plain lookup needs neither.
     //
-    // `cap == 0` (an unallocated table) reports absence without indexing
-    // anything. Only an empty slot ends the chain; a tombstone is walked
-    // past, so a key inserted past a tombstone stays reachable — removing
-    // from the middle of a chain must not break the chain for keys further
-    // along it.
+    // Only an empty slot ends the chain; a tombstone is walked past, so a key
+    // inserted past a tombstone stays reachable — removing from the middle of
+    // a chain must not break the chain for keys further along it.
     fn find(self, k: K) -> Int {
         let cap = self.state.len()
+        // Not what keeps this safe from indexing anything bad — at `cap == 0`
+        // the loop below never executes regardless, since `probes < cap` is
+        // false from the start. What this guard keeps true is `slot_of`'s own
+        // precondition (see its comment above): every caller checks for the
+        // unallocated table first, and without this line `find` would call
+        // `slot_of(k, 0)` and break that contract, even though nothing
+        // downstream happens to depend on it today.
         if cap == 0 { return -1 }
         let mut i = self.slot_of(k, cap)
         let mut probes = 0
@@ -179,6 +189,14 @@ impl<K: Hash + Eq, V> Map<K, V> {
             i = (i + 1) & (cap - 1)
             probes = probes + 1
         }
+        // Unreachable, for the same reason `insert`'s trailing `panic` is
+        // (see its comment above): the 3/4 load threshold caps `used` at 6 of
+        // 8 (or the equivalent fraction at any capacity), so at least two
+        // slots are always empty and the scan above always returns at
+        // `st == 0` before `probes` runs out. Kept as `return -1` rather than
+        // a `panic` — unlike `insert`, `find` has a safe fallback: an absent
+        // key is an ordinary result, not a corrupted table.
+        //
         // Not a bare trailing `-1`: a line starting with `-` right after a
         // `}`-closed block is absorbed as binary subtraction against the
         // `while` above (which types `Unit`), not read as a fresh statement —
@@ -261,7 +279,7 @@ impl<K: Hash + Eq, V> Map<K, V> {
 //
 // As with `Map` (see the note above it), the `T: Hash + Eq` contract lives on
 // the `impl`, not on this record's generic parameter: a bound on a record
-// parameter parses but is silently dropped by the current compiler.
+// parameter is now a hard error, `E0900`.
 pub record Set<T> { map: Map<T, Bool> }
 
 impl<T: Hash + Eq> Set<T> {

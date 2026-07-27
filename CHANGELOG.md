@@ -297,12 +297,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `contains`, `remove`, backed by a `Map<T, Bool>` so the probing, tombstone
     and growth logic lives in exactly one place. `insert` and `remove` report
     whether the set changed.
-  - The bound sits on each `impl`, not on the record's generic parameters as
-    `20-STDLIB.md` writes it, because **a bound on a record's generic parameter
-    parses but is silently dropped** by the current compiler — on the impl it is
-    real, and a non-`Hash` key is `E0013` at monomorphization. Reachability
-    pruning rooted at `main` keeps a program that touches no collection from
-    paying for any of it.
+  - The bound sits on each `impl`, not on the record's generic parameters: a
+    bound on a record's generic parameter is rejected with `E0900`, not
+    silently accepted (see "Fixed" below). On the impl it is real, and a
+    non-`Hash` key is `E0013` at monomorphization. Reachability pruning rooted
+    at `main` keeps a program that touches no collection from paying for any
+    of it.
   - The whole module is exercised end-to-end by `tests/runtime/collections.nova`
     under `nova run`, `nova build` **and `NOVA_GC_STRESS=1`** (collect on every
     allocation): `Vec` across three growths, `Map` through two rehashes with the

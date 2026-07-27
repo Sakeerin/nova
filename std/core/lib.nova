@@ -78,8 +78,8 @@ impl<T, E> Result<T, E> {
 // `Ty::String`; MIR's `lower_binary` intercepts it) that introduces no name
 // in any namespace, so it has no "reserved word" concern to begin with.
 // `str_cmp` does, and unlike `println`/`print`/`panic` it is not meant to be
-// user-visible language surface, so it is seeded only into this module's own
-// scope (`Builtin::STD_ONLY`), not into every module — a user program
+// user-visible language surface, so it is seeded only into std modules' own
+// scopes (`Builtin::STD_ONLY`), not into every module — a user program
 // may freely define its own `str_cmp` (String is not FFI-safe, and
 // `nova_`-prefixed extern symbols are reserved by the compiler, so a
 // user-visible `extern` was not an option either).

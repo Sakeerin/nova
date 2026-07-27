@@ -19,8 +19,11 @@ impl Eq for Key { fn eq(self, other: Key) -> Bool { self.id == other.id } }
 // A `Map`'s raw slot states, one digit per slot: 0 empty, 1 occupied,
 // 2 tombstone. Nova has no field privacy, so `Map`'s fields are readable from
 // here — which is what lets these assertions pin the tombstone *layout*
-// directly instead of inferring it from behaviour.
-fn state_str(m: Map<Key, Int>) -> String {
+// directly instead of inferring it from behaviour. Generic over `K, V` (the
+// body only ever touches `state: [Int]`, never a `K` or `V` value, so no
+// `Hash`/`Eq` bound is needed) so the same function also renders a `Set`'s
+// backing map via its `map` field, e.g. `state_str(some_set.map)`.
+fn state_str<K, V>(m: Map<K, V>) -> String {
     let mut out = ""
     let mut i = 0
     while i < m.state.len() {
@@ -58,6 +61,23 @@ fn main() {
     println("vec pop empty=${empty_pop.unwrap_or(miss)} len=${v.len()}")
     v.push(7)
     println("vec after clear len=${v.len()} get0=${v.get(0).unwrap_or(miss)}")
+
+    // === `find`'s `cap == 0` guard: get/contains_key/remove before any insert
+    // `Map::new()`/`Set::new()` never allocate `state`/`keys`/`vals` (all `[]`,
+    // cap 0). `slot_of`'s own contract requires `cap` to be positive (see its
+    // comment above), so `find` must report absence before ever calling
+    // `slot_of`, not merely happen to survive doing so. The key is absent, so
+    // `remove` finds nothing to touch either — the table is still unallocated
+    // after all three calls.
+    let mut fresh_m: Map<Int, Int> = Map::new()
+    println("fresh map get=${fresh_m.get(9).unwrap_or(miss)} contains=${fresh_m.contains_key(9)}")
+    let fresh_rm = fresh_m.remove(9)
+    println("fresh map remove=${fresh_rm.unwrap_or(miss)} len=${fresh_m.len()}")
+
+    let mut fresh_s: Set<Int> = Set::new()
+    println("fresh set contains=${fresh_s.contains(9)}")
+    let fresh_srm = fresh_s.remove(9)
+    println("fresh set remove=${fresh_srm} len=${fresh_s.len()}")
 
     // === Map<Int, Int>: the load-factor arithmetic, and two rehashes ===
     // Growth fires when `(used + 1) * 4 > cap * 3`, i.e. above 3/4 load. From
@@ -291,4 +311,23 @@ fn main() {
     let krm = ks.remove(a14)
     let krm2 = ks.remove(a14)
     println("keyset has22=${ks.contains(a22)} rm14=${krm} again=${krm2} len=${ks.len()} has6=${ks.contains(a6)}")
+
+    // === len == 0, used > 0: emptied by removal, not by starting empty ===
+    // `is_empty` must read `len` (live entries), not `used` (occupied plus
+    // tombstones): removing the one entry ever inserted leaves a tombstone
+    // behind, so `used` stays 1 while `len` drops to 0. A `Map`/`Set` whose
+    // `is_empty` read `used` instead would report `false` here despite
+    // holding nothing live. The `state` line makes the tombstone (a `2`, not
+    // a `0`) visible directly, rather than merely inferred from `len`/`used`/
+    // `is_empty` agreeing by coincidence.
+    let tk = Key { id: 42 }
+    let mut em: Map<Key, Int> = Map::new()
+    let _ = em.insert(tk, 4200)
+    let _ = em.remove(tk)
+    println("empty-by-removal map len=${em.len()} used=${em.used} is_empty=${em.is_empty()} state=${state_str(em)}")
+
+    let mut es: Set<Key> = Set::new()
+    let _ = es.insert(tk)
+    let _ = es.remove(tk)
+    println("empty-by-removal set len=${es.len()} used=${es.map.used} is_empty=${es.is_empty()} state=${state_str(es.map)}")
 }
