@@ -1611,6 +1611,12 @@ fn unwrap_on_the_wrong_variant_aborts_with_message() {
 
 **Read the real panic messages out of `std/collections/lib.nova` and `std/core/lib.nova` before asserting them** — do not guess the wording, and do not change the messages to match a guess. If either path turns out **not** to panic (for instance if `Vec::set`'s guard is missing, or `unwrap`'s message differs from what the comment implies), that is a genuine finding in previously shipped code: report it rather than adjusting the test to pass.
 
+- [ ] **Step 4c: One-clause doc correction that Task 9 left behind**
+
+`Builtin::STD_ONLY`'s doc comment in `crates/nova-resolver/src/lib.rs` enumerates which std method each builtin backs. It currently says `str_chars` backs "`std/strings`' `String::chars`" — true but now **incomplete**: as of Task 9, `str_chars` also backs `std/core`'s `impl Debug for String`, which is the whole reason that fix needed no new ABI symbol. Add that second call site to the clause.
+
+This is the last doc-accuracy item on the branch. Task 9's reviewer spotted it but correctly left it alone as outside that task's diff.
+
 - [ ] **Step 5: Update the CHANGELOG**
 
 Under `[Unreleased]`, record: the five new intrinsics and that they are std-only; `std/strings` as the third embedded std module with its 18 methods; that `String` now has **18 inherent methods that shadow same-named user trait methods on `String`** (not an error — inherent wins by priority — but permanent); the codepoint-not-bytes contract; the `Debug for String` escaping fix; and the deliberate limitations (approximate whitespace set, O(n) allocation per inspection, no `replace`/padding/parsing).
