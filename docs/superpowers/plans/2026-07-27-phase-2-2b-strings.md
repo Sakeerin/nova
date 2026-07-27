@@ -54,7 +54,7 @@ Neither codegen backend changes: `RtFunc::ALL` is their single source of truth, 
 
 ---
 
-### Task S1: Third std module scaffold
+### Task 1 (S1): Third std module scaffold
 
 Creates `std/strings` as `STD_MODULES[2]` with the one method that needs **no** new intrinsic, so the module-wiring change is gated independently of any ABI work.
 
@@ -167,7 +167,7 @@ git commit -m "feat(std): add std/strings as the third embedded std module"
 
 ---
 
-### Task S2: `str_len_chars` + `String::len`
+### Task 2 (S2): `str_len_chars` + `String::len`
 
 The simplest possible new intrinsic, done end-to-end through all six touchpoints — so a mistake in the wiring pattern surfaces here, isolated from S3's array-layout risk.
 
@@ -335,7 +335,7 @@ git commit -m "feat(std): add str_len_chars and String::len (codepoints, not byt
 
 ---
 
-### Task S3: `str_chars` + `String::chars` + `String::char_at`
+### Task 3 (S3): `str_chars` + `String::chars` + `String::char_at`
 
 **The highest-risk task in the plan.** `str_chars` is the first intrinsic that constructs a Nova array in the runtime, so it must reproduce codegen's layout exactly. A mistake is a silent miscompile, not a crash — which is why Step 1's test reads the array back from Nova rather than trusting Rust-side inspection.
 
@@ -507,7 +507,7 @@ git commit -m "feat(std): add str_chars, String::chars and String::char_at"
 
 ---
 
-### Task S4: `str_from_chars` + `slice` + `reverse`
+### Task 4 (S4): `str_from_chars` + `slice` + `reverse`
 
 Closes the round-trip, and adds the two methods that only need encoding.
 
@@ -699,7 +699,7 @@ git commit -m "feat(std): add str_from_chars, String::slice and String::reverse"
 
 ---
 
-### Task S5: Search — `starts_with`, `ends_with`, `index_of`, `contains`
+### Task 5 (S5): Search — `starts_with`, `ends_with`, `index_of`, `contains`
 
 No new intrinsics. All four share one private matcher.
 
@@ -818,7 +818,7 @@ git commit -m "feat(std): add String starts_with, ends_with, index_of and contai
 
 ---
 
-### Task S6: `split` and `join`
+### Task 6 (S6): `split` and `join`
 
 The trickiest algorithms in the module, and the ones with the most spec-pinned edge cases.
 
@@ -988,7 +988,7 @@ git commit -m "feat(std): add String::split and String::join"
 
 ---
 
-### Task S7: `trim` family and `repeat`
+### Task 7 (S7): `trim` family and `repeat`
 
 **Files:**
 - Modify: `std/strings/lib.nova`
@@ -1137,7 +1137,7 @@ git commit -m "feat(std): add the String trim family and String::repeat"
 
 ---
 
-### Task S8: `str_to_upper` / `str_to_lower` + the case-mapping methods
+### Task 8 (S8): `str_to_upper` / `str_to_lower` + the case-mapping methods
 
 Two intrinsics in one task: they are the same shape, and the single test that matters (`ß → SS`) covers the reason both are whole-string.
 
@@ -1290,7 +1290,7 @@ git commit -m "feat(std): add whole-string Unicode case mapping to std/strings"
 
 ---
 
-### Task S9: Fix `Debug for String`, and correct the comments this design falsifies
+### Task 9 (S9): Fix `Debug for String`, and correct the comments this design falsifies
 
 The defect that motivated the phase. Also corrects two comments that stop being true — the failure mode the *previous* branch actually shipped, so treat it as part of the work, not a nicety.
 
@@ -1400,7 +1400,7 @@ git commit -m "fix(std): escape string contents in Debug for String"
 
 ---
 
-### Task S10: The phase gate and CHANGELOG
+### Task 10 (S10): The phase gate and CHANGELOG
 
 **Files:**
 - Create: `tests/runtime/strings.nova`, `tests/runtime/strings.stdout`
