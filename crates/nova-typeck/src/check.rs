@@ -2607,7 +2607,8 @@ impl<'a> Checker<'a> {
             | Builtin::StrHash
             | Builtin::CharToInt
             | Builtin::StrLenChars
-            | Builtin::StrChars => "",
+            | Builtin::StrChars
+            | Builtin::StrFromChars => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -5298,6 +5299,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::CharToInt => (vec![Ty::Char], Ty::Int),
         Builtin::StrLenChars => (vec![Ty::String], Ty::Int),
         Builtin::StrChars => (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
+        Builtin::StrFromChars => (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
     }
 }
 
@@ -9261,6 +9263,10 @@ mod tests {
                 Builtin::StrChars => (
                     (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
                     "`str_chars(self)` in `String::chars`",
+                ),
+                Builtin::StrFromChars => (
+                    (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
+                    "`str_from_chars(cs)` in `chars_to_string`",
                 ),
             }
         }

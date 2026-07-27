@@ -1426,3 +1426,83 @@ fn str_chars_array_matches_codegen_layout() {
         .success()
         .stdout("3 a → 🦀\n0\nh é ? ? ?\n");
 }
+
+/// Round-trip and the half-open slice boundary. Per spec §4.2, `slice` is
+/// `start` inclusive / `end` exclusive, `start == end` is valid and yields
+/// "", and `reverse` reverses codepoints.
+#[test]
+fn str_from_chars_round_trips_and_slice_is_half_open() {
+    let src = "fn main() {\n\
+               println(\"${\"a→🦀é\".chars().len()}\")\n\
+               println(\"${\"héllo wörld\".slice(0, 5)}|${\"héllo\".slice(0, 0)}|\
+               ${\"héllo\".slice(5, 5)}|${\"héllo\".slice(0, 5)}\")\n\
+               println(\"${\"a→🦀\".reverse()} ${\"\".reverse()}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-slice");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("4\nhéllo|||héllo\n🦀→a \n");
+}
+
+/// `String::slice`'s first panic: a negative `start`. Modelled on
+/// `panic_aborts_with_message` — `panic` aborts the process, so this cannot
+/// share a fixture with anything that must keep running afterward.
+#[test]
+fn string_slice_negative_start_panics() {
+    let dir = std::env::temp_dir().join("nova-strings-slice-neg-start");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(
+        &path,
+        "fn main() { println(\"${\"abc\".slice(0 - 1, 2)}\") }\n",
+    )
+    .expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: String::slice start is negative"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `String::slice`'s second panic: `end` past the string's length (`"abc"` has
+/// 3 codepoints, so `end = 4` is out of range). `start == end` is deliberately
+/// NOT tested here — that is the valid empty-slice case covered by
+/// `str_from_chars_round_trips_and_slice_is_half_open`.
+#[test]
+fn string_slice_end_past_len_panics() {
+    let dir = std::env::temp_dir().join("nova-strings-slice-end-oob");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, "fn main() { println(\"${\"abc\".slice(0, 4)}\") }\n").expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: String::slice end is past the end of the string"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `String::slice`'s third panic: `start > end` (here `start == end + 1`, one
+/// past the boundary where `start == end` would be the valid empty slice).
+#[test]
+fn string_slice_start_after_end_panics() {
+    let dir = std::env::temp_dir().join("nova-strings-slice-start-after-end");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, "fn main() { println(\"${\"abc\".slice(2, 1)}\") }\n").expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: String::slice start is after end"),
+        "stderr: {stderr}"
+    );
+}

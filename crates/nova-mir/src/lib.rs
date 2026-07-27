@@ -161,6 +161,8 @@ rt_funcs! {
     StrLenChars,
     /// `(str) -> ptr` — a Nova `[Char]`.
     StrChars,
+    /// `(ptr to [Char]) -> str`
+    StrFromChars,
     /// `(size_bytes) -> ptr` — allocate a heap value (sum or record).
     Alloc,
     /// `(index, len) -> unit` — abort if `index` is out of `0..len`.
@@ -185,6 +187,7 @@ impl RtFunc {
             RtFunc::StrHash => "nova_rt_str_hash",
             RtFunc::StrLenChars => "nova_rt_str_len_chars",
             RtFunc::StrChars => "nova_rt_str_chars",
+            RtFunc::StrFromChars => "nova_rt_str_from_chars",
             RtFunc::Alloc => "nova_rt_alloc",
             RtFunc::CheckBounds => "nova_rt_check_bounds",
             RtFunc::Panic => "nova_rt_panic_str",
@@ -205,6 +208,7 @@ impl RtFunc {
             RtFunc::StrHash => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::StrLenChars => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::StrChars => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::StrFromChars => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),

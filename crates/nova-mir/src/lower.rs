@@ -601,6 +601,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::CharToInt => None,
                     Builtin::StrLenChars => Some(RtFunc::StrLenChars),
                     Builtin::StrChars => Some(RtFunc::StrChars),
+                    Builtin::StrFromChars => Some(RtFunc::StrFromChars),
                 };
                 match rt {
                     Some(func) => self.push(Stmt::CallRuntime {

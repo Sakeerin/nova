@@ -111,6 +111,12 @@ builtins! {
     /// that module that inspects a string. Also backs `std/core`'s
     /// `impl Debug for String`, which needs to escape the contents. Std-only.
     StrChars,
+    /// `str_from_chars(cs: [Char]) -> String` — encode codepoints as UTF-8.
+    /// The inverse of [`Builtin::StrChars`], and how every `std/strings`
+    /// operation that produces a string produces it: Nova has no `+` for
+    /// `String` (`E0013`), so building a result any other way would mean
+    /// quadratic interpolation. Std-only.
+    StrFromChars,
 }
 
 impl Builtin {
@@ -125,6 +131,7 @@ impl Builtin {
             Builtin::CharToInt => "char_to_int",
             Builtin::StrLenChars => "str_len_chars",
             Builtin::StrChars => "str_chars",
+            Builtin::StrFromChars => "str_from_chars",
         }
     }
 
@@ -141,13 +148,16 @@ impl Builtin {
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
     /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
     /// `str_len_chars` backs `std/strings`' `String::len`; `str_chars` backs
-    /// `std/strings`' `String::chars`.
-    pub const STD_ONLY: [Builtin; 5] = [
+    /// `std/strings`' `String::chars`; `str_from_chars` backs `std/strings`'
+    /// private `chars_to_string` helper, which in turn backs `String::slice`
+    /// and `String::reverse`.
+    pub const STD_ONLY: [Builtin; 6] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
         Builtin::StrLenChars,
         Builtin::StrChars,
+        Builtin::StrFromChars,
     ];
 }
 

@@ -22,6 +22,19 @@
 // named `fmt`, `dbg`, `eq`, `ne`, `cmp`, `clone`, `default` or `hash` — those
 // are std/core's trait methods on `String` and would be silently shadowed.
 
+// The codepoints `start..end` of `cs` as a string. `end` is exclusive.
+// Callers have already validated the range.
+fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
+    let n = end - start
+    if n <= 0 { return "" }
+    // `[' '; n]` needs a filler; every slot is overwritten immediately below,
+    // so the space never survives. A repeat literal is the only way to
+    // allocate a runtime-length array.
+    let mut out = [' '; n]
+    for i in 0..n { out[i] = cs[start + i] }
+    str_from_chars(out)
+}
+
 impl String {
     // Not `self.len() == 0`: `len()` decodes the whole string, while `==` on
     // `String` compares byte lengths first in the runtime.
@@ -40,5 +53,29 @@ impl String {
         if i < 0 { return None }
         let cs = str_chars(self)
         if i >= cs.len() { None } else { Some(cs[i]) }
+    }
+
+    // Codepoints `start..end`, with `end` EXCLUSIVE (half-open, like every
+    // other index range in the language). `start == end` yields "".
+    // Panics rather than returning an Option, matching `Vec::set` — an index
+    // that must be valid is a caller bug, whereas `char_at`'s query is not.
+    pub fn slice(self, start: Int, end: Int) -> String {
+        let cs = str_chars(self)
+        if start < 0 { panic("String::slice start is negative") }
+        if end > cs.len() { panic("String::slice end is past the end of the string") }
+        if start > end { panic("String::slice start is after end") }
+        chars_to_string(cs, start, end)
+    }
+
+    // Reverses CODEPOINTS, so a combining accent detaches from the character
+    // it modifies. That is inherent to codepoint-level operations and is why
+    // this module is not grapheme-aware (see the design doc, decision D1).
+    pub fn reverse(self) -> String {
+        let cs = str_chars(self)
+        let n = cs.len()
+        if n == 0 { return "" }
+        let mut out = [' '; n]
+        for i in 0..n { out[i] = cs[n - 1 - i] }
+        str_from_chars(out)
     }
 }

@@ -187,6 +187,30 @@ pub unsafe extern "C" fn nova_rt_str_chars(s: *const NovaStr) -> *mut u8 {
     block
 }
 
+/// Encode a Nova `[Char]` back into a string.
+///
+/// A word that is not a valid Unicode scalar value becomes
+/// [`char::REPLACEMENT_CHARACTER`] rather than aborting, matching what
+/// [`nova_rt_char_to_str`] already does. Nova source cannot produce one —
+/// there is no `Int` → `Char` conversion in the language (`let c: Char = 65`
+/// is `E0010`, `'a' + 1` is `E0010`, and no such builtin exists) — so this is
+/// defensive only.
+///
+/// # Safety
+/// `cs` must point to a Nova array of `Char`: `{ len: i64, elems… }` with
+/// element `i` at byte offset `8 + 8*i`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_from_chars(cs: *const u8) -> *mut NovaStr {
+    let words = cs as *const i64;
+    let n = (*words).max(0) as usize;
+    let mut out = String::new();
+    for i in 0..n {
+        let v = *words.add(1 + i);
+        out.push(char::from_u32(v as u32).unwrap_or(char::REPLACEMENT_CHARACTER));
+    }
+    gc_str(&out)
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -255,6 +279,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
         ("nova_rt_str_len_chars", nova_rt_str_len_chars as *const u8),
         ("nova_rt_str_chars", nova_rt_str_chars as *const u8),
+        (
+            "nova_rt_str_from_chars",
+            nova_rt_str_from_chars as *const u8,
+        ),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -389,6 +417,22 @@ mod tests {
             let empty = nova_rt_str_chars(make_str(""));
             assert_eq!(*(empty as *const i64), 0);
             assert_eq!(gc::object_info(empty as usize), Some((8, true)));
+        }
+    }
+
+    #[test]
+    fn str_from_chars_round_trips_and_substitutes_invalid_scalars() {
+        unsafe {
+            for s in ["", "ascii", "café", "日本語", "🦀🇹🇭"] {
+                let back = nova_rt_str_from_chars(nova_rt_str_chars(make_str(s)));
+                assert_eq!(nova_rt_str_eq(back, make_str(s)), 1, "round-trip {s}");
+            }
+            // A surrogate is not a scalar value; substitute, do not abort.
+            let block = gc::alloc(16, true) as *mut i64;
+            *block = 1;
+            *block.add(1) = 0xD800;
+            let s = nova_rt_str_from_chars(block as *const u8);
+            assert_eq!(as_str(s), "\u{FFFD}");
         }
     }
 }
