@@ -29,4 +29,16 @@ impl String {
 
     // Codepoints, not bytes. O(n): the runtime walks the UTF-8.
     pub fn len(self) -> Int { str_len_chars(self) }
+
+    // The string's codepoints. Prefer this over repeated `char_at` — see the
+    // performance contract in the module header.
+    pub fn chars(self) -> [Char] { str_chars(self) }
+
+    // The codepoint at `i`, or `None` when `i` is outside `0..len()`. A
+    // negative index is `None` rather than a panic, matching `Vec::get`.
+    pub fn char_at(self, i: Int) -> Option<Char> {
+        if i < 0 { return None }
+        let cs = str_chars(self)
+        if i >= cs.len() { None } else { Some(cs[i]) }
+    }
 }

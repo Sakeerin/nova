@@ -600,6 +600,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrHash => Some(RtFunc::StrHash),
                     Builtin::CharToInt => None,
                     Builtin::StrLenChars => Some(RtFunc::StrLenChars),
+                    Builtin::StrChars => Some(RtFunc::StrChars),
                 };
                 match rt {
                     Some(func) => self.push(Stmt::CallRuntime {

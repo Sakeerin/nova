@@ -155,6 +155,38 @@ pub unsafe extern "C" fn nova_rt_str_len_chars(s: *const NovaStr) -> i64 {
     as_str(s).chars().count() as i64
 }
 
+/// Decompose `s` into a Nova `[Char]`.
+///
+/// The result must match **exactly** what codegen emits for an array: one
+/// block holding `{ len: i64, elem0, elem1, … }`, element `i` at byte offset
+/// `8 + 8*i`, allocated *scanned* the way [`nova_rt_alloc`] allocates (it
+/// takes no scan parameter and always scans). A `Char` element is its `i64`
+/// Unicode scalar value, because `Ty::Char` and `Ty::Int` are both
+/// `MirTy::I64`.
+///
+/// Scanning an array of scalars can retain garbage that happens to look like
+/// a pointer. That is the conservative collector's existing behaviour for any
+/// `[Int]`, not something new here.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_chars(s: *const NovaStr) -> *mut u8 {
+    let chars: Vec<char> = as_str(s).chars().collect();
+    let n = chars.len();
+    // `8` for the length header plus `8` per element — the same size
+    // arithmetic `nova_rt_alloc` is asked for when codegen builds an array.
+    // A char count cannot overflow this on a 64-bit target, and `gc::alloc`
+    // rejects an undescribable size regardless.
+    let block = gc::alloc(8 + 8 * n, true);
+    let words = block as *mut i64;
+    *words = n as i64;
+    for (i, c) in chars.iter().enumerate() {
+        *words.add(1 + i) = *c as i64;
+    }
+    block
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -222,6 +254,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
         ("nova_rt_str_len_chars", nova_rt_str_len_chars as *const u8),
+        ("nova_rt_str_chars", nova_rt_str_chars as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
@@ -332,6 +365,21 @@ mod tests {
             assert_eq!(nova_rt_str_len_chars(make_str("")), 0);
             // A 4-byte scalar outside the BMP is still one character.
             assert_eq!(nova_rt_str_len_chars(make_str("🦀")), 1);
+        }
+    }
+
+    #[test]
+    fn str_chars_writes_the_array_layout_codegen_expects() {
+        unsafe {
+            let block = nova_rt_str_chars(make_str("a→🦀"));
+            let words = block as *const i64;
+            // Length header first, then one i64 scalar per element.
+            assert_eq!(*words, 3);
+            assert_eq!(*words.add(1), 'a' as i64);
+            assert_eq!(*words.add(2), '→' as i64);
+            assert_eq!(*words.add(3), '🦀' as i64);
+            // An empty string still yields a well-formed zero-length array.
+            assert_eq!(*(nova_rt_str_chars(make_str("")) as *const i64), 0);
         }
     }
 }

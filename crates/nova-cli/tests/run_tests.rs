@@ -1388,3 +1388,33 @@ fn string_len_counts_codepoints_not_bytes() {
         .success()
         .stdout("4 3 0\n");
 }
+
+/// `str_chars` is the first intrinsic to build a Nova array in the runtime, so
+/// it must reproduce codegen's `{ len, elems at 8 + 8*i }` layout exactly. A
+/// wrong offset or a wrong length header is a SILENT MISCOMPILE, not a crash —
+/// so this reads `.len()` back and indexes elements from Nova, which is the
+/// only thing that actually exercises the layout the compiler assumes.
+#[test]
+fn str_chars_array_matches_codegen_layout() {
+    let src = "fn main() {\n\
+               let cs = \"a→🦀\".chars()\n\
+               println(\"${cs.len()} ${cs[0]} ${cs[1]} ${cs[2]}\")\n\
+               let e = \"\".chars()\n\
+               println(\"${e.len()}\")\n\
+               println(\"${\"héllo\".char_at(1).unwrap_or('?')} \
+               ${\"héllo\".char_at(9).unwrap_or('?')} \
+               ${\"héllo\".char_at(0 - 1).unwrap_or('?')}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-chars");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("3 a → 🦀\n0\né ? ?\n");
+}

@@ -2603,7 +2603,11 @@ impl<'a> Checker<'a> {
             Builtin::Println | Builtin::Print | Builtin::Panic => {
                 " (use string interpolation: \"${value}\")"
             }
-            Builtin::StrCmp | Builtin::StrHash | Builtin::CharToInt | Builtin::StrLenChars => "",
+            Builtin::StrCmp
+            | Builtin::StrHash
+            | Builtin::CharToInt
+            | Builtin::StrLenChars
+            | Builtin::StrChars => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -5273,12 +5277,14 @@ fn error_expr(span: Span) -> hir::Expr {
 ///
 /// It has to be a table rather than per-builtin code because most of these
 /// are *not callable from a user program*: `Builtin::STD_ONLY` members
-/// (`str_cmp`, `str_hash`, `char_to_int`, `str_len_chars`) are seeded only
-/// into std modules' scopes, so their arity/type diagnostics are unreachable
-/// from any Nova source and cannot be tested through it. Sharing one checking
-/// path means the reachable builtins (`println`/`print`/`panic`) exercise it,
-/// and this function's own table is directly unit-testable — see
-/// `builtin_signatures_are_what_the_std_call_sites_use`.
+/// (`str_cmp`, `str_hash`, `char_to_int`, `str_len_chars`, `str_chars`) are
+/// seeded only into std modules' scopes, so their arity/type diagnostics are
+/// unreachable from any Nova source and cannot be tested through it. Sharing
+/// one checking path means the reachable builtins (`println`/`print`/`panic`)
+/// exercise it, and this function's own table is directly unit-testable —
+/// see `builtin_signatures_are_what_the_std_call_sites_use`, which covers
+/// *every* variant (an exhaustive `match` over `Builtin::ALL`, not a
+/// hand-picked subset).
 fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
     match builtin {
         Builtin::Println | Builtin::Print => (vec![Ty::String], Ty::Unit),
@@ -5287,6 +5293,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrHash => (vec![Ty::String], Ty::Int),
         Builtin::CharToInt => (vec![Ty::Char], Ty::Int),
         Builtin::StrLenChars => (vec![Ty::String], Ty::Int),
+        Builtin::StrChars => (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
     }
 }
 
@@ -9218,36 +9225,45 @@ mod tests {
         assert_eq!(calls[7], Ty::Int, "final `len` returns `Int`: {calls:?}");
     }
 
-    /// `check_builtin_call` reads its arity and argument types out of
-    /// `builtin_signature`, so this table *is* the typing rule for every
-    /// builtin — including the `Builtin::STD_ONLY` ones whose call sites
-    /// live in `std/core` and whose diagnostics no Nova program can reach.
+    /// Written as an exhaustive `match` rather than a list of `assert_eq!`s so
+    /// that adding a `Builtin` without stating its expected signature does not
+    /// compile. The previous hand-written list silently missed `StrLenChars`.
     #[test]
     fn builtin_signatures_are_what_the_std_call_sites_use() {
-        assert_eq!(
-            builtin_signature(Builtin::StrHash),
-            (vec![Ty::String], Ty::Int),
-            "`str_hash(self)` in `impl Hash for String`"
-        );
-        assert_eq!(
-            builtin_signature(Builtin::CharToInt),
-            (vec![Ty::Char], Ty::Int),
-            "`char_to_int(self)` in `impl Hash for Char`"
-        );
-        assert_eq!(
-            builtin_signature(Builtin::StrCmp),
-            (vec![Ty::String, Ty::String], Ty::Int),
-            "`str_cmp(self, other)` in `impl Ord for String`"
-        );
-        // `panic` diverges; the other two print families are statements.
-        assert_eq!(
-            builtin_signature(Builtin::Panic),
-            (vec![Ty::String], Ty::Never)
-        );
-        assert_eq!(
-            builtin_signature(Builtin::Println),
-            (vec![Ty::String], Ty::Unit)
-        );
+        // The site each signature has to satisfy, so a mismatch names the
+        // caller it would break rather than only the types.
+        fn expected(b: Builtin) -> ((Vec<Ty>, Ty), &'static str) {
+            match b {
+                Builtin::Println | Builtin::Print => {
+                    ((vec![Ty::String], Ty::Unit), "`println(s)` / `print(s)`")
+                }
+                Builtin::Panic => ((vec![Ty::String], Ty::Never), "`panic(msg)` diverges"),
+                Builtin::StrCmp => (
+                    (vec![Ty::String, Ty::String], Ty::Int),
+                    "`str_cmp(self, other)` in `impl Ord for String`",
+                ),
+                Builtin::StrHash => (
+                    (vec![Ty::String], Ty::Int),
+                    "`str_hash(self)` in `impl Hash for String`",
+                ),
+                Builtin::CharToInt => (
+                    (vec![Ty::Char], Ty::Int),
+                    "`char_to_int(self)` in `impl Hash for Char`",
+                ),
+                Builtin::StrLenChars => (
+                    (vec![Ty::String], Ty::Int),
+                    "`str_len_chars(self)` in `String::len`",
+                ),
+                Builtin::StrChars => (
+                    (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
+                    "`str_chars(self)` in `String::chars`",
+                ),
+            }
+        }
+        for b in Builtin::ALL {
+            let (sig, site) = expected(b);
+            assert_eq!(builtin_signature(b), sig, "{}: {site}", b.name());
+        }
     }
 
     /// The shared arity/argument path all builtins now go through, exercised

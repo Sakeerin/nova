@@ -70,6 +70,11 @@ pub enum Builtin {
     /// FFI-safe). Separate from `str_chars` so a length query allocates
     /// nothing. Std-only, so it is not a reserved word in user code.
     StrLenChars,
+    /// `str_chars(s: String) -> [Char]` — the string's Unicode scalar values
+    /// in order. Backs `std/strings`' `String::chars`, and every operation in
+    /// that module that inspects a string. Also backs `std/core`'s
+    /// `impl Debug for String`, which needs to escape the contents. Std-only.
+    StrChars,
 }
 
 impl Builtin {
@@ -83,6 +88,7 @@ impl Builtin {
             Builtin::StrHash => "str_hash",
             Builtin::CharToInt => "char_to_int",
             Builtin::StrLenChars => "str_len_chars",
+            Builtin::StrChars => "str_chars",
         }
     }
 
@@ -98,12 +104,31 @@ impl Builtin {
     /// code, just to serve a single std method. `str_cmp` backs `std/core`'s
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
     /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
-    /// `str_len_chars` backs `std/strings`' `String::len`.
-    pub const STD_ONLY: [Builtin; 4] = [
+    /// `str_len_chars` backs `std/strings`' `String::len`; `str_chars` backs
+    /// `std/strings`' `String::chars`.
+    pub const STD_ONLY: [Builtin; 5] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
         Builtin::StrLenChars,
+        Builtin::StrChars,
+    ];
+
+    /// Every `Builtin` variant, in declaration order. Exists so
+    /// `builtin_signatures_are_what_the_std_call_sites_use` can iterate
+    /// "every builtin" as an exhaustive `match` rather than a hand-written
+    /// list of `assert_eq!`s — the hand-written list silently missed
+    /// `StrLenChars` when it was added, and this makes that omission a
+    /// compile error instead.
+    pub const ALL: [Builtin; 8] = [
+        Builtin::Println,
+        Builtin::Print,
+        Builtin::Panic,
+        Builtin::StrCmp,
+        Builtin::StrHash,
+        Builtin::CharToInt,
+        Builtin::StrLenChars,
+        Builtin::StrChars,
     ];
 }
 
