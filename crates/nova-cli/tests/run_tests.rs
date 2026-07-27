@@ -1653,11 +1653,37 @@ fn string_split_and_join_match_the_pinned_semantics() {
 ///    two-codepoint separator occurring twice INSIDE a seven-codepoint
 ///    haystack (non-overlapping, neither match at either boundary), a
 ///    combination none of the brief's cases cover.
+/// 4. Every separator tried so far is either non-repeating (`","`, `"→"`,
+///    `"::"`) or spans the WHOLE haystack with no room to overlap (`"xx"`
+///    in `"xx"`), so the two-pass invariant (pass 1 counts, pass 2 fills,
+///    and they MUST walk identically) is only half pinned: a separator
+///    that can self-overlap when stepped one codepoint at a time is never
+///    tried. Mutating pass 1's step alone — `i = i + s.len()` to
+///    `i = i + 1` at `lib.nova:179`, leaving pass 2's `lib.nova:193`
+///    untouched — makes pass 1 find every overlapping occurrence of `"aa"`
+///    in `"aaaa"` (3, at positions 0/1/2) instead of the 2 correct
+///    non-overlapping ones, so `pieces` comes out at 4 instead of 3. Since
+///    every piece of `"aaaa".split("aa")` is `""` regardless, content alone
+///    cannot catch this — only the LENGTH can, which is why `${u.len()}` is
+///    checked explicitly rather than just concatenating pieces.
+///    `"ababab".split("abab")` (expect `["", "ab"]`, length 2) adds a case
+///    with a nonempty trailing piece after an overlap-capable separator, so
+///    the same mutation is pinned by both an all-empty and a
+///    not-all-empty result.
+/// 5. No test above uses a non-ASCII separator occurring more than once
+///    (`"a→b".split("→")` is one occurrence; `"a::b::c".split("::")` occurs
+///    twice but is ASCII). `"a→b→c".split("→")` covers both at once.
 #[test]
 fn string_split_and_join_cover_multi_codepoint_separators_and_one_part_join() {
     let src = "fn main() {\n\
                let s = \"a::b::c\".split(\"::\")\n\
                println(\"${s.len()} ${s[0]}|${s[1]}|${s[2]}\")\n\
+               let t = \"a→b→c\".split(\"→\")\n\
+               println(\"${t.len()} ${t[0]}|${t[1]}|${t[2]}\")\n\
+               let u = \"aaaa\".split(\"aa\")\n\
+               println(\"${u.len()} [${u[0]}][${u[1]}][${u[2]}]\")\n\
+               let v = \"ababab\".split(\"abab\")\n\
+               println(\"${v.len()} [${v[0]}][${v[1]}]\")\n\
                let parts = [\"a\", \"b\", \"c\"]\n\
                println(\"${\"->\".join(parts)}\")\n\
                let one = [\"solo\"]\n\
@@ -1674,5 +1700,5 @@ fn string_split_and_join_cover_multi_codepoint_separators_and_one_part_join() {
         .arg(&path)
         .assert()
         .success()
-        .stdout("3 a|b|c\na->b->c\nsolo\n");
+        .stdout("3 a|b|c\n3 a|b|c\n3 [][][]\n2 [][ab]\na->b->c\nsolo\n");
 }
