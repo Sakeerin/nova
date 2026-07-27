@@ -1851,3 +1851,110 @@ fn string_case_mapping_is_whole_string_not_per_char() {
         .success()
         .stdout("STRASSE 2\nhéllo wörld |\n2 ABC123\n");
 }
+
+/// `("a\"b").dbg()` used to produce `"a"b"`, which is not a valid Nova
+/// literal — the defect that motivated Phase 2.2b. Escaping needs to inspect
+/// the string's contents, which `str_chars` now allows.
+#[test]
+fn debug_for_string_escapes_into_a_valid_literal() {
+    let src = "fn main() {\n\
+               println(\"${(\"a\\\"b\").dbg()}\")\n\
+               println(\"${(\"back\\\\slash\").dbg()}\")\n\
+               println(\"${(\"tab\\there\").dbg()}\")\n\
+               println(\"${(\"\").dbg()} ${(\"é→\").dbg()}\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-dbg");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("\"a\\\"b\"\n\"back\\\\slash\"\n\"tab\\there\"\n\"\" \"é→\"\n");
+}
+
+/// Mutation-coverage gap the test above leaves open: it exercises `"`, `\\`
+/// and `\t`, but never in isolation (always beside plain letters), and never
+/// `\n`, `\r` or `\0` at all — four of `escape_common`'s six arms have no
+/// dedicated case anywhere else in this file. `\r` and `\0` are the likeliest
+/// to be typo'd and go unnoticed: unlike `\n`, a stray CR or NUL byte does not
+/// visibly break a terminal line, so a wrong comparison or a wrong returned
+/// escape string (e.g. swapping `\r`'s output with `\n`'s, or writing the
+/// letter `O` for `\0`'s digit `0`) would be invisible in casual output and
+/// invisible to every other test in this file. Each solo case is exactly the
+/// one-codepoint string for that escape, so any such mutation surfaces as a
+/// wrong line here with nothing else to mask it.
+///
+/// The last line puts all six escapes adjacent with no plain character
+/// between them, which no per-arm-in-isolation case can: an off-by-one in the
+/// character loop, or an `out` accumulation step that drops a piece, would
+/// only show up when consecutive iterations each append a multi-character
+/// escape back to back. It also carries the round-trip property directly:
+/// `escape_common`'s escape letters are exactly Nova's own (`n`, `t`, `r`,
+/// `0`), so the printed line is byte-for-byte the same text as the source
+/// literal used to build the input string — confirmed here by tracing the
+/// algorithm byte-by-byte by hand *before* running it (see the task report),
+/// not by pasting whatever the program happened to print.
+///
+/// Written with raw strings (`r#"..."#`) rather than this file's usual
+/// backslash-escaped `&str` literals: both the Nova source and the expected
+/// stdout are dense with `"` and `\`, and a raw string passes every one of
+/// them through unchanged instead of adding a third level of escaping on top
+/// of Nova's own and the shell's.
+#[test]
+fn debug_for_string_escapes_every_control_arm_in_isolation() {
+    let src = r#"fn main() {
+    println("${("\\").dbg()}")
+    println("${("\n").dbg()}")
+    println("${("\t").dbg()}")
+    println("${("\r").dbg()}")
+    println("${("\0").dbg()}")
+    println("${("\"").dbg()}")
+    println("${("\\\n\t\r\0\"").dbg()}")
+}
+"#;
+    let dir = std::env::temp_dir().join("nova-strings-dbg-arms");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova().arg("run").arg(&path).assert().success().stdout(
+        r#""\\"
+"\n"
+"\t"
+"\r"
+"\0"
+"\""
+"\\\n\t\r\0\""
+"#,
+    );
+}
+
+/// The refactor shares one `escape_common` helper between `Debug for Char`
+/// and `Debug for String`, and each keeps only the one quote its own literal
+/// syntax needs escaped: `Char` escapes `'` but not `"` (a `"` needs no
+/// escaping inside `'…'`), `String` escapes `"` but not `'` (symmetrically).
+/// A one-character slip that pointed either impl's quote check at the other
+/// quote character would still compile, and would still pass every other
+/// test in this file — neither `'"'` nor `"'"` appears in any of them — so
+/// each direction gets its own case here.
+#[test]
+fn debug_for_char_and_string_escape_only_their_own_quote() {
+    let src = r#"fn main() {
+    println("${('"').dbg()}")
+    println("${("'").dbg()}")
+}
+"#;
+    let dir = std::env::temp_dir().join("nova-strings-dbg-quote-cross");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova().arg("run").arg(&path).assert().success().stdout(
+        r#"'"'
+"'"
+"#,
+    );
+}

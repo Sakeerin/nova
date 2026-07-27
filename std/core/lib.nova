@@ -149,33 +149,68 @@ impl Display for String { fn fmt(self) -> String { self } }
 impl Debug for Int    { fn dbg(self) -> String { "${self}" } }
 impl Debug for Float  { fn dbg(self) -> String { "${self}" } }
 impl Debug for Bool   { fn dbg(self) -> String { "${self}" } }
-// Backslash is tested first, so the backslash that `\'` and friends introduce
-// is never itself re-escaped. The escaped set is exactly what `lex_char`
-// accepts, so every output here round-trips back through the lexer to `self`.
-// A raw newline/tab/NUL does lex inside `'…'`, but emitting one would put a
-// control character in the middle of debug output, which defeats the purpose.
+
+// The escape sequence for `c` inside a string literal, or `None` when `c`
+// needs none. Quoting differs between a `Char` literal and a `String`
+// literal, so the quote characters are the callers' business: `Debug for
+// Char` escapes `'`, `Debug for String` escapes `"`, and both need the rest
+// of this identically — shared here rather than duplicated a second time, the
+// way `Map::get`/`remove`'s probe scan was in Phase 2.2a.
+fn escape_common(c: Char) -> Option<String> {
+    if c == '\\' { return Some("\\\\") }
+    if c == '\n' { return Some("\\n") }
+    if c == '\t' { return Some("\\t") }
+    if c == '\r' { return Some("\\r") }
+    if c == '\0' { return Some("\\0") }
+    None
+}
+
+// `'` is the one escape `Char` needs that `escape_common` does not cover
+// (mirrored by `"` in `Debug for String` below), so it is handled directly;
+// everything else comes from `escape_common`. The escaped set is exactly
+// what `lex_char` accepts, so every output here round-trips back through the
+// lexer to `self`. A raw newline/tab/NUL does lex inside `'…'`, but emitting
+// one would put a control character in the middle of debug output, which
+// defeats the purpose.
 impl Debug for Char {
     fn dbg(self) -> String {
-        if self == '\\' { "'\\\\'" }
-        else if self == '\'' { "'\\''" }
-        else if self == '\n' { "'\\n'" }
-        else if self == '\t' { "'\\t'" }
-        else if self == '\r' { "'\\r'" }
-        else if self == '\0' { "'\\0'" }
-        else { "'${self}'" }
+        if self == '\'' { "'\\''" }
+        else {
+            match escape_common(self) {
+                Some(e) => "'${e}'",
+                None => "'${self}'",
+            }
+        }
     }
 }
-// LIMITATION: this cannot escape, so a string containing `"` or `\` debugs to
-// something that is not a valid Nova literal — `("a\"b").dbg()` is `"a"b"`.
-// Escaping needs to inspect the string's contents, and Nova has no way to:
-// `String` has no length, indexing, or iteration, and it is not FFI-safe
-// (`require_ffi_safe` accepts only scalars), so no `extern` can reach it
-// either. Closing this needs a new compiler builtin alongside `str_cmp` (a
-// `str_escape` in `Builtin::STD_ONLY`, backed by a runtime
-// `nova_rt_str_escape`) — deliberately deferred rather than improvised here,
-// since it adds a runtime ABI symbol. `Char` above escapes correctly because
-// a `Char` *can* be compared, so it needs no such inspection.
-impl Debug for String { fn dbg(self) -> String { "\"${self}\"" } }
+
+// `str_chars` (a `Builtin::STD_ONLY` member added for `std/strings`, so it is
+// already visible here with no import and no dependency on `std/strings`)
+// lets this inspect the string's contents directly — which turned out to be
+// all that closing this ever needed. No dedicated ABI symbol was added: `"`
+// is handled the same way `'` is handled above, and everything else comes
+// from `escape_common`. Building `out` by repeated interpolation (rather than
+// `str_from_chars`) is quadratic in the string's length, since each
+// `${out}${piece}` copies `out` again; `dbg` is a diagnostic path, not a hot
+// one, so that trade is the right one rather than pretending otherwise.
+impl Debug for String {
+    fn dbg(self) -> String {
+        let cs = str_chars(self)
+        let mut out = "\""
+        for i in 0..cs.len() {
+            let c = cs[i]
+            if c == '"' {
+                out = "${out}\\\""
+            } else {
+                match escape_common(c) {
+                    Some(e) => out = "${out}${e}",
+                    None => out = "${out}${c}",
+                }
+            }
+        }
+        "${out}\""
+    }
+}
 
 impl Eq for Int    { fn eq(self, other: Int) -> Bool { self == other } }
 // Not reflexive for NaN: `NaN == NaN` is `false`, so `eq(NaN, NaN)` is

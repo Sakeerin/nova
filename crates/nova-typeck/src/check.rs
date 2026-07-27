@@ -2597,8 +2597,10 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         }
         // The print family's hint is specific to it: passing a non-`String`
-        // there is nearly always a missing interpolation, whereas the std-only
-        // builtins are called from one hand-written std/core site each.
+        // there is nearly always a missing interpolation, whereas the
+        // std-only builtins are called from several sites across std/core and
+        // std/strings, with no single wrong-argument pattern common to all of
+        // them.
         let hint = match builtin {
             Builtin::Println | Builtin::Print | Builtin::Panic => {
                 " (use string interpolation: \"${value}\")"
