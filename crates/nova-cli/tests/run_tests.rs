@@ -1346,3 +1346,21 @@ fn panic_aborts_with_message() {
     );
     assert!(!stdout.contains("unreachable"), "stdout was {stdout:?}");
 }
+
+/// `std/strings` is the third embedded std module (Phase 2.2b). `is_empty` is
+/// the one method in it that needs no new intrinsic, so this pins that the
+/// module is loaded and its inherent `impl String` resolves — independently of
+/// the five intrinsics the rest of the surface needs.
+#[test]
+fn std_strings_module_is_loaded() {
+    let src = "fn main() { println(\"${\"\".is_empty()} ${\"x\".is_empty()}\") }";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("true false\n");
+}

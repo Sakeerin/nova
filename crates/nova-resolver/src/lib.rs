@@ -506,11 +506,15 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 2] = [
+pub const STD_MODULES: [(&str, &str); 3] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
     (
         "$std.collections",
         include_str!("../../../std/collections/lib.nova"),
+    ),
+    (
+        "$std.strings",
+        include_str!("../../../std/strings/lib.nova"),
     ),
 ];
 

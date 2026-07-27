@@ -1,0 +1,29 @@
+// Nova standard library — strings.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
+//
+// EVERY index and length here is in CODEPOINTS (Unicode scalar values), never
+// bytes. `NovaStr` stores UTF-8 and its own `len` field is a byte count, but
+// no part of this module's surface exposes that.
+//
+// PERFORMANCE CONTRACT, worth reading before using this module in a loop:
+// every operation that inspects the string decodes the whole thing into a
+// `[Char]` first, so `char_at` is O(n), and calling it for each index is
+// QUADRATIC. Call `chars()` once and index the resulting array instead. This
+// is the same class of rule as the `hash & (cap - 1)` note beside
+// `pub trait Hash` in std/core — an invariant a caller has to know.
+//
+// This is the first inherent `impl String` in the language. Keep it as ONE
+// block: whether two inherent impls on the same primitive in different std
+// modules is rejected (`E0074` is specified for *trait* impls) or silently
+// accepted with one shadowing the other is untested. An inherent method also
+// wins by priority over a same-named trait method, so no method here may be
+// named `fmt`, `dbg`, `eq`, `ne`, `cmp`, `clone`, `default` or `hash` — those
+// are std/core's trait methods on `String` and would be silently shadowed.
+
+impl String {
+    // Not `self.len() == 0`: `len()` decodes the whole string, while `==` on
+    // `String` compares byte lengths first in the runtime.
+    pub fn is_empty(self) -> Bool { self == "" }
+}
