@@ -157,12 +157,15 @@ impl Builtin {
     /// `impl Ord for String`; `str_hash` and `char_to_int` back its
     /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
     /// `str_len_chars` backs `std/strings`' `String::len`; `str_chars` backs
-    /// `std/strings`' `String::chars`; `str_from_chars` backs two separate
-    /// call sites in `std/strings`: its private `chars_to_string` helper
-    /// (itself called by `String::slice`), and `String::reverse`, which
-    /// calls `str_from_chars` directly rather than going through
-    /// `chars_to_string`; `str_to_upper` and `str_to_lower` back
-    /// `std/strings`' `String::to_upper` and `String::to_lower`.
+    /// `std/strings`' `String::chars` *and* `std/core`'s `impl Debug for
+    /// String` (added in Phase 2.2b to escape the string's contents into a
+    /// valid Nova literal — the reason that fix needed no new ABI symbol);
+    /// `str_from_chars` backs two separate call sites in `std/strings`: its
+    /// private `chars_to_string` helper (itself called by `String::slice`),
+    /// and `String::reverse`, which calls `str_from_chars` directly rather
+    /// than going through `chars_to_string`; `str_to_upper` and
+    /// `str_to_lower` back `std/strings`' `String::to_upper` and
+    /// `String::to_lower`.
     pub const STD_ONLY: [Builtin; 8] = [
         Builtin::StrCmp,
         Builtin::StrHash,
