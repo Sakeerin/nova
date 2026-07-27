@@ -259,6 +259,57 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Reject a trait bound written on a record's or sum type's *own* generic
+    /// parameter (`record Keyed<K: Hash, V>`, `type Wrap<T: Hash> = …`).
+    ///
+    /// Such a bound parses but nothing honours it: neither [`hir::RecordType`]
+    /// nor [`hir::SumType`] carries a `bounds` field, and monomorphization
+    /// discharges only *function* and *impl* bounds (`nova-mir`'s `mono.rs`
+    /// walks a worklist of function instances). Enforcing it would need a notion
+    /// of "record instantiation site" that no pass has — a record's type
+    /// arguments survive only inside the enclosing expression's `Ty`,
+    /// `ExprKind::MakeRecord` does not record them, and MIR erases them to
+    /// `Ptr` — so, exactly as for `trait B where Self: A`, the construct is
+    /// rejected loudly rather than left reading as meaningful. Put the bound on
+    /// an `impl` block instead, which *is* enforced (this is what
+    /// `std/collections`' `Map<K, V>` does).
+    ///
+    /// One diagnostic per bounded parameter, so a second offender is not hidden
+    /// behind the first. The bound names are deliberately **not** resolved: an
+    /// unknown trait here would stack an `E0001` cascade on top of the real
+    /// error. `owner` is the plural noun phrase for the message, e.g.
+    /// "record type parameters".
+    fn reject_type_param_bounds(&mut self, generics: &[ast::TypeParam], owner: &str) {
+        for g in generics {
+            if g.bounds.is_empty() {
+                continue;
+            }
+            // Cover `K: Hash + Eq`, not just `K`. Guarded rather than a bare
+            // `merge`, which debug-asserts that both spans share a file.
+            let mut span = g.name.span;
+            for b in &g.bounds {
+                if b.span.file == span.file {
+                    span = span.merge(b.span);
+                }
+            }
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "E0900",
+                    format!("trait bounds on {owner} are not supported yet"),
+                )
+                .with_primary_label(
+                    span,
+                    format!("bound on the type parameter `{}`", g.name.value),
+                )
+                .with_note(
+                    "this bound is not enforced, so it is rejected rather than \
+                     silently ignored; write it on an `impl` block instead \
+                     (`impl<K: Hash + Eq, V> Map<K, V> { … }`), where it is enforced",
+                ),
+            );
+        }
+    }
+
     fn collect_records(&mut self) {
         for (i, def) in self.defs.defs().iter().enumerate() {
             let DefKind::Record { item_index } = &def.kind else {
@@ -269,6 +320,7 @@ impl<'a> Checker<'a> {
             };
             self.cur_module = self.defs.module_of(*item_index);
             self.check_duplicate_generics(&decl.generics, "type");
+            self.reject_type_param_bounds(&decl.generics, "record type parameters");
             let generics = generic_scope(&decl.generics);
             let fields = decl
                 .fields
@@ -326,6 +378,7 @@ impl<'a> Checker<'a> {
             };
             self.cur_module = self.defs.module_of(*item_index);
             self.check_duplicate_generics(&decl.generics, "type");
+            self.reject_type_param_bounds(&decl.generics, "sum type parameters");
             let generics = generic_scope(&decl.generics);
             let variants = variants
                 .iter()
@@ -7183,6 +7236,96 @@ mod tests {
              fn main() { }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn record_type_param_bound_reports_e0900() {
+        // `record Keyed<K: Hash2, V>` parses, but nothing honours the bound:
+        // `hir::RecordType` has no `bounds` field and monomorphization only
+        // discharges *function* bounds, so this used to compile and run with
+        // `NoHash` — a bound that means nothing. Rejected outright, exactly as
+        // `trait B where Self: A` is, rather than left reading as meaningful.
+        let r = check_src(
+            "trait Hash2 { fn h(self) -> Int }\n\
+             record Keyed<K: Hash2, V> { k: K, v: V }\n\
+             record NoHash { n: Int }\n\
+             fn main() { let x = Keyed { k: NoHash { n: 1 }, v: 2 }\n println(\"${x.v}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+        // Exactly one, on the one bounded parameter — not one per parameter.
+        assert_eq!(
+            error_codes(&r).iter().filter(|c| **c == "E0900").count(),
+            1,
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn sum_type_param_bound_reports_e0900() {
+        // The same hole in the sum-type spelling: `hir::SumType` has no
+        // `bounds` field either, so `type Wrap<T: Hash2>` used to accept a
+        // payload with no `Hash2` impl.
+        let r = check_src(
+            "trait Hash2 { fn h(self) -> Int }\n\
+             type Wrap<T: Hash2> = | Wrapped(T) | Empty\n\
+             record NoHash { n: Int }\n\
+             fn main() { let x = Wrapped(NoHash { n: 1 })\n match x { Wrapped(_) => println(\"w\"), Empty => println(\"e\") } }",
+        );
+        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn record_type_param_bound_e0900_reports_every_bounded_param() {
+        // One diagnostic per bounded parameter, so a multi-parameter record
+        // does not hide the second offender behind the first.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B { fn b(self) -> Int }\n\
+             record Two<K: A, V: B> { k: K, v: V }\n\
+             fn main() { }",
+        );
+        assert_eq!(
+            error_codes(&r).iter().filter(|c| **c == "E0900").count(),
+            2,
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn bounds_on_supported_positions_do_not_report_e0900() {
+        // The E0900 above must fire *only* for a bound on a record's or sum
+        // type's own parameter. Bounds on functions, impl blocks, generic trait
+        // methods and `where` clauses are all supported and are used throughout
+        // `std/`, which every program compiles — a false positive here would
+        // break the whole stdlib. An unbounded generic record/sum (how `std`
+        // actually writes `Vec<T>` / `Map<K, V>`) must stay clean too.
+        let r = check_src(
+            "trait Show { fn show(self) -> String }\n\
+             impl Show for Int { fn show(self) -> String { \"i\" } }\n\
+             record Vec2<T> { a: T, b: T }\n\
+             type Maybe<T> = | Just(T) | Nothing\n\
+             impl<T: Show> Vec2<T> { fn first(self) -> String { self.a.show() } }\n\
+             trait Conv { fn conv<U: Show>(self, u: U) -> String }\n\
+             impl Conv for Int { fn conv<U: Show>(self, u: U) -> String { u.show() } }\n\
+             fn label<T: Show>(x: T) -> String { x.show() }\n\
+             fn label2<T>(x: T) -> String where T: Show { x.show() }\n\
+             fn main() {\n\
+                 println(label(1))\n\
+                 println(label2(2))\n\
+                 println(Vec2 { a: 1, b: 2 }.first())\n\
+                 println(3.conv(4))\n\
+                 let m = Just(5)\n\
+                 match m { Just(v) => println(\"${v}\"), Nothing => println(\"n\") }\n\
+             }",
+        );
+        assert!(
+            !error_codes(&r).contains(&"E0900"),
+            "false positive: {:?}",
+            r.diagnostics
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

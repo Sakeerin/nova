@@ -419,7 +419,7 @@ impl<T> Vec<T> {
 }
 
 // Hash map
-pub record Map<K: Hash + Eq, V> { /* opaque */ }
+pub record Map<K, V> { /* opaque */ }
 impl<K: Hash + Eq, V> Map<K, V> {
     pub fn new() -> Map<K, V>
     pub fn insert(self, key: K, value: V) -> Option<V>
@@ -430,10 +430,23 @@ impl<K: Hash + Eq, V> Map<K, V> {
     pub fn iter(self) -> impl Iterator<Item = (&K, &V)>
 }
 
-pub record Set<T: Hash + Eq> { /* opaque */ }
+pub record Set<T> { /* opaque */ }
+impl<T: Hash + Eq> Set<T> {
+    pub fn new() -> Set<T>
+    // ... etc
+}
+
 pub record Queue<T> { /* opaque */ }
 pub record Deque<T> { /* opaque */ }
 ```
+
+`Map`'s and `Set`'s `Hash + Eq` requirement is written on the **`impl` block**,
+not on the record's own type parameters. A trait bound on a *record* (or sum)
+type parameter is rejected with `E0900`: bounds are discharged at
+monomorphization, which walks function and impl instances, so a bound in that
+position would enforce nothing. Writing it on the `impl` is not a workaround but
+the enforced spelling — it is what `std/collections` does, and it is what makes
+`Map<NotHashable, V>` a compile error rather than a silently accepted type.
 
 ---
 

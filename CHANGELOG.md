@@ -333,6 +333,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     design, not an increment on this one.
 
 ### Fixed (Phase 2)
+- A trait bound on a **record** or **sum type** type parameter
+  (`record Keyed<K: Hash, V>`, `type Wrap<T: Hash> = …`) is now rejected with
+  `E0900` instead of being silently discarded. It parsed and then enforced
+  nothing: `hir::RecordType`/`hir::SumType` carry no bounds, and monomorphization
+  discharges only function and impl bounds, so `Keyed { k: NoHash { … }, v: 2 }`
+  compiled and ran with a `NoHash` that had no `Hash` impl. Enforcing the bound
+  instead would need a notion of "record instantiation site" that no pass has —
+  a record's type arguments survive only in the enclosing expression's `Ty`,
+  `ExprKind::MakeRecord` does not record them, and MIR erases them — so the
+  construct is rejected loudly, following the precedent set for
+  `trait B where Self: A`. Write the bound on the `impl` block instead
+  (`impl<K: Hash + Eq, V> Map<K, V>`), where it *is* enforced; that is what
+  `std/collections` already does, so no stdlib or test-suite program changes.
+  Bounds on functions, impl blocks, generic trait methods, and `where` clauses
+  are unaffected. `nova-spec/20-STDLIB.md`'s `Map`/`Set` declarations, which had
+  shown the unenforced form, now show the enforced one.
 - A `${…}` string-interpolation hole now ends at the `}` matching its `${`
   rather than at the first `}`, so an expression containing braces works inside
   one — most visibly a record literal (`"${f(R { v: 1 })}"`), nested to any
