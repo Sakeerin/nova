@@ -303,8 +303,8 @@ impl<'a> Checker<'a> {
                 )
                 .with_note(
                     "this bound is not enforced, so it is rejected rather than \
-                     silently ignored; write it on an `impl` block instead \
-                     (`impl<K: Hash + Eq, V> Map<K, V> { … }`), where it is enforced",
+                     silently ignored; write it on an `impl` block instead, \
+                     where it is enforced",
                 ),
             );
         }
@@ -4349,6 +4349,17 @@ impl<'a> Checker<'a> {
     }
 
     /// Check `arr[index] = value`.
+    ///
+    /// Invariant shared with [`Checker::check_field_set`]: `rhs` is always
+    /// type-checked, whatever early return this function takes. A mistake in
+    /// the right-hand side (an unresolved call, say) is independent of
+    /// whatever is wrong with the assignment target — an unsupported
+    /// compound-assignment shape, a non-array receiver, an unknown field —
+    /// so it is reported exactly as it already is on the path where the
+    /// target is fine. The one thing deliberately *not* repeated is a second
+    /// diagnostic about the target itself once one has already been reported
+    /// for it (`check_field_set`'s `Ty::Error`-receiver case): that would be
+    /// the same mistake twice, not an independent one.
     fn check_index_set(
         &mut self,
         fcx: &mut FnCtx,
@@ -4360,6 +4371,7 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         if !matches!(op, ast::AssignOp::Assign) {
             self.unsupported(span, "compound assignment to an array element");
+            self.check_expr(fcx, rhs);
             return error_expr(span);
         }
         // The array's storage must be reachable through a mutable binding.
@@ -4382,6 +4394,7 @@ impl<'a> Checker<'a> {
                 ),
                 target.span,
             );
+            self.check_expr(fcx, rhs);
             return error_expr(span);
         }
         let value = self.check_expr(fcx, rhs);
@@ -4407,7 +4420,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check `target.field = value`.
+    /// Check `target.field = value`. Shares `check_index_set`'s invariant
+    /// that `rhs` is type-checked on every early return, not only the path
+    /// where the target resolves cleanly.
     fn check_field_set(
         &mut self,
         fcx: &mut FnCtx,
@@ -4419,6 +4434,7 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         if !matches!(op, ast::AssignOp::Assign) {
             self.unsupported(span, "compound assignment to a record field");
+            self.check_expr(fcx, rhs);
             return error_expr(span);
         }
         // The record's storage must be reachable through a mutable binding.
@@ -4431,6 +4447,7 @@ impl<'a> Checker<'a> {
         // A broken receiver already reported its own error; another one here
         // would just cascade, as it would on the read path.
         if matches!(recv_ty, Ty::Error) {
+            self.check_expr(fcx, rhs);
             return error_expr(span);
         }
         // Resolve the field to its index and declared type through the same
@@ -4445,14 +4462,6 @@ impl<'a> Checker<'a> {
                 self.no_field_message(fcx, &recv_ty, &field.value),
                 field.span,
             );
-            // The field name being wrong is an independent mistake from
-            // whatever the RHS says, so check it anyway rather than dropping
-            // it silently — `p.nope = undefined_fn()` must still name
-            // `undefined_fn` as unresolved, the way `a[i] = undefined_fn()`
-            // already does on the array path. This is distinct from the
-            // `Ty::Error`-receiver return above: that one guards against a
-            // *second* diagnostic about the same already-reported mistake,
-            // and stays a bare early return.
             self.check_expr(fcx, rhs);
             return error_expr(span);
         };
@@ -6144,6 +6153,33 @@ mod tests {
              fn main() { let p = Point { x: 3, y: 4 }\n let z = p.z }",
         );
         assert!(error_codes(&r).contains(&"E0014"), "{:?}", r.diagnostics);
+        // Exact wording, not just the code: the read and write paths share
+        // `no_field_message` precisely so they cannot independently drift,
+        // but until this assertion existed only the write path's
+        // `assignment_to_unknown_field_reports_e0014` pinned any wording at
+        // all — reverting the read path to inline its own message would have
+        // passed every test in this file.
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0014")
+            .expect("an E0014 was reported");
+        assert_eq!(d.message, "no field `z` on record `Point`");
+    }
+
+    #[test]
+    fn field_access_on_non_record_reports_e0014() {
+        // The read-path mirror of `field_assignment_on_non_record_reports_e0014`:
+        // a receiver with no fields at all gets `no_field_message`'s other
+        // wording, not the "no field `x` on record `P`" phrasing that implies
+        // a record exists. No read-path test exercised this case before.
+        let r = check_src("fn main() { let n = 1\n let z = n.v }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0014")
+            .expect("an E0014 was reported");
+        assert_eq!(d.message, "cannot access field `v` on `Int`");
     }
 
     #[test]
@@ -6537,6 +6573,26 @@ mod tests {
     }
 
     #[test]
+    fn index_set_on_non_array_still_checks_the_rhs() {
+        // The mirror of `field_assignment_with_unknown_field_still_checks_the_rhs`
+        // on `check_index_set`'s "not an array" branch: it used to return
+        // before checking the RHS, dropping an independent mistake there
+        // alongside (correctly) rejecting the index-assign itself.
+        let r = check_src("fn main() { let mut n = 1\n n[0] = undefined_fn() }");
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"E0014"),
+            "expected the not-an-array error: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            codes.contains(&"E0001"),
+            "expected `undefined_fn`'s own error to still surface: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
     fn field_assignment_typechecks() {
         let r = check_src(
             "record P { v: Int }\n\
@@ -6690,16 +6746,25 @@ mod tests {
     fn field_assignment_through_broken_receiver_does_not_cascade() {
         // `p.nope` is already an error on the read path; the write path must not
         // add a second E0014 for the unknown field of an error-typed receiver.
-        // This is the `Ty::Error` early return, deliberately kept as a bare
-        // return with no RHS check — unlike the "no field" branch above, there
-        // is no *new* mistake to report here, only the one the read path
-        // already did.
+        // This is the `Ty::Error` early return: the *target* diagnostic is
+        // deliberately not repeated, since that would be the same mistake
+        // reported twice. But the RHS is unrelated to the receiver and must
+        // still be checked, per the invariant on `check_index_set` — so the
+        // RHS below is `undefined_fn()`, not a literal: a literal produces no
+        // diagnostic either way and cannot tell "checked but clean" apart
+        // from "never checked".
         let r = check_src(
             "record P { v: Int }\n\
-             fn main() { let mut p = P { v: 1 }\n p.nope.deeper = 7\n println(\"${p.v}\") }",
+             fn main() { let mut p = P { v: 1 }\n p.nope.deeper = undefined_fn() }",
         );
-        let n = error_codes(&r).iter().filter(|c| **c == "E0014").count();
+        let codes = error_codes(&r);
+        let n = codes.iter().filter(|c| **c == "E0014").count();
         assert_eq!(n, 1, "expected exactly one E0014, got {:?}", r.diagnostics);
+        assert!(
+            codes.contains(&"E0001"),
+            "expected `undefined_fn`'s own error to still surface: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
@@ -6752,6 +6817,39 @@ mod tests {
              fn main() { let mut p = P { v: 1 }\n p.v += 1\n println(\"${p.v}\") }",
         );
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn compound_assignment_to_field_still_checks_the_rhs() {
+        // This branch returns before doing anything else at all — no
+        // mutability check, no receiver check — so it used to drop an
+        // independent RHS mistake along with (correctly) rejecting the
+        // compound form itself.
+        let r = check_src(
+            "record P { v: Int }\n\
+             fn main() { let mut p = P { v: 1 }\n p.v += undefined_fn() }",
+        );
+        let codes = error_codes(&r);
+        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(
+            codes.contains(&"E0001"),
+            "expected `undefined_fn`'s own error to still surface: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn compound_assignment_to_array_element_still_checks_the_rhs() {
+        // The array-element analogue of
+        // `compound_assignment_to_field_still_checks_the_rhs`.
+        let r = check_src("fn main() { let mut xs = [1, 2]\n xs[0] += undefined_fn() }");
+        let codes = error_codes(&r);
+        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(
+            codes.contains(&"E0001"),
+            "expected `undefined_fn`'s own error to still surface: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
@@ -7005,12 +7103,15 @@ mod tests {
     /// receiver, typechecks clean today — the same operation on an *inherent*
     /// method is `mut_self_method_on_immutable_receiver_reports_e0060` a few
     /// tests up, and reports E0060. This test pins today's accepted behaviour
-    /// the same way `float_has_no_hash_impl` pins a deliberate absence: so
-    /// that half-closing the gap, or adding a `mut self` trait method
-    /// anywhere in `std/`, cannot happen silently. If this test starts
-    /// failing, that is the gap closing (at least partially) — update it
-    /// deliberately, with reference to ADR 0005 §1's Migration path, rather
-    /// than just making it pass again.
+    /// the same way `float_has_no_hash_impl` pins a deliberate absence: this
+    /// exact six-line program's clean acceptance is now a recorded fact, so
+    /// half-closing the gap (at least for this shape of program) makes this
+    /// test fail and forces a deliberate decision, with reference to ADR
+    /// 0005 §1's Migration path, rather than a silent pass. It does not, and
+    /// cannot, reach further than the program it compiles — a `mut self`
+    /// trait method added elsewhere, e.g. to `std/`, is not covered by this
+    /// test and would typecheck clean with no diagnostic anywhere, exactly
+    /// because this is the gap it documents.
     #[test]
     fn trait_method_mut_self_is_not_enforced_on_immutable_receiver_known_gap() {
         let r = check_src(
