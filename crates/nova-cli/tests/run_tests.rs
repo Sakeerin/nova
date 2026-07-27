@@ -1394,6 +1394,12 @@ fn string_len_counts_codepoints_not_bytes() {
 /// wrong offset or a wrong length header is a SILENT MISCOMPILE, not a crash —
 /// so this reads `.len()` back and indexes elements from Nova, which is the
 /// only thing that actually exercises the layout the compiler assumes.
+///
+/// `char_at`'s whole contract is its two boundaries — `i == 0` (the `i < 0`
+/// guard) and `i == len` (the `i >= cs.len()` guard) — so both are exercised
+/// directly here, not just interior (`1`) and clearly-out-of-range (`9`, `-1`)
+/// indices: `"héllo"` is 5 codepoints, so `char_at(0)` must be `Some('h')` and
+/// `char_at(5)` (`== len`) must be `None`, never a bounds-check abort.
 #[test]
 fn str_chars_array_matches_codegen_layout() {
     let src = "fn main() {\n\
@@ -1401,7 +1407,9 @@ fn str_chars_array_matches_codegen_layout() {
                println(\"${cs.len()} ${cs[0]} ${cs[1]} ${cs[2]}\")\n\
                let e = \"\".chars()\n\
                println(\"${e.len()}\")\n\
-               println(\"${\"héllo\".char_at(1).unwrap_or('?')} \
+               println(\"${\"héllo\".char_at(0).unwrap_or('?')} \
+               ${\"héllo\".char_at(1).unwrap_or('?')} \
+               ${\"héllo\".char_at(5).unwrap_or('?')} \
                ${\"héllo\".char_at(9).unwrap_or('?')} \
                ${\"héllo\".char_at(0 - 1).unwrap_or('?')}\")\n\
                }";
@@ -1416,5 +1424,5 @@ fn str_chars_array_matches_codegen_layout() {
         .arg(&path)
         .assert()
         .success()
-        .stdout("3 a → 🦀\n0\né ? ?\n");
+        .stdout("3 a → 🦀\n0\nh é ? ? ?\n");
 }

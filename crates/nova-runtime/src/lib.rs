@@ -378,8 +378,17 @@ mod tests {
             assert_eq!(*words.add(1), 'a' as i64);
             assert_eq!(*words.add(2), '→' as i64);
             assert_eq!(*words.add(3), '🦀' as i64);
+            // Reading back the written words alone cannot tell a correctly
+            // sized 32-byte block (8 header + 8*3 elements) from one that
+            // merely has enough allocator slop past a *wrong* declared size
+            // for these four words to still land in live memory, and cannot
+            // observe the `scan` flag at all — it only affects GC behaviour,
+            // not what's readable. Assert what `alloc` actually recorded.
+            assert_eq!(gc::object_info(block as usize), Some((32, true)));
             // An empty string still yields a well-formed zero-length array.
-            assert_eq!(*(nova_rt_str_chars(make_str("")) as *const i64), 0);
+            let empty = nova_rt_str_chars(make_str(""));
+            assert_eq!(*(empty as *const i64), 0);
+            assert_eq!(gc::object_info(empty as usize), Some((8, true)));
         }
     }
 }

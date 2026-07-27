@@ -166,6 +166,29 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
     p
 }
 
+/// Test-only: the `(size, scan)` this collector recorded for the live object
+/// starting at `addr`, or `None` if `addr` is not a tracked object's start
+/// address.
+///
+/// Exists because reading back the words `alloc` handed out (as
+/// `nova-runtime`'s own layout tests do) cannot distinguish a correctly-sized,
+/// correctly-scanned allocation from one that merely has enough slop past its
+/// declared size for a test's own assertions to still land inside live
+/// memory, or one whose `scan` flag is wrong (undetectable by reading words at
+/// all — it only changes GC behaviour). This reaches into the tracked `Obj`
+/// directly so a caller can assert the exact size and scan flag `alloc` was
+/// given, not just what got written.
+#[cfg(test)]
+pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
+    HEAP.with(|h| {
+        h.borrow()
+            .objects
+            .iter()
+            .find(|o| o.addr == addr)
+            .map(|o| (o.size, o.scan))
+    })
+}
+
 fn maybe_collect(incoming: usize) {
     let over = HEAP.with(|h| {
         let h = h.borrow();
