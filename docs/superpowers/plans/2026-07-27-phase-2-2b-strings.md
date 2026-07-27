@@ -79,8 +79,11 @@ In `crates/nova-cli/tests/run_tests.rs`:
 #[test]
 fn std_strings_module_is_loaded() {
     let src = "fn main() { println(\"${\"\".is_empty()} ${\"x\".is_empty()}\") }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-scaffold");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -189,8 +192,11 @@ In `crates/nova-cli/tests/run_tests.rs`:
 #[test]
 fn string_len_counts_codepoints_not_bytes() {
     let src = "fn main() { println(\"${\"café\".len()} ${\"日本語\".len()} ${\"\".len()}\") }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-len");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -365,8 +371,11 @@ fn str_chars_array_matches_codegen_layout() {
                ${\"héllo\".char_at(9).unwrap_or('?')} \
                ${\"héllo\".char_at(0 - 1).unwrap_or('?')}\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-chars");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -532,8 +541,11 @@ fn str_from_chars_round_trips_and_slice_is_half_open() {
                ${\"héllo\".slice(5, 5)}|${\"héllo\".slice(0, 5)}\")\n\
                println(\"${\"a→🦀\".reverse()} ${\"\".reverse()}\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-slice");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -734,8 +746,11 @@ fn string_search_is_codepoint_indexed_and_empty_needle_matches() {
                ${\"aaa\".index_of(\"aa\").unwrap_or(0 - 1)} \
                ${\"abc\".starts_with(\"abcd\")}\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-search");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -861,8 +876,11 @@ fn string_split_and_join_match_the_pinned_semantics() {
                println(\"${g.len()} [${g[0]}][${g[1]}]\")\n\
                println(\"[${\",\".join(a)}] [${\"\".join(f)}] [${\"-\".join([])}]\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-split");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -1012,8 +1030,11 @@ fn string_trim_family_and_repeat() {
                println(\"[${\"ab\".repeat(3)}][${\"ab\".repeat(0)}][${\"\".repeat(5)}]\")\n\
                println(\"[${\"→\".repeat(2)}]\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-trim");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -1162,8 +1183,11 @@ fn string_case_mapping_is_whole_string_not_per_char() {
                println(\"${\"HÉLLO WÖRLD\".to_lower()} ${\"\".to_upper()}|\")\n\
                println(\"${\"İ\".to_lower().len()} ${\"abc123\".to_upper()}\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-case");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
@@ -1316,8 +1340,11 @@ fn debug_for_string_escapes_into_a_valid_literal() {
                println(\"${(\"tab\\there\").dbg()}\")\n\
                println(\"${(\"\").dbg()} ${(\"é→\").dbg()}\")\n\
                }";
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("main.nova");
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-dbg");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
     nova()
         .arg("run")
