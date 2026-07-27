@@ -29,9 +29,10 @@
 // literal, the `0..0` loop is vacuous, and `str_from_chars` of an empty
 // array is already ""), so that half is only a fast path skipping the
 // allocation. The `n < 0` half is defensive rather than load-bearing today —
-// `slice` and `split` are this helper's only callers, and both already
-// guarantee `start <= end` themselves — kept here in case a future caller of
-// this module-private helper does not validate as carefully.
+// `slice`, `split` and the `trim` family (`trim`, `trim_start`, `trim_end`)
+// are this helper's only callers, and all of them already guarantee
+// `start <= end` themselves — kept here in case a future caller of this
+// module-private helper does not validate as carefully.
 fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
     let n = end - start
     if n <= 0 { return "" }
@@ -63,6 +64,50 @@ fn chars_match_at(h: [Char], n: [Char], at: Int) -> Bool {
         k = k + 1
     }
     true
+}
+
+// Whether `c` is whitespace, for the `trim` family.
+//
+// DELIBERATE APPROXIMATION: this is an explicit list, not Unicode's full
+// White_Space property. `Char` cannot currently be asked whether it is
+// whitespace, and an exact answer would need a sixth permanent runtime ABI
+// symbol, which is not worth it for this increment. It lives in exactly one
+// place so there is one line to correct when that changes.
+fn char_is_whitespace(c: Char) -> Bool {
+    if c == ' ' { return true }
+    if c == '\t' { return true }
+    if c == '\n' { return true }
+    if c == '\r' { return true }
+    // The non-ASCII spaces are compared by SCALAR VALUE, not as character
+    // literals: `'\u{00A0}'` DOES NOT LEX — the `\u{…}` escape works in a
+    // string literal but not in a char literal (verified; it fails with
+    // `L0001: unexpected character '`). `char_to_int` is already a std-only
+    // builtin, so an std module can compare codepoints directly.
+    let v = char_to_int(c)
+    if v == 160 { return true }    // U+00A0 NO-BREAK SPACE
+    if v == 8194 { return true }   // U+2002 EN SPACE
+    if v == 8195 { return true }   // U+2003 EM SPACE
+    if v == 12288 { return true }  // U+3000 IDEOGRAPHIC SPACE
+    false
+}
+
+// First index at or after 0 that is not whitespace; `cs.len()` if all of it is.
+fn trim_start_index(cs: [Char]) -> Int {
+    let mut a = 0
+    while a < cs.len() {
+        if char_is_whitespace(cs[a]) { a = a + 1 } else { return a }
+    }
+    cs.len()
+}
+
+// Exclusive end index of the last non-whitespace codepoint at or after
+// `floor`; `floor` if everything from there on is whitespace.
+fn trim_end_index(cs: [Char], floor: Int) -> Int {
+    let mut b = cs.len()
+    while b > floor {
+        if char_is_whitespace(cs[b - 1]) { b = b - 1 } else { return b }
+    }
+    floor
 }
 
 impl String {
@@ -223,6 +268,45 @@ impl String {
             let p = str_chars(parts[i])
             for k in 0..p.len() {
                 out[w] = p[k]
+                w = w + 1
+            }
+        }
+        str_from_chars(out)
+    }
+
+    // Trims whitespace (see `char_is_whitespace`) from both ends. An
+    // all-whitespace string, including "", yields "".
+    pub fn trim(self) -> String {
+        let cs = str_chars(self)
+        let a = trim_start_index(cs)
+        chars_to_string(cs, a, trim_end_index(cs, a))
+    }
+
+    // Trims whitespace from the start only.
+    pub fn trim_start(self) -> String {
+        let cs = str_chars(self)
+        chars_to_string(cs, trim_start_index(cs), cs.len())
+    }
+
+    // Trims whitespace from the end only.
+    pub fn trim_end(self) -> String {
+        let cs = str_chars(self)
+        chars_to_string(cs, 0, trim_end_index(cs, 0))
+    }
+
+    // `n` copies of `self`. Builds one array rather than concatenating, both
+    // because `String` has no `+` (E0013) and because repeated interpolation
+    // would be quadratic.
+    pub fn repeat(self, n: Int) -> String {
+        if n < 0 { panic("String::repeat count must not be negative") }
+        let cs = str_chars(self)
+        let total = cs.len() * n
+        if total == 0 { return "" }
+        let mut out = [' '; total]
+        let mut w = 0
+        for r in 0..n {
+            for i in 0..cs.len() {
+                out[w] = cs[i]
                 w = w + 1
             }
         }

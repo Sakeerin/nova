@@ -1702,3 +1702,85 @@ fn string_split_and_join_cover_multi_codepoint_separators_and_one_part_join() {
         .success()
         .stdout("3 a|b|c\n3 a|b|c\n3 [][][]\n2 [][ab]\na->b->c\nsolo\n");
 }
+
+/// The trim family and `repeat`. `repeat(0)` is "" and a negative count
+/// panics (spec §4.2). Trimming an all-whitespace string yields "".
+#[test]
+fn string_trim_family_and_repeat() {
+    let src = "fn main() {\n\
+               let s = \"  héllo\\t\\n\"\n\
+               println(\"[${s.trim()}][${s.trim_start()}][${s.trim_end()}]\")\n\
+               println(\"[${\"   \".trim()}][${\"\".trim()}][${\"x\".trim()}]\")\n\
+               println(\"[${\"ab\".repeat(3)}][${\"ab\".repeat(0)}][${\"\".repeat(5)}]\")\n\
+               println(\"[${\"→\".repeat(2)}]\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-trim");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("[héllo][héllo\t\n][  héllo]\n[][][x]\n[ababab][][]\n[→→]\n");
+}
+
+/// `String::repeat`'s panic: a negative count. Modelled on
+/// `panic_aborts_with_message` — `panic` aborts the process, so this cannot
+/// share a fixture with anything that must keep running afterward. (An
+/// earlier draft of this task pointed at a "`Vec::set` out-of-range test" as
+/// the model instead; no such test exists in this file — the comment beside
+/// `collections_run` claiming one does is stale — so `panic_aborts_with_message`
+/// is the real, committed idiom for a process-aborting panic test.)
+#[test]
+fn string_repeat_negative_count_panics() {
+    let dir = std::env::temp_dir().join("nova-strings-repeat-negative");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, "fn main() { println(\"${\"x\".repeat(0 - 1)}\") }\n").expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: String::repeat count must not be negative"),
+        "stderr: {stderr}"
+    );
+}
+
+/// Mutation-coverage gap the brief's own required test leaves open (same
+/// shape as the Task 3–6 lessons): `string_trim_family_and_repeat` above only
+/// ever trims ASCII whitespace (space, `\t`, `\n`) — none of the four
+/// non-ASCII codepoints `char_is_whitespace` compares by scalar value
+/// (U+00A0, U+2002, U+2003, U+3000) is exercised anywhere, so deleting or
+/// mistyping any one of those four `if v == ...` lines is invisible to the
+/// required test. All four are stacked on both sides of "mid" here (rather
+/// than tested one at a time) because `trim_start_index`/`trim_end_index`
+/// stop scanning at the FIRST non-whitespace codepoint they see: breaking any
+/// single line makes the scan halt right there, leaving that codepoint and
+/// everything after it (on that side) unstrimmed — so a wrong result on
+/// EITHER side already proves at least one of the four is broken, without
+/// needing four separate assertions. `\u{...}` is used rather than the raw
+/// bytes because these are literally invisible/near-invisible characters in
+/// a source file, and the brief's note that `\u{...}` lexes in a Nova STRING
+/// literal (unlike a char literal) makes the escaped form both correct and
+/// far more reviewable than an invisible byte would be.
+#[test]
+fn string_trim_covers_non_ascii_whitespace() {
+    let src = "fn main() {\n\
+               println(\"[${\"\\u{00A0}\\u{2002}\\u{2003}\\u{3000}mid\\u{3000}\\u{2003}\\u{2002}\\u{00A0}\".trim()}]\")\n\
+               }";
+    // House idiom for a temp Nova source in this file — see
+    // `check_reports_type_errors_with_code`. No `tempfile` dependency.
+    let dir = std::env::temp_dir().join("nova-strings-trim-unicode-ws");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("[mid]\n");
+}
