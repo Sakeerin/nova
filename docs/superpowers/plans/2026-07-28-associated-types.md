@@ -634,6 +634,20 @@ Add to `hir::ImplInfo`:
 
 In `check_impl_conformance`, after the existing method loop, compare the set the trait declares against the set the impl binds and report `E0072` for each difference, naming the type. Both directions matter: a missing binding means every projection through this impl is unresolvable, and an extra one is a typo the user wants told about.
 
+- [ ] **Step 4b: Make `Self::Item` resolve inside an impl — Task 6 cannot start without it**
+
+Task 3's review found that Task 6's own Step 1 test is currently **unreachable**, and that Task 3's `resolve_projection` cannot express what it needs. This step closes both. It lands here because this is the impl task; leaving it to Task 6 would mean discovering it mid-task.
+
+The problem, verified: `impl R { fn h(self) -> Self::Item { … } }` reports `error[E0900]: module-qualified type paths are not supported yet` — unchanged from before the branch. `Self` is not special-cased anywhere; it is an ordinary entry in the `generics` map, inserted **only** by `self_generic_scope()` (`crates/nova-typeck/src/check.rs:5429`), which trait paths use and impls do not.
+
+And `resolve_projection` as Task 3 wrote it cannot be reused as-is: it takes `idx: u32`, hardcodes `on: Ty::Param(idx)`, and looks bounds up **by parameter index**. An impl's `Self` is a compound type — `W<Param(0)>` for `impl<T> Tr for W<T>` — which has no parameter index, no slot in the by-index bounds table, and whose relevant "bounds" are the traits the impl implements, a different table entirely.
+
+So: **generalize `resolve_projection` to take `on: Ty` plus an explicit list of candidate trait `DefId`s**, and keep the existing by-index path as a thin caller that passes `Ty::Param(idx)` and `bounds[idx]`. Then add the impl-scope caller, which passes the impl's self type and — for a trait impl — the trait it implements. Decide and state in a comment what an **inherent** impl (`impl W { … }`, no trait) should do with `Self::Item`: it has no trait, so there is no associated type to find, and the answer is a diagnostic rather than silence.
+
+Test all three scopes resolve: `Self::Item` in a trait method (already works), in a trait-impl method (new), and rejected with a clear message in an inherent impl.
+
+**Also correct Task 6's Step 2 expectation while you are here** — it predicts its test fails "because conformance is comparing an unnormalized projection against a concrete type." Before this step, it would actually have failed with `E0900` on the impl side, before conformance ran at all. After this step, Task 6's stated cause becomes the real one.
+
 - [ ] **Step 5: Run the tests**
 
 Run: `cargo test -p nova-typeck --no-fail-fast assoc_binding`, then `cargo test --workspace --no-fail-fast`
