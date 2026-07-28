@@ -108,6 +108,9 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         externs: Vec::new(),
         diagnostics: Vec::new(),
     };
+    // Before any collection pass: every later pass builds a generic scope, and
+    // one containing `Self` would give the name two meanings at once.
+    checker.reject_self_type_params();
     checker.collect_type_arities();
     checker.collect_records();
     checker.collect_sums();
@@ -275,6 +278,86 @@ impl<'a> Checker<'a> {
     /// checker's name→index map keeping only the last binding, so the earlier
     /// parameter becomes a phantom the program can never name. `owner` names the
     /// declaration kind for the message (e.g. "function", "type", "method").
+    /// Reject a user-written type parameter named `Self` (`E0076`), at every
+    /// place a generic parameter can be declared.
+    ///
+    /// `Self` already means something in two scopes, and in neither is it a
+    /// parameter the user declared: inside a trait body it is the trait's own
+    /// implicit type, bound at `Param(0)` by [`self_generic_scope`]; inside an
+    /// impl it is that impl's self type, read from [`Checker::impl_self`] by
+    /// [`Checker::convert_ty`]. But `Token::SelfUpper` parses to the plain
+    /// string `"Self"`, so the parser admits it as an ordinary identifier and
+    /// [`generic_scope`] would bind it like any other name — giving `Self` a
+    /// second meaning in the very scope where it already has one, and making
+    /// `Self::Item` mean two different things depending on whether the user
+    /// happened to declare a parameter by that name. `E0076` and not `E0900`:
+    /// this is a name that will never be legal, not a feature arriving later.
+    ///
+    /// One pass over every item rather than a call beside each
+    /// [`Checker::check_duplicate_generics`] — those five sites cover neither a
+    /// trait's own generics nor an impl method's, and a generic-carrying
+    /// construct added later would silently opt out of a per-site check. This
+    /// walks all six of the AST's `generics` fields.
+    ///
+    /// The rejected name is still bound by `generic_scope` afterwards, so the
+    /// rest of the declaration resolves and the user gets this one error rather
+    /// than a cascade of "cannot find type `Self`".
+    fn reject_self_type_params(&mut self) {
+        // Copy the `&'a File` so the item borrow is tied to `'a`, not to `self`.
+        let file: &'a ast::File = self.file;
+        for item in &file.items {
+            match &item.value {
+                ast::Item::Function(f) => self.reject_self_generic_name(&f.generics),
+                ast::Item::Record(r) => self.reject_self_generic_name(&r.generics),
+                ast::Item::Type(t) => self.reject_self_generic_name(&t.generics),
+                ast::Item::Trait(t) => {
+                    self.reject_self_generic_name(&t.generics);
+                    for ti in &t.items {
+                        match ti {
+                            TraitItem::Required(sig) => {
+                                self.reject_self_generic_name(&sig.generics)
+                            }
+                            TraitItem::Provided(f) => self.reject_self_generic_name(&f.generics),
+                            // An associated type declares no generics of its
+                            // own — Nova has no generic associated types.
+                            TraitItem::AssocType { .. } => {}
+                        }
+                    }
+                }
+                ast::Item::Impl(b) => {
+                    self.reject_self_generic_name(&b.generics);
+                    for f in &b.functions {
+                        self.reject_self_generic_name(&f.generics);
+                    }
+                }
+                ast::Item::Extern(b) => {
+                    for ei in &b.items {
+                        match ei {
+                            ExternItem::Fn(sig) => self.reject_self_generic_name(&sig.generics),
+                        }
+                    }
+                }
+                ast::Item::Const(_) | ast::Item::Import(_) | ast::Item::Module(_) => {}
+            }
+        }
+    }
+
+    /// The per-declaration half of [`Checker::reject_self_type_params`]. One
+    /// diagnostic per offending parameter, so a second is not hidden behind the
+    /// first.
+    fn reject_self_generic_name(&mut self, generics: &[ast::TypeParam]) {
+        for g in generics {
+            if g.name.value == "Self" {
+                self.error(
+                    "E0076",
+                    "a generic parameter may not be named `Self`: in a trait `Self` is the \
+                     implementing type, and in an impl it is that impl's self type",
+                    g.name.span,
+                );
+            }
+        }
+    }
+
     fn check_duplicate_generics(&mut self, generics: &[ast::TypeParam], owner: &str) {
         let mut seen: Vec<&str> = Vec::new();
         for g in generics {
@@ -9834,27 +9917,113 @@ mod tests {
     }
 
     #[test]
-    fn a_user_written_self_type_parameter_makes_self_item_resolve_in_an_impl() {
-        // `Self` has no special case in `convert_ty`'s projection branch — it
-        // is looked up in `generics` like any other name. `self_generic_scope`
-        // is one source of a `Self` entry (trait bodies, default methods,
-        // Param 0), but not the only one: `Self` is an accepted identifier
+    fn a_user_written_self_type_parameter_is_rejected_in_an_impl() {
+        // Was `a_user_written_self_type_parameter_makes_self_item_resolve_in_
+        // an_impl`, which pinned that this program compiled clean. It did, and
+        // that was the problem: `Self` is an accepted identifier
         // (`Token::SelfUpper` parses to the plain string `"Self"`), so a
-        // user-written `<Self>` type parameter lands its own entry through
-        // the ordinary `generic_scope` too — including inside an `impl`,
-        // which calls exactly that. So `Self` here names an ordinary generic
-        // parameter that happens to be spelled `Self`, not the impl's own
-        // self type, and `Self::Item` resolves the same way `I::Item` would
-        // for a parameter actually named `I`. This is what makes the
-        // corrected comment in `convert_ty` a claim worth pinning rather
-        // than letting it silently drift false again, as its predecessor did.
+        // user-written `<Self>` landed an ordinary `generic_scope` entry and
+        // `Self::Item` resolved to `Assoc { on: Param(0) }` — a *second*
+        // meaning of `Self` in the very scope where `Self` also means the
+        // impl's own self type. Rejecting the name is what makes that
+        // unambiguous, so the same program is now an error. Same program on
+        // purpose: it is the only pin on this shape.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              record W<T> { v: T }\n\
              impl<Self: It> W<Self> { fn peek(self) -> Self::Item { panic(\"x\") } }\n\
              fn main() { }",
         );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0076")
+            .expect("E0076 for a type parameter named `Self`");
+        assert!(
+            d.message.contains("Self"),
+            "names the parameter: {}",
+            d.message
+        );
+        // Not E0900: this is not a feature that arrives later, it is a name
+        // that will never be legal.
+        assert!(!error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_type_parameter_named_self_is_rejected_at_every_generic_declaration() {
+        // `record W<Self>` is exactly as confusing as `impl<Self>`, so the
+        // check belongs at every place a generic parameter can be declared —
+        // all six `generics` fields in the AST, including the two that only
+        // ever hold a method's own parameters. One shared pass, so a new
+        // generic-carrying construct cannot quietly opt out.
+        //
+        // Each program is checked in isolation, and each must produce at least
+        // one E0076 that names the parameter.
+        let cases: &[(&str, &str)] = &[
+            ("free fn", "fn f<Self>(x: Self) -> Int { 1 }\nfn main() { }"),
+            ("record", "record W<Self> { v: Self }\nfn main() { }"),
+            // `ast::Item::Type` covers both a sum type and a plain alias, but
+            // an alias cannot be tested here: the resolver rejects
+            // `type A<T> = …` outright with "type aliases are not supported yet
+            // in the Phase 1 compiler", so it never reaches this pass.
+            ("sum type", "type S<Self> = | A(Self)\nfn main() { }"),
+            (
+                "trait",
+                "trait Q<Self> { fn q(self) -> Int }\nfn main() { }",
+            ),
+            (
+                "trait method",
+                "trait Q { fn q<Self>(self, x: Self) -> Int }\nfn main() { }",
+            ),
+            (
+                "impl",
+                "record W<T> { v: T }\nimpl<Self> W<Self> { fn m(self) -> Int { 1 } }\n\
+                 fn main() { }",
+            ),
+            (
+                "impl method",
+                "record W { v: Int }\nimpl W { fn m<Self>(self, x: Self) -> Int { 1 } }\n\
+                 fn main() { }",
+            ),
+        ];
+        for (label, src) in cases {
+            let r = check_src(src);
+            let d = r
+                .diagnostics
+                .iter()
+                .find(|d| d.code == "E0076")
+                .unwrap_or_else(|| panic!("{label}: expected E0076, got {:?}", r.diagnostics));
+            assert!(d.message.contains("Self"), "{label}: {}", d.message);
+        }
+    }
+
+    #[test]
+    fn the_implicit_self_of_a_trait_body_is_not_a_user_written_parameter() {
+        // The rejection must not catch the `Self` that `self_generic_scope`
+        // inserts for a trait's own implicit type — that one is not a declared
+        // parameter at all, and it is the whole mechanism `Self::Item` inside a
+        // trait relies on. A control case, because a check that rejected every
+        // occurrence of the *name* rather than every *declaration* of it would
+        // still pass the test above.
+        let r = check_src(
+            "trait It { type Item\n \
+             fn get(self) -> Self::Item\n \
+             fn dup(self) -> Self::Item { self.get() } }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n fn get(self) -> Self::Item { panic(\"x\") } }\n\
+             fn main() { }",
+        );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert!(!error_codes(&r).contains(&"E0076"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_parameter_named_self_is_rejected_but_still_scoped() {
+        // The rejected name still enters the generic scope, so the *rest* of
+        // the declaration resolves normally and the user gets one error rather
+        // than an E0076 followed by a cascade of "cannot find type `Self`".
+        let r = check_src("record W<Self> { v: Self }\nfn main() { }");
+        assert_eq!(error_codes(&r), vec!["E0076"], "{:?}", r.diagnostics);
     }
 
     #[test]
