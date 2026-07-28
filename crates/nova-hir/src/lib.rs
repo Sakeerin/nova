@@ -126,6 +126,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_params) || ret.has_params(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_params),
             Ty::Array(elem) => elem.has_params(),
+            Ty::Assoc { on, .. } => on.has_params(),
             _ => false,
         }
     }
@@ -137,6 +138,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_vars) || ret.has_vars(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
             Ty::Array(elem) => elem.has_vars(),
+            Ty::Assoc { on, .. } => on.has_vars(),
             _ => false,
         }
     }
@@ -913,5 +915,36 @@ mod tests {
         // `E0073`'s unused-impl-parameter check depends on.
         assert!(proj.mentions_param(2));
         assert!(!proj.mentions_param(0));
+    }
+
+    #[test]
+    fn a_projection_reports_the_params_and_vars_inside_its_self_type() {
+        use nova_resolver::DefId;
+        let on_param = Ty::Assoc {
+            on: Box::new(Ty::Param(0)),
+            assoc: DefId(7),
+        };
+        assert!(on_param.has_params(), "a projection on a Param is generic");
+        assert!(!on_param.has_vars());
+
+        let on_var = Ty::Assoc {
+            on: Box::new(Ty::Var(3)),
+            assoc: DefId(7),
+        };
+        // Assoc-on-Var is meant to be unreachable (E0011 fires first), but
+        // typeck's finalize checks are the net for that argument being wrong,
+        // and they are driven by has_vars.
+        assert!(
+            on_var.has_vars(),
+            "a projection on a Var still contains a var"
+        );
+        assert!(!on_var.has_params());
+
+        let concrete = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: DefId(7),
+        };
+        assert!(!concrete.has_params());
+        assert!(!concrete.has_vars());
     }
 }
