@@ -327,7 +327,9 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|f| hir::RecordField {
                     name: f.name.value.clone(),
-                    ty: self.convert_ty(&f.ty, &generics),
+                    // No bounds: `reject_type_param_bounds` above rejects any
+                    // bound on a record's generic parameters outright.
+                    ty: self.convert_ty(&f.ty, &generics, &[]),
                 })
                 .collect();
             self.records.push(hir::RecordType {
@@ -384,10 +386,12 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|v| hir::Variant {
                     name: v.name.value.clone(),
+                    // No bounds: `reject_type_param_bounds` above rejects any
+                    // bound on a sum type's generic parameters outright.
                     fields: v
                         .fields
                         .iter()
-                        .map(|t| self.convert_ty(t, &generics))
+                        .map(|t| self.convert_ty(t, &generics, &[]))
                         .collect(),
                 })
                 .collect();
@@ -603,11 +607,22 @@ impl<'a> Checker<'a> {
                 for (j, g) in generics.iter().enumerate() {
                     m_scope.insert(g.name.value.clone(), 1 + j as u32);
                 }
-                let (m_params, m_ret) = self.method_sig_parts(params, ret, &m_scope);
-                let mut m_bounds = self.resolve_bounds(generics);
+                // `Self` (at index 0, matching `m_scope`) is bounded by the
+                // enclosing trait plus its supertraits — needed so this
+                // method's OWN signature can resolve `Self::Item` (e.g.
+                // `Iterator::next`'s `Option<Self::Item>`) before this
+                // trait's `hir::TraitDef` even exists (see `find_assoc_type`).
+                // Computed and expanded *before* `method_sig_parts` so
+                // `convert_ty` can see it; `TraitMethod.bounds` stays indexed
+                // 0..generics with no Self slot, so it is sliced off below
+                // rather than stored as-is.
+                let mut sig_bounds = vec![vec![def_id]];
+                sig_bounds.extend(self.resolve_bounds(generics));
                 // A `where` clause on a trait method is rejected above, so the
                 // inline bounds are the complete set.
-                self.expand_bounds(&mut m_bounds);
+                self.expand_bounds(&mut sig_bounds);
+                let (m_params, m_ret) = self.method_sig_parts(params, ret, &m_scope, &sig_bounds);
+                let m_bounds = sig_bounds[1..].to_vec();
                 let default_def = if is_default {
                     default_defs.get(&(item_index, mi)).copied()
                 } else {
@@ -675,7 +690,19 @@ impl<'a> Checker<'a> {
                 for (j, g) in f.generics.iter().enumerate() {
                     scope.insert(g.name.value.clone(), 1 + j as u32);
                 }
-                let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
+                // One generic for `Self` (bounded by the trait) plus the method's
+                // own generics, at the same flat Param indices. Computed *before*
+                // `method_sig_parts` (reordered from its previous position after
+                // it) so `convert_ty` can resolve a `Self::Item` this default
+                // body's own signature might mention.
+                let mut bounds = vec![vec![trait_id]];
+                bounds.extend(self.resolve_bounds(&f.generics));
+                // `Self`'s bound is the enclosing trait, so expanding it is what
+                // lets a `trait B: A` default body call `self.a()` — and lets its
+                // signature resolve `Self::Item` when `Item` is declared by `A`.
+                self.expand_bounds(&mut bounds);
+                let (mut params, ret) =
+                    self.method_sig_parts(&f.params, &f.return_ty, &scope, &bounds);
                 // Prepend the `self` receiver typed as `Self` (`Param(0)`) — but
                 // only for a method that declares one. A default-bodied
                 // associated function (`fn zero() -> Self { … }`) has no
@@ -685,13 +712,6 @@ impl<'a> Checker<'a> {
                 if f.params.iter().any(|p| p.name.value == "self") {
                     params.insert(0, Ty::Param(0));
                 }
-                // One generic for `Self` (bounded by the trait) plus the method's
-                // own generics, at the same flat Param indices.
-                let mut bounds = vec![vec![trait_id]];
-                bounds.extend(self.resolve_bounds(&f.generics));
-                // `Self`'s bound is the enclosing trait, so expanding it is what
-                // lets a `trait B: A` default body call `self.a()`.
-                self.expand_bounds(&mut bounds);
                 self.sigs.insert(
                     def_id,
                     FnSig {
@@ -738,7 +758,7 @@ impl<'a> Checker<'a> {
             let mut impl_bounds = self.resolve_bounds(&block.generics);
             self.apply_where(&mut impl_bounds, &block.where_clause, &impl_generics);
             self.expand_bounds(&mut impl_bounds);
-            let self_ty = self.convert_ty(&block.ty, &impl_generics);
+            let self_ty = self.convert_ty(&block.ty, &impl_generics, &impl_bounds);
             let Some(self_head) = self_ty.head() else {
                 self.error(
                     "E0010",
@@ -837,7 +857,8 @@ impl<'a> Checker<'a> {
                 self.expand_bounds(&mut bounds);
                 // Non-self params + ret in terms of the self type, resolving the
                 // impl's and this method's generic parameters.
-                let (mut params, ret) = self.method_sig_parts(&f.params, &f.return_ty, &scope);
+                let (mut params, ret) =
+                    self.method_sig_parts(&f.params, &f.return_ty, &scope, &bounds);
                 // `self` is stripped by `method_sig_parts` and re-inserted here as
                 // the receiver — but only for methods that actually declare one.
                 // For an associated function (`fn new() -> P`) inserting it would
@@ -1228,21 +1249,23 @@ impl<'a> Checker<'a> {
     }
 
     /// Convert a method's non-`self` parameter types and return type using
-    /// `scope` (which maps `Self`/generics to `Param` indices).
+    /// `scope` (which maps `Self`/generics to `Param` indices) and `bounds`
+    /// (indexed the same way — see `convert_ty`).
     fn method_sig_parts(
         &mut self,
         params: &[ast::Param],
         ret: &Option<Spanned<ast::Type>>,
         scope: &FxHashMap<String, u32>,
+        bounds: &[Vec<DefId>],
     ) -> (Vec<Ty>, Ty) {
         let converted = params
             .iter()
             .filter(|p| p.name.value != "self")
-            .map(|p| self.convert_ty(&p.ty, scope))
+            .map(|p| self.convert_ty(&p.ty, scope, bounds))
             .collect();
         let ret_ty = ret
             .as_ref()
-            .map(|t| self.convert_ty(t, scope))
+            .map(|t| self.convert_ty(t, scope, bounds))
             .unwrap_or(Ty::Unit);
         (converted, ret_ty)
     }
@@ -1265,12 +1288,12 @@ impl<'a> Checker<'a> {
             let params = f
                 .params
                 .iter()
-                .map(|p| self.convert_ty(&p.ty, &generics))
+                .map(|p| self.convert_ty(&p.ty, &generics, &bounds))
                 .collect();
             let ret = f
                 .return_ty
                 .as_ref()
-                .map(|t| self.convert_ty(t, &generics))
+                .map(|t| self.convert_ty(t, &generics, &bounds))
                 .unwrap_or(Ty::Unit);
             self.sigs.insert(
                 def_id,
@@ -1289,7 +1312,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
-            let ret = self.convert_ty(&c.ty, &FxHashMap::default());
+            let ret = self.convert_ty(&c.ty, &FxHashMap::default(), &[]);
             self.sigs.insert(
                 def_id,
                 FnSig {
@@ -1358,14 +1381,14 @@ impl<'a> Checker<'a> {
                 .params
                 .iter()
                 .map(|p| {
-                    let ty = self.convert_ty(&p.ty, &empty);
+                    let ty = self.convert_ty(&p.ty, &empty, &[]);
                     self.require_ffi_safe(&ty, p.ty.span, false);
                     ty
                 })
                 .collect();
             let ret = match &sig.return_ty {
                 Some(t) => {
-                    let ty = self.convert_ty(t, &empty);
+                    let ty = self.convert_ty(t, &empty, &[]);
                     self.require_ffi_safe(&ty, t.span, true);
                     ty
                 }
@@ -1472,7 +1495,7 @@ impl<'a> Checker<'a> {
         scope: &FxHashMap<String, u32>,
     ) {
         for wb in where_clause {
-            let idx = match self.convert_ty(&wb.ty, scope) {
+            let idx = match self.convert_ty(&wb.ty, scope, bounds) {
                 Ty::Param(i) => i as usize,
                 // `convert_ty` already reported an unknown/invalid type.
                 Ty::Error => continue,
@@ -1509,10 +1532,52 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Convert an AST type annotation to a `Ty`, resolving names.
-    fn convert_ty(&mut self, ty: &Spanned<ast::Type>, generics: &FxHashMap<String, u32>) -> Ty {
+    /// Convert an AST type annotation to a `Ty`, resolving names. `bounds` is
+    /// the trait-bound list of each of `generics`' parameters, indexed the
+    /// same way (`bounds[i]` bounds whichever name maps to `i` in `generics`,
+    /// mirroring `FnCtx.param_bounds`) — needed to resolve a two-segment path
+    /// like `I::Item` against the traits `I` is actually bounded by.
+    fn convert_ty(
+        &mut self,
+        ty: &Spanned<ast::Type>,
+        generics: &FxHashMap<String, u32>,
+        bounds: &[Vec<DefId>],
+    ) -> Ty {
         match &ty.value {
             ast::Type::Path { path, args } => {
+                if path.segments.len() == 2 {
+                    let base = path.segments[0].value.as_str();
+                    // `Self` inside a trait or impl is that scope's own
+                    // parameter 0 (see hir::TraitMethod's doc comment).
+                    let base_param = if base == "Self" {
+                        generics.get("Self").copied()
+                    } else {
+                        generics.get(base).copied()
+                    };
+                    if let Some(idx) = base_param {
+                        let assoc_name = path.segments[1].value.as_str();
+                        // Find the associated type among the traits bounding
+                        // this parameter. Searching the bounds (rather than
+                        // every trait) is what makes `I::Item` mean "the Item
+                        // of the trait I is bounded by". `expand_bounds` has
+                        // already folded supertraits into every entry here,
+                        // so a bound of `Ord` also carries `Eq` — `I::Item`
+                        // resolves against the transitive bound set as a
+                        // consequence of that ordering, not a separate
+                        // decision made here.
+                        let parent_bounds =
+                            bounds.get(idx as usize).map(Vec::as_slice).unwrap_or(&[]);
+                        return self.resolve_projection(
+                            idx,
+                            base,
+                            assoc_name,
+                            parent_bounds,
+                            ty.span,
+                        );
+                    }
+                    self.unsupported(ty.span, "module-qualified type paths");
+                    return Ty::Error;
+                }
                 if path.segments.len() != 1 {
                     self.unsupported(ty.span, "module-qualified type paths");
                     return Ty::Error;
@@ -1551,8 +1616,10 @@ impl<'a> Checker<'a> {
                     // Arity is precomputed (see `collect_type_arities`) so it is
                     // independent of whether this type has been collected yet.
                     let expected = self.type_arity.get(&def_id).copied().unwrap_or(0);
-                    let converted: Vec<Ty> =
-                        args.iter().map(|a| self.convert_ty(a, generics)).collect();
+                    let converted: Vec<Ty> = args
+                        .iter()
+                        .map(|a| self.convert_ty(a, generics, bounds))
+                        .collect();
                     if converted.len() != expected as usize {
                         self.error(
                             "E0012",
@@ -1583,9 +1650,9 @@ impl<'a> Checker<'a> {
             ast::Type::Fn { params, ret } => Ty::Fn {
                 params: params
                     .iter()
-                    .map(|p| self.convert_ty(p, generics))
+                    .map(|p| self.convert_ty(p, generics, bounds))
                     .collect(),
-                ret: Box::new(self.convert_ty(ret, generics)),
+                ret: Box::new(self.convert_ty(ret, generics, bounds)),
             },
             ast::Type::Tuple(_) => {
                 self.unsupported(ty.span, "tuple types");
@@ -1595,7 +1662,7 @@ impl<'a> Checker<'a> {
                 self.unsupported(ty.span, "reference and pointer types");
                 Ty::Error
             }
-            ast::Type::Array(elem) => Ty::Array(Box::new(self.convert_ty(elem, generics))),
+            ast::Type::Array(elem) => Ty::Array(Box::new(self.convert_ty(elem, generics, bounds))),
             ast::Type::Optional(_) => {
                 self.unsupported(ty.span, "the `T?` optional sugar");
                 Ty::Error
@@ -1605,6 +1672,79 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
         }
+    }
+
+    /// Resolve a two-segment type path `<base>::<assoc_name>` where `base`
+    /// names an in-scope generic parameter (or `Self`, encoded the same way —
+    /// see `self_generic_scope`) at position `idx`. Searches `bounds` — that
+    /// parameter's already supertrait-expanded trait bounds — for the one
+    /// bound that declares `assoc_name`, and projects onto it.
+    ///
+    /// A user-written `I::Item` always names a generic parameter, so `on` is
+    /// `Ty::Param(idx)` here, never `Ty::Var` — see the `Ty::Assoc` doc
+    /// comment on why that distinction matters to the unifier.
+    fn resolve_projection(
+        &mut self,
+        idx: u32,
+        base: &str,
+        assoc_name: &str,
+        bounds: &[DefId],
+        span: Span,
+    ) -> Ty {
+        let candidates: Vec<DefId> = bounds
+            .iter()
+            .filter_map(|&trait_id| self.find_assoc_type(trait_id, assoc_name))
+            .collect();
+        match candidates.as_slice() {
+            [assoc] => Ty::Assoc {
+                on: Box::new(Ty::Param(idx)),
+                assoc: *assoc,
+            },
+            [] => {
+                self.error(
+                    "E0001",
+                    format!("no associated type `{assoc_name}` on any bound of `{base}`"),
+                    span,
+                );
+                Ty::Error
+            }
+            _ => {
+                self.error(
+                    "E0015",
+                    format!(
+                        "ambiguous associated type `{base}::{assoc_name}`: more than one \
+                         bound of `{base}` declares it"
+                    ),
+                    span,
+                );
+                Ty::Error
+            }
+        }
+    }
+
+    /// The `DefId` of the associated type named `name` declared directly by
+    /// trait `trait_id`, if any.
+    ///
+    /// Searches `self.defs` (the resolver's output) rather than the
+    /// incrementally-built `self.traits`: a trait's own method signature can
+    /// name its own associated type (`Self::Item` in `Iterator::next`, which
+    /// has no default body) before `collect_traits` has pushed *that very
+    /// trait's* `hir::TraitDef`, and a bound can equally name a trait
+    /// declared later in the file. That is the same ordering hazard
+    /// `Checker::supertraits` exists to avoid for supertrait expansion (see
+    /// its doc comment) — `self.defs` carries every `DefKind::AssocType` from
+    /// resolution, before any of `collect_traits`'s incremental order exists.
+    fn find_assoc_type(&self, trait_id: DefId, name: &str) -> Option<DefId> {
+        self.defs
+            .defs()
+            .iter()
+            .enumerate()
+            .find_map(|(di, d)| match d.kind {
+                DefKind::AssocType { trait_def } if trait_def == trait_id && d.name == name => {
+                    Some(DefId(di as u32))
+                }
+                _ => None,
+            })
     }
 
     // === Function bodies ===
@@ -1877,7 +2017,8 @@ impl<'a> Checker<'a> {
                     };
                     let mut value = self.check_expr(fcx, init);
                     if let Some(annot) = ty {
-                        let annot_ty = self.convert_ty(annot, &fcx.generics.clone());
+                        let annot_ty =
+                            self.convert_ty(annot, &fcx.generics.clone(), &fcx.param_bounds);
                         if !fcx.icx.unify(&value.ty, &annot_ty) {
                             self.error(
                                 "E0010",
@@ -3010,14 +3151,14 @@ impl<'a> Checker<'a> {
             let ty = if matches!(p.ty.value, ast::Type::Infer) {
                 fcx.icx.fresh()
             } else {
-                self.convert_ty(&p.ty, &generics_scope)
+                self.convert_ty(&p.ty, &generics_scope, &fcx.param_bounds)
             };
             let local = fcx.new_local(p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
             param_locals.push(local);
             param_types.push(ty);
         }
         let ret_ty = match ret {
-            Some(rt) => self.convert_ty(rt, &generics_scope),
+            Some(rt) => self.convert_ty(rt, &generics_scope, &fcx.param_bounds),
             None => fcx.icx.fresh(),
         };
         // A `break`/`continue` in the closure body cannot target a loop in
@@ -9090,6 +9231,250 @@ mod tests {
             "message should name the construct: {}",
             d.message
         );
+    }
+
+    #[test]
+    fn a_projection_on_a_generic_parameter_resolves() {
+        // `I::Item` where I is a generic parameter bounded by a trait that
+        // declares `Item`. No impl is needed: the projection stays abstract.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn first<I: It>(x: I) -> I::Item { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_module_qualified_type_path_still_reports_e0900() {
+        // The two-segment path case now has a second meaning; the original
+        // one must survive with its original message.
+        let r = check_src("fn f(x: some_mod::Thing) -> Int { 1 }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 for a module-qualified type path");
+        assert!(
+            d.message.contains("module-qualified type paths"),
+            "original message preserved: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_projection_naming_an_undeclared_associated_type_is_an_error() {
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn f<I: It>(x: I) -> I::Nope { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(
+            !r.diagnostics.is_empty(),
+            "`I::Nope` must not silently typecheck"
+        );
+    }
+
+    #[test]
+    fn two_traits_with_the_same_associated_type_name_get_distinct_defids() {
+        // The `trait_def == def_id` guard in `collect_traits` (where
+        // `assoc_type_ids` is filtered) is exactly what a single-trait test
+        // cannot exercise: two unrelated traits both declaring `Item` must
+        // not be cross-assigned to each other's associated type.
+        let r = check_src(
+            "trait A { type Item\n fn a(self) -> Int }\n\
+             trait B { type Item\n fn b(self) -> Int }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let a = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "A")
+            .expect("trait A collected");
+        let b = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "B")
+            .expect("trait B collected");
+        let a_item = a
+            .assoc_types
+            .iter()
+            .find(|(n, _)| n.as_str() == "Item")
+            .expect("A::Item")
+            .1;
+        let b_item = b
+            .assoc_types
+            .iter()
+            .find(|(n, _)| n.as_str() == "Item")
+            .expect("B::Item")
+            .1;
+        assert_ne!(a_item, b_item, "A::Item and B::Item must not share a DefId");
+    }
+
+    #[test]
+    fn a_projection_ambiguous_between_two_bounds_is_an_error() {
+        // `expand_bounds` folds supertraits in *before* `convert_ty` runs, so
+        // a parameter can legitimately see associated types declared by more
+        // than one of its bounds — this is the case that makes that
+        // reachable, not hypothetical. Two unrelated traits, both declaring
+        // `Item`, both bounding the same parameter: an implementation that
+        // picked the first match (e.g. the first bounding trait, or always
+        // `assoc_types[0]`) would silently resolve to the wrong one instead
+        // of reporting the ambiguity.
+        let r = check_src(
+            "trait A { type Item\n fn a(self) -> Int }\n\
+             trait B { type Item\n fn b(self) -> Int }\n\
+             fn f<I: A + B>(x: I) -> I::Item { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0015"),
+            "expected an ambiguity error: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_projection_resolves_through_a_transitive_supertrait_bound() {
+        // `expand_bounds` folds supertraits into a bound list before
+        // `convert_ty` runs, so a bound on `B` (which requires `A`) also
+        // carries `A` — `I::Item` must resolve against `A`'s declaration even
+        // though `I` is only written `I: B`, not `I: A`. Desirable, but a
+        // consequence of ordering rather than a decision made in
+        // `resolve_projection` itself (see its comment in `convert_ty`); this
+        // is the test that would fail if that ordering ever regressed.
+        let r = check_src(
+            "trait A { type Item\n fn a(self) -> Int }\n\
+             trait B: A { fn b(self) -> Int }\n\
+             fn f<I: B>(x: I) -> I::Item { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_projection_resolves_to_the_bounding_traits_own_associated_type_not_an_unrelated_one() {
+        // Two traits both declare `Item`, but only ONE (`Keeper`) bounds `I`
+        // here. A lookup that ignored *which* trait `I` is actually bounded
+        // by — matching the name alone, anywhere in the program — could
+        // silently resolve to `Other::Item` instead of `Keeper::Item`, and a
+        // test that only asserts "compiles clean" would not notice: both
+        // outcomes typecheck. So this inspects the compiled `Ty::Assoc`
+        // itself and pins both halves of it — the projection's `on` (must be
+        // `Param(0)`, i.e. `I`, never some other parameter or a `Var`) and
+        // its `assoc` (must be `Keeper`'s `Item`, not `Other`'s or a fresh
+        // one).
+        let r = check_src(
+            "trait Other { type Item\n fn o(self) -> Int }\n\
+             trait Keeper { type Item\n fn get(self) -> Int }\n\
+             fn first<I: Keeper>(x: I) -> I::Item { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let keeper = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "Keeper")
+            .expect("trait Keeper collected");
+        let keeper_item = keeper
+            .assoc_types
+            .iter()
+            .find(|(n, _)| n.as_str() == "Item")
+            .expect("Keeper::Item")
+            .1;
+        let f = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "first")
+            .expect("fn first collected");
+        match &f.ret_ty {
+            Ty::Assoc { on, assoc } => {
+                assert_eq!(
+                    on.as_ref(),
+                    &Ty::Param(0),
+                    "projected on `I` (Param 0), not a Var or some other parameter"
+                );
+                assert_eq!(
+                    *assoc, keeper_item,
+                    "must resolve to Keeper::Item, not Other::Item"
+                );
+            }
+            other => panic!("expected `first`'s return type to be a Ty::Assoc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_projection_projects_onto_the_correct_parameter_when_there_are_several() {
+        // `I` is the SECOND generic parameter here (`T` is first, unrelated
+        // and unbounded). Every other projection test in this file happens
+        // to project onto a lone parameter at index 0, so a resolver that
+        // hardcoded `Ty::Param(0)` for the projection's `on` — instead of the
+        // actual index `base` resolved to — would still pass all of them.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn f<T, I: It>(x: T, y: I) -> I::Item { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let it = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "It")
+            .expect("trait It collected");
+        let item = it
+            .assoc_types
+            .iter()
+            .find(|(n, _)| n.as_str() == "Item")
+            .expect("It::Item")
+            .1;
+        let f = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "f")
+            .expect("fn f collected");
+        assert_eq!(
+            f.ret_ty,
+            Ty::Assoc {
+                on: Box::new(Ty::Param(1)),
+                assoc: item,
+            },
+            "must project onto `I` at Param(1), not `T` at Param(0)"
+        );
+    }
+
+    #[test]
+    fn a_required_methods_own_signature_resolves_its_own_traits_self_item() {
+        // `Iterator::next`'s eventual shape (`fn next(mut self) ->
+        // Option<Self::Item>`) is exactly this: a REQUIRED method whose own
+        // return type projects, through `Self`, onto an associated type its
+        // own enclosing trait declares. At the point this method's signature
+        // is converted, `collect_traits` has not yet pushed *this trait's
+        // own* `hir::TraitDef` (it is still being built) — this test is what
+        // proves `find_assoc_type` must search `self.defs`, not the
+        // incrementally-built `self.traits`.
+        let r = check_src("trait It { type Item\n fn get(self) -> Self::Item }\nfn main() { }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_default_methods_own_signature_resolves_its_own_traits_self_item() {
+        // Mirrors the required-method case above, but for a method WITH a
+        // default body: `collect_traits` builds this signature in a second,
+        // separate pass (the default-method-body pass), with its own
+        // `Self`-bound construction that is independently susceptible to the
+        // same ordering hazard.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Self::Item { panic(\"unreachable\") } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
     #[test]

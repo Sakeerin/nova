@@ -1412,6 +1412,18 @@ mod tests {
     }
 
     #[test]
+    fn associated_type_is_not_in_the_value_namespace() {
+        // Mirrors the test above for the other namespace: an associated
+        // type's `Def` is created by `push_def` alone and never registered in
+        // `scope.values` either, so it must not resolve as an expression name
+        // (there is no value `Item` could denote). Untested until now, not
+        // known broken.
+        let r = resolve_src("trait It { type Item }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(r.definitions.resolve_value(ModuleId(0), "Item"), None);
+    }
+
+    #[test]
     fn user_fn_named_str_cmp_is_not_a_reserved_word() {
         // Regression for the `str_cmp` builtin becoming an accidental
         // reserved word in every module: `Builtin::STD_ONLY` (unlike
