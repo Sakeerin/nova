@@ -2163,9 +2163,17 @@ impl<'a> Checker<'a> {
     /// code without reaching through a half-built `Checker`. All this adds is the
     /// diagnostic, which `nova-hir` cannot emit.
     ///
-    /// Safe to call before every impl has been collected: `self.impls` is filled
-    /// by `collect_impls`, which runs before `collect_signatures` and before any
-    /// body is checked, so every seam sees the complete table.
+    /// **Precondition: `collect_impls` has returned.** It fills `self.impls`, and
+    /// it runs before `collect_signatures` and before any body is checked, so every
+    /// seam that exists today sees the complete table. Nothing enforces this, and
+    /// it is easy to get wrong in one specific way: `collect_impls` pushes each
+    /// `ImplInfo` at the *end* of its loop body, ten lines after it calls
+    /// `check_impl_conformance`, so a `normalize` added inside conformance cannot
+    /// see the bindings of the very impl it is checking. Measured — with both sides
+    /// of the conformance return-type comparison normalized, `impl<T> It for W<T>
+    /// { type Item = T  fn get_item(self) -> T }` still reports `E0072`, and moving
+    /// the push above the conformance call is what makes it pass. Whoever adds the
+    /// conformance seam has to reorder something first.
     ///
     /// **Never called from `unify`.** The whole design rests on projections being
     /// gone by the time the unifier sees a type; normalizing inside it would give
