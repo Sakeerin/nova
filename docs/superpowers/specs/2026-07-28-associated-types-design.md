@@ -37,14 +37,18 @@ Both established by probing the compiler rather than reading the spec:
 
 ## 3. Syntax: `Self::Item`, a deliberate deviation from the spec
 
-`nova-spec/20-STDLIB.md:93` writes `fn next(self) -> Option<Self.Item>` — a **dot**. Nova will
-use `::` instead, and the spec will be corrected.
+`nova-spec/20-STDLIB.md:95` writes `fn next(self) -> Option<Self.Item>` — a **dot**. Nova will
+use `::` instead, and the spec will be corrected. (**Corrected citation**: this said `:93`,
+which is the `pub trait Iterator {` line; the dot signature is two lines down.)
 
 Reasons, in order of weight:
 
 1. **`::` is free; `.` is not.** `Self::Item` reuses a path form the parser already accepts.
-   `Self.Item` fails in the grammar today (`P0001: expected 'fn', found '.'`) and would need
-   new type-position syntax.
+   `Self.Item` fails in the grammar today and would need new type-position syntax. **Corrected
+   message**: this claimed `P0001: expected 'fn', found '.'`; the actual output is
+   `error[P0001]: expected \`fn\` (in function signature), found \`<\`` — same code, same layer
+   (a `P` code is a parser error, so it never reaches typeck), but recovery reports the `<` of
+   `Option<` rather than the offending `.`.
 2. **`::` is already Nova's "reach into a type" operator** — `P::new()` and `T::default()` are
    associated *functions*. Using `.` for associated types would mean two spellings for one
    idea, on the same types.
@@ -56,11 +60,19 @@ of ADR 0004 and 0005.
 ## 4. Representation: `Ty::Assoc`, normalized at three seams
 
 ```rust
-Ty::Assoc { on: Box<Ty>, trait_id: DefId, index: u32 }
+Ty::Assoc { on: Box<Ty>, assoc: DefId }
 ```
 
-`index` is the position in the trait's associated-type list, so nothing depends on string
-comparison after resolution.
+`assoc` is the associated type's **own** `DefId`, under a new `DefKind::AssocType` — exactly as
+trait methods already get one. Nothing depends on string comparison after resolution.
+
+**Corrected.** This section originally specified `{ on, trait_id: DefId, index: u32 }`, where
+`index` was the position in the trait's associated-type list and `display_ty` would look the
+name up there. That does not work: `display_ty` (`crates/nova-typeck/src/lib.rs:35`) takes only
+`defs: &Definitions` and cannot see the trait table, so it could not turn an index back into a
+name. Giving the associated type its own `DefId` makes `display_ty` work unchanged via
+`defs.def(*assoc).name`, drops the index entirely, and still keeps `Ty` free of a `String`.
+Implemented this way in Task 1; recorded here so the design doc matches the code.
 
 ### 4.1 Why normalization, and not a constraint queue
 
