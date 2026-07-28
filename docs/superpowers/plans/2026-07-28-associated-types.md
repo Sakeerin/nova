@@ -664,6 +664,29 @@ Test all three scopes resolve: `Self::Item` in a trait method (already works), i
 
 **Also correct Task 6's Step 2 expectation while you are here** — it predicts its test fails "because conformance is comparing an unnormalized projection against a concrete type." Before this step, it would actually have failed with `E0900` on the impl side, before conformance ran at all. After this step, Task 6's stated cause becomes the real one.
 
+- [ ] **Step 4c: Reject `Self` as a user-written type-parameter name — this is what makes 4b unambiguous**
+
+Task 3's re-review found that **`Self` is currently a legal type-parameter name**, which quietly gives Step 4b two possible meanings for `Self` in the same scope. Verified on `1c4cd47`:
+
+```nova
+trait It { type Item
+ fn get(self) -> Int }
+record W<Self> { v: Self }
+impl<Self: It> W<Self> { fn peek(self) -> Self::Item { panic("x") } }
+fn main() { }
+```
+
+`nova check` → **`ok`**. So `Self::Item` inside an impl *already* resolves today — as `Assoc { on: Param(0) }` — whenever the user writes `<Self>` themselves. The mechanism, all confirmed: `parse_ident` accepts `Token::SelfUpper` and returns the plain string `"Self"` (`crates/nova-parser/src/grammar.rs:2281-2284`), so `parse_generics_opt` (`:372`) admits it like any identifier; `generic_scope` (`crates/nova-typeck/src/check.rs:5432`) then inserts whatever name the user wrote; and impls build their scope with exactly that function (`:757`). `fn f<Self: It>(x: Self) -> Self::Item` is `ok` for the same reason.
+
+Without this step, Step 4b would have to branch on "is there a user-written `Self` in `generics`?" and carry two meanings of `Self` forward into Tasks 5–8 and every diagnostic that prints the word. Reject the name instead:
+
+- **Policy: a generic parameter may not be named `Self`.** Report a **new** code — `E0076` is free and sits in the right band, next to `E0073` (`check.rs:780`, "impl generic parameter not used in the self type"), which is the same kind of "this generic declaration is invalid" error and is raised a few lines after the `generic_scope` call this check belongs beside. Do not reuse `E0073` and do **not** use `E0900`: this is not an unimplemented feature, it is a name that will never be legal.
+- Apply it to **every** generic declaration — `fn`, `record`, `trait`, `impl`, and method-level generics — not just impls. One shared helper called wherever generics are collected. A `record W<Self>` is exactly as confusing as an `impl<Self>`.
+- **Safe to do:** `Self` is used as a type-parameter name nowhere in `std/`, `examples/`, or `tests/` (checked), and it is not currently reserved anywhere outside the lexer's `#[token("Self")]`. Expect zero pre-existing test churn; if a test does break, read it before touching it.
+- Test both that `impl<Self: It> …` is now rejected with `E0076` naming the parameter, and that a plain `Self` inside a trait body still works — the rejection must not touch the legitimate implicit `Self` that `self_generic_scope` inserts, which is not a user-written parameter at all.
+
+After this step, `Self` in an impl means exactly one thing (the impl's self type), which is the assumption Step 4b's implementation and Task 6's normalization both rest on. **Update the comment at `check.rs:1550` once this lands**, so it describes the finished state: `Self` is an ordinary `generics` key, populated only by `self_generic_scope` for trait bodies and default methods, because `E0076` now rejects the user-written path.
+
 - [ ] **Step 5: Run the tests**
 
 Run: `cargo test -p nova-typeck --no-fail-fast assoc_binding`, then `cargo test --workspace --no-fail-fast`
