@@ -354,7 +354,11 @@ In `crates/nova-ast/src/item.rs`, in `enum TraitItem`:
 
 - [ ] **Step 4: Parse it**
 
-In `crates/nova-parser/src/grammar.rs`'s trait-body parser, add an alternative before the `fn` case that triggers on the `type` keyword: consume `type`, then an identifier, then optionally `:` followed by `+`-separated paths. Follow the existing bound-list parser used for `trait B: A` supertraits rather than writing a new one — grep for how `supertraits` is parsed and reuse it.
+In `crates/nova-parser/src/grammar.rs`, `parse_trait_decl`'s body loop is at **`:536`**. Traced, so use this rather than searching:
+
+- **`Token::Type` exists** (`crates/nova-lexer/src/lib.rs:576`) — the `type` keyword is already lexed, for type aliases.
+- **`self.parse_trait_bounds()` is the reusable bound-list parser** — `parse_trait_decl` already calls it at `:530` for `trait B: A` supertraits. Call it for `type Item: Display`; do not write a second bound parser.
+- **The `type` check must come BEFORE `parse_function_sig()`, not after.** That loop opens with `let saved_pos = self.pos; let saved_errors_len = self.errors.len();` and then *speculatively* calls `parse_function_sig()`, rolling back if a body brace follows. Reaching `parse_function_sig()` with `type Item` ahead makes it fail and fall into `sync_to_stmt_boundary()`, producing a spurious parse error even once your arm exists. Guard on `self.check(&Token::Type)` at the top of the loop body and `continue`.
 
 Add an insta snapshot test in `crates/nova-parser/tests/parser_tests.rs` (the repo convention) covering `trait It { type Item  fn next(self) -> Int }` and `trait It { type Item: Display }`.
 
@@ -599,7 +603,13 @@ Expected: FAIL — `type Item = T` inside an `impl` does not parse yet.
 
 - [ ] **Step 3: Parse `type Name = Type` in an impl body**
 
-The impl body currently accepts `fn` and `const` (its error message is `expected fn or const inside impl`). Add a `type` alternative producing a new AST node — put it beside the impl's items, not in `TraitItem`, since an impl binding has a right-hand side that a trait declaration does not. Add an insta snapshot test.
+The impl body loop is `parse_impl_block` at **`crates/nova-parser/src/grammar.rs:593`**, and its fallthrough error is `expected: "fn or const inside impl"` at `:614`. Traced, so use this rather than searching:
+
+- **`ast::ImplBlock` has PARALLEL VECS, not a unified item list** — `functions: Vec<Function>` and `consts: Vec<ConstDecl>` (`crates/nova-ast/src/item.rs:136-137`). So an associated-type binding is a **third vector**, `assoc_types: Vec<AssocTypeBinding>`, with its own small struct `{ name: Spanned<String>, ty: Spanned<Type> }` — **not** a variant in a shared enum. The plan's earlier "put it beside the impl's items" was vague; this is what it means concretely.
+- The body loop `match self.peek()`es on `Token::Fn | Token::Async` and `Token::Const`, with a `_` arm that emits the error above. Add a `Token::Type` arm beside them. Unlike the trait-body loop, there is **no speculative parse to sequence around** here — the `match` dispatches on one token, so arm order does not matter.
+- `parse_visibility()` runs before the `match`, so a `pub type Item = …` would parse and then be silently ignored. Decide it deliberately: an impl's associated-type binding has no meaningful visibility of its own, so reject a non-private `vis` with a diagnostic rather than dropping it.
+
+Add an insta snapshot test.
 
 - [ ] **Step 4: Record and check the bindings**
 
