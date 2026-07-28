@@ -170,8 +170,9 @@ from the design without anyone noticing:
 | Does `Self::Item` inside an impl body or signature resolve to that impl's binding? | **Yes** — inside `impl<T> Iterator for VecIter<T>`, `Self::Item` normalizes to `T`. |
 | Where may a projection appear? | **Anywhere a type may appear** — trait and impl signatures, function signatures, `let` annotations, record fields. Normalization is uniform, so restricting the positions would be extra rules for no gain. |
 | `Vec::iter` — new `impl<T> Vec<T>` block, or the existing one? | **The existing one.** `std/collections` already has `impl<T> Vec<T>`; a second inherent impl on the same type is the untested configuration `std/strings` was careful to avoid. |
-| Diagnostic for an impl that omits a required `type Item`, or binds one the trait never declared | **`E0072`**, the existing impl-conformance code, with the missing or unexpected name in the message. |
+| Diagnostic for an impl that omits a required `type Item`, or binds one the trait never declared | **`E0070`** for the omission, **`E0071`** for the undeclared binding, with the name in the message. **Corrected** — this row originally said `E0072` for both, which was wrong in both directions: `check_impl_conformance` already runs a three-code scheme, `E0070` = missing a required item (`check.rs:1242`), `E0071` = not a member of the trait (`:1088`), `E0072` = the item exists on both sides but its shape disagrees. `E0072` must stay free for the shape case §4.1's seam 2 actually produces. |
 | Is a projection *inferred backwards* — does unifying `Assoc{..}` with `Int` deduce `on`? | **No.** Projections are resolved, never solved for. Nothing here needs it, and it would require the constraint machinery §4.1 avoids. |
+| May a user name a generic parameter `Self`? | **No** — rejected with **`E0076`** at every generic declaration (`fn`, `record`, `trait`, `impl`, method-level). **Added during implementation**, not in the original design: `Self` was an accepted identifier (`parse_ident` maps `Token::SelfUpper` to the plain string `"Self"`), so `generic_scope` gave a user-written `<Self>` its own entry — including in an impl, which meant `impl<Self: It> W<Self> { fn peek(self) -> Self::Item }` already type-checked, resolving `Self` as an ordinary parameter rather than the impl's self type. Two meanings for one token in one scope would have propagated through every normalization seam and every diagnostic that prints `Self`. Rejecting the name is what makes "`Self` in an impl means the impl's self type" true rather than usually-true. Zero migration cost: no `std/`, `examples/`, or `tests/` code named a parameter `Self`. |
 
 ## 6. The `mut self` trait-method gap must close here
 
@@ -223,8 +224,8 @@ Separately, as `#[test]`s rather than fixture lines (each of these aborts or fai
 which a fixture cannot contain):
 
 6. `type Item: Display` → `E0900`.
-7. An impl that omits a required `type Item` → `E0072` naming the missing name.
-8. An impl binding an associated type the trait does not declare → `E0072` naming it.
+7. An impl that omits a required `type Item` → `E0070` naming the missing name (**corrected** from `E0072`; see §5.1).
+8. An impl binding an associated type the trait does not declare → `E0071` naming it (**corrected** from `E0072`).
 9. `E0060` on a `mut self` **trait** method called through an immutable binding (§6).
 10. An impl/trait `mut self` mismatch in either direction → a conformance error.
 
