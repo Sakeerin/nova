@@ -1547,14 +1547,31 @@ impl<'a> Checker<'a> {
             ast::Type::Path { path, args } => {
                 if path.segments.len() == 2 {
                     let base = path.segments[0].value.as_str();
-                    // No special case for `Self`: it is an ordinary entry in
-                    // `generics`, inserted only by `self_generic_scope` (Param
-                    // 0, inside a trait body or default method). An `impl`
-                    // block's own scope never adds such an entry — which is
-                    // why `Self::Item` written inside an impl's own method
-                    // signature falls through to the module-qualified-path
-                    // branch below rather than being resolved here; that is
-                    // not a bug in this branch, just this task's scope.
+                    // No special case for `Self` here: this is the same
+                    // lookup as any other name in `generics`, which is why it
+                    // resolves in more places than "trait context" alone.
+                    // `self_generic_scope` (trait bodies, default methods —
+                    // check.rs:540, :672, :1823) inserts `Self` at `Param(0)`
+                    // for the trait's own implicit type. But `Self` is also
+                    // just an accepted identifier (`Token::SelfUpper` parses
+                    // to the plain string `"Self"`, see
+                    // nova-parser/grammar.rs's `parse_ident`), so a
+                    // user-written `<Self>` type parameter lands its own
+                    // entry via the ordinary `generic_scope` too — including
+                    // in an `impl`, which calls exactly that
+                    // (`generic_scope(&block.generics)`, check.rs:757). That
+                    // is why e.g. `impl<Self: It> W<Self> { fn peek(self) ->
+                    // Self::Item { ... } }` resolves today: `Self` there is
+                    // an ordinary generic parameter that happens to be named
+                    // `Self`, not the impl's own self type. An impl with no
+                    // such explicit parameter has no `Self` key at all, so
+                    // `Self::Item` in *that* impl falls through to the
+                    // module-qualified-path branch below and reports E0900 —
+                    // not a special case, just an absent map entry. Task 4
+                    // Step 4c rejects `Self` as a type-parameter name
+                    // (`E0076`), after which `self_generic_scope` becomes the
+                    // only source of a `Self` entry and this comment can
+                    // shrink back down.
                     let base_param = generics.get(base).copied();
                     if let Some(idx) = base_param {
                         let assoc_name = path.segments[1].value.as_str();
@@ -1563,11 +1580,16 @@ impl<'a> Checker<'a> {
                         // it must be flagged rather than silently dropped —
                         // mirroring the two single-segment branches below
                         // (generic parameter, primitive) that already guard
-                        // this the same way.
+                        // this the same way. Deliberately says only
+                        // "`{base}::{assoc_name}`", not "associated type
+                        // `{base}::{assoc_name}`": `assoc_name` may not even
+                        // be one (`I::Nope<Int>` reports this alongside
+                        // resolve_projection's own E0001 for `Nope`, and the
+                        // two must not read as contradicting each other).
                         if !args.is_empty() {
                             self.error(
                                 "E0012",
-                                format!("associated type `{base}::{assoc_name}` takes no type arguments"),
+                                format!("`{base}::{assoc_name}` takes no type arguments"),
                                 ty.span,
                             );
                         }
@@ -9278,6 +9300,42 @@ mod tests {
     }
 
     #[test]
+    fn rejected_type_arguments_and_an_undeclared_name_do_not_contradict_each_other() {
+        // `I::Nope<Int>` combines both problems the projection branch can
+        // report: type arguments on a projection (rejected, E0012) and an
+        // undeclared associated-type name (E0001). Both fire — the E0012
+        // guard runs before resolve_projection, deliberately, so args are
+        // rejected whether or not the name even resolves — and neither may
+        // claim something the other disproves: E0012 must not call `Nope`
+        // "an associated type" in the same breath E0001 says it is not one.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn f<I: It>(x: I) -> I::Nope<Int> { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        let e0012 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0012")
+            .expect("E0012 for the rejected type arguments");
+        assert!(
+            !e0012.message.contains("associated type"),
+            "must not call `Nope` an associated type before E0001 says it is not one: {}",
+            e0012.message
+        );
+        let e0001 = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001 for the undeclared associated type name");
+        assert!(
+            e0001.message.contains("no associated type") && e0001.message.contains("Nope"),
+            "{}",
+            e0001.message
+        );
+    }
+
+    #[test]
     fn a_projection_naming_an_undeclared_associated_type_is_an_error() {
         // Not just "some diagnostic fired": a lazy implementation that
         // reused `self.unsupported(span, "module-qualified type paths")` for
@@ -9524,26 +9582,99 @@ mod tests {
             .find(|d| d.code == "E0012")
             .expect("E0012 for type arguments on a projection");
         assert!(
-            d.message.contains("takes no type arguments"),
+            d.message.contains("`I::Item` takes no type arguments"),
             "{}",
+            d.message
+        );
+        // Deliberately NOT "associated type `I::Item` takes no type
+        // arguments": `I::Nope<Int>` reports this same E0012 alongside
+        // resolve_projection's own E0001 for the undeclared `Nope`, and
+        // calling something "an associated type" that then turns out not to
+        // be one would read as self-contradictory.
+        assert!(
+            !d.message.contains("associated type"),
+            "must not call the base an \"associated type\" before it is known to resolve: {}",
             d.message
         );
     }
 
     #[test]
-    fn a_projection_with_an_unresolvable_type_argument_still_reports_a_diagnostic() {
-        // Before `args` was guarded on the projection path, a non-empty
-        // `args` was dropped without being converted at all, so `Nope` here
-        // was never looked up and its own `cannot find type` diagnostic
-        // never fired — the whole program compiled clean.
+    fn rejected_type_arguments_on_a_projection_are_not_themselves_resolved() {
+        // `args` is rejected wholesale (E0012) rather than converted, exactly
+        // like the two single-segment branches (generic parameter,
+        // primitive) that also reject type arguments without recursing into
+        // them. That is intentional, not an oversight, so this pins it as a
+        // positive fact rather than merely "some diagnostic fired": `Nope`
+        // must never surface its own `cannot find type` (E0001) — if it did,
+        // rejected arguments would secretly still be getting resolved, and a
+        // future change making that happen should have to update this test
+        // rather than slip in silently under a bare `!diagnostics.is_empty()`.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              fn first<I: It>(x: I) -> I::Item<Nope> { panic(\"unreachable\") }\n\
              fn main() { }",
         );
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "expected exactly the one E0012 for the rejected argument: {:?}",
+            r.diagnostics
+        );
+        assert_eq!(r.diagnostics[0].code, "E0012", "{:?}", r.diagnostics);
         assert!(
-            !r.diagnostics.is_empty(),
-            "`I::Item<Nope>` must not silently typecheck"
+            !r.diagnostics.iter().any(|d| d.message.contains("Nope")),
+            "`Nope` must not be individually resolved or diagnosed: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_user_written_self_type_parameter_makes_self_item_resolve_in_an_impl() {
+        // `Self` has no special case in `convert_ty`'s projection branch — it
+        // is looked up in `generics` like any other name. `self_generic_scope`
+        // is one source of a `Self` entry (trait bodies, default methods,
+        // Param 0), but not the only one: `Self` is an accepted identifier
+        // (`Token::SelfUpper` parses to the plain string `"Self"`), so a
+        // user-written `<Self>` type parameter lands its own entry through
+        // the ordinary `generic_scope` too — including inside an `impl`,
+        // which calls exactly that. So `Self` here names an ordinary generic
+        // parameter that happens to be spelled `Self`, not the impl's own
+        // self type, and `Self::Item` resolves the same way `I::Item` would
+        // for a parameter actually named `I`. This is what makes the
+        // corrected comment in `convert_ty` a claim worth pinning rather
+        // than letting it silently drift false again, as its predecessor did.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<Self: It> W<Self> { fn peek(self) -> Self::Item { panic(\"x\") } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn self_item_in_an_impl_with_no_explicit_self_parameter_still_reports_e0900() {
+        // The companion of the test above: an impl that does NOT declare its
+        // own `<Self>` type parameter has no `Self` entry in `generics` at
+        // all, so `Self::Item` there still falls through to the
+        // module-qualified-path branch — the same `E0900` as before this
+        // task, not a regression introduced by the parameter-name coincidence
+        // the test above exploits.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record K { v: Int }\n\
+             impl K { fn peek(self) -> Self::Item { panic(\"x\") } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 for Self::Item in an impl with no <Self> parameter of its own");
+        assert!(
+            d.message.contains("module-qualified type paths"),
+            "{}",
+            d.message
         );
     }
 
