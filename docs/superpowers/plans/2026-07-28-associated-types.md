@@ -875,7 +875,18 @@ Expected: the first FAILS for at least one spelling. If it fails for **both**, c
 
 - [ ] **Step 3: Implement**
 
-In `check_impl_conformance`, substitute the impl's self type for `Param(0)` in the trait's declared signature, then `normalize` **both** sides before comparing. Substituting alone is not enough: it turns `Self::Item` into `Assoc { on: W<Param(0)> }`, which is still a projection.
+Substitute the impl's self type for `Param(0)` in the trait's declared signature, then `normalize` **both** sides before comparing. Substituting alone is not enough: it turns `Self::Item` into `Assoc { on: W<Param(0)> }`, which is still a projection.
+
+**But you cannot simply do this inside `check_impl_conformance`, and this step previously said to.** Task 5 measured why, and documented it on `Checker::normalize`: `collect_impls` calls `check_impl_conformance` at `check.rs:1105` but pushes the `ImplInfo` at `:1115`, ten lines later. So a `normalize` inside conformance **cannot see the bindings of the very impl it is checking** — with both sides normalized, `impl<T> It for W<T> { type Item = T   fn get_item(self) -> T }` still reports `E0072`.
+
+Two ways out, and the second is almost certainly right:
+
+- **(a) Move the push above the conformance call.** Task 5 measured that this makes the case pass. It is minimal, but **incomplete**: normalization consults the *whole* impl table, so a binding that resolves through a *different* impl declared **later** in the file would still fail. That reintroduces a declaration-order dependency, and Nova deliberately has none for impls.
+- **(b) Run the associated-type-dependent comparison as a separate pass after `collect_impls` returns**, when `self.impls` is complete. **This is the house pattern, and there is a precedent in this exact file for this exact reason**: `check_supertrait_impls` (`check.rs:1213`) was deliberately moved out of conformance and made to run after the whole table is built, beside `check_impl_coherence`, because — quoting its own doc comment — "conformance is called from the middle of `collect_impls`, before the impl being checked has even been pushed, so it sees only impls from *earlier* items and would reject an `impl B for R` written above its `impl A for R`. Nova has no declaration-order rule for impls."
+
+Read that doc comment before choosing. If you pick (b), you will need the per-impl spans, which `collect_impls` already accumulates into `impl_spans` and hands to `check_supertrait_impls` — so the plumbing exists.
+
+**Whichever you choose, prove the declaration-order property**, because it is what separates the two: a test where the impl whose binding is needed for normalization is declared **after** the impl being checked. Under (a) that test should fail; under (b) it should pass. If you choose (a) anyway, say why and pin the limitation with a `known_gap` test rather than leaving it undiscovered.
 
 - [ ] **Step 4: Run the tests**
 
