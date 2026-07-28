@@ -60,6 +60,23 @@ enum TraitCallSelf {
     Qualifier(Ty),
 }
 
+/// The `Self` of an `impl` block, for resolving `Self::Item` written inside it.
+///
+/// An impl's `Self` cannot be a `generics` entry the way a trait body's is: a
+/// trait body's `Self` is an implicit type *parameter* at `Param(0)`, whereas an
+/// impl's is a concrete (possibly compound) type — `W<Param(0)>` for
+/// `impl<T> Tr for W<T>` — with no parameter index and therefore no slot in the
+/// by-index bound table either. Its candidate traits are not bounds at all but
+/// the single trait the impl implements.
+#[derive(Debug, Clone)]
+struct ImplSelf {
+    /// The impl's self type, with the impl's own `Param(k)` still in it.
+    ty: Ty,
+    /// The trait this impl implements, or `None` for an inherent impl — which
+    /// implements no trait and so has no associated type to project onto.
+    trait_id: Option<DefId>,
+}
+
 /// The AST location and flavor of a method to compile.
 #[derive(Debug, Clone, Copy)]
 struct MethodLoc {
@@ -83,6 +100,8 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         supertraits: FxHashMap::default(),
         traits: Vec::new(),
         impls: Vec::new(),
+        impl_self: None,
+        impl_selves: FxHashMap::default(),
         extra_functions: Vec::new(),
         next_closure_def: defs.defs().len() as u32,
         type_arity: FxHashMap::default(),
@@ -165,6 +184,21 @@ struct Checker<'a> {
     supertraits: FxHashMap<DefId, Vec<DefId>>,
     traits: Vec<hir::TraitDef>,
     impls: Vec<hir::ImplInfo>,
+    /// The `Self` of the `impl` block whose signatures or body are being
+    /// converted right now, or `None` outside one. Read by [`Checker::convert_ty`]
+    /// to resolve `Self::Item` inside an impl.
+    ///
+    /// Ambient rather than a `convert_ty` parameter because `convert_ty` has 18
+    /// call sites and only two of them are inside an impl. The discipline is
+    /// that every per-item entry point sets it: `collect_impls` per item,
+    /// `check_method` per method (`None` for a trait default body, whose `Self`
+    /// is the trait's own `Param(0)` in `generics` instead), and
+    /// `check_function` / `check_const` clear it.
+    impl_self: Option<ImplSelf>,
+    /// Each impl's `Self`, keyed by AST item index, so [`Checker::check_method`]
+    /// can restore it when compiling a body in a later pass without re-running
+    /// (and re-diagnosing) the self-type conversion.
+    impl_selves: FxHashMap<usize, ImplSelf>,
     /// Lifted closure / fn-wrapper functions, appended to the module.
     extra_functions: Vec<hir::Function>,
     /// Next synthetic `DefId` for a closure/wrapper (starts past all
@@ -751,6 +785,11 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
+            // Cleared up front, not only on the way out: several paths below
+            // `continue` past the end of the loop body, and a stale `Self` from
+            // the previous impl would then resolve a `Self::Item` written in
+            // this one against the wrong type.
+            self.impl_self = None;
             self.check_duplicate_generics(&block.generics, "impl");
             // The impl's generic parameters (`impl<T> …`) are in scope in the
             // self type and every method signature/body.
@@ -807,6 +846,16 @@ impl<'a> Checker<'a> {
                 }
                 None => None,
             };
+
+            // From here on, `Self` inside this impl means this impl's self type.
+            // Recorded by item index too, so `check_method` can restore it when
+            // it compiles a body in a later pass.
+            let imp_self = ImplSelf {
+                ty: self_ty.clone(),
+                trait_id,
+            };
+            self.impl_selves.insert(item_index, imp_self.clone());
+            self.impl_self = Some(imp_self);
 
             let impl_count = block.generics.len() as u32;
             // Associated-type bindings (`type Item = T`), keyed by the
@@ -985,6 +1034,9 @@ impl<'a> Checker<'a> {
             });
             impl_spans.push(block.ty.span);
         }
+        // No impl is in scope for `collect_signatures` / `collect_externs`,
+        // which run next.
+        self.impl_self = None;
 
         self.check_impl_coherence(&impl_spans);
         self.check_supertrait_impls(&impl_spans);
@@ -1652,34 +1704,28 @@ impl<'a> Checker<'a> {
             ast::Type::Path { path, args } => {
                 if path.segments.len() == 2 {
                     let base = path.segments[0].value.as_str();
-                    // No special case for `Self` here: this is the same
-                    // lookup as any other name in `generics`, which is why it
-                    // resolves in more places than "trait context" alone.
-                    // `self_generic_scope` (trait bodies, default methods —
-                    // check.rs:540, :672, :1823) inserts `Self` at `Param(0)`
-                    // for the trait's own implicit type. But `Self` is also
-                    // just an accepted identifier (`Token::SelfUpper` parses
-                    // to the plain string `"Self"`, see
-                    // nova-parser/grammar.rs's `parse_ident`), so a
-                    // user-written `<Self>` type parameter lands its own
-                    // entry via the ordinary `generic_scope` too — including
-                    // in an `impl`, which calls exactly that
-                    // (`generic_scope(&block.generics)`, check.rs:757). That
-                    // is why e.g. `impl<Self: It> W<Self> { fn peek(self) ->
-                    // Self::Item { ... } }` resolves today: `Self` there is
-                    // an ordinary generic parameter that happens to be named
-                    // `Self`, not the impl's own self type. An impl with no
-                    // such explicit parameter has no `Self` key at all, so
-                    // `Self::Item` in *that* impl falls through to the
-                    // module-qualified-path branch below and reports E0900 —
-                    // not a special case, just an absent map entry. Task 4
-                    // Step 4c rejects `Self` as a type-parameter name
-                    // (`E0076`), after which `self_generic_scope` becomes the
-                    // only source of a `Self` entry and this comment can
-                    // shrink back down.
-                    let base_param = generics.get(base).copied();
-                    if let Some(idx) = base_param {
-                        let assoc_name = path.segments[1].value.as_str();
+                    let assoc_name = path.segments[1].value.as_str();
+                    // A two-segment path is a **projection** when its first
+                    // segment names something a projection can be *on*, and a
+                    // module-qualified path otherwise. There are exactly two
+                    // such things, and they are different mechanisms:
+                    //
+                    //  * an in-scope generic parameter, i.e. a `generics` key.
+                    //    That includes a trait body's `Self`, which
+                    //    `self_generic_scope` inserts as the trait's own
+                    //    implicit parameter at `Param(0)`. It does *not*
+                    //    include a user-written parameter spelled `Self`:
+                    //    `E0076` rejects that name outright, so `Self` never
+                    //    has two meanings in one scope.
+                    //  * `Self` inside an `impl` block, which is not a
+                    //    parameter at all but the impl's own self type — a
+                    //    possibly compound `W<Param(0)>` with no parameter
+                    //    index, and therefore no slot in the by-index `bounds`
+                    //    table. Its candidates are not bounds but the single
+                    //    trait the impl implements.
+                    let by_index = generics.get(base).copied();
+                    let in_impl = by_index.is_none() && base == "Self";
+                    if by_index.is_some() || (in_impl && self.impl_self.is_some()) {
                         // Nova has no generic associated types: a non-empty
                         // `args` here (`I::Item<Int>`) has nowhere to go, so
                         // it must be flagged rather than silently dropped —
@@ -1698,24 +1744,56 @@ impl<'a> Checker<'a> {
                                 ty.span,
                             );
                         }
-                        // Find the associated type among the traits bounding
-                        // this parameter. Searching the bounds (rather than
-                        // every trait) is what makes `I::Item` mean "the Item
-                        // of the trait I is bounded by". `expand_bounds` has
-                        // already folded supertraits into every entry here,
-                        // so a bound of `Ord` also carries `Eq` — `I::Item`
-                        // resolves against the transitive bound set as a
-                        // consequence of that ordering, not a separate
-                        // decision made here.
-                        let parent_bounds =
-                            bounds.get(idx as usize).map(Vec::as_slice).unwrap_or(&[]);
-                        return self.resolve_projection(
-                            idx,
-                            base,
-                            assoc_name,
-                            parent_bounds,
-                            ty.span,
-                        );
+                        let (on, candidates) = match by_index {
+                            // Find the associated type among the traits
+                            // bounding this parameter. Searching the bounds
+                            // (rather than every trait) is what makes
+                            // `I::Item` mean "the Item of the trait I is
+                            // bounded by". `expand_bounds` has already folded
+                            // supertraits into every entry here, so a bound of
+                            // `Ord` also carries `Eq` — `I::Item` resolves
+                            // against the transitive bound set as a
+                            // consequence of that ordering, not a separate
+                            // decision made here.
+                            Some(idx) => (
+                                Ty::Param(idx),
+                                bounds.get(idx as usize).cloned().unwrap_or_default(),
+                            ),
+                            None => {
+                                // `in_impl` and `impl_self` is `Some`, per the
+                                // guard above.
+                                let imp = match self.impl_self.clone() {
+                                    Some(imp) => imp,
+                                    None => return Ty::Error,
+                                };
+                                match imp.trait_id {
+                                    Some(tid) => (imp.ty, vec![tid]),
+                                    // An inherent impl implements no trait, so
+                                    // no trait declares an associated type for
+                                    // this to name. Given its own wording
+                                    // rather than `resolve_projection`'s
+                                    // empty-candidate message, which says "on
+                                    // any bound of `Self`" — an inherent
+                                    // impl's `Self` has no bounds, so that
+                                    // would describe a lookup that never
+                                    // happened.
+                                    None => {
+                                        let on = display_ty(&imp.ty, self.defs);
+                                        self.error(
+                                            "E0001",
+                                            format!(
+                                                "no associated type `{assoc_name}` on `{on}`: \
+                                                 an inherent impl implements no trait, so \
+                                                 nothing declares one"
+                                            ),
+                                            ty.span,
+                                        );
+                                        return Ty::Error;
+                                    }
+                                }
+                            }
+                        };
+                        return self.resolve_projection(on, base, assoc_name, &candidates, ty.span);
                     }
                     self.unsupported(ty.span, "module-qualified type paths");
                     return Ty::Error;
@@ -1816,30 +1894,36 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolve a two-segment type path `<base>::<assoc_name>` where `base`
-    /// names an in-scope generic parameter (or `Self`, encoded the same way —
-    /// see `self_generic_scope`) at position `idx`. Searches `bounds` — that
-    /// parameter's already supertrait-expanded trait bounds — for the one
-    /// bound that declares `assoc_name`, and projects onto it.
+    /// Resolve a two-segment type path `<base>::<assoc_name>` into a projection
+    /// on `on`, searching `candidate_traits` for the one that declares
+    /// `assoc_name`.
     ///
-    /// A user-written `I::Item` always names a generic parameter, so `on` is
-    /// `Ty::Param(idx)` here, never `Ty::Var` — see the `Ty::Assoc` doc
-    /// comment on why that distinction matters to the unifier.
+    /// `on` is the type the projection is *on*, chosen by the caller: a generic
+    /// parameter's `Ty::Param(idx)`, or an impl's own (possibly compound) self
+    /// type. It is never `Ty::Var` — see the `Ty::Assoc` doc comment on why that
+    /// distinction matters to the unifier.
+    ///
+    /// `candidate_traits` is likewise the caller's: a parameter's
+    /// already-supertrait-expanded bounds, or the single trait an impl
+    /// implements. `base` is only for rendering the two error messages, and both
+    /// of them read the list as bounds — a caller whose candidates are not
+    /// bounds must handle its own empty case before calling (see the inherent
+    /// impl in `convert_ty`).
     fn resolve_projection(
         &mut self,
-        idx: u32,
+        on: Ty,
         base: &str,
         assoc_name: &str,
-        bounds: &[DefId],
+        candidate_traits: &[DefId],
         span: Span,
     ) -> Ty {
-        let candidates: Vec<DefId> = bounds
+        let candidates: Vec<DefId> = candidate_traits
             .iter()
             .filter_map(|&trait_id| self.find_assoc_type(trait_id, assoc_name))
             .collect();
         match candidates.as_slice() {
             [assoc] => Ty::Assoc {
-                on: Box::new(Ty::Param(idx)),
+                on: Box::new(on),
                 assoc: *assoc,
             },
             [] => {
@@ -1896,6 +1980,10 @@ impl<'a> Checker<'a> {
             return None;
         };
         self.cur_module = self.defs.module_of(item_index);
+        // A free function is not inside any impl, so `Self::Item` in its body
+        // is a module-qualified path. Cleared rather than assumed, because
+        // `check_method` may have run first and left an impl in scope.
+        self.impl_self = None;
         let generics = generic_scope(&f.generics);
         self.check_fn_body(def_id, f, generics)
     }
@@ -1928,6 +2016,14 @@ impl<'a> Checker<'a> {
                     TraitItem::Required(_) | TraitItem::AssocType { .. } => return None,
                 }
             }
+        };
+        // `Self` inside an impl method's body means the impl's self type, the
+        // same as in its signature; inside a trait default body it is the
+        // trait's own implicit `Param(0)`, which `self_generic_scope` puts in
+        // `generics` below instead.
+        self.impl_self = match loc.owner {
+            MethodOwner::Impl => self.impl_selves.get(&loc.item_index).cloned(),
+            MethodOwner::TraitDefault => None,
         };
         let generics = match loc.owner {
             // An impl method sees the impl's generic parameters (`impl<T> …`) at
@@ -2034,6 +2130,10 @@ impl<'a> Checker<'a> {
             return None;
         };
         self.cur_module = self.defs.module_of(item_index);
+        // A top-level `const` is not inside any impl (an impl's own `const`
+        // items are never collected at all — `ast::ImplBlock::consts` has no
+        // consumer), so nothing here can see an impl's `Self`.
+        self.impl_self = None;
         let value_ast = &c.value;
         let sig = self.sigs.get(&def_id)?.clone();
         let name = self.defs.def(def_id).name.clone();
@@ -9758,13 +9858,19 @@ mod tests {
     }
 
     #[test]
-    fn self_item_in_an_impl_with_no_explicit_self_parameter_still_reports_e0900() {
-        // The companion of the test above: an impl that does NOT declare its
-        // own `<Self>` type parameter has no `Self` entry in `generics` at
-        // all, so `Self::Item` there still falls through to the
-        // module-qualified-path branch — the same `E0900` as before this
-        // task, not a regression introduced by the parameter-name coincidence
-        // the test above exploits.
+    fn self_item_in_an_inherent_impl_reports_that_it_has_no_trait() {
+        // Was `self_item_in_an_impl_with_no_explicit_self_parameter_still_
+        // reports_e0900`, which pinned that this shape fell through to the
+        // module-qualified-path branch. `Self` in an impl now means the impl's
+        // own self type, so it no longer falls through — but an *inherent*
+        // impl implements no trait, so nothing declares an associated type for
+        // `Self::Item` to name. That is an E0001 "no such name", not an E0900
+        // "not supported yet": there is no feature missing here.
+        //
+        // Deliberately not `resolve_projection`'s shared empty-candidate
+        // wording ("on any bound of `Self`"): an inherent impl's `Self` has no
+        // bounds at all, so that message would describe a lookup that never
+        // happened.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              record K { v: Int }\n\
@@ -9774,12 +9880,189 @@ mod tests {
         let d = r
             .diagnostics
             .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001 for Self::Item in an inherent impl");
+        assert!(d.message.contains("Item"), "names it: {}", d.message);
+        assert!(d.message.contains("inherent"), "says why: {}", d.message);
+        assert!(
+            !d.message.contains("bound"),
+            "an inherent impl's `Self` has no bounds: {}",
+            d.message
+        );
+        assert!(
+            !error_codes(&r).contains(&"E0900"),
+            "no longer a module-qualified path: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn self_item_in_a_trait_impl_projects_onto_the_impls_own_self_type() {
+        // The case Task 6's normalization rests on: `Self::Item` written
+        // inside `impl<T> It for W<T>` must resolve, and it must project onto
+        // the impl's SELF TYPE (`W<Param(0)>`) — not onto `Param(0)`, which is
+        // the impl's first type parameter and a different type entirely. Every
+        // projection before this task was on a flat `Param(idx)`, so a
+        // by-index implementation would look right until this compound case.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n \
+             fn get(self) -> Self::Item { panic(\"x\") } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let it = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "It")
+            .expect("trait It collected");
+        let item = it.assoc_types[0].1;
+        let w = r
+            .module
+            .records
+            .iter()
+            .find(|rec| rec.name == "W")
+            .expect("record W collected")
+            .def_id;
+        // The impl method's compiled return type, not just "no diagnostics":
+        // `Ty::Error` unifies with everything, so an empty diagnostic list
+        // alone would also hold if the projection had collapsed to an error.
+        // By the impl method's exact mangled name — `<self type>.<trait>.<method>`,
+        // with the self type's own arguments folded in by `type_full_name`.
+        // Matching on a suffix instead picks up `Option::get` from the implicit
+        // prelude.
+        let m = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "W_T.It.get")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the impl's `get` was compiled; have {:?}",
+                    r.module
+                        .functions
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .filter(|n| n.contains("get"))
+                        .collect::<Vec<_>>()
+                )
+            });
+        match &m.ret_ty {
+            Ty::Assoc { on, assoc } => {
+                assert_eq!(
+                    on.as_ref(),
+                    &Ty::Record {
+                        def_id: w,
+                        args: vec![Ty::Param(0)]
+                    },
+                    "projects onto the impl's self type `W<T>`, not `T`"
+                );
+                assert_eq!(*assoc, item, "resolves to `It::Item`");
+            }
+            other => panic!("expected a Ty::Assoc return type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_naming_an_undeclared_associated_type_in_a_trait_impl_is_an_error() {
+        // The impl's trait is the only candidate: `It` declares `Item`, not
+        // `Nope`, so this must not silently resolve to something.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n \
+             fn get(self) -> Int { 1 }\n \
+             fn other(self) -> Self::Nope { panic(\"x\") } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001" && d.message.contains("Nope"))
+            .expect("E0001 for Self::Nope in a trait impl");
+        assert!(d.message.contains("associated type"), "{}", d.message);
+    }
+
+    #[test]
+    fn self_item_outside_any_impl_or_trait_still_reports_e0900() {
+        // The two-segment path branch now has a third meaning, and the
+        // original one must survive it: outside a trait body and outside an
+        // impl there is no `Self` at all, so `Self::Item` is just a
+        // module-qualified path.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn f() -> Self::Item { panic(\"x\") }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
             .find(|d| d.code == "E0900")
-            .expect("E0900 for Self::Item in an impl with no <Self> parameter of its own");
+            .expect("E0900 for Self::Item with no enclosing impl or trait");
         assert!(
             d.message.contains("module-qualified type paths"),
             "{}",
             d.message
+        );
+    }
+
+    #[test]
+    fn self_item_resolves_in_an_impl_method_body_annotation_too() {
+        // `impl_self` has to be in scope for body checking, not only signature
+        // collection: a `let` annotation goes through the same `convert_ty`,
+        // from a different pass (`check_method`, not `collect_impls`).
+        //
+        // The initializer is `panic(...)` (type `Never`, which unifies with
+        // anything) rather than `1`: nothing normalizes a projection yet, so
+        // `let x: Self::Item = 1` is a genuine mismatch until the seam in
+        // Task 5 lands. What this pins is that the annotation *resolves*.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Self::Item }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n \
+             fn get(self) -> Self::Item { let x: Self::Item = panic(\"x\")\n x } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let it = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "It")
+            .expect("trait It collected");
+        let item = it.assoc_types[0].1;
+        let m = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "W.It.get")
+            .expect("the impl's `get` was compiled");
+        // The local's own recorded type, not just an empty diagnostic list:
+        // `Ty::Error` unifies with everything, so a failed annotation would
+        // also have produced no diagnostics here.
+        let x = m
+            .locals
+            .iter()
+            .find(|l| l.name == "x")
+            .expect("local `x` compiled");
+        assert_eq!(
+            x.ty,
+            Ty::Assoc {
+                on: Box::new(Ty::Record {
+                    def_id: r
+                        .module
+                        .records
+                        .iter()
+                        .find(|rec| rec.name == "W")
+                        .expect("record W")
+                        .def_id,
+                    args: vec![],
+                }),
+                assoc: item,
+            },
+            "the `let` annotation resolved to the projection"
         );
     }
 
