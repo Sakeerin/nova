@@ -1547,15 +1547,30 @@ impl<'a> Checker<'a> {
             ast::Type::Path { path, args } => {
                 if path.segments.len() == 2 {
                     let base = path.segments[0].value.as_str();
-                    // `Self` inside a trait or impl is that scope's own
-                    // parameter 0 (see hir::TraitMethod's doc comment).
-                    let base_param = if base == "Self" {
-                        generics.get("Self").copied()
-                    } else {
-                        generics.get(base).copied()
-                    };
+                    // No special case for `Self`: it is an ordinary entry in
+                    // `generics`, inserted only by `self_generic_scope` (Param
+                    // 0, inside a trait body or default method). An `impl`
+                    // block's own scope never adds such an entry — which is
+                    // why `Self::Item` written inside an impl's own method
+                    // signature falls through to the module-qualified-path
+                    // branch below rather than being resolved here; that is
+                    // not a bug in this branch, just this task's scope.
+                    let base_param = generics.get(base).copied();
                     if let Some(idx) = base_param {
                         let assoc_name = path.segments[1].value.as_str();
+                        // Nova has no generic associated types: a non-empty
+                        // `args` here (`I::Item<Int>`) has nowhere to go, so
+                        // it must be flagged rather than silently dropped —
+                        // mirroring the two single-segment branches below
+                        // (generic parameter, primitive) that already guard
+                        // this the same way.
+                        if !args.is_empty() {
+                            self.error(
+                                "E0012",
+                                format!("associated type `{base}::{assoc_name}` takes no type arguments"),
+                                ty.span,
+                            );
+                        }
                         // Find the associated type among the traits bounding
                         // this parameter. Searching the bounds (rather than
                         // every trait) is what makes `I::Item` mean "the Item
@@ -9264,14 +9279,25 @@ mod tests {
 
     #[test]
     fn a_projection_naming_an_undeclared_associated_type_is_an_error() {
+        // Not just "some diagnostic fired": a lazy implementation that
+        // reused `self.unsupported(span, "module-qualified type paths")` for
+        // the not-found case (E0900, "... are not supported yet") would also
+        // satisfy a bare `!diagnostics.is_empty()` — so this pins the actual
+        // code and that the message names the real construct.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              fn f<I: It>(x: I) -> I::Nope { panic(\"unreachable\") }\n\
              fn main() { }",
         );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001 for a projection naming an undeclared associated type");
         assert!(
-            !r.diagnostics.is_empty(),
-            "`I::Nope` must not silently typecheck"
+            d.message.contains("associated type"),
+            "message should name the construct: {}",
+            d.message
         );
     }
 
@@ -9446,6 +9472,78 @@ mod tests {
                 assoc: item,
             },
             "must project onto `I` at Param(1), not `T` at Param(0)"
+        );
+    }
+
+    #[test]
+    fn a_projection_resolves_against_its_own_parameters_bounds_not_every_parameters() {
+        // Two generic parameters, each bounded by a DIFFERENT trait, and the
+        // projection is onto the FIRST one — the shape the existing
+        // two-parameter test above does not cover, because there `T` (index
+        // 0) is unbounded and only `I` (index 1) has any bounds at all. A
+        // resolver that read the wrong bound list for `idx` — e.g.
+        // concatenating every parameter's bounds instead of indexing just
+        // this one's — would still pass every projection test in this file,
+        // because in every one of them there is only a single non-empty
+        // bound list for such a mistake to fall into. Here `A: Foo` (declares
+        // `Item`, not `Other`) and `B: It` (declares `Other`); projecting
+        // `A::Other` must fail, because `Other` is not on any bound of `A`,
+        // even though it *is* on a bound of some parameter in scope.
+        let r = check_src(
+            "trait Foo { type Item\n fn f(self) -> Int }\n\
+             trait It { type Other\n fn get(self) -> Int }\n\
+             fn f<A: Foo, B: It>(x: A, y: B) -> A::Other { panic(\"x\") }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001: `Other` is not on any bound of `A`");
+        assert!(
+            d.message.contains("Other") && d.message.contains("bound of `A`"),
+            "names both the missing associated type and the parameter: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_projection_with_type_arguments_reports_e0012() {
+        // Nova has no generic associated types, so `I::Item<Int>` must not
+        // silently drop the `<Int>` and resolve exactly as plain `I::Item`
+        // would — that would let a program compile clean while meaning
+        // something its source does not actually say.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn first<I: It>(x: I) -> I::Item<Int> { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0012")
+            .expect("E0012 for type arguments on a projection");
+        assert!(
+            d.message.contains("takes no type arguments"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_projection_with_an_unresolvable_type_argument_still_reports_a_diagnostic() {
+        // Before `args` was guarded on the projection path, a non-empty
+        // `args` was dropped without being converted at all, so `Nope` here
+        // was never looked up and its own `cannot find type` diagnostic
+        // never fired — the whole program compiled clean.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             fn first<I: It>(x: I) -> I::Item<Nope> { panic(\"unreachable\") }\n\
+             fn main() { }",
+        );
+        assert!(
+            !r.diagnostics.is_empty(),
+            "`I::Item<Nope>` must not silently typecheck"
         );
     }
 
