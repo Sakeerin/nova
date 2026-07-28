@@ -564,7 +564,7 @@ git commit -m "feat(typeck): resolve Self::Item and I::Item to a projection"
     }
 
     #[test]
-    fn an_impl_missing_an_associated_type_reports_e0072() {
+    fn an_impl_missing_an_associated_type_reports_e0070() {
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              record W { v: Int }\n\
@@ -574,13 +574,13 @@ git commit -m "feat(typeck): resolve Self::Item and I::Item to a projection"
         let d = r
             .diagnostics
             .iter()
-            .find(|d| d.code == "E0072")
-            .expect("E0072 for a missing associated type");
+            .find(|d| d.code == "E0070")
+            .expect("E0070 for a missing associated type");
         assert!(d.message.contains("Item"), "names the missing type: {}", d.message);
     }
 
     #[test]
-    fn an_impl_binding_an_undeclared_associated_type_reports_e0072() {
+    fn an_impl_binding_an_undeclared_associated_type_reports_e0071() {
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Int }\n\
              record W { v: Int }\n\
@@ -590,11 +590,23 @@ git commit -m "feat(typeck): resolve Self::Item and I::Item to a projection"
         let d = r
             .diagnostics
             .iter()
-            .find(|d| d.code == "E0072")
-            .expect("E0072 for an undeclared associated type");
+            .find(|d| d.code == "E0071")
+            .expect("E0071 for an undeclared associated type");
         assert!(d.message.contains("Extra"), "names it: {}", d.message);
     }
 ```
+
+**On the two codes — this corrects an earlier version of this plan, which said E0072 for both directions.** That was wrong in both. `check_impl_conformance` already runs a three-code scheme for methods, and associated types must join it rather than invent a fourth meaning:
+
+| code | means | existing site |
+|---|---|---|
+| `E0070` | the impl is **missing** something the trait requires | `check.rs:1242`, `"impl of trait \`{}\` is missing method(s): {}"` |
+| `E0071` | the impl provides something **not a member** of the trait | `check.rs:1088`, `"method \`{name}\` is not a member of trait \`{}\`"` |
+| `E0072` | the item exists on both sides but its **shape disagrees** (arity, param type, return type, generic count, bounds) | six sites, `check.rs:1113`–`1221` |
+
+A missing binding is the E0070 case and an undeclared one is the E0071 case. E0072 is *not* free for either: Task 6 needs it for the shape case that genuinely arises — an impl whose method signature disagrees with the trait's *after* the trait's projection is normalized through this impl's binding.
+
+Prefer extending the **existing** `E0070` missing-list and `E0071` not-a-member sites over adding parallel ones, if the surrounding code makes that natural — one diagnostic listing every missing item reads better than two. Use "associated type(s)" in the wording either way, so the message never claims a missing `Item` is a missing *method*.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -603,9 +615,9 @@ Expected: FAIL — `type Item = T` inside an `impl` does not parse yet.
 
 - [ ] **Step 3: Parse `type Name = Type` in an impl body**
 
-The impl body loop is `parse_impl_block` at **`crates/nova-parser/src/grammar.rs:593`**, and its fallthrough error is `expected: "fn or const inside impl"` at `:614`. Traced, so use this rather than searching:
+The impl body loop is `parse_impl_block` at **`crates/nova-parser/src/grammar.rs:592`**, and its fallthrough error is `expected: "fn or const inside impl"` at `:634`. Traced against `HEAD` after Task 2 landed, so use this rather than searching — but re-confirm, since Task 3 and this task's own Step 3 both shift these:
 
-- **`ast::ImplBlock` has PARALLEL VECS, not a unified item list** — `functions: Vec<Function>` and `consts: Vec<ConstDecl>` (`crates/nova-ast/src/item.rs:136-137`). So an associated-type binding is a **third vector**, `assoc_types: Vec<AssocTypeBinding>`, with its own small struct `{ name: Spanned<String>, ty: Spanned<Type> }` — **not** a variant in a shared enum. The plan's earlier "put it beside the impl's items" was vague; this is what it means concretely.
+- **`ast::ImplBlock` has PARALLEL VECS, not a unified item list** — `functions: Vec<Function>` and `consts: Vec<ConstDecl>`, the last two fields of the struct at `crates/nova-ast/src/item.rs:140`. So an associated-type binding is a **third vector**, `assoc_types: Vec<AssocTypeBinding>`, with its own small struct `{ name: Spanned<String>, ty: Spanned<Type> }` — **not** a variant in a shared enum. The plan's earlier "put it beside the impl's items" was vague; this is what it means concretely.
 - The body loop `match self.peek()`es on `Token::Fn | Token::Async` and `Token::Const`, with a `_` arm that emits the error above. Add a `Token::Type` arm beside them. Unlike the trait-body loop, there is **no speculative parse to sequence around** here — the `match` dispatches on one token, so arm order does not matter.
 - `parse_visibility()` runs before the `match`, so a `pub type Item = …` would parse and then be silently ignored. Decide it deliberately: an impl's associated-type binding has no meaningful visibility of its own, so reject a non-private `vis` with a diagnostic rather than dropping it.
 
@@ -632,17 +644,21 @@ Add to `hir::ImplInfo`:
     pub assoc_bindings: Vec<(DefId, Ty)>,
 ```
 
-In `check_impl_conformance`, after the existing method loop, compare the set the trait declares against the set the impl binds and report `E0072` for each difference, naming the type. Both directions matter: a missing binding means every projection through this impl is unresolvable, and an extra one is a typo the user wants told about.
+In `check_impl_conformance` (`crates/nova-typeck/src/check.rs:1074`), after the existing method loop, compare the set the trait declares against the set the impl binds and report a diagnostic for each difference, naming the type — **`E0070` for a missing binding, `E0071` for an undeclared one**, per the table in Step 1. Both directions matter: a missing binding means every projection through this impl is unresolvable, and an extra one is a typo the user wants told about.
+
+Note the shape of the existing missing-method check (`:1235-1249`): it filters `tr.methods` by `default_def.is_none() && !provided.contains(name)`. Associated types have **no defaults** in this increment, so every declared one is required — the filter is simply "not provided", with no default to exempt. If you later add defaults, this is the line that must learn about them.
 
 - [ ] **Step 4b: Make `Self::Item` resolve inside an impl — Task 6 cannot start without it**
 
 Task 3's review found that Task 6's own Step 1 test is currently **unreachable**, and that Task 3's `resolve_projection` cannot express what it needs. This step closes both. It lands here because this is the impl task; leaving it to Task 6 would mean discovering it mid-task.
 
-The problem, verified: `impl R { fn h(self) -> Self::Item { … } }` reports `error[E0900]: module-qualified type paths are not supported yet` — unchanged from before the branch. `Self` is not special-cased anywhere; it is an ordinary entry in the `generics` map, inserted **only** by `self_generic_scope()` (`crates/nova-typeck/src/check.rs:5429`), which trait paths use and impls do not.
+The problem, verified: `impl R { fn h(self) -> Self::Item { … } }` reports `error[E0900]: module-qualified type paths are not supported yet` — unchanged from before the branch. `Self` is not special-cased anywhere; it is an ordinary entry in the `generics` map, inserted **only** by `self_generic_scope()` (`crates/nova-typeck/src/check.rs:5442`), which trait paths use and impls do not.
 
-And `resolve_projection` as Task 3 wrote it cannot be reused as-is: it takes `idx: u32`, hardcodes `on: Ty::Param(idx)`, and looks bounds up **by parameter index**. An impl's `Self` is a compound type — `W<Param(0)>` for `impl<T> Tr for W<T>` — which has no parameter index, no slot in the by-index bounds table, and whose relevant "bounds" are the traits the impl implements, a different table entirely.
+`resolve_projection` (`:1701`) is closer to reusable than an earlier draft of this step claimed — **correcting that draft**: it already takes `bounds: &[DefId]`, i.e. an explicit candidate-trait list that its *caller* looked up by index. It does **not** index a bounds table itself. The one thing that blocks reuse is that it takes `idx: u32` and hardcodes `on: Box::new(Ty::Param(idx))`, which an impl's `Self` cannot be: for `impl<T> Tr for W<T>` it is the compound `W<Param(0)>`, with no parameter index at all.
 
-So: **generalize `resolve_projection` to take `on: Ty` plus an explicit list of candidate trait `DefId`s**, and keep the existing by-index path as a thin caller that passes `Ty::Param(idx)` and `bounds[idx]`. Then add the impl-scope caller, which passes the impl's self type and — for a trait impl — the trait it implements. Decide and state in a comment what an **inherent** impl (`impl W { … }`, no trait) should do with `Self::Item`: it has no trait, so there is no associated type to find, and the answer is a diagnostic rather than silence.
+So the generalization is **one parameter, not a restructure**: change `idx: u32` to `on: Ty` and use it directly in the `[assoc]` arm. `base: &str` stays as-is — it is only used to render the two error messages, and the impl caller passes `"Self"`. The existing call site becomes `self.resolve_projection(Ty::Param(idx), base, assoc_name, &bounds[idx as usize], span)` or equivalent; confirm against the real code, since Task 3's fix round moved these lines.
+
+Then add the impl-scope caller, passing the impl's self type and — for a trait impl — the trait it implements as the single candidate. Decide and state in a comment what an **inherent** impl (`impl W { … }`, no trait) should do with `Self::Item`: it has no trait, so there is no associated type to find. Note that `resolve_projection`'s existing `[]` arm already produces a reasonable diagnostic for an empty candidate list (`no associated type \`Item\` on any bound of \`Self\``) — judge whether that message is right for an inherent impl, where "bound" is the wrong word, or whether this case deserves its own wording. Either way it must be a diagnostic, not silence.
 
 Test all three scopes resolve: `Self::Item` in a trait method (already works), in a trait-impl method (new), and rejected with a clear message in an inherent impl.
 
