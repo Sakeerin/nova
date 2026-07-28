@@ -532,7 +532,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decoding the string with the new `str_chars` builtin (see `std/strings`
   above) rather than the dedicated `nova_rt_str_escape` that `std/core`'s
   stale comment had predicted — so the fix needed no new ABI symbol.
-  `String` escapes `"` where `Char` escapes `'`, and both round-trip back
+  `String` escapes `"` where `Char` escapes `'`, and additionally escapes
+  every `$` as `\u{24}`: a string literal (unlike a char literal) opens an
+  interpolation hole on `$` immediately followed by `{`, so a literal `$`
+  left unescaped in the output could silently reopen one when pasted back
+  as source — the whole-branch review caught this gap in the initial fix,
+  where a string built to contain `${` still printed it unescaped. With that
+  arm in place, both `Debug for Char` and `Debug for String` round-trip back
   through the lexer to the original value.
 
 ## [0.1.0] - 2026-07-23

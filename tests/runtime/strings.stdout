@@ -47,3 +47,4 @@ dbg quote="a\"b"
 dbg backslash="back\\slash"
 dbg tab="tab\there"
 dbg empty="" unicode="é→"
+dbg dollar len=6 escaped=true roundtrips=true

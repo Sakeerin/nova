@@ -189,4 +189,31 @@ fn main() {
     println("dbg backslash=${("back\\slash").dbg()}")
     println("dbg tab=${("tab\there").dbg()}")
     println("dbg empty=${("").dbg()} unicode=${("é→").dbg()}")
+    // `$` must be escaped too, not just `"` and the five `escape_common`
+    // arms (whole-branch review finding): a string literal opens an
+    // interpolation hole on `$` immediately followed by `{`
+    // (`nova-lexer`'s `lex_string_content`), so an unescaped `$` left in
+    // `dbg()`'s output could silently reopen one when pasted back — the
+    // same defect class `"` above exists to close, one sequence over.
+    // `${` cannot be written directly in a literal (it would itself open a
+    // hole), so the dangerous value is built by interpolating a
+    // one-codepoint `$` binding instead, matching how the review reproduced
+    // it.
+    let dollar = "$"
+    let has_hole = "a${dollar}{b}c"
+    // Two boolean/length checks rather than printing the raw escaped text
+    // and eyeballing it (same reasoning as the `trim cr len=` case above,
+    // since backslash-heavy output is awkward to verify by inspection):
+    // `dbg_escaped` pins the EXACT text `dbg()` must produce — removing the
+    // `$` escape arm would print the unescaped `"a${b}c"` here instead (5
+    // characters shorter, and containing a raw `${`), so this alone would
+    // flip to `false`. `dbg_roundtrips` pins the other half of the
+    // property: that same text, written as real Nova source right here
+    // (not simulated — the `\u{24}` below is a genuine escape the compiler
+    // decodes), evaluates back to exactly the original 6-codepoint value.
+    // Together they prove `dbg()`'s output, pasted back as a literal,
+    // reproduces `has_hole` without actually needing an `eval`.
+    let dbg_escaped = has_hole.dbg() == "\"a\\u{24}{b}c\""
+    let dbg_roundtrips = "a\u{24}{b}c" == has_hole
+    println("dbg dollar len=${has_hole.len()} escaped=${dbg_escaped} roundtrips=${dbg_roundtrips}")
 }

@@ -144,8 +144,12 @@ impl Display for String { fn fmt(self) -> String { self } }
 // `Char` and `String` are quoted where `Display` is not. Nova's lexer accepts
 // `\n \t \r \\ \0 \u{…}` plus `\"` in a string literal and `\'` in a char
 // literal (`nova-lexer`'s string scanner and `lex_char`); `\"` is not valid in
-// a char literal, nor `\'` in a string one, so each form escapes only the
-// quote that delimits it, plus the backslash.
+// a char literal, nor `\'` in a string one, so each form escapes the quote
+// that delimits it, plus the backslash. `String` also escapes every `$` (as
+// `\u{24}`): a string literal, unlike a char literal, opens an interpolation
+// hole on `$` immediately followed by `{`, so a literal `$` left in the
+// output could silently reopen one when the output is pasted back as
+// source. `Char` never interpolates, so it needs no such rule.
 impl Debug for Int    { fn dbg(self) -> String { "${self}" } }
 impl Debug for Float  { fn dbg(self) -> String { "${self}" } }
 impl Debug for Bool   { fn dbg(self) -> String { "${self}" } }
@@ -188,11 +192,20 @@ impl Debug for Char {
 // already visible here with no import and no dependency on `std/strings`)
 // lets this inspect the string's contents directly — which turned out to be
 // all that closing this ever needed. No dedicated ABI symbol was added: `"`
-// is handled the same way `'` is handled above, and everything else comes
-// from `escape_common`. Building `out` by repeated interpolation (rather than
-// `str_from_chars`) is quadratic in the string's length, since each
-// `${out}${piece}` copies `out` again; `dbg` is a diagnostic path, not a hot
-// one, so that trade is the right one rather than pretending otherwise.
+// is handled the same way `'` is handled above; `$` gets its own arm too,
+// escaped unconditionally as `\u{24}` rather than only when immediately
+// followed by `{` — a plain per-character rule like every other entry here,
+// with no lookahead to get wrong, and it costs nothing since a `$` not
+// before `{` was already safe to leave alone. That arm has to live here
+// rather than in `escape_common`: `\u{24}` does not lex inside a char
+// literal (`'\u{24}'` fails with `unexpected character '`), so routing it
+// through the shared helper would make `Debug for Char` emit `'\u{24}'`,
+// which does not parse; `\$` is not an escape sequence either. Everything
+// else comes from `escape_common`. Building `out` by repeated interpolation
+// (rather than `str_from_chars`) is quadratic in the string's length, since
+// each `${out}${piece}` copies `out` again; `dbg` is a diagnostic path, not
+// a hot one, so that trade is the right one rather than pretending
+// otherwise.
 impl Debug for String {
     fn dbg(self) -> String {
         let cs = str_chars(self)
@@ -201,6 +214,8 @@ impl Debug for String {
             let c = cs[i]
             if c == '"' {
                 out = "${out}\\\""
+            } else if c == '$' {
+                out = "${out}\\u{24}"
             } else {
                 match escape_common(c) {
                     Some(e) => out = "${out}${e}",

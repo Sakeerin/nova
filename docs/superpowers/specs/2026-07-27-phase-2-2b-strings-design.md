@@ -193,8 +193,15 @@ Two consequences to watch rather than assume:
 ## 5. `Debug for String`, fixed without new ABI
 
 `Debug for Char` in `std/core/lib.nova:157` already contains the escaping logic (`\\`, `'`,
-`\n`, `\t`, `\r`, `\0`). Once `str_chars` exists, `Debug for String` is that same logic mapped
-over `str_chars(self)`, with `"` escaped instead of `'`:
+`\n`, `\t`, `\r`, `\0`). Once `str_chars` exists, `Debug for String` is mostly that same logic
+mapped over `str_chars(self)`, with `"` escaped instead of `'` — plus one rule `Char` never
+needs: every `$` is also escaped, as `\u{24}`, because a *string* literal (unlike a char
+literal) opens an interpolation hole on `$` immediately followed by `{`; an unescaped `$` left
+in the output could silently reopen one when the output is pasted back as source. That arm
+lives in `Debug for String` only, not in the shared per-character helper below — `\u{24}` does
+not lex inside a char literal (`'\u{24}'` fails with `unexpected character '`), so routing it
+through the shared helper would make `Debug for Char` emit `'\u{24}'`, which does not parse,
+and `\$` is not an escape sequence either:
 
 - it lives in **std/core**, using only the builtin — no dependency on `std/strings`, so no
   layering inversion;
@@ -202,9 +209,11 @@ over `str_chars(self)`, with `"` escaped instead of `'`:
   `std/core/lib.nova:168-177`, whose comment must be corrected as part of this work rather
   than left describing a plan that was not followed.
 
-The per-character escape logic is shared between `Debug for Char` and `Debug for String`
-rather than written twice — the `Map::get`/`remove` duplication from Phase 2.2a is the
-cautionary precedent.
+The per-character escape logic (everything except `"` and `$`) is shared between `Debug for
+Char` and `Debug for String` rather than written twice — the `Map::get`/`remove` duplication
+from Phase 2.2a is the cautionary precedent. With the `$` arm in place, both `Debug for Char`
+and `Debug for String` round-trip back through the lexer to the original value for every input,
+not only the ones that happen to avoid `${`.
 
 ## 6. Accepted costs
 
