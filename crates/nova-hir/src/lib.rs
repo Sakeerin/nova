@@ -49,6 +49,25 @@ pub enum Ty {
     Array(Box<Ty>),
     /// A generic type parameter of the enclosing item (`T`).
     Param(u32),
+    /// A projection onto a trait's associated type: `<on>::Name`, where
+    /// `assoc` is the associated type's own `DefId` (see
+    /// `DefKind::AssocType`).
+    ///
+    /// This is the one `Ty` variant that is **not** a type by itself — it is a
+    /// *request* for one, answerable only with the impl table. It is therefore
+    /// normalized away at three seams (typeck's `normalize`,
+    /// `check_impl_conformance`, and `mono` after `subst`), and the unifier
+    /// never has to decide a projection against a concrete type.
+    ///
+    /// `on` is `Param(k)` inside a generic body, a concrete type at an
+    /// ordinary use site, and — provably — never an unsolved `Var`:
+    /// `check_method_call` rejects an uninferred receiver with `E0011` before
+    /// any return type is computed, and a user-written `I::Item` names a
+    /// generic parameter. See the design doc §4.2.
+    Assoc {
+        on: Box<Ty>,
+        assoc: DefId,
+    },
     /// An unsolved inference variable (only during type checking).
     Var(u32),
     /// The never type `!` (return, panic); coerces to anything.
@@ -76,6 +95,10 @@ impl Ty {
                 args: a.iter().map(|t| t.subst(args)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(elem.subst(args))),
+            Ty::Assoc { on, assoc } => Ty::Assoc {
+                on: Box::new(on.subst(args)),
+                assoc: *assoc,
+            },
             other => other.clone(),
         }
     }
@@ -91,6 +114,7 @@ impl Ty {
                 args.iter().any(|a| a.mentions_param(idx))
             }
             Ty::Array(elem) => elem.mentions_param(idx),
+            Ty::Assoc { on, .. } => on.mentions_param(idx),
             _ => false,
         }
     }
@@ -192,6 +216,9 @@ impl Ty {
                 p1.len() == p2.len()
                     && p1.iter().zip(p2).all(|(a, b)| a.match_pattern(b, out))
                     && r1.match_pattern(r2, out)
+            }
+            (Ty::Assoc { on: p, assoc: pa }, Ty::Assoc { on: g, assoc: ga }) => {
+                pa == ga && p.match_pattern(g, out)
             }
             // Primitives, `Unit`, etc.: match iff identical.
             (a, b) => a == b,
@@ -321,11 +348,23 @@ impl Module {
 /// never reported as overlapping, while a generic and a specific pattern
 /// (`Box<T>` vs `Box<Int>`) are.
 pub fn self_types_overlap(a: &Ty, a_generics: u32, b: &Ty, b_generics: u32) -> bool {
-    // Shift `b`'s parameters into a disjoint range so the two namespaces do not
-    // collide in the shared substitution.
-    let b = shift_params(b, a_generics);
-    let mut subst: Vec<Option<Ty>> = vec![None; (a_generics + b_generics) as usize];
-    unify_patterns(a, &b, &mut subst)
+    // A projection's value is unknown until normalized, so assume it could
+    // coincide with anything unless both sides are projections that provably
+    // differ. A false E0074 is a loud error; a missed overlap is a silent
+    // miscompile, so err toward overlap.
+    match (a, b) {
+        (Ty::Assoc { on: a1, assoc: x }, Ty::Assoc { on: b1, assoc: y }) => {
+            x != y || self_types_overlap(a1, a_generics, b1, b_generics)
+        }
+        (Ty::Assoc { .. }, _) | (_, Ty::Assoc { .. }) => true,
+        _ => {
+            // Shift `b`'s parameters into a disjoint range so the two namespaces
+            // do not collide in the shared substitution.
+            let b = shift_params(b, a_generics);
+            let mut subst: Vec<Option<Ty>> = vec![None; (a_generics + b_generics) as usize];
+            unify_patterns(a, &b, &mut subst)
+        }
+    }
 }
 
 fn shift_params(t: &Ty, by: u32) -> Ty {
@@ -837,4 +876,42 @@ pub enum Pattern {
         variant: u32,
         binders: Vec<Option<LocalId>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subst_recurses_into_a_projection_without_normalizing() {
+        use nova_resolver::DefId;
+        let proj = Ty::Assoc {
+            on: Box::new(Ty::Param(0)),
+            assoc: DefId(7),
+        };
+        // subst has no impl table, so it substitutes and stops. Normalizing is
+        // the caller's job (typeck's `normalize`, or mono after subst).
+        assert_eq!(
+            proj.subst(&[Ty::Int]),
+            Ty::Assoc {
+                on: Box::new(Ty::Int),
+                assoc: DefId(7)
+            }
+        );
+    }
+
+    #[test]
+    fn a_projection_has_no_head_and_no_param_of_its_own() {
+        use nova_resolver::DefId;
+        let proj = Ty::Assoc {
+            on: Box::new(Ty::Param(2)),
+            assoc: DefId(7),
+        };
+        // No head: impl lookup cannot key on an unnormalized projection.
+        assert!(proj.head().is_none());
+        // But it does mention the parameter in its Self type, which
+        // `E0073`'s unused-impl-parameter check depends on.
+        assert!(proj.mentions_param(2));
+        assert!(!proj.mentions_param(0));
+    }
 }

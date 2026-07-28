@@ -451,8 +451,11 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         | hir::Ty::Record { .. }
         | hir::Ty::Array(_) => MirTy::Ptr,
         hir::Ty::Unit | hir::Ty::Never => MirTy::Unit,
-        // Post-typeck these should not occur; map defensively.
-        hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => MirTy::Unit,
+        // Post-typeck these should not occur; map defensively. `Assoc` in
+        // particular is normalized away by `mono` before lowering, and mono
+        // reports a diagnostic if one survives — so reaching here is a
+        // compiler bug, but one that must not panic in a library path.
+        hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error | hir::Ty::Assoc { .. } => MirTy::Unit,
     }
 }
 
@@ -507,6 +510,11 @@ fn mangle_ty(ty: &hir::Ty) -> String {
             }
         }
         hir::Ty::Array(elem) => format!("A{}E", mangle_ty(elem)),
-        hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error => "X".to_string(),
+        // Post-typeck these should not occur; map defensively, matching
+        // `mir_ty`'s convention above (`Assoc` is normalized away by `mono`
+        // before a type ever reaches mangling).
+        hir::Ty::Param(_) | hir::Ty::Var(_) | hir::Ty::Error | hir::Ty::Assoc { .. } => {
+            "X".to_string()
+        }
     }
 }

@@ -48,6 +48,10 @@ impl InferCtx {
                 args: args.iter().map(|a| self.apply(a)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(self.apply(&elem))),
+            Ty::Assoc { on, assoc } => Ty::Assoc {
+                on: Box::new(self.apply(&on)),
+                assoc,
+            },
             other => other,
         }
     }
@@ -63,6 +67,7 @@ impl InferCtx {
                 args.iter().any(|a| self.occurs(v, a))
             }
             Ty::Array(elem) => self.occurs(v, &elem),
+            Ty::Assoc { on, .. } => self.occurs(v, &on),
             _ => false,
         }
     }
@@ -151,6 +156,9 @@ impl InferCtx {
                         .all(|(x, y)| self.unify(x, y))
             }
             (Ty::Array(e1), Ty::Array(e2)) => self.unify(&e1.clone(), &e2.clone()),
+            (Ty::Assoc { on: o1, assoc: a1 }, Ty::Assoc { on: o2, assoc: a2 }) => {
+                a1 == a2 && self.unify(&o1.clone(), &o2.clone())
+            }
             _ => false,
         }
     }
@@ -206,5 +214,77 @@ mod tests {
         };
         assert!(cx.unify(&a, &b));
         assert_eq!(cx.apply(&v), Ty::Bool);
+    }
+
+    // A projection is opaque to the unifier: two projections match only when
+    // they name the same associated type on unifiable Self types. Anything
+    // else must already have been normalized away by the caller, which is why
+    // there is no Assoc-vs-concrete arm.
+    #[test]
+    fn assoc_unifies_only_with_the_same_projection() {
+        use nova_resolver::DefId;
+        let item = DefId(7);
+        let other = DefId(8);
+        let mut icx = InferCtx::default();
+        let a = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        let b = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        assert!(icx.unify(&a, &b), "same projection on same Self");
+
+        let c = Ty::Assoc {
+            on: Box::new(Ty::Bool),
+            assoc: item,
+        };
+        assert!(!icx.unify(&a, &c), "same name, different Self");
+
+        let d = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: other,
+        };
+        assert!(!icx.unify(&a, &d), "different associated type");
+
+        assert!(!icx.unify(&a, &Ty::Int), "a projection is not Int");
+    }
+
+    // The Self type is an ordinary type position, so a variable inside it must
+    // solve through unification like any other.
+    #[test]
+    fn assoc_unification_solves_a_var_inside_the_self_type() {
+        use nova_resolver::DefId;
+        let item = DefId(7);
+        let mut icx = InferCtx::default();
+        let v = icx.fresh();
+        let a = Ty::Assoc {
+            on: Box::new(v.clone()),
+            assoc: item,
+        };
+        let b = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        assert!(icx.unify(&a, &b));
+        assert_eq!(icx.apply(&v), Ty::Int);
+    }
+
+    // occurs must see through a projection, or `?0 == ?0::Item` would bind a
+    // variable to a type containing itself and `apply` would not terminate.
+    #[test]
+    fn occurs_looks_inside_a_projection() {
+        use nova_resolver::DefId;
+        let mut icx = InferCtx::default();
+        let v = icx.fresh();
+        let proj = Ty::Assoc {
+            on: Box::new(v.clone()),
+            assoc: DefId(7),
+        };
+        assert!(
+            !icx.unify(&v, &proj),
+            "occurs check must reject ?0 = ?0::Item"
+        );
     }
 }

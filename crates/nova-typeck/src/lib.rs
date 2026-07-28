@@ -63,6 +63,9 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
         }
         Ty::Array(elem) => format!("[{}]", display_ty(elem, defs)),
         Ty::Param(i) => format!("T{i}"),
+        Ty::Assoc { on, assoc } => {
+            format!("{}::{}", display_ty(on, defs), defs.def(*assoc).name)
+        }
         Ty::Var(v) => format!("?{v}"),
         Ty::Never => "!".to_string(),
         Ty::Error => "{error}".to_string(),
