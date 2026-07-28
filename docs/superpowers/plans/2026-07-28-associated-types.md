@@ -759,9 +759,30 @@ The second test is the one that matters. A `normalize` that resolves everything 
 Run: `cargo test -p nova-typeck --no-fail-fast normalize`
 Expected: the first FAILS (the projection never resolves, so `Assoc` fails to unify with `Int`); the second may pass vacuously — note that, it is why both exist.
 
+- [ ] **Step 0: Reject a cyclic associated-type binding first — `normalize` cannot be written safely until you do**
+
+Task 4's review found this and it is a **prerequisite for this task**, not a nicety. Measured on `a332528`, all three are accepted (`nova check` → `ok`):
+
+```nova
+impl It for W { type Item = Self::Item  … }              // self-cycle
+impl It for W { type A = Self::B   type B = Self::A  … }  // mutual cycle
+impl It for W { type A = Self::B   type B = Int       … }  // LEGITIMATE chain
+```
+
+Step 4b of Task 4 is what made `Self::X` expressible in that position — before it, all three were `E0900`. So `ImplInfo.assoc_bindings` can now contain a cycle.
+
+**Why this blocks Step 3 specifically.** The third case is legal and must work, and making it work means `normalize` has to re-normalize its own result: `A` resolves to `Assoc{B}`, which must then resolve to `Int`. That is precisely the implementation that recurses forever on cases one and two. Writing Step 3 as specified — "resolve `on` first … look up the binding, and `subst`" — with no guard produces a compiler that hangs on a two-line program. The word *cycle* appeared nowhere in this plan before this step existed.
+
+Do **both**, because they fail differently:
+
+1. **Reject the cycle where it is created**, in `collect_impls`, beside the existing duplicate-binding check (`E0403`'s neighbourhood). Walk each binding's converted type for an `Assoc` whose `on` is this impl's own self type, and follow those references to a fixed point; report a diagnostic naming the cycle if one closes. This gives the user a real error instead of a hang.
+2. **Give `normalize` a bounded-depth guard anyway.** Rejection at collection covers bindings; it does not prove no other path ever constructs a cycle, and a compiler that hangs is far worse than one that reports "projection nested too deeply". Pick a generous limit, and when it trips, report — never silently return `Ty::Error`, which unifies with anything and would turn a hang into a wrong answer.
+
+Test all four: both cycles rejected with a diagnostic naming the offending type, the legitimate chain still normalizing to `Int`, and — the one that matters most — **a test that the compiler terminates on the cyclic input**, since a hang is not assertable by any other means. Task 4's Step 3b tests are the model: their value is that they complete.
+
 - [ ] **Step 3: Implement `normalize`**
 
-Resolve `on` first (it may itself contain a projection), take its `head()`, find the impl of the projection's owning trait for that head, recover the impl's type arguments with `match_pattern`, look up the binding, and `subst` the impl's arguments into it. Recurse into `Fn`, `Sum`, `Record`, `Array` so a projection nested inside a compound type is reached. Leave `Assoc { on: Param(_) }` untouched — that is Task 7's job.
+Resolve `on` first (it may itself contain a projection), take its `head()`, find the impl of the projection's owning trait for that head, recover the impl's type arguments with `match_pattern`, look up the binding, and `subst` the impl's arguments into it. Re-normalize the result so a legitimate chain resolves fully, under Step 0's depth guard. Recurse into `Fn`, `Sum`, `Record`, `Array` so a projection nested inside a compound type is reached. Leave `Assoc { on: Param(_) }` untouched — that is Task 7's job.
 
 **Put the core in `nova-hir`, as a free function taking `&[hir::ImplInfo]`.** Task 7 needs the identical logic at monomorphization and the plan requires it written once; this is the shape that makes that possible, verified:
 
@@ -1286,9 +1307,34 @@ Measured today: `trait It { type Item\n type Item\n fn g(self) -> Int }` → **`
 
 Task 4 already rejects a duplicate *binding* in an impl (`binding_the_same_associated_type_twice_is_rejected`, mutation E). This is the declaration side, which nothing checks. Report a duplicate-definition diagnostic naming the type; check how `collect_traits` handles two methods of the same name first and match it, since the same hole may exist there — **if it does, fix both and say so**, because a trait with two same-named methods is the same defect wearing different clothes.
 
-- [ ] **Step 3: Verify and commit**
+- [ ] **Step 3: Stop impl-body recovery escaping the impl's own body**
 
-`cargo build --workspace`, `cargo test --workspace --no-fail-fast`, clippy, fmt, and the three gates. Two commits, one per step.
+Found by Task 4's review. `sync_to_item_boundary` (`crates/nova-parser/src/grammar.rs:138-156`) does not list `RBrace`, so recovery walks straight past the impl's closing brace and consumes the next top-level item. Measured:
+
+```nova
+record W { v: Int }
+impl W { 42 }
+record R { a: Int }
+fn main() { }
+```
+
+```
+error[P0001]: expected fn or const inside impl, found integer literal
+error[P0001]: expected fn or const inside impl, found `record`      <-- the VALID record
+error[P0001]: expected `}` (in impl block), found end of file
+```
+
+`record R` is swallowed and misreported as an illegal impl item, then `fn main` is parsed *into* the impl and discarded with it. One bad token inside an impl body costs every following item in the file.
+
+This is **pre-existing and not a regression** — Task 4's review confirmed recovery cannot over-consume relative to the old behaviour, because for a boundary token the old code did not terminate at all. But Task 4 newly routes eight previously-hanging shapes down this path, so it is now reachable in ways it was not before.
+
+Add `RBrace` as a stop in `sync_to_item_boundary`. This is safe *now* in a way it would not have been before Task 4: the impl-body loop's `_` arm advances before syncing (`92cb37c`), so a non-consuming stop can no longer spin. **Verify that invariant still holds before relying on it** — if any caller syncs without first advancing, adding a non-consuming stop reintroduces the hang Task 4 just fixed.
+
+Test that the example above reports the first error and then parses `record R` and `fn main` normally, and re-run Task 4's termination tests, which are the guard against reintroducing the hang.
+
+- [ ] **Step 4: Verify and commit**
+
+`cargo build --workspace`, `cargo test --workspace --no-fail-fast`, clippy, fmt, and the three gates. One commit per step.
 
 ---
 
