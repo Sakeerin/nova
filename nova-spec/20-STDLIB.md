@@ -92,7 +92,10 @@ pub trait Hash {
 
 pub trait Iterator {
     type Item
-    fn next(self) -> Option<Self.Item>
+    fn next(self) -> Option<Self::Item>   // `::`, not `.` — see docs/adr/0006
+    // The receiver becomes `mut self` once the mutable-receiver rule covers
+    // trait methods (ADR 0005 §1's migration path); `next` is the first such
+    // method and is what forces that gap closed.
     // default methods: map, filter, collect, fold, ...
 }
 
