@@ -89,15 +89,18 @@ builtins! {
     /// through an `extern` either (`String` is not FFI-safe). Std-only, so
     /// `str_hash` is not a reserved word in user code.
     StrHash,
-    /// `char_to_int(c: Char) -> Int` — a `Char`'s Unicode scalar value.
-    /// Backs `std/core`'s `impl Hash for Char`. Nova has no other `Char` →
-    /// `Int` conversion: `as` casts are unsupported (`E0900`), `Char` has no
-    /// methods beyond its trait impls, and no arithmetic operator accepts a
-    /// `Char`. Unlike every other builtin this is *not* a runtime call —
-    /// `Char` and `Int` are both `MirTy::I64`, so `nova-mir` lowers it to a
-    /// register move (see `lower_call`) rather than adding a runtime ABI
-    /// symbol whose body would be the identity function. Std-only, so
-    /// `char_to_int` is not a reserved word in user code.
+    /// `char_to_int(c: Char) -> Int` — a `Char`'s Unicode scalar value. The
+    /// only way any std module can compare or classify a `Char` numerically:
+    /// Nova has no other `Char` → `Int` conversion (`as` casts are
+    /// unsupported, `E0900`; `Char` has no methods beyond its trait impls;
+    /// no arithmetic operator accepts a `Char`). Backs `std/core`'s
+    /// `impl Hash for Char`, and `std/strings`' non-ASCII whitespace check
+    /// (`char_is_whitespace`), and any future std module with the same need.
+    /// Unlike every other builtin this is *not* a runtime call — `Char` and
+    /// `Int` are both `MirTy::I64`, so `nova-mir` lowers it to a register
+    /// move (see `lower_call`) rather than adding a runtime ABI symbol whose
+    /// body would be the identity function. Std-only, so `char_to_int` is
+    /// not a reserved word in user code.
     CharToInt,
     /// `str_len_chars(s: String) -> Int` — the number of Unicode scalar
     /// values in `s`. Backs `std/strings`' `String::len`. Nova cannot walk a
@@ -152,23 +155,17 @@ impl Builtin {
     /// [`STD_MODULES`], not only `std/core`). These are implementation
     /// details of the standard library, not user-visible language surface:
     /// reserving one of these names in *every* module (as [`Builtin::GLOBAL`]
-    /// does) would silently and permanently take the name away from user
-    /// code, just to serve a single std method. `str_cmp` backs `std/core`'s
-    /// `impl Ord for String`; `str_hash` and `char_to_int` back its
-    /// `impl Hash for String` and `impl Hash for Char` (ADR 0005 §2);
-    /// `str_len_chars` backs `std/strings`' `String::len` and `String::join`
-    /// (the latter uses each part's own codepoint count to size the output
-    /// buffer); `str_chars` backs `std/strings`' `String::chars` *and*
-    /// `std/core`'s `impl Debug for String` (added in Phase 2.2b to escape
-    /// the string's contents into a valid Nova literal — the reason that fix
-    /// needed no new ABI symbol); `str_from_chars` backs four call sites in
-    /// `std/strings`: its private `chars_to_string` helper — itself called
-    /// from seven call sites across five methods (`slice`; three inside
-    /// `split`; `trim`; `trim_start`; `trim_end`) — plus `String::reverse`,
-    /// `String::join` and `String::repeat`, each of which calls
-    /// `str_from_chars` directly rather than going through
-    /// `chars_to_string`; `str_to_upper` and `str_to_lower` back
-    /// `std/strings`' `String::to_upper` and `String::to_lower`.
+    /// does) would permanently take it away from user code to serve the
+    /// standard library's own internals. Each member exists because Nova
+    /// source cannot express what it does — `String` has no length, indexing
+    /// or iteration, is not FFI-safe, and there is no `Char`/`Int`
+    /// conversion — so each is documented on its own variant above, next to
+    /// the capability it provides. This list is membership only; call sites
+    /// are a `grep` away and are deliberately not enumerated here: doing so
+    /// produced stale or wrong counts in three places across three
+    /// consecutive review rounds (see the Phase 2.2b whole-branch review),
+    /// because the roster is duplicated information that only this array
+    /// needs to stay exact.
     pub const STD_ONLY: [Builtin; 8] = [
         Builtin::StrCmp,
         Builtin::StrHash,
@@ -503,10 +500,9 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
     let mut exports: Vec<Exports> = Vec::new();
 
     // A scope per module, seeded with the compiler builtins. `Builtin::GLOBAL`
-    // goes into every module; `Builtin::STD_ONLY` (`str_cmp`, `str_hash`,
-    // `char_to_int`) goes only into an std module's own scope, so none of them
-    // ever becomes a reserved word in user code (see the `Builtin` doc
-    // comments).
+    // goes into every module; `Builtin::STD_ONLY` goes only into an std
+    // module's own scope, so none of them ever becomes a reserved word in
+    // user code (see the `Builtin` doc comments).
     for (mid, m) in all.iter().enumerate() {
         let mut scope = ModuleScope {
             name: m.name.clone(),

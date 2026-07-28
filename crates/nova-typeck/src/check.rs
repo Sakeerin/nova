@@ -5281,8 +5281,7 @@ fn error_expr(span: Span) -> hir::Expr {
 /// checking is a single shared code path rather than an arm per builtin.
 ///
 /// It has to be a table rather than per-builtin code because most of these
-/// are *not callable from a user program*: `Builtin::STD_ONLY` members
-/// (`str_cmp`, `str_hash`, `char_to_int`, `str_len_chars`, `str_chars`) are
+/// are *not callable from a user program*: `Builtin::STD_ONLY` members are
 /// seeded only into std modules' scopes, so their arity/type diagnostics are
 /// unreachable from any Nova source and cannot be tested through it. Sharing
 /// one checking path means the reachable builtins (`println`/`print`/`panic`)
