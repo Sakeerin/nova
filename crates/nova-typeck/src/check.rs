@@ -2121,6 +2121,76 @@ impl<'a> Checker<'a> {
             })
     }
 
+    /// Substitute a call's type arguments into a stored signature type and
+    /// resolve any projection the result contains — the call-site half of
+    /// normalization seam 1.
+    ///
+    /// `subst` alone is not enough at a call site. A call's type arguments start
+    /// as fresh inference variables that the argument unification then solves, so
+    /// a projection on a generic parameter substitutes to `Assoc { on: Var(k) }`,
+    /// which has no [`Ty::head`] and cannot be resolved. Applying the current
+    /// substitution first turns it into `Assoc { on: <concrete> }`.
+    ///
+    /// **The `has_assoc` guard is not an optimization.** Applying the
+    /// substitution changes what goes into `hir::Expr::ty` for *every* call, and
+    /// while `finalize_function` applies it again at the end anyway, doing it
+    /// early only earns its risk where a projection makes it necessary. Without
+    /// a projection this is exactly the plain `subst` every call site did before.
+    ///
+    /// This is also where the design's one admitted hole shows: the variable has
+    /// to be *already solved*, which for a call means the argument that
+    /// determines it must come first. `fn f<I: It>(y: I::Item, x: I)` still fails
+    /// — see the design doc §4.2, whose claim that `Assoc { on: Var(_) }` is
+    /// unreachable holds for receivers but not for this shape.
+    fn instantiate(&mut self, ty: &Ty, args: &[Ty], icx: &InferCtx, span: Span) -> Ty {
+        let ty = ty.subst(args);
+        if !ty.has_assoc() {
+            return ty;
+        }
+        self.normalize(&icx.apply(&ty), span)
+    }
+
+    /// Resolve the associated-type projections in `ty` through the impl table —
+    /// normalization seam 1 of three (design doc §4.1).
+    ///
+    /// A thin wrapper: [`hir::normalize_ty`] holds all of the logic, over a plain
+    /// `&[hir::ImplInfo]` slice, so that monomorphization can call the identical
+    /// code without reaching through a half-built `Checker`. All this adds is the
+    /// diagnostic, which `nova-hir` cannot emit.
+    ///
+    /// Safe to call before every impl has been collected: `self.impls` is filled
+    /// by `collect_impls`, which runs before `collect_signatures` and before any
+    /// body is checked, so every seam sees the complete table.
+    ///
+    /// **Never called from `unify`.** The whole design rests on projections being
+    /// gone by the time the unifier sees a type; normalizing inside it would give
+    /// the unifier the impl-table dependency it deliberately does not have.
+    fn normalize(&mut self, ty: &Ty, span: Span) -> Ty {
+        match hir::normalize_ty(ty, &self.impls) {
+            Ok(t) => t,
+            Err(hir::NormalizeOverflow { at }) => {
+                // Reported, not silently swallowed: `Ty::Error` unifies with
+                // anything, so returning it without a diagnostic would turn a
+                // hang into a wrong answer. `E0077` already covers every cyclic
+                // *binding* (and poisons it), so reaching here means some other
+                // path built a projection that does not converge — a compiler
+                // defect, but one that must still produce a diagnostic rather
+                // than run forever.
+                self.error(
+                    "E0078",
+                    format!(
+                        "could not resolve the associated type `{}`: normalization did not \
+                         finish within {} steps",
+                        display_ty(&at, self.defs),
+                        hir::NORMALIZE_DEPTH_LIMIT,
+                    ),
+                    span,
+                );
+                Ty::Error
+            }
+        }
+    }
+
     // === Function bodies ===
 
     fn check_function(&mut self, def_id: DefId, item_index: usize) -> Option<hir::Function> {
@@ -2208,7 +2278,28 @@ impl<'a> Checker<'a> {
         f: &ast::Function,
         generics: FxHashMap<String, u32>,
     ) -> Option<hir::Function> {
-        let sig = self.sigs.get(&def_id)?.clone();
+        let mut sig = self.sigs.get(&def_id)?.clone();
+        // Normalization seam: the declared return type. `impl It for K { type
+        // Item = Int  fn get(self) -> Self::Item { 1 } }` writes `K::Item` where
+        // the body produces `Int`, and the unifier cannot decide a projection
+        // against a concrete type.
+        //
+        // Done once, here, rather than at the `unify` below, because `sig.ret`
+        // is read three times for the same contract — `fcx.ret_ty` (which every
+        // `return e` in the body checks against), this unify, and
+        // `hir::Function::ret_ty` — and normalizing only one of them would let
+        // `return 1` and a trailing `1` disagree about the same signature.
+        //
+        // `sig.params` for the same reason: each becomes a local's type below, so
+        // `fn put(self, x: Self::Item) -> Int { x + 1 }` would type `x` as an
+        // unresolved projection and reject every operation on it.
+        sig.ret = self.normalize(&sig.ret, f.name.span);
+        let params: Vec<Ty> = sig
+            .params
+            .iter()
+            .map(|p| self.normalize(p, f.name.span))
+            .collect();
+        sig.params = params;
         let name = self.defs.def(def_id).name.clone();
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -2409,6 +2500,13 @@ impl<'a> Checker<'a> {
                     if let Some(annot) = ty {
                         let annot_ty =
                             self.convert_ty(annot, &fcx.generics.clone(), &fcx.param_bounds);
+                        // Normalization seam: a projection written in a `let`
+                        // annotation. Needed twice over — for the unify just
+                        // below, and because `value.ty = annot_ty` *replaces* the
+                        // initializer's type with the annotation, so an
+                        // unnormalized projection would become the binding's type
+                        // and propagate to every later use of the local.
+                        let annot_ty = self.normalize(&annot_ty, annot.span);
                         if !fcx.icx.unify(&value.ty, &annot_ty) {
                             self.error(
                                 "E0010",
@@ -3116,7 +3214,11 @@ impl<'a> Checker<'a> {
         let mut checked = Vec::new();
         for (arg, param) in args.iter().zip(sig.params.iter()) {
             let a = self.check_expr(fcx, arg);
-            let expected = param.subst(&type_args);
+            // Normalization seam: a generic function may declare a parameter or
+            // its return type as a projection on one of its own type parameters
+            // (`fn take<I: It>(x: I, y: I::Item)`), and `type_args` has just been
+            // narrowed by the earlier arguments.
+            let expected = self.instantiate(param, &type_args, &fcx.icx, a.span);
             if !fcx.icx.unify(&a.ty, &expected) {
                 self.error(
                     "E0010",
@@ -3130,7 +3232,7 @@ impl<'a> Checker<'a> {
             }
             checked.push(a);
         }
-        let ret = sig.ret.subst(&type_args);
+        let ret = self.instantiate(&sig.ret, &type_args, &fcx.icx, span);
         hir::Expr {
             kind: hir::ExprKind::Call {
                 func: hir::Callee::Def(def_id),
@@ -4525,7 +4627,10 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         }
         for (arg, param) in args.iter().zip(tm.params.iter()) {
-            let expected = param.subst(&subst);
+            // Same seam as the return type below: a trait method may declare a
+            // *parameter* as `Self::Item` (`fn put(mut self, x: Self::Item)`) and
+            // the argument the caller passes is a concrete type.
+            let expected = self.instantiate(param, &subst, &fcx.icx, arg.span);
             if !fcx.icx.unify(&arg.ty, &expected) {
                 self.error(
                     "E0010",
@@ -4538,6 +4643,16 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // Normalization seam: the method-call return type. A trait method
+        // declaring `-> Self::Item` gives `Assoc { on: Param(0) }`, and `subst`
+        // has just replaced `Param(0)` with the receiver's *concrete* type — so
+        // this is the first point at which the impl table can answer it, and the
+        // last point before the type escapes into the caller's unification.
+        //
+        // `self_ty` came from `fcx.icx.apply(&recv.ty)` above, so the `Self` half
+        // of `subst` is already resolved; `instantiate` covers the rest, for a
+        // generic trait method projecting onto one of its own parameters.
+        let ret = self.instantiate(&tm.ret, &subst, &fcx.icx, span);
         hir::Expr {
             kind: hir::ExprKind::TraitCall {
                 trait_id,
@@ -4547,7 +4662,7 @@ impl<'a> Checker<'a> {
                 receiver,
                 args,
             },
-            ty: tm.ret.subst(&subst),
+            ty: ret,
             span,
         }
     }
@@ -10217,6 +10332,17 @@ mod tests {
             .find(|rec| rec.name == "W")
             .expect("record W collected")
             .def_id;
+        // The trait's own declared return type still *is* the projection — this
+        // is the side nothing normalizes, and it pins the `Param(0)`-is-`Self`
+        // convention the impl side is checked against.
+        assert_eq!(
+            it.methods[0].ret,
+            Ty::Assoc {
+                on: Box::new(Ty::Param(0)),
+                assoc: item
+            },
+            "the trait declares `Self::Item`"
+        );
         // The impl method's compiled return type, not just "no diagnostics":
         // `Ty::Error` unifies with everything, so an empty diagnostic list
         // alone would also hold if the projection had collapsed to an error.
@@ -10240,20 +10366,40 @@ mod tests {
                         .collect::<Vec<_>>()
                 )
             });
-        match &m.ret_ty {
-            Ty::Assoc { on, assoc } => {
-                assert_eq!(
-                    on.as_ref(),
-                    &Ty::Record {
-                        def_id: w,
-                        args: vec![Ty::Param(0)]
-                    },
-                    "projects onto the impl's self type `W<T>`, not `T`"
-                );
-                assert_eq!(*assoc, item, "resolves to `It::Item`");
+        // **Deliberately flipped by Task 5**, which is what this test's own
+        // header anticipated. It used to assert `ret_ty` was still
+        // `Assoc { on: W<Param(0)>, assoc: Item }`; the function-return
+        // normalization seam now resolves that through `type Item = T` to
+        // `Param(0)`, i.e. `T`.
+        //
+        // The flip *strengthens* the original claim rather than weakening it. A
+        // projection built onto `Param(0)` instead of onto the impl's self type
+        // — the by-index implementation this test exists to catch, Task 4's
+        // mutation F — has no `head()` and so cannot normalize at all: it would
+        // still read `Assoc { .. }` here, and would additionally trip
+        // conformance. Reaching `Param(0)` therefore proves both that the
+        // projection was on `W<T>` and that it resolved through this impl's own
+        // binding.
+        assert_eq!(
+            m.ret_ty,
+            Ty::Param(0),
+            "`W<T>::Item` normalizes through `type Item = T` to the impl's `T`"
+        );
+        // `w` is still the record this projects onto; asserted through the trait
+        // impl's recorded self type, which normalization does not touch.
+        let imp = r
+            .module
+            .impls
+            .iter()
+            .find(|i| i.trait_id.is_some())
+            .expect("the trait impl was collected");
+        assert_eq!(
+            imp.self_ty,
+            Ty::Record {
+                def_id: w,
+                args: vec![Ty::Param(0)]
             }
-            other => panic!("expected a Ty::Assoc return type, got {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -10305,25 +10451,27 @@ mod tests {
         // collection: a `let` annotation goes through the same `convert_ty`,
         // from a different pass (`check_method`, not `collect_impls`).
         //
-        // The initializer is `panic(...)` (type `Never`, which unifies with
-        // anything) rather than `1`: nothing normalizes a projection yet, so
-        // `let x: Self::Item = 1` is a genuine mismatch until the seam in
-        // Task 5 lands. What this pins is that the annotation *resolves*.
+        // **Deliberately flipped by Task 5**, exactly as this test's own header
+        // said it would be. The initializer used to be `panic(...)` (type
+        // `Never`, which unifies with anything), because nothing normalized a
+        // projection and `let x: Self::Item = 1` was a genuine mismatch; it is
+        // now a plain `1`, and `x` is typed `Int`. That closes concern 1 of the
+        // Task 4 report.
+        //
+        // `1` is the stronger initializer, not merely the newly-legal one:
+        // `Never` unified with an unnormalized projection just as happily, so the
+        // old program could not tell resolving from failing to resolve. `Int`
+        // against `W::Item` can only pass if the projection was resolved through
+        // `type Item = Int` — and the mismatching spelling is pinned separately
+        // by `a_projection_in_a_let_annotation_normalizes`.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Self::Item }\n\
              record W { v: Int }\n\
              impl It for W { type Item = Int\n \
-             fn get(self) -> Self::Item { let x: Self::Item = panic(\"x\")\n x } }\n\
+             fn get(self) -> Self::Item { let x: Self::Item = 1\n x } }\n\
              fn main() { }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-        let it = r
-            .module
-            .traits
-            .iter()
-            .find(|t| t.name == "It")
-            .expect("trait It collected");
-        let item = it.assoc_types[0].1;
         let m = r
             .module
             .functions
@@ -10340,20 +10488,8 @@ mod tests {
             .expect("local `x` compiled");
         assert_eq!(
             x.ty,
-            Ty::Assoc {
-                on: Box::new(Ty::Record {
-                    def_id: r
-                        .module
-                        .records
-                        .iter()
-                        .find(|rec| rec.name == "W")
-                        .expect("record W")
-                        .def_id,
-                    args: vec![],
-                }),
-                assoc: item,
-            },
-            "the `let` annotation resolved to the projection"
+            Ty::Int,
+            "the `let` annotation resolved to the projection and normalized to Int"
         );
     }
 
@@ -10683,6 +10819,209 @@ mod tests {
                 r.diagnostics
             );
         }
+    }
+
+    /// The plan's Step 1 test, with one change recorded here rather than only in
+    /// the report: it writes the impl's return type as `Self::Item`, not as `T`.
+    ///
+    /// The `T` spelling reports an *extra* `E0072` ("method `get_item` returns
+    /// `T0` but trait `It` declares `W<T0>::Item`"), because
+    /// `check_impl_conformance` still compares the two signatures raw — that is
+    /// the second normalization seam, and it is Task 6's, where both spellings
+    /// are pinned by `an_impl_may_echo_the_projection_or_write_the_concrete_type`.
+    /// Written the `T` way, this test could not pass at the end of Task 5 for a
+    /// reason that has nothing to do with `normalize`.
+    #[test]
+    fn a_projection_on_a_concrete_type_normalizes_at_a_use_site() {
+        // `w.get_item()` returns `Self::Item`; with Self = W<Int> that is Int,
+        // so assigning it to an Int must typecheck with no annotation.
+        let r = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             fn main() { let w = W { v: 7 }\n let n: Int = w.get_item()\n println(\"${n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // Not vacuous on the *value* either: the call must be typed `Int`, so a
+        // `normalize` that returned `Ty::Error` (which unifies with anything)
+        // cannot hide behind the empty diagnostic list above.
+        let call = exprs_in(&r.module, "main")
+            .into_iter()
+            .find(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .expect("the get_item() call");
+        assert_eq!(call.ty, Ty::Int, "the call is typed Int, not an error type");
+    }
+
+    #[test]
+    fn a_projection_normalizes_to_the_wrong_type_is_an_error() {
+        // The negative direction: Self::Item is Int here, so binding it to a
+        // Bool must fail. Without this, a `normalize` that returned Ty::Error
+        // or Ty::Never for everything would pass the positive test.
+        let r = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             fn main() { let w = W { v: 7 }\n let b: Bool = w.get_item()\n println(\"${b}\") }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0010"),
+            "expected a type mismatch: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn normalization_picks_the_impl_that_matches_the_receiver() {
+        // Two impls of one trait, on different self types, binding `Item` to
+        // different types. A single-impl test cannot tell "looks the impl up"
+        // apart from "takes the only impl in the table".
+        let prelude = "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             record K { k: Bool }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             impl It for K { type Item = Bool\n\
+             fn get_item(self) -> Self::Item { self.k } }\n";
+        let r = check_src(&format!(
+            "{prelude}fn main() {{ let w = W {{ v: 7 }}\n let k = K {{ k: true }}\n\
+             let n: Int = w.get_item()\n let b: Bool = k.get_item()\n\
+             println(\"${{n}} ${{b}}\") }}"
+        ));
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // And the crossed pairing must fail, or `Item` is resolving to something
+        // that fits both.
+        let bad = check_src(&format!(
+            "{prelude}fn main() {{ let w = W {{ v: 7 }}\n\
+             let b: Bool = w.get_item()\n println(\"${{b}}\") }}"
+        ));
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "W<Int>::Item is Int, not Bool: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_projection_nested_inside_a_compound_type_normalizes() {
+        // `[Self::Item]`, not `Self::Item`. A `normalize` that handles a
+        // top-level projection but does not recurse into `Array`/`Record`/
+        // `Sum`/`Fn` passes every test whose projection is the whole type.
+        let r = check_src(
+            "trait It { type Item\n fn items(self) -> [Self::Item] }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn items(self) -> [Self::Item] { [self.v] } }\n\
+             fn main() { let w = W { v: 7 }\n let a: [Int] = w.items()\n\
+             println(\"${a.len()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let bad = check_src(
+            "trait It { type Item\n fn items(self) -> [Self::Item] }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn items(self) -> [Self::Item] { [self.v] } }\n\
+             fn main() { let a: [Bool] = W { v: 7 }.items()\n println(\"${a.len()}\") }",
+        );
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "`[W<Int>::Item]` is `[Int]`, not `[Bool]`: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_projection_in_a_let_annotation_normalizes() {
+        // The `let`-annotation seam. `value.ty = annot_ty` happens *after* the
+        // unify, so an unnormalized projection written here becomes the
+        // binding's type and propagates to every later use of it.
+        let r = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { let n: Self::Item = self.v\n n } }\n\
+             fn main() { let w = W { v: 7 }\n println(\"${w.get_item()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // And the annotation still constrains: `Self::Item` is `T` here, so
+        // initializing it from a `Bool` must fail.
+        let bad = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { let n: Self::Item = true\n self.v } }\n\
+             fn main() { }",
+        );
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "expected a mismatch on the annotated let: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_method_body_checks_against_its_normalized_return_type() {
+        // The function-return seam, on a *non-generic* impl so the expected type
+        // is a concrete `Int` rather than a parameter: the body must be accepted
+        // when it matches and rejected when it does not. The negative half is
+        // what distinguishes normalizing from discarding.
+        let ok = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record K { k: Int }\n\
+             impl It for K { type Item = Int\n fn get_item(self) -> Self::Item { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        let bad = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record K { k: Int }\n\
+             impl It for K { type Item = Int\n fn get_item(self) -> Self::Item { true } }\n\
+             fn main() { }",
+        );
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "`K::Item` is `Int`, so a `Bool` body is wrong: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_chain_of_associated_type_bindings_normalizes_all_the_way() {
+        // `A = Self::B` and `B = Int`: one resolution step yields `Self::B`, not
+        // `Int`. A `normalize` that does not re-normalize its own result fails
+        // here and passes every other positive test in this file.
+        let prelude = "trait Two { type A\n type B\n fn get_a(self) -> Self::A }\n\
+             record W { v: Int }\n\
+             impl Two for W { type A = Self::B\n type B = Int\n\
+             fn get_a(self) -> Self::A { self.v } }\n";
+        let r = check_src(&format!(
+            "{prelude}fn main() {{ let n: Int = W {{ v: 1 }}.get_a()\n println(\"${{n}}\") }}"
+        ));
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let bad = check_src(&format!(
+            "{prelude}fn main() {{ let b: Bool = W {{ v: 1 }}.get_a()\n println(\"${{b}}\") }}"
+        ));
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "the chain ends at Int, not Bool: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_reported_binding_cycle_is_poisoned_and_does_not_cascade() {
+        // E0077 poisons the binding to `Ty::Error`, so a *use* of the cyclic
+        // projection adds nothing: not a second E0010, and not `normalize`'s
+        // E0078 depth-limit report. One mistake, one diagnostic.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Self::Item }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Self::Item\n\
+             fn get(self) -> Self::Item { 1 } }\n\
+             fn main() { println(\"${W { v: 1 }.get()}\") }",
+        );
+        assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
     }
 
     #[test]

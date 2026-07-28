@@ -55,15 +55,26 @@ pub enum Ty {
     ///
     /// This is the one `Ty` variant that is **not** a type by itself — it is a
     /// *request* for one, answerable only with the impl table. It is therefore
-    /// normalized away at three seams (typeck's `normalize`,
+    /// normalized away at three seams ([`normalize_ty`] called from typeck,
     /// `check_impl_conformance`, and `mono` after `subst`), and the unifier
     /// never has to decide a projection against a concrete type.
     ///
-    /// `on` is `Param(k)` inside a generic body, a concrete type at an
-    /// ordinary use site, and — provably — never an unsolved `Var`:
-    /// `check_method_call` rejects an uninferred receiver with `E0011` before
-    /// any return type is computed, and a user-written `I::Item` names a
-    /// generic parameter. See the design doc §4.2.
+    /// `on` is `Param(k)` inside a generic body and a concrete type at an
+    /// ordinary use site.
+    ///
+    /// **It can also be an unsolved `Var`, which the design doc §4.2 claims is
+    /// unreachable.** That claim holds for the case it argues:
+    /// `check_method_call` rejects an uninferred receiver with `E0011` before any
+    /// return type is computed, so a *receiver's* projection is never on a `Var`.
+    /// It does not hold for a generic call, where the type arguments are fresh
+    /// variables that argument unification narrows as it goes — `fn f<I: It>(y:
+    /// I::Item, x: I)` reaches the first parameter with `Assoc { on: Var(0) }`
+    /// and nothing has solved `Var(0)` yet. `Checker::instantiate` applies the
+    /// current substitution before normalizing, which covers every ordering where
+    /// the determining argument comes first; the reverse order is a genuine
+    /// (order-dependent) limitation of resolving at seams instead of deferring,
+    /// and it reports an ordinary type mismatch naming the projection rather than
+    /// anything worse.
     Assoc {
         on: Box<Ty>,
         assoc: DefId,
@@ -139,6 +150,23 @@ impl Ty {
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
             Ty::Array(elem) => elem.has_vars(),
             Ty::Assoc { on, .. } => on.has_vars(),
+            _ => false,
+        }
+    }
+
+    /// Whether this type (transitively) contains an associated-type projection.
+    ///
+    /// Lets a caller ask "is there anything here for [`normalize_ty`] to do?"
+    /// before paying for a normalization pass — and, more importantly, before
+    /// taking a step that is only correct *because* a projection is present. The
+    /// call seams in `nova-typeck` resolve their inference variables before
+    /// normalizing, which they must not do to an ordinary signature type.
+    pub fn has_assoc(&self) -> bool {
+        match self {
+            Ty::Assoc { .. } => true,
+            Ty::Fn { params, ret } => params.iter().any(Ty::has_assoc) || ret.has_assoc(),
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_assoc),
+            Ty::Array(elem) => elem.has_assoc(),
             _ => false,
         }
     }
@@ -339,6 +367,132 @@ impl Module {
             let def = tr.methods[method as usize].default_def?;
             Some((def, vec![self_ty.clone()]))
         }
+    }
+}
+
+/// How many projection resolutions one [`normalize_ty`] walk may perform before
+/// giving up.
+///
+/// Generous on purpose: a chain of associated-type bindings that a person would
+/// write is a handful of links, so anything short of this is either a cycle or a
+/// machine-generated type — and reporting a limit on a legitimate program is
+/// worse than the limit being loose. The count is per projection *chain*, not
+/// per structural nesting level: a finite type is a finite tree, so recursion
+/// into `Fn`/`Sum`/`Record`/`Array` cannot diverge and does not spend budget.
+pub const NORMALIZE_DEPTH_LIMIT: u32 = 64;
+
+/// [`normalize_ty`] ran out of budget resolving a projection.
+///
+/// This is deliberately *not* folded into `Ty::Error`: `Error` unifies with
+/// anything, so returning it would silently accept whatever the caller compared
+/// the type against, turning a hang into a wrong answer. The caller must report
+/// a diagnostic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NormalizeOverflow {
+    /// The projection being resolved when the budget ran out.
+    pub at: Ty,
+}
+
+/// Resolve every [`Ty::Assoc`] projection in `ty` that the impl table can
+/// answer, leaving the rest untouched.
+///
+/// This is the shared core of all three normalization seams (see the design doc
+/// §4.1): `nova-typeck` calls it where a checked type is consumed, and
+/// monomorphization calls it after `subst`. It lives here, over a plain
+/// `&[ImplInfo]` slice, because that is the one signature both callers can
+/// satisfy — the `Checker` holds `impls` mid-construction and mono holds the
+/// finished `Module::impls`.
+///
+/// **A projection is resolved when, and only when, its Self type has a
+/// nominal [`Ty::head`]:**
+///
+/// - `Assoc { on: W<Int> }` resolves through the impl of the owning trait for
+///   `W`, substituting the impl's own type arguments (recovered by
+///   [`ImplInfo::match_args`]) into the bound type.
+/// - `Assoc { on: Param(k) }` has no head and is returned unchanged. That is not
+///   a failure: inside a generic body the projection is genuinely abstract until
+///   monomorphization substitutes `Param(k)`.
+/// - A projection with a head but no impl binding it is likewise returned
+///   unchanged, so the caller's unification reports a type error that *names the
+///   projection* rather than a normalizer that invented `Ty::Error`.
+///
+/// The impl is selected by the associated type's own `DefId`, which belongs to
+/// exactly one associated type of exactly one trait. An impl binding that
+/// `DefId` is therefore an impl of the owning trait by construction, and no
+/// separate trait lookup (or `Definitions` access) is needed here.
+///
+/// The result is **re-normalized**, because a bound type may itself be a
+/// projection: `type A = Self::B` with `type B = Int` must resolve all the way
+/// to `Int`. That is what makes the depth guard load-bearing rather than
+/// paranoid — see [`NORMALIZE_DEPTH_LIMIT`].
+pub fn normalize_ty(ty: &Ty, impls: &[ImplInfo]) -> Result<Ty, NormalizeOverflow> {
+    normalize_within(ty, impls, NORMALIZE_DEPTH_LIMIT)
+}
+
+fn normalize_within(ty: &Ty, impls: &[ImplInfo], budget: u32) -> Result<Ty, NormalizeOverflow> {
+    match ty {
+        Ty::Assoc { on, assoc } => {
+            let Some(budget) = budget.checked_sub(1) else {
+                return Err(NormalizeOverflow { at: ty.clone() });
+            };
+            // The Self type may itself contain a projection, so resolve it
+            // before asking it for a head.
+            let on = normalize_within(on, impls, budget)?;
+            let Some(head) = on.head() else {
+                return Ok(Ty::Assoc {
+                    on: Box::new(on),
+                    assoc: *assoc,
+                });
+            };
+            // Sharing a head is not enough: an impl with a repeated or
+            // partially-concrete self type (`impl<T> It for Pair<T, T>`) only
+            // applies to Self types that genuinely fit it, which is what
+            // `match_args` decides.
+            let bound = impls.iter().filter(|i| i.self_head == head).find_map(|i| {
+                let (_, bound) = i.assoc_bindings.iter().find(|(d, _)| d == assoc)?;
+                let args = i.match_args(&on)?;
+                Some(bound.subst(&args))
+            });
+            match bound {
+                Some(bound) => normalize_within(&bound, impls, budget),
+                None => Ok(Ty::Assoc {
+                    on: Box::new(on),
+                    assoc: *assoc,
+                }),
+            }
+        }
+        Ty::Fn { params, ret } => Ok(Ty::Fn {
+            params: params
+                .iter()
+                .map(|p| normalize_within(p, impls, budget))
+                .collect::<Result<_, _>>()?,
+            ret: Box::new(normalize_within(ret, impls, budget)?),
+        }),
+        Ty::Sum { def_id, args } => Ok(Ty::Sum {
+            def_id: *def_id,
+            args: args
+                .iter()
+                .map(|a| normalize_within(a, impls, budget))
+                .collect::<Result<_, _>>()?,
+        }),
+        Ty::Record { def_id, args } => Ok(Ty::Record {
+            def_id: *def_id,
+            args: args
+                .iter()
+                .map(|a| normalize_within(a, impls, budget))
+                .collect::<Result<_, _>>()?,
+        }),
+        Ty::Array(elem) => Ok(Ty::Array(Box::new(normalize_within(elem, impls, budget)?))),
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Char
+        | Ty::String
+        | Ty::Unit
+        | Ty::Param(_)
+        | Ty::Var(_)
+        | Ty::Never
+        | Ty::Error => Ok(ty.clone()),
     }
 }
 
@@ -1051,5 +1205,283 @@ mod tests {
         // partial match, in both argument orders.
         assert!(!pattern.match_pattern(&Ty::Int, &mut Vec::new()));
         assert!(!Ty::Int.match_pattern(&ground, &mut Vec::new()));
+    }
+
+    #[test]
+    fn has_assoc_finds_a_projection_at_every_nesting_depth() {
+        use nova_resolver::DefId;
+        let p = || Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: DefId(7),
+        };
+        assert!(p().has_assoc());
+        assert!(Ty::Array(Box::new(p())).has_assoc());
+        assert!(
+            Ty::Record {
+                def_id: DefId(1),
+                args: vec![Ty::Bool, p()],
+            }
+            .has_assoc(),
+            "not only the first argument"
+        );
+        assert!(Ty::Sum {
+            def_id: DefId(1),
+            args: vec![p()],
+        }
+        .has_assoc());
+        assert!(
+            Ty::Fn {
+                params: vec![Ty::Int],
+                ret: Box::new(p()),
+            }
+            .has_assoc(),
+            "the return type counts, not only the parameters"
+        );
+        assert!(Ty::Fn {
+            params: vec![p()],
+            ret: Box::new(Ty::Int),
+        }
+        .has_assoc());
+        // And says no when there is genuinely nothing to normalize, including
+        // for the compound types it recurses into.
+        assert!(!Ty::Int.has_assoc());
+        assert!(!Ty::Param(0).has_assoc());
+        assert!(!Ty::Array(Box::new(Ty::Int)).has_assoc());
+        assert!(!Ty::Fn {
+            params: vec![Ty::Int],
+            ret: Box::new(Ty::Bool),
+        }
+        .has_assoc());
+    }
+
+    // === normalize_ty ===
+
+    /// `impl<generics> ? for self_ty { type <assoc> = <bound> }` — the minimum
+    /// an `ImplInfo` needs to be for `normalize_ty` to read it. `trait_id` is
+    /// deliberately `None` on some of these: `normalize_ty` keys on the
+    /// associated type's own `DefId`, which belongs to exactly one trait, so it
+    /// never has to consult `trait_id` — and a test that set it would hide a
+    /// lookup that secretly depended on it.
+    fn imp(self_ty: Ty, generics: u32, bindings: Vec<(DefId, Ty)>) -> ImplInfo {
+        ImplInfo {
+            trait_id: None,
+            self_head: self_ty.head().expect("test self types have a head"),
+            self_ty,
+            generics,
+            bounds: Vec::new(),
+            methods: Vec::new(),
+            assoc_bindings: bindings,
+        }
+    }
+
+    fn rec(def: u32, args: Vec<Ty>) -> Ty {
+        Ty::Record {
+            def_id: DefId(def),
+            args,
+        }
+    }
+
+    fn proj(on: Ty, assoc: u32) -> Ty {
+        Ty::Assoc {
+            on: Box::new(on),
+            assoc: DefId(assoc),
+        }
+    }
+
+    const ITEM: u32 = 7;
+
+    #[test]
+    fn normalize_resolves_a_projection_through_the_impls_own_arguments() {
+        // `impl<T> It for W<T> { type Item = T }`, projected onto `W<Int>`.
+        let impls = [imp(
+            rec(1, vec![Ty::Param(0)]),
+            1,
+            vec![(DefId(ITEM), Ty::Param(0))],
+        )];
+        assert_eq!(
+            normalize_ty(&proj(rec(1, vec![Ty::Int]), ITEM), &impls),
+            Ok(Ty::Int)
+        );
+    }
+
+    #[test]
+    fn normalize_picks_the_impl_whose_self_type_matches() {
+        // Two impls binding the *same* associated type on different heads. With
+        // only one impl in the table, "looks the impl up" and "takes the only
+        // impl" are indistinguishable.
+        let impls = [
+            imp(
+                rec(1, vec![Ty::Param(0)]),
+                1,
+                vec![(DefId(ITEM), Ty::Param(0))],
+            ),
+            imp(rec(2, vec![]), 0, vec![(DefId(ITEM), Ty::Bool)]),
+        ];
+        assert_eq!(
+            normalize_ty(&proj(rec(1, vec![Ty::Char]), ITEM), &impls),
+            Ok(Ty::Char),
+            "W<Char>::Item comes from the W impl"
+        );
+        assert_eq!(
+            normalize_ty(&proj(rec(2, vec![]), ITEM), &impls),
+            Ok(Ty::Bool),
+            "K::Item comes from the K impl"
+        );
+    }
+
+    #[test]
+    fn normalize_only_reads_the_binding_for_the_projected_associated_type() {
+        // One impl binding two associated types. Reading the first entry
+        // regardless of key gives `Ty::Int` for both.
+        let other = 8;
+        let impls = [imp(
+            rec(1, vec![]),
+            0,
+            vec![(DefId(ITEM), Ty::Int), (DefId(other), Ty::String)],
+        )];
+        assert_eq!(
+            normalize_ty(&proj(rec(1, vec![]), ITEM), &impls),
+            Ok(Ty::Int)
+        );
+        assert_eq!(
+            normalize_ty(&proj(rec(1, vec![]), other), &impls),
+            Ok(Ty::String)
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_a_projection_on_a_generic_parameter_alone() {
+        // `Assoc { on: Param(k) }` has no head, so no impl can be selected. It
+        // is monomorphization's job (Task 7), not an error and not `Ty::Error`.
+        let impls = [imp(rec(1, vec![]), 0, vec![(DefId(ITEM), Ty::Int)])];
+        let abstract_proj = proj(Ty::Param(0), ITEM);
+        assert_eq!(normalize_ty(&abstract_proj, &impls), Ok(abstract_proj));
+    }
+
+    #[test]
+    fn normalize_leaves_a_projection_with_no_matching_impl_alone() {
+        // No impl of the owning trait for `Int`: the projection stays, so the
+        // caller's unification reports a type error naming the projection
+        // rather than a normalizer that invented `Ty::Error`.
+        let impls = [imp(rec(1, vec![]), 0, vec![(DefId(ITEM), Ty::Int)])];
+        let unresolvable = proj(Ty::Bool, ITEM);
+        assert_eq!(normalize_ty(&unresolvable, &impls), Ok(unresolvable));
+    }
+
+    #[test]
+    fn normalize_recurses_into_every_compound_type() {
+        // A projection nested inside a compound type must be reached. An
+        // implementation that only handles a top-level `Assoc` passes every
+        // test whose projection is the whole type.
+        let impls = [
+            imp(rec(1, vec![]), 0, vec![(DefId(ITEM), Ty::Int)]),
+            imp(rec(2, vec![Ty::Param(0)]), 1, vec![(DefId(ITEM), Ty::Char)]),
+        ];
+        let p = || proj(rec(1, vec![]), ITEM);
+        assert_eq!(
+            normalize_ty(&Ty::Array(Box::new(p())), &impls),
+            Ok(Ty::Array(Box::new(Ty::Int)))
+        );
+        assert_eq!(
+            normalize_ty(&rec(3, vec![p(), Ty::Bool]), &impls),
+            Ok(rec(3, vec![Ty::Int, Ty::Bool]))
+        );
+        assert_eq!(
+            normalize_ty(
+                &Ty::Sum {
+                    def_id: DefId(4),
+                    args: vec![p()]
+                },
+                &impls
+            ),
+            Ok(Ty::Sum {
+                def_id: DefId(4),
+                args: vec![Ty::Int]
+            })
+        );
+        assert_eq!(
+            normalize_ty(
+                &Ty::Fn {
+                    params: vec![p(), Ty::Bool],
+                    ret: Box::new(p())
+                },
+                &impls
+            ),
+            Ok(Ty::Fn {
+                params: vec![Ty::Int, Ty::Bool],
+                ret: Box::new(Ty::Int)
+            })
+        );
+        // And inside the Self type of another projection.
+        assert_eq!(
+            normalize_ty(&proj(rec(2, vec![p()]), ITEM), &impls),
+            Ok(Ty::Char),
+            "the inner W::Item resolves to Int, making the outer K<Int>::Item"
+        );
+    }
+
+    #[test]
+    fn normalize_follows_a_chain_of_bindings_to_the_end() {
+        // `type A = Self::B` with `type B = Int`: one resolution step is not
+        // enough, so the result has to be re-normalized. This is the behaviour
+        // that forces the depth guard to exist.
+        let a = 7;
+        let b = 8;
+        let self_ty = rec(1, vec![]);
+        let impls = [imp(
+            self_ty.clone(),
+            0,
+            vec![(DefId(a), proj(self_ty.clone(), b)), (DefId(b), Ty::Int)],
+        )];
+        assert_eq!(normalize_ty(&proj(self_ty, a), &impls), Ok(Ty::Int));
+    }
+
+    #[test]
+    fn normalize_gives_up_on_a_cyclic_binding_instead_of_diverging() {
+        // typeck rejects this at collection (E0077) and poisons the binding, so
+        // this shape is unreachable from source today. The guard exists because
+        // that argument covers *bindings*, not every path that can build a
+        // projection — and a compiler that hangs is worse than one that reports
+        // a limit. This test's other value is that it completes.
+        let self_ty = rec(1, vec![]);
+        let cycle = proj(self_ty.clone(), ITEM);
+        let impls = [imp(self_ty, 0, vec![(DefId(ITEM), cycle.clone())])];
+        assert_eq!(
+            normalize_ty(&cycle, &impls),
+            Err(NormalizeOverflow { at: cycle })
+        );
+    }
+
+    #[test]
+    fn normalize_gives_up_on_a_binding_that_grows_without_bound() {
+        // `type Item = [Self::Item]`, the nested cycle: each step is a strictly
+        // larger type rather than the same one, so a guard implemented as a
+        // "have I seen this exact projection before" set would loop forever
+        // where a depth counter does not.
+        let self_ty = rec(1, vec![]);
+        let grows = Ty::Array(Box::new(proj(self_ty.clone(), ITEM)));
+        let impls = [imp(self_ty.clone(), 0, vec![(DefId(ITEM), grows)])];
+        assert_eq!(
+            normalize_ty(&proj(self_ty.clone(), ITEM), &impls),
+            Err(NormalizeOverflow {
+                at: proj(self_ty, ITEM)
+            }),
+            "reports overflow rather than diverging"
+        );
+    }
+
+    #[test]
+    fn normalize_admits_a_chain_longer_than_a_couple_of_links() {
+        // The depth limit must be generous enough that a legitimate chain never
+        // trips it. Sixteen links is far past anything a person writes and well
+        // inside the limit.
+        let self_ty = rec(1, vec![]);
+        let n = 16u32;
+        let mut bindings: Vec<(DefId, Ty)> = (0..n)
+            .map(|i| (DefId(100 + i), proj(self_ty.clone(), 101 + i)))
+            .collect();
+        bindings.push((DefId(100 + n), Ty::Int));
+        let impls = [imp(self_ty.clone(), 0, bindings)];
+        assert_eq!(normalize_ty(&proj(self_ty, 100), &impls), Ok(Ty::Int));
     }
 }
