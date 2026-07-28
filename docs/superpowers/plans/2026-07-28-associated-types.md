@@ -611,6 +611,16 @@ The impl body loop is `parse_impl_block` at **`crates/nova-parser/src/grammar.rs
 
 Add an insta snapshot test.
 
+- [ ] **Step 3b: Fix the zero-progress recovery loop in the same body — it is an infinite loop today**
+
+While adding the `Token::Type` arm, fix the bug that made me find it. **`impl W { type Item = T }` currently HANGS the compiler** (`nova check` never terminates — measured, exit 124 on a 12-second timeout), and so does any other item-start token inside an impl body: `record`, `trait`, `impl`, `import` all reproduce it.
+
+Root cause, confirmed: `sync_to_item_boundary` (`crates/nova-parser/src/grammar.rs:138-156`) `break`s at any of ten item-start tokens — `Fn`, `Pub`, `Record`, `Trait`, `Impl`, `Type`, `Const`, `Import`, `Module`, `Extern` — **without consuming one**. The impl-body loop's `_` arm (`:611-618`) pushes its error and then calls it, so the loop re-peeks the identical token and repeats forever. Non-item tokens like `42` or `let` recover fine, because `sync_to_item_boundary` consumes those.
+
+Adding a `Token::Type` arm alone would fix only the instance I happened to trip over and leave four others hanging. **Guarantee progress instead**: the `_` arm must consume at least one token before or after syncing, so a token that is both unexpected *and* an item boundary cannot be re-peeked. Verify all five shapes above now terminate with a diagnostic, and add a `#[test]` for at least two of them — a hang is untestable by assertion, so the test's value is that it *completes*.
+
+This is **pre-existing**, not introduced by this branch: `Token::Type` has always been an item-start token (top-level type aliases), and the `_` arm has always called `sync_to_item_boundary`. It may well share a root cause with the separately-queued parser hang from the `std/strings` phase (a keyword used as an impl method name plus a following generic trait method) — if your fix makes that repro terminate too, say so in the report, because that would let the queued task be closed.
+
 - [ ] **Step 4: Record and check the bindings**
 
 Add to `hir::ImplInfo`:
