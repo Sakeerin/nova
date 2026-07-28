@@ -95,18 +95,52 @@ discharged at monomorphization (`E0013`, `crates/nova-mir/src/mono.rs:117`) rath
 `check_src`. Projection resolution uses the same seam for the same reason: mono is the first
 point where a generic parameter is known.
 
-### 4.2 The case that would have forced a constraint queue cannot arise
+### 4.2 The case that would have forced a constraint queue — **REACHABLE, this section was wrong**
 
 `Assoc { on: Var(_) }` — a projection on a Self type that is still an unsolved inference
-variable — is the one shape that needs deferral. It is **structurally unreachable**:
-`check_method_call` (`crates/nova-typeck/src/check.rs:3626`) already rejects an uninferred
-receiver with `E0011: cannot infer the receiver's type; add a type annotation`, before any
-return type is computed. And a user-written `I::Item` names a generic parameter, so its `on` is
-a `Param`, never a `Var`.
+variable — is the one shape that needs deferral.
 
-It is therefore an explicit internal error, not a silent wrong answer — and the reason is
-recorded here so a future change to `check_method_call`'s receiver handling reveals that it
-would reopen this.
+**This section originally claimed it was structurally unreachable. That is false.** The argument
+was that `check_method_call` rejects an uninferred *receiver* with `E0011` before any return
+type is computed, and that a user-written `I::Item` names a generic parameter so its `on` is a
+`Param`. Both halves are true and neither is sufficient: at a **call site** the callee's generic
+parameters are instantiated as fresh inference variables, so a *parameter* whose declared type
+is `I::Item` is checked as `Assoc { on: Var(k) }`. No receiver is involved, so `E0011` never
+fires. Found by Task 5; the two failure modes below are measured, on an ordinary two-parameter
+generic function with a concrete impl in scope.
+
+**Both orders fail, differently, and the difference is diagnostic:**
+
+```nova
+trait It { type Item
+ fn g(self) -> Int }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn g(self) -> Int { 1 } }
+```
+
+- `fn f<I: It>(y: I::Item, x: I) -> Int` called as `f(5, W { v: 1 })` — **a valid program** — is
+  rejected: `error[E0010]: argument to \`f\` has type \`Int\` but \`?0::Item\` was expected`. `I`
+  is not yet pinned when the first argument is checked, so normalization has nothing to resolve.
+  The message also leaks `?0`, an internal inference-variable rendering, into user-facing output.
+- `fn f<I: It>(x: I, y: I::Item) -> Int` called as `f(W { v: 1 }, 5)` — where `I` **is** pinned by
+  the first argument — type-checks and then reaches **Cranelift's verifier with invalid IR**
+  (`WARN cranelift_codegen::verifier: Found verifier errors`). The projection survived to
+  lowering and `mir_ty`'s defensive arm mapped it to `MirTy::Unit` (§9 risk 1), so codegen
+  emitted garbage.
+
+The second is the more serious: a silently wrong machine-code path rather than an error. It is
+also the one Task 7 should close, because at monomorphization the type arguments are known —
+`subst` turns `Assoc { on: Param(0) }` into `Assoc { on: W }`, which normalizes to `Int`. Task 7
+must additionally ensure that a projection which *still* survives becomes a diagnostic rather
+than reaching `mir_ty`.
+
+The first is a genuine **ordering limitation** of normalize-at-seams with no constraint queue,
+and it is the price this design chose to pay (§4.1). Argument order should not decide whether a
+program compiles, so it needs either a re-normalization pass once a call's arguments are all
+unified, or an explicit refusal that names the real cause rather than an `E0010` mentioning
+`?0`. Whichever is chosen, the `?0` leak must not survive: no user-facing diagnostic should
+render an inference variable.
 
 ### 4.3 Blast radius
 

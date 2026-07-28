@@ -900,6 +900,21 @@ git commit -m "fix(typeck): normalize both sides when checking impl conformance"
 - Consumes: Tasks 1–6.
 - Produces: after `subst`, any `Assoc` whose `on` became concrete is resolved; one that survives is a diagnostic, not silent `MirTy::Unit`.
 
+- [ ] **Step 0: Close the invalid-codegen path that Task 5 found**
+
+Task 5 falsified spec §4.2: `Assoc { on: Var(_) }` is reachable, because a call site instantiates the callee's generic parameters as fresh inference variables, so a *parameter* declared `I::Item` is checked as a projection on a `Var`. No receiver is involved, so the `E0011` guard §4.2 relied on never fires. Measured, with a concrete impl in scope:
+
+```nova
+fn f<I: It>(x: I, y: I::Item) -> Int { 7 }
+fn main() { println("${f(W { v: 1 }, 5)}") }
+```
+
+This **type-checks and then reaches Cranelift's verifier with invalid IR** (`WARN cranelift_codegen::verifier: Found verifier errors in function`). The projection survived to lowering and `mir_ty`'s defensive arm mapped it to `MirTy::Unit`, so codegen emitted garbage for a program the front end accepted. That is §9's risk 1 actually happening, and it is this task's subject.
+
+It should fall out of Step 3: at monomorphization the type arguments are known, so `subst` turns `Assoc { on: Param(0) }` into `Assoc { on: W }` and normalization resolves it to `Int`. **Verify that it does**, with this exact program as a test, and if it does not, find out why before writing anything else — a projection reaching `mir_ty` is precisely what this task exists to prevent.
+
+Note the sibling case is **not** yours: with the parameters reversed (`fn f<I: It>(y: I::Item, x: I)`), the same call is *falsely rejected* at typeck with `error[E0010]: argument to \`f\` has type \`Int\` but \`?0::Item\` was expected`. That is an ordering limitation of normalize-at-seams plus an inference-variable leak into a user-facing message, recorded in the corrected §4.2. Do not fix it here; do **not** let your Step 3 work paper over it either, and say in your report whether your changes affected it.
+
 - [ ] **Step 1: Write the failing test**
 
 In `crates/nova-cli/tests/run_tests.rs`:
