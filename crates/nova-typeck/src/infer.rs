@@ -287,4 +287,51 @@ mod tests {
             "occurs check must reject ?0 = ?0::Item"
         );
     }
+
+    // occurs must not flag a projection whose Self type has nothing to do
+    // with the variable — only recursing into `on` and actually finding the
+    // variable there should reject the unification. (A mutant that ignores
+    // `on` and always reports "found" would make this spuriously fail and
+    // reject an otherwise-valid unification.)
+    #[test]
+    fn occurs_does_not_reject_a_var_unrelated_to_the_projections_self_type() {
+        use nova_resolver::DefId;
+        let mut icx = InferCtx::default();
+        let v = icx.fresh();
+        let proj = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: DefId(7),
+        };
+        assert!(
+            icx.unify(&v, &proj),
+            "v does not occur in `proj`'s Self type, so unification must succeed"
+        );
+        assert_eq!(icx.apply(&v), proj);
+    }
+
+    // `apply` backs `display_ty` (via `show`), so a broken Assoc arm would
+    // render a stale unresolved variable inside every diagnostic that
+    // mentions a projection. Exercise `apply` on a value that is itself
+    // `Ty::Assoc` at the top level, not just on the bare `Var` that resolves
+    // to one (as `assoc_unification_solves_a_var_inside_the_self_type` does).
+    #[test]
+    fn apply_resolves_a_solved_var_inside_a_top_level_projection() {
+        use nova_resolver::DefId;
+        let mut icx = InferCtx::default();
+        let v = icx.fresh();
+        assert!(icx.unify(&v, &Ty::Int));
+        let proj = Ty::Assoc {
+            on: Box::new(v.clone()),
+            assoc: DefId(7),
+        };
+        let resolved = icx.apply(&proj);
+        assert_eq!(
+            resolved,
+            Ty::Assoc {
+                on: Box::new(Ty::Int),
+                assoc: DefId(7),
+            },
+            "apply must resolve the solved var inside `on`, not just pass the projection through"
+        );
+    }
 }

@@ -947,4 +947,97 @@ mod tests {
         assert!(!concrete.has_params());
         assert!(!concrete.has_vars());
     }
+
+    // `self_types_overlap`'s two new arms, mutation-tested: the reviewer
+    // found that mutating this function to unconditional `false` (the
+    // silent-miscompile direction the design doc warns about) left the full
+    // workspace suite green before this test existed.
+    #[test]
+    fn self_types_overlap_treats_a_projection_conservatively() {
+        use nova_resolver::DefId;
+        let item = DefId(7);
+        let other = DefId(8);
+
+        // Same associated type, Self types that provably differ: no overlap.
+        let on_int = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        let on_bool = Ty::Assoc {
+            on: Box::new(Ty::Bool),
+            assoc: item,
+        };
+        assert!(
+            !self_types_overlap(&on_int, 0, &on_bool, 0),
+            "same associated type, but Int and Bool can never be the same Self type"
+        );
+
+        // Same associated type, Self types that could unify (a generic
+        // parameter against a concrete type): overlap.
+        let on_param = Ty::Assoc {
+            on: Box::new(Ty::Param(0)),
+            assoc: item,
+        };
+        assert!(
+            self_types_overlap(&on_param, 1, &on_int, 0),
+            "Param(0) can be instantiated to Int, so these can coincide"
+        );
+
+        // Different associated types: nothing is known about either, so the
+        // conservative answer is still overlap.
+        let other_assoc = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: other,
+        };
+        assert!(
+            self_types_overlap(&on_int, 0, &other_assoc, 0),
+            "different associated types cannot be proven disjoint, so assume overlap"
+        );
+
+        // A projection against a non-projection: always assumed to overlap,
+        // in both argument orders.
+        assert!(self_types_overlap(&on_int, 0, &Ty::Int, 0));
+        assert!(self_types_overlap(&Ty::Bool, 0, &on_int, 0));
+    }
+
+    // `match_pattern`'s new arm, mutation-tested: the reviewer found that
+    // mutating it to unconditional `false` also left the full workspace
+    // suite green before this test existed.
+    #[test]
+    fn match_pattern_treats_assoc_structurally() {
+        use nova_resolver::DefId;
+        let item = DefId(7);
+        let other = DefId(8);
+
+        // Same associated type: the Self-type pattern matches structurally
+        // and records its Param binding like any other position.
+        let pattern = Ty::Assoc {
+            on: Box::new(Ty::Param(0)),
+            assoc: item,
+        };
+        let ground = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        let mut out = Vec::new();
+        assert!(pattern.match_pattern(&ground, &mut out));
+        assert_eq!(out, vec![Some(Ty::Int)]);
+
+        // Different associated types: never a match, even with identical
+        // Self types.
+        let different_assoc = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: other,
+        };
+        let same_self = Ty::Assoc {
+            on: Box::new(Ty::Int),
+            assoc: item,
+        };
+        assert!(!same_self.match_pattern(&different_assoc, &mut Vec::new()));
+
+        // A projection on only one side is a structural mismatch, not a
+        // partial match, in both argument orders.
+        assert!(!pattern.match_pattern(&Ty::Int, &mut Vec::new()));
+        assert!(!Ty::Int.match_pattern(&ground, &mut Vec::new()));
+    }
 }
