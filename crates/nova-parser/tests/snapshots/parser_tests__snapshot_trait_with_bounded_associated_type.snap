@@ -1,0 +1,77 @@
+---
+source: crates/nova-parser/tests/parser_tests.rs
+assertion_line: 303
+expression: ast
+---
+Some(
+    File {
+        items: [
+            Spanned {
+                value: Trait(
+                    TraitDecl {
+                        vis: Private,
+                        name: Spanned {
+                            value: "It",
+                            span: Span {
+                                start: 6,
+                                end: 8,
+                                file: FileId(
+                                    0,
+                                ),
+                            },
+                        },
+                        generics: [],
+                        supertraits: [],
+                        where_clause: [],
+                        items: [
+                            AssocType {
+                                name: Spanned {
+                                    value: "Item",
+                                    span: Span {
+                                        start: 16,
+                                        end: 20,
+                                        file: FileId(
+                                            0,
+                                        ),
+                                    },
+                                },
+                                bounds: [
+                                    Spanned {
+                                        value: Path {
+                                            segments: [
+                                                Spanned {
+                                                    value: "Display",
+                                                    span: Span {
+                                                        start: 22,
+                                                        end: 29,
+                                                        file: FileId(
+                                                            0,
+                                                        ),
+                                                    },
+                                                },
+                                            ],
+                                        },
+                                        span: Span {
+                                            start: 22,
+                                            end: 29,
+                                            file: FileId(
+                                                0,
+                                            ),
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                ),
+                span: Span {
+                    start: 0,
+                    end: 31,
+                    file: FileId(
+                        0,
+                    ),
+                },
+            },
+        ],
+    },
+)

@@ -112,6 +112,16 @@ pub enum TraitItem {
     Required(FunctionSig),
     /// A provided method (with default body).
     Provided(Function),
+    /// An associated type declaration: `type Item`.
+    ///
+    /// `bounds` is parsed (`type Item: Display`) but **not** supported —
+    /// `nova-typeck` reports `E0900` for a non-empty list, the same way a
+    /// `where` clause on a trait is parsed here and rejected there. Parsing it
+    /// gives a precise span and a real diagnostic instead of a syntax error.
+    AssocType {
+        name: Spanned<String>,
+        bounds: Vec<Spanned<Path>>,
+    },
 }
 
 /// A function signature without a body.

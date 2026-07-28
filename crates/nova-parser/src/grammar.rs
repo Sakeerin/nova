@@ -534,6 +534,26 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "trait body")?;
         let mut items = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            // An associated type declaration (`type Item` or `type Item:
+            // Display`) must be handled before the speculative
+            // `parse_function_sig()` below: that call expects `fn` as its
+            // very first token, so reaching it with `type` ahead fails and
+            // falls into `sync_to_stmt_boundary()`, producing a spurious
+            // parse error even though this arm exists.
+            if self.eat(&Token::Type).is_some() {
+                if let Some(name) = self.parse_ident("associated type name") {
+                    let bounds = if self.eat(&Token::Colon).is_some() {
+                        self.parse_trait_bounds()
+                    } else {
+                        Vec::new()
+                    };
+                    self.eat(&Token::Semicolon);
+                    items.push(TraitItem::AssocType { name, bounds });
+                } else {
+                    self.sync_to_stmt_boundary();
+                }
+                continue;
+            }
             // Look ahead: if there's a body `{`, it's a provided method
             let saved_pos = self.pos;
             let saved_errors_len = self.errors.len();

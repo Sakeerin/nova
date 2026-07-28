@@ -516,6 +516,11 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
+            // Needed before the items loop below: an associated type's `Def`
+            // (`DefKind::AssocType { trait_def }`) points back to this trait's
+            // own id, so matching them up requires knowing it up front rather
+            // than only after `methods` is built.
+            let def_id = DefId(i as u32);
             if !decl.generics.is_empty() {
                 self.unsupported(decl.name.span, "generic traits");
             }
@@ -530,6 +535,24 @@ impl<'a> Checker<'a> {
             }
             let self_scope = self_generic_scope();
             let mut methods = Vec::new();
+            // The resolver pushes one `Def` per `TraitItem::AssocType` for
+            // this trait, in the same order it walked `t.items` — the same
+            // order `decl.items` is walked just below. Filtering preserves
+            // that relative order, so draining this front-to-back as each
+            // `AssocType` item is encountered lines each one up with its
+            // `DefId` without needing a second, item-indexed lookup table.
+            let mut assoc_type_ids =
+                self.defs
+                    .defs()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(di, d)| match d.kind {
+                        DefKind::AssocType { trait_def } if trait_def == def_id => {
+                            Some(DefId(di as u32))
+                        }
+                        _ => None,
+                    });
+            let mut assoc_types = Vec::new();
             for (mi, item) in decl.items.iter().enumerate() {
                 let (name, generics, where_clause, params, ret, is_default, is_async) = match item {
                     TraitItem::Required(sig) => (
@@ -550,6 +573,15 @@ impl<'a> Checker<'a> {
                         true,
                         f.is_async,
                     ),
+                    TraitItem::AssocType { name, bounds } => {
+                        if !bounds.is_empty() {
+                            self.unsupported(name.span, "trait bounds on an associated type");
+                        }
+                        if let Some(assoc_def_id) = assoc_type_ids.next() {
+                            assoc_types.push((name.value.clone(), assoc_def_id));
+                        }
+                        continue;
+                    }
                 };
                 // `async` is unsupported at every method site; check it here so
                 // that declaration-only (`Required`) trait methods are covered
@@ -596,12 +628,12 @@ impl<'a> Checker<'a> {
                     default_def,
                 });
             }
-            let def_id = DefId(i as u32);
             self.traits.push(hir::TraitDef {
                 def_id,
                 name: def.name.clone(),
                 supertraits: self.supertraits.get(&def_id).cloned().unwrap_or_default(),
                 methods,
+                assoc_types,
             });
         }
 
@@ -1606,7 +1638,12 @@ impl<'a> Checker<'a> {
                 };
                 match &decl.items[loc.method_index] {
                     TraitItem::Provided(f) => f,
-                    TraitItem::Required(_) => return None,
+                    // Neither has a body to check: a required method has none,
+                    // and `loc.method_index` never actually points at an
+                    // associated type — the resolver only ever creates a
+                    // `MethodOwner::TraitDefault` `Def` for a `Provided` item —
+                    // but the match must stay exhaustive over `TraitItem`.
+                    TraitItem::Required(_) | TraitItem::AssocType { .. } => return None,
                 }
             }
         };
@@ -9017,6 +9054,42 @@ mod tests {
             .expect("trait B collected");
         assert_eq!(b.supertraits, vec![a.def_id]);
         assert!(a.supertraits.is_empty());
+    }
+
+    #[test]
+    fn a_trait_records_its_associated_types_in_order() {
+        let r = check_src("trait Pair { type A\n type B\n fn get(self) -> Int }\nfn main() { }");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let t = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "Pair")
+            .expect("trait Pair collected");
+        let names: Vec<&str> = t.assoc_types.iter().map(|(n, _)| n.as_str()).collect();
+        // Order matters: it is declaration order, and two associated types is
+        // the case that catches an implementation assuming there is only one.
+        assert_eq!(names, ["A", "B"]);
+        // Each gets its own DefId, so `display_ty` can name it.
+        assert_ne!(t.assoc_types[0].1, t.assoc_types[1].1);
+    }
+
+    #[test]
+    fn a_bound_on_an_associated_type_reports_e0900() {
+        // Rejected rather than silently dropped — the same rule this project
+        // applies to record and sum type-parameter bounds, because a bound
+        // that enforces nothing is worse than no bound.
+        let r = check_src("trait It { type Item: Display }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 for a bound on an associated type");
+        assert!(
+            d.message.contains("associated type"),
+            "message should name the construct: {}",
+            d.message
+        );
     }
 
     #[test]

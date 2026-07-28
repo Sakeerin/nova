@@ -205,6 +205,10 @@ pub enum DefKind {
     /// An `extern` function declaration (a C-ABI import, no Nova body).
     /// `fn_index` selects the declaration within the extern block's `items`.
     ExternFn { item_index: usize, fn_index: usize },
+    /// An associated type declared in a trait (`type Item`). Carries its
+    /// owning trait so a projection can be checked against the right trait
+    /// without a separate lookup table.
+    AssocType { trait_def: DefId },
 }
 
 /// Where a [`DefKind::Method`] lives.
@@ -811,21 +815,42 @@ fn collect_item(
                     exp.traits.insert(name, id);
                 }
             }
-            // Default-method bodies become their own method defs (global).
+            // Default-method bodies become their own method defs (global);
+            // each associated type gets its own `DefId` too, named after
+            // itself. A `match` (not `if let`) on purpose: unlike a
+            // non-exhaustive `if let`, this is not something `cargo check`
+            // can force open when a new `TraitItem` variant is added, so it
+            // must already cover every arm.
             for (method_index, ti) in t.items.iter().enumerate() {
-                if let nova_ast::item::TraitItem::Provided(f) = ti {
-                    push_def(
-                        defs,
-                        Def {
-                            name: format!("{}::{}$default", t.name.value, f.name.value),
-                            span: f.name.span,
-                            kind: DefKind::Method {
-                                item_index,
-                                method_index,
-                                owner: MethodOwner::TraitDefault,
+                match ti {
+                    nova_ast::item::TraitItem::Provided(f) => {
+                        push_def(
+                            defs,
+                            Def {
+                                name: format!("{}::{}$default", t.name.value, f.name.value),
+                                span: f.name.span,
+                                kind: DefKind::Method {
+                                    item_index,
+                                    method_index,
+                                    owner: MethodOwner::TraitDefault,
+                                },
                             },
-                        },
-                    );
+                        );
+                    }
+                    nova_ast::item::TraitItem::AssocType { name: at_name, .. } => {
+                        // Not inserted into `scope.types`: an associated type
+                        // is not a type name you can write bare, only
+                        // reachable through a projection (`Self::Item`).
+                        push_def(
+                            defs,
+                            Def {
+                                name: at_name.value.clone(),
+                                span: at_name.span,
+                                kind: DefKind::AssocType { trait_def: id },
+                            },
+                        );
+                    }
+                    nova_ast::item::TraitItem::Required(_) => {}
                 }
             }
         }
@@ -1373,6 +1398,17 @@ mod tests {
             r.definitions.def(tr).kind,
             DefKind::Trait { item_index } if r.definitions.module_of(item_index) == ModuleId(0)
         ));
+    }
+
+    #[test]
+    fn associated_type_is_not_in_the_type_namespace() {
+        // `Item` is not a type name you can write bare — it is reachable only
+        // through a projection (`Self::Item`, resolved in a later task). If a
+        // future change ever seeded it into `scope.types` too, this would
+        // start returning `Some`, silently making it a global type name.
+        let r = resolve_src("trait It { type Item }\nfn main() { }\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(r.definitions.resolve_type(ModuleId(0), "Item"), None);
     }
 
     #[test]

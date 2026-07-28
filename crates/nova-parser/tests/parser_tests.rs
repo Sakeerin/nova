@@ -277,6 +277,32 @@ fn plain_and_empty_array_literals_still_parse() {
     assert_eq!(errs, 0, "expected no parse errors, got {}", errs);
 }
 
+#[test]
+fn snapshot_trait_with_associated_type() {
+    // No separator is required between an associated-type declaration and the
+    // next trait item — same convention as a required method signature.
+    let source = "trait It { type Item  fn next(self) -> Int }";
+    let mut db = FileDb::new();
+    let file_id = db.add("test.nova", source);
+    let (tokens, _) = lex(source, file_id);
+    let (ast, errs) = parse(&tokens, file_id);
+    assert!(errs.is_empty(), "parse errors: {:?}", errs);
+    insta::assert_debug_snapshot!(ast);
+}
+
+#[test]
+fn snapshot_trait_with_bounded_associated_type() {
+    // `bounds` is parsed here and rejected later (`nova-typeck` reports
+    // E0900) — this snapshot only pins that parsing keeps the bound.
+    let source = "trait It { type Item: Display }";
+    let mut db = FileDb::new();
+    let file_id = db.add("test.nova", source);
+    let (tokens, _) = lex(source, file_id);
+    let (ast, errs) = parse(&tokens, file_id);
+    assert!(errs.is_empty(), "parse errors: {:?}", errs);
+    insta::assert_debug_snapshot!(ast);
+}
+
 // Property test: parse never panics
 #[cfg(test)]
 mod prop {

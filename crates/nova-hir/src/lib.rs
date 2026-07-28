@@ -495,6 +495,10 @@ pub struct TraitDef {
     /// it only ever appends an id it has not already recorded.)
     pub supertraits: Vec<DefId>,
     pub methods: Vec<TraitMethod>,
+    /// Associated types this trait declares, in declaration order, each with
+    /// its own `DefId` (`DefKind::AssocType`). An impl must bind every one of
+    /// them; `check_impl_conformance` enforces that.
+    pub assoc_types: Vec<(String, DefId)>,
 }
 
 /// One method of a trait. In `params`/`ret`, `Ty::Param(0)` denotes `Self` and
