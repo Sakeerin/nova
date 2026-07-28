@@ -317,5 +317,9 @@ impl String {
     // in codepoints: `"ß".to_upper()` is `"SS"`.
     pub fn to_upper(self) -> String { str_to_upper(self) }
 
+    // Full Unicode case mapping, for the same reason as `to_upper`: the
+    // result may differ in codepoint count from the input, just in the other
+    // direction — `"İ".to_lower()` is `"i"` followed by a combining dot
+    // above (U+0307), 2 codepoints from 1.
     pub fn to_lower(self) -> String { str_to_lower(self) }
 }
