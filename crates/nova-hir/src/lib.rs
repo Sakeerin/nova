@@ -546,6 +546,14 @@ pub struct ImplInfo {
     /// `(method name, compiled method function DefId)` for methods this
     /// impl defines directly.
     pub methods: Vec<(String, DefId)>,
+    /// Associated types this impl binds, keyed by the associated type's own
+    /// `DefId` (`DefKind::AssocType`, the same id `TraitDef::assoc_types`
+    /// carries). The bound type may contain the impl's `Param(k)`, so
+    /// normalization must substitute the impl's arguments before using it.
+    ///
+    /// Empty for an inherent impl: only a trait declares associated types, so
+    /// only a trait impl can bind one.
+    pub assoc_bindings: Vec<(DefId, Ty)>,
 }
 
 impl ImplInfo {

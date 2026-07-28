@@ -809,6 +809,60 @@ impl<'a> Checker<'a> {
             };
 
             let impl_count = block.generics.len() as u32;
+            // Associated-type bindings (`type Item = T`), keyed by the
+            // associated type's own `DefId` — the same key
+            // `TraitDef::assoc_types` uses, so a projection resolved to
+            // `Ty::Assoc { assoc, .. }` looks its binding up directly.
+            //
+            // The bound type is converted in the impl's own generic scope, so
+            // it may contain the impl's `Param(k)`; normalization substitutes
+            // the impl's type arguments before using it. Converting it here
+            // rather than lazily also means `type Item = Nope` reports its own
+            // "cannot find type" once, at the binding, and not once per use.
+            //
+            // Whether the *set* of bindings matches the trait's is
+            // `check_impl_conformance`'s job, beside the method set. All that
+            // happens here is resolving each name to its `DefId`: a name the
+            // trait does not declare has no `DefId` to be keyed under, so it is
+            // dropped from this list and reported there.
+            let mut assoc_bindings: Vec<(DefId, Ty)> = Vec::new();
+            for b in &block.assoc_types {
+                let ty = self.convert_ty(&b.ty, &impl_generics, &impl_bounds);
+                let resolved = trait_id.and_then(|tid| self.find_assoc_type(tid, &b.name.value));
+                let Some(assoc) = resolved else {
+                    // An inherent impl has no trait, so it can never bind an
+                    // associated type — and `check_impl_conformance` does not
+                    // run for it, so this is the only place that can say so.
+                    if trait_id.is_none() {
+                        self.error(
+                            "E0071",
+                            format!(
+                                "associated type `{}` cannot be bound by an inherent impl, \
+                                 which implements no trait",
+                                b.name.value
+                            ),
+                            b.name.span,
+                        );
+                    }
+                    continue;
+                };
+                // Two bindings for one associated type would leave which one
+                // normalization picks up to list order. Keep the first and
+                // reject the rest, the way a duplicate generic parameter is
+                // handled (`check_duplicate_generics`, same code).
+                if assoc_bindings.iter().any(|(d, _)| *d == assoc) {
+                    self.error(
+                        "E0403",
+                        format!(
+                            "the associated type `{}` is already bound by this impl",
+                            b.name.value
+                        ),
+                        b.name.span,
+                    );
+                    continue;
+                }
+                assoc_bindings.push((assoc, ty));
+            }
             let mut methods = Vec::new();
             for (mi, f) in block.functions.iter().enumerate() {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
@@ -910,7 +964,14 @@ impl<'a> Checker<'a> {
             // Conformance: a trait impl must define exactly the trait's
             // methods that lack defaults, and nothing foreign.
             if let Some(tid) = trait_id {
-                self.check_impl_conformance(tid, &methods, &self_ty, impl_count, block.ty.span);
+                self.check_impl_conformance(
+                    tid,
+                    &methods,
+                    &block.assoc_types,
+                    &self_ty,
+                    impl_count,
+                    block.ty.span,
+                );
             }
 
             self.impls.push(hir::ImplInfo {
@@ -920,6 +981,7 @@ impl<'a> Checker<'a> {
                 generics: block.generics.len() as u32,
                 bounds: impl_bounds,
                 methods,
+                assoc_bindings,
             });
             impl_spans.push(block.ty.span);
         }
@@ -1065,16 +1127,22 @@ impl<'a> Checker<'a> {
         format!("`{}`", names.join(" + "))
     }
 
-    /// Verify a trait impl provides all required methods, no unknown ones,
-    /// and that each provided method's signature matches the trait's
-    /// declaration (with `Self` bound to the impl's self type). Without the
-    /// signature check the call site uses the trait signature while codegen
-    /// dispatches to the impl's method — a mismatch miscompiles or is
-    /// memory-unsafe.
+    /// Verify a trait impl provides all required methods, binds exactly the
+    /// trait's associated types, no unknown ones of either, and that each
+    /// provided method's signature matches the trait's declaration (with
+    /// `Self` bound to the impl's self type). Without the signature check the
+    /// call site uses the trait signature while codegen dispatches to the
+    /// impl's method — a mismatch miscompiles or is memory-unsafe.
+    ///
+    /// `provided_assoc` is the impl's associated-type bindings as written, by
+    /// name and span: this is the set-membership check in both directions, so
+    /// it needs the names the trait *doesn't* declare, which have no `DefId`
+    /// and are therefore absent from `ImplInfo::assoc_bindings`.
     fn check_impl_conformance(
         &mut self,
         trait_id: DefId,
         provided: &[(String, DefId)],
+        provided_assoc: &[ast::AssocTypeBinding],
         self_ty: &Ty,
         impl_count: u32,
         span: Span,
@@ -1229,19 +1297,56 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        // An associated type the trait never declared: the E0071 "not a member
+        // of the trait" case, the same as a foreign method above, and reported
+        // at the binding itself rather than at the impl's self type because
+        // there is a precise span for it.
+        for b in provided_assoc {
+            if !tr.assoc_types.iter().any(|(n, _)| n == &b.name.value) {
+                self.error(
+                    "E0071",
+                    format!(
+                        "associated type `{}` is not a member of trait `{}`",
+                        b.name.value, tr.name
+                    ),
+                    b.name.span,
+                );
+            }
+        }
         let missing: Vec<String> = tr
             .methods
             .iter()
             .filter(|m| m.default_def.is_none() && !provided.iter().any(|(n, _)| n == &m.name))
             .map(|m| format!("`{}`", m.name))
             .collect();
+        // Associated types have no defaults in this increment, so every
+        // declared one is required: the filter is simply "not provided", with
+        // no `default_def.is_none()` counterpart to exempt anything. If
+        // defaults are ever added, this is the line that must learn about them.
+        let missing_assoc: Vec<String> = tr
+            .assoc_types
+            .iter()
+            .filter(|(n, _)| !provided_assoc.iter().any(|b| &b.name.value == n))
+            .map(|(n, _)| format!("`{n}`"))
+            .collect();
+        // One diagnostic for both categories — but naming only the ones
+        // actually missing, so a missing `Item` never reads as a missing
+        // *method*. With only methods missing this is byte-identical to the
+        // message this site emitted before associated types existed.
+        let mut kinds: Vec<String> = Vec::new();
         if !missing.is_empty() {
+            kinds.push(format!("method(s): {}", missing.join(", ")));
+        }
+        if !missing_assoc.is_empty() {
+            kinds.push(format!("associated type(s): {}", missing_assoc.join(", ")));
+        }
+        if !kinds.is_empty() {
             self.error(
                 "E0070",
                 format!(
-                    "impl of trait `{}` is missing method(s): {}",
+                    "impl of trait `{}` is missing {}",
                     tr.name,
-                    missing.join(", ")
+                    kinds.join(" and ")
                 ),
                 span,
             );
@@ -9704,6 +9809,175 @@ mod tests {
              fn main() { }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn an_impl_binds_its_associated_type() {
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let i = r
+            .module
+            .impls
+            .iter()
+            .find(|i| i.trait_id.is_some())
+            .expect("the trait impl was collected");
+        // Bound to the impl's OWN parameter, which is what makes `subst` the
+        // thing that carries it — a binding to a primitive would not.
+        assert_eq!(i.assoc_bindings.len(), 1);
+        assert_eq!(i.assoc_bindings[0].1, Ty::Param(0));
+        // And the key is the trait's own associated-type `DefId`, not some
+        // freshly minted or positional id: a binding keyed by anything else
+        // could not be looked up by the normalization seams in Tasks 5-7.
+        let t = r
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "It")
+            .expect("trait It collected");
+        assert_eq!(i.assoc_bindings[0].0, t.assoc_types[0].1);
+    }
+
+    #[test]
+    fn an_impl_missing_an_associated_type_reports_e0070() {
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0070")
+            .expect("E0070 for a missing associated type");
+        assert!(
+            d.message.contains("Item"),
+            "names the missing type: {}",
+            d.message
+        );
+        // The impl provides every method the trait requires, so the message
+        // must not read as a missing *method* — the shared E0070 site says
+        // "method(s)" for that case and has to say something else for this one.
+        assert!(
+            !d.message.contains("method"),
+            "a missing associated type is not a missing method: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn an_impl_binding_an_undeclared_associated_type_reports_e0071() {
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n type Extra = Bool\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0071")
+            .expect("E0071 for an undeclared associated type");
+        assert!(d.message.contains("Extra"), "names it: {}", d.message);
+        // `Item` IS declared, so only the one offender may be reported.
+        assert!(
+            !d.message.contains("Item"),
+            "must not implicate the legitimate binding: {}",
+            d.message
+        );
+        assert_eq!(
+            r.diagnostics.iter().filter(|d| d.code == "E0071").count(),
+            1,
+            "exactly one E0071: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn binding_the_same_associated_type_twice_is_rejected() {
+        // Both bindings resolve to the same `DefId`, so keeping both would
+        // leave which one normalization reads up to list order.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n type Item = Bool\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0403")
+            .expect("E0403 for a repeated associated-type binding");
+        assert!(d.message.contains("Item"), "{}", d.message);
+        // The first binding survives, so the set is complete and no E0070 is
+        // due — a duplicate is one error, not two.
+        assert!(!error_codes(&r).contains(&"E0070"), "{:?}", r.diagnostics);
+        let i = r
+            .module
+            .impls
+            .iter()
+            .find(|i| i.trait_id.is_some())
+            .expect("the trait impl was collected");
+        assert_eq!(i.assoc_bindings.len(), 1, "{:?}", i.assoc_bindings);
+        assert_eq!(i.assoc_bindings[0].1, Ty::Int, "the FIRST binding is kept");
+    }
+
+    #[test]
+    fn an_inherent_impl_cannot_bind_an_associated_type() {
+        // `check_impl_conformance` never runs for an inherent impl, so without
+        // its own check here the binding would be silently dropped.
+        let r = check_src(
+            "record W { v: Int }\n\
+             impl W { type Item = Int\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0071")
+            .expect("E0071 for a binding on an inherent impl");
+        assert!(d.message.contains("Item"), "{}", d.message);
+        assert!(
+            d.message.contains("inherent"),
+            "says why, not just that: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn conformance_compares_the_associated_type_sets_not_their_sizes() {
+        // Two declared, two bound, but one of each is wrong: `A` is missing
+        // and `C` is undeclared. A count comparison sees 2 == 2 and reports
+        // nothing; only a set comparison catches both. This is the case a
+        // single-associated-type test cannot distinguish.
+        let r = check_src(
+            "trait Pair { type A\n type B\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl Pair for W { type B = Int\n type C = Bool\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let missing = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0070")
+            .expect("E0070 for the missing `A`");
+        assert!(missing.message.contains('A'), "{}", missing.message);
+        assert!(
+            !missing.message.contains('B'),
+            "`B` is bound, so it is not missing: {}",
+            missing.message
+        );
+        let extra = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0071")
+            .expect("E0071 for the undeclared `C`");
+        assert!(extra.message.contains('C'), "{}", extra.message);
     }
 
     #[test]
