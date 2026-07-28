@@ -763,7 +763,23 @@ Expected: the first FAILS (the projection never resolves, so `Assoc` fails to un
 
 Resolve `on` first (it may itself contain a projection), take its `head()`, find the impl of the projection's owning trait for that head, recover the impl's type arguments with `match_pattern`, look up the binding, and `subst` the impl's arguments into it. Recurse into `Fn`, `Sum`, `Record`, `Array` so a projection nested inside a compound type is reached. Leave `Assoc { on: Param(_) }` untouched — that is Task 7's job.
 
-Call it immediately after `fcx.icx.apply(..)` at the points that consume a type: the method-call return type, `let` annotations, and function return types. **Do not** call it inside `unify` — the whole design depends on projections being gone before unification, and normalizing inside would reintroduce the impl-table dependency the unifier deliberately lacks.
+**Put the core in `nova-hir`, as a free function taking `&[hir::ImplInfo]`.** Task 7 needs the identical logic at monomorphization and the plan requires it written once; this is the shape that makes that possible, verified:
+
+- `nova-hir` already hosts exactly this kind of `Module`-level type operation — `match_pattern` (`crates/nova-hir/src/lib.rs:168`), `resolve_method_full` (`:319`), `self_types_overlap` (`:352`), `trait_def` (`:299`) — and `normalize` needs only those plus `subst`.
+- Both callers can supply `&[ImplInfo]`: the `Checker` owns `impls: Vec<hir::ImplInfo>` (`crates/nova-typeck/src/check.rs:167`), populated by `collect_impls` *before* any function body is checked and moved into `module.impls` at the end (`:128`); mono has the finished `module.impls`. A free function over a slice is the one signature that serves both without either side reaching into the other's internals.
+- **Do not instead have `nova-mir` call a `Checker` method.** `nova-mir` *does* list `nova-typeck` as a dependency, so it would compile — but normalization would then be reachable only through a half-built checker, and the `Checker` is mid-construction while it checks bodies. Resist it.
+
+Keep the `Checker` side a thin wrapper that passes `&self.impls` and adds the diagnostic behaviour, so the shared core stays free of `Checker` state.
+
+Call it immediately after `fcx.icx.apply(..)` at the points that consume a type. **There are 16 `.icx.apply(` call sites** — "the points that consume a type" is not self-evident, so the three intended ones are:
+
+- the **method-call return type** (`check.rs:3550`'s neighbourhood, `let recv_ty = fcx.icx.apply(&recv.ty)` and the return type derived from the resolved method),
+- **`let` annotations** — `check.rs:2061`, inside `ast::Stmt::Let`; note it does `value.ty = annot_ty` *after* the unify, so a projection written in the annotation becomes the binding's type and must be normalized or it propagates,
+- **function return types** — `check.rs:1882`'s check of `body.ty` against `sig.ret`.
+
+If you conclude another site needs it, add it and **say which and why in your report** — do not silently normalize everywhere, and do not skip one of the three because a test happens to pass without it.
+
+**Do not** call it inside `unify` — the whole design depends on projections being gone before unification, and normalizing inside would reintroduce the impl-table dependency the unifier deliberately lacks.
 
 - [ ] **Step 4: Run the tests**
 
@@ -897,9 +913,13 @@ Expected: FAIL. The projection survives to lowering, `mir_ty` maps it to `MirTy:
 
 - [ ] **Step 3: Implement**
 
-In `mono.rs`, after `specialize`/`subst` produces a function instance, walk its types and normalize every `Assoc` whose `on` is now concrete, using the same impl-table logic as Task 5 — factor that logic so it is written **once** and called from both, rather than reimplemented. Phase 2.2a's headline defect was one probe scan existing in two copies that could drift; two copies of projection normalization is the same hazard with worse consequences.
+In `mono.rs`, after `specialize`/`subst` produces a function instance, walk its types and normalize every `Assoc` whose `on` is now concrete. `specialize` is at `crates/nova-mir/src/mono.rs:213` and is where `subst` runs (`ret_ty: func.ret_ty.subst(type_args)`, plus `subst_expr` over the body), so that is the seam.
 
-Then, if an `Assoc` remains after normalization, emit a diagnostic naming the projection rather than letting it reach `mir_ty`. Use `E0013`'s neighbourhood in `mono.rs` as the model for how mono reports.
+**Call Task 5's shared `nova-hir` function — do not write a second copy.** Task 5 places the core in `nova-hir` as a free function over `&[hir::ImplInfo]` precisely so this task can call it with `&module.impls`. If it is not there when you start, that is a Task 5 defect: report it and put it there rather than reimplementing. Phase 2.2a's headline defect was one probe scan existing in two copies that could drift; two copies of projection normalization is the same hazard with worse consequences, because the two would disagree silently about a *type* rather than about a scan bound.
+
+Then, if an `Assoc` remains after normalization, emit a diagnostic naming the projection rather than letting it reach `mir_ty`. Mono already reports diagnostics with codes — `E0601`, `E0075`, `E0011`, `E0013` (`mono.rs:21, 61, 88, 117`) — so follow that pattern.
+
+Note what makes the current behaviour a silent wrong answer rather than a crash: `mir_ty` maps `Assoc` to `MirTy::Unit` via its defensive arm (`crates/nova-mir/src/lib.rs:460`), which Task 1 added deliberately with a comment naming this task. So a surviving projection today produces a *unit-typed value where another type was meant*, not an ICE. That is why the diagnostic matters and why Step 2's expected failure is a wrong result or a backend error, not a panic.
 
 - [ ] **Step 4: Run the tests**
 
