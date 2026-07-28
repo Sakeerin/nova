@@ -610,6 +610,14 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "impl block")?;
         let mut functions = Vec::new();
         let mut consts = Vec::new();
+        // Loop invariant: every arm below advances `self.pos` by at least one
+        // token, so this terminates. `parse_function` opens with
+        // `expect(&Token::Fn, …)`, which consumes on the match this arm has
+        // already peeked; the `const` arm advances before parsing; and the
+        // fallthrough arm advances explicitly (see its own comment). Anything
+        // added here must keep that invariant, because neither
+        // `sync_to_item_boundary` nor `sync_to_stmt_boundary` provides it —
+        // both stop *at* their boundary token without consuming it.
         while !self.check(&Token::RBrace) && !self.is_at_end() {
             let vis = self.parse_visibility();
             match self.peek() {
@@ -635,6 +643,19 @@ impl<'a> Parser<'a> {
                         found: self.peek().description().to_owned(),
                         span,
                     });
+                    // Consume the offending token before syncing. This is the
+                    // arm's half of the loop invariant above, and it is not
+                    // optional: `sync_to_item_boundary` breaks at any of ten
+                    // item-start tokens (`fn`, `pub`, `record`, `trait`,
+                    // `impl`, `type`, `const`, `import`, `module`, `extern`)
+                    // *without* consuming one, so a token that is both
+                    // unexpected here and an item start — every one of
+                    // `record`, `trait`, `impl`, `type`, `import`, `module`,
+                    // `extern` inside an impl body — was re-peeked forever.
+                    // Syncing alone recovers only from tokens that are not
+                    // item starts, which is why `impl W { 42 }` always worked
+                    // and `impl W { record R { } }` never terminated.
+                    self.advance();
                     self.sync_to_item_boundary();
                 }
             }

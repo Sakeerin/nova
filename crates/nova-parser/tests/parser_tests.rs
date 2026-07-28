@@ -303,6 +303,84 @@ fn snapshot_trait_with_bounded_associated_type() {
     insta::assert_debug_snapshot!(ast);
 }
 
+/// Every token that `sync_to_item_boundary` treats as an item boundary, as it
+/// would appear at the start of an item inside an `impl` body. Each one used to
+/// make the impl-body loop spin forever: the `_` arm pushed an error and then
+/// called a sync that stops *at* an item-start token without consuming it, so
+/// the next iteration re-peeked the identical token. `pub` is included because
+/// `parse_visibility()` consumes it and leaves the loop looking at the
+/// item-start token behind it.
+const IMPL_BODY_ITEM_STARTS: &[(&str, &str)] = &[
+    ("type", "type Item = Int"),
+    ("record", "record R { a: Int }"),
+    ("trait", "trait Q { fn q(self) -> Int }"),
+    ("impl", "impl W { }"),
+    ("import", "import foo"),
+    ("module", "module foo"),
+    ("extern", "extern { fn e() -> Int }"),
+    ("pub record", "pub record R { a: Int }"),
+];
+
+#[test]
+fn an_item_start_token_inside_an_impl_body_terminates() {
+    // The load-bearing property is that this test *finishes*: a
+    // zero-progress recovery loop cannot be caught by an assertion, only by
+    // the run never returning (or, in a test binary, by the allocator giving
+    // up on the error vector — measured at 8 GiB before this was fixed).
+    //
+    // The bound on the error count is the assertable half of the same
+    // property. The exact number is not the contract — being O(1) rather than
+    // O(remaining tokens) is, so a regression that merely made recovery
+    // quadratic instead of infinite would still be caught here.
+    for (label, item) in IMPL_BODY_ITEM_STARTS {
+        let source = format!("record W {{ v: Int }}\nimpl W {{ {item} }}\nfn main() {{ }}\n");
+        let (ok, errs) = parse_file(label, &source);
+        assert!(ok, "{label}: parser must still return an AST");
+        assert!(
+            errs > 0,
+            "{label}: an item inside an impl body is an error, not silence"
+        );
+        assert!(
+            errs < 10,
+            "{label}: recovery must be bounded, got {errs} errors"
+        );
+    }
+}
+
+#[test]
+fn a_non_item_token_inside_an_impl_body_still_recovers() {
+    // The control case: `42` and `let` were never item-start tokens, so
+    // `sync_to_item_boundary` always consumed them and these two always
+    // terminated. They must keep doing so — the fix must not turn a working
+    // recovery path into a worse one.
+    for (label, item) in [("int", "42"), ("let", "let x = 1")] {
+        let source = format!("record W {{ v: Int }}\nimpl W {{ {item} }}\nfn main() {{ }}\n");
+        let (ok, errs) = parse_file(label, &source);
+        assert!(ok, "{label}: parser must still return an AST");
+        assert!(errs > 0, "{label}: still an error");
+        assert!(errs < 10, "{label}: bounded, got {errs}");
+    }
+}
+
+#[test]
+fn a_keyword_method_name_followed_by_a_generic_trait_method_terminates() {
+    // The separately queued parser hang from the `std/strings` phase
+    // (`.superpowers/sdd/phase-2.2a-debt/parser-hang-repro.nova`), which needs
+    // BOTH halves to reproduce: `with` is a keyword, so it fails in the
+    // method-name position and `parse_function` returns `None`; the impl-body
+    // loop then syncs forward, and `sync_to_item_boundary` walks straight past
+    // the impl's own closing brace to stop at the following `trait` — which
+    // the loop re-peeked forever. Same root cause, same fix.
+    let source = "record B<T> { v: T }\n\
+                  impl<T> B<T> { fn with(self) -> Int { 1 } }\n\
+                  trait M { fn remap<U>(self, u: U) -> Int }\n\
+                  fn main() { }\n";
+    let (ok, errs) = parse_file("keyword_method_name", source);
+    assert!(ok, "parser must still return an AST");
+    assert!(errs > 0, "`fn with` is a parse error");
+    assert!(errs < 10, "recovery must be bounded, got {errs} errors");
+}
+
 // Property test: parse never panics
 #[cfg(test)]
 mod prop {
