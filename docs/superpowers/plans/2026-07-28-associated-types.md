@@ -685,7 +685,14 @@ Without this step, Step 4b would have to branch on "is there a user-written `Sel
 - **Safe to do:** `Self` is used as a type-parameter name nowhere in `std/`, `examples/`, or `tests/` (checked), and it is not currently reserved anywhere outside the lexer's `#[token("Self")]`. Expect zero pre-existing test churn; if a test does break, read it before touching it.
 - Test both that `impl<Self: It> …` is now rejected with `E0076` naming the parameter, and that a plain `Self` inside a trait body still works — the rejection must not touch the legitimate implicit `Self` that `self_generic_scope` inserts, which is not a user-written parameter at all.
 
-After this step, `Self` in an impl means exactly one thing (the impl's self type), which is the assumption Step 4b's implementation and Task 6's normalization both rest on. **Update the comment at `check.rs:1550` once this lands**, so it describes the finished state: `Self` is an ordinary `generics` key, populated only by `self_generic_scope` for trait bodies and default methods, because `E0076` now rejects the user-written path.
+After this step, `Self` in an impl means exactly one thing (the impl's self type), which is the assumption Step 4b's implementation and Task 6's normalization both rest on. **Update the comment at `check.rs:1550` once this lands**, so it describes the finished state: `Self` is an ordinary `generics` key, populated only by `self_generic_scope` for trait bodies and default methods, because `E0076` now rejects the user-written path. The comment already carries a forward reference to this step, so it will read as stale the moment 4c lands.
+
+**Two existing tests must be deliberately flipped, not worked around.** Task 3's second fix round added tests pinning the *current* behaviour, precisely so that changing it would be a visible decision rather than silent drift:
+
+- `a_user_written_self_type_parameter_makes_self_item_resolve_in_an_impl` — asserts `impl<Self: It> W<Self> { fn peek(self) -> Self::Item … }` type-checks clean. Step 4c makes that an `E0076`, so **rewrite the test to assert the rejection**, keeping the same program. Do not delete it: it is the only pin on this shape.
+- Its sibling, which asserts a plain `impl K { … -> Self::Item }` reports `E0900`, should still pass unchanged after 4c — but Step 4b changes it too (that is the case 4b makes resolve). Reconcile both steps' effects on it in one place and say in the commit message what the final expected diagnostic is and why.
+
+This is the same deliberate-flip pattern Task 8 uses for its `known_gap` test. A flipped assertion with a commit message explaining the flip is correct; a deleted test is not.
 
 - [ ] **Step 5: Run the tests**
 
