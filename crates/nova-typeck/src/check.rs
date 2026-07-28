@@ -2131,11 +2131,16 @@ impl<'a> Checker<'a> {
     /// which has no [`Ty::head`] and cannot be resolved. Applying the current
     /// substitution first turns it into `Assoc { on: <concrete> }`.
     ///
-    /// **The `has_assoc` guard is not an optimization.** Applying the
-    /// substitution changes what goes into `hir::Expr::ty` for *every* call, and
-    /// while `finalize_function` applies it again at the end anyway, doing it
-    /// early only earns its risk where a projection makes it necessary. Without
-    /// a projection this is exactly the plain `subst` every call site did before.
+    /// **The `has_assoc` guard is not an optimization, and no test can kill it.**
+    /// Applying the substitution early is, as far as I can reason, unobservable —
+    /// `unify` walks through variables anyway, `show` applies before rendering,
+    /// and `finalize_function` applies again at the end — and the full suite is
+    /// green with the guard removed, so nothing pins it. It is here because that
+    /// reasoning, not the compiler, is what makes the unguarded version safe: with
+    /// the guard, a call whose signature has no projection takes exactly the plain
+    /// `subst` path it took before this task, and the reasoning only has to hold
+    /// for the projection case. Deliberate, unpinned, and recorded as such rather
+    /// than left to look like a mutation that got away.
     ///
     /// This is also where the design's one admitted hole shows: the variable has
     /// to be *already solved*, which for a call means the argument that
@@ -10840,17 +10845,31 @@ mod tests {
              record W<T> { v: T }\n\
              impl<T> It for W<T> { type Item = T\n\
              fn get_item(self) -> Self::Item { self.v } }\n\
-             fn main() { let w = W { v: 7 }\n let n: Int = w.get_item()\n println(\"${n}\") }",
+             fn main() { let w = W { v: 7 }\n let n: Int = w.get_item()\n\
+             println(\"${n} ${w.get_item()}\") }",
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
         // Not vacuous on the *value* either: the call must be typed `Int`, so a
         // `normalize` that returned `Ty::Error` (which unifies with anything)
         // cannot hide behind the empty diagnostic list above.
-        let call = exprs_in(&r.module, "main")
+        //
+        // Read off the **unannotated** second call, deliberately. `Stmt::Let`
+        // does `value.ty = annot_ty` *after* the unify, so the initializer of
+        // `let n: Int = …` carries the annotation's type by construction — an
+        // assertion there equals `Int` whatever `normalize` returned. Measured:
+        // this exact test passed against a `normalize` that answered `Ty::Error`
+        // for the second impl when it was written against the annotated call.
+        let call_tys: Vec<&Ty> = exprs_in(&r.module, "main")
             .into_iter()
-            .find(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
-            .expect("the get_item() call");
-        assert_eq!(call.ty, Ty::Int, "the call is typed Int, not an error type");
+            .filter(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .map(|e| &e.ty)
+            .collect();
+        assert_eq!(call_tys.len(), 2, "two calls: {call_tys:?}");
+        assert_eq!(
+            *call_tys[1],
+            Ty::Int,
+            "the unannotated call is typed Int, not an error type"
+        );
     }
 
     #[test]
@@ -10884,12 +10903,28 @@ mod tests {
              fn get_item(self) -> Self::Item { self.v } }\n\
              impl It for K { type Item = Bool\n\
              fn get_item(self) -> Self::Item { self.k } }\n";
+        // The calls are left **unannotated**, on purpose: `Stmt::Let` overwrites
+        // an annotated initializer's type with the annotation, so `let n: Int =
+        // w.get_item()` records `Int` on the call node no matter what `normalize`
+        // returned. The `let`s below only pin the mismatch direction; the types
+        // are read off the interpolated calls.
         let r = check_src(&format!(
             "{prelude}fn main() {{ let w = W {{ v: 7 }}\n let k = K {{ k: true }}\n\
-             let n: Int = w.get_item()\n let b: Bool = k.get_item()\n\
-             println(\"${{n}} ${{b}}\") }}"
+             println(\"${{w.get_item()}} ${{k.get_item()}}\") }}"
         ));
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // The two calls' own types, in source order. An empty diagnostic list is
+        // not enough: an implementation that picks the wrong impl and fails to
+        // recover its arguments yields `Ty::Error`, which unifies with both `Int`
+        // and `Bool` and so satisfies the assertion above for the wrong reason.
+        // Measured — this is what let a "take any impl that binds `Item`"
+        // mutation survive before these two lines existed.
+        let call_tys: Vec<&Ty> = exprs_in(&r.module, "main")
+            .into_iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::TraitCall { .. }))
+            .map(|e| &e.ty)
+            .collect();
+        assert_eq!(call_tys, [&Ty::Int, &Ty::Bool], "one type each, in order");
         // And the crossed pairing must fail, or `Item` is resolving to something
         // that fits both.
         let bad = check_src(&format!(
@@ -10900,6 +10935,153 @@ mod tests {
             bad.diagnostics.iter().any(|d| d.code == "E0010"),
             "W<Int>::Item is Int, not Bool: {:?}",
             bad.diagnostics
+        );
+    }
+
+    /// A trait method may declare a *parameter* as `Self::Item`, and the caller
+    /// passes a concrete value for it. The plan named only the method-call
+    /// *return* type; the parameter is the mirror at the same seam, and without
+    /// it `w.put(9)` reads "argument has type `Int` but `W<Int>::Item` was
+    /// expected".
+    #[test]
+    fn a_projection_in_a_trait_method_parameter_normalizes_at_the_call() {
+        let prelude = "trait It { type Item\n fn put(self, x: Self::Item) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn put(self, x: Self::Item) -> Int { 1 } }\n";
+        let r = check_src(&format!(
+            "{prelude}fn main() {{ println(\"${{(W {{ v: 7 }}).put(9)}}\") }}"
+        ));
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // And the parameter still constrains: `W<Int>::Item` is `Int`.
+        let bad = check_src(&format!(
+            "{prelude}fn main() {{ println(\"${{(W {{ v: 7 }}).put(true)}}\") }}"
+        ));
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "a Bool argument where Int was expected: {:?}",
+            bad.diagnostics
+        );
+    }
+
+    /// An *impl* method whose parameter is declared `Self::Item` binds a local of
+    /// that type, so `check_fn_body` has to normalize `sig.params` as well as
+    /// `sig.ret` — otherwise `x + 1` reports "mismatched operand types:
+    /// `K::Item` vs `Int`" inside a body the signature seam already accepted.
+    #[test]
+    fn a_projection_in_an_impl_method_parameter_normalizes_in_the_body() {
+        let r = check_src(
+            "trait It { type Item\n fn put(self, x: Self::Item) -> Int }\n\
+             record K { k: Int }\n\
+             impl It for K { type Item = Int\n\
+             fn put(self, x: Self::Item) -> Int { x + 1 } }\n\
+             fn main() { println(\"${(K { k: 0 }).put(9)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // The local's recorded type, not just the absence of diagnostics: an
+        // annotation that collapsed to `Ty::Error` would also add nothing here.
+        let m = r
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "K.It.put")
+            .expect("the impl's `put` was compiled");
+        let x = m
+            .locals
+            .iter()
+            .find(|l| l.name == "x")
+            .expect("local `x` compiled");
+        assert_eq!(x.ty, Ty::Int, "`K::Item` normalized to Int");
+    }
+
+    /// A generic *free* function whose signature projects onto its own type
+    /// parameter. Neither the plan's three seams nor Task 7's monomorphization
+    /// covers this: the instantiation is fully concrete here in typeck, and it is
+    /// the exact shape of Task 7's own Step 1 test
+    /// (`fn unwrap_item<I: It>(x: I) -> I::Item`), which cannot even be called
+    /// without it.
+    #[test]
+    fn a_projection_in_a_generic_functions_signature_normalizes_at_the_call() {
+        let prelude = "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             record K { k: Bool }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             impl It for K { type Item = Bool\n\
+             fn get_item(self) -> Self::Item { self.k } }\n\
+             fn first<I: It>(x: I) -> I::Item { x.get_item() }\n\
+             fn take<I: It>(x: I, y: I::Item) -> Int { 1 }\n";
+        // Two instantiations of the same generic function, so "resolves per
+        // instantiation" is distinguishable from "resolves once".
+        let r = check_src(&format!(
+            "{prelude}fn main() {{ let n: Int = first(W {{ v: 7 }})\n\
+             let b: Bool = first(K {{ k: true }})\n\
+             let t: Int = take(W {{ v: 7 }}, 9)\n\
+             println(\"${{n}} ${{b}} ${{t}}\") }}"
+        ));
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let bad = check_src(&format!(
+            "{prelude}fn main() {{ let b: Bool = first(W {{ v: 7 }})\n println(\"${{b}}\") }}"
+        ));
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "E0010"),
+            "`W<Int>::Item` is Int, not Bool: {:?}",
+            bad.diagnostics
+        );
+        let bad_arg = check_src(&format!(
+            "{prelude}fn main() {{ println(\"${{take(W {{ v: 7 }}, true)}}\") }}"
+        ));
+        assert!(
+            bad_arg.diagnostics.iter().any(|d| d.code == "E0010"),
+            "`I::Item` is Int for `W<Int>`, so a Bool argument is wrong: {:?}",
+            bad_arg.diagnostics
+        );
+    }
+
+    /// The design doc §4.2 says `Assoc { on: Var(_) }` cannot arise. It can, in
+    /// one shape: a generic call whose projection-typed parameter comes *before*
+    /// the parameter that determines the type, so nothing has solved the variable
+    /// when the projection is instantiated.
+    ///
+    /// Pinned as a **known gap**, not as desired behaviour. Fixing it needs
+    /// deferred obligations, which §4.1 rules out for this increment. The value
+    /// of the test is that closing it later is a visible decision with a test to
+    /// change, and that the failure mode stays an ordinary type mismatch.
+    #[test]
+    fn known_gap_a_projection_parameter_before_its_determining_parameter() {
+        let r = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             fn take<I: It>(y: I::Item, x: I) -> Int { 1 }\n\
+             fn main() { println(\"${take(9, W { v: 7 })}\") }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0010")
+            .expect("the known gap still reports a plain type mismatch");
+        // Names the unresolved projection rather than claiming anything false.
+        assert!(
+            d.message.contains("::Item"),
+            "the message names the projection: {}",
+            d.message
+        );
+        // Reversing the parameters is the workaround, and it must work — the gap
+        // is about argument order, not about the shape being unsupported.
+        let reversed = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item(self) -> Self::Item { self.v } }\n\
+             fn take<I: It>(x: I, y: I::Item) -> Int { 1 }\n\
+             fn main() { println(\"${take(W { v: 7 }, 9)}\") }",
+        );
+        assert!(
+            reversed.diagnostics.is_empty(),
+            "{:?}",
+            reversed.diagnostics
         );
     }
 
