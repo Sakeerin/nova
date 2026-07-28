@@ -145,6 +145,25 @@ pub struct ImplBlock {
     pub where_clause: Vec<WhereBound>,
     pub functions: Vec<Function>,
     pub consts: Vec<ConstDecl>,
+    /// Associated types this impl binds (`type Item = Int`).
+    ///
+    /// A third parallel vector beside `functions` and `consts`, not a variant
+    /// of a shared item enum: an `ImplBlock` has never had a unified item
+    /// list, and adding one would touch every consumer of the other two.
+    pub assoc_types: Vec<AssocTypeBinding>,
+}
+
+/// One associated-type binding inside an `impl` block: `type Item = Int`.
+///
+/// There is deliberately no `vis` field. An associated-type binding is not an
+/// independently nameable item — it is only ever reached through a projection
+/// on the impl's trait, whose own visibility already governs it — so a `pub`
+/// here would be stored and honoured by nothing. `nova-parser` rejects one
+/// instead of dropping it silently.
+#[derive(Debug, Clone)]
+pub struct AssocTypeBinding {
+    pub name: Spanned<String>,
+    pub ty: Spanned<Type>,
 }
 
 /// A `const` declaration.

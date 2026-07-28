@@ -7,9 +7,9 @@
 use nova_ast::{
     expr::{AssignOp, BinOp, Expr, FieldInit, Literal, MatchArm, StringPart, UnOp},
     item::{
-        ConstDecl, ExternBlock, ExternItem, Function, FunctionSig, ImplBlock, Import, ImportKind,
-        Module, Param, Record, RecordField, TraitDecl, TraitItem, TypeDecl, TypeDef, Variant,
-        Visibility, WhereBound,
+        AssocTypeBinding, ConstDecl, ExternBlock, ExternItem, Function, FunctionSig, ImplBlock,
+        Import, ImportKind, Module, Param, Record, RecordField, TraitDecl, TraitItem, TypeDecl,
+        TypeDef, Variant, Visibility, WhereBound,
     },
     pattern::{FieldPat, Pattern},
     ty::{Type, TypeParam},
@@ -610,6 +610,7 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "impl block")?;
         let mut functions = Vec::new();
         let mut consts = Vec::new();
+        let mut assoc_types = Vec::new();
         // Loop invariant: every arm below advances `self.pos` by at least one
         // token, so this terminates. `parse_function` opens with
         // `expect(&Token::Fn, …)`, which consumes on the match this arm has
@@ -619,6 +620,9 @@ impl<'a> Parser<'a> {
         // `sync_to_item_boundary` nor `sync_to_stmt_boundary` provides it —
         // both stop *at* their boundary token without consuming it.
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            // Captured before `parse_visibility` consumes it, so the `pub`
+            // rejection in the `type` arm can point at the `pub` itself.
+            let vis_span = self.peek_span();
             let vis = self.parse_visibility();
             match self.peek() {
                 Token::Fn | Token::Async => {
@@ -626,6 +630,38 @@ impl<'a> Parser<'a> {
                         functions.push(f);
                     } else {
                         self.sync_to_item_boundary();
+                    }
+                }
+                // An associated-type binding: `type Item = Int`. Unlike the
+                // trait body's own `type` handling, there is no speculative
+                // `parse_function_sig()` to sequence around here — this match
+                // dispatches on a single peeked token, so arm order is
+                // irrelevant.
+                Token::Type => {
+                    self.advance();
+                    if vis != Visibility::Private {
+                        // `ast::AssocTypeBinding` has no `vis` field on
+                        // purpose (see its doc comment), so a `pub` here would
+                        // otherwise be parsed and then dropped without a word.
+                        self.errors.push(ParseError::Custom {
+                            message: "an associated type binding in an impl cannot be `pub`".into(),
+                            span: vis_span,
+                        });
+                    }
+                    match self.parse_ident("associated type name") {
+                        Some(name) => {
+                            if self.expect(&Token::Eq, "associated type binding").is_some() {
+                                if let Some(ty) = self.parse_type("associated type binding") {
+                                    self.eat(&Token::Semicolon);
+                                    assoc_types.push(AssocTypeBinding { name, ty });
+                                } else {
+                                    self.sync_to_stmt_boundary();
+                                }
+                            } else {
+                                self.sync_to_stmt_boundary();
+                            }
+                        }
+                        None => self.sync_to_stmt_boundary(),
                     }
                 }
                 Token::Const => {
@@ -668,6 +704,7 @@ impl<'a> Parser<'a> {
             where_clause,
             functions,
             consts,
+            assoc_types,
         })
     }
 

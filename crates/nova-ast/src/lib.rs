@@ -16,8 +16,9 @@ pub mod ty;
 
 pub use expr::{BinOp, Expr, FieldInit, Literal, MatchArm, StringPart, UnOp};
 pub use item::{
-    AssignOp, ConstDecl, ExternBlock, Function, ImplBlock, Import, Module as ModuleDecl, Param,
-    Record, RecordField, TraitDecl, TraitItem, TypeDecl, Visibility, WhereBound,
+    AssignOp, AssocTypeBinding, ConstDecl, ExternBlock, Function, ImplBlock, Import,
+    Module as ModuleDecl, Param, Record, RecordField, TraitDecl, TraitItem, TypeDecl, Visibility,
+    WhereBound,
 };
 pub use pattern::Pattern;
 pub use ty::{Type, TypeParam};

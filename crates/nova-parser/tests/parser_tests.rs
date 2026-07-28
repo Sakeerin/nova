@@ -303,6 +303,49 @@ fn snapshot_trait_with_bounded_associated_type() {
     insta::assert_debug_snapshot!(ast);
 }
 
+#[test]
+fn snapshot_impl_with_associated_type_binding() {
+    // `type Item = Int` inside an impl, mixed with a method and a const, to
+    // pin that the three parallel vectors on `ImplBlock` stay independent and
+    // that no separator is required between impl items.
+    let source = "impl It for W { type Item = Int  const N: Int = 1  fn get(self) -> Int { 1 } }";
+    let mut db = FileDb::new();
+    let file_id = db.add("test.nova", source);
+    let (tokens, _) = lex(source, file_id);
+    let (ast, errs) = parse(&tokens, file_id);
+    assert!(errs.is_empty(), "parse errors: {errs:?}");
+    insta::assert_debug_snapshot!(ast);
+}
+
+#[test]
+fn an_impl_associated_type_binding_may_not_be_pub() {
+    // `parse_visibility()` runs before the impl body's item dispatch, so a
+    // `pub` here would otherwise parse and then be silently dropped: the
+    // binding has no visibility of its own to honour it with. Rejected
+    // loudly, and the binding is still recorded so the rest of the impl
+    // checks normally.
+    let source = "impl It for W { pub type Item = Int }";
+    let mut db = FileDb::new();
+    let file_id = db.add("test.nova", source);
+    let (tokens, _) = lex(source, file_id);
+    let (ast, errs) = parse(&tokens, file_id);
+    assert!(ast.is_some(), "still returns an AST");
+    let msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+    assert_eq!(msgs.len(), 1, "exactly one error: {msgs:?}");
+    assert!(
+        msgs[0].contains("pub"),
+        "names the offending modifier: {msgs:?}"
+    );
+    // The private spelling of the same item must stay clean — otherwise the
+    // assertion above would pass for an implementation that rejects every
+    // binding.
+    let ok_src = "impl It for W { type Item = Int }";
+    let ok_id = db.add("ok.nova", ok_src);
+    let (ok_tokens, _) = lex(ok_src, ok_id);
+    let (_, ok_errs) = parse(&ok_tokens, ok_id);
+    assert!(ok_errs.is_empty(), "private binding is fine: {ok_errs:?}");
+}
+
 /// Every token that `sync_to_item_boundary` treats as an item boundary, as it
 /// would appear at the start of an item inside an `impl` body. Each one used to
 /// make the impl-body loop spin forever: the `_` arm pushed an error and then
@@ -310,8 +353,12 @@ fn snapshot_trait_with_bounded_associated_type() {
 /// the next iteration re-peeked the identical token. `pub` is included because
 /// `parse_visibility()` consumes it and leaves the loop looking at the
 /// item-start token behind it.
+///
+/// `type` was an eighth entry here until an impl gained associated-type
+/// bindings, which made `type Item = Int` a legal impl item rather than an
+/// unexpected token — its malformed spellings are covered by
+/// `a_malformed_associated_type_binding_terminates` instead.
 const IMPL_BODY_ITEM_STARTS: &[(&str, &str)] = &[
-    ("type", "type Item = Int"),
     ("record", "record R { a: Int }"),
     ("trait", "trait Q { fn q(self) -> Int }"),
     ("impl", "impl W { }"),
@@ -344,6 +391,25 @@ fn an_item_start_token_inside_an_impl_body_terminates() {
             errs < 10,
             "{label}: recovery must be bounded, got {errs} errors"
         );
+    }
+}
+
+#[test]
+fn a_malformed_associated_type_binding_terminates() {
+    // The `Token::Type` arm consumes `type` before anything can fail, so each
+    // of these bails out having already made progress. Same property as the
+    // test above, for the arm that replaced `type` in that list.
+    for (label, item) in [
+        ("no name", "type"),
+        ("no eq", "type Item"),
+        ("no type", "type Item ="),
+        ("bad name", "type = Int"),
+    ] {
+        let source = format!("record W {{ v: Int }}\nimpl W {{ {item} }}\nfn main() {{ }}\n");
+        let (ok, errs) = parse_file(label, &source);
+        assert!(ok, "{label}: parser must still return an AST");
+        assert!(errs > 0, "{label}: an incomplete binding is an error");
+        assert!(errs < 10, "{label}: bounded, got {errs}");
     }
 }
 
