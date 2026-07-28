@@ -500,7 +500,16 @@ Replace the early `path.segments.len() != 1` rejection in `convert_ty` with a tw
                 }
 ```
 
-Add `resolve_projection`, which needs the bounds of parameter `idx` in the current scope. **Read how `apply_where` and the bound tables store per-parameter bounds before writing this** — the plan cannot name the field because the surrounding scope differs between a trait method, an impl method, and a free function, and getting it from the wrong table is the likely bug. If more than one bounding trait declares the same associated-type name, report an ambiguity error rather than picking the first; if none does, report that the name is not an associated type of any bound.
+Add `resolve_projection`, which needs the bounds of parameter `idx` in the current scope.
+
+**This step was the plan's least-specified one; it has since been traced, so use this rather than going looking.** There is exactly **one** bound table and it is uniform across trait methods, impl methods and free functions — the plan's worry about "the wrong table" was unfounded:
+
+- The shape is `Vec<Vec<DefId>>`, indexed by parameter position, i.e. **indexed like `generics`' values**. It appears as the local `bounds` during signature collection and as `FnCtx.param_bounds` (`crates/nova-typeck/src/check.rs:190`) inside a body, populated from `sig.bounds`.
+- In `collect_signatures` (`:1218`) the order is already `resolve_bounds` → `apply_where` → `expand_bounds` → **then** `convert_ty`. So bounds are fully resolved *before* any type conversion, and no reordering is needed.
+- **`convert_ty` cannot see them today.** Its signature is `fn convert_ty(&mut self, ty, generics: &FxHashMap<String, u32>)` — names only. Add a `bounds: &[Vec<DefId>]` parameter (or bundle the pair into one small struct if that reads better). There are **19** call sites in `check.rs`; exactly **one** passes an empty generic scope, and that one passes an empty slice.
+- **`expand_bounds` has already folded supertraits in**, so a bound of `Ord` also carries `Eq`. That means `I::Item` resolves against the *transitive* bound set: if `I: Ord` and `Ord: Eq` and `Eq` declared `Item`, it is found. That is the desirable behaviour, but state it in a comment, because it is a consequence of ordering rather than an explicit decision.
+
+If more than one bounding trait declares the same associated-type name, report an ambiguity error rather than picking the first — with supertraits folded in, this is reachable, not hypothetical. If none does, report that the name is not an associated type of any bound on that parameter.
 
 - [ ] **Step 4: Run the tests**
 
@@ -1166,4 +1175,6 @@ git commit -m "test(trait): add the associated-types end-to-end gate"
 
 **Every Nova construct used in the plan's test code exists and was verified this session:** records with generics, `impl<T> Trait for R<T>`, `mut self` methods, field assignment, `match` on `Option` with a bound payload, `while` with a counter, string interpolation, `Vec::new`/`push`/`get`/`len`, `panic`. The one shape I flagged rather than assumed is `break` inside a `match` arm (Task 9 Step 1), which is why that loop is written with a sentinel instead.
 
-**Known plan risk:** Task 3's `resolve_projection` is the least specified step, because the bound table it must consult is scope-dependent. If the implementer cannot find a single place that holds "the bounds of parameter `idx` in the current scope", that is a signal the plan under-modelled the scope threading — report it rather than inventing a fourth bound table.
+**~~Known plan risk~~ — resolved before Task 3 was dispatched.** I had flagged `resolve_projection` as the least specified step, on the theory that the bound table was scope-dependent and I might have under-modelled the threading. Traced it instead: there is exactly **one** table (`Vec<Vec<DefId>>`, indexed like `generics`' values — the local `bounds` during collection, `FnCtx.param_bounds` inside a body), it is uniform across trait methods, impl methods and free functions, and `collect_signatures` already resolves it *before* calling `convert_ty`. Task 3's step now names all of it.
+
+The one real defect the trace found: **`convert_ty` cannot see the bounds** — it takes parameter names only — so it needs a new argument threaded through 19 call sites. The plan originally implied `resolve_projection` could just read them, which was wrong.
