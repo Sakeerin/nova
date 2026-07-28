@@ -958,6 +958,10 @@ impl<'a> Checker<'a> {
             // trait does not declare has no `DefId` to be keyed under, so it is
             // dropped from this list and reported there.
             let mut assoc_bindings: Vec<(DefId, Ty)> = Vec::new();
+            // Span of each kept binding's name, aligned with `assoc_bindings`,
+            // so the cycle check below can point at the offending binding rather
+            // than at the impl header.
+            let mut assoc_spans: Vec<Span> = Vec::new();
             for b in &block.assoc_types {
                 let ty = self.convert_ty(&b.ty, &impl_generics, &impl_bounds);
                 let resolved = trait_id.and_then(|tid| self.find_assoc_type(tid, &b.name.value));
@@ -994,7 +998,9 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 assoc_bindings.push((assoc, ty));
+                assoc_spans.push(b.name.span);
             }
+            self.check_assoc_binding_cycles(&mut assoc_bindings, &assoc_spans, &self_ty);
             let mut methods = Vec::new();
             for (mi, f) in block.functions.iter().enumerate() {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
@@ -1123,6 +1129,65 @@ impl<'a> Checker<'a> {
 
         self.check_impl_coherence(&impl_spans);
         self.check_supertrait_impls(&impl_spans);
+    }
+
+    /// Report `E0077` for an associated type this impl binds in terms of
+    /// itself, and poison the offending binding to `Ty::Error`.
+    ///
+    /// One binding may legitimately name another of the same impl's associated
+    /// types — `type A = Self::B` with `type B = Int` is legal, and it is the
+    /// reason [`hir::normalize_ty`] re-normalizes its own result. That is
+    /// precisely the walk that never terminates on `type Item = Self::Item`, or
+    /// on a mutual `A = Self::B` / `B = Self::A`, so the cycle has to be
+    /// rejected where it is created. `normalize_ty`'s depth guard is the
+    /// backstop for a cycle built by some path this does not see, not a
+    /// substitute for this check: a hang is worse than any diagnostic, and a
+    /// compiler-limit message is the wrong thing to show a user who wrote a
+    /// two-line cycle.
+    ///
+    /// **Poisoning to `Ty::Error` rather than dropping the binding** keeps the
+    /// bound *set* complete, so `check_impl_conformance` does not add a spurious
+    /// `E0070` for a binding that is present but bad, and `Ty::Error` unifies
+    /// with anything, so no use of the projection cascades either. The cycle is
+    /// already reported, so this is suppression of a *second* error, never
+    /// silence.
+    fn check_assoc_binding_cycles(
+        &mut self,
+        bindings: &mut [(DefId, Ty)],
+        spans: &[Span],
+        self_ty: &Ty,
+    ) {
+        // Edges: this impl's associated type `d` refers to `e` when its bound
+        // type projects onto `Self::e` anywhere inside it.
+        let mut edges: FxHashMap<DefId, Vec<DefId>> = FxHashMap::default();
+        for (d, ty) in bindings.iter() {
+            let mut refs = Vec::new();
+            collect_self_projections(ty, self_ty, &mut refs);
+            edges.insert(*d, refs);
+        }
+        // `zip` rather than an index: the two are pushed in the same step by
+        // `collect_impls`, and zipping makes a misalignment inexpressible rather
+        // than something a fallback span would paper over.
+        for ((d, ty), &span) in bindings.iter_mut().zip(spans) {
+            if !reaches_self(*d, &edges) {
+                continue;
+            }
+            let name = self.defs.def(*d).name.clone();
+            *ty = Ty::Error;
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "E0077",
+                    format!("the associated type `{name}` is defined in terms of itself"),
+                )
+                .with_primary_label(span, "cyclic associated type")
+                .with_note(
+                    "an associated type's binding may name another of this impl's \
+                     associated types, but the references must bottom out in a \
+                     concrete type"
+                        .to_string(),
+                ),
+            );
+        }
     }
 
     /// Every trait impl must be accompanied by an impl of each of the trait's
@@ -2283,7 +2348,7 @@ impl<'a> Checker<'a> {
         let mut cyclic: Vec<DefId> = const_ids
             .iter()
             .copied()
-            .filter(|&c| const_reaches_self(c, &edges))
+            .filter(|&c| reaches_self(c, &edges))
             .collect();
         cyclic.sort();
         for c in cyclic {
@@ -5486,9 +5551,66 @@ fn collect_const_calls(expr: &hir::Expr, consts: &FxHashSet<DefId>, out: &mut Ve
     }
 }
 
-/// Whether constant `start` can reach itself through the dependency edges
-/// (i.e. participates in a cycle).
-fn const_reaches_self(start: DefId, edges: &FxHashMap<DefId, Vec<DefId>>) -> bool {
+/// Collect, without duplicates, the associated types that `ty` projects onto
+/// `self_ty` — every `Assoc { on, assoc }` inside `ty` whose `on` is exactly
+/// `self_ty`, which inside an impl block is what `Self::Name` converts to (see
+/// `convert_ty`'s two-segment path case). The edge set for
+/// `check_assoc_binding_cycles`.
+///
+/// **Recurses into compound types.** `type Item = [Self::Item]` names an
+/// infinitely large type just as `type Item = Self::Item` does, and a walk that
+/// only inspected the top level would accept it and leave `normalize_ty` growing
+/// one `[…]` layer per step.
+///
+/// A projection onto anything *other* than the impl's own self type is not an
+/// edge: `type Item = T::Item` for `impl<T: It> It for W<T>` names the
+/// argument's associated type, and every normalization step strips a `W<…>`
+/// layer, so it bottoms out. Flagging it would reject legitimate code.
+fn collect_self_projections(ty: &Ty, self_ty: &Ty, out: &mut Vec<DefId>) {
+    match ty {
+        Ty::Assoc { on, assoc } => {
+            if **on == *self_ty && !out.contains(assoc) {
+                out.push(*assoc);
+            }
+            // A projection *on* a projection (`Self::A::B` is unwritable today,
+            // but `subst` can build one) still has to be searched.
+            collect_self_projections(on, self_ty, out);
+        }
+        Ty::Fn { params, ret } => {
+            for p in params {
+                collect_self_projections(p, self_ty, out);
+            }
+            collect_self_projections(ret, self_ty, out);
+        }
+        Ty::Sum { args, .. } | Ty::Record { args, .. } => {
+            for a in args {
+                collect_self_projections(a, self_ty, out);
+            }
+        }
+        Ty::Array(elem) => collect_self_projections(elem, self_ty, out),
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Char
+        | Ty::String
+        | Ty::Unit
+        | Ty::Param(_)
+        | Ty::Var(_)
+        | Ty::Never
+        | Ty::Error => {}
+    }
+}
+
+/// Whether `start` can reach itself through the dependency edges (i.e.
+/// participates in a cycle). Shared by the two definition-cycle checks —
+/// `check_const_cycles` (a constant defined in terms of its own value) and
+/// `check_assoc_binding_cycles` (an associated type bound in terms of itself);
+/// the graph is `DefId -> DefId` in both and the walk is identical, so keeping
+/// one copy is what stops the two from drifting on cycle detection itself.
+///
+/// `seen` is what makes this terminate on the cyclic input it exists to find:
+/// a node is expanded at most once.
+fn reaches_self(start: DefId, edges: &FxHashMap<DefId, Vec<DefId>>) -> bool {
     let mut stack: Vec<DefId> = edges.get(&start).cloned().unwrap_or_default();
     let mut seen: FxHashSet<DefId> = FxHashSet::default();
     while let Some(n) = stack.pop() {
@@ -10430,6 +10552,137 @@ mod tests {
             .find(|d| d.code == "E0071")
             .expect("E0071 for the undeclared `C`");
         assert!(extra.message.contains('C'), "{}", extra.message);
+    }
+
+    #[test]
+    fn a_self_referential_associated_type_binding_is_rejected() {
+        // `type Item = Self::Item` describes a type in terms of itself. It has
+        // to be rejected *here*, at the declaration, because `normalize` must
+        // re-normalize its own result for the legitimate `A = Self::B` /
+        // `B = Int` chain to resolve — and that is exactly the walk that would
+        // never terminate on this input.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Self::Item }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Self::Item\n\
+             fn get(self) -> Self::Item { 1 } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0077")
+            .expect("E0077 for a self-referential associated-type binding");
+        assert!(
+            d.message.contains("Item"),
+            "names the offending type: {}",
+            d.message
+        );
+        // A cycle is one mistake, so the binding is not also reported missing.
+        assert!(!error_codes(&r).contains(&"E0070"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_mutually_recursive_pair_of_associated_type_bindings_is_rejected() {
+        // Neither binding is self-referential on its own, so a check that only
+        // looked at each binding in isolation would accept this. The cycle
+        // closes only by following `A -> B -> A`.
+        let r = check_src(
+            "trait Two { type A\n type B\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl Two for W { type A = Self::B\n type B = Self::A\n\
+             fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        let msgs: Vec<&str> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "E0077")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(msgs.len(), 2, "one per offending type: {:?}", r.diagnostics);
+        assert!(
+            msgs.iter().any(|m| m.contains('A')) && msgs.iter().any(|m| m.contains('B')),
+            "both members of the cycle are named: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn a_cyclic_associated_type_binding_nested_in_a_compound_type_is_rejected() {
+        // `Item = [Item]` is an infinitely large type exactly as `Item = Item`
+        // is. A cycle walk that only inspected the top level of each bound type
+        // accepts this and hands `normalize` a projection that grows a layer per
+        // step, so the compiler diverges on a five-line program.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = [Self::Item]\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_binding_projecting_onto_an_impl_parameter_is_not_a_cycle() {
+        // The control case. `type Item = T::Item` is a projection in a binding
+        // and must be accepted: it names the *argument's* associated type, and
+        // each normalization step strips a `W<…>` layer, so it bottoms out.
+        // A cycle check that flags any `Assoc` in a bound type kills this.
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T: It> It for W<T> { type Item = T::Item\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_chain_of_associated_type_bindings_is_accepted() {
+        // `A = Self::B` with `B = Int` is legal and is the reason `normalize`
+        // has to re-normalize its own result. The cycle check must not reject a
+        // reference that bottoms out.
+        let r = check_src(
+            "trait Two { type A\n type B\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl Two for W { type A = Self::B\n type B = Int\n\
+             fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    /// A hang is not assertable: this test's value is that it *completes*.
+    /// Every cyclic shape reachable from source goes through here, and the
+    /// diagnostic count is bounded so a regression to merely-quadratic
+    /// reporting is caught too (the model is Task 4's termination tests).
+    #[test]
+    fn the_compiler_terminates_on_every_cyclic_binding_shape() {
+        let shapes = [
+            "impl It for W { type Item = Self::Item\n fn get(self) -> Self::Item { 1 } }",
+            "impl It for W { type Item = [Self::Item]\n fn get(self) -> Int { 1 } }",
+            "impl It for W { type Item = [[Self::Item]]\n fn get(self) -> Int { 1 } }",
+        ];
+        for shape in shapes {
+            let src = format!(
+                "trait It {{ type Item\n fn get(self) -> Self::Item }}\n\
+                 record W {{ v: Int }}\n\
+                 {shape}\n\
+                 fn use_it(w: W) -> Int {{ 1 }}\n\
+                 fn main() {{ println(\"${{use_it(W {{ v: 1 }})}}\") }}"
+            );
+            let r = check_src(&src);
+            assert!(
+                r.diagnostics.len() < 10,
+                "bounded diagnostics for {shape}: {:?}",
+                r.diagnostics
+            );
+            assert!(
+                error_codes(&r).contains(&"E0077"),
+                "the cycle is reported for {shape}: {:?}",
+                r.diagnostics
+            );
+        }
     }
 
     #[test]
