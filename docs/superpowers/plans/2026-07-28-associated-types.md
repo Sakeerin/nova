@@ -1249,6 +1249,49 @@ git commit -m "test(trait): add the associated-types end-to-end gate"
 
 ---
 
+### Task 11: Close the two holes found by probing, not by review
+
+Both were suspicions carried since Task 1 and are now **measured facts**, verified on `a332528`. Neither is caused by this branch's changes, but both are squarely about projections, so they belong here rather than in a follow-up.
+
+**Files:**
+- Modify: `crates/nova-typeck/src/check.rs` (impl collection; `collect_traits`)
+- Modify: `docs/superpowers/specs/2026-07-28-associated-types-design.md` is **already corrected** (`ba35dac`, and the §5.1 "where may a projection appear" row) — do not re-edit it.
+
+- [ ] **Step 1: Reject a projection in an impl's self type**
+
+Measured today:
+
+```nova
+trait It { type Item
+ fn g(self) -> Int }
+trait Tr { fn h(self) -> Int }
+record W<T> { v: T }
+impl<T: It> Tr for W<T::Item> { fn h(self) -> Int { 1 } }
+impl Tr for W<Int> { fn h(self) -> Int { 2 } }
+fn main() { }
+```
+
+`nova check` → **`ok`**. Two problems in one:
+
+- **No `E0074`.** The control — the same file with `impl<T> Tr for W<T>` instead — *does* report `conflicting implementations of trait \`Tr\``. So a projection in the self type slips past overlap checking, because `self_types_overlap`'s helpers do not understand `Assoc`. If any `T` has `Item = Int`, both impls apply to `W<Int>`.
+- **The impl can never be selected anyway.** `match_pattern` recovers an impl's type arguments by structural matching against a ground type; it cannot invert `T::Item` to find `T`. So the impl is dead code that also breaks coherence — the worst combination.
+
+This is why Rust forbids the position. Reject it: when converting an impl's self type, if the result contains an `Assoc` anywhere, report a diagnostic rather than accepting it. `E0900` with a message naming the position is defensible (the construct may become supportable if the impl-selection machinery ever inverts projections); a dedicated code is also fine — decide and say why.
+
+Test all three: the two-impl program above now errors; a single `impl<T: It> Tr for W<T::Item>` alone also errors (it is unselectable regardless of overlap); and a projection in every *other* position still works, so the fix does not over-reach. That last one matters — it is the assertion that keeps this from silently becoming "projections are banned from impls".
+
+- [ ] **Step 2: Reject duplicate associated-type declarations in one trait**
+
+Measured today: `trait It { type Item\n type Item\n fn g(self) -> Int }` → **`ok`**. Two declarations, silently one wins.
+
+Task 4 already rejects a duplicate *binding* in an impl (`binding_the_same_associated_type_twice_is_rejected`, mutation E). This is the declaration side, which nothing checks. Report a duplicate-definition diagnostic naming the type; check how `collect_traits` handles two methods of the same name first and match it, since the same hole may exist there — **if it does, fix both and say so**, because a trait with two same-named methods is the same defect wearing different clothes.
+
+- [ ] **Step 3: Verify and commit**
+
+`cargo build --workspace`, `cargo test --workspace --no-fail-fast`, clippy, fmt, and the three gates. Two commits, one per step.
+
+---
+
 ## Plan Self-Review
 
 **Spec coverage** — every section maps to a task:
@@ -1261,7 +1304,7 @@ git commit -m "test(trait): add the associated-types end-to-end gate"
 | §4.2 `Assoc { on: Var }` unreachable | 1 (the variant's doc comment records the argument; Step 4's `occurs`/`unify` tests cover a `Var` inside `on`, which is a different and legal case) |
 | §4.3 blast radius, nine sites | 1, Steps 4 and 6 |
 | §5 surface (`Iterator`, `VecIter`, `Vec::iter`) | 9 |
-| §5.1 the six pinned cases | 6 (either spelling), 5 (`Self::Item` in an impl), 3 (projection anywhere a type may appear), 9 (existing `impl<T> Vec<T>` block), 4 (`E0072` both directions), 1 (no backwards inference — `unify` has no `Assoc`-vs-concrete arm) |
+| §5.1 the pinned cases | 6 (either spelling), 4 Step 4b + 5 (`Self::Item` in an impl), 3 (projection in most positions) + **11 Step 1** (the impl-self-type exception, found by probing after the spec claimed no position needed restricting), 9 (existing `impl<T> Vec<T>` block), 4 (`E0070`/`E0071` — **not** `E0072`, corrected in `2f9a1e2`), 1 (no backwards inference — `unify` has no `Assoc`-vs-concrete arm), 4 Step 4c (`Self` rejected as a parameter name, `E0076`) |
 | §6 `mut self` enforcement + flipping the gap test | 8 |
 | §7 gate, items 1–5 | 10 Step 1 |
 | §7 `#[test]`s, items 6–10 | 2 (E0900 bounds), 4 (E0072 missing/extra), 8 (E0060 + mismatch) |
