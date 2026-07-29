@@ -2394,6 +2394,53 @@ fn a_generic_function_over_iterator_resolves_item_per_instantiation() {
         .stdout("int=7\nstr=hi\nbool=none\n");
 }
 
+/// `std/core`'s `Iterator` is implementable by **user** code, and an impl may
+/// echo the trait's projection (`-> Option<Self::Item>`) instead of writing the
+/// concrete type — design doc §5.1's "either spelling is accepted" row, checked
+/// against the shipped trait rather than a test-local one.
+///
+/// Also a third instantiation of `first<I: Iterator>` that is not a `VecIter`
+/// at all, which is what distinguishes "the trait works" from "the trait works
+/// for the one implementor std happens to ship".
+///
+/// `Counter { n: 9 }` is bound to a local before being passed: a record literal
+/// written directly inside a `match` scrutinee (`match first(Counter { n: 9 })`)
+/// does not parse — the `{` is taken as the end of the call arguments. That is a
+/// pre-existing parser limitation unrelated to iterators, worked around here
+/// rather than papered over silently.
+#[test]
+fn a_user_record_can_implement_the_std_iterator_trait() {
+    let src = "record Counter { n: Int }\n\
+               impl Iterator for Counter {\n\
+                   type Item = Int\n\
+                   fn next(mut self) -> Option<Self::Item> {\n\
+                       if self.n >= 3 { return None }\n\
+                       let x = self.n\n\
+                       self.n = self.n + 1\n\
+                       Some(x)\n\
+                   }\n\
+               }\n\
+               fn first<I: Iterator>(mut it: I) -> Option<I::Item> { it.next() }\n\
+               fn main() {\n\
+                   let mut c = Counter { n: 0 }\n\
+                   match c.next() { Some(x) => println(\"a=${x}\"), None => println(\"a=none\") }\n\
+                   let c0 = Counter { n: 0 }\n\
+                   match first(c0) { Some(x) => println(\"b=${x}\"), None => println(\"b=none\") }\n\
+                   let c9 = Counter { n: 9 }\n\
+                   match first(c9) { Some(x) => println(\"c=${x}\"), None => println(\"c=none\") }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-iterator-user-impl");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("a=0\nb=0\nc=none\n");
+}
+
 /// `Iterator::next` takes `mut self`, so calling it through an immutable
 /// binding is `E0060` — on `std/core`'s own trait, not just a test-local one.
 ///
