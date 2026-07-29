@@ -1340,6 +1340,13 @@ impl<'a> Checker<'a> {
     /// the trait) are decided here, from names alone; `E0072` (the item exists
     /// on both sides but its shape disagrees) is decided there, from types.
     ///
+    /// The *whole* per-method comparison moved, not only the two checks that
+    /// compare a type. The receiver, generic-count and generic-bound checks need
+    /// nothing from the impl table and could have stayed — but they are the early
+    /// `continue`s that decide whether the type comparison runs at all, so
+    /// splitting the loop would mean duplicating each of those guards on both
+    /// sides of the split and keeping the two copies in agreement forever.
+    ///
     /// `provided_assoc` is the impl's associated-type bindings as written, by
     /// name and span: this is the set-membership check in both directions, so
     /// it needs the names the trait *doesn't* declare, which have no `DefId`
@@ -1453,11 +1460,25 @@ impl<'a> Checker<'a> {
     /// `impl Base for W` — which may be written either side of
     /// `impl Ext for W`. Nova has no declaration-order rule for impls, and
     /// `conformance_resolves_a_projection_bound_by_a_later_declared_impl` pins
-    /// that it has none here either.
+    /// that it has none here either. Measured under a hoisted push: that test's
+    /// `impl Ext` first ordering still reports `E0072`, and it is the *only*
+    /// test in the suite that separates the two designs.
+    ///
+    /// **What moving this changed with no test to pin it: diagnostic order.**
+    /// Every `E0070`/`E0071` for every impl now precedes every `E0072` about a
+    /// method signature, where before both came from one call per impl in source
+    /// order. Nothing sorts diagnostics between here and the terminal, so the
+    /// order is user-visible: an impl on line 5 with a bad signature and one on
+    /// line 7 missing a method now report line 7 first. No test asserts a code
+    /// *sequence* spanning both bands, so this is deliberate and unpinned rather
+    /// than accidentally green — pinning it would freeze an ordering that is not
+    /// itself a designed property.
     fn check_impl_method_signatures(&mut self, spans: &[Span]) {
         // The table is cloned rather than walked in place: `normalize` and
         // `error` both need `&mut self`, and `normalize` — reading `self.impls`
-        // — is the entire point of this pass.
+        // — is the entire point of this pass. `check_supertrait_impls` avoids the
+        // clone by deferring its diagnostics to a second loop; that is not open
+        // here, because `normalize` itself needs `&mut self` to report `E0078`.
         let impls = self.impls.clone();
         for (imp, &span) in impls.iter().zip(spans) {
             let Some(trait_id) = imp.trait_id else {
@@ -1583,7 +1604,17 @@ impl<'a> Checker<'a> {
                 }
                 // Normalized on both sides, and *after* the count check so a
                 // wrong arity is still reported as an arity error rather than as
-                // a per-parameter mismatch.
+                // a per-parameter mismatch — `zip` truncates to the shorter list,
+                // so with the count check gone a missing parameter reports
+                // *nothing at all*.
+                //
+                // Normalized unconditionally, with no `Ty::has_assoc` guard of
+                // the kind `Checker::instantiate` carries. There, the guard
+                // preserves the exact pre-existing `subst`-only path for a
+                // projection-free call; here `normalize_ty` on a projection-free
+                // type is a structural clone and returns an equal value, so a
+                // guard would be unobservable *and* unpinnable, and would only
+                // add a second thing to keep true.
                 let expected: Vec<Ty> = trait_method
                     .params
                     .iter()
