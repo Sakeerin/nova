@@ -464,6 +464,67 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     on an associated type (`type Item: Display` is `E0900`); and a projection in
     an impl's self type, which is unselectable and invisible to overlap
     checking.
+  - **`Iterator` in `std/core`, `VecIter<T>` and `Vec::iter()` in
+    `std/collections`** — the consumer the whole increment exists for.
+    `pub trait Iterator { type Item  fn next(mut self) -> Option<Self::Item> }`,
+    with `pub record VecIter<T> { v: Vec<T>, i: Int }` and
+    `impl<T> Iterator for VecIter<T> { type Item = T }`. `iter()` went into
+    `std/collections`' **existing** `impl<T> Vec<T>` block rather than a second
+    inherent impl on the same type, which nothing in std or the test suite
+    exercises. `Item` is bound to the impl's own parameter, not to a primitive,
+    so every projection through it goes through `subst` — a monomorphic
+    `type Item = Char` would have left that path untested while appearing to
+    pass. The impl writes `-> Option<T>` rather than echoing
+    `-> Option<Self::Item>`; both are accepted, and the equivalence was checked
+    on the shipped impl, not only on a test-local trait.
+    - **An iterator must be held in a `mut` binding or arrive as a `mut`
+      parameter**, or `next()` is `E0060`. That is the visible face of the
+      `mut self` trait-method rule above, and `mut` on a *parameter* is what
+      carries it when the iterator arrives as an argument — there is no `let mut`
+      to reach for there. (The `E0060` note still advises `let mut` on that
+      route, which is wrong advice for a parameter; queued.)
+    - `mut self` on `next` is load-bearing, not stylistic: with plain `self` on
+      both the trait and the impl, `VecIter::next`'s own body does not compile
+      (`E0060`, cannot assign to a field of immutable self). Measured, which is
+      why the trait could not be declared before ADR 0005 §1's gap closed.
+    - **`Iterator` is implemented for no primitive**, unlike the six traits
+      above it in `std/core`, so `next` is *not* taken away from user code on
+      `Int`/`Float`/`Bool`/`Char`/`String` the way `fmt`/`eq`/`cmp`/`clone`/
+      `default` are (ADR 0004, "method names are not soft-reserved").
+    - `VecIter` holds the `Vec` by pointer, so it **aliases** the caller's
+      storage rather than copying it: a `push` during iteration is visible to
+      the iterator, and an element appended after `next` has already answered
+      `None` is still yielded by the following call. Documented and pinned by a
+      test rather than prevented — preventing it needs borrow tracking the
+      language does not have. Record field visibility is also parsed and never
+      enforced, so `VecIter`'s cursor (like `Vec`'s `len`) is writable from any
+      user program; pre-existing, and bounded — breaking the invariant produces
+      a bounds-check abort, not memory unsafety.
+    - Iterating today means a hand-written `while` plus a `match` on the
+      `Option`. Still absent, all deliberate: **no `for x in it`** desugar; **no
+      default methods**, so no `map`/`filter`/`collect`/`fold`; **no `Set` or
+      `String` iterator** (`chars()` already returns an indexable `[Char]`, so
+      nothing regresses); **no `IntoIterator`**; and no backwards inference —
+      unifying a projection with a concrete type never deduces its `Self`.
+  - **The gate:** `tests/runtime/assoc_types.{nova,stdout}`, run three ways
+    (`assoc_types_run`, `assoc_types_build_standalone`,
+    `assoc_types_under_gc_stress`) — a fourth committed fixture beside
+    `collections`, `std_core` and `strings`, and the first coverage of
+    associated-type code through the object-file backend and under
+    `NOVA_GC_STRESS=1` at all.
+    - One measured fact from building it is worth recording, because it makes an
+      obvious-looking test toothless: **`mir_ty` maps `Int` *and* `Char` to
+      `MirTy::I64`, and `String`/`Record`/`Sum`/`Array` to `MirTy::Ptr`, which is
+      `pointer_type()` — `types::I64` on x86-64.** So at the level a backend can
+      see, `Int`, `Char`, `String` and every heap type are one type. A generic
+      function naming a projection resolved to the *wrong* one of them
+      miscompiles silently: `fn first_or<I: Iterator>(mut it: I, dflt: I::Item)
+      -> I::Item` at `Vec<Int>` + `Vec<String>` survives a mutation that makes
+      monomorphization's normalization cache its first answer, byte-identically,
+      and so does `Vec<Int>` + `Vec<Char>`. Only `Bool` (`I8`) and `Float`
+      (`F64`) have distinguishable machine classes. Every generic block in the
+      fixture therefore instantiates at `Bool` and at `Float`, and each one
+      independently kills that mutation.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
