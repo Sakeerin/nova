@@ -1,0 +1,277 @@
+// Associated types end-to-end (Phase 2.2c Task 10) — the phase's gate.
+//
+// Run three ways: `nova run` (JIT), `nova build` (object backend), and
+// `NOVA_GC_STRESS=1`. The stress run is not belt-and-braces: `VecIter` holds a
+// `Vec` which holds an array, so the backing storage is reachable only as
+// `it` -> `VecIter` -> `Vec` -> `data` while `next` allocates a fresh
+// `Option`. A collector whose root scan misses the iterator loses the elements
+// silently rather than crashing.
+//
+// Nothing in this file may panic — a panic aborts the process and silently
+// truncates the rest of the gate, so every `Option` is opened with
+// `unwrap_or`/`is_some`/`is_none` or a `match`, never `unwrap`. The
+// compile-time half of the design doc's §7 list (its items 6-10: `E0900` on an
+// associated-type bound, `E0070`/`E0071` for a missing/undeclared binding,
+// `E0060` on a `mut self` trait method, and a `mut self` conformance
+// mismatch) cannot live in a fixture at all and is pinned by `#[test]`s in
+// `crates/nova-typeck/src/check.rs` instead.
+//
+// Maps to the design doc's §7 gate list item by item:
+//   1. `type Out = T` bound to the impl's OWN generic parameter,
+//      and a value obtained through it                       -> CELL, EMIT_OF
+//   2. `it.next()` on a concrete `VecIter<Int>` typing as
+//      `Option<Int>` with no annotation anywhere             -> UNANNOTATED
+//   3. a generic function naming the projection, at several
+//      instantiations — BOTH wrapped (`Option<I::Item>`) and
+//      bare (`I::Item`), because only the bare form has teeth
+//      at the monomorphization seam                          -> EMIT_OF, PAIR
+//                                                               generic, FIRST
+//   4. a trait with TWO associated types                     -> PAIR
+//   5. a `Vec` iterated to exhaustion, and a `Vec::new()`
+//      whose first `next` is already `None`                  -> EXHAUST, EMPTY
+//
+// Every mutation below was run against this file and each is killed by the
+// line named. They are recorded because a fixture line that survives a broken
+// compiler is worse than no line — it looks like coverage.
+//   A. `VecIter::next`'s `self.i >= self.v.len()` -> `>`  -> CURSOR, EMPTY
+//   B. `self.i = self.i + 1` deleted                      -> EXHAUST
+//   C. mono's normalization caching its first answer      -> EMIT_OF, PAIR
+//                                                            generic, FIRST_OR
+//   D. `find_assoc_type` ignoring the name (index 0)      -> PAIR
+//   E. seam 1 (`check.rs`'s normalize after `apply`) off  -> UNANNOTATED
+
+// === §7 item 1: an associated type bound to the impl's own generic parameter.
+//
+// `type Out = T` rather than a primitive is the whole point: it is what makes
+// every projection through this impl go through `subst`, so `Cell<Int>` and
+// `Cell<String>` resolve `Out` differently instead of sharing one answer. A
+// monomorphic `type Out = Int` would leave that path untested while appearing
+// to pass.
+trait Source {
+    type Out
+    fn emit(self) -> Self::Out
+}
+
+record Cell<T> { v: T }
+
+impl<T> Source for Cell<T> {
+    type Out = T
+    // The concrete spelling. §5.1 accepts either this or the echoed
+    // `Self::Out`; `Flag` below uses the other one, so both are exercised by
+    // the same trait rather than only by whichever std happened to pick.
+    fn emit(self) -> T { self.v }
+}
+
+record Flag { on: Bool }
+
+impl Source for Flag {
+    type Out = Bool
+    // The echoed spelling, plus `Self::Out` in a `let` annotation inside an
+    // impl body — a different `convert_ty` call site from a signature, and one
+    // that has to resolve through *this* impl's binding rather than the
+    // trait's declaration.
+    fn emit(self) -> Self::Out {
+        let b: Self::Out = self.on
+        b
+    }
+}
+
+// === §7 item 4: TWO associated types in one trait.
+//
+// `Left` and `Right` bind to *different* parameters, and `Both<Int, String>`
+// and `Both<String, Int>` swap which is which — so a lookup that matched the
+// trait's first associated type regardless of name cannot satisfy both.
+trait Pair {
+    type Left
+    type Right
+    fn left(self) -> Self::Left
+    fn right(self) -> Self::Right
+}
+
+record Both<A, B> { a: A, b: B }
+
+impl<A, B> Pair for Both<A, B> {
+    type Left = A
+    type Right = B
+    fn left(self) -> A { self.a }
+    fn right(self) -> B { self.b }
+}
+
+// === §7 item 3: generic functions whose signatures name the projection.
+//
+// Every one of these names the projection BARE (`S::Out`, `P::Left`), not
+// wrapped in a sum. Task 9 measured that `-> Option<I::Item>` alone is
+// toothless at the monomorphization seam: `Option<Int>` and `Option<String>`
+// lower to the same `MirTy` (a pointer to a heap sum), so a wrong `Item` is
+// invisible after lowering, and `main` is not generic, so the type checker's
+// own seam had already fixed the dispatch types. Bare, the projection decides
+// a machine class (`I64` vs a pointer vs `I8`) and a wrong answer dies in
+// Cranelift.
+fn emit_of<S: Source>(s: S) -> S::Out { s.emit() }
+
+fn left_of<P: Pair>(p: P) -> P::Left { p.left() }
+fn right_of<P: Pair>(p: P) -> P::Right { p.right() }
+
+// The wrapped form is kept as well as the bare one: it is the design doc's
+// literal signature and the shape a user writes.
+fn first<I: Iterator>(mut it: I) -> Option<I::Item> { it.next() }
+
+// `mut it`, not `it`: `Iterator::next` takes `mut self`, so a plain parameter
+// is `E0060`. `mut` on a *parameter* is what carries it — there is no `let mut`
+// to reach for when the iterator arrives as an argument.
+//
+// `it: I` deliberately precedes `dflt: I::Item` so `I` is pinned by the first
+// argument before the projection parameter is checked.
+fn first_or<I: Iterator>(mut it: I, dflt: I::Item) -> I::Item {
+    // `I::Item` in a `let` annotation too, which is a third position after the
+    // parameter list and the return type.
+    let head: Option<I::Item> = it.next()
+    match head { Some(x) => x, None => dflt }
+}
+
+// A user implementor of std's `Iterator`, so the generic functions above see an
+// instantiation that is not a `VecIter`. Echoes `Option<Self::Item>` rather
+// than writing `Option<Int>`.
+record Countdown { n: Int }
+
+impl Iterator for Countdown {
+    type Item = Int
+    fn next(mut self) -> Option<Self::Item> {
+        if self.n <= 0 { return None }
+        self.n = self.n - 1
+        Some(self.n)
+    }
+}
+
+fn main() {
+    // `unwrap_or`'s sentinel, bound to a local because a line starting with `-`
+    // after a block is absorbed as binary subtraction.
+    let miss = 0 - 1
+
+    // === CELL — §7 item 1: a value obtained through the projection, at three
+    // instantiations of one impl whose `Out` is its own parameter. Printing the
+    // values rather than a boolean is deliberate: a wrong `Out` shows up as
+    // wrong text, where `is_some()` would not move.
+    let ci = Cell { v: 41 }
+    let cs = Cell { v: "hi" }
+    let cc = Cell { v: 'z' }
+    println("cell int=${ci.emit()} str=${cs.emit()} char=${cc.emit()}")
+    let fl = Flag { on: true }
+    println("cell echo=${fl.emit()}")
+
+    // === EMIT_OF — §7 item 3 on a user trait: the projection named bare as a
+    // return type, at three instantiations whose machine classes differ
+    // (`I64`, a pointer, `I8`). Mutation C (mono caching its first resolved
+    // answer) dies here.
+    println("emit_of int=${emit_of(ci)} str=${emit_of(cs)} char=${emit_of(cc)} bool=${emit_of(fl)}")
+
+    // === PAIR — §7 item 4: two associated types, and the pair of
+    // instantiations that swaps them. If `Left` and `Right` were confused, `p1`
+    // and `p2` could not both check.
+    let p1 = Both { a: 7, b: "seven" }
+    let p2 = Both { a: "eight", b: 8 }
+    println("pair p1 left=${p1.left()} right=${p1.right()}")
+    println("pair p2 left=${p2.left()} right=${p2.right()}")
+    println("pair generic p1 left=${left_of(p1)} right=${right_of(p1)}")
+    println("pair generic p2 left=${left_of(p2)} right=${right_of(p2)}")
+
+    // === UNANNOTATED — §7 item 2: `it.next()` on a concrete `VecIter<Int>`
+    // typing as `Option<Int>` with **no** annotation anywhere. `v` is
+    // annotated only because an empty `Vec::new()` has nothing to infer from;
+    // `it0` and `n0` are not, and `unwrap_or(miss)` plus the `+ 1` are what
+    // force `n0` to be `Option<Int>` rather than merely accepting it.
+    let mut v: Vec<Int> = Vec::new()
+    v.push(10)
+    v.push(20)
+    v.push(40)
+    let mut it0 = v.iter()
+    let n0 = it0.next()
+    println("unannotated value=${n0.unwrap_or(miss)} plus=${n0.unwrap_or(0) + 1} some=${n0.is_some()} none=${n0.is_none()}")
+
+    // === EXHAUST — §7 item 5, first half: a fixed six `next()` calls over a
+    // three-element vector rather than stopping at the first `None`, so that
+    // (a) `None` REPEATING after exhaustion is pinned, not merely occurring
+    // once, and (b) a non-advancing `next` is observable instead of a hang.
+    // Values are 10/20/40, not 10/20/30, because with 10/20/30 a non-advancing
+    // iterator sums to the same 60 as a correct one over six turns and only
+    // `nones` would notice. Mutation B (deleting `self.i = self.i + 1`) dies
+    // here.
+    let mut it = v.iter()
+    let mut total = 0
+    let mut nones = 0
+    let mut k = 0
+    while k < 6 {
+        match it.next() {
+            Some(x) => total = total + x,
+            None => nones = nones + 1,
+        }
+        k = k + 1
+    }
+    println("exhaust total=${total} nones=${nones}")
+
+    // === CURSOR — the `>=` in `next`'s guard, which is NOT the bounds check it
+    // looks like: `Vec::get` already returns `None` out of range, so relaxing
+    // it to `>` still answers `None` at every index past the end and the
+    // EXHAUST block above survives byte-identically (Task 9 measured this).
+    // What the guard buys is that `i` stops at `len`, and the only way to
+    // observe `i` from Nova is to give the vector a new element for the cursor
+    // to find — which works because `VecIter` holds the `Vec` by pointer, so
+    // `wi.v` and `w` are the same object. Mutation A dies here.
+    let mut w: Vec<Int> = Vec::new()
+    w.push(10)
+    let mut wi = w.iter()
+    match wi.next() { Some(x) => println("cursor a=${x}"), None => println("cursor a=none") }
+    match wi.next() { Some(x) => println("cursor b=${x}"), None => println("cursor b=none") }
+    w.push(20)
+    match wi.next() { Some(x) => println("cursor c=${x}"), None => println("cursor c=none") }
+
+    // === EMPTY — §7 item 5, second half: a `Vec::new()` whose FIRST `next` is
+    // already `None`. A separate behaviour from exhausting a non-empty vector,
+    // because the cursor never advances at all — so the guard is reached with
+    // `i == len == 0`, an index the CURSOR block never visits. The push
+    // afterwards pins that `i` stopped at 0 rather than running to 1, which is
+    // the second and independent place mutation A dies.
+    let mut e: Vec<Int> = Vec::new()
+    let mut ei = e.iter()
+    match ei.next() { Some(x) => println("empty a=${x}"), None => println("empty a=none") }
+    e.push(5)
+    match ei.next() { Some(x) => println("empty b=${x}"), None => println("empty b=none") }
+
+    // === FIRST — §7 item 3 in the design doc's literal wrapped spelling, at
+    // four instantiations including an empty one. Kept for the shape a user
+    // writes, and NOT relied on for the mono seam.
+    let mut ss: Vec<String> = Vec::new()
+    ss.push("hi")
+    ss.push("there")
+    let mut bs: Vec<Bool> = Vec::new()
+    bs.push(false)
+    let ev: Vec<Char> = Vec::new()
+    match first(v.iter()) { Some(x) => println("first int=${x}"), None => println("first int=none") }
+    match first(ss.iter()) { Some(x) => println("first str=${x}"), None => println("first str=none") }
+    match first(bs.iter()) { Some(x) => println("first bool=${x}"), None => println("first bool=none") }
+    match first(ev.iter()) { Some(x) => println("first char=${x}"), None => println("first char=none") }
+
+    // === FIRST_OR — the same four instantiations through the BARE projection,
+    // which is the one with teeth. `Option<Int>` and `Option<String>` lower to
+    // one `MirTy`; `Int` and `String` do not.
+    println("first_or int=${first_or(v.iter(), miss)} str=${first_or(ss.iter(), "?")} bool=${first_or(bs.iter(), true)} char=${first_or(ev.iter(), 'x')}")
+
+    // === COUNTDOWN — a non-`VecIter` implementor of the same trait, so
+    // `first`/`first_or` are instantiated at an `I` that is not generic over
+    // its element type at all, and `Option<Self::Item>` is exercised in a
+    // user impl.
+    let cd = Countdown { n: 3 }
+    let cd_empty = Countdown { n: 0 }
+    println("countdown first_or=${first_or(cd, miss)} empty=${first_or(cd_empty, miss)}")
+    let mut cd3 = Countdown { n: 3 }
+    let mut seq = ""
+    let mut j = 0
+    while j < 5 {
+        match cd3.next() {
+            Some(x) => seq = "${seq}${x}",
+            None => seq = "${seq}.",
+        }
+        j = j + 1
+    }
+    println("countdown seq=${seq}")
+}

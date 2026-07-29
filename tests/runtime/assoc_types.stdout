@@ -1,0 +1,21 @@
+cell int=41 str=hi char=z
+cell echo=true
+emit_of int=41 str=hi char=z bool=true
+pair p1 left=7 right=seven
+pair p2 left=eight right=8
+pair generic p1 left=7 right=seven
+pair generic p2 left=eight right=8
+unannotated value=10 plus=11 some=true none=false
+exhaust total=70 nones=3
+cursor a=10
+cursor b=none
+cursor c=20
+empty a=none
+empty b=5
+first int=10
+first str=hi
+first bool=false
+first char=none
+first_or int=10 str=hi bool=false char=x
+countdown first_or=2 empty=-1
+countdown seq=210..

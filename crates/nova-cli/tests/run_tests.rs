@@ -2569,3 +2569,87 @@ fn calling_next_on_an_immutable_vec_iterator_reports_e0060() {
         "stderr: {stderr}"
     );
 }
+
+/// Associated types end-to-end gate (Phase 2.2c, Task 10). One program covering
+/// every item of the design doc's §7 gate list that a fixture *can* cover —
+/// items 1-5; its items 6-10 each fail to compile or abort, so they are
+/// `#[test]`s in `crates/nova-typeck/src/check.rs` instead
+/// (`a_bound_on_an_associated_type_reports_e0900`,
+/// `an_impl_missing_an_associated_type_reports_e0070`,
+/// `an_impl_binding_an_undeclared_associated_type_reports_e0071`,
+/// `mut_self_trait_method_on_an_immutable_receiver_reports_e0060`,
+/// `mut_self_trait_method_conformance_disagreement_is_e0072`).
+///
+/// Covers: an associated type bound to the impl's **own** generic parameter at
+/// three instantiations (so every projection goes through `subst`); both
+/// accepted spellings of an impl's signature (`-> T` and the echoed
+/// `-> Self::Out`) plus `Self::Out` in a `let` annotation inside an impl body;
+/// a trait with **two** associated types, instantiated once as
+/// `Both<Int, String>` and once as `Both<String, Int>` so the two cannot be
+/// confused; `it.next()` on a concrete `VecIter<Int>` typing as `Option<Int>`
+/// with no annotation; a `Vec` iterated past exhaustion; a `Vec::new()` whose
+/// first `next` is already `None`; and generic functions naming the projection
+/// **bare** (`-> S::Out`, `-> P::Left`, `(dflt: I::Item) -> I::Item`) as well as
+/// wrapped (`-> Option<I::Item>`).
+///
+/// The bare spelling is the load-bearing one and the reason this fixture is not
+/// just `first`. Task 9 measured that `-> Option<I::Item>` at three
+/// instantiations **survives** a mutation making monomorphization's
+/// normalization cache its first answer, byte-identically: `Option<Int>` and
+/// `Option<String>` lower to the same `MirTy`, so a wrong `Item` is invisible
+/// after lowering, and `main` is not generic, so typeck's seam had already
+/// fixed the dispatch types. Bare, a wrong `Item` is a wrong machine class and
+/// dies in Cranelift. See the fixture's header for the mutation-to-line map.
+#[test]
+fn assoc_types_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/assoc_types.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/assoc_types.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through the object-file backend. Not redundant with
+/// `assoc_types_run` for the reason `strings_build_standalone`'s comment gives
+/// — `nova run` resolves runtime symbols through `nova_runtime::symbols()`
+/// while `nova build` links `nova_runtime.lib` by export name and never
+/// consults that table — and for one specific to this gate: the mutation this
+/// fixture exists to catch fails in **code generation**, not in the type
+/// checker, so the two backends are the two places it can fail differently.
+#[test]
+fn assoc_types_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/assoc_types.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/assoc_types.nova", "assoc_types");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation) — a
+/// gate criterion, not belt-and-braces. `VecIter` introduces a three-level
+/// rooting chain: the backing `[T]` is reachable only as
+/// `it` -> `VecIter` -> `Vec` -> `data`, and `next` allocates a fresh `Option`
+/// on every call, so the storage must survive a collection triggered by the
+/// very call that reads it. The collector scans the stack plus callee-saved
+/// registers, and that is precisely what makes an iterator held across a call a
+/// root; a missed root here loses elements silently rather than crashing. The
+/// `String` and `Char` iterators in the fixture matter for the same reason —
+/// their elements are themselves heap objects, so a lost root shows up as wrong
+/// text rather than a wrong number.
+#[test]
+fn assoc_types_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/assoc_types.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/assoc_types.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
