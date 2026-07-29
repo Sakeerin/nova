@@ -11341,6 +11341,133 @@ mod tests {
     }
 
     #[test]
+    fn conformance_normalizes_parameter_types_not_only_the_return_type() {
+        // Normalizing only the return type is the plausible half-fix: it passes
+        // every return-position test in this file and leaves this one reporting a
+        // bogus E0072 on parameter 1.
+        let ok = check_src(
+            "trait It { type Item\n fn put(self, x: Self::Item) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn put(self, x: T) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        // The negative: `Self::Item` is `T`, so `x: Bool` is wrong and must still
+        // be rejected. `x` is deliberately unused, which produces no diagnostic
+        // of its own — measured, so the exact-sequence assertion is safe.
+        let bad = check_src(
+            "trait It { type Item\n fn put(self, x: Self::Item) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn put(self, x: Bool) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&bad), ["E0072"], "{:?}", bad.diagnostics);
+        let msg = &bad.diagnostics[0].message;
+        assert!(
+            msg.contains("parameter 1") && msg.contains("declares `T0`"),
+            "the parameter diagnostic reports the normalized trait type: {msg}"
+        );
+    }
+
+    #[test]
+    fn conformance_normalizes_inside_a_compound_type() {
+        // `[Self::Item]` against `[T]`. A comparison that normalized only a
+        // top-level projection passes every other positive test here and fails
+        // this one — the same boundary
+        // `a_projection_nested_inside_a_compound_type_normalizes` pins for seam
+        // 1, at seam 2.
+        let ok = check_src(
+            "trait It { type Item\n fn items(self) -> [Self::Item] }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn items(self) -> [T] { [self.v] } }\n\
+             fn main() { }",
+        );
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        // `[Bool]` is still wrong, so the compound case is not waved through
+        // wholesale.
+        let bad = check_src(
+            "trait It { type Item\n fn items(self) -> [Self::Item] }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn items(self) -> [Bool] { [true] } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&bad), ["E0072"], "{:?}", bad.diagnostics);
+    }
+
+    #[test]
+    fn conformance_still_rejects_a_wrong_arity_and_a_wrong_receiver() {
+        // Neither of these compares a projection at all — the arity check counts
+        // parameters and the receiver check compares two bools — but both sit on
+        // the code path this seam moved out of `check_impl_conformance`, and both
+        // `continue` past the type comparison. They are the checks that can
+        // silently stop running while every projection-shaped test stays green.
+        let arity = check_src(
+            "trait It { type Item\n fn put(self, x: Self::Item) -> Int }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn put(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&arity), ["E0072"], "{:?}", arity.diagnostics);
+        // Specifically the arity message, not a per-parameter mismatch: the
+        // count is compared before substitution and normalization precisely so a
+        // wrong arity reads as one.
+        assert!(
+            arity.diagnostics[0].message.contains("0 parameter(s)"),
+            "{}",
+            arity.diagnostics[0].message
+        );
+        // A trait method declared with `self`, implemented as an associated
+        // function. The return types agree (`T` on both sides once normalized),
+        // so the receiver is the only disagreement and nothing else can catch it.
+        let recv = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n\
+             fn get_item() -> T { panic(\"no\") } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&recv), ["E0072"], "{:?}", recv.diagnostics);
+        assert!(
+            recv.diagnostics[0].message.contains("`self` receiver"),
+            "{}",
+            recv.diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn conformance_normalizes_through_the_matching_impl_not_the_only_one() {
+        // Two impls of one trait with **different** bindings, each writing its
+        // own concrete type. A normalizer that takes the first impl, or the only
+        // impl, or ignores the self type answers `T` where `[T]` is wanted and
+        // reports E0072 on one of them — which a single-impl test cannot see.
+        let prelude = "trait It { type Item\n fn peek(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             record K<T> { k: T }\n";
+        let ok = check_src(&format!(
+            "{prelude}\
+             impl<T> It for W<T> {{ type Item = T\n fn peek(self) -> T {{ self.v }} }}\n\
+             impl<T> It for K<T> {{ type Item = [T]\n fn peek(self) -> [T] {{ [self.k] }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        // Swap the two return types and *both* impls must be rejected. Without
+        // this half, the positive above would also hold for a normalizer that
+        // answered "whichever binding fits" rather than "this impl's binding".
+        let swapped = check_src(&format!(
+            "{prelude}\
+             impl<T> It for W<T> {{ type Item = T\n fn peek(self) -> [T] {{ [self.v] }} }}\n\
+             impl<T> It for K<T> {{ type Item = [T]\n fn peek(self) -> T {{ self.k }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(
+            error_codes(&swapped),
+            ["E0072", "E0072"],
+            "{:?}",
+            swapped.diagnostics
+        );
+    }
+
+    #[test]
     fn conformance_resolves_a_projection_bound_by_a_later_declared_impl() {
         // The discriminating test for why this seam is a post-collection pass
         // rather than a `normalize` inside `check_impl_conformance` with the
