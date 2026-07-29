@@ -1330,6 +1330,73 @@ mod tests {
     }
 
     #[test]
+    fn normalize_rejects_an_impl_that_shares_the_head_but_does_not_fit() {
+        // Two impls on the SAME head, one structurally non-matching:
+        // `impl<T> It for Pair<T, T>` does not cover `Pair<Int, Bool>`, so the
+        // projection must resolve through `impl It for Pair<Int, Bool>` instead.
+        //
+        // This is the only test of the `match_args` gate that a head-only
+        // implementation fails. `normalize_picks_the_impl_whose_self_type_matches`
+        // and `normalize_recurses_into_every_compound_type` both discriminate by
+        // *head* alone, so dropping the gate (`i.match_args(&on)?` →
+        // `.unwrap_or_default()`) survives them: the wrong impl is selected, its
+        // `Param(0)` substitutes against an empty argument list to `Ty::Error`,
+        // and `Ty::Error` unifies with anything downstream. Head-only impl
+        // selection is the miscompile class this project has already shipped once
+        // (see the comment on the gate), which is why it gets its own test.
+        let pair = |a: Ty, b: Ty| rec(1, vec![a, b]);
+        let impls = [
+            imp(
+                pair(Ty::Param(0), Ty::Param(0)),
+                1,
+                vec![(DefId(ITEM), Ty::Param(0))],
+            ),
+            imp(pair(Ty::Int, Ty::Bool), 0, vec![(DefId(ITEM), Ty::String)]),
+        ];
+        assert_eq!(
+            normalize_ty(&proj(pair(Ty::Int, Ty::Bool), ITEM), &impls),
+            Ok(Ty::String),
+            "Pair<Int, Bool> does not fit Pair<T, T>, so the concrete impl answers"
+        );
+        // The control: the generic impl *is* selected when the self type fits it.
+        // Without this, the test above would also pass if `Pair<T, T>` were never
+        // selectable at all.
+        assert_eq!(
+            normalize_ty(&proj(pair(Ty::Int, Ty::Int), ITEM), &impls),
+            Ok(Ty::Int),
+            "Pair<Int, Int> does fit Pair<T, T>"
+        );
+    }
+
+    #[test]
+    fn normalize_resolves_a_projection_whose_self_type_is_itself_a_projection() {
+        // `Assoc { on: Assoc { .. } }` — the shape that makes pre-normalizing
+        // `on` load-bearing. `W::Mid` resolves to `K`, and only then does the
+        // outer projection have a head to look `Item` up on.
+        //
+        // Unwritable in Nova source (a binding cannot name another concrete
+        // type's associated type), but `subst` builds it: monomorphization can
+        // substitute a projection into `Assoc { on: Param(k) }`. Without the
+        // pre-normalization the outer `on` has no `head()` and the whole thing is
+        // returned unresolved.
+        //
+        // `normalize_recurses_into_every_compound_type`'s last case looks like
+        // this but is not: there the projection is *inside* a record that already
+        // has a head, so the outer lookup succeeds either way.
+        let mid = 9;
+        let w = rec(1, vec![]);
+        let k = rec(2, vec![]);
+        let impls = [
+            imp(w.clone(), 0, vec![(DefId(mid), k)]),
+            imp(rec(2, vec![]), 0, vec![(DefId(ITEM), Ty::Bool)]),
+        ];
+        assert_eq!(
+            normalize_ty(&proj(proj(w, mid), ITEM), &impls),
+            Ok(Ty::Bool)
+        );
+    }
+
+    #[test]
     fn normalize_only_reads_the_binding_for_the_projected_associated_type() {
         // One impl binding two associated types. Reading the first entry
         // regardless of key gives `Ty::Int` for both.
