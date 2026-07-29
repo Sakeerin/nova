@@ -2653,3 +2653,177 @@ fn assoc_types_under_gc_stress() {
         .success()
         .stdout(expected);
 }
+
+// === Task 11 Step 6b: two source-reachable branches in `mono.rs` that had no
+// test at all. Both survived mutation with the whole suite green.
+
+/// A trait with `n+1` associated types `A0..An` whose impl chains each `Ak` to
+/// `link(k)` and bottoms out at `An = Int`, plus a generic function that names
+/// `I::A0` **only inside its own body**.
+///
+/// That last part is what makes monomorphization the *first* seam to resolve the
+/// chain concretely, and it is the whole difficulty of reaching mono's `E0078`
+/// from source. The typeck-side twins of these programs
+/// (`a_binding_chain_that_resolves_to_an_enormous_type_is_a_diagnostic` and
+/// `a_long_but_terminating_binding_chain_is_a_diagnostic` in
+/// `crates/nova-typeck/src/check.rs`) give the trait a method whose *signature*
+/// mentions `Self::A0`, so `check_impl_conformance` normalizes it with a
+/// concrete `Self` and reports there — three times — and compilation stops
+/// before mono runs. Here nothing in any signature mentions the projection:
+/// inside `use_it` the type is `[Assoc { on: Param(0) }]`, which has no head, so
+/// seam 1 correctly leaves it alone, and `main`'s call instantiates only
+/// `(I) -> Int`.
+///
+/// `[I::A0]` rather than `Vec<I::A0>` for the diagnostic's sake, not the
+/// compiler's: both reach the branch, but mono's `type_name` drops a record's
+/// type arguments, so the `Vec` spelling reports "the associated types in
+/// `Vec`" — naming a type that does not mention a projection at all. The array
+/// spelling reports `[W::A0]`. (`type_name` dropping generic arguments is a
+/// queued defect; this test is written so it cannot hide behind it.)
+///
+/// An empty array literal is the initializer because the element type is
+/// genuinely uninhabited here: no value of `I::A0` can be produced without a
+/// trait method returning it, and adding one would put the projection back into
+/// a signature and move the diagnostic to typeck.
+fn assoc_chain_in_a_generic_body(n: u32, link: impl Fn(u32) -> String) -> String {
+    let decls: String = (0..=n).map(|k| format!(" type A{k}\n")).collect();
+    let binds: String = (0..n)
+        .map(|k| format!(" type A{} = {}\n", k, link(k)))
+        .collect();
+    format!(
+        "record Pair<A, B> {{ a: A\n b: B }}\n\
+         trait Chain {{\n{decls} fn g(self) -> Int }}\n\
+         record W {{ v: Int }}\n\
+         impl Chain for W {{\n{binds} type A{n} = Int\n\
+         fn g(self) -> Int {{ 1 }} }}\n\
+         fn use_it<I: Chain>(x: I) -> Int {{\n\
+         let a: [I::A0] = []\n\
+         a.len() }}\n\
+         fn main() {{ println(\"${{use_it(W {{ v: 1 }})}}\") }}\n"
+    )
+}
+
+/// Monomorphization's `E0078` branch, and **which of the two limits it names**.
+///
+/// Mono has its own normalization budget failure path, distinct from
+/// `Checker::normalize`'s, and before this test it had no coverage of any kind:
+/// making the branch unreachable left the whole suite green. It is not a
+/// backstop — a 45-line program reaches it (the wide half below), which is why
+/// this is a `nova check` test and not a hand-built `hir::Module`.
+///
+/// Both halves are here because the `detail` match in `mono.rs` has two arms and
+/// a test that asserted only the code would accept either arm for either input.
+/// The wide chain is 16 links, comfortably inside the depth limit of 64, so
+/// blaming depth would tell the user to shorten a chain that is already short;
+/// the deep chain resolves to 66 nodes, so blaming size would tell them to
+/// simplify a type that is tiny. The same mutation on the typeck side
+/// (`619f453`) survived a test that checked only the code.
+///
+/// Exactly one diagnostic each, asserted by counting: the typeck twins report
+/// three for one root cause because conformance and `check_fn_body` each
+/// normalize the same signature, and mono records only the *first* failure per
+/// instance. A regression that moved the report back to typeck would show up
+/// here as three.
+#[test]
+fn mono_reports_which_normalization_limit_a_projection_overflowed() {
+    let dir = std::env::temp_dir().join("nova-mono-normalize-limits");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // Wide: `type A(k) = Pair<Self::A(k+1), Self::A(k+1)>`, so `A0` resolves to
+    // 2^17-1 nodes. The step allowance, not the depth one.
+    let wide = dir.join("wide.nova");
+    std::fs::write(
+        &wide,
+        assoc_chain_in_a_generic_body(16, |k| format!("Pair<Self::A{}, Self::A{}>", k + 1, k + 1)),
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&wide).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert_eq!(
+        stderr.matches("error[E0078]").count(),
+        1,
+        "one overflow, one report: {stderr}"
+    );
+    assert!(
+        stderr.contains("resolves to more than 10000 type nodes"),
+        "a wide chain is a size report, not a depth report: {stderr}"
+    );
+    // The projection has to be nameable in the message; `[W::A0]` is what
+    // `type_name` produces for the array of it.
+    assert!(
+        stderr.contains("`[W::A0]`") && stderr.contains("when instantiating `use_it`"),
+        "the message must name both the type and the instance: {stderr}"
+    );
+    // Deep: `type A(k) = Self::A(k+1)`, 65 links, so the chain exceeds the depth
+    // limit long before the step allowance (66 nodes total).
+    let deep = dir.join("deep.nova");
+    std::fs::write(
+        &deep,
+        assoc_chain_in_a_generic_body(65, |k| format!("Self::A{}", k + 1)),
+    )
+    .expect("write");
+    let assert = nova().arg("check").arg(&deep).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert_eq!(
+        stderr.matches("error[E0078]").count(),
+        1,
+        "one overflow, one report: {stderr}"
+    );
+    assert!(
+        stderr.contains("the chain of bindings is more than 64 deep"),
+        "a deep chain is a depth report, not a size report: {stderr}"
+    );
+}
+
+/// A trait bound is satisfied only by an impl whose self type **fits the
+/// argument structurally**, not merely one that shares its head.
+///
+/// `impl_satisfies` filters `module.impls` by `self_head`, then requires
+/// `imp.match_args(arg)` to succeed. Dropping that second requirement — so any
+/// impl on the same head satisfies the bound — left the entire suite green, and
+/// it is not an equivalent mutant: `f(P { a: 1, b: true })` then **prints `7`
+/// and exits 0** with a declared bound silently unenforced. That is the
+/// head-only-selection class this project has already shipped once as a
+/// miscompile (`d49f896`), and it is also the gate `E0079`'s unreachability
+/// rests on — `match_args` on a non-fitting impl is what would otherwise hand
+/// mono a `Ty::Error` self type with a projection on it.
+///
+/// The positive half is not optional. `P<Int, Bool>` alone would also pass if
+/// `impl It for P<Int, Int>` were never selectable at all, which is the failure
+/// mode the fix for a head-only bug most plausibly introduces. Both halves are
+/// the same declarations with one literal changed.
+#[test]
+fn a_trait_bound_needs_an_impl_that_fits_structurally_not_just_by_head() {
+    let program = |b: &str| {
+        format!(
+            "trait It {{ type Item\n\
+             fn g(self) -> Int }}\n\
+             record P<A, B> {{ a: A\n\
+             b: B }}\n\
+             impl It for P<Int, Int> {{ type Item = Int\n\
+             fn g(self) -> Int {{ 1 }} }}\n\
+             fn f<I: It>(x: I) -> Int {{ 7 }}\n\
+             fn main() {{ println(\"${{f(P {{ a: 1, b: {b} }})}}\") }}\n"
+        )
+    };
+    let dir = std::env::temp_dir().join("nova-impl-structural-fit");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    // `P<Int, Bool>` shares the head `Record(P)` with the impl and does not fit
+    // it, so the bound is unsatisfied.
+    let bad = dir.join("bad.nova");
+    std::fs::write(&bad, program("true")).expect("write");
+    let assert = nova().arg("run").arg(&bad).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error[E0013]") && stderr.contains("`P: It`"),
+        "stderr: {stderr}"
+    );
+    // The control: `P<Int, Int>` does fit, so the same program compiles and runs.
+    let good = dir.join("good.nova");
+    std::fs::write(&good, program("2")).expect("write");
+    nova()
+        .arg("run")
+        .arg(&good)
+        .assert()
+        .success()
+        .stdout("7\n");
+}
