@@ -409,6 +409,61 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `char::is_whitespace` intrinsic (the approximate list above stands in for
   it); and `nova_rt_str_find`/other fast paths for the O(n)-per-call cost
   noted above.
+- **Associated types (Phase 2.2c)** — `trait Iterator { type Item }` and
+  projections written `Self::Item` / `I::Item`. A trait may declare associated
+  types; an impl binds each one (`type Item = T`), and conformance checks the
+  set in both directions — `E0070` for a binding the trait requires and the
+  impl omits, `E0071` for one the trait never declared.
+  - **Syntax is `::`, deviating from `nova-spec/20-STDLIB.md:95`, which wrote
+    `Self.Item` with a dot** (ADR 0006, and the spec is corrected). `::` reuses
+    a path form the parser already produced — `A::B` in type position always
+    parsed and was rejected by *typeck*, so the projection syntax cost zero
+    parser work — and it is already Nova's reach-into-a-type operator
+    (`P::new()`, `T::default()`). `Self.Item` does not parse at all.
+  - **Represented as `Ty::Assoc { on, assoc }`**, where `assoc` is the
+    associated type's own `DefId` under a new `DefKind::AssocType`. Resolved by
+    **normalization at seams, not by deferred obligations**: the unifier is a
+    210-line Robinson engine whose entire state is `vars: Vec<Option<Ty>>`, with
+    no impl table and no constraint queue, and giving it one would have been the
+    larger change. The shared core is `hir::normalize_ty(&Ty, &[ImplInfo])` in
+    `nova-hir` — a free function over a slice, which is the one signature both
+    the type checker (`&self.impls`) and monomorphization (`&module.impls`) can
+    satisfy. It is never called from `unify`.
+  - Normalization runs at **seven** sites in the type checker (the design
+    predicted three), at impl conformance, and after `subst` at
+    monomorphization. Conformance needed a **separate pass after the impl table
+    is complete**: `collect_impls` calls conformance ten lines before pushing
+    the `ImplInfo`, so normalizing in place cannot see the impl being checked,
+    and hoisting the push instead would make resolution depend on declaration
+    order — which Nova deliberately does not have for impls.
+  - **`Self` is no longer a legal generic-parameter name (`E0076`).** It had
+    been accepted, so `impl<Self: It> W<Self>` type-checked with `Self` meaning
+    an ordinary parameter rather than the impl's self type — two meanings for
+    one token in one scope.
+  - Cyclic bindings are rejected (`E0077`, `type Item = Self::Item` and mutual
+    chains), while the legitimate chain `type A = Self::B` / `type B = Int`
+    still resolves. Normalization is bounded by **two** independent allowances
+    and reports rather than diverging: a depth limit (`E0078`, reachable from a
+    chain longer than 64) and a total-work allowance (`E0078`, for a *branching*
+    chain, which is exponential in depth). Both are load-bearing and measured:
+    dropping the work allowance makes a 58-line accepted program take longer
+    than 60 seconds; dropping the depth limit overflows the stack.
+  - A projection that somehow survives to monomorphization is `E0079` rather
+    than reaching code generation. That path is not reachable from source today
+    — sixteen probes each hit an earlier diagnostic — and is pinned by a
+    `nova-mir` unit test, which is the honest way to test a backstop.
+  - **The mutable-receiver rule now covers trait methods** (`E0060`), closing
+    ADR 0005 §1's documented gap, which `Iterator::next(mut self)` required.
+    The check sits at the single point where a trait call's receiver is emitted,
+    because the gap turned out to have **five** routes, not one: a direct call,
+    a generic bound, a supertrait bound, a trait default body delegating to a
+    mutator, and string interpolation reaching a `fmt(mut self)` through a path
+    that bypasses ordinary method dispatch entirely.
+  - Deliberately out of scope: `Map::iter()` yielding key/value pairs, which
+    needs tuples; generic associated types (`I::Item<Int>` is `E0012`); bounds
+    on an associated type (`type Item: Display` is `E0900`); and a projection in
+    an impl's self type, which is unselectable and invisible to overlap
+    checking.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
