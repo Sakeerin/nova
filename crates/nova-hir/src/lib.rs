@@ -767,6 +767,20 @@ pub struct TraitMethod {
     /// and dispatch that ignores it lowers a receiver argument into a callee
     /// that has no slot for it.
     pub has_self: bool,
+    /// Whether the `self` receiver is declared `mut`, i.e. whether the method is
+    /// a mutator whose callers must supply a mutable receiver place (`E0060`,
+    /// ADR 0005 §1). Meaningless when `has_self` is false, and the conformance
+    /// check that compares this against the impl's own `mut` runs only after the
+    /// two agree about `has_self` at all.
+    ///
+    /// It has to live here rather than being read off the impl: trait dispatch
+    /// resolves to `(trait_id, method_index)`, and for a generic receiver
+    /// (`fn f<T: Tr>(mut x: T) { x.m() }`) there is no single impl whose
+    /// receiver declaration could be consulted. `params` cannot carry it either
+    /// — `method_sig_parts` strips a `self` parameter whether or not it is
+    /// `mut`, so the flag is the only record, exactly as `has_self` is the only
+    /// record of the receiver's presence.
+    pub mut_self: bool,
     /// Number of the method's own generic parameters (not counting `Self`).
     pub generics: u32,
     /// Trait bounds per method generic parameter (indexed `0..generics`).

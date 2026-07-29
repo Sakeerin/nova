@@ -49,11 +49,20 @@ enum MethodRes {
 /// Two sibling emitters instead had to keep the flat `Param` substitution
 /// layout (`[Self] ++ method generics`) in step by hand, and a divergence there
 /// silently dispatches to a wrongly specialized function.
-enum TraitCallSelf {
+enum TraitCallSelf<'a> {
     /// `receiver.name(args)`: `Self` is the receiver's resolved type and the
     /// receiver becomes the callee's `self` argument. Valid only for a method
     /// the trait declares *with* a `self` receiver ([`hir::TraitMethod::has_self`]).
-    Receiver(hir::Expr),
+    ///
+    /// The receiver's **AST** travels alongside its checked form for the same
+    /// reason [`Checker::check_mutable_receiver`] takes one: `place_root` walks
+    /// the field/index projection shape, which the checked `hir::Expr` has
+    /// already lost. Carrying it *in the variant* rather than as a separate
+    /// parameter is what makes the mutable-receiver rule unbypassable by route —
+    /// there is no way to hand `emit_trait_call` a receiver without also handing
+    /// it the place to classify, so a future caller cannot reintroduce the gap
+    /// ADR 0005 §1 recorded by simply forgetting a check.
+    Receiver(hir::Expr, &'a Spanned<ast::Expr>),
     /// `Type::name(args)` or `T::name(args)`: `Self` comes from the path
     /// qualifier and there is no receiver. Valid only for a receiver-less
     /// method (a trait associated function).
@@ -168,11 +177,19 @@ struct Checker<'a> {
     /// Their `sigs` entry holds only the declared parameters — no prepended
     /// self type — so `check_fn_body`'s params/sig zip stays aligned.
     selfless: FxHashSet<DefId>,
-    /// Methods whose `self` receiver is declared `mut`. Calling one requires a
-    /// mutable receiver place at the call site, so `mut` keeps the meaning it
-    /// already has for `arr[i] = v` and `rec.f = v` (see ADR 0005). Populated
-    /// for **inherent** impl methods only — see [`Checker::check_method_call`]
-    /// for why the trait-dispatch path is not covered.
+    /// Impl methods whose `self` receiver is declared `mut`. Calling one requires
+    /// a mutable receiver place at the call site, so `mut` keeps the meaning it
+    /// already has for `arr[i] = v` and `rec.f = v` (see ADR 0005 §1).
+    ///
+    /// Populated in `collect_impls` for **every** impl method, inherent or in a
+    /// trait impl, and read for two different purposes. An *inherent* callee is
+    /// looked up here at its call site ([`Checker::check_mutable_receiver`]). A
+    /// *trait* callee is not: the call site consults
+    /// [`hir::TraitMethod::mut_self`] instead, because trait dispatch resolves
+    /// to `(trait_id, method_index)` with no impl to look up. The trait-impl
+    /// entries are what
+    /// [`Checker::check_impl_method_signatures`] compares against the trait's
+    /// declaration, so the two flags cannot silently disagree.
     mut_self: FxHashSet<DefId>,
     sums: Vec<hir::SumType>,
     records: Vec<hir::RecordType>,
@@ -755,6 +772,15 @@ impl<'a> Checker<'a> {
                     // decide both or `params` and `has_self` disagree. Mirrors
                     // `collect_impls`.
                     has_self: params.iter().any(|p| p.name.value == "self"),
+                    // The same predicate `collect_impls` uses for the impl side
+                    // of this flag, for the same reason `has_self` uses `any`:
+                    // `method_sig_parts` strips a `self` at any position, so a
+                    // `params[0]`-shaped predicate would classify a misplaced
+                    // receiver as a non-mutator while the signature machinery
+                    // still treated it as a receiver. Both sides of the
+                    // conformance comparison below must be decided the same way
+                    // or the comparison itself is the bug.
+                    mut_self: params.iter().any(|p| p.name.value == "self" && p.is_mut),
                     generics: generics.len() as u32,
                     bounds: m_bounds,
                     default_def,
@@ -1523,6 +1549,41 @@ impl<'a> Checker<'a> {
                         span,
                     );
                     continue;
+                }
+                // The receiver's *mutability* must agree too, and nothing else
+                // catches it either: `method_sig_parts` strips a `self`
+                // parameter whether or not it is `mut`, so neither `params` list
+                // records it, and the parameter and return comparisons below
+                // therefore pass a disagreeing pair. Yet the two halves are read
+                // by *different* consumers — `emit_trait_call` gates the call
+                // site on the trait's flag while `check_fn_body` gates the body
+                // on the impl's own `mut` — so a disagreement means the
+                // receiver's mutability requirement is decided by whichever
+                // table the reader happened to consult. Trait `mut self` with an
+                // impl `self` demands `let mut` at every call site for a method
+                // that cannot mutate; the reverse lets an impl mutate through a
+                // binding no caller ever granted the permission to.
+                //
+                // Deliberately **no `continue`**, unlike the receiver-*presence*
+                // mismatch above. That one `continue`s because both parameter
+                // lists are then misaligned by one and every later comparison is
+                // noise; a `mut` disagreement misaligns nothing, so the rest of
+                // the signature is still worth checking in the same pass.
+                let impl_mut_self = self.mut_self.contains(def_id);
+                if impl_mut_self != trait_method.mut_self {
+                    let (want, got) = if trait_method.mut_self {
+                        ("a `mut self` receiver", "a plain `self` receiver")
+                    } else {
+                        ("a plain `self` receiver", "a `mut self` receiver")
+                    };
+                    self.error(
+                        "E0072",
+                        format!(
+                            "method `{name}` has {got} but trait `{}` declares {want}",
+                            tr.name
+                        ),
+                        span,
+                    );
                 }
                 // The impl method's own generics = its total minus the impl's,
                 // and must match the trait method's generic count.
@@ -2922,7 +2983,7 @@ impl<'a> Checker<'a> {
                             // Bridge to a user-defined `Display` trait: if the
                             // value's type has a `fmt(self) -> String` in scope,
                             // interpolation calls it.
-                            match self.try_display(fcx, value, &other) {
+                            match self.try_display(fcx, value, e, &other) {
                                 Some(fmt_call) => pieces.push(fmt_call),
                                 None => {
                                     self.error(
@@ -4424,16 +4485,15 @@ impl<'a> Checker<'a> {
 
     /// Check `receiver.method(args)`. `receiver` is the already-checked HIR;
     /// `receiver_ast` is the same expression before checking, needed because the
-    /// mutable-receiver rule below classifies it with `place_root`.
+    /// mutable-receiver rule classifies it with `place_root`.
     ///
-    /// **The rule covers inherent methods only.** A trait method's `mut self`
-    /// is declared on the *trait*, not on the impl, and trait dispatch here
-    /// resolves to `(trait_id, method_index)` — for a generic receiver
-    /// (`fn f<T: Tr>(x: T) { x.m() }`) there is no single impl to read the
-    /// receiver's mutability off. Enforcing it there needs a `mut_self` flag on
-    /// `hir::TraitMethod` beside `has_self`, plus a conformance rule keeping the
-    /// impl's receiver in step with the trait's. Deliberately deferred; ADR 0005
-    /// records it as a known gap.
+    /// **The rule covers both dispatch paths.** An inherent callee is checked
+    /// here, keyed on the impl method's `DefId` in `Checker::mut_self`; a trait
+    /// callee is checked inside [`Checker::emit_trait_call`], keyed on
+    /// [`hir::TraitMethod::mut_self`], because that is the one point *every*
+    /// receiver route converges on and this arm is not (see the note there).
+    /// Either way the receiver AST is what gets classified, which is why it is
+    /// threaded through [`TraitCallSelf::Receiver`] rather than left behind.
     fn check_method_call(
         &mut self,
         fcx: &mut FnCtx,
@@ -4486,7 +4546,7 @@ impl<'a> Checker<'a> {
                 fcx,
                 trait_id,
                 method_idx,
-                TraitCallSelf::Receiver(receiver),
+                TraitCallSelf::Receiver(receiver, receiver_ast),
                 args,
                 span,
             ),
@@ -4706,7 +4766,7 @@ impl<'a> Checker<'a> {
         fcx: &mut FnCtx,
         trait_id: DefId,
         method_idx: u32,
-        dispatch: TraitCallSelf,
+        dispatch: TraitCallSelf<'_>,
         args: Vec<hir::Expr>,
         span: Span,
     ) -> hir::Expr {
@@ -4729,7 +4789,7 @@ impl<'a> Checker<'a> {
         // reintroducing the ICE, mirroring `emit_inherent_call`, and being one
         // check covering both directions it cannot rot on only one side.
         let (self_ty, receiver) = match dispatch {
-            TraitCallSelf::Receiver(_) if !tm.has_self => {
+            TraitCallSelf::Receiver(..) if !tm.has_self => {
                 self.error(
                     "E0014",
                     format!(
@@ -4743,7 +4803,38 @@ impl<'a> Checker<'a> {
             }
             // `Self` is the receiver's type; deriving it here rather than taking
             // it from the caller is what makes the two impossible to disagree.
-            TraitCallSelf::Receiver(recv) => (fcx.icx.apply(&recv.ty), Some(Box::new(recv))),
+            TraitCallSelf::Receiver(recv, recv_ast) => {
+                // The mutable-receiver rule (ADR 0005 §1), on the trait path.
+                // Keyed on the *trait method's* flag, not on any impl's: for a
+                // generic receiver there is no single impl, and the trait's
+                // declaration is what the call site programs against anyway —
+                // `check_impl_method_signatures` is what keeps the impl in step.
+                //
+                // Here rather than in `check_method_call`'s `MethodRes::Trait`
+                // arm, which is where ADR 0005's migration path put it, because
+                // that arm is not the only receiver route: `try_display` reaches
+                // a `fmt(mut self) -> String` straight from string interpolation
+                // without passing through it at all. This is the one point every
+                // receiver route converges on, so the rule cannot be dodged by
+                // finding another way in. Runs *before* the arity and argument
+                // checks below and does not return early, so a missing `let mut`
+                // stays one diagnostic rather than cascading — the same order
+                // and the same reasoning as `MethodRes::Inherent`.
+                if tm.mut_self {
+                    // The callee is named by the trait's declared method name,
+                    // unqualified: `Self` may still be a generic parameter here,
+                    // so there is no impl to qualify with. That is the same
+                    // choice every other diagnostic at this dispatch site makes,
+                    // and `arity_errors_name_the_callee_uniformly` pins it.
+                    self.require_mutable_place(
+                        fcx,
+                        recv_ast,
+                        span,
+                        MutTarget::Receiver(tm.name.clone()),
+                    );
+                }
+                (fcx.icx.apply(&recv.ty), Some(Box::new(recv)))
+            }
             TraitCallSelf::Qualifier(_) if tm.has_self => {
                 self.error(
                     "E0014",
@@ -4825,10 +4916,19 @@ impl<'a> Checker<'a> {
     /// scope, build the call that produces its string. Used to interpolate
     /// user types. Returns `None` (leaving `value` consumed) if no such
     /// method resolves.
+    ///
+    /// `value_ast` is `value` before checking, threaded through purely so
+    /// [`Checker::emit_trait_call`] can apply the mutable-receiver rule: nothing
+    /// stops a user trait from declaring `fn fmt(mut self) -> String`, and this
+    /// is a receiver route that never passes through
+    /// [`Checker::check_method_call`]. `std/core`'s own `Display` declares a
+    /// plain `self`, so the flag is false for every interpolation in std and the
+    /// check is a no-op there.
     fn try_display(
         &mut self,
         fcx: &mut FnCtx,
         value: hir::Expr,
+        value_ast: &Spanned<ast::Expr>,
         recv_ty: &Ty,
     ) -> Option<hir::Expr> {
         let (trait_id, method_idx) = match self.resolve_method_on(recv_ty, fcx, "fmt") {
@@ -4850,7 +4950,7 @@ impl<'a> Checker<'a> {
             fcx,
             trait_id,
             method_idx,
-            TraitCallSelf::Receiver(value),
+            TraitCallSelf::Receiver(value, value_ast),
             Vec::new(),
             span,
         ))
@@ -8002,30 +8102,37 @@ mod tests {
         );
     }
 
-    /// **Documents a known gap, not a desired behaviour.** ADR 0005 §1
-    /// ("Consequences" / "Migration path") records that the mutable-receiver
-    /// rule covers inherent methods only: `check_method_call`'s
-    /// `MethodRes::Trait` arm dispatches straight to `emit_trait_call` with no
-    /// call to `check_mutable_receiver` at all, because a generic receiver's
-    /// trait dispatch has no single impl method whose `mut self` could be read
-    /// off — closing it needs a `mut_self` flag on `hir::TraitMethod` plus an
-    /// impl/trait conformance check, neither of which exists yet.
+    /// **The enforced rule: `mut self` demands a mutable receiver whichever way
+    /// the method was dispatched.** A trait method declaring `mut self`, called
+    /// through an immutable binding, is `E0060` — the same answer the *inherent*
+    /// path gives for the same operation
+    /// (`mut_self_method_on_immutable_receiver_reports_e0060` a few tests up).
+    /// One rule, one answer, which was the whole point: ADR 0005 §1 rejected
+    /// Java/Python receiver semantics precisely because "a language where
+    /// `v.push(x)` is allowed but `v.items[0] = x` is not has no rule a reader
+    /// can hold in their head — it has two", and until this landed *trait*
+    /// dispatch was a third answer to the same question.
     ///
-    /// So a trait method declaring `mut self`, called through an *immutable*
-    /// receiver, typechecks clean today — the same operation on an *inherent*
-    /// method is `mut_self_method_on_immutable_receiver_reports_e0060` a few
-    /// tests up, and reports E0060. This test pins today's accepted behaviour
-    /// the same way `float_has_no_hash_impl` pins a deliberate absence: this
-    /// exact six-line program's clean acceptance is now a recorded fact, so
-    /// half-closing the gap (at least for this shape of program) makes this
-    /// test fail and forces a deliberate decision, with reference to ADR
-    /// 0005 §1's Migration path, rather than a silent pass. It does not, and
-    /// cannot, reach further than the program it compiles — a `mut self`
-    /// trait method added elsewhere, e.g. to `std/`, is not covered by this
-    /// test and would typecheck clean with no diagnostic anywhere, exactly
-    /// because this is the gap it documents.
+    /// **This assertion was deliberately inverted, and that is the intended
+    /// outcome, not a test bent to fit.** It previously read
+    /// `assert!(r.diagnostics.is_empty())` under the name
+    /// `…_is_not_enforced_on_immutable_receiver_known_gap`, pinning the
+    /// permissive behaviour on purpose so that closing the gap could not happen
+    /// silently. What authorised the flip: ADR 0005 §1's Migration path, whose
+    /// three steps (the `hir::TraitMethod` flag, the conformance comparison, the
+    /// call-site check) are now all executed and recorded there as done, and the
+    /// associated-types plan and design doc §6, which made closing it a hard gate
+    /// before the first `mut self` trait method — `Iterator::next` — could be
+    /// declared at all.
+    ///
+    /// It keeps its narrow reach: it compiles one program and says nothing about
+    /// any other. The routes into the same check that this shape does *not*
+    /// exercise — a generic bound, a supertrait bound, a default body, string
+    /// interpolation — are pinned individually by the `mut_self_trait_method_*`
+    /// tests below, because one accepted program could never have proved the
+    /// check was unbypassable.
     #[test]
-    fn trait_method_mut_self_is_not_enforced_on_immutable_receiver_known_gap() {
+    fn trait_method_mut_self_is_enforced_on_immutable_receiver() {
         let r = check_src(
             "trait Bump { fn bump(mut self) }\n\
              record P { v: Int }\n\
@@ -8033,12 +8140,276 @@ mod tests {
              fn main() { let p = P { v: 1 }\n p.bump()\n println(\"${p.v}\") }",
         );
         assert!(
-            r.diagnostics.is_empty(),
-            "known gap (ADR 0005 §1): trait-dispatched `mut self` methods are \
-             not yet checked against the receiver's mutability, so this is \
-             expected to compile clean today: {:?}",
+            r.diagnostics.iter().any(|d| d.code == "E0060"),
+            "the mutable-receiver rule is enforced on trait dispatch too \
+             (ADR 0005 §1, Migration path): `p` is immutable, so `p.bump()` on a \
+             `mut self` trait method must be E0060: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn mut_self_trait_method_on_an_immutable_receiver_reports_e0060() {
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() { let c = C { n: 1 }\n c.bump() }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0060"),
+            "expected E0060 on a mut-self trait method through an immutable binding: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn mut_self_trait_method_on_a_mutable_receiver_is_accepted() {
+        // The over-rejection guard for the common case: enforcing the rule on
+        // trait dispatch must not make a legitimately `mut` binding unusable.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() { let mut c = C { n: 1 }\n c.bump()\n println(\"${c.n}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_plain_self_trait_method_is_unaffected_by_the_mut_self_trait_rule() {
+        // The no-op half, and the mutation-killer for an unconditional check:
+        // only `mut self` demands anything of the caller, so a reader still
+        // works on an immutable binding. Mirrors
+        // `plain_self_method_on_immutable_receiver_still_typechecks` on the
+        // inherent path.
+        let r = check_src(
+            "trait Get { fn get(self) -> Int }\n\
+             record C { n: Int }\n\
+             impl Get for C { fn get(self) -> Int { self.n } }\n\
+             fn main() { let c = C { n: 1 }\n println(\"${c.get()}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_conformance_disagreement_is_e0072() {
+        // Both directions: the trait says mut, the impl does not, and vice
+        // versa. Either way the receiver's mutability requirement would be
+        // decided by whichever table the caller happened to consult — the call
+        // site reads the trait's flag, `check_fn_body` reads the impl's `mut`.
+        //
+        // The two messages are pinned, not merely the code: a single `E0072`
+        // assertion holds just as well if the want/got pair is swapped, and a
+        // swapped pair tells the author to change the wrong side.
+        for (t, i, got, want) in [
+            (
+                "mut self",
+                "self",
+                "a plain `self` receiver",
+                "a `mut self` receiver",
+            ),
+            (
+                "self",
+                "mut self",
+                "a `mut self` receiver",
+                "a plain `self` receiver",
+            ),
+        ] {
+            let src = format!(
+                "trait Bump {{ fn bump({t}) }}\n\
+                 record C {{ n: Int }}\n\
+                 impl Bump for C {{ fn bump({i}) {{ }} }}\n\
+                 fn main() {{ }}"
+            );
+            let r = check_src(&src);
+            let msgs: Vec<&str> = r
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "E0072")
+                .map(|d| d.message.as_str())
+                .collect();
+            assert!(
+                msgs.contains(
+                    &format!("method `bump` has {got} but trait `Bump` declares {want}").as_str()
+                ),
+                "trait `{t}` vs impl `{i}` must be a conformance error naming both sides: {:?}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn mut_self_trait_method_diagnostic_names_the_callee_and_advises_let_mut() {
+        // The trait-dispatch spelling of the callee is the trait's declared
+        // method name, unqualified — `arity_errors_name_the_callee_uniformly`
+        // pins the same choice for `E0016` at this dispatch site, and for the
+        // same reason: `Self` may still be a generic parameter, so there is no
+        // impl to qualify with. The actionable note is shared with the other
+        // three mutation forms via `require_mutable_place`.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() { let c = C { n: 1 }\n c.bump() }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0060")
+            .expect("an E0060 was reported");
+        assert_eq!(
+            d.message,
+            "`bump` mutates its receiver, but `c` is immutable"
+        );
+        assert!(
+            d.notes.iter().any(|n| n.contains("let mut c")),
+            "{:?}",
+            d.notes
+        );
+    }
+
+    #[test]
+    fn mut_self_trait_method_on_a_temporary_reports_e0060() {
+        // ADR 0005 §1 Consequences: a temporary receiver is rejected, because
+        // the mutation could not be observed by anyone. The trait path must
+        // agree with the inherent one
+        // (`mut_self_method_on_temporary_reports_e0060`) — one rule, one answer,
+        // which is the whole point of closing this gap.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn make() -> C { C { n: 1 } }\n\
+             fn main() { make().bump() }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_on_a_field_of_a_mutable_root_is_accepted() {
+        // `place_root` walks the whole projection chain on the trait path too,
+        // so a nested receiver under a `mut` root is fine — the shape
+        // `std/collections` uses, but reached through trait dispatch.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record Inner { n: Int }\n\
+             record Outer { inner: Inner }\n\
+             impl Bump for Inner { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() {\n\
+                 let mut o = Outer { inner: Inner { n: 1 } }\n\
+                 o.inner.bump()\n\
+                 println(\"${o.inner.n}\")\n\
+             }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_through_a_generic_bound_reports_e0060() {
+        // Route 2 of five. A generic receiver is the case ADR 0005 named as the
+        // reason the gap existed: there is no single impl to read `mut self`
+        // off, so the flag has to live on `hir::TraitMethod`. `x` is an
+        // ordinary immutable parameter, so the rule must fire here exactly as
+        // it does for a `let`.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn poke<T: Bump>(x: T) { x.bump() }\n\
+             fn main() { let c = C { n: 1 }\n poke(c) }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_through_a_mut_generic_parameter_is_accepted() {
+        // The over-rejection mirror of the above, and a prerequisite for the
+        // generic-projection gate (`fn first<I: Iterator>(…)` calls
+        // `it.next()`): `mut` on a *parameter* parses and makes the parameter a
+        // mutable root, so the generic route stays writable.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn poke<T: Bump>(mut x: T) { x.bump() }\n\
+             fn main() { let c = C { n: 1 }\n poke(c) }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_through_a_supertrait_bound_reports_e0060() {
+        // Route 3 of five. `collect_traits` puts a trait's *expanded*
+        // supertraits in the `Self` bound slot, so `x.bump()` under `T: Ext`
+        // resolves to `Bump`'s method through a different trait's bound list.
+        // The check must key on the trait the method was resolved *in*, not on
+        // the bound that was written.
+        let r = check_src(
+            "trait Bump { fn bump(mut self) }\n\
+             trait Ext: Bump { }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             impl Ext for C { }\n\
+             fn poke<T: Ext>(x: T) { x.bump() }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_from_a_plain_self_default_body_reports_e0060() {
+        // Route 4 of five, and the one a trait author hits: a default body
+        // forgets its own `mut` and delegates to a mutator. Inside a default
+        // body `self` is typed `Param(0)`, so the delegated call resolves
+        // through `Self`'s own bound — a second trait-dispatch route into the
+        // same check.
+        let r = check_src(
+            "trait Bump {\n\
+                 fn bump(mut self)\n\
+                 fn twice(self) { self.bump() }\n\
+             }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() { }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_from_a_mut_self_default_body_is_accepted() {
+        // The over-rejection mirror: a `mut self` default body is a mutable
+        // root, so delegating to another `mut self` method is exactly what the
+        // declaration promises. Without this, closing the gap would make every
+        // mutating default method unwritable.
+        let r = check_src(
+            "trait Bump {\n\
+                 fn bump(mut self)\n\
+                 fn twice(mut self) { self.bump() }\n\
+             }\n\
+             record C { n: Int }\n\
+             impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }\n\
+             fn main() { }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn mut_self_trait_method_reached_by_string_interpolation_reports_e0060() {
+        // Route 5 of five, and the one that is invisible from
+        // `check_method_call`: `"${c}"` bridges to a user `fmt(self) -> String`
+        // through `try_display`, which calls `emit_trait_call` directly. A check
+        // installed only in `check_method_call`'s `MethodRes::Trait` arm leaves
+        // this route accepting a mutation through an immutable binding — so the
+        // check lives at `emit_trait_call`, the choke point every receiver
+        // route passes through.
+        let r = check_src(
+            "trait Show { fn fmt(mut self) -> String }\n\
+             record C { n: Int }\n\
+             impl Show for C { fn fmt(mut self) -> String { \"c\" } }\n\
+             fn main() { let c = C { n: 1 }\n println(\"${c}\") }",
+        );
+        assert!(error_codes(&r).contains(&"E0060"), "{:?}", r.diagnostics);
     }
 
     #[test]
