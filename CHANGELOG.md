@@ -455,7 +455,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     than 60 seconds; dropping the depth limit overflows the stack.
   - A projection that somehow survives to monomorphization is `E0079` rather
     than reaching code generation. That path is not reachable from source today
-    — sixteen probes each hit an earlier diagnostic — and is pinned by a
+    — every probe of it hit an earlier diagnostic first — and is pinned by a
     `nova-mir` unit test, which is the honest way to test a backstop.
   - **The mutable-receiver rule now covers trait methods** (`E0060`), closing
     ADR 0005 §1's documented gap, which `Iterator::next(mut self)` required.
@@ -471,11 +471,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     site is `let mut x = …`; at a function parameter it is `mut x: T` in the
     signature — note the `E0060` message currently suggests `let mut` even for
     a parameter, which is the wrong advice for that case and is queued. Nothing
-    in `std` relied on the permissive behaviour (all nine `mut self` methods
-    there are in inherent impls), and no gate fixture output moved.
+    in `std` relied on the permissive behaviour — `VecIter::next` is std's only
+    `mut self` in a trait impl and nothing in `std` calls it; every other
+    `mut self` method there is in an inherent impl and takes the pre-existing
+    route — and no gate fixture output moved.
   - Deliberately out of scope: `Map::iter()` yielding key/value pairs, which
     needs tuples; generic associated types (`I::Item<Int>` is `E0012`); and
     bounds on an associated type (`type Item: Display` is `E0900`).
+  - **Known limitation — a projection parameter must not precede the parameter
+    that determines it.** `fn f<I: It>(y: I::Item, x: I)` *declares* fine, but
+    every call reports `argument to 'f' has type 'Int' but '?0::Item' was
+    expected`: `I` is not yet pinned when the first argument is checked, and
+    normalization has nothing to resolve. **There is no workaround** —
+    annotating the argument does not help — so put the determining parameter
+    first (`fn f<I: It>(x: I, y: I::Item)`), which works. This is the price of
+    resolving projections at seams instead of deferring them to a constraint
+    queue, and the `?0` in that message is an internal inference variable that
+    should not be user-visible; both are recorded in the design doc §4.2.
   - **`Iterator` in `std/core`, `VecIter<T>` and `Vec::iter()` in
     `std/collections`** — the consumer the whole increment exists for.
     `pub trait Iterator { type Item  fn next(mut self) -> Option<Self::Item> }`,
@@ -572,6 +584,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       advancing, and `}` is the first stop it has no arm for, so the obvious fix
       made `nova check` hang on a two-line file — measured, and caught only
       because the plan required verifying the invariant it also asserted.
+
+### Changed (Phase 2 — behaviour changes, Phase 2.2c)
+
+Filed here as well as under Added, because these change the meaning of code that
+already compiled. Full detail is in the associated-types entry above.
+
+- **A `mut self` trait method now requires a mutable receiver** (`E0060`), closing
+  ADR 0005 §1's gap. Calling one through an immutable binding was silently
+  accepted and did mutate. Fix: `let mut x = …` at a call site, `mut x: T` at a
+  parameter. Reachable through five routes including string interpolation, so a
+  program can hit this without an obvious method call.
+- **Three constructs that compiled are now rejected**: a projection in an impl's
+  self type (`E0900`), a trait declaring the same associated type twice, and a
+  trait declaring the same method name twice (both `E0403`). All three were
+  silently accepted, and the first was invisible to overlap checking.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova

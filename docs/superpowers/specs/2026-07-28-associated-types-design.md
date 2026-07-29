@@ -87,7 +87,7 @@ the unifier, the projection is resolved wherever the impl table *is* in scope:
 | `check_impl_conformance` | the impl writes `Option<T>`; the trait declares `Option<Self::Item>` | otherwise every impl of a trait with an associated type is a spurious `E0072` |
 | `mono.rs`, after `subst` | `Assoc { on: Param(i) }` once `Param(i)` is concrete | generic bodies: `fn count<I: Iterator>(it: I)` |
 
-`unify` gains exactly one arm: two `Assoc`s unify when trait and index match and their `on`
+`unify` gains exactly one arm: two `Assoc`s unify when their `assoc` `DefId`s are equal and their `on`
 unify. No other pairing can arise, because everything else was normalized first.
 
 **This follows the grain of the codebase rather than fighting it.** Trait *bounds* are already
@@ -153,7 +153,7 @@ is discovered late:
 | `InferCtx::apply` | recurse into `on` |
 | `InferCtx::occurs` | recurse into `on` |
 | `InferCtx::unify` | the one new arm (§4.1) |
-| `display_ty` | render as `<on>::Name`, looking the name up in the trait's list — so `display_ty` needs the trait table in scope, which it has in `check.rs`; a projection printed as `Assoc(3)` in a diagnostic would be useless |
+| `display_ty` | render as `<on>::Name` via `defs.def(*assoc).name`. **Corrected**: this row said `display_ty` "needs the trait table in scope" — it does not, and that requirement is exactly why §4 rejected the `{trait_id, index}` representation. `display_ty` takes only `defs: &Definitions` (`crates/nova-typeck/src/lib.rs:35`) and giving the associated type its own `DefId` is what lets it name the projection unchanged. |
 | `mir_ty` (nova-mir) | **defensive, and it was NOT unreachable** — see the correction below |
 | `Ty::match_pattern` | match structurally on `on` |
 | `hir::self_types_overlap` | conservative: treat as overlapping unless the `on`s provably differ |
@@ -338,7 +338,7 @@ A new `tests/runtime/assoc_types.{nova,stdout}` fixture under `nova run`, `nova 
    the `MirTy` classes it instantiates at.** Every future test of this seam must include a `Bool`
    or a `Float` instance, and the bare spelling matters only because it keeps the projection's
    type *in the signature at all* — it does not by itself make a wrong answer observable.
-4. A trait with **two** associated types, to prove `index` is used rather than assumed zero.
+4. A trait with **two** associated types, to prove the *right* one is selected rather than the first. (This item used to say "to prove `index` is used rather than assumed zero" — there is no index; §4 replaced it with the associated type's own `DefId`. The item's purpose stands: it is what catches a lookup that ignores the name.)
 5. Iterating a `Vec` to exhaustion so `next` returns `None` at the end, and a `Vec::new()` whose
    first `next` is already `None`.
 

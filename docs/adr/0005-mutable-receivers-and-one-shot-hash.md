@@ -8,7 +8,7 @@ ends: section 1 is about the *receiver*, section 2 about the *keys*.
 Both sections are accepted. They are not independent in one direction: the
 streaming `Hash` that section 2 rejects would need exactly the trait-method
 receiver mutability that section 1 left as its open gap — and which section 1's
-Migration path has since closed (Phase 2.2b), so that particular obstacle is no
+Migration path has since closed (Phase 2.2c), so that particular obstacle is no
 longer what stands in section 2's way. See section 1's "Migration path: done"
 for what changed and what section 2 still lacks.
 
@@ -123,7 +123,7 @@ into argument-type or arity noise.
   bindings keeps `place_root` the only answer to "may this be mutated".
 - **Cover trait-method calls in the same change.** Deferred at the time, with
   the reasoning and the cost recorded under Consequences and Migration path
-  below. Done in Phase 2.2b, as the Migration path prescribed and at the cost it
+  below. Done in Phase 2.2c, as the Migration path prescribed and at the cost it
   predicted; the Consequences entry below records what the gap was and how it
   closed.
 
@@ -149,7 +149,7 @@ into argument-type or arity noise.
   `impl Tr for P { fn m(mut self) { … } }` called as `p.m()` on an immutable `p`
   was accepted, silently mutating it. That hole was deliberately left open for
   Phase 2.2a, whose collections use **inherent** impls only, and closed in Phase
-  2.2b exactly as the Migration path prescribed: `hir::TraitMethod` gained the
+  2.2c exactly as the Migration path prescribed: `hir::TraitMethod` gained the
   flag, `check_impl_method_signatures` gained the conformance comparison that
   decides the disagreement case (`E0072`, beside the `has_self` agreement check
   it extends), and the call site consults the trait's flag.
@@ -183,7 +183,7 @@ into argument-type or arity noise.
 
 ### Migration path: done
 
-**The trait-method gap is closed** (Phase 2.2b), so the three steps below now
+**The trait-method gap is closed** (Phase 2.2c), so the three steps below now
 describe what was done rather than what is pending. Closing it changed neither
 the rule, the diagnostic, nor `place_root`, exactly as predicted — it added a
 second population site and a second call site:
@@ -258,7 +258,7 @@ fn hash<H: Hasher>(self, mut h: H) { h.write_int(self.x) }
 which needs (a) `mut` on a *parameter*, (b) `write_int` to be a `mut self`
 trait method — at the time this was decided, precisely the case section 1
 recorded as an open gap, since `hir::TraitMethod` had no receiver-mutability
-field; both (a) and (b) work as of Phase 2.2b, so this half of the objection has
+field; both (a) and (b) work as of Phase 2.2c, so this half of the objection has
 lapsed and the rest below has not — and (c) the caller to
 observe the accumulated state afterwards, which works only because records
 are reference values (section 1's alias-visible note), i.e. the whole
@@ -394,7 +394,7 @@ per-map hasher choice, or HashDoS resistance via a seed.
 The prerequisites are all in section 1's territory, which is why the two
 decisions share a file: `mut` on parameters, receiver mutability declared on
 `hir::TraitMethod` (section 1's Migration path steps 1–2), and `mut self` trait
-methods checked at the call site (step 3). **All three now exist** (Phase 2.2b),
+methods checked at the call site (step 3). **All three now exist** (Phase 2.2c),
 so the streaming shape became *writable* — which changes nothing about this
 decision. Every reason to reject it stood on its own: `Hash`'s signature is its
 whole surface, the shape is viral across every impl and call site, and a
