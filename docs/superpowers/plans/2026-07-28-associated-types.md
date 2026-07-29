@@ -19,6 +19,19 @@ Both found by reading actual signatures. Implement the plan, not the spec, where
 
 ## Global Constraints
 
+> **A zero-match `cargo test <filter>` run EXITS 0 — so every "run it and confirm it fails" step in this plan can report success while running nothing.** Measured:
+>
+> ```
+> $ cargo test -p nova-typeck --no-fail-fast conformance
+> running 0 tests
+> test result: ok. 0 passed; 0 failed; 292 filtered out
+> exit=0
+> ```
+>
+> This has already bitten twice. **Two filters written into this plan match zero tests even though their tasks are complete**, so their verification never ran what it claimed: `assoc_binding` (Task 4 Steps 2 and 5 — the tests are actually named `an_impl_*`, use `an_impl`, 9 tests) and `conformance_projection` (Task 6 Steps 2 and 4 — actually `conformance_*`, use `conformance`, 8 tests). Task 6's implementer noticed and worked around it; Task 4's did not report it.
+>
+> **So: before treating any filtered run as evidence, check the `running N tests` line is non-zero.** A step that expects a failure has proven nothing until it has seen the test actually execute and fail. Filters that legitimately match zero today are the ones for tasks not yet implemented (`mut_self_trait` for Task 8).
+
 - Run every `cargo` command from `D:\Projects\nona\nova`.
 - Must end green on all three: `cargo test --workspace --no-fail-fast`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`. **`--no-fail-fast` is mandatory** — without it cargo abandons later targets and under-reports.
 - **After editing `crates/nova-runtime/`, run `cargo build --workspace` BEFORE `cargo test`.** `cargo test` does not regenerate `nova-runtime`'s staticlib, which `nova build` links against, so ~25 `*_build_standalone` tests fail with an MSVC `unresolved external symbol` error that is not a real defect. (No task here should touch the runtime; if one does, this applies.)
@@ -610,7 +623,7 @@ Prefer extending the **existing** `E0070` missing-list and `E0071` not-a-member 
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p nova-typeck --no-fail-fast assoc_binding`
+Run: `cargo test -p nova-typeck --no-fail-fast an_impl`
 Expected: FAIL — `type Item = T` inside an `impl` does not parse yet.
 
 - [ ] **Step 3: Parse `type Name = Type` in an impl body**
@@ -696,7 +709,7 @@ This is the same deliberate-flip pattern Task 8 uses for its `known_gap` test. A
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p nova-typeck --no-fail-fast assoc_binding`, then `cargo test --workspace --no-fail-fast`
+Run: `cargo test -p nova-typeck --no-fail-fast an_impl`, then `cargo test --workspace --no-fail-fast`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
@@ -870,7 +883,7 @@ The spec's named risk #2: conformance compares a trait signature that may contai
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p nova-typeck --no-fail-fast conformance_projection`
+Run: `cargo test -p nova-typeck --no-fail-fast conformance`
 Expected: the first FAILS for at least one spelling. If it fails for **both**, conformance is comparing an unnormalized projection against a concrete type — expected before the fix.
 
 - [ ] **Step 3: Implement**
@@ -890,7 +903,7 @@ Read that doc comment before choosing. If you pick (b), you will need the per-im
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p nova-typeck --no-fail-fast conformance_projection`, then `cargo test --workspace --no-fail-fast`
+Run: `cargo test -p nova-typeck --no-fail-fast conformance`, then `cargo test --workspace --no-fail-fast`
 Expected: all PASS. Watch the existing conformance tests especially — `E0072` is exercised by several, and normalizing both sides is exactly the change that could make a real mismatch compare equal.
 
 - [ ] **Step 5: Commit**
