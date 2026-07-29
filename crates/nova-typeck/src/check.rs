@@ -2280,9 +2280,19 @@ impl<'a> Checker<'a> {
     /// `check_impl_conformance`, so a `normalize` added inside conformance cannot
     /// see the bindings of the very impl it is checking. Measured — with both sides
     /// of the conformance return-type comparison normalized, `impl<T> It for W<T>
-    /// { type Item = T  fn get_item(self) -> T }` still reports `E0072`, and moving
-    /// the push above the conformance call is what makes it pass. Whoever adds the
-    /// conformance seam has to reorder something first.
+    /// { type Item = T  fn get_item(self) -> T }` still reports `E0072`.
+    ///
+    /// **This comment used to prescribe hoisting the push above the conformance
+    /// call. Do not do that — it is measured to be wrong.** It fixes the case
+    /// above and leaves a worse one: normalization consults the *whole* impl
+    /// table, so a binding that resolves through a **later-declared** impl would
+    /// still fail, which is a declaration-order dependency Nova deliberately does
+    /// not have for impls. Exactly one test in the suite separates the two
+    /// designs, and both of the obvious hand-written tests pass under the wrong
+    /// one. The seam was instead added as a separate pass that runs once
+    /// `collect_impls` has returned — see [`Checker::check_impl_method_signatures`],
+    /// which follows [`Checker::check_supertrait_impls`]'s precedent for the same
+    /// reason.
     ///
     /// **Never called from `unify`.** The whole design rests on projections being
     /// gone by the time the unifier sees a type; normalizing inside it would give
