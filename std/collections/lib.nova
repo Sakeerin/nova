@@ -57,6 +57,55 @@ impl<T> Vec<T> {
     }
 
     pub fn clear(mut self) { self.len = 0 }
+
+    // A cursor over this vector's elements, starting at index 0. See `VecIter`
+    // below for what the cursor shares with this vector.
+    //
+    // Deliberately in this existing `impl<T> Vec<T>` block rather than a second
+    // inherent impl on `Vec<T>`: two inherent impls on one type is a
+    // configuration nothing in std or the test suite exercises, and `std/strings`
+    // avoided it for the same reason.
+    pub fn iter(self) -> VecIter<T> { VecIter { v: self, i: 0 } }
+}
+
+// A cursor over a `Vec<T>`: the vector, plus the next index to yield.
+//
+// The vector is held by value, but records are heap objects passed by pointer,
+// so this **shares** the caller's storage rather than copying it — a `push`
+// during iteration is visible to the iterator, and an element appended after
+// the iterator has already answered `None` is still yielded by the next call.
+// That is the same alias-visibility the whole module has (see the header); it is
+// documented rather than prevented, because preventing it needs borrow tracking
+// the language does not have. `an_exhausted_vec_iterator_does_not_advance_its_cursor`
+// in `crates/nova-cli/tests/run_tests.rs` pins it, so it is a property and not
+// an accident.
+//
+// As with `Map` and `Set` above, the `Iterator` contract lives on the `impl`
+// below, not on this record's generic parameter — a bound in that position is
+// `E0900`.
+pub record VecIter<T> { v: Vec<T>, i: Int }
+
+impl<T> Iterator for VecIter<T> {
+    // Bound to the impl's **own** parameter, not to a primitive. That is what
+    // makes every projection through this impl go through `subst`, and so what
+    // makes `VecIter<Int>` and `VecIter<String>` resolve `Item` differently
+    // instead of sharing one cached answer.
+    type Item = T
+
+    // Written `Option<T>` rather than echoing the trait's `Option<Self::Item>`.
+    // Both spellings are accepted (conformance normalizes each side before
+    // comparing); the concrete one is chosen here because it reads as the
+    // answer to "what does this yield" rather than restating the question.
+    fn next(mut self) -> Option<T> {
+        // Not a bounds check — `Vec::get` already returns `None` out of range,
+        // so this guard is redundant for safety. What it buys is that `i` stops
+        // at `len` instead of running away past it, which is why relaxing `>=`
+        // to `>` is not the equivalent mutation it looks like.
+        if self.i >= self.v.len() { return None }
+        let x = self.v.get(self.i)
+        self.i = self.i + 1
+        x
+    }
 }
 
 // A hash map with open addressing and linear probing.

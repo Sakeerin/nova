@@ -2241,3 +2241,183 @@ fn a_projection_in_a_nested_calls_type_arguments_is_normalized_too() {
         .success()
         .stdout("7 true\n");
 }
+
+// === The `Iterator` trait and `Vec::iter` (design doc §5) ===
+//
+// The first real consumer of associated types: `std/core`'s `Iterator` with
+// `type Item`, and `std/collections`' `VecIter<T>` binding `Item = T`. Every
+// test here compiles a *user* program with no `import`, so it also pins that
+// both names arrive by the std glob (ADR 0004).
+//
+// These are `run_tests` rather than `nova-typeck` unit tests on purpose: the
+// projection is resolved at three separate seams and only the whole pipeline
+// visits all three. They are also deliberately not folded into
+// `tests/runtime/`'s fixtures — the fixture gate is a single program whose
+// failure mode is one diff, while these isolate one property each.
+
+/// Iterating a `Vec` by hand through the `Iterator` trait: no `for x in it`
+/// desugar and no default methods exist yet (design doc §8), so this is what
+/// iteration looks like today — a `while` plus a `match` on the `Option`.
+///
+/// The loop runs a **fixed** six `next()` calls over a three-element vector
+/// rather than stopping at the first `None`, and that shape is load-bearing
+/// three ways:
+///
+/// - It pins that `next` keeps answering `None` after exhaustion, not only
+///   that it says `None` once. `nones=3` is the assertion.
+/// - It makes a non-advancing `next` *observable instead of a hang*. Deleting
+///   `self.i = self.i + 1` from `VecIter::next` yields element 0 six times:
+///   `total=60 nones=0`, which fails here. A loop that exited on the first
+///   `None` would spin forever and report nothing.
+/// - The element values are 10/20/40, not 10/20/30, so that `total` alone
+///   distinguishes the mutations. With 10/20/30 a non-advancing iterator sums
+///   to the same 60 as the correct one, and only `nones` would have caught it.
+///
+/// `break` is avoided in the `match` arms: `break` followed by a newline and
+/// an expression parses that expression as the break value (see the plan's
+/// Global Constraints), and a counter is clearer than working around it.
+#[test]
+fn a_vec_iterates_to_exhaustion_through_the_iterator_trait() {
+    let src = "fn main() {\n\
+                   let mut v: Vec<Int> = Vec::new()\n\
+                   v.push(10)\n\
+                   v.push(20)\n\
+                   v.push(40)\n\
+                   let mut it = v.iter()\n\
+                   let mut total = 0\n\
+                   let mut nones = 0\n\
+                   let mut n = 0\n\
+                   while n < 6 {\n\
+                       match it.next() {\n\
+                           Some(x) => total = total + x,\n\
+                           None => nones = nones + 1,\n\
+                       }\n\
+                       n = n + 1\n\
+                   }\n\
+                   println(\"total=${total} nones=${nones}\")\n\
+                   let mut it2 = v.iter()\n\
+                   let o: Option<Int> = it2.next()\n\
+                   println(\"first=${o.unwrap_or(0)}\")\n\
+                   let e: Vec<Int> = Vec::new()\n\
+                   let mut ei = e.iter()\n\
+                   match ei.next() {\n\
+                       Some(x) => println(\"unexpected ${x}\"),\n\
+                       None => println(\"empty ok\"),\n\
+                   }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-veciter");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("total=70 nones=3\nfirst=10\nempty ok\n");
+}
+
+/// `next` at exhaustion must **not** advance the cursor, and nothing above can
+/// see the difference.
+///
+/// `VecIter::next`'s `if self.i >= self.v.len() { return None }` guard is
+/// redundant for *safety* — `Vec::get` bounds-checks and would return `None`
+/// anyway — so relaxing it to `>` still returns `None` at every index past the
+/// end, and `a_vec_iterates_to_exhaustion_through_the_iterator_trait` above
+/// passes byte-identically under that mutation. What the guard actually buys is
+/// that `i` stops at `len`, and the only way to observe `i` from Nova is to
+/// give the vector a new element for the cursor to find.
+///
+/// That works because `VecIter` holds the `Vec` record by pointer, so `it.v`
+/// and `v` are the same object and a `push` during iteration is visible to the
+/// iterator (documented at `VecIter`'s declaration). So this test doubles as
+/// the pin on that alias-visibility, which is otherwise only asserted in a
+/// comment.
+#[test]
+fn an_exhausted_vec_iterator_does_not_advance_its_cursor() {
+    let src = "fn main() {\n\
+                   let mut v: Vec<Int> = Vec::new()\n\
+                   v.push(10)\n\
+                   let mut it = v.iter()\n\
+                   match it.next() { Some(x) => println(\"a=${x}\"), None => println(\"a=none\") }\n\
+                   match it.next() { Some(x) => println(\"b=${x}\"), None => println(\"b=none\") }\n\
+                   v.push(20)\n\
+                   match it.next() { Some(x) => println(\"c=${x}\"), None => println(\"c=none\") }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-veciter-cursor");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("a=10\nb=none\nc=20\n");
+}
+
+/// A generic function bounded by `Iterator` whose signature names the
+/// projection, called at **two different** instantiations plus an empty one.
+///
+/// This is design doc §7's gate item 3, and it is the reason `Item = T` rather
+/// than a primitive: `Int` and `String` are different machine classes, so a
+/// substitution that dropped the impl's argument, or a normalization that
+/// cached its first answer, cannot give both the right result.
+///
+/// The receiver is `mut it`, not `it`. §7 originally wrote
+/// `fn first<I: Iterator>(it: I)`; Task 8 made `mut self` on a trait method
+/// enforced, so that spelling is now `E0060` and the `mut` is the rule working
+/// rather than a workaround. `mut` on a *parameter* is what carries it — there
+/// is no `let mut` to reach for when the iterator arrives as an argument.
+#[test]
+fn a_generic_function_over_iterator_resolves_item_per_instantiation() {
+    let src = "fn first<I: Iterator>(mut it: I) -> Option<I::Item> { it.next() }\n\
+               fn main() {\n\
+                   let mut ns: Vec<Int> = Vec::new()\n\
+                   ns.push(7)\n\
+                   let mut ss: Vec<String> = Vec::new()\n\
+                   ss.push(\"hi\")\n\
+                   match first(ns.iter()) { Some(n) => println(\"int=${n}\"), None => println(\"int=none\") }\n\
+                   match first(ss.iter()) { Some(s) => println(\"str=${s}\"), None => println(\"str=none\") }\n\
+                   let e: Vec<Bool> = Vec::new()\n\
+                   match first(e.iter()) { Some(b) => println(\"bool=${b}\"), None => println(\"bool=none\") }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-iterator-generic");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("int=7\nstr=hi\nbool=none\n");
+}
+
+/// `Iterator::next` takes `mut self`, so calling it through an immutable
+/// binding is `E0060` — on `std/core`'s own trait, not just a test-local one.
+///
+/// Task 8 pinned the rule on a synthetic `trait Bump`. This pins it on the
+/// shipped trait, which is what a user actually meets, and is the reason
+/// `let mut it` appears in every test above rather than being incidental
+/// style. Without it a caller could silently advance an iterator someone else
+/// believes is unread.
+#[test]
+fn calling_next_on_an_immutable_vec_iterator_reports_e0060() {
+    let src = "fn main() {\n\
+                   let mut v: Vec<Int> = Vec::new()\n\
+                   v.push(1)\n\
+                   let it = v.iter()\n\
+                   match it.next() { Some(x) => println(\"${x}\"), None => println(\"none\") }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-iterator-immutable");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    let assert = nova().arg("check").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error[E0060]") && stderr.contains("`next` mutates its receiver"),
+        "stderr: {stderr}"
+    );
+}

@@ -134,6 +134,40 @@ pub trait Default { fn default() -> Self }
 //     promises that any particular slice of it is uniform on its own.
 pub trait Hash { fn hash(self) -> Int }
 
+// The iteration protocol, and the first trait in this file with an associated
+// type. `next` advances the iterator and yields the next element, or `None`
+// once exhausted; `Item` is what it yields, chosen by the implementor.
+//
+// `mut self` is load-bearing rather than stylistic: an iterator has to advance,
+// which means mutating its own state, so a `next` taking plain `self` would
+// either not advance or advance invisibly. It is also the first `mut self` in
+// any `impl Trait for Type` in std — closing the trait-method half of the
+// mutable-receiver rule was a hard gate before this trait could be declared at
+// all (ADR 0005 §1). The consequence for callers: an iterator must be held in
+// a `mut` binding or arrive as a `mut` parameter, or the call is `E0060`.
+//
+// `Option<Self::Item>` is the projection this whole increment exists to make
+// expressible. It is deliberately spelled with `::` and not the `.` that
+// nova-spec/20-STDLIB.md used, because `::` is already how Nova reaches into a
+// type (`Vec::new`, `T::default`) while `.` is field access everywhere else.
+//
+// NOT YET, all deliberately deferred rather than overlooked: no `for x in it`
+// desugar, no default methods (`map`/`filter`/`fold`/`collect`), no
+// `IntoIterator`, and no implementor other than `VecIter` in std/collections.
+// `Map::iter` is not merely unwritten but impossible — it would yield a pair
+// and Nova has no tuples. Iterating therefore means a hand-written `while`
+// plus a `match` on the `Option`.
+//
+// Unlike the six traits above, this one is implemented for **no** primitive, so
+// `next` is not taken away from user code on `Int`/`Float`/`Bool`/`Char`/
+// `String` the way `fmt`/`eq`/`cmp`/`clone`/`default` are (ADR 0004,
+// "Method names are not soft-reserved"). A user `trait Feed { fn next(...) }`
+// stays usable on those types.
+pub trait Iterator {
+    type Item
+    fn next(mut self) -> Option<Self::Item>
+}
+
 impl Display for Int    { fn fmt(self) -> String { "${self}" } }
 impl Display for Float  { fn fmt(self) -> String { "${self}" } }
 impl Display for Bool   { fn fmt(self) -> String { "${self}" } }
