@@ -1440,6 +1440,25 @@ Both from Task 6's review, both places where a committed test is weaker than an 
 - `conformance_resolves_a_projection_bound_by_a_later_declared_impl` (`check.rs:11525`) binds a **primitive** on a **non-generic** record. The generic form (`record W<T>`, `type Elem = T`) discriminates the two routes exactly as well *and* additionally exercises the impl's own parameter surviving substitution into the trait's `Param` space. Task 6's report claims every binding uses `type Item = T`; that is false for this test.
 - The **selfless** (associated-function) branch of the comparison (`check.rs:1587-1591`) has no test with a projection in it. Behaviour was verified correct by CLI probe but is unpinned.
 
+- [ ] **Step 6b: Two source-reachable branches in `mono.rs` with zero coverage**
+
+Both found by Task 7's review, both survive mutation with the whole suite green, and both are the *twin* of a gap Task 7 closed on the `nova-hir` side — which is why they were missed: the fix went in one crate and the same shape existed in the other.
+
+**A — mono's `E0078` overflow branch (`mono.rs:157-185`).** Mutating it so it never fires leaves the suite fully green. It is **not** a backstop; a ~45-line program reaches it, reporting `could not resolve the associated types in 'W::A0' when instantiating 'f': it resolves to more than 10000 type nodes`. The construction matters: the wide chain is reached only through a trait **default** method the impl does not override, so seam 1 sees `Assoc { on: Param }` and mono is the first to resolve it concretely. Add a test, and **assert which limit is reported** — the two-limit `detail` match at `:162-171` could name the wrong one and nothing would notice, which is exactly the defect `619f453` fixed on the typeck side.
+
+**B — `impl_satisfies`'s structural-fit gate (`mono.rs:244`).** Mutating `imp.match_args(arg)` to `.or(Some(Vec::new()))` also leaves the suite green, and it is emphatically not an equivalent mutant:
+
+```nova
+record P<A, B> { a: A
+ b: B }
+impl It for P<Int, Int> { type Item = Int
+ fn g(self) -> Int { 1 } }
+fn f<I: It>(x: I) -> Int { 7 }
+fn main() { println("${f(P { a: 1, b: true })}") }
+```
+
+Unmutated: `E0013: trait bound 'P: It' is not satisfied`. Mutated: **prints `7`, exit 0** — a declared bound silently unenforced. This is the same head-only-selection class as the miscompile this project shipped in `d49f896`, and it is the gate `E0079`'s unreachability actually rests on. The complementary half (dropping the recursive impl-generic bounds check) *is* pinned by two existing tests, so the hole is precisely the structural fit.
+
 - [ ] **Step 7: Verify and commit**
 
 `cargo build --workspace`, `cargo test --workspace --no-fail-fast`, clippy, fmt, and the three gates. One commit per step.

@@ -327,9 +327,21 @@ Stated so the next increment inherits a list rather than a surprise:
 ## 9. Risks
 
 1. **`mir_ty` defaulting instead of failing** for `Assoc` would let a projection reach codegen
-   and miscompile silently. It must be an explicit unreachable, and a test should prove a
-   projection never arrives — most cheaply by asserting the fixture's generic function
-   monomorphizes to concrete instances.
+   and miscompile silently. **This risk materialised — see the correction in §4.3.** It was not
+   hypothetical and it was not caught by the test this risk proposed: asserting that the
+   fixture's generic function monomorphizes to concrete instances would not have found it,
+   because the miscompiling program was never in the fixture. It was found by Task 7 probing
+   the seam directly.
+
+   Two further corrections to this item's framing. First, "an explicit unreachable" is the wrong
+   remedy in a library path — `mir_ty` and `mangle_ty` are `pub` and run before some validity
+   checks, so panicking would convert a diagnostic into a crash. The remedy that shipped is
+   normalization at mono plus `E0079` when a projection still survives, with the defensive arms
+   retained as backstops. Second, the `mangle_ty` arm has its own distinct hazard that this risk
+   did not anticipate: it maps four different types to the single string `"X"`, and that string
+   is `mono`'s dedup key, so two distinct instantiations can collide on one symbol and the
+   second is skipped while both dispatch to the first's code — the same class as the head-only
+   mangling this project shipped as a miscompile. Queued for distinguishable mangling.
 2. **`check_impl_conformance` is where this most plausibly goes subtly wrong**: it compares
    signatures, and now one side may contain a projection while the other is already concrete.
    Normalizing only one side yields either spurious `E0072` on every impl, or — worse — an
