@@ -11413,6 +11413,19 @@ mod tests {
             "{:?}",
             r.diagnostics
         );
+        // And that it reports the *size* limit, not the depth one. The chain here
+        // is 16 links, comfortably inside the depth limit of 64, so a message
+        // blaming depth would be actively misleading — it would tell the user to
+        // shorten a chain that is already short. Added after a mutation that
+        // reported `NormalizeLimit::Depth` for every overflow survived this test
+        // with only the code asserted.
+        assert!(
+            r.diagnostics[0]
+                .message
+                .contains("resolves to more than 10000 type nodes"),
+            "a wide chain is a size report, not a depth report: {}",
+            r.diagnostics[0].message
+        );
 
         // The control: the same shape, small enough to resolve. Without this, the
         // test above would also pass if all branching were rejected outright.
