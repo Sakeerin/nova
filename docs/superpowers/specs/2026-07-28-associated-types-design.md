@@ -289,9 +289,13 @@ A new `tests/runtime/assoc_types.{nova,stdout}` fixture under `nova run`, `nova 
 1. A trait with an associated type, an impl binding it to **the impl's own generic parameter**,
    and a value obtained through it — proving `subst` carries the binding.
 2. `it.next()` on a concrete `VecIter<Int>` typing as `Option<Int>` — the `check.rs` seam.
-3. A **generic** function over the trait whose signature mentions the projection
-   (`fn first<I: Iterator>(it: I) -> Option<I::Item>`) called at two different instantiations —
-   the mono seam, and the reason one instantiation alone is insufficient.
+3. A **generic** function over the trait whose signature mentions the projection, called at two
+   different instantiations — the mono seam, and the reason one instantiation alone is
+   insufficient. **Note the receiver must be `mut`**: written as `fn first<I: Iterator>(it: I)`
+   and calling `it.next()`, this is now `E0060`, because Task 8 closed the mutable-receiver gap
+   for trait methods and `Iterator::next` takes `mut self`. Write
+   `fn first<I: Iterator>(mut it: I) -> Option<I::Item>`. Flagged by Task 8 so Task 9/10 do not
+   read the resulting `E0060` as a broken gate — it is the rule working.
 4. A trait with **two** associated types, to prove `index` is used rather than assumed zero.
 5. Iterating a `Vec` to exhaustion so `next` returns `None` at the end, and a `Vec::new()` whose
    first `next` is already `None`.

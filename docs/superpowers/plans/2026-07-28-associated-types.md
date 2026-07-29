@@ -30,7 +30,7 @@ Both found by reading actual signatures. Implement the plan, not the spec, where
 >
 > This has already bitten twice. **Two filters written into this plan match zero tests even though their tasks are complete**, so their verification never ran what it claimed: `assoc_binding` (Task 4 Steps 2 and 5 — the tests are actually named `an_impl_*`, use `an_impl`, 9 tests) and `conformance_projection` (Task 6 Steps 2 and 4 — actually `conformance_*`, use `conformance`, 8 tests). Task 6's implementer noticed and worked around it; Task 4's did not report it.
 >
-> **So: before treating any filtered run as evidence, check the `running N tests` line is non-zero.** A step that expects a failure has proven nothing until it has seen the test actually execute and fail. Filters that legitimately match zero today are the ones for tasks not yet implemented (`mut_self_trait` for Task 8).
+> **So: before treating any filtered run as evidence, check the `running N tests` line is non-zero.** A step that expects a failure has proven nothing until it has seen the test actually execute and fail. Filters that legitimately match zero today are the ones for tasks not yet implemented (none, now that Task 8 has landed — and note Task 8's own filter `mut_self_trait` UNDER-matched its own tests, missing `an_impl_disagreeing_about_mut_self_is_a_conformance_error`; it is now `mut_self`).
 
 - Run every `cargo` command from `D:\Projects\nona\nova`.
 - Must end green on all three: `cargo test --workspace --no-fail-fast`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo fmt --check`. **`--no-fail-fast` is mandatory** — without it cargo abandons later targets and under-reports.
@@ -1028,7 +1028,7 @@ ADR 0005 recorded this as an open gap with an explicit gate: closing it is *"a h
 
 **Files:**
 - Modify: `crates/nova-hir/src/lib.rs` (`TraitMethod.mut_self`)
-- Modify: `crates/nova-typeck/src/check.rs` (`collect_traits`; `MethodRes::Trait` arm of `check_method_call`; `check_impl_conformance`)
+- Modify: `crates/nova-typeck/src/check.rs` (`collect_traits`; `emit_trait_call`'s receiver arm — NOT `check_method_call`'s `MethodRes::Trait` arm, see Step 3; `check_impl_method_signatures` — NOT `check_impl_conformance`, Task 6 moved the shape comparison out of it)
 - Modify: `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` (record the gap as closed)
 
 **Interfaces:**
@@ -1088,12 +1088,20 @@ ADR 0005 recorded this as an open gap with an explicit gate: closing it is *"a h
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p nova-typeck --no-fail-fast mut_self_trait`
+Run: `cargo test -p nova-typeck --no-fail-fast mut_self`
 Expected: the first and third FAIL (today the gap is open — measured: a `mut self` trait method on a non-`mut` binding silently mutates it); the second passes already.
 
 - [ ] **Step 3: Implement**
 
-Add `mut_self: bool` to `hir::TraitMethod`, fill it in `collect_traits` from the AST receiver, call `check_mutable_receiver` from `check_method_call`'s `MethodRes::Trait` arm — which currently dispatches straight to `emit_trait_call` with no mutability check at all — and compare `mut_self` in `check_impl_conformance`.
+Add `mut_self: bool` to `hir::TraitMethod`, fill it in `collect_traits` from the AST receiver, enforce the rule on the receiver, and compare `mut_self` where impl/trait signature shape is compared.
+
+**Two parts of that were wrong as originally written, and Task 8 measured both.** Recorded here because the same two mistakes are easy to repeat:
+
+1. **The gap is not one call site — it is five routes, and the prescribed site misses one.** This step used to say "call `check_mutable_receiver` from `check_method_call`'s `MethodRes::Trait` arm — which currently dispatches straight to `emit_trait_call` with no mutability check at all". True, but insufficient. Task 8 measured **five** receiver routes that all accepted a mutation through an immutable binding with no diagnostic: a direct trait call, a generic bound, a supertrait bound, a trait default body delegating to a mutator, and **string interpolation** reaching a `fmt(mut self) -> String` via `try_display`, which calls `emit_trait_call` **directly** and never passes through that arm. So the check belongs at **`emit_trait_call`'s receiver arm** — the choke point — with `TraitCallSelf::Receiver` carrying the receiver's AST alongside its checked form, making the rule unbypassable by construction rather than by a second remembered call site.
+
+   Task 8 quantified the difference: implementing this step's literal prescription left **exactly one test failing — the interpolation one this plan never asks for.** Following it would have shipped twelve of thirteen tests green with that route silently open.
+
+2. **The conformance half no longer lives in `check_impl_conformance`.** Task 6 split that function: names (`E0070`/`E0071`) stayed, and *type/shape* comparison (`E0072`) moved to `check_impl_method_signatures`. The `has_self` agreement check this step extends went with it. This step, its Files list, and ADR 0005 §1's migration step 2 were all written against the pre-Task-6 layout.
 
 - [ ] **Step 4: Deliberately flip the test that pins today's behaviour**
 
