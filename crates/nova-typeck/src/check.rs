@@ -715,12 +715,78 @@ impl<'a> Checker<'a> {
                         if !bounds.is_empty() {
                             self.unsupported(name.span, "trait bounds on an associated type");
                         }
-                        if let Some(assoc_def_id) = assoc_type_ids.next() {
+                        // Drained unconditionally, *before* the duplicate check
+                        // can `continue`: this iterator is positional (see its
+                        // comment above), so skipping a `next()` would hand the
+                        // *next* associated type this one's `DefId` and every
+                        // later one would be off by one. The whole point of the
+                        // rejection is that a duplicate name is ambiguous, so
+                        // misaligning the survivors while reporting it would be
+                        // the same bug one seat over.
+                        let assoc_def_id = assoc_type_ids.next();
+                        // Two declarations of one name leave which `DefId` a
+                        // projection resolves to up to `find_assoc_type`'s scan
+                        // order — it takes the first, so the second is silently
+                        // dead: nothing binds it, nothing can name it, and
+                        // conformance matches bindings by *name* so the missing
+                        // binding is not reported either. Keep the first and
+                        // reject the rest, the same `E0403` a duplicate generic
+                        // parameter and a duplicate associated-type *binding* in
+                        // an impl already get.
+                        if assoc_types.iter().any(|(n, _)| n == &name.value) {
+                            self.error(
+                                "E0403",
+                                format!(
+                                    "the name `{}` is already used for an associated type of \
+                                     this trait",
+                                    name.value
+                                ),
+                                name.span,
+                            );
+                            continue;
+                        }
+                        if let Some(assoc_def_id) = assoc_def_id {
                             assoc_types.push((name.value.clone(), assoc_def_id));
                         }
                         continue;
                     }
                 };
+                // The same hole as the duplicate associated type above, wearing
+                // different clothes, and the plan's Step 2 asked for it to be
+                // checked rather than assumed: `trait It { fn g(self) -> Int\n
+                // fn g(self) -> Bool }` was accepted, and the second declaration
+                // is dead in exactly the same way. `trait_method_index` and
+                // `check_impl_method_signatures` both take the *first* match by
+                // name, so an impl conforms to signature one while signature two
+                // constrains nothing — a trait can promise two contradictory
+                // things and the impl is checked against whichever is written
+                // first.
+                //
+                // On the name alone, not on `(name, has_self)`. The two lookups
+                // that consume this list partition it by receiver
+                // (`trait_method_index` wants `has_self`,
+                // `trait_assoc_fn_index` wants `!has_self`), so allowing
+                // `fn g(self)` beside `fn g()` would make `g` mean two different
+                // things depending on the *call syntax* — which is the very
+                // ambiguity being rejected, not an exception to it.
+                //
+                // Reported before the signature work below rather than after, so
+                // a rejected duplicate does not also emit its own `E0900`s and
+                // `E0001`s: one mistake, one diagnostic.
+                if methods
+                    .iter()
+                    .any(|m: &hir::TraitMethod| m.name == name.value)
+                {
+                    self.error(
+                        "E0403",
+                        format!(
+                            "the name `{}` is already used for a method of this trait",
+                            name.value
+                        ),
+                        name.span,
+                    );
+                    continue;
+                }
                 // `async` is unsupported at every method site; check it here so
                 // that declaration-only (`Required`) trait methods are covered
                 // too — the default-body pass below only visits `Provided` ones.
@@ -907,6 +973,65 @@ impl<'a> Checker<'a> {
             self.apply_where(&mut impl_bounds, &block.where_clause, &impl_generics);
             self.expand_bounds(&mut impl_bounds);
             let self_ty = self.convert_ty(&block.ty, &impl_generics, &impl_bounds);
+            // A projection anywhere in the self type is rejected outright, and
+            // *before* the head check below so the message names the real
+            // problem: a bare `impl<T: It> Tr for T::Item` otherwise reports
+            // "impl blocks are only supported on named types", which is
+            // misleading because `T::Item` may well resolve to a named type.
+            //
+            // Two independent defects compound here, which is why this is not a
+            // position to leave accepted-and-broken. Measured on `25db453`, both
+            // on the same five-line program:
+            //
+            //  * **The impl can never be selected.** `Ty::match_pattern`
+            //    recovers an impl's type arguments by matching its self type
+            //    structurally against a ground type, and it cannot invert
+            //    `T::Item` to find `T`. So the impl is dead code.
+            //  * **It is invisible to coherence.** `hir::self_types_overlap`'s
+            //    helpers do not understand `Assoc`, so
+            //    `impl<T: It> Tr for W<T::Item>` and `impl Tr for W<Int>` do not
+            //    conflict — while the control, `impl<T> Tr for W<T>` in place of
+            //    the first, correctly reports `E0074`. Any `T` with
+            //    `Item = Int` makes both apply to `W<Int>`.
+            //
+            // Dead code that also silently defeats overlap checking is the worst
+            // of the two, which is why Rust forbids the position outright.
+            //
+            // `E0900` and not a new code, deliberately. The construct is not
+            // meaningless — it becomes implementable the moment impl selection
+            // can invert a projection — and every other "the parser accepts it,
+            // no machinery implements it" rejection in this checker is `E0900`
+            // (generic traits, `where` on trait methods, bounds on an associated
+            // type, module-qualified type paths). A dedicated code would assert a
+            // *permanent* illegality this project has not decided, and the design
+            // doc has already been falsified twice on exactly this subject.
+            if self_ty.has_assoc() {
+                let tystr = display_ty(&self_ty, self.defs);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "E0900",
+                        format!(
+                            "an associated-type projection in an impl's self type \
+                             (`{tystr}`) is not supported yet"
+                        ),
+                    )
+                    .with_primary_label(block.ty.span, "not supported yet")
+                    .with_note(
+                        "an impl's type arguments are recovered by matching its self type \
+                         against a concrete one, which cannot invert a projection, so this \
+                         impl could never be selected — and overlap checking cannot see \
+                         through the projection either, so it would not conflict with an \
+                         impl that does apply"
+                            .to_string(),
+                    )
+                    .with_note(
+                        "the Phase 1 MVP compiler supports a subset of Nova; \
+                         this feature arrives in a later milestone"
+                            .to_string(),
+                    ),
+                );
+                continue;
+            }
             let Some(self_head) = self_ty.head() else {
                 self.error(
                     "E0010",
@@ -11404,6 +11529,233 @@ mod tests {
                     d.message
                 );
             }
+        }
+    }
+
+    /// Task 11 Step 1. A projection in an impl's **self type** is rejected.
+    ///
+    /// Two independent defects compound in that position, both measured on
+    /// `25db453` where the whole file below reported `ok`. The impl can never be
+    /// selected, because `Ty::match_pattern` recovers an impl's type arguments by
+    /// matching its self type against a ground type and cannot invert `T::Item`
+    /// to find `T`. And it is invisible to coherence, because
+    /// `hir::self_types_overlap`'s helpers do not understand `Assoc` — so it does
+    /// not conflict with an impl that *does* apply to the same type. Dead code
+    /// that also defeats overlap checking is worse than either alone.
+    ///
+    /// The `E0074` control is what makes the coherence half of that claim
+    /// falsifiable: the same file with `impl<T> Tr for W<T>` in place of the
+    /// projection *does* conflict. Without it, "no `E0074`" would be consistent
+    /// with these two impls simply not overlapping.
+    #[test]
+    fn a_projection_in_an_impls_self_type_is_rejected() {
+        let prelude = "trait It { type Item\n fn g(self) -> Int }\n\
+                       trait Tr { fn h(self) -> Int }\n\
+                       record W<T> { v: T }\n";
+        let overlapping = "impl<T: It> Tr for W<T::Item> { fn h(self) -> Int { 1 } }\n\
+                           impl Tr for W<Int> { fn h(self) -> Int { 2 } }\n";
+        let r = check_src(&format!("{prelude}{overlapping}fn main() {{ }}"));
+        assert_eq!(error_codes(&r), ["E0900"], "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics[0].message.contains("impl's self type"),
+            "the message must name the position: {}",
+            r.diagnostics[0].message
+        );
+        // Alone, too: the impl is unselectable whether or not anything overlaps
+        // it, so overlap is not the reason for the rejection and a test that only
+        // used the pair would leave the single impl accepted.
+        let alone = check_src(&format!(
+            "{prelude}impl<T: It> Tr for W<T::Item> {{ fn h(self) -> Int {{ 1 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(error_codes(&alone), ["E0900"], "{:?}", alone.diagnostics);
+        // A *bare* projection as the self type, which used to report
+        // `E0010: impl blocks are only supported on named types` — misleading,
+        // because `T::Item` may well resolve to a named type. Checked before the
+        // head check for exactly that reason.
+        let bare = check_src(&format!(
+            "{prelude}impl<T: It> Tr for T::Item {{ fn h(self) -> Int {{ 1 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(error_codes(&bare), ["E0900"], "{:?}", bare.diagnostics);
+        // The control. With a plain `W<T>` the same pair *is* an overlap, so the
+        // projection was genuinely hiding one rather than the two impls being
+        // disjoint.
+        let control = check_src(&format!(
+            "{prelude}impl<T> Tr for W<T> {{ fn h(self) -> Int {{ 1 }} }}\n\
+             impl Tr for W<Int> {{ fn h(self) -> Int {{ 2 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(
+            error_codes(&control),
+            ["E0074"],
+            "{:?}",
+            control.diagnostics
+        );
+    }
+
+    /// The other half of Step 1, and the assertion that keeps the rejection from
+    /// quietly becoming "projections are banned from impls".
+    ///
+    /// Every position a projection *is* legal in, in one program: an impl's
+    /// binding right-hand side both on the impl's own parameter (`type Item =
+    /// T::Item`) and on `Self` (`type Other = Self::Item`); an impl method's
+    /// return type, bare and wrapped in `Option`; a `let` annotation inside an
+    /// impl method body; a trait method's own declaration; and a free generic
+    /// function's return type. Only the self type is refused.
+    #[test]
+    fn a_projection_is_still_accepted_in_every_other_position_of_an_impl() {
+        let r = check_src(
+            "trait It { type Item\n type Other\n\
+             fn get(self) -> Self::Item\n\
+             fn wrapped(self) -> Option<Self::Item> }\n\
+             record W<T> { v: T }\n\
+             impl<T: It> It for W<T> { type Item = T::Item\n\
+             type Other = Self::Item\n\
+             fn get(self) -> Self::Item { self.v.get() }\n\
+             fn wrapped(self) -> Option<Self::Item> { let x: Self::Item = self.get()\n\
+             Some(x) } }\n\
+             record C { n: Int }\n\
+             impl It for C { type Item = Int\n type Other = Int\n\
+             fn get(self) -> Int { self.n }\n\
+             fn wrapped(self) -> Option<Int> { Some(self.n) } }\n\
+             fn first<I: It>(x: I) -> I::Item { x.get() }\n\
+             fn main() { let c = C { n: 4 }\n println(\"${first(c)}\")\n\
+             let w = W { v: C { n: 7 } }\n println(\"${first(w)}\") }",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    /// Task 11 Step 2. A trait may not declare the same name twice — as an
+    /// associated type or as a method.
+    ///
+    /// Both were accepted on `25db453`, and both are the same defect: the
+    /// consumers take the **first** match by name, so the second declaration is
+    /// silently dead. For an associated type, `find_assoc_type` scans and takes
+    /// the first, so nothing binds the second and conformance does not notice
+    /// because it matches bindings by *name*. For a method,
+    /// `trait_method_index` and `check_impl_method_signatures` likewise take the
+    /// first, so a trait can declare two contradictory signatures and the impl is
+    /// checked against whichever happens to be written first.
+    ///
+    /// The plan asked for the associated-type half and said to *check* whether
+    /// the method half had the same hole rather than assume it. It does; both are
+    /// fixed here, with the same `E0403` a duplicate generic parameter and a
+    /// duplicate associated-type binding in an impl already report.
+    ///
+    /// `fn g(self)` beside `fn g()` is rejected too, and that is the case worth
+    /// naming: the two lookups partition the method list by receiver, so allowing
+    /// it would make `g` resolve to a different declaration depending on the call
+    /// syntax.
+    ///
+    /// One diagnostic each, asserted as the complete list: the duplicate is
+    /// skipped before its signature is converted, so it does not also report its
+    /// own errors for a mistake that is the duplication.
+    #[test]
+    fn a_trait_may_not_declare_one_name_twice() {
+        let assoc = check_src(
+            "trait It { type Item\n type Item\n fn g(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Int\n fn g(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&assoc), ["E0403"], "{:?}", assoc.diagnostics);
+        assert!(
+            assoc.diagnostics[0].message.contains("`Item`")
+                && assoc.diagnostics[0].message.contains("associated type"),
+            "the message must name the type: {}",
+            assoc.diagnostics[0].message
+        );
+        let method = check_src(
+            "trait It { fn g(self) -> Int\n fn g(self) -> Bool }\n\
+             record W { v: Int }\n\
+             impl It for W { fn g(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&method), ["E0403"], "{:?}", method.diagnostics);
+        assert!(
+            method.diagnostics[0].message.contains("`g`")
+                && method.diagnostics[0].message.contains("method"),
+            "the message must name the method: {}",
+            method.diagnostics[0].message
+        );
+        // A receiver-ful method beside a receiver-less associated function of the
+        // same name: still one name, still rejected.
+        let mixed = check_src(
+            "trait It { fn g(self) -> Int\n fn g() -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { fn g(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&mixed), ["E0403"], "{:?}", mixed.diagnostics);
+        // Control: distinct names are untouched.
+        let ok = check_src(
+            "trait It { type A\n type B\n fn g(self) -> Self::A\n fn h(self) -> Self::B }\n\
+             record W { v: Int }\n\
+             impl It for W { type A = Int\n type B = Bool\n\
+             fn g(self) -> Int { 1 }\n fn h(self) -> Bool { true } }\n\
+             fn main() { }",
+        );
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        // And the survivors keep the right `DefId`s. `assoc_type_ids` is drained
+        // *positionally* — one id per `TraitItem::AssocType`, in source order —
+        // so a rejection that `continue`d without calling `next()` would hand `B`
+        // the id minted for the discarded second `A`, and `TraitDef.assoc_types`
+        // would carry a `(name, DefId)` pair whose two halves disagree.
+        //
+        // The observable consequence is a cross-table one, which is why this is
+        // asserted here rather than left to the diagnostic list: `ImplInfo
+        // .assoc_bindings` is keyed by `find_assoc_type`, which searches
+        // `self.defs` by name and is therefore *immune* to the misalignment,
+        // while `TraitDef.assoc_types` is not. So the two tables key the same
+        // associated type under two different ids and nothing else notices —
+        // `check_impl_conformance` compares by name, so it reports nothing, and
+        // the only reader of the id half is `mono.rs`'s `type_name`, which would
+        // render the projection as `W::?` in a diagnostic that needs a name.
+        // Measured: with the `next()` moved inside the `if let`, the whole
+        // 599-test suite stays green and only this assertion fails.
+        let realigned = check_src(
+            "trait It { type A\n type A\n type B\n\
+             fn g(self) -> Self::B }\n\
+             record W { v: Int }\n\
+             impl It for W { type A = Int\n type B = Bool\n\
+             fn g(self) -> Bool { true } }\n\
+             fn main() { }",
+        );
+        assert_eq!(
+            error_codes(&realigned),
+            ["E0403"],
+            "the duplicate is the only error — `B` must still resolve to `Bool`: {:?}",
+            realigned.diagnostics
+        );
+        let t = realigned
+            .module
+            .traits
+            .iter()
+            .find(|t| t.name == "It")
+            .expect("trait It collected");
+        assert_eq!(
+            t.assoc_types
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"],
+            "the duplicate is dropped, the two survivors keep their order"
+        );
+        let i = realigned
+            .module
+            .impls
+            .iter()
+            .find(|i| i.trait_id.is_some())
+            .expect("the trait impl was collected");
+        for (name, id) in &t.assoc_types {
+            assert!(
+                i.assoc_bindings.iter().any(|(d, _)| d == id),
+                "`{name}` in the trait table is keyed by an id no binding uses, so the \
+                 positional drain fell out of step: {:?} vs {:?}",
+                t.assoc_types,
+                i.assoc_bindings
+            );
         }
     }
 
