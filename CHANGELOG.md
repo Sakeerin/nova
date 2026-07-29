@@ -537,6 +537,41 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       (`F64`) have distinguishable machine classes. Every generic block in the
       fixture therefore instantiates at `Bool` and at `Float`, and each one
       independently kills that mutation.
+  - **Three constructs that compiled before now do not.** All three were
+    silently accepted, and each was found by review or probing rather than
+    predicted:
+    - **A projection in an impl's self type** — `impl<T: It> Tr for W<T::Item>`
+      — is now `E0900`. It type-checked, but impl selection recovers an impl's
+      arguments by structural matching and cannot invert a projection, so such an
+      impl could never be selected; worse, it was invisible to overlap checking,
+      so it coexisted with `impl Tr for W<Int>` without the `E0074` that pair
+      would otherwise get. Dead code that also punched a hole in coherence.
+    - **A trait declaring the same associated type twice**, and — the same
+      defect wearing different clothes — **a trait declaring the same method
+      name twice** — are now `E0403`, the existing duplicate-name code. Both
+      previously kept one binding silently.
+  - **Fixed, all pre-existing and none introduced by this increment:**
+    - `Ty::Error` no longer reaches a user-facing `E0072` as the literal
+      `{error}`. A poisoned or unresolvable associated-type binding produced its
+      real diagnostic *plus* a meaningless follow-on comparing against
+      `{error}`. The cause is worth recording: `Ty` derives `PartialEq` with no
+      `Error` absorption, so at the impl signature comparison an `Error` on one
+      side **forces** a mismatch — the exact opposite of its behaviour at
+      `unify`, where it absorbs. The guard is transitive, because
+      `Option<{error}>` is a `Sum`, not a `Ty::Error`.
+    - **An impl may now echo a supertrait's associated type.** A trait method
+      could name `Self::Elem` inherited from a supertrait, but its impl writing
+      the same signature reported `E0001` — the trait side resolved against the
+      expanded supertrait bounds and the impl side did not.
+    - **Parser recovery no longer escapes an impl body.** One bad token inside
+      an `impl` consumed every following top-level item, because the item-boundary
+      sync did not treat `}` as a stop — so a following `record` was reported as
+      an illegal impl member and `fn main` was parsed *into* the impl and
+      discarded with it. Fixing it needed a checked-progress guard rather than
+      the obvious "advance first": `parse_file`'s own loop syncs *without*
+      advancing, and `}` is the first stop it has no arm for, so the obvious fix
+      made `nova check` hang on a two-line file — measured, and caught only
+      because the plan required verifying the invariant it also asserted.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
