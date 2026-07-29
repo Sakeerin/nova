@@ -447,6 +447,105 @@ fn a_keyword_method_name_followed_by_a_generic_trait_method_terminates() {
     assert!(errs < 10, "recovery must be bounded, got {errs} errors");
 }
 
+/// The names of the top-level items the parser actually produced, so a test can
+/// assert that recovery from a bad item did not eat the *good* ones after it.
+/// The error count alone cannot say that: an item swallowed inside a preceding
+/// impl block is reported as an illegal impl item, which is still just "an
+/// error".
+fn item_names(name: &str, source: &str) -> Vec<String> {
+    use nova_ast::Item;
+    let mut db = FileDb::new();
+    let file_id = db.add(name, source);
+    let (tokens, lex_errs) = lex(source, file_id);
+    assert!(lex_errs.is_empty(), "lex errors in {name}: {lex_errs:?}");
+    let (ast, _) = parse(&tokens, file_id);
+    ast.map(|f| {
+        f.items
+            .iter()
+            .map(|i| match &i.value {
+                Item::Function(f) => f.name.value.clone(),
+                Item::Record(r) => r.name.value.clone(),
+                Item::Trait(t) => t.name.value.clone(),
+                Item::Type(t) => t.name.value.clone(),
+                Item::Const(c) => c.name.value.clone(),
+                Item::Impl(_) => "<impl>".to_string(),
+                Item::Import(_) => "<import>".to_string(),
+                Item::Module(_) => "<module>".to_string(),
+                Item::Extern(_) => "<extern>".to_string(),
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Task 11 Step 3. Recovery from a bad item inside an `impl` body must stop at
+/// the impl's own closing brace instead of walking out of it.
+///
+/// `sync_to_item_boundary` listed only item-start keywords, so from `impl W
+/// { 42 }` it skipped past the `}` and stopped at the following `record` —
+/// which the impl-body loop then reported as an illegal impl item, and `fn main`
+/// was parsed *into* the impl and discarded with it. Measured on `25db453`, on
+/// the four-line file below: three errors, two of them about perfectly valid
+/// items. One bad token inside an impl body cost every following item in the
+/// file.
+///
+/// The error count is not the load-bearing assertion — `item_names` is. A fix
+/// that merely stopped reporting the swallowed items while still swallowing them
+/// would pass on the count alone.
+#[test]
+fn impl_body_recovery_stops_at_the_impls_closing_brace() {
+    let source = "record W { v: Int }\n\
+                  impl W { 42 }\n\
+                  record R { a: Int }\n\
+                  fn main() { }\n";
+    let (ok, errs) = parse_file("impl_recovery", source);
+    assert!(ok, "parser must still return an AST");
+    assert_eq!(
+        errs, 1,
+        "one bad token, one error — not one per following item"
+    );
+    assert_eq!(
+        item_names("impl_recovery", source),
+        ["W", "<impl>", "R", "main"],
+        "the items after the malformed impl must survive it"
+    );
+}
+
+/// The other half of Step 3, and the reason it is not a one-line change.
+///
+/// `RBrace` is the first stop token that `try_parse_item` has no arm for, and
+/// `try_parse_item`'s fallthrough reports without consuming. So a stray `}` at
+/// top level left `parse_file` re-peeking the same token forever: measured with
+/// the stop added and the progress guard absent, `nova check` on these two lines
+/// produced no output and was killed at 15 seconds. That is the same hang class
+/// Task 4 fixed inside the impl body, reintroduced one caller over.
+///
+/// Both orders, because the guard has to hold whether or not any valid item
+/// follows, and `fn main` surviving is what says recovery consumed exactly the
+/// stray brace.
+#[test]
+fn top_level_recovery_terminates_on_a_stray_closing_brace() {
+    for (label, source, want) in [
+        ("brace first", "}\nfn main() { }\n", vec!["main"]),
+        ("brace last", "fn main() { }\n}\n", vec!["main"]),
+        ("brace alone", "}\n", vec![]),
+        ("two braces", "}\n}\nfn main() { }\n", vec!["main"]),
+    ] {
+        let (ok, errs) = parse_file(label, source);
+        assert!(ok, "{label}: parser must still return an AST");
+        assert!(errs > 0, "{label}: a stray `}}` is an error, not silence");
+        assert!(
+            errs < 10,
+            "{label}: recovery must be bounded, got {errs} errors"
+        );
+        assert_eq!(
+            item_names(label, source),
+            want,
+            "{label}: the stray brace is consumed and nothing else is"
+        );
+    }
+}
+
 // Property test: parse never panics
 #[cfg(test)]
 mod prop {

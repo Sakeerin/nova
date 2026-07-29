@@ -147,7 +147,8 @@ impl<'a> Parser<'a> {
                 | Token::Const
                 | Token::Import
                 | Token::Module
-                | Token::Extern => break,
+                | Token::Extern
+                | Token::RBrace => break,
                 _ => {
                     self.advance();
                 }
@@ -195,7 +196,37 @@ impl<'a> Parser<'a> {
         while !self.is_at_end() {
             match self.try_parse_item() {
                 Some(item) => items.push(item),
-                None => self.sync_to_item_boundary(),
+                None => {
+                    // Progress, guaranteed here rather than assumed from the
+                    // two halves. `try_parse_item`'s fallthrough arm reports and
+                    // returns `None` **without consuming** the offending token,
+                    // and `sync_to_item_boundary` stops *at* its boundary tokens
+                    // without consuming one either — so whenever the token that
+                    // failed is itself a stop, neither advances and this loop
+                    // re-peeks it forever.
+                    //
+                    // That combination was unreachable while every stop was an
+                    // item-start keyword, because `try_parse_item` has an arm for
+                    // each of those. Adding `RBrace` as a stop (so impl-body
+                    // recovery cannot escape the impl) made it reachable from a
+                    // two-line file: `}` followed by `fn main() { }` hung
+                    // `nova check` with no output — measured, killed at 15 s.
+                    //
+                    // Checked-progress rather than an unconditional `advance()`
+                    // before the sync, which is what the impl-body `_` arm does.
+                    // There the arm has already peeked the offending token, so it
+                    // knows exactly what it is discarding; here `try_parse_item`
+                    // may have consumed an arbitrary prefix before failing, and
+                    // an unconditional advance would then eat the *next* item's
+                    // first token — turning one bad item into two. This form also
+                    // keeps termination true for any stop token added later,
+                    // which is the property that was quietly false above.
+                    let before = self.pos;
+                    self.sync_to_item_boundary();
+                    if self.pos == before {
+                        self.advance();
+                    }
+                }
             }
         }
         File { items }
