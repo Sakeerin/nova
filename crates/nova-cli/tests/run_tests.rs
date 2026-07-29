@@ -2200,3 +2200,44 @@ fn a_projection_parameter_on_a_pinned_generic_reaches_codegen_resolved() {
         "the projection must not reach codegen: {stderr}"
     );
 }
+
+/// The type arguments recorded at a *nested* call must be normalized too, not
+/// only the instance's own signature and locals.
+///
+/// Inside `f`, `id`'s inferred type argument is `Param(0)::Item`, so each
+/// instance of `f` records a projection there. Those arguments pick which
+/// instance of `id` to emit and are fed to `mangle` — and `mangle_ty` maps
+/// **every** `Ty::Assoc` to the single string `"X"`. So substituting without
+/// normalizing gives `f::<W<Int>>` and `f::<W<Bool>>` the same callee symbol
+/// `id.N$X`; mono's `done` set skips the second, and both calls dispatch to the
+/// first one's code. That is a silent wrong answer of exactly the kind head-only
+/// impl selection produced once before in this project.
+///
+/// Found by mutating `type_args: self.tys(type_args)` back to a bare `subst`,
+/// which the rest of the suite survived. Measured under that mutation: Cranelift
+/// aborts with `declared type of variable var2 doesn't match type of value v2`,
+/// because `id`'s `Int` instance is asked to carry a `Bool`. Two instantiations
+/// are load-bearing — with one, there is no second symbol to collide with.
+#[test]
+fn a_projection_in_a_nested_calls_type_arguments_is_normalized_too() {
+    let src = "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+               record W<T> { v: T }\n\
+               impl<T> It for W<T> { type Item = T\n fn get_item(self) -> T { self.v } }\n\
+               fn id<T>(x: T) -> T { x }\n\
+               fn f<I: It>(x: I) -> I::Item { id(x.get_item()) }\n\
+               fn main() {\n\
+                   let a = f(W { v: 7 })\n\
+                   let b = f(W { v: true })\n\
+                   println(\"${a} ${b}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-mono-typeargs");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("7 true\n");
+}
