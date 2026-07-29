@@ -1140,7 +1140,7 @@ impl<'a> Checker<'a> {
     /// reason [`hir::normalize_ty`] re-normalizes its own result. That is
     /// precisely the walk that never terminates on `type Item = Self::Item`, or
     /// on a mutual `A = Self::B` / `B = Self::A`, so the cycle has to be
-    /// rejected where it is created. `normalize_ty`'s depth guard is the
+    /// rejected where it is created. `normalize_ty`'s step guard is the
     /// backstop for a cycle built by some path this does not see, not a
     /// substitute for this check: a hang is worse than any diagnostic, and a
     /// compiler-limit message is the wrong thing to show a user who wrote a
@@ -2300,21 +2300,43 @@ impl<'a> Checker<'a> {
     fn normalize(&mut self, ty: &Ty, span: Span) -> Ty {
         match hir::normalize_ty(ty, &self.impls) {
             Ok(t) => t,
-            Err(hir::NormalizeOverflow { at }) => {
+            Err(hir::NormalizeOverflow { at, limit }) => {
                 // Reported, not silently swallowed: `Ty::Error` unifies with
                 // anything, so returning it without a diagnostic would turn a
-                // hang into a wrong answer. `E0077` already covers every cyclic
-                // *binding* (and poisons it), so reaching here means some other
-                // path built a projection that does not converge — a compiler
-                // defect, but one that must still produce a diagnostic rather
-                // than run forever.
+                // hang into a wrong answer.
+                //
+                // **`E0078` is reachable from ordinary source**, and an earlier
+                // version of this comment said the opposite ("reaching here means
+                // some other path built a projection that does not converge — a
+                // compiler defect"), which would send a maintainer hunting an ICE
+                // that does not exist. `E0077` catches every cyclic *binding* and
+                // poisons it, but a binding chain that is long or wide is not a
+                // cycle, so `E0077` never sees it. Measured, both on programs
+                // `nova check` otherwise accepts: a linear chain of 64 links
+                // (`ok` at 63, `E0078` at 64), and `type A(k) =
+                // Pair<Self::A(k+1), Self::A(k+1)>`, which resolves to a
+                // `2^k`-node type.
+                //
+                // Those two are different failures with different fixes, so the
+                // message distinguishes them rather than quoting one number for
+                // both. Both name the type *this call* was asked about — which is
+                // what the user wrote — not the intermediate the walk ran out on.
+                let detail = match limit {
+                    hir::NormalizeLimit::Depth => format!(
+                        "the chain of bindings is more than {} deep, or does not terminate",
+                        hir::NORMALIZE_DEPTH_LIMIT,
+                    ),
+                    hir::NormalizeLimit::Steps => format!(
+                        "it resolves to more than {} type nodes",
+                        hir::NORMALIZE_STEP_LIMIT,
+                    ),
+                };
                 self.error(
                     "E0078",
                     format!(
-                        "could not resolve the associated type `{}`: normalization did not \
-                         finish within {} steps",
+                        "could not resolve the associated types in `{}`: {}",
                         display_ty(&at, self.defs),
-                        hir::NORMALIZE_DEPTH_LIMIT,
+                        detail,
                     ),
                     span,
                 );
@@ -11331,6 +11353,100 @@ mod tests {
              fn main() { println(\"${W { v: 1 }.get()}\") }",
         );
         assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
+    }
+
+    /// A trait with `n+1` associated types `A0..An`, a method taking `Self::A0`,
+    /// and an impl binding each `Ak` from `link(k)`. Terminates at `An = Int`, so
+    /// there is no cycle and `E0077` never fires — this is the shape that makes
+    /// `E0078` reachable from ordinary source.
+    ///
+    /// Accepted, when it is accepted: the method takes `Self::A0` as a
+    /// *parameter* and returns `Int`, so conformance compares two spellings of the
+    /// same projection and the body is just `1`. An `E0078` here is therefore the
+    /// only diagnostic, never a knock-on of some other rejection.
+    fn assoc_chain_src(n: u32, link: impl Fn(u32) -> String) -> String {
+        let decls: String = (0..=n).map(|k| format!(" type A{k}\n")).collect();
+        let binds: String = (0..n)
+            .map(|k| format!(" type A{} = {}\n", k, link(k)))
+            .collect();
+        format!(
+            "record Pair<A, B> {{ a: A\n b: B }}\n\
+             trait Chain {{\n{decls} fn put(self, y: Self::A0) -> Int }}\n\
+             record W {{ v: Int }}\n\
+             impl Chain for W {{\n{binds} type A{n} = Int\n\
+             fn put(self, y: Self::A0) -> Int {{ 1 }} }}\n\
+             fn main() {{ }}"
+        )
+    }
+
+    #[test]
+    fn a_binding_chain_that_resolves_to_an_enormous_type_is_a_diagnostic() {
+        // `type A(k) = Pair<Self::A(k+1), Self::A(k+1)>`. No cycle and only 16
+        // links, so neither `E0077` nor the depth limit sees anything wrong — but
+        // the resolved type is `2^16` nodes. Before the step allowance this
+        // *compiled*, slowly: measured through `nova check`, 16 links took 716 ms,
+        // 20 took 12.9 s, and 24 (a 60-line file) had not finished after two
+        // minutes. Now 41 ms and an error.
+        //
+        // The failure has to be a diagnostic, and it has to be *this* code: a hang
+        // is worse than any error, and `Ty::Error` without a diagnostic would be
+        // worse still, because it unifies with anything and would turn the hang
+        // into a silently wrong type.
+        let branching =
+            assoc_chain_src(16, |k| format!("Pair<Self::A{}, Self::A{}>", k + 1, k + 1));
+        let r = check_src(&branching);
+        // Three reports, all `E0078`, for one root cause. That is **pre-existing
+        // duplication**, not a consequence of this fix: `normalize` has three call
+        // sites this program reaches — conformance normalizes the trait side and
+        // the impl side of the same signature (two, same span), and
+        // `check_fn_body` normalizes `sig.params` (one, the body's span) — and
+        // nothing in this codebase deduplicates diagnostics. Verified by rebuilding
+        // the base commit and counting: `nova check` printed three `E0078`s there
+        // too, and the number of `self.normalize(` call sites is unchanged at 8.
+        //
+        // Asserted rather than tolerated, because before this seam was reachable
+        // nobody could see it. Asserting only "contains E0078" would hide both the
+        // duplication and any *other* code creeping in.
+        assert_eq!(
+            error_codes(&r),
+            ["E0078", "E0078", "E0078"],
+            "{:?}",
+            r.diagnostics
+        );
+
+        // The control: the same shape, small enough to resolve. Without this, the
+        // test above would also pass if all branching were rejected outright.
+        let small = assoc_chain_src(4, |k| format!("Pair<Self::A{}, Self::A{}>", k + 1, k + 1));
+        let ok = check_src(&small);
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+    }
+
+    #[test]
+    fn a_binding_chain_longer_than_the_depth_limit_is_a_diagnostic() {
+        // A plain linear chain, which is neither a cycle nor large — it resolves
+        // to `Int`. It is only *long*. This is the case that proves `E0078` is
+        // reachable from source and that the comment claiming otherwise ("a
+        // compiler defect") was wrong: 63 links check clean, 64 report.
+        //
+        // Both boundaries are asserted because a limit test that only checks the
+        // rejecting side cannot tell the limit from a blanket refusal.
+        let ok = check_src(&assoc_chain_src(63, |k| format!("Self::A{}", k + 1)));
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+        let r = check_src(&assoc_chain_src(64, |k| format!("Self::A{}", k + 1)));
+        // Three, for the pre-existing reason recorded on the test above.
+        assert_eq!(
+            error_codes(&r),
+            ["E0078", "E0078", "E0078"],
+            "{:?}",
+            r.diagnostics
+        );
+        // And that the two limits are told apart in the message. A single
+        // catch-all wording would make this chain read as if it were too big.
+        assert!(
+            r.diagnostics[0].message.contains("more than 64 deep"),
+            "a long chain is a depth report, not a size report: {}",
+            r.diagnostics[0].message
+        );
     }
 
     // === Normalization seam 2: impl conformance (design doc §4.1, risk 2) ===

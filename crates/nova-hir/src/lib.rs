@@ -370,18 +370,81 @@ impl Module {
     }
 }
 
-/// How many projection resolutions one [`normalize_ty`] walk may perform before
-/// giving up.
+/// How many resolutions deep one projection *chain* may go before
+/// [`normalize_ty`] gives up.
 ///
-/// Generous on purpose: a chain of associated-type bindings that a person would
-/// write is a handful of links, so anything short of this is either a cycle or a
-/// machine-generated type — and reporting a limit on a legitimate program is
-/// worse than the limit being loose. The count is per projection *chain*, not
-/// per structural nesting level: a finite type is a finite tree, so recursion
-/// into `Fn`/`Sum`/`Record`/`Array` cannot diverge and does not spend budget.
+/// Charged only where a projection is actually resolved, and passed *unchanged*
+/// into the compound arms: a finite type is a finite tree, so recursion into
+/// `Fn`/`Sum`/`Record`/`Array` cannot diverge, and charging it would reject a
+/// legitimately deeply-nested type.
+///
+/// Two jobs, both load-bearing:
+///
+/// - It catches a **cycle**. `type Item = Self::Item` resolves to itself forever;
+///   `type Item = [Self::Item]` grows a level each time, so a "have I seen this
+///   exact projection" set would not catch it but a counter does.
+/// - It bounds the **stack**, which is why it cannot simply be raised. Each
+///   resolution costs a constant number of `normalize_within` frames, and a
+///   growing binding nests one level deeper per step, so recursion depth tracks
+///   this number. Measured: allowing 10 000 resolutions makes
+///   `type Item = [Self::Item]` overflow a test thread's 2 MiB stack — a hard
+///   crash, strictly worse than the diagnostic it replaced. 64 keeps the deepest
+///   walk to a couple of hundred frames.
+///
+/// **64 is still the right number even though this limit is user-facing** (see
+/// `Checker::normalize` — a non-cyclic chain of 64 links reports `E0078`, so this
+/// is reachable from ordinary source and not merely a backstop for compiler
+/// defects). Nova has no macros and no code generation, so every binding chain is
+/// hand-written, and a hand-written one is one to three links; 64 is already
+/// twenty times past the plausible. Raising it trades a limit nobody can reach by
+/// accident for a stack overflow, which is the wrong trade.
+///
+/// It does **not** bound total work — see [`NORMALIZE_STEP_LIMIT`].
 pub const NORMALIZE_DEPTH_LIMIT: u32 = 64;
 
-/// [`normalize_ty`] ran out of budget resolving a projection.
+/// How many nodes one whole [`normalize_ty`] walk may visit before giving up.
+///
+/// **The second of two allowances, because bounding chain depth does not bound
+/// work.** [`NORMALIZE_DEPTH_LIMIT`]'s justification — "a finite type is a finite
+/// tree, so compound recursion cannot diverge" — is sound and proves the wrong
+/// thing: non-divergence is not bounded work. A *branching* binding chain
+/// multiplies. With `type A(k) = Pair<Self::A(k+1), Self::A(k+1)>` terminating at
+/// `type A(n) = Int` — no cycle, chain length `n`, every link far inside the depth
+/// limit — the resolved type is itself `2^n` nodes, and each level pays for both
+/// copies of the level below. Measured through `nova check` on programs it
+/// *accepts*: n=16 → 716 ms, n=20 → 12.9 s, n=24 (a 60-line source file) → still
+/// running after two minutes. A four-field record gives `4^n` in fewer lines.
+///
+/// So this counter is a single allowance shared by the entire walk, spent one step
+/// per node, charged by **every** arm. That bounds total work by construction: at
+/// most this many calls happen, so at most this many nodes are built.
+///
+/// Memoizing the projection lookups was the other candidate and does **not** fix
+/// it: the *result* for `A(0)` is `2^n` nodes whatever the cache hit rate, so it
+/// must still be materialized, and cloned into both branches at every level. Only
+/// a cap on the result bounds the work, and a shared step counter is that cap.
+///
+/// 10 000 is three orders of magnitude past anything a person writes (std's
+/// largest signature type is a handful of nodes), exhausts in microseconds when
+/// something pathological hits it, and caps a resolved type at ~10 000 nodes. It
+/// is deliberately *not* the same number as the depth limit: the units differ
+/// (total nodes vs. resolutions along one chain), and 64 total nodes would reject
+/// an ordinary projection-free type with 64 parts.
+pub const NORMALIZE_STEP_LIMIT: u32 = 10_000;
+
+/// Which of [`normalize_ty`]'s two allowances ran out. They fail on different
+/// shapes and a user fixes them differently, so the diagnostic distinguishes
+/// them: [`Depth`](Self::Depth) means a chain that does not terminate,
+/// [`Steps`](Self::Steps) means one that terminates at an unreasonable size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizeLimit {
+    /// [`NORMALIZE_DEPTH_LIMIT`] — resolutions along one projection chain.
+    Depth,
+    /// [`NORMALIZE_STEP_LIMIT`] — nodes visited by the whole walk.
+    Steps,
+}
+
+/// [`normalize_ty`] ran out of budget.
 ///
 /// This is deliberately *not* folded into `Ty::Error`: `Error` unifies with
 /// anything, so returning it would silently accept whatever the caller compared
@@ -389,8 +452,17 @@ pub const NORMALIZE_DEPTH_LIMIT: u32 = 64;
 /// a diagnostic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizeOverflow {
-    /// The projection being resolved when the budget ran out.
+    /// The type [`normalize_ty`] was asked to resolve — the whole input, not the
+    /// intermediate the walk happened to be on when the budget ran out.
+    ///
+    /// The intermediate is the wrong thing to name. On a linear chain
+    /// `A0 → A1 → … → A64` it is `W::A64`, a rung the user never wrote, in the
+    /// middle of a ladder they would have to count to find; the input is `W::A0`,
+    /// which is the projection to go and look at. Depth-first exhaustion also
+    /// makes *which* intermediate you land on an artifact of traversal order.
     pub at: Ty,
+    /// Which allowance ran out.
+    pub limit: NormalizeLimit,
 }
 
 /// Resolve every [`Ty::Assoc`] projection in `ty` that the impl table can
@@ -423,21 +495,40 @@ pub struct NormalizeOverflow {
 ///
 /// The result is **re-normalized**, because a bound type may itself be a
 /// projection: `type A = Self::B` with `type B = Int` must resolve all the way
-/// to `Int`. That is what makes the depth guard load-bearing rather than
-/// paranoid — see [`NORMALIZE_DEPTH_LIMIT`].
+/// to `Int`. That is what makes the step guard load-bearing rather than
+/// paranoid — see [`NORMALIZE_STEP_LIMIT`].
 pub fn normalize_ty(ty: &Ty, impls: &[ImplInfo]) -> Result<Ty, NormalizeOverflow> {
-    normalize_within(ty, impls, NORMALIZE_DEPTH_LIMIT)
+    let mut steps = NORMALIZE_STEP_LIMIT;
+    // The inner walk reports only *which* allowance ran out; the type named in
+    // the diagnostic is this call's input, not whichever intermediate depth-first
+    // traversal happened to be on (see `NormalizeOverflow::at`).
+    normalize_within(ty, impls, NORMALIZE_DEPTH_LIMIT, &mut steps).map_err(|limit| {
+        NormalizeOverflow {
+            at: ty.clone(),
+            limit,
+        }
+    })
 }
 
-fn normalize_within(ty: &Ty, impls: &[ImplInfo], budget: u32) -> Result<Ty, NormalizeOverflow> {
+fn normalize_within(
+    ty: &Ty,
+    impls: &[ImplInfo],
+    depth: u32,
+    steps: &mut u32,
+) -> Result<Ty, NormalizeLimit> {
+    // Charged once per node by every arm, compound arms included, out of one
+    // allowance shared by the whole walk. Charging only the `Assoc` arm is what
+    // let a branching binding chain do exponential work without ever diverging —
+    // see `NORMALIZE_STEP_LIMIT`. `depth`, by contrast, stays per-branch.
+    *steps = steps.checked_sub(1).ok_or(NormalizeLimit::Steps)?;
     match ty {
         Ty::Assoc { on, assoc } => {
-            let Some(budget) = budget.checked_sub(1) else {
-                return Err(NormalizeOverflow { at: ty.clone() });
+            let Some(depth) = depth.checked_sub(1) else {
+                return Err(NormalizeLimit::Depth);
             };
             // The Self type may itself contain a projection, so resolve it
             // before asking it for a head.
-            let on = normalize_within(on, impls, budget)?;
+            let on = normalize_within(on, impls, depth, steps)?;
             let Some(head) = on.head() else {
                 return Ok(Ty::Assoc {
                     on: Box::new(on),
@@ -454,7 +545,7 @@ fn normalize_within(ty: &Ty, impls: &[ImplInfo], budget: u32) -> Result<Ty, Norm
                 Some(bound.subst(&args))
             });
             match bound {
-                Some(bound) => normalize_within(&bound, impls, budget),
+                Some(bound) => normalize_within(&bound, impls, depth, steps),
                 None => Ok(Ty::Assoc {
                     on: Box::new(on),
                     assoc: *assoc,
@@ -464,25 +555,27 @@ fn normalize_within(ty: &Ty, impls: &[ImplInfo], budget: u32) -> Result<Ty, Norm
         Ty::Fn { params, ret } => Ok(Ty::Fn {
             params: params
                 .iter()
-                .map(|p| normalize_within(p, impls, budget))
+                .map(|p| normalize_within(p, impls, depth, steps))
                 .collect::<Result<_, _>>()?,
-            ret: Box::new(normalize_within(ret, impls, budget)?),
+            ret: Box::new(normalize_within(ret, impls, depth, steps)?),
         }),
         Ty::Sum { def_id, args } => Ok(Ty::Sum {
             def_id: *def_id,
             args: args
                 .iter()
-                .map(|a| normalize_within(a, impls, budget))
+                .map(|a| normalize_within(a, impls, depth, steps))
                 .collect::<Result<_, _>>()?,
         }),
         Ty::Record { def_id, args } => Ok(Ty::Record {
             def_id: *def_id,
             args: args
                 .iter()
-                .map(|a| normalize_within(a, impls, budget))
+                .map(|a| normalize_within(a, impls, depth, steps))
                 .collect::<Result<_, _>>()?,
         }),
-        Ty::Array(elem) => Ok(Ty::Array(Box::new(normalize_within(elem, impls, budget)?))),
+        Ty::Array(elem) => Ok(Ty::Array(Box::new(normalize_within(
+            elem, impls, depth, steps,
+        )?))),
         Ty::Int
         | Ty::Float
         | Ty::Bool
@@ -1491,7 +1584,7 @@ mod tests {
     fn normalize_follows_a_chain_of_bindings_to_the_end() {
         // `type A = Self::B` with `type B = Int`: one resolution step is not
         // enough, so the result has to be re-normalized. This is the behaviour
-        // that forces the depth guard to exist.
+        // that forces the step guard to exist.
         let a = 7;
         let b = 8;
         let self_ty = rec(1, vec![]);
@@ -1515,7 +1608,12 @@ mod tests {
         let impls = [imp(self_ty, 0, vec![(DefId(ITEM), cycle.clone())])];
         assert_eq!(
             normalize_ty(&cycle, &impls),
-            Err(NormalizeOverflow { at: cycle })
+            Err(NormalizeOverflow {
+                at: cycle,
+                // The chain, not the total: a cycle resolves one link at a time
+                // and never widens, so it is the depth allowance that stops it.
+                limit: NormalizeLimit::Depth
+            })
         );
     }
 
@@ -1524,14 +1622,19 @@ mod tests {
         // `type Item = [Self::Item]`, the nested cycle: each step is a strictly
         // larger type rather than the same one, so a guard implemented as a
         // "have I seen this exact projection before" set would loop forever
-        // where a depth counter does not.
+        // where a step counter does not.
         let self_ty = rec(1, vec![]);
         let grows = Ty::Array(Box::new(proj(self_ty.clone(), ITEM)));
         let impls = [imp(self_ty.clone(), 0, vec![(DefId(ITEM), grows)])];
         assert_eq!(
             normalize_ty(&proj(self_ty.clone(), ITEM), &impls),
             Err(NormalizeOverflow {
-                at: proj(self_ty, ITEM)
+                at: proj(self_ty, ITEM),
+                // Depth, and this case is why the depth allowance cannot simply be
+                // raised to match the step allowance: each resolution nests one
+                // `Array` deeper, so recursion depth tracks it. At 10 000 this
+                // overflows a test thread's 2 MiB stack instead of reporting.
+                limit: NormalizeLimit::Depth
             }),
             "reports overflow rather than diverging"
         );
@@ -1539,9 +1642,9 @@ mod tests {
 
     #[test]
     fn normalize_admits_a_chain_longer_than_a_couple_of_links() {
-        // The depth limit must be generous enough that a legitimate chain never
-        // trips it. Sixteen links is far past anything a person writes and well
-        // inside the limit.
+        // The limit must be generous enough that a legitimate chain never trips
+        // it. Sixteen links is far past anything a person writes and well inside
+        // the limit.
         let self_ty = rec(1, vec![]);
         let n = 16u32;
         let mut bindings: Vec<(DefId, Ty)> = (0..n)
@@ -1550,5 +1653,71 @@ mod tests {
         bindings.push((DefId(100 + n), Ty::Int));
         let impls = [imp(self_ty.clone(), 0, bindings)];
         assert_eq!(normalize_ty(&proj(self_ty, 100), &impls), Ok(Ty::Int));
+    }
+
+    #[test]
+    fn normalize_bounds_total_work_not_only_chain_depth() {
+        // `type A(k) = Pair<Self::A(k+1), Self::A(k+1)>` down to `type A(n) = Int`.
+        // No cycle, and the chain is `n` links — half the depth limit — but the
+        // resolved type is `2^n` nodes, so a budget charged only when a projection
+        // is resolved and passed *unchanged* into each compound arm does
+        // exponential work while remaining, technically, convergent. At n=32 that
+        // is four billion nodes.
+        //
+        // This is the test that separates "cannot diverge" from "does bounded
+        // work", and the only overflow test here that is not a cycle — a cycle is
+        // caught by the depth allowance alone, which is why the review found this
+        // class unguarded. Measured through `nova check` before the step
+        // allowance existed: n=20 took 12.9 s and n=24 (a 60-line source file,
+        // accepted) had not finished after two minutes.
+        let n = 32u32;
+        let self_ty = rec(1, vec![]);
+        let pair = |a: Ty, b: Ty| rec(2, vec![a, b]);
+        let mut bindings: Vec<(DefId, Ty)> = (0..n)
+            .map(|i| {
+                let next = proj(self_ty.clone(), 101 + i);
+                (DefId(100 + i), pair(next.clone(), next))
+            })
+            .collect();
+        bindings.push((DefId(100 + n), Ty::Int));
+        let impls = [imp(self_ty.clone(), 0, bindings)];
+        let input = proj(self_ty, 100);
+        assert_eq!(
+            normalize_ty(&input, &impls),
+            Err(NormalizeOverflow {
+                at: input,
+                // Steps, not depth: n=32 is inside the depth limit of 64, so
+                // asserting the limit is what proves the *new* allowance is doing
+                // the work rather than the old one catching it by luck.
+                limit: NormalizeLimit::Steps
+            }),
+            "a diagnostic, not a hang — and not `Ty::Error`, which unifies with \
+             anything and would make this a wrong answer instead"
+        );
+    }
+
+    #[test]
+    fn normalize_admits_a_branching_chain_that_stays_within_the_allowance() {
+        // The control for the test above: branching is not itself the problem, so
+        // a modest branching chain must still resolve. Ten levels is 1 024 leaves
+        // and ~2 047 nodes, comfortably inside 10 000, and the result is checked
+        // in full — a guard that rejected all branching would pass an assertion
+        // that only looked at `is_ok`.
+        let n = 10u32;
+        let self_ty = rec(1, vec![]);
+        let pair = |a: Ty, b: Ty| rec(2, vec![a, b]);
+        let mut bindings: Vec<(DefId, Ty)> = (0..n)
+            .map(|i| {
+                let next = proj(self_ty.clone(), 101 + i);
+                (DefId(100 + i), pair(next.clone(), next))
+            })
+            .collect();
+        bindings.push((DefId(100 + n), Ty::Int));
+        let impls = [imp(self_ty.clone(), 0, bindings)];
+        let mut expected = Ty::Int;
+        for _ in 0..n {
+            expected = pair(expected.clone(), expected);
+        }
+        assert_eq!(normalize_ty(&proj(self_ty, 100), &impls), Ok(expected));
     }
 }
