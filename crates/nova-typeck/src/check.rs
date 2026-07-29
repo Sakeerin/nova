@@ -1113,6 +1113,31 @@ impl<'a> Checker<'a> {
             // so the cycle check below can point at the offending binding rather
             // than at the impl header.
             let mut assoc_spans: Vec<Span> = Vec::new();
+
+            // Associated constants are parsed but not implemented. `ImplBlock`
+            // carries them in a third parallel vector beside `functions` and
+            // `assoc_types`, and until this check existed **nothing in the
+            // workspace read it** — so `impl K { const LIMIT: Int = 99 }`
+            // compiled, ran, and silently dropped the constant, after which
+            // `K::LIMIT` reported `no variant \`LIMIT\` on type \`K\``: a
+            // message about a construct the user did not write.
+            //
+            // Refusing it is the honest state. Accepting a declaration and
+            // discarding it is strictly worse than rejecting it, because the
+            // program looks correct and the constant simply is not there. This
+            // is deliberately *not* wired into the top-level `const` path
+            // (which compiles a constant as a zero-argument function): doing
+            // that is a real feature with its own questions — visibility,
+            // whether `Self` may appear in the type, cycle detection across
+            // impls — and it belongs in an increment that answers them.
+            for c in &block.consts {
+                // `unsupported` appends "are not supported yet", so this reads
+                // as a plural phrase.
+                self.unsupported(
+                    c.name.span,
+                    &format!("associated constants like `{}`", c.name.value),
+                );
+            }
             for b in &block.assoc_types {
                 let ty = self.convert_ty(&b.ty, &impl_generics, &impl_bounds);
                 let resolved = trait_id.and_then(|tid| self.find_assoc_type(tid, &b.name.value));
@@ -11357,6 +11382,51 @@ mod tests {
             "says why, not just that: {}",
             d.message
         );
+    }
+
+    #[test]
+    fn an_impl_level_const_is_rejected_rather_than_silently_dropped() {
+        // `ast::ImplBlock::consts` had no reader anywhere in the workspace, so
+        // an impl-level `const` parsed, ran, and vanished: this program printed
+        // its method's result with no diagnostic, and `K::LIMIT` then reported
+        // `no variant 'LIMIT' on type 'K'` — which is not what the user wrote.
+        // Accepting and discarding a declaration is worse than refusing it, so
+        // it is `E0900` until associated constants are actually implemented.
+        let r = check_src(
+            "record K { v: Int }\n\
+             impl K { const LIMIT: Int = 99\n fn get(self) -> Int { self.v } }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 for an impl-level const");
+        assert!(
+            d.message.contains("LIMIT"),
+            "names the constant: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("associated constant"),
+            "names the construct, so the message is searchable: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_top_level_const_still_works_beside_an_impl() {
+        // The rejection above must not reach ordinary `const`s. Without this,
+        // narrowing it to impl bodies could not be distinguished from banning
+        // constants outright — every existing const test uses a file with no
+        // `impl` in it at all.
+        let r = check_src(
+            "const LIMIT: Int = 99\n\
+             record K { v: Int }\n\
+             impl K { fn get(self) -> Int { LIMIT } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
     }
 
     #[test]
