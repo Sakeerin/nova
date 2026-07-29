@@ -1100,16 +1100,13 @@ impl<'a> Checker<'a> {
             }
 
             // Conformance: a trait impl must define exactly the trait's
-            // methods that lack defaults, and nothing foreign.
+            // methods that lack defaults, and nothing foreign. Only the *set* of
+            // items is decided here — each method's signature is compared by
+            // `check_impl_method_signatures` after the loop, because that
+            // comparison normalizes associated-type projections and so needs the
+            // finished impl table.
             if let Some(tid) = trait_id {
-                self.check_impl_conformance(
-                    tid,
-                    &methods,
-                    &block.assoc_types,
-                    &self_ty,
-                    impl_count,
-                    block.ty.span,
-                );
+                self.check_impl_conformance(tid, &methods, &block.assoc_types, block.ty.span);
             }
 
             self.impls.push(hir::ImplInfo {
@@ -1127,6 +1124,10 @@ impl<'a> Checker<'a> {
         // which run next.
         self.impl_self = None;
 
+        // Ordered first among the three post-collection passes so that an
+        // `E0072` about a method signature still precedes `check_supertrait_impls`'s
+        // own `E0072`, as it did when the signature check ran inside the loop.
+        self.check_impl_method_signatures(&impl_spans);
         self.check_impl_coherence(&impl_spans);
         self.check_supertrait_impls(&impl_spans);
     }
@@ -1327,12 +1328,17 @@ impl<'a> Checker<'a> {
         format!("`{}`", names.join(" + "))
     }
 
-    /// Verify a trait impl provides all required methods, binds exactly the
-    /// trait's associated types, no unknown ones of either, and that each
-    /// provided method's signature matches the trait's declaration (with
-    /// `Self` bound to the impl's self type). Without the signature check the
-    /// call site uses the trait signature while codegen dispatches to the
-    /// impl's method — a mismatch miscompiles or is memory-unsafe.
+    /// Verify a trait impl provides exactly the trait's *set* of items: every
+    /// required method, every declared associated type, and nothing foreign in
+    /// either category.
+    ///
+    /// **Set membership only.** Whether each provided method's *signature*
+    /// agrees with the trait's declaration is
+    /// [`Checker::check_impl_method_signatures`], which cannot run from here —
+    /// see its doc comment for why. The split follows the diagnostic codes
+    /// exactly: `E0070` (missing a required item) and `E0071` (not a member of
+    /// the trait) are decided here, from names alone; `E0072` (the item exists
+    /// on both sides but its shape disagrees) is decided there, from types.
     ///
     /// `provided_assoc` is the impl's associated-type bindings as written, by
     /// name and span: this is the set-membership check in both directions, so
@@ -1343,156 +1349,16 @@ impl<'a> Checker<'a> {
         trait_id: DefId,
         provided: &[(String, DefId)],
         provided_assoc: &[ast::AssocTypeBinding],
-        self_ty: &Ty,
-        impl_count: u32,
         span: Span,
     ) {
         let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id).cloned() else {
             return;
         };
-        for (name, def_id) in provided {
-            let Some(trait_method) = tr.methods.iter().find(|m| &m.name == name) else {
+        for (name, _) in provided {
+            if !tr.methods.iter().any(|m| &m.name == name) {
                 self.error(
                     "E0071",
                     format!("method `{name}` is not a member of trait `{}`", tr.name),
-                    span,
-                );
-                continue;
-            };
-            let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
-                continue;
-            };
-            // The receiver must agree. Nothing below can catch a disagreement:
-            // neither `params` list stores `self`, so an impl that adds or drops
-            // the receiver still compares equal parameter-for-parameter and
-            // return-type-wise. Yet a call site programs against the trait's
-            // signature while codegen dispatches to the impl's function, so the
-            // two differ by exactly one leading argument — Cranelift rejects the
-            // module ("mismatched argument count") and the compiler ICEs on
-            // source that `nova check` accepted.
-            let impl_has_self = !self.selfless.contains(def_id);
-            if impl_has_self != trait_method.has_self {
-                let (want, got) = if trait_method.has_self {
-                    ("a `self` receiver", "none")
-                } else {
-                    ("no `self` receiver", "one")
-                };
-                self.error(
-                    "E0072",
-                    format!(
-                        "method `{name}` has {got} but trait `{}` declares {want}",
-                        tr.name
-                    ),
-                    span,
-                );
-                continue;
-            }
-            // The impl method's own generics = its total minus the impl's, and
-            // must match the trait method's generic count.
-            let impl_method_generics = impl_sig.generics.saturating_sub(impl_count);
-            if impl_method_generics != trait_method.generics {
-                self.error(
-                    "E0072",
-                    format!(
-                        "method `{name}` has {impl_method_generics} generic parameter(s) but \
-                         trait `{}` declares {}",
-                        tr.name, trait_method.generics
-                    ),
-                    span,
-                );
-                continue;
-            }
-            // Each method generic must carry exactly the trait's declared bounds
-            // — neither dropped nor added. The impl method's own generics live at
-            // `impl_sig.bounds[impl_count + k]`, aligned with the trait method's
-            // `bounds[k]`. Without this the trait signature the call site programs
-            // against is not the contract the impl honors: an impl that drops a
-            // bound accepts calls the trait forbids (unsound), and one that adds a
-            // bound rejects trait-valid calls only later, at monomorphization.
-            for k in 0..trait_method.generics as usize {
-                let want = trait_method.bounds[k].as_slice();
-                let got = impl_sig
-                    .bounds
-                    .get(impl_count as usize + k)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                if !same_bound_set(want, got) {
-                    let want_str = self.render_bound_set(want);
-                    let got_str = self.render_bound_set(got);
-                    self.error(
-                        "E0072",
-                        format!(
-                            "generic parameter {} of method `{name}` has bound(s) {got_str} \
-                             but trait `{}` declares {want_str}",
-                            k + 1,
-                            tr.name,
-                        ),
-                        span,
-                    );
-                }
-            }
-            // Map the trait method's Param space into the impl's: `Self`
-            // (Param(0)) -> the impl self type; method generic k (Param(1+k)) ->
-            // the impl method's own generic at Param(impl_count + k).
-            let mut subst = Vec::with_capacity(1 + trait_method.generics as usize);
-            subst.push(self_ty.clone());
-            for k in 0..trait_method.generics {
-                subst.push(Ty::Param(impl_count + k));
-            }
-            // `impl_sig.params[0]` is the `self` receiver — skip it and compare
-            // the declared parameters (and the return type) against the trait
-            // method's, which `method_sig_parts` also stores without `self`. An
-            // associated function has no receiver stored, so there is nothing to
-            // skip (and `[1..]` would panic on its empty parameter list).
-            let impl_params: &[Ty] = if self.selfless.contains(def_id) {
-                &impl_sig.params
-            } else {
-                impl_sig.params.get(1..).unwrap_or_default()
-            };
-            let expected: Vec<Ty> = trait_method
-                .params
-                .iter()
-                .map(|p| p.subst(&subst))
-                .collect();
-            if impl_params.len() != expected.len() {
-                self.error(
-                    "E0072",
-                    format!(
-                        "method `{name}` has {} parameter(s) but trait `{}` declares {}",
-                        impl_params.len(),
-                        tr.name,
-                        expected.len()
-                    ),
-                    span,
-                );
-                continue;
-            }
-            for (i, (got, want)) in impl_params.iter().zip(expected.iter()).enumerate() {
-                if got != want {
-                    self.error(
-                        "E0072",
-                        format!(
-                            "parameter {} of method `{name}` has type `{}` but trait `{}` \
-                             declares `{}`",
-                            i + 1,
-                            display_ty(got, self.defs),
-                            tr.name,
-                            display_ty(want, self.defs),
-                        ),
-                        span,
-                    );
-                }
-            }
-            let expected_ret = trait_method.ret.subst(&subst);
-            if impl_sig.ret != expected_ret {
-                self.error(
-                    "E0072",
-                    format!(
-                        "method `{name}` returns `{}` but trait `{}` declares `{}`",
-                        display_ty(&impl_sig.ret, self.defs),
-                        tr.name,
-                        display_ty(&expected_ret, self.defs),
-                    ),
                     span,
                 );
             }
@@ -1550,6 +1416,218 @@ impl<'a> Checker<'a> {
                 ),
                 span,
             );
+        }
+    }
+
+    /// Verify each impl method's signature against the trait's declaration,
+    /// with `Self` bound to the impl's self type and **both sides normalized**
+    /// — normalization seam 2 of three (design doc §4.1, and its named risk 2).
+    ///
+    /// Without this check the call site programs against the trait's signature
+    /// while codegen dispatches to the impl's method, and a mismatch
+    /// miscompiles or is memory-unsafe. Every diagnostic here is `E0072`.
+    ///
+    /// **Both sides are normalized, not just the trait's.** The trait's
+    /// declaration may spell a type as `Self::Item`; an impl may spell the same
+    /// type either way (design doc §5.1 pins that both are accepted). Normalize
+    /// only the trait side and the `-> Self::Item` spelling breaks, since the
+    /// impl's stored signature still holds the projection; normalize only the
+    /// impl side and the `-> T` spelling stays broken. Substituting is not
+    /// enough on its own either: it turns `Self::Item` into
+    /// `Assoc { on: W<Param(0)> }`, which is still a projection.
+    ///
+    /// **Runs after the whole impl table is built**, beside
+    /// [`Checker::check_impl_coherence`] and
+    /// [`Checker::check_supertrait_impls`], rather than from
+    /// [`Checker::check_impl_conformance`] where it used to live — and for the
+    /// same reason `check_supertrait_impls` was moved out of conformance.
+    /// `collect_impls` calls conformance ten lines *before* it pushes the impl
+    /// being checked, so a `normalize` there would see neither this impl's own
+    /// bindings nor those of any impl written below it. Pushing the `ImplInfo`
+    /// above the conformance call fixes the first half only: normalization
+    /// consults the whole table, and a projection can need a *different*
+    /// impl's binding. It is reachable from ordinary source, because
+    /// `collect_traits` puts a trait's expanded supertraits in `sig_bounds[0]`,
+    /// so `Self::Elem` inside `trait Ext: Base` is `Base`'s associated type and
+    /// substituting `Self` yields a projection whose binding lives in
+    /// `impl Base for W` — which may be written either side of
+    /// `impl Ext for W`. Nova has no declaration-order rule for impls, and
+    /// `conformance_resolves_a_projection_bound_by_a_later_declared_impl` pins
+    /// that it has none here either.
+    fn check_impl_method_signatures(&mut self, spans: &[Span]) {
+        // The table is cloned rather than walked in place: `normalize` and
+        // `error` both need `&mut self`, and `normalize` — reading `self.impls`
+        // — is the entire point of this pass.
+        let impls = self.impls.clone();
+        for (imp, &span) in impls.iter().zip(spans) {
+            let Some(trait_id) = imp.trait_id else {
+                continue;
+            };
+            let Some(tr) = self.traits.iter().find(|t| t.def_id == trait_id).cloned() else {
+                continue;
+            };
+            for (name, def_id) in &imp.methods {
+                let Some(trait_method) = tr.methods.iter().find(|m| &m.name == name) else {
+                    // A method the trait does not declare: reported as `E0071`
+                    // by `check_impl_conformance`, and there is no trait
+                    // signature here to compare it against.
+                    continue;
+                };
+                let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
+                    continue;
+                };
+                let impl_count = imp.generics;
+                // The receiver must agree. Nothing below can catch a
+                // disagreement: neither `params` list stores `self`, so an impl
+                // that adds or drops the receiver still compares equal
+                // parameter-for-parameter and return-type-wise. Yet a call site
+                // programs against the trait's signature while codegen
+                // dispatches to the impl's function, so the two differ by
+                // exactly one leading argument — Cranelift rejects the module
+                // ("mismatched argument count") and the compiler ICEs on source
+                // that `nova check` accepted.
+                let impl_has_self = !self.selfless.contains(def_id);
+                if impl_has_self != trait_method.has_self {
+                    let (want, got) = if trait_method.has_self {
+                        ("a `self` receiver", "none")
+                    } else {
+                        ("no `self` receiver", "one")
+                    };
+                    self.error(
+                        "E0072",
+                        format!(
+                            "method `{name}` has {got} but trait `{}` declares {want}",
+                            tr.name
+                        ),
+                        span,
+                    );
+                    continue;
+                }
+                // The impl method's own generics = its total minus the impl's,
+                // and must match the trait method's generic count.
+                let impl_method_generics = impl_sig.generics.saturating_sub(impl_count);
+                if impl_method_generics != trait_method.generics {
+                    self.error(
+                        "E0072",
+                        format!(
+                            "method `{name}` has {impl_method_generics} generic parameter(s) \
+                             but trait `{}` declares {}",
+                            tr.name, trait_method.generics
+                        ),
+                        span,
+                    );
+                    continue;
+                }
+                // Each method generic must carry exactly the trait's declared
+                // bounds — neither dropped nor added. The impl method's own
+                // generics live at `impl_sig.bounds[impl_count + k]`, aligned
+                // with the trait method's `bounds[k]`. Without this the trait
+                // signature the call site programs against is not the contract
+                // the impl honors: an impl that drops a bound accepts calls the
+                // trait forbids (unsound), and one that adds a bound rejects
+                // trait-valid calls only later, at monomorphization.
+                for k in 0..trait_method.generics as usize {
+                    let want = trait_method.bounds[k].as_slice();
+                    let got = impl_sig
+                        .bounds
+                        .get(impl_count as usize + k)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    if !same_bound_set(want, got) {
+                        let want_str = self.render_bound_set(want);
+                        let got_str = self.render_bound_set(got);
+                        self.error(
+                            "E0072",
+                            format!(
+                                "generic parameter {} of method `{name}` has bound(s) \
+                                 {got_str} but trait `{}` declares {want_str}",
+                                k + 1,
+                                tr.name,
+                            ),
+                            span,
+                        );
+                    }
+                }
+                // Map the trait method's Param space into the impl's: `Self`
+                // (Param(0)) -> the impl self type; method generic k
+                // (Param(1+k)) -> the impl method's own generic at
+                // Param(impl_count + k).
+                let mut subst = Vec::with_capacity(1 + trait_method.generics as usize);
+                subst.push(imp.self_ty.clone());
+                for k in 0..trait_method.generics {
+                    subst.push(Ty::Param(impl_count + k));
+                }
+                // `impl_sig.params[0]` is the `self` receiver — skip it and
+                // compare the declared parameters (and the return type) against
+                // the trait method's, which `method_sig_parts` also stores
+                // without `self`. An associated function has no receiver stored,
+                // so there is nothing to skip (and `[1..]` would panic on its
+                // empty parameter list).
+                let impl_params: &[Ty] = if self.selfless.contains(def_id) {
+                    &impl_sig.params
+                } else {
+                    impl_sig.params.get(1..).unwrap_or_default()
+                };
+                if impl_params.len() != trait_method.params.len() {
+                    self.error(
+                        "E0072",
+                        format!(
+                            "method `{name}` has {} parameter(s) but trait `{}` declares {}",
+                            impl_params.len(),
+                            tr.name,
+                            trait_method.params.len()
+                        ),
+                        span,
+                    );
+                    continue;
+                }
+                // Normalized on both sides, and *after* the count check so a
+                // wrong arity is still reported as an arity error rather than as
+                // a per-parameter mismatch.
+                let expected: Vec<Ty> = trait_method
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let p = p.subst(&subst);
+                        self.normalize(&p, span)
+                    })
+                    .collect();
+                let got_params: Vec<Ty> = impl_params
+                    .iter()
+                    .map(|p| self.normalize(p, span))
+                    .collect();
+                for (i, (got, want)) in got_params.iter().zip(expected.iter()).enumerate() {
+                    if got != want {
+                        self.error(
+                            "E0072",
+                            format!(
+                                "parameter {} of method `{name}` has type `{}` but trait \
+                                 `{}` declares `{}`",
+                                i + 1,
+                                display_ty(got, self.defs),
+                                tr.name,
+                                display_ty(want, self.defs),
+                            ),
+                            span,
+                        );
+                    }
+                }
+                let expected_ret = trait_method.ret.subst(&subst);
+                let expected_ret = self.normalize(&expected_ret, span);
+                let impl_ret = self.normalize(&impl_sig.ret, span);
+                if impl_ret != expected_ret {
+                    self.error(
+                        "E0072",
+                        format!(
+                            "method `{name}` returns `{}` but trait `{}` declares `{}`",
+                            display_ty(&impl_ret, self.defs),
+                            tr.name,
+                            display_ty(&expected_ret, self.defs),
+                        ),
+                        span,
+                    );
+                }
+            }
         }
     }
 
@@ -11212,6 +11290,120 @@ mod tests {
              fn main() { println(\"${W { v: 1 }.get()}\") }",
         );
         assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
+    }
+
+    // === Normalization seam 2: impl conformance (design doc §4.1, risk 2) ===
+    //
+    // The dangerous direction here is **over-acceptance**. This seam makes two
+    // types that used to compare unequal compare equal, so a suite that only
+    // checks "the good impl is accepted" cannot tell the real fix from deleting
+    // the comparison. Every positive test below is therefore paired with the
+    // negative the same code path must still reject.
+
+    #[test]
+    fn an_impl_may_echo_the_projection_or_write_the_concrete_type() {
+        // Both spellings must be accepted (design doc §5.1).
+        for ret in ["T", "Self::Item"] {
+            let src = format!(
+                "trait It {{ type Item\n fn get_item(self) -> Self::Item }}\n\
+                 record W<T> {{ v: T }}\n\
+                 impl<T> It for W<T> {{ type Item = T\n fn get_item(self) -> {ret} {{ self.v }} }}\n\
+                 fn main() {{ }}"
+            );
+            let r = check_src(&src);
+            assert!(r.diagnostics.is_empty(), "ret = {ret}: {:?}", r.diagnostics);
+        }
+    }
+
+    #[test]
+    fn a_genuinely_wrong_impl_signature_still_reports_e0072() {
+        // The risk is that normalizing to make the two spellings agree also
+        // makes everything agree. Self::Item is T here, so returning Bool is
+        // wrong and must still be caught.
+        let r = check_src(
+            "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+             record W<T> { v: T }\n\
+             impl<T> It for W<T> { type Item = T\n fn get_item(self) -> Bool { true } }\n\
+             fn main() { }",
+        );
+        // Exactly one, and exactly the conformance error — not a `contains` that
+        // would also hold if the fix had added a second, cascading diagnostic.
+        assert_eq!(error_codes(&r), ["E0072"], "{:?}", r.diagnostics);
+        // And the message names the **normalized** trait type. Before this seam
+        // it read "declares `W<T0>::Item`" — the projection the user never
+        // wrote. A fix that normalized only the impl side would still report
+        // E0072 here, so the code alone cannot tell the two apart.
+        let msg = &r.diagnostics[0].message;
+        assert!(
+            msg.contains("returns `Bool`") && msg.contains("declares `T0`"),
+            "the diagnostic reports the normalized trait type: {msg}"
+        );
+    }
+
+    #[test]
+    fn conformance_resolves_a_projection_bound_by_a_later_declared_impl() {
+        // The discriminating test for why this seam is a post-collection pass
+        // rather than a `normalize` inside `check_impl_conformance` with the
+        // `ImplInfo` push hoisted above the call.
+        //
+        // A supertrait's associated type is reachable from a subtrait method's
+        // signature: `collect_traits` puts the trait *plus its expanded
+        // supertraits* in `sig_bounds[0]`, so `Self::Elem` inside
+        // `trait Ext: Base` is `Base`'s `Elem`. Substituting `Self` at
+        // conformance yields `Assoc { on: W }` — a projection with a head whose
+        // binding lives in a **different** impl, `impl Base for W`, which the
+        // user may write either side of `impl Ext for W`.
+        //
+        // Hoisting the push fixes only the impl's own bindings: the "sub first"
+        // ordering below would still fail, because normalization consults the
+        // whole table and would see only impls from earlier items. Nova has no
+        // declaration-order rule for impls — the same reason
+        // `check_supertrait_impls` was moved out of conformance — so both
+        // orderings must pass.
+        for (order, impls) in [
+            (
+                "sub first",
+                "impl Ext for W { fn peek(self) -> Int { self.v } }\n\
+                 impl Base for W { type Elem = Int }\n",
+            ),
+            (
+                "super first",
+                "impl Base for W { type Elem = Int }\n\
+                 impl Ext for W { fn peek(self) -> Int { self.v } }\n",
+            ),
+        ] {
+            let r = check_src(&format!(
+                "trait Base {{ type Elem }}\n\
+                 trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
+                 record W {{ v: Int }}\n\
+                 {impls}fn main() {{ }}"
+            ));
+            assert!(r.diagnostics.is_empty(), "{order}: {:?}", r.diagnostics);
+        }
+        // Not vacuous in either order: `Elem` is `Int`, so a `Bool` return is
+        // still wrong however the two impls are ordered. Without this half, a
+        // pass that skipped the comparison whenever a projection was involved
+        // would satisfy the loop above.
+        for (order, impls) in [
+            (
+                "sub first",
+                "impl Ext for W { fn peek(self) -> Bool { true } }\n\
+                 impl Base for W { type Elem = Int }\n",
+            ),
+            (
+                "super first",
+                "impl Base for W { type Elem = Int }\n\
+                 impl Ext for W { fn peek(self) -> Bool { true } }\n",
+            ),
+        ] {
+            let r = check_src(&format!(
+                "trait Base {{ type Elem }}\n\
+                 trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
+                 record W {{ v: Int }}\n\
+                 {impls}fn main() {{ }}"
+            ));
+            assert_eq!(error_codes(&r), ["E0072"], "{order}: {:?}", r.diagnostics);
+        }
     }
 
     #[test]
