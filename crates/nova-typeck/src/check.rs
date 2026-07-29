@@ -1174,10 +1174,20 @@ impl<'a> Checker<'a> {
     ///
     /// **Poisoning to `Ty::Error` rather than dropping the binding** keeps the
     /// bound *set* complete, so `check_impl_conformance` does not add a spurious
-    /// `E0070` for a binding that is present but bad, and `Ty::Error` unifies
-    /// with anything, so no use of the projection cascades either. The cycle is
-    /// already reported, so this is suppression of a *second* error, never
-    /// silence.
+    /// `E0070` for a binding that is present but bad. The cycle is already
+    /// reported, so this is suppression of a *second* error, never silence.
+    ///
+    /// **Poisoning is not self-suppressing, and this comment used to claim it
+    /// was.** It said `Ty::Error` "unifies with anything, so no use of the
+    /// projection cascades either". That is true of `InferCtx::unify`, where
+    /// `Ty::Error` absorbs — and false of every consumer that compares two `Ty`s
+    /// with the derived `PartialEq`, where an `Error` on one side *forces* a
+    /// mismatch. `check_impl_method_signatures` is such a consumer, and it
+    /// reported `method `get` returns `Int` but trait `It` declares `{error}``
+    /// after this very check had already explained the cycle. It now skips a
+    /// comparison whose either side [`hir::Ty::has_error`]; the suppression has
+    /// to live at each `PartialEq` consumer, because poisoning cannot do it from
+    /// here.
     fn check_assoc_binding_cycles(
         &mut self,
         bindings: &mut [(DefId, Ty)],
@@ -1689,6 +1699,11 @@ impl<'a> Checker<'a> {
                     .map(|p| self.normalize(p, span))
                     .collect();
                 for (i, (got, want)) in got_params.iter().zip(expected.iter()).enumerate() {
+                    // A poisoned side is not a mismatch — see `signatures_are
+                    // _not_compared_when_either_side_is_already_poisoned`.
+                    if got.has_error() || want.has_error() {
+                        continue;
+                    }
                     if got != want {
                         self.error(
                             "E0072",
@@ -1707,6 +1722,27 @@ impl<'a> Checker<'a> {
                 let expected_ret = trait_method.ret.subst(&subst);
                 let expected_ret = self.normalize(&expected_ret, span);
                 let impl_ret = self.normalize(&impl_sig.ret, span);
+                // `Ty::Error` on either side means a diagnostic about *that* type
+                // was already reported, so comparing is worse than useless here:
+                // `Ty` derives `PartialEq` with no `Error` absorption, so a
+                // poisoned side does not merely fail to help — it *forces* a
+                // mismatch, and the follow-on `E0072` renders it as `{error}`,
+                // which names nothing a user can act on. This is the exact
+                // opposite of `Ty::Error`'s behaviour at `unify`, where it
+                // absorbs; the two consumers of the same sentinel need opposite
+                // handling, and only `unify` got it for free.
+                //
+                // Transitive (`has_error`) rather than `== Ty::Error`: an impl
+                // binding an unresolvable type makes the trait's
+                // `Option<Self::Item>` normalize to `Option<{error}>`, so a
+                // top-level check would still leak `{error}` through a wrapper.
+                //
+                // Suppression of a *second* error only. Both routes to a poisoned
+                // side — `E0077` for a cyclic binding and `E0001` for an
+                // unresolvable one — have already reported the real problem.
+                if impl_ret.has_error() || expected_ret.has_error() {
+                    continue;
+                }
                 if impl_ret != expected_ret {
                     self.error(
                         "E0072",
@@ -2085,7 +2121,21 @@ impl<'a> Checker<'a> {
                                     None => return Ty::Error,
                                 };
                                 match imp.trait_id {
-                                    Some(tid) => (imp.ty, vec![tid]),
+                                    // Supertrait-expanded, so `Self::Elem` in
+                                    // `impl Ext for W` resolves against `Base`
+                                    // when `trait Ext: Base` declares nothing
+                                    // itself. This is not an extra feature: the
+                                    // *trait* side already does it, because
+                                    // `collect_traits` seeds `sig_bounds[0]` with
+                                    // the trait and then calls `expand_bounds`.
+                                    // Without it, `trait Ext: Base { fn peek
+                                    // (self) -> Self::Elem }` compiled while
+                                    // `impl Ext for W { fn peek(self) ->
+                                    // Self::Elem }` — the same signature, echoed
+                                    // — was `E0001`, so the one spelling §5.1
+                                    // pins as accepted was rejected on the side
+                                    // that has to write it.
+                                    Some(tid) => (imp.ty, self.with_supertraits(&[tid])),
                                     // An inherent impl implements no trait, so
                                     // no trait declares an associated type for
                                     // this to name. Given its own wording
@@ -11283,6 +11333,153 @@ mod tests {
         assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
     }
 
+    /// Task 11 Step 4. A signature comparison whose either side is already
+    /// poisoned reports nothing, so `{error}` never reaches a user.
+    ///
+    /// `Ty` derives `PartialEq` with no `Ty::Error` absorption, so at this seam a
+    /// poisoned side *forces* a mismatch — the opposite of `unify`, where
+    /// `Ty::Error` unifies with anything and the poison quietly stops. Every one
+    /// of the three programs below already has a diagnostic explaining the real
+    /// problem, and each used to get a second `E0072` naming `{error}`, which is
+    /// meaningless to a user and points at a method that is not the mistake.
+    ///
+    /// Three rows, not one, because the poison arrives by two different routes
+    /// and at two different depths:
+    ///  * a cyclic binding poisoned by `E0077`, on the **trait** side;
+    ///  * an unresolvable binding poisoned by `E0001`, also on the trait side;
+    ///  * the same, but the projection is **wrapped** in `Option`, so the
+    ///    normalized type is `Option<{error}>` and not `Ty::Error` itself. This
+    ///    row is why the guard is `has_error()` and not `== Ty::Error`: a
+    ///    top-level check leaves this one leaking `Option<{error}>`. Measured, on
+    ///    `25db453`.
+    ///
+    /// The fourth row is the control that this is suppression of a *second* error
+    /// and not of the check: two concrete types that genuinely disagree, with no
+    /// poison anywhere, still report `E0072`. Without it, deleting the comparison
+    /// outright would pass.
+    #[test]
+    fn signatures_are_not_compared_when_either_side_is_already_poisoned() {
+        // (impl body, the codes that must be the complete set)
+        let rows: [(&str, &str, &[&str]); 4] = [
+            (
+                "-> Self::Item",
+                "type Item = Self::Item\n fn get(self) -> Int { 1 }",
+                &["E0077"],
+            ),
+            (
+                "-> Self::Item",
+                "type Item = Nope\n fn get(self) -> Bool { true }",
+                &["E0001"],
+            ),
+            (
+                "-> Option<Self::Item>",
+                "type Item = Nope\n fn get(self) -> Option<Bool> { None }",
+                &["E0001"],
+            ),
+            (
+                "-> Int",
+                "type Item = Int\n fn get(self) -> Bool { true }",
+                &["E0072"],
+            ),
+        ];
+        for (trait_ret, impl_body, want) in rows {
+            let r = check_src(&format!(
+                "trait It {{ type Item\n fn get(self) {trait_ret} }}\n\
+                 record W {{ v: Int }}\n\
+                 impl It for W {{ {impl_body} }}\n\
+                 fn main() {{ }}"
+            ));
+            assert_eq!(
+                error_codes(&r),
+                want,
+                "impl `{impl_body}` against `fn get(self) {trait_ret}`: {:?}",
+                r.diagnostics
+            );
+            // Belt and braces on the whole row set: no message may render the
+            // `Ty::Error` sentinel, whatever code carries it.
+            for d in &r.diagnostics {
+                assert!(
+                    !d.message.contains("{error}"),
+                    "no user-facing message may render `Ty::Error`: {}",
+                    d.message
+                );
+            }
+        }
+    }
+
+    /// Task 11 Step 5. An impl may echo an associated type its trait inherits
+    /// from a **supertrait**, exactly as the trait's own method signature may.
+    ///
+    /// The two sides used to disagree. `collect_traits` seeds `sig_bounds[0]`
+    /// with the trait and then calls `expand_bounds`, so inside
+    /// `trait Ext: Base { fn peek(self) -> Self::Elem }` the projection resolves
+    /// against `Base`. `convert_ty`'s impl branch passed `vec![tid]`
+    /// *unexpanded*, and `find_assoc_type` matches `trait_def == trait_id`
+    /// exactly, so the echoed spelling in `impl Ext for W` was
+    /// `E0001: no associated type `Elem` on any bound of `Self`` — measured on
+    /// `25db453` — while the identical signature one declaration above was fine.
+    /// Design doc §5.1 pins "either spelling is accepted", and this was the one
+    /// place the echo was not.
+    ///
+    /// Two negative controls, because "resolve it against more traits" has two
+    /// ways to over-reach. A name no bound declares must still be `E0001`, and a
+    /// name **both** `Ext` and `Base` declare must still be `E0015` — for that
+    /// second one the trait side already reported `E0015` before this change (so
+    /// the program was already rejected, measured), and the impl now agrees
+    /// instead of quietly picking `Ext`'s. Two reports for one root cause is the
+    /// pre-existing lack of diagnostic dedup, asserted by count rather than
+    /// hidden behind a `contains`.
+    #[test]
+    fn an_impl_may_echo_an_associated_type_inherited_from_a_supertrait() {
+        let prelude = "trait Base { type Elem\n fn base(self) -> Int }\n";
+        let w = "record W { v: Int }\n\
+                 impl Base for W { type Elem = Int\n fn base(self) -> Int { 1 } }\n";
+        // The echo: `Ext` declares no associated type of its own, so `Self::Elem`
+        // can only come from `Base`.
+        let r = check_src(&format!(
+            "{prelude}trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
+             {w}impl Ext for W {{ fn peek(self) -> Self::Elem {{ 5 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        // And it really resolved to `Int` rather than to `Ty::Error`, which would
+        // unify with anything and make the assertion above vacuous.
+        let wrong = check_src(&format!(
+            "{prelude}trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
+             {w}impl Ext for W {{ fn peek(self) -> Bool {{ true }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(error_codes(&wrong), ["E0072"], "{:?}", wrong.diagnostics);
+        // Control 1: a name no bound of `Self` declares is still unresolved, on
+        // both sides.
+        let absent = check_src(&format!(
+            "{prelude}trait Ext: Base {{ fn peek(self) -> Self::Nope }}\n\
+             {w}impl Ext for W {{ fn peek(self) -> Self::Nope {{ 5 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(
+            error_codes(&absent),
+            ["E0001", "E0001"],
+            "{:?}",
+            absent.diagnostics
+        );
+        // Control 2: declared by the trait *and* its supertrait is ambiguous, and
+        // now says so on both sides. Pre-fix this reported one `E0015` (the trait
+        // side), so the program was already rejected; the impl no longer resolves
+        // it silently to `Ext`'s.
+        let ambiguous = check_src(&format!(
+            "{prelude}trait Ext: Base {{ type Elem\n fn peek(self) -> Self::Elem }}\n\
+             {w}impl Ext for W {{ type Elem = Int\n fn peek(self) -> Self::Elem {{ 5 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(
+            error_codes(&ambiguous),
+            ["E0015", "E0015"],
+            "{:?}",
+            ambiguous.diagnostics
+        );
+    }
+
     #[test]
     fn a_binding_projecting_onto_an_impl_parameter_is_not_a_cycle() {
         // The control case. `type Item = T::Item` is a projection in a binding
@@ -11711,16 +11908,28 @@ mod tests {
         );
     }
 
+    /// `E0077` poisons the binding to `Ty::Error`, so a *use* of the cyclic
+    /// projection adds nothing: not a second `E0010`, and not `normalize`'s
+    /// `E0078` depth-limit report. One mistake, one diagnostic.
+    ///
+    /// **The impl's return type is `Int`, deliberately, and this test was wrong
+    /// before it was.** It used to spell `Self::Item` on the impl side too, so
+    /// *both* sides of `check_impl_method_signatures`' comparison normalized to
+    /// `Ty::Error` and compared **equal** — the test passed by accident of its
+    /// own spelling, not because the property it is named for held. Changing that
+    /// one token to a concrete type made it fail with
+    /// `E0072: method `get` returns `Int` but trait `It` declares `{error}``,
+    /// which is the cascade the name denies. Fixed at the comparison (see the
+    /// `has_error` guard there and the poisoning comment on
+    /// `check_assoc_binding_cycles`), and the spelling is now the one that can
+    /// see it.
     #[test]
     fn a_reported_binding_cycle_is_poisoned_and_does_not_cascade() {
-        // E0077 poisons the binding to `Ty::Error`, so a *use* of the cyclic
-        // projection adds nothing: not a second E0010, and not `normalize`'s
-        // E0078 depth-limit report. One mistake, one diagnostic.
         let r = check_src(
             "trait It { type Item\n fn get(self) -> Self::Item }\n\
              record W { v: Int }\n\
              impl It for W { type Item = Self::Item\n\
-             fn get(self) -> Self::Item { 1 } }\n\
+             fn get(self) -> Int { 1 } }\n\
              fn main() { println(\"${W { v: 1 }.get()}\") }",
         );
         assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);

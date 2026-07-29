@@ -171,6 +171,33 @@ impl Ty {
         }
     }
 
+    /// Whether this type (transitively) contains [`Ty::Error`].
+    ///
+    /// `Ty::Error` means "a diagnostic about this type has already been
+    /// reported", and it behaves **oppositely at the two consumers** that read
+    /// it. At `InferCtx::unify` it absorbs: it unifies with anything, so a
+    /// poisoned type silently stops cascading. `Ty` derives `PartialEq` with no
+    /// such absorption, so at a consumer that compares two types *directly* an
+    /// `Error` on one side instead **forces** a mismatch, and the second
+    /// diagnostic renders it as the meaningless `{error}`.
+    ///
+    /// This is for that second kind of consumer: it asks "is either side already
+    /// poisoned?" so the comparison can be skipped rather than turned into
+    /// noise. Transitive rather than a top-level `== Ty::Error` check because the
+    /// poison is usually nested — an impl binding an unresolvable type makes the
+    /// trait's `Option<Self::Item>` normalize to `Option<{error}>`, which is not
+    /// itself `Ty::Error`.
+    pub fn has_error(&self) -> bool {
+        match self {
+            Ty::Error => true,
+            Ty::Fn { params, ret } => params.iter().any(Ty::has_error) || ret.has_error(),
+            Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_error),
+            Ty::Array(elem) => elem.has_error(),
+            Ty::Assoc { on, .. } => on.has_error(),
+            _ => false,
+        }
+    }
+
     /// The nominal head of this type, if it has one — used to key impl
     /// lookups. Generic arguments do not participate (Phase 1 has no
     /// overlapping impls per head).
