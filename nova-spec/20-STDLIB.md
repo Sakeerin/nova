@@ -92,10 +92,14 @@ pub trait Hash {
 
 pub trait Iterator {
     type Item
-    fn next(self) -> Option<Self::Item>   // `::`, not `.` — see docs/adr/0006
-    // The receiver becomes `mut self` once the mutable-receiver rule covers
-    // trait methods (ADR 0005 §1's migration path); `next` is the first such
-    // method and is what forces that gap closed.
+    fn next(mut self) -> Option<Self::Item>   // `::`, not `.` — see docs/adr/0006
+    // `mut self`, not `self`: the mutable-receiver rule now covers trait
+    // methods (ADR 0005 §1's migration path is complete), and `next` is the
+    // first such method — it is what forced that gap closed. Load-bearing, not
+    // stylistic: with plain `self` on both sides, `VecIter::next`'s body does
+    // not compile (`E0060`, cannot assign to a field of immutable self). The
+    // consequence for callers is that an iterator must be held in a `mut`
+    // binding or arrive as a `mut` parameter.
     // default methods: map, filter, collect, fold, ...
 }
 
