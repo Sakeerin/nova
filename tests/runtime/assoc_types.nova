@@ -38,7 +38,27 @@
 //   C. mono's normalization caching its first answer      -> EMIT_OF, PAIR
 //                                                            generic, FIRST_OR
 //   D. `find_assoc_type` ignoring the name (index 0)      -> PAIR
-//   E. seam 1 (`check.rs`'s normalize after `apply`) off  -> UNANNOTATED
+//   E. seam 1 (`check.rs`'s `normalize` after `apply`)
+//      returning the projection unresolved                -> UNANNOTATED,
+//                                                            EXHAUST, CELL
+//   F. `normalize_ty` dropping the `bound.subst(&args)`
+//      that carries the impl's own type arguments into
+//      the binding — §7 item 1's literal claim            -> CELL, EMIT_OF
+//
+// **Every generic block below therefore instantiates at `Bool` and at `Float`,
+// and that is not decoration.** `mir_ty` maps `Int` AND `Char` to
+// `MirTy::I64`, and `String`/`Record`/`Sum`/`Array` to `MirTy::Ptr`, which is
+// `pointer_type()` — `types::I64` on x86-64. So at the level a backend can see,
+// `Int`, `Char`, `String` and every heap type are the SAME type, and a
+// projection resolved to the wrong one of them is invisible even when it is
+// named bare. Measured: `first_or` at `Vec<Int>` + `Vec<String>` survives
+// mutation C byte-identically, and so does `Vec<Int>` + `Vec<Char>`; adding a
+// `Vec<Bool>` kills it immediately. Only `Bool` (`I8`) and `Float` (`F64`) have
+// distinguishable machine classes, so only they can discriminate at the mono
+// seam. Design doc §7's correction (b) says a bare projection works because
+// "its identity survives to `MirTy`" — that is true of `Bool`/`Float` and false
+// of everything else, and Task 9's measurement killed the mutation only because
+// its third instantiation happened to be `Vec<Bool>`.
 
 // === §7 item 1: an associated type bound to the impl's own generic parameter.
 //
@@ -155,25 +175,38 @@ fn main() {
     let ci = Cell { v: 41 }
     let cs = Cell { v: "hi" }
     let cc = Cell { v: 'z' }
-    println("cell int=${ci.emit()} str=${cs.emit()} char=${cc.emit()}")
+    // A `Float` and a `Bool` `Cell`, which are the only two instantiations whose
+    // `Out` has a machine class distinguishable from `Int`'s — see the header.
+    let cf = Cell { v: 2.5 }
+    let cb = Cell { v: false }
+    println("cell int=${ci.emit()} str=${cs.emit()} char=${cc.emit()} float=${cf.emit()} bool=${cb.emit()}")
     let fl = Flag { on: true }
     println("cell echo=${fl.emit()}")
 
     // === EMIT_OF — §7 item 3 on a user trait: the projection named bare as a
-    // return type, at three instantiations whose machine classes differ
-    // (`I64`, a pointer, `I8`). Mutation C (mono caching its first resolved
-    // answer) dies here.
-    println("emit_of int=${emit_of(ci)} str=${emit_of(cs)} char=${emit_of(cc)} bool=${emit_of(fl)}")
+    // return type, at five instantiations. `Int`/`String`/`Char` are all one
+    // machine class (see the header), so `Float` and `Bool` are the two that
+    // give this line teeth. Mutation C (mono caching its first resolved answer)
+    // dies here.
+    println("emit_of int=${emit_of(ci)} str=${emit_of(cs)} char=${emit_of(cc)} float=${emit_of(cf)} bool=${emit_of(cb)}")
 
     // === PAIR — §7 item 4: two associated types, and the pair of
     // instantiations that swaps them. If `Left` and `Right` were confused, `p1`
     // and `p2` could not both check.
+    // `p3` puts a `Bool` in `Left` and a `Float` in `Right`, which is what gives
+    // this block teeth at the mono seam as well: without it every `Left`/`Right`
+    // here is `Int` or `String`, and those share one Cranelift type, so
+    // mutation C would pass through `left_of`/`right_of` unnoticed. Measured —
+    // `p1`/`p2` alone survive it.
     let p1 = Both { a: 7, b: "seven" }
     let p2 = Both { a: "eight", b: 8 }
+    let p3 = Both { a: true, b: 2.5 }
     println("pair p1 left=${p1.left()} right=${p1.right()}")
     println("pair p2 left=${p2.left()} right=${p2.right()}")
+    println("pair p3 left=${p3.left()} right=${p3.right()}")
     println("pair generic p1 left=${left_of(p1)} right=${right_of(p1)}")
     println("pair generic p2 left=${left_of(p2)} right=${right_of(p2)}")
+    println("pair generic p3 left=${left_of(p3)} right=${right_of(p3)}")
 
     // === UNANNOTATED — §7 item 2: `it.next()` on a concrete `VecIter<Int>`
     // typing as `Option<Int>` with **no** annotation anywhere. `v` is
@@ -245,16 +278,21 @@ fn main() {
     ss.push("there")
     let mut bs: Vec<Bool> = Vec::new()
     bs.push(false)
+    let mut fs: Vec<Float> = Vec::new()
+    fs.push(2.5)
     let ev: Vec<Char> = Vec::new()
     match first(v.iter()) { Some(x) => println("first int=${x}"), None => println("first int=none") }
     match first(ss.iter()) { Some(x) => println("first str=${x}"), None => println("first str=none") }
     match first(bs.iter()) { Some(x) => println("first bool=${x}"), None => println("first bool=none") }
+    match first(fs.iter()) { Some(x) => println("first float=${x}"), None => println("first float=none") }
     match first(ev.iter()) { Some(x) => println("first char=${x}"), None => println("first char=none") }
 
-    // === FIRST_OR — the same four instantiations through the BARE projection,
-    // which is the one with teeth. `Option<Int>` and `Option<String>` lower to
-    // one `MirTy`; `Int` and `String` do not.
-    println("first_or int=${first_or(v.iter(), miss)} str=${first_or(ss.iter(), "?")} bool=${first_or(bs.iter(), true)} char=${first_or(ev.iter(), 'x')}")
+    // === FIRST_OR — the same five instantiations through the BARE projection,
+    // which is the one with teeth: `Option<Int>` and `Option<String>` lower to
+    // one `MirTy`. But so do `Int` and `String` themselves (see the header), so
+    // it is the `Bool` and `Float` instantiations here — not the bare spelling
+    // on its own — that actually kill mutation C. Both halves are needed.
+    println("first_or int=${first_or(v.iter(), miss)} str=${first_or(ss.iter(), "?")} bool=${first_or(bs.iter(), true)} float=${first_or(fs.iter(), 0.5)} char=${first_or(ev.iter(), 'x')}")
 
     // === COUNTDOWN — a non-`VecIter` implementor of the same trait, so
     // `first`/`first_or` are instantiated at an `I` that is not generic over
