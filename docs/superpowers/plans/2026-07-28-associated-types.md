@@ -926,6 +926,29 @@ It should fall out of Step 3: at monomorphization the type arguments are known, 
 
 Note the sibling case is **not** yours: with the parameters reversed (`fn f<I: It>(y: I::Item, x: I)`), the same call is *falsely rejected* at typeck with `error[E0010]: argument to \`f\` has type \`Int\` but \`?0::Item\` was expected`. That is an ordering limitation of normalize-at-seams plus an inference-variable leak into a user-facing message, recorded in the corrected §4.2. Do not fix it here; do **not** let your Step 3 work paper over it either, and say in your report whether your changes affected it.
 
+- [ ] **Step 0c: Fix the four normalization defects Task 5's review found**
+
+All four are in `hir::normalize_ty`, and **all four get sharper here**, because this task calls it after `subst` — where projections that were abstract become concrete and actually resolve. Numbered as the review reported them.
+
+**F1 (Important) — a legal, non-cyclic program hangs the compiler.** The budget is charged only on the `Assoc` arm; the compound arms recurse with it unchanged. The justification at `nova-hir/src/lib.rs:376-381` ("a finite type is a finite tree") correctly proves **non-divergence** but not **bounded work**: a *branching* binding chain multiplies. With `type A(k) = Pair<Self::A(k+1), Self::A(k+1)>` and `type A(n) = Int` — no cycle, depth well under 64 — I measured, on accepted programs (`exit 0`):
+
+| n | file | result |
+|---|---|---|
+| 8 | 25 lines | 130 ms |
+| 16 | 41 lines | 541 ms |
+| 20 | 49 lines | 8 108 ms |
+| 24 | **57 lines** | **timeout at 60 s** |
+
+Roughly 15× per four levels. The result type is itself `2^n` nodes and nothing memoizes. A four-field record gives `4^n` in fewer lines. Fix by charging budget on the compound arms too, memoizing, or capping result size — and say which and why. Whatever you choose, **the failure must be a diagnostic, never a hang and never `Ty::Error`**.
+
+**F2 (Important) — `E0078` is reachable from source, and a comment says it cannot be.** A non-cyclic chain longer than the limit is not a cycle, so `E0077` never sees it. Measured with a plain linear chain: length **63 → `ok`**, length **64 → `E0078`**. So the comment at `check.rs:2187-2191` — "reaching here means some other path built a projection that does not converge — a compiler defect" — is wrong, and would send a maintainer hunting an ICE that does not exist. Correct it to say this is reachable from ordinary source, and decide whether 64 is still the right limit now that it is user-facing rather than a backstop. Task 5's report makes the same claim in its defect #7 and concern #2; note the correction in your report.
+
+**F3 (Important) — the structural impl-selection gate is pinned by no test.** `nova-hir/src/lib.rs:451-455` requires `match_args` to succeed, with a comment at `:447-450` explaining that head-only matching is the historical miscompile class this project already shipped once. Mutating `i.match_args(&on)?` to `.unwrap_or_default()` **survives all 301 tests**. The two tests that look like coverage both discriminate only by *head*. Add the missing case: **two impls on the same head, one structurally non-matching** (`impl<T> It for Pair<T, T>` against `Pair<Int, Bool>`). Cheap, and it guards a class this codebase has already been bitten by.
+
+**F4 (Minor) — pre-normalizing `on` is pinned by no test.** `nova-hir/src/lib.rs:440`; replacing it with `(**on).clone()` also survives all 301. Unwritable from source today, but `subst` can build the shape — and **this task is what makes it reachable**. A three-line unit test on a hand-built `Assoc { on: Assoc { .. } }` closes it.
+
+Do these before Step 1 if any of them affects the seam you are about to add; otherwise after, but in this task.
+
 - [ ] **Step 1: Write the failing test**
 
 In `crates/nova-cli/tests/run_tests.rs`:
