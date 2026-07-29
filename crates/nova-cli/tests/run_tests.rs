@@ -2358,20 +2358,42 @@ fn an_exhausted_vec_iterator_does_not_advance_its_cursor() {
 
 /// A generic function bounded by `Iterator` whose signature names the
 /// projection, called at **two different** instantiations plus an empty one.
-///
-/// This is design doc §7's gate item 3, and it is the reason `Item = T` rather
-/// than a primitive: `Int` and `String` are different machine classes, so a
-/// substitution that dropped the impl's argument, or a normalization that
-/// cached its first answer, cannot give both the right result.
+/// Design doc §7's gate item 3.
 ///
 /// The receiver is `mut it`, not `it`. §7 originally wrote
 /// `fn first<I: Iterator>(it: I)`; Task 8 made `mut self` on a trait method
 /// enforced, so that spelling is now `E0060` and the `mut` is the rule working
 /// rather than a workaround. `mut` on a *parameter* is what carries it — there
 /// is no `let mut` to reach for when the iterator arrives as an argument.
+///
+/// Two functions, because `first` alone does **not** reach the monomorphization
+/// seam and I measured that rather than assuming it. Made mono's normalization
+/// cache its first answer and reuse it for every projection (the plan's
+/// mutation 3), and `first`'s three instantiations still printed
+/// `int=7 / str=hi / bool=none` byte-identically: `Option<Int>` and
+/// `Option<String>` lower to the *same* `MirTy` — a pointer to a heap sum — so a
+/// corrupted return type on `first`'s String instance changes nothing a backend
+/// can see, and `main` is not generic, so typeck's own seam had already fixed
+/// the types the `${…}` interpolations dispatch on.
+///
+/// `first_or` fixes that by naming `I::Item` **bare**, in both a parameter and
+/// the return type, so the projection's resolution decides a machine class
+/// (`I64` vs a pointer) instead of hiding inside a sum. Under the same mutation
+/// it dies in Cranelift with `declared type of variable ... doesn't match type
+/// of value`. The wrapped and unwrapped forms are both worth keeping: the
+/// wrapped one is the spec's literal signature and the shape a user writes; the
+/// unwrapped one is the one with teeth.
+///
+/// `it: I` deliberately precedes `dflt: I::Item`, so `I` is pinned by the first
+/// argument before the projection parameter is checked — the ordering
+/// `a_projection_parameter_on_a_pinned_generic_reaches_codegen_resolved` above
+/// depends on for the same reason.
 #[test]
 fn a_generic_function_over_iterator_resolves_item_per_instantiation() {
     let src = "fn first<I: Iterator>(mut it: I) -> Option<I::Item> { it.next() }\n\
+               fn first_or<I: Iterator>(mut it: I, dflt: I::Item) -> I::Item {\n\
+                   match it.next() { Some(x) => x, None => dflt }\n\
+               }\n\
                fn main() {\n\
                    let mut ns: Vec<Int> = Vec::new()\n\
                    ns.push(7)\n\
@@ -2381,17 +2403,28 @@ fn a_generic_function_over_iterator_resolves_item_per_instantiation() {
                    match first(ss.iter()) { Some(s) => println(\"str=${s}\"), None => println(\"str=none\") }\n\
                    let e: Vec<Bool> = Vec::new()\n\
                    match first(e.iter()) { Some(b) => println(\"bool=${b}\"), None => println(\"bool=none\") }\n\
+                   println(\"or_int=${first_or(ns.iter(), 0)}\")\n\
+                   println(\"or_str=${first_or(ss.iter(), \"?\")}\")\n\
+                   println(\"or_empty=${first_or(e.iter(), true)}\")\n\
                }";
     let dir = std::env::temp_dir().join("nova-assoc-iterator-generic");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join("main.nova");
     std::fs::write(&path, src).expect("write");
-    nova()
+    let assert = nova()
         .arg("run")
         .arg(&path)
         .assert()
         .success()
-        .stdout("int=7\nstr=hi\nbool=none\n");
+        .stdout("int=7\nstr=hi\nbool=none\nor_int=7\nor_str=hi\nor_empty=true\n");
+    // The mutation this test exists to catch fails in the *backend*, so a clean
+    // stderr is part of the assertion: a regression that emitted invalid IR and
+    // still printed the right bytes by luck would otherwise pass.
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("verifier") && !stderr.contains("panicked"),
+        "no projection may reach codegen unresolved: {stderr}"
+    );
 }
 
 /// `std/core`'s `Iterator` is implementable by **user** code, and an impl may
