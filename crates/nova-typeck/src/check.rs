@@ -11478,38 +11478,48 @@ mod tests {
     ///    top-level check leaves this one leaking `Option<{error}>`. Measured, on
     ///    `25db453`.
     ///
-    /// The fourth row is the control that this is suppression of a *second* error
+    /// A fourth row puts the projection in a **parameter** rather than the return
+    /// type, because the comparison has two guarded sites and they are separate
+    /// code: measured, removing only the parameter-side guard left all 602 tests
+    /// green when the first three rows were the whole test.
+    ///
+    /// The last row is the control that this is suppression of a *second* error
     /// and not of the check: two concrete types that genuinely disagree, with no
     /// poison anywhere, still report `E0072`. Without it, deleting the comparison
     /// outright would pass.
     #[test]
     fn signatures_are_not_compared_when_either_side_is_already_poisoned() {
-        // (impl body, the codes that must be the complete set)
-        let rows: [(&str, &str, &[&str]); 4] = [
+        // (trait's `get` signature tail, impl body, the complete code set)
+        let rows: [(&str, &str, &[&str]); 5] = [
             (
-                "-> Self::Item",
+                ") -> Self::Item",
                 "type Item = Self::Item\n fn get(self) -> Int { 1 }",
                 &["E0077"],
             ),
             (
-                "-> Self::Item",
+                ") -> Self::Item",
                 "type Item = Nope\n fn get(self) -> Bool { true }",
                 &["E0001"],
             ),
             (
-                "-> Option<Self::Item>",
+                ") -> Option<Self::Item>",
                 "type Item = Nope\n fn get(self) -> Option<Bool> { None }",
                 &["E0001"],
             ),
             (
-                "-> Int",
+                ", x: Self::Item) -> Int",
+                "type Item = Nope\n fn get(self, x: Bool) -> Int { 1 }",
+                &["E0001"],
+            ),
+            (
+                ") -> Int",
                 "type Item = Int\n fn get(self) -> Bool { true }",
                 &["E0072"],
             ),
         ];
-        for (trait_ret, impl_body, want) in rows {
+        for (trait_tail, impl_body, want) in rows {
             let r = check_src(&format!(
-                "trait It {{ type Item\n fn get(self) {trait_ret} }}\n\
+                "trait It {{ type Item\n fn get(self{trait_tail} }}\n\
                  record W {{ v: Int }}\n\
                  impl It for W {{ {impl_body} }}\n\
                  fn main() {{ }}"
@@ -11517,7 +11527,7 @@ mod tests {
             assert_eq!(
                 error_codes(&r),
                 want,
-                "impl `{impl_body}` against `fn get(self) {trait_ret}`: {:?}",
+                "impl `{impl_body}` against `fn get(self{trait_tail}`: {:?}",
                 r.diagnostics
             );
             // Belt and braces on the whole row set: no message may render the
