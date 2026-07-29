@@ -12589,50 +12589,149 @@ mod tests {
         // declaration-order rule for impls — the same reason
         // `check_supertrait_impls` was moved out of conformance — so both
         // orderings must pass.
-        for (order, impls) in [
+        //
+        // **Two shapes, added in Task 11 Step 6.** The original test only had
+        // the primitive-on-a-non-generic-record row, which resolves the
+        // projection through a **ground** self type: `Assoc { on: W }`, whose
+        // binding is `Int`. Nothing there can tell whether the impl's own type
+        // arguments reach the binding at all, because `Int.subst(_)` is `Int`
+        // for every argument list.
+        //
+        // The second row is the one with teeth: the supertrait impl binds
+        // `Elem = A` — its *first* parameter — and the subtrait impl is
+        // partially concrete, `impl<T> Ext for W<Int, T>`. So conformance
+        // resolves `Assoc { on: W<Int, Param(0)> }`, `match_args` recovers
+        // `[Int, Param(0)]`, and `Elem` is `Int` **only if** those arguments are
+        // substituted into the binding. Measured: dropping the `subst` in
+        // `hir::normalize_ty`'s `Assoc` arm leaves the primitive row passing and
+        // fails this one.
+        //
+        // The plan asked for `record W<T>` with `type Elem = T`. That is not
+        // enough, and the reason is worth recording: `match_args` on
+        // `W<Param(0)>` recovers `[Param(0)]`, so `Param(0).subst([Param(0)])` is
+        // the *identity* — the substitution runs but cannot be observed, and the
+        // subst-dropping mutation survives it. A parameter of the impl only
+        // "survives substitution" observably when the argument it maps to is
+        // something else.
+        for (shape, decl, ext_ok, ext_bad, base) in [
             (
-                "sub first",
-                "impl Ext for W { fn peek(self) -> Int { self.v } }\n\
-                 impl Base for W { type Elem = Int }\n",
+                "a primitive on a non-generic record",
+                "record W { v: Int }\n",
+                "impl Ext for W { fn peek(self) -> Int { self.v } }\n",
+                "impl Ext for W { fn peek(self) -> Bool { true } }\n",
+                "impl Base for W { type Elem = Int }\n",
             ),
             (
-                "super first",
-                "impl Base for W { type Elem = Int }\n\
-                 impl Ext for W { fn peek(self) -> Int { self.v } }\n",
+                "the impl's own arguments substituted into a supertrait's binding",
+                "record W<A, B> { a: A\n b: B }\n",
+                "impl<T> Ext for W<Int, T> { fn peek(self) -> Int { self.a } }\n",
+                "impl<T> Ext for W<Int, T> { fn peek(self) -> Bool { true } }\n",
+                "impl<A, B> Base for W<A, B> { type Elem = A }\n",
             ),
         ] {
-            let r = check_src(&format!(
-                "trait Base {{ type Elem }}\n\
-                 trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
-                 record W {{ v: Int }}\n\
-                 {impls}fn main() {{ }}"
-            ));
-            assert!(r.diagnostics.is_empty(), "{order}: {:?}", r.diagnostics);
+            let src = |impls: String| {
+                format!(
+                    "trait Base {{ type Elem }}\n\
+                     trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
+                     {decl}{impls}fn main() {{ }}"
+                )
+            };
+            for (order, impls) in [
+                ("sub first", format!("{ext_ok}{base}")),
+                ("super first", format!("{base}{ext_ok}")),
+            ] {
+                let r = check_src(&src(impls));
+                assert!(
+                    r.diagnostics.is_empty(),
+                    "{shape}, {order}: {:?}",
+                    r.diagnostics
+                );
+            }
+            // Not vacuous in either order: `Elem` is the element type, so a
+            // `Bool` return is still wrong however the two impls are ordered.
+            // Without this half, a pass that skipped the comparison whenever a
+            // projection was involved would satisfy the loop above.
+            for (order, impls) in [
+                ("sub first", format!("{ext_bad}{base}")),
+                ("super first", format!("{base}{ext_bad}")),
+            ] {
+                let r = check_src(&src(impls));
+                assert_eq!(
+                    error_codes(&r),
+                    ["E0072"],
+                    "{shape}, {order}: {:?}",
+                    r.diagnostics
+                );
+            }
         }
-        // Not vacuous in either order: `Elem` is `Int`, so a `Bool` return is
-        // still wrong however the two impls are ordered. Without this half, a
-        // pass that skipped the comparison whenever a projection was involved
-        // would satisfy the loop above.
-        for (order, impls) in [
-            (
-                "sub first",
-                "impl Ext for W { fn peek(self) -> Bool { true } }\n\
-                 impl Base for W { type Elem = Int }\n",
-            ),
-            (
-                "super first",
-                "impl Base for W { type Elem = Int }\n\
-                 impl Ext for W { fn peek(self) -> Bool { true } }\n",
-            ),
-        ] {
-            let r = check_src(&format!(
-                "trait Base {{ type Elem }}\n\
-                 trait Ext: Base {{ fn peek(self) -> Self::Elem }}\n\
-                 record W {{ v: Int }}\n\
-                 {impls}fn main() {{ }}"
-            ));
-            assert_eq!(error_codes(&r), ["E0072"], "{order}: {:?}", r.diagnostics);
-        }
+    }
+
+    /// Task 11 Step 6, second half. The **selfless** branch of the conformance
+    /// comparison, with a projection in it.
+    ///
+    /// A trait method declared without a receiver leaves the impl signature with
+    /// no `self` to skip, so `check_impl_method_signatures` compares
+    /// `impl_sig.params` as-is instead of `params[1..]`. Its nearest existing
+    /// test, `selfless_trait_impl_method_checks_conformance_without_panicking`,
+    /// cannot see the branch at all: with `fn zero() -> Int` both arms produce an
+    /// empty parameter list, so always slicing `[1..]` is an equivalent mutant
+    /// there. A *parameter* is what makes the branch observable.
+    ///
+    /// Measured, so the claim is exact rather than "this branch was untested":
+    /// under the always-slice mutation the whole workspace reports **two**
+    /// failures — this test and
+    /// `trait_call_substitution_puts_self_before_the_methods_own_generics`, whose
+    /// `fn make<U>(u: U) -> Self` row also puts a parameter on a receiverless
+    /// trait method. So the branch was partly pinned; what had no test is the
+    /// branch **with a projection on it**, where the parameter list the arm
+    /// selects is also the list normalization runs over.
+    ///
+    /// The impl echoes `Self::Out` in both positions rather than writing `Int`,
+    /// so this is also the §5.1 "either spelling" row for an associated function
+    /// — the one place the echo was never exercised.
+    #[test]
+    fn conformance_normalizes_a_selfless_methods_projection() {
+        let prelude = "trait Zero { type Out\n\
+                       fn zero() -> Self::Out\n\
+                       fn of(x: Self::Out) -> Self::Out }\n\
+                       record P { v: Int }\n";
+        // Echoed on the impl side, in a parameter and in the return type.
+        let echoed = check_src(&format!(
+            "{prelude}impl Zero for P {{ type Out = Int\n\
+             fn zero() -> Int {{ 0 }}\n\
+             fn of(x: Self::Out) -> Self::Out {{ x }} }}\n\
+             fn main() {{ println(\"${{P::of(P::zero())}}\") }}"
+        ));
+        assert!(echoed.diagnostics.is_empty(), "{:?}", echoed.diagnostics);
+        // And the concrete spelling of the same signature.
+        let concrete = check_src(&format!(
+            "{prelude}impl Zero for P {{ type Out = Int\n\
+             fn zero() -> Int {{ 0 }}\n\
+             fn of(x: Int) -> Int {{ x }} }}\n\
+             fn main() {{ println(\"${{P::of(P::zero())}}\") }}"
+        ));
+        assert!(
+            concrete.diagnostics.is_empty(),
+            "{:?}",
+            concrete.diagnostics
+        );
+        // Not vacuous: the *parameter* is what the branch decides, so a wrong
+        // parameter type is the assertion that matters. `Out` is `Int`, so a
+        // `Bool` parameter is a mismatch and must be reported as one — not as an
+        // arity error, which is what slicing an already-receiverless list
+        // produces.
+        let wrong = check_src(&format!(
+            "{prelude}impl Zero for P {{ type Out = Int\n\
+             fn zero() -> Int {{ 0 }}\n\
+             fn of(x: Bool) -> Int {{ 1 }} }}\n\
+             fn main() {{ }}"
+        ));
+        assert_eq!(error_codes(&wrong), ["E0072"], "{:?}", wrong.diagnostics);
+        assert!(
+            wrong.diagnostics[0].message.contains("parameter 1"),
+            "the parameter is compared, not sliced away: {}",
+            wrong.diagnostics[0].message
+        );
     }
 
     #[test]
