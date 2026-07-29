@@ -2427,6 +2427,74 @@ fn a_generic_function_over_iterator_resolves_item_per_instantiation() {
     );
 }
 
+/// The rooting chain `VecIter` introduces, under `NOVA_GC_STRESS=1` (collect on
+/// every allocation).
+///
+/// This is the one risk in `VecIter` that is not a typing question. `next`
+/// allocates on every call — `Vec::get` returns `Some(x)`, which is a heap
+/// variant — and under stress every one of those is a collection point. The
+/// backing `[String]` is reachable only as `it` -> `VecIter` -> `Vec` ->
+/// `data`: three levels of heap indirection from one stack slot. Nothing in the
+/// existing `collections` gate has that shape, because a `Vec` there is always
+/// itself a live local.
+///
+/// `make()` is what makes the chain load-bearing: the vector is built in a frame
+/// that has already returned, so `it` is the **only** root. Holding the `Vec` in
+/// `main` as well would keep the array alive independently and the test would
+/// prove nothing about `VecIter` holding it.
+///
+/// `Vec<String>` rather than `Vec<Int>` so the elements are heap objects too,
+/// and the accumulator is built by interpolation so each loop turn allocates
+/// again while the iterator's storage must stay live across it.
+///
+/// `VecIter<String>` is written out as `make`'s return type, which also pins
+/// that the type is nameable from user code rather than only inferable.
+#[test]
+fn a_vec_iterator_keeps_its_backing_storage_alive_under_gc_stress() {
+    let src = "fn make() -> VecIter<String> {\n\
+                   let mut v: Vec<String> = Vec::new()\n\
+                   v.push(\"a\")\n\
+                   v.push(\"b\")\n\
+                   v.push(\"c\")\n\
+                   v.push(\"d\")\n\
+                   v.push(\"e\")\n\
+                   v.iter()\n\
+               }\n\
+               fn main() {\n\
+                   let mut it = make()\n\
+                   let mut out = \"\"\n\
+                   let mut n = 0\n\
+                   while n < 7 {\n\
+                       match it.next() {\n\
+                           Some(s) => out = \"${out}${s}\",\n\
+                           None => out = \"${out}.\",\n\
+                       }\n\
+                       n = n + 1\n\
+                   }\n\
+                   println(\"out=${out}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-veciter-gc");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    // Both modes, from one program: a missed root here is silently wrong *text*,
+    // not a crash, so the un-stressed run is the control that says the expected
+    // string is right in the first place.
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("out=abcde..\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("out=abcde..\n");
+}
+
 /// `std/core`'s `Iterator` is implementable by **user** code, and an impl may
 /// echo the trait's projection (`-> Option<Self::Item>`) instead of writing the
 /// concrete type — design doc §5.1's "either spelling is accepted" row, checked
