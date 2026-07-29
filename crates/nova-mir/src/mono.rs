@@ -134,8 +134,77 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
             continue;
         }
 
-        // Specialize the function body for these type arguments.
-        let specialized = specialize(func, &type_args);
+        // Specialize the function body for these type arguments, resolving every
+        // associated-type projection the now-concrete arguments make resolvable
+        // (normalization seam 3 — see `Specializer`).
+        let mut spec = Specializer {
+            args: &type_args,
+            impls: &module.impls,
+            unresolved: None,
+            overflow: None,
+        };
+        let specialized = spec.function(func);
+        // A projection that survives to `mir_ty` is mapped to `MirTy::Unit` by
+        // its defensive arm, so the failure is a *unit-typed value where another
+        // type was meant* — not a crash. Measured before this seam existed:
+        // `unwrap_item(W { v: 7 })` printed `0` and `unwrap_item(W { v: true })`
+        // printed `false`, exit code 0, no diagnostic at all; and a projection in
+        // a parameter position dropped the parameter from the Cranelift
+        // signature, so the caller passed two arguments to a one-argument
+        // function and the backend aborted with a verifier error. Both are why
+        // this has to be reported here, where a diagnostic is still possible.
+        let mut resolved_ok = true;
+        if let Some((at, limit)) = spec.overflow {
+            resolved_ok = false;
+            // The same condition and the same remedy as `Checker::normalize`'s
+            // `E0078`, so the same code: it names the error class, not the phase
+            // that noticed. A second code for one condition would be worse.
+            let detail = match limit {
+                hir::NormalizeLimit::Depth => format!(
+                    "the chain of bindings is more than {} deep, or does not terminate",
+                    hir::NORMALIZE_DEPTH_LIMIT,
+                ),
+                hir::NormalizeLimit::Steps => format!(
+                    "it resolves to more than {} type nodes",
+                    hir::NORMALIZE_STEP_LIMIT,
+                ),
+            };
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0078",
+                    format!(
+                        "could not resolve the associated types in `{}` when instantiating \
+                         `{}`: {}",
+                        type_name(&at, module),
+                        func.name,
+                        detail,
+                    ),
+                )
+                .with_primary_label(func.span, "instantiated here"),
+            );
+        }
+        if let Some(at) = spec.unresolved {
+            resolved_ok = false;
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0079",
+                    format!(
+                        "`{}` is still an unresolved associated type after instantiating `{}`; \
+                         no impl in scope binds it for this Self type",
+                        type_name(&at, module),
+                        func.name,
+                    ),
+                )
+                .with_primary_label(func.span, "instantiated here"),
+            );
+        }
+        // Skip lowering, for the same reason an instance with unsatisfied bounds
+        // is skipped: its types are not the types they claim to be, so lowering
+        // would add its own diagnostics — or emit the invalid code this check
+        // exists to prevent — for one root cause.
+        if !resolved_ok {
+            continue;
+        }
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
         match lower_function(&specialized, &name, module, entry, &mut request) {
             Ok(f) => mir.functions.push(f),
@@ -188,6 +257,12 @@ fn impl_satisfies(module: &hir::Module, arg: &Ty, trait_id: DefId) -> bool {
 }
 
 /// A short display name for a type in monomorphization diagnostics.
+///
+/// `nova-typeck`'s `display_ty` is the richer renderer but it needs
+/// `&Definitions`, which mono does not have; this reads names out of the HIR
+/// module instead. A projection is spelled `<on>::Name`, matching `display_ty`,
+/// by finding the owning trait — the associated type's `DefId` belongs to
+/// exactly one, so the scan is unambiguous.
 fn type_name(ty: &Ty, module: &hir::Module) -> String {
     match ty {
         Ty::Int => "Int".to_string(),
@@ -204,192 +279,482 @@ fn type_name(ty: &Ty, module: &hir::Module) -> String {
             .record(*def_id)
             .map(|r| r.name.clone())
             .unwrap_or_else(|| "?".to_string()),
+        Ty::Array(elem) => format!("[{}]", type_name(elem, module)),
+        Ty::Assoc { on, assoc } => {
+            let name = module
+                .traits
+                .iter()
+                .flat_map(|t| t.assoc_types.iter())
+                .find(|(_, d)| d == assoc)
+                .map(|(n, _)| n.as_str())
+                .unwrap_or("?");
+            format!("{}::{}", type_name(on, module), name)
+        }
         _ => "?".to_string(),
     }
 }
 
-/// Clone a function with `Param(i)` replaced by `type_args[i]` throughout
-/// locals, signature, and body (including recorded call-site type args).
-fn specialize(func: &hir::Function, type_args: &[Ty]) -> hir::Function {
-    hir::Function {
-        def_id: func.def_id,
-        name: func.name.clone(),
-        generics: 0,
-        bounds: Vec::new(),
-        takes_env: func.takes_env,
-        capture_count: func.capture_count,
-        params: func.params,
-        locals: func
-            .locals
-            .iter()
-            .map(|l| hir::Local {
-                name: l.name.clone(),
-                ty: l.ty.subst(type_args),
-                is_mut: l.is_mut,
-                span: l.span,
-            })
-            .collect(),
-        ret_ty: func.ret_ty.subst(type_args),
-        body: subst_expr(&func.body, type_args),
-        span: func.span,
+/// `subst` followed by normalization — **normalization seam 3** (design doc
+/// §4.1), and the reason it belongs here rather than in `nova-typeck`.
+///
+/// Inside a generic body a projection on a generic parameter is genuinely
+/// abstract: `Assoc { on: Param(0) }` has no [`Ty::head`], so no impl can be
+/// selected and seam 1 correctly leaves it alone. Monomorphization is the first
+/// point where `Param(0)` is known, so `subst` turns it into
+/// `Assoc { on: W<Int> }` — which does have a head — and normalization resolves
+/// it to the impl's binding. Both halves have to happen together at every type
+/// in the instance; `subst` alone is what let a projection reach `mir_ty`.
+///
+/// Carries the *first* failure of each kind rather than reporting per type: one
+/// unresolvable projection appears in a parameter type, in the corresponding
+/// local, and again on every expression node that mentions it, so reporting at
+/// each site would give one root cause a dozen diagnostics.
+struct Specializer<'a> {
+    /// The instance's type arguments, indexed by `Param`.
+    args: &'a [Ty],
+    /// The whole impl table. `normalize_ty` takes a plain `&[hir::ImplInfo]`
+    /// slice precisely so this crate can pass `&module.impls` and share the
+    /// identical code with `Checker::normalize`'s `&self.impls` — two copies of
+    /// projection resolution would be free to disagree silently about a *type*.
+    impls: &'a [hir::ImplInfo],
+    /// A projection that normalization could not resolve even with concrete
+    /// type arguments in hand. Reaching `mir_ty` with one is a miscompile
+    /// (§9 risk 1), so it must be a diagnostic.
+    unresolved: Option<Ty>,
+    /// Normalization ran out of budget: `(the type asked about, which limit)`.
+    overflow: Option<(Ty, hir::NormalizeLimit)>,
+}
+
+impl Specializer<'_> {
+    fn ty(&mut self, ty: &Ty) -> Ty {
+        let substituted = ty.subst(self.args);
+        // Not observable — `normalize_ty` on a projection-free type returns an
+        // equal value — but it is a real cost here in a way it is not at the
+        // other two seams: this runs over *every* type of every local and every
+        // expression node of every instance, where conformance runs over a
+        // handful of signatures. Every Nova program compiles all of std, so the
+        // saved tree clones are not hypothetical.
+        if !substituted.has_assoc() {
+            return substituted;
+        }
+        match hir::normalize_ty(&substituted, self.impls) {
+            Ok(resolved) => {
+                if resolved.has_assoc() && self.unresolved.is_none() {
+                    self.unresolved = Some(resolved.clone());
+                }
+                resolved
+            }
+            Err(hir::NormalizeOverflow { at, limit }) => {
+                if self.overflow.is_none() {
+                    self.overflow = Some((at, limit));
+                }
+                // Returned unresolved rather than as `Ty::Error`: the caller
+                // skips lowering this instance entirely because a diagnostic was
+                // recorded, so nothing reads it, and `Ty::Error` would be a
+                // second lie on top of the one being reported.
+                substituted
+            }
+        }
+    }
+
+    /// Clone a function with every type substituted and normalized: locals,
+    /// signature, and body, including the type arguments recorded at nested call
+    /// sites — those pick the callee's instance, so a projection left in one
+    /// would monomorphize the wrong function.
+    fn function(&mut self, func: &hir::Function) -> hir::Function {
+        hir::Function {
+            def_id: func.def_id,
+            name: func.name.clone(),
+            generics: 0,
+            bounds: Vec::new(),
+            takes_env: func.takes_env,
+            capture_count: func.capture_count,
+            params: func.params,
+            locals: func
+                .locals
+                .iter()
+                .map(|l| hir::Local {
+                    name: l.name.clone(),
+                    ty: self.ty(&l.ty),
+                    is_mut: l.is_mut,
+                    span: l.span,
+                })
+                .collect(),
+            ret_ty: self.ty(&func.ret_ty),
+            body: self.expr(&func.body),
+            span: func.span,
+        }
     }
 }
 
-fn subst_expr(expr: &hir::Expr, args: &[Ty]) -> hir::Expr {
-    use hir::ExprKind as K;
-    let kind = match &expr.kind {
-        K::IntLit(v) => K::IntLit(*v),
-        K::FloatLit(v) => K::FloatLit(*v),
-        K::BoolLit(v) => K::BoolLit(*v),
-        K::StrLit(v) => K::StrLit(v.clone()),
-        K::CharLit(v) => K::CharLit(*v),
-        K::Unit => K::Unit,
-        K::Break => K::Break,
-        K::Continue => K::Continue,
-        K::Local(l) => K::Local(*l),
-        K::MakeClosure {
-            func,
-            type_args,
-            captures,
-        } => K::MakeClosure {
-            func: *func,
-            type_args: type_args.iter().map(|t| t.subst(args)).collect(),
-            captures: captures.iter().map(|c| subst_expr(c, args)).collect(),
-        },
-        K::Call {
-            func,
-            type_args,
-            args: call_args,
-        } => K::Call {
-            func: *func,
-            type_args: type_args.iter().map(|t| t.subst(args)).collect(),
-            args: call_args.iter().map(|a| subst_expr(a, args)).collect(),
-        },
-        K::MakeVariant {
-            sum,
-            variant,
-            args: v_args,
-        } => K::MakeVariant {
-            sum: *sum,
-            variant: *variant,
-            args: v_args.iter().map(|a| subst_expr(a, args)).collect(),
-        },
-        K::MakeRecord {
-            record,
-            fields: rec_fields,
-        } => K::MakeRecord {
-            record: *record,
-            fields: rec_fields.iter().map(|f| subst_expr(f, args)).collect(),
-        },
-        K::FieldGet { target, index } => K::FieldGet {
-            target: Box::new(subst_expr(target, args)),
-            index: *index,
-        },
-        K::FieldSet {
-            target,
-            index,
-            value,
-        } => K::FieldSet {
-            target: Box::new(subst_expr(target, args)),
-            index: *index,
-            value: Box::new(subst_expr(value, args)),
-        },
-        K::MakeArray { elems } => K::MakeArray {
-            elems: elems.iter().map(|e| subst_expr(e, args)).collect(),
-        },
-        K::ArrayRepeat { init, len } => K::ArrayRepeat {
-            init: Box::new(subst_expr(init, args)),
-            len: Box::new(subst_expr(len, args)),
-        },
-        K::Index { target, index } => K::Index {
-            target: Box::new(subst_expr(target, args)),
-            index: Box::new(subst_expr(index, args)),
-        },
-        K::IndexSet {
-            target,
-            index,
-            value,
-        } => K::IndexSet {
-            target: Box::new(subst_expr(target, args)),
-            index: Box::new(subst_expr(index, args)),
-            value: Box::new(subst_expr(value, args)),
-        },
-        K::ArrayLen { target } => K::ArrayLen {
-            target: Box::new(subst_expr(target, args)),
-        },
-        K::TraitCall {
-            trait_id,
-            method,
-            self_ty,
-            type_args,
-            receiver,
-            args: call_args,
-        } => K::TraitCall {
-            trait_id: *trait_id,
-            method: *method,
-            self_ty: self_ty.subst(args),
-            type_args: type_args.iter().map(|t| t.subst(args)).collect(),
-            // `None` for a trait associated function; substitution must not
-            // invent a receiver for one.
-            receiver: receiver.as_ref().map(|r| Box::new(subst_expr(r, args))),
-            args: call_args.iter().map(|a| subst_expr(a, args)).collect(),
-        },
-        K::Binary { op, lhs, rhs } => K::Binary {
-            op: *op,
-            lhs: Box::new(subst_expr(lhs, args)),
-            rhs: Box::new(subst_expr(rhs, args)),
-        },
-        K::LogicalAnd { lhs, rhs } => K::LogicalAnd {
-            lhs: Box::new(subst_expr(lhs, args)),
-            rhs: Box::new(subst_expr(rhs, args)),
-        },
-        K::LogicalOr { lhs, rhs } => K::LogicalOr {
-            lhs: Box::new(subst_expr(lhs, args)),
-            rhs: Box::new(subst_expr(rhs, args)),
-        },
-        K::Unary { op, expr: inner } => K::Unary {
-            op: *op,
-            expr: Box::new(subst_expr(inner, args)),
-        },
-        K::Let { local, init } => K::Let {
-            local: *local,
-            init: Box::new(subst_expr(init, args)),
-        },
-        K::Assign { local, value } => K::Assign {
-            local: *local,
-            value: Box::new(subst_expr(value, args)),
-        },
-        K::Block { stmts, trailing } => K::Block {
-            stmts: stmts.iter().map(|s| subst_expr(s, args)).collect(),
-            trailing: trailing.as_ref().map(|t| Box::new(subst_expr(t, args))),
-        },
-        K::If { cond, then, else_ } => K::If {
-            cond: Box::new(subst_expr(cond, args)),
-            then: Box::new(subst_expr(then, args)),
-            else_: else_.as_ref().map(|e| Box::new(subst_expr(e, args))),
-        },
-        K::While { cond, body } => K::While {
-            cond: Box::new(subst_expr(cond, args)),
-            body: Box::new(subst_expr(body, args)),
-        },
-        K::Match { scrutinee, arms } => K::Match {
-            scrutinee: Box::new(subst_expr(scrutinee, args)),
-            arms: arms
-                .iter()
-                .map(|a| hir::Arm {
-                    pattern: a.pattern.clone(),
-                    body: subst_expr(&a.body, args),
-                    span: a.span,
-                })
-                .collect(),
-        },
-        K::Return(v) => K::Return(v.as_ref().map(|e| Box::new(subst_expr(e, args)))),
-        K::ToStr(inner) => K::ToStr(Box::new(subst_expr(inner, args))),
-        K::StrConcat(parts) => K::StrConcat(parts.iter().map(|p| subst_expr(p, args)).collect()),
-    };
-    hir::Expr {
-        kind,
-        ty: expr.ty.subst(args),
-        span: expr.span,
+/// Helper methods so a struct literal below can call several of them in one
+/// expression: each returns an owned value, so its `&mut self` borrow ends with
+/// the call.
+impl Specializer<'_> {
+    fn tys(&mut self, tys: &[Ty]) -> Vec<Ty> {
+        tys.iter().map(|t| self.ty(t)).collect()
+    }
+
+    fn exprs(&mut self, exprs: &[hir::Expr]) -> Vec<hir::Expr> {
+        exprs.iter().map(|e| self.expr(e)).collect()
+    }
+
+    fn boxed(&mut self, expr: &hir::Expr) -> Box<hir::Expr> {
+        Box::new(self.expr(expr))
+    }
+
+    fn opt(&mut self, expr: Option<&hir::Expr>) -> Option<Box<hir::Expr>> {
+        expr.map(|e| self.boxed(e))
+    }
+
+    fn expr(&mut self, expr: &hir::Expr) -> hir::Expr {
+        use hir::ExprKind as K;
+        let kind = match &expr.kind {
+            K::IntLit(v) => K::IntLit(*v),
+            K::FloatLit(v) => K::FloatLit(*v),
+            K::BoolLit(v) => K::BoolLit(*v),
+            K::StrLit(v) => K::StrLit(v.clone()),
+            K::CharLit(v) => K::CharLit(*v),
+            K::Unit => K::Unit,
+            K::Break => K::Break,
+            K::Continue => K::Continue,
+            K::Local(l) => K::Local(*l),
+            K::MakeClosure {
+                func,
+                type_args,
+                captures,
+            } => K::MakeClosure {
+                func: *func,
+                type_args: self.tys(type_args),
+                captures: self.exprs(captures),
+            },
+            K::Call {
+                func,
+                type_args,
+                args: call_args,
+            } => K::Call {
+                func: *func,
+                type_args: self.tys(type_args),
+                args: self.exprs(call_args),
+            },
+            K::MakeVariant {
+                sum,
+                variant,
+                args: v_args,
+            } => K::MakeVariant {
+                sum: *sum,
+                variant: *variant,
+                args: self.exprs(v_args),
+            },
+            K::MakeRecord {
+                record,
+                fields: rec_fields,
+            } => K::MakeRecord {
+                record: *record,
+                fields: self.exprs(rec_fields),
+            },
+            K::FieldGet { target, index } => K::FieldGet {
+                target: self.boxed(target),
+                index: *index,
+            },
+            K::FieldSet {
+                target,
+                index,
+                value,
+            } => K::FieldSet {
+                target: self.boxed(target),
+                index: *index,
+                value: self.boxed(value),
+            },
+            K::MakeArray { elems } => K::MakeArray {
+                elems: self.exprs(elems),
+            },
+            K::ArrayRepeat { init, len } => K::ArrayRepeat {
+                init: self.boxed(init),
+                len: self.boxed(len),
+            },
+            K::Index { target, index } => K::Index {
+                target: self.boxed(target),
+                index: self.boxed(index),
+            },
+            K::IndexSet {
+                target,
+                index,
+                value,
+            } => K::IndexSet {
+                target: self.boxed(target),
+                index: self.boxed(index),
+                value: self.boxed(value),
+            },
+            K::ArrayLen { target } => K::ArrayLen {
+                target: self.boxed(target),
+            },
+            K::TraitCall {
+                trait_id,
+                method,
+                self_ty,
+                type_args,
+                receiver,
+                args: call_args,
+            } => K::TraitCall {
+                trait_id: *trait_id,
+                method: *method,
+                self_ty: self.ty(self_ty),
+                type_args: self.tys(type_args),
+                // `None` for a trait associated function; substitution must not
+                // invent a receiver for one.
+                receiver: self.opt(receiver.as_deref()),
+                args: self.exprs(call_args),
+            },
+            K::Binary { op, lhs, rhs } => K::Binary {
+                op: *op,
+                lhs: self.boxed(lhs),
+                rhs: self.boxed(rhs),
+            },
+            K::LogicalAnd { lhs, rhs } => K::LogicalAnd {
+                lhs: self.boxed(lhs),
+                rhs: self.boxed(rhs),
+            },
+            K::LogicalOr { lhs, rhs } => K::LogicalOr {
+                lhs: self.boxed(lhs),
+                rhs: self.boxed(rhs),
+            },
+            K::Unary { op, expr: inner } => K::Unary {
+                op: *op,
+                expr: self.boxed(inner),
+            },
+            K::Let { local, init } => K::Let {
+                local: *local,
+                init: self.boxed(init),
+            },
+            K::Assign { local, value } => K::Assign {
+                local: *local,
+                value: self.boxed(value),
+            },
+            K::Block { stmts, trailing } => K::Block {
+                stmts: self.exprs(stmts),
+                trailing: self.opt(trailing.as_deref()),
+            },
+            K::If { cond, then, else_ } => K::If {
+                cond: self.boxed(cond),
+                then: self.boxed(then),
+                else_: self.opt(else_.as_deref()),
+            },
+            K::While { cond, body } => K::While {
+                cond: self.boxed(cond),
+                body: self.boxed(body),
+            },
+            K::Match { scrutinee, arms } => K::Match {
+                scrutinee: self.boxed(scrutinee),
+                arms: arms
+                    .iter()
+                    .map(|a| hir::Arm {
+                        pattern: a.pattern.clone(),
+                        body: self.expr(&a.body),
+                        span: a.span,
+                    })
+                    .collect(),
+            },
+            K::Return(v) => K::Return(self.opt(v.as_deref())),
+            K::ToStr(inner) => K::ToStr(self.boxed(inner)),
+            K::StrConcat(parts) => K::StrConcat(self.exprs(parts)),
+        };
+        hir::Expr {
+            kind,
+            ty: self.ty(&expr.ty),
+            span: expr.span,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nova_diagnostics::{FileId, Span};
+    use nova_hir::{Callee, Expr, ExprKind as K, ImplInfo, Local, TraitDef, TyHead};
+
+    const TRAIT: DefId = DefId(10);
+    const ITEM: DefId = DefId(11);
+    const OTHER: DefId = DefId(12);
+    const REC: DefId = DefId(13);
+    const MAIN: DefId = DefId(14);
+    const F: DefId = DefId(15);
+
+    fn dummy_span() -> Span {
+        Span::point(0, FileId::DUMMY)
+    }
+
+    fn w() -> Ty {
+        Ty::Record {
+            def_id: REC,
+            args: Vec::new(),
+        }
+    }
+
+    fn expr(kind: K, ty: Ty) -> Expr {
+        Expr {
+            kind,
+            ty,
+            span: dummy_span(),
+        }
+    }
+
+    /// A module where `main` calls `f::<W>`, and `f` holds one local whose
+    /// declared type is the projection `Param(0)::Item`.
+    ///
+    /// `binding` is what `impl ? for W` binds, keyed by associated type — so
+    /// passing `ITEM` gives an impl that answers the projection and passing
+    /// `OTHER` gives one that shares the head but binds something else. That is
+    /// the difference between a projection this seam resolves and one that
+    /// survives it, with everything else held equal.
+    fn module_with(binding: DefId) -> hir::Module {
+        // `let y = 5` where `y: Param(0)::Item`. Nothing else, so the only thing
+        // under test is what that type becomes.
+        let body = expr(
+            K::Block {
+                stmts: vec![expr(
+                    K::Let {
+                        local: nova_hir::LocalId(0),
+                        init: Box::new(expr(K::IntLit(5), Ty::Int)),
+                    },
+                    Ty::Unit,
+                )],
+                trailing: None,
+            },
+            Ty::Unit,
+        );
+        let f = hir::Function {
+            def_id: F,
+            name: "f".to_string(),
+            generics: 1,
+            // No bounds: `E0013` is a different check and would mask this one.
+            bounds: vec![Vec::new()],
+            takes_env: false,
+            capture_count: 0,
+            params: 0,
+            locals: vec![Local {
+                name: "y".to_string(),
+                ty: Ty::Assoc {
+                    on: Box::new(Ty::Param(0)),
+                    assoc: ITEM,
+                },
+                is_mut: false,
+                span: dummy_span(),
+            }],
+            ret_ty: Ty::Unit,
+            body,
+            span: dummy_span(),
+        };
+        let main = hir::Function {
+            def_id: MAIN,
+            name: "main".to_string(),
+            generics: 0,
+            bounds: Vec::new(),
+            takes_env: false,
+            capture_count: 0,
+            params: 0,
+            locals: Vec::new(),
+            ret_ty: Ty::Unit,
+            body: expr(
+                K::Block {
+                    stmts: vec![expr(
+                        K::Call {
+                            func: Callee::Def(F),
+                            type_args: vec![w()],
+                            args: Vec::new(),
+                        },
+                        Ty::Unit,
+                    )],
+                    trailing: None,
+                },
+                Ty::Unit,
+            ),
+            span: dummy_span(),
+        };
+        hir::Module {
+            sums: Vec::new(),
+            records: vec![hir::RecordType {
+                def_id: REC,
+                name: "W".to_string(),
+                generics: 0,
+                fields: Vec::new(),
+            }],
+            traits: vec![TraitDef {
+                def_id: TRAIT,
+                name: "It".to_string(),
+                supertraits: Vec::new(),
+                methods: Vec::new(),
+                assoc_types: vec![("Item".to_string(), ITEM)],
+            }],
+            impls: vec![ImplInfo {
+                trait_id: Some(TRAIT),
+                self_head: TyHead::Record(REC),
+                self_ty: w(),
+                generics: 0,
+                bounds: Vec::new(),
+                methods: Vec::new(),
+                assoc_bindings: vec![(binding, Ty::Int)],
+            }],
+            functions: vec![main, f],
+            externs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_projection_on_a_generic_parameter_resolves_once_the_argument_is_known() {
+        // The positive half of seam 3, at the level the diagnostic lives: `f`'s
+        // local is declared `Param(0)::Item`, the instance is `f::<W>`, and the
+        // impl binds `Item = Int`. So the lowered temp must be `I64`.
+        //
+        // `MirTy::Unit` is the discriminating value, not an arbitrary one: it is
+        // exactly what `mir_ty`'s defensive arm returns for an unresolved
+        // `Assoc`, so this assertion fails precisely when the projection reaches
+        // codegen unresolved.
+        let module = module_with(ITEM);
+        let mir = lower_module(&module).expect("no diagnostics");
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name.starts_with("f."))
+            .expect("f was instantiated");
+        assert_eq!(
+            f.temps.first(),
+            Some(&MirTy::I64),
+            "W::Item is Int, so the local is an i64, not a dropped unit"
+        );
+    }
+
+    #[test]
+    fn a_projection_that_survives_monomorphization_is_a_diagnostic() {
+        // The same module with the impl binding a *different* associated type, so
+        // no binding answers `W::Item` and normalization returns the projection
+        // unchanged. Without the check this reaches `mir_ty`, which maps it to
+        // `MirTy::Unit` — a unit-typed value where an `Int` was meant, with no
+        // diagnostic at all. That is spec §9's risk 1, and it is the one failure
+        // mode this seam exists to make impossible.
+        //
+        // Constructed here rather than in a `.nova` file because **it is not
+        // reachable from source**. Seven probes were tried and each is closed by
+        // an earlier diagnostic: an unresolvable projection at a concrete call
+        // site is `E0010` from seam 1, a supertrait whose impl does not fit
+        // structurally is `E0072`, and an impl generic that the self type does
+        // not mention is `E0073` — that last one being the only route that would
+        // otherwise reach here, via `match_args` resolving the unused parameter
+        // to `Ty::Error`. Instrumenting this branch and running the whole suite
+        // reached it zero times. So it is a backstop, and a backstop with no test
+        // is exactly what Task 5's review found twice.
+        let module = module_with(OTHER);
+        let diagnostics = lower_module(&module).expect_err("a surviving projection");
+        let codes: Vec<&str> = diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["E0079"], "{diagnostics:?}");
+        // The message has to name the projection. A diagnostic that says only
+        // "could not resolve an associated type" leaves the user with nothing to
+        // look at, and `type_name` returning `?` for `Assoc` (as it did before
+        // this task) would still satisfy an assertion on the code alone.
+        assert!(
+            diagnostics[0].message.contains("`W::Item`"),
+            "{}",
+            diagnostics[0].message
+        );
     }
 }

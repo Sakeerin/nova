@@ -2122,3 +2122,81 @@ fn unwrap_on_the_wrong_variant_aborts_with_message() {
         "stderr: {stderr}"
     );
 }
+
+// === Normalization seam 3: monomorphization (design doc §4.1) ===
+//
+// Trait bounds are discharged at monomorphization, not in `check_src`, so this
+// seam cannot be exercised from `nova-typeck`'s unit suite at all — it needs the
+// whole pipeline, which is why these live here.
+
+/// A generic function whose signature mentions a projection, instantiated at
+/// TWO different types. One instantiation would pass even if `subst` dropped
+/// the binding and every projection resolved to the same thing; two cannot.
+#[test]
+fn a_projection_resolves_per_instantiation_at_monomorphization() {
+    let src = "trait It { type Item\n fn get_item(self) -> Self::Item }\n\
+               record W<T> { v: T }\n\
+               impl<T> It for W<T> { type Item = T\n fn get_item(self) -> T { self.v } }\n\
+               fn unwrap_item<I: It>(x: I) -> I::Item { x.get_item() }\n\
+               fn main() {\n\
+                   let a = unwrap_item(W { v: 7 })\n\
+                   let b = unwrap_item(W { v: true })\n\
+                   println(\"${a} ${b}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-assoc-mono");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("7 true\n");
+}
+
+/// The invalid-codegen path spec §4.2 and §9's risk 1 describe, closed.
+///
+/// A *parameter* declared `I::Item` is checked as `Assoc { on: Var(k) }`, because
+/// a call site instantiates the callee's generic parameters as fresh inference
+/// variables. No receiver is involved, so the `E0011` guard §4.2 relied on never
+/// fires. With the determining argument first, `I` is pinned and the program
+/// type-checks — and before this seam existed the projection survived to
+/// lowering, where `mir_ty`'s defensive arm mapped it to `MirTy::Unit`.
+///
+/// Measured on the tree before this seam, which is sharper than the plan's
+/// "codegen emitted garbage": `MirTy::Unit` parameters are *dropped* from the
+/// Cranelift signature, so `f` was emitted taking ONE argument while `main`
+/// called it with two, and the run died with
+/// `WARN cranelift_codegen::verifier: Found verifier errors in function` /
+/// `mismatched argument count for v4 = call fn1(v2, v3): got 2, expected 1`.
+///
+/// `y` is deliberately unused by the body: the point is the *signature* reaching
+/// codegen, and using it would risk some other seam normalizing it first and
+/// hiding what is under test.
+#[test]
+fn a_projection_parameter_on_a_pinned_generic_reaches_codegen_resolved() {
+    let src = "trait It { type Item\n fn g(self) -> Int }\n\
+               record W { v: Int }\n\
+               impl It for W { type Item = Int\n fn g(self) -> Int { 1 } }\n\
+               fn f<I: It>(x: I, y: I::Item) -> Int { 7 }\n\
+               fn main() { println(\"${f(W { v: 1 }, 5)}\") }";
+    let dir = std::env::temp_dir().join("nova-assoc-mono-param");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    let assert = nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("7\n");
+    // The old failure was a *backend* crash, so assert stderr is clean too: a
+    // regression that emitted invalid IR but still printed `7` by luck would
+    // otherwise pass.
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains("verifier"),
+        "the projection must not reach codegen: {stderr}"
+    );
+}
