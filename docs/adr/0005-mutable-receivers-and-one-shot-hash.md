@@ -7,7 +7,10 @@ ends: section 1 is about the *receiver*, section 2 about the *keys*.
 
 Both sections are accepted. They are not independent in one direction: the
 streaming `Hash` that section 2 rejects would need exactly the trait-method
-receiver mutability that section 1 leaves as its open gap.
+receiver mutability that section 1 left as its open gap — and which section 1's
+Migration path has since closed (Phase 2.2b), so that particular obstacle is no
+longer what stands in section 2's way. See section 1's "Migration path: done"
+for what changed and what section 2 still lacks.
 
 ---
 
@@ -64,6 +67,12 @@ place.** Concretely, in `crates/nova-typeck/src/check.rs`:
   `self` at *any* position and the parser accepts a misplaced receiver
   (`fn f(x: Int, mut self)`). Two predicates that disagree about the same
   parameter is how `has_self` bugs happen; both scan the whole list.
+- `hir::TraitMethod::mut_self` is the trait-side counterpart, populated in
+  `collect_traits` with the identical scan. It has to be a flag on the trait
+  rather than a lookup into `mut_self`, because trait dispatch resolves to
+  `(trait_id, method_index)` with no impl to consult, and because
+  `method_sig_parts` strips a `self` parameter whether or not it is `mut`, so
+  `params` cannot carry it either.
 - `Checker::check_mutable_receiver` runs from `check_method_call`'s
   `MethodRes::Inherent` arm and classifies the receiver's **AST** with
   `place_root` — the AST, because the checked `hir::Expr` has already lost the
@@ -71,9 +80,19 @@ place.** Concretely, in `crates/nova-typeck/src/check.rs`:
   and `NotAPlace` each report `E0060`, and the immutable-local case carries the
   same ``declare it as `let mut …` `` note the other two assignment forms
   attach.
-- It is a **no-op for any method not in `mut_self`**, so a plain `self` reader
-  (`fn get(self) -> Int`) is still callable on an immutable binding. Only the
-  `mut` keyword demands anything of the caller.
+- The **trait** path runs the same `require_mutable_place` from
+  `emit_trait_call`'s receiver arm, keyed on `hir::TraitMethod::mut_self`.
+  `emit_trait_call` rather than `check_method_call`'s `MethodRes::Trait` arm —
+  which is where the Migration path below originally pointed — because that arm
+  is not the only receiver route: `try_display` reaches a
+  `fmt(mut self) -> String` straight from string interpolation without passing
+  through it. `emit_trait_call` is the one point every receiver route converges
+  on, so `TraitCallSelf::Receiver` carries the receiver's AST alongside its
+  checked form and the rule cannot be dodged by finding another way in.
+- It is a **no-op for any method that does not declare `mut self`**, so a plain
+  `self` reader (`fn get(self) -> Int`) is still callable on an immutable
+  binding, on either path. Only the `mut` keyword demands anything of the
+  caller.
 
 `mut self` is a *declared* contract, checked at the call site. The call is
 still emitted after the error so a single missing `let mut` does not cascade
@@ -93,15 +112,20 @@ into argument-type or arity noise.
   contract depend on its implementation, so adding one assignment inside a
   method body silently invalidates every existing call site — the opposite of
   what a signature is for. And it cannot work for a trait method declared
-  without a body at all, which is precisely where the remaining gap below is.
+  without a body at all, which is precisely the case the gap below was about —
+  and the reason closing it needed a *declared* flag on `hir::TraitMethod`
+  rather than anything inferred.
 - **Put `mut` on record fields instead** (`record C { mut n: Int }`) and drop
   the binding-level rule. Rejected: it needs a second mutability oracle
   operating per field, which then has to be reconciled with `place_root` for
   index chains and with the field *read* path; and it cannot express
   `Vec::push`, whose mutation is of the receiver as a whole. Keeping `mut` on
   bindings keeps `place_root` the only answer to "may this be mutated".
-- **Cover trait-method calls in the same change.** Deferred, with the reasoning
-  and the cost recorded under Consequences and Migration path below.
+- **Cover trait-method calls in the same change.** Deferred at the time, with
+  the reasoning and the cost recorded under Consequences and Migration path
+  below. Done in Phase 2.2b, as the Migration path prescribed and at the cost it
+  predicted; the Consequences entry below records what the gap was and how it
+  closed.
 
 ### Consequences
 
@@ -117,18 +141,20 @@ into argument-type or arity noise.
   `Map` — while `o.inner.bump()` on an immutable `o` is rejected at the root.
 - **A temporary receiver is rejected**: `make().bump()` is `NotAPlace` and
   reports `E0060`, because the mutation could not be observed by anyone.
-- **Gap: trait-method calls are not covered.** `MethodRes::Trait` dispatch
-  resolves to `(trait_id, method_index)`, and for a generic receiver
-  (`fn f<T: Tr>(x: T) { x.m() }`) there is no single impl whose receiver
-  declaration could be consulted — the `mut self` would have to be declared on
-  the *trait*, which `hir::TraitMethod` has no field for. So
-  `impl Tr for P { fn m(mut self) { … } }` called as `p.m()` on an immutable
-  `p` is accepted today. This is a real hole in the rule, deliberately left
-  open: the collections in Phase 2.2a use **inherent** impls only, and closing
-  it well means also deciding what happens when an impl's receiver mutability
-  disagrees with its trait's (a new conformance rule, cf. the existing
-  `has_self` agreement check and its `E0072`/`E0014` family). Closing it is
-  cheap and mechanical once that is decided — see Migration path.
+- **Trait-method calls were not covered at first. They are now.** Originally
+  `MethodRes::Trait` dispatch resolved to `(trait_id, method_index)`, and for a
+  generic receiver (`fn f<T: Tr>(x: T) { x.m() }`) there was no single impl whose
+  receiver declaration could be consulted — the `mut self` would have to be
+  declared on the *trait*, which `hir::TraitMethod` had no field for. So
+  `impl Tr for P { fn m(mut self) { … } }` called as `p.m()` on an immutable `p`
+  was accepted, silently mutating it. That hole was deliberately left open for
+  Phase 2.2a, whose collections use **inherent** impls only, and closed in Phase
+  2.2b exactly as the Migration path prescribed: `hir::TraitMethod` gained the
+  flag, `check_impl_method_signatures` gained the conformance comparison that
+  decides the disagreement case (`E0072`, beside the `has_self` agreement check
+  it extends), and the call site consults the trait's flag.
+  `mut` on a *parameter* already parsed, so the generic case
+  (`fn f<T: Tr>(mut x: T) { x.m() }`) is writable rather than merely rejected.
 - **`mut self` does not copy the receiver, and mutation is alias-visible.**
   Records are heap objects; `mut` is a permission on a binding, not an
   ownership or aliasing claim, and Nova has no borrow checker. So two mutable
@@ -155,24 +181,46 @@ into argument-type or arity noise.
   matching every other inherent-method diagnostic in this file — the spelling
   `arity_errors_name_the_callee_uniformly` already pins.
 
-### Migration path
+### Migration path: done
 
-`Checker::mut_self` plus `check_mutable_receiver` is the single seam. Closing
-the trait-method gap does not change the rule, the diagnostic, or `place_root`;
-it adds a second population site and a second call site:
+**The trait-method gap is closed** (Phase 2.2b), so the three steps below now
+describe what was done rather than what is pending. Closing it changed neither
+the rule, the diagnostic, nor `place_root`, exactly as predicted — it added a
+second population site and a second call site:
 
-1. Add `mut_self: bool` to `hir::TraitMethod` beside `has_self`, populated in
-   `collect_traits` with the identical `.any(…)` predicate.
-2. Extend `check_impl_conformance`'s existing `has_self` agreement check to the
-   receiver's mutability, so an impl cannot declare `mut self` for a trait
-   method that does not, or vice versa.
-3. Call the same `check_mutable_receiver` logic from `check_method_call`'s
-   `MethodRes::Trait` arm, keyed on the trait method's flag instead of the
-   impl method's `DefId`.
+1. **Done.** `mut_self: bool` on `hir::TraitMethod` beside `has_self`, populated
+   in `collect_traits` with the identical `.any(…)` predicate.
+2. **Done, but not where this said.** The receiver-agreement check the
+   mutability comparison extends had already moved out of
+   `check_impl_conformance` into `check_impl_method_signatures` (the `E0070`/
+   `E0071` vs `E0072` split), so the comparison went there. It reports `E0072`
+   naming both sides, and deliberately does *not* `continue` the way the
+   receiver-*presence* mismatch does: a `mut` disagreement misaligns neither
+   parameter list, so the rest of the signature is still worth checking.
+3. **Done, but at a wider seam than this said.** The check runs from
+   `emit_trait_call`'s receiver arm, not from `check_method_call`'s
+   `MethodRes::Trait` arm, because that arm is not the only route to a receiver
+   call: `try_display` reaches a `fmt(mut self) -> String` from string
+   interpolation without passing through it. Five routes were measured, and
+   before the change **all five** accepted a mutation through an immutable
+   binding: a direct trait call, a generic bound, a supertrait bound, a trait
+   default body delegating to a mutator, and string interpolation. Installing
+   the check at `check_method_call` as written above would have closed three of
+   the five and left the last two silently open. `TraitCallSelf::Receiver`
+   therefore carries the receiver's AST alongside its checked form, so there is
+   no way to hand `emit_trait_call` a receiver without also handing it the place
+   to classify.
 
-Whether `mut self` should eventually be inferable for *closure* receivers, or
-extended to a real `&mut`-style borrow discipline, is out of scope here: both
-would be new rules layered over `place_root`, not replacements for it.
+The lesson worth carrying forward: **a rule stated over a resolution *outcome*
+must be enforced where the outcomes converge, not where one caller happens to
+produce one.** The gap this ADR recorded was one missing call; re-opening it
+needs only a fourth `emit_trait_call` caller if the AST ever stops travelling
+with the receiver.
+
+What is still out of scope, and unchanged by the above: whether `mut self`
+should eventually be inferable for *closure* receivers, or extended to a real
+`&mut`-style borrow discipline. Both would be new rules layered over
+`place_root`, not replacements for it.
 
 ---
 
@@ -208,8 +256,10 @@ fn hash<H: Hasher>(self, mut h: H) { h.write_int(self.x) }
 ```
 
 which needs (a) `mut` on a *parameter*, (b) `write_int` to be a `mut self`
-trait method — precisely the case section 1 records as an open gap, since
-`hir::TraitMethod` has no receiver-mutability field — and (c) the caller to
+trait method — at the time this was decided, precisely the case section 1
+recorded as an open gap, since `hir::TraitMethod` had no receiver-mutability
+field; both (a) and (b) work as of Phase 2.2b, so this half of the objection has
+lapsed and the rest below has not — and (c) the caller to
 observe the accumulated state afterwards, which works only because records
 are reference values (section 1's alias-visible note), i.e. the whole
 mechanism would rest on aliasing rather than on anything the type says. It is
@@ -344,8 +394,16 @@ per-map hasher choice, or HashDoS resistance via a seed.
 The prerequisites are all in section 1's territory, which is why the two
 decisions share a file: `mut` on parameters, receiver mutability declared on
 `hir::TraitMethod` (section 1's Migration path steps 1–2), and `mut self` trait
-methods checked at the call site (step 3). Until those exist, the streaming
-shape is not merely inconvenient in Nova — it is not writable.
+methods checked at the call site (step 3). **All three now exist** (Phase 2.2b),
+so the streaming shape became *writable* — which changes nothing about this
+decision. Every reason to reject it stood on its own: `Hash`'s signature is its
+whole surface, the shape is viral across every impl and call site, and a
+streaming hasher's correctness would rest on records being alias-visible
+reference values rather than on anything the type says. Writability was never the
+argument; it was only the thing that made the argument academic. Treat the
+unblocking as removing the excuse, not as reopening the question — reopening it
+still needs the concrete need named above (per-map hasher choice, or HashDoS
+resistance via a seed).
 
 Cheaper changes that this decision does *not* foreclose, because none of them
 touch `Hash`'s signature: replacing FNV-1a inside `nova_rt_str_hash`, replacing
