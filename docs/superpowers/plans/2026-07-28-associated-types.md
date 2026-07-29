@@ -1381,9 +1381,49 @@ Add `RBrace` as a stop in `sync_to_item_boundary`. This is safe *now* in a way i
 
 Test that the example above reports the first error and then parses `record R` and `fn main` normally, and re-run Task 4's termination tests, which are the guard against reintroducing the hang.
 
-- [ ] **Step 4: Verify and commit**
+- [ ] **Step 4: Stop `Ty::Error` leaking into `E0072` messages as `{error}`**
+
+Found by Task 6's review, reproduced by me on `be0fe9e`. Two ordinary programs:
+
+```
+impl It for W { type Item = Self::Item   fn get(self) -> Int { 1 } }
+  error[E0077]: the associated type `Item` is defined in terms of itself
+  error[E0072]: method `get` returns `Int` but trait `It` declares `{error}`
+
+impl It for W { type Item = Nope        fn get(self) -> Bool { true } }
+  error[E0001]: cannot find type `Nope`
+  error[E0072]: method `get` returns `Bool` but trait `It` declares `{error}`
+```
+
+`{error}` is meaningless to a user, and the follow-on `E0072` is noise after a diagnostic that already explained the real problem.
+
+The root cause is worth understanding before fixing: **`Ty` derives `PartialEq` with no `Error` absorption** (`nova-hir/src/lib.rs:22`), so at this seam an `Error` on one side *forces* a mismatch. That is the opposite of the behaviour at `unify`, where `Ty::Error` unifies with anything and silently swallows. The comment justifying the `E0077` poisoning (`check.rs:1149-1153`) says poisoning is safe because "`Ty::Error` unifies with anything, so no use of the projection cascades either" — true of `unify`, false of the `PartialEq` consumer Task 6 added.
+
+Worse, the test that *names* this property — `a_reported_binding_cycle_is_poisoned_and_does_not_cascade` (`check.rs:11312`, asserting `error_codes == ["E0077"]`) — passes only because its impl happens to spell `Self::Item` on **both** sides, so both normalize to `Error` and compare equal. Change that one token to `Int` and the property the test is named for is false.
+
+Fix: skip the signature comparison when either normalized side is `Ty::Error`, which also makes that test's name true. Then **strengthen the test** so it no longer passes by accident of its own spelling — give it a concrete type on the impl side. Also revisit the poisoning comment so it distinguishes the `unify` consumer from the `PartialEq` one.
+
+- [ ] **Step 5: A trait method may name a supertrait's associated type; its impl may not echo it**
+
+Also from Task 6's review. `trait Ext: Base` where `Base` declares `Elem`:
+
+- the **trait** side resolves `Self::Elem`, because `collect_traits` seeds `sig_bounds[0]` with the trait and then calls `expand_bounds` (`check.rs:736-740`), so `Param(0)` is bounded by the trait *and* its supertraits;
+- the **impl** side does not: `convert_ty` passes `candidates = vec![tid]` **unexpanded** (`check.rs:2027`), and `find_assoc_type` matches `trait_def == trait_id` exactly (`:2220-2231`) without looking through supertraits.
+
+So `impl Ext for W { fn peek(self) -> Self::Elem }` reports `E0001: no associated type 'Elem' on any bound of 'Self'` while the trait declaring the same signature is fine. Expand the impl side's candidates the same way the trait side does. This is also one of the three programs that produce the `{error}` leak in Step 4, so do them together and check the interaction.
+
+- [ ] **Step 6: Two cheap test strengthenings**
+
+Both from Task 6's review, both places where a committed test is weaker than an available alternative:
+
+- `conformance_resolves_a_projection_bound_by_a_later_declared_impl` (`check.rs:11525`) binds a **primitive** on a **non-generic** record. The generic form (`record W<T>`, `type Elem = T`) discriminates the two routes exactly as well *and* additionally exercises the impl's own parameter surviving substitution into the trait's `Param` space. Task 6's report claims every binding uses `type Item = T`; that is false for this test.
+- The **selfless** (associated-function) branch of the comparison (`check.rs:1587-1591`) has no test with a projection in it. Behaviour was verified correct by CLI probe but is unpinned.
+
+- [ ] **Step 7: Verify and commit**
 
 `cargo build --workspace`, `cargo test --workspace --no-fail-fast`, clippy, fmt, and the three gates. One commit per step.
+
+**Read this before probing anything in this task.** `cargo test --workspace` **rebuilds `nova.exe`**, because `run_tests.rs` invokes it. So a `cargo test -p nova-typeck` run does *not* refresh the binary your `nova check` probes use, and a `cargo test --workspace` run performed while a mutation is applied leaves `nova.exe` poisoned for every later probe. Task 6's reviewer lost time to a retracted finding this way and only caught it by instrumenting the pass and seeing output from code it had already reverted. **Run `cargo build --workspace` after reverting any mutation, before any CLI probe.**
 
 ---
 
