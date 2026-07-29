@@ -154,13 +154,43 @@ is discovered late:
 | `InferCtx::occurs` | recurse into `on` |
 | `InferCtx::unify` | the one new arm (§4.1) |
 | `display_ty` | render as `<on>::Name`, looking the name up in the trait's list — so `display_ty` needs the trait table in scope, which it has in `check.rs`; a projection printed as `Assoc(3)` in a diagnostic would be useless |
-| `mir_ty` (nova-mir) | **unreachable** — a projection at codegen is a bug, not a lowering case |
+| `mir_ty` (nova-mir) | **defensive, and it was NOT unreachable** — see the correction below |
 | `Ty::match_pattern` | match structurally on `on` |
 | `hir::self_types_overlap` | conservative: treat as overlapping unless the `on`s provably differ |
 | `TyHead::of` | `None` — a projection has no head until normalized |
 
-`mir_ty` being unreachable is the load-bearing one. It must fail loudly rather than defaulting
-to a pointer, because a silent default is how a projection would reach codegen and miscompile.
+`mir_ty` being unreachable was the load-bearing claim, and **it was false until Task 7 made it
+true**. This section asserted a projection could not reach `mir_ty`; in fact it did, from
+ordinary source, and the consequence was exactly what the claim was meant to prevent.
+
+Measured before Task 7, both with a concrete impl in scope:
+
+```nova
+fn f<I: It>(x: I, y: I::Item) -> Int { 7 }
+fn main() { println("${f(W { v: 1 }, 5)}") }
+```
+reached Cranelift's verifier with invalid IR. The mechanism is worth recording precisely,
+because it is not the "defaults to a pointer" story this section assumed: `mir_ty` mapped
+`Assoc` to `MirTy::Unit`, and **unit parameters are dropped from the Cranelift signature**, so
+the caller passed two arguments to a one-argument function.
+
+Worse, and found by Task 7 rather than predicted here:
+
+```nova
+fn unwrap_item<I: It>(x: I, y: I::Item) -> I::Item { y }
+fn main() { println("${unwrap_item(W { v: 1 }, 7)}")
+ println("${unwrap_item(W { v: true }, true)}") }
+```
+printed `0` and `false` — **exit code 0, no diagnostic, wrong answers**. A silent miscompile,
+which is strictly worse than the crash this section imagined. Both now behave correctly (`7`,
+`true`), because Task 7 normalizes after `subst` at monomorphization, where the type arguments
+are known.
+
+So the correct statement is: `mir_ty`'s `Assoc` arm is a **backstop**, reached only if
+normalization has already failed to do its job. Task 7 added `E0079` for that case and found it
+**unreachable from source today** — seven probes each closed by an earlier diagnostic, and
+instrumenting the branch across the whole suite reached it zero times. It is pinned by a
+`nova-mir` unit test rather than a Nova program, which is the honest way to test a backstop.
 
 ## 5. Surface
 
