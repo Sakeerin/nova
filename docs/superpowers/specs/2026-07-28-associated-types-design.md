@@ -212,9 +212,11 @@ impl<T> Iterator for VecIter<T> {
     }
 }
 
-impl<T> Vec<T> {
-    pub fn iter(self) -> VecIter<T> { VecIter { v: self, i: 0 } }
-}
+// NOT a new block — `iter` goes INSIDE std/collections' existing `impl<T> Vec<T>`,
+// per §5.1's decision below. This snippet showed a standalone block, which is the
+// second inherent impl §5.1 explicitly forbids; corrected after Task 9 caught the
+// contradiction. Shown separately here only to isolate the new method.
+pub fn iter(self) -> VecIter<T> { VecIter { v: self, i: 0 } }
 ```
 
 Rules:
@@ -291,11 +293,35 @@ A new `tests/runtime/assoc_types.{nova,stdout}` fixture under `nova run`, `nova 
 2. `it.next()` on a concrete `VecIter<Int>` typing as `Option<Int>` — the `check.rs` seam.
 3. A **generic** function over the trait whose signature mentions the projection, called at two
    different instantiations — the mono seam, and the reason one instantiation alone is
-   insufficient. **Note the receiver must be `mut`**: written as `fn first<I: Iterator>(it: I)`
-   and calling `it.next()`, this is now `E0060`, because Task 8 closed the mutable-receiver gap
-   for trait methods and `Iterator::next` takes `mut self`. Write
-   `fn first<I: Iterator>(mut it: I) -> Option<I::Item>`. Flagged by Task 8 so Task 9/10 do not
-   read the resulting `E0060` as a broken gate — it is the rule working.
+   insufficient.
+
+   **Two corrections, both measured, and the second means this item as originally written does
+   not test what it claims:**
+
+   **(a) The receiver must be `mut`.** Written as `fn first<I: Iterator>(it: I)` and calling
+   `it.next()`, this is `E0060`, because Task 8 closed the mutable-receiver gap for trait methods
+   and `Iterator::next` takes `mut self`. Write `mut it: I`. An `E0060` here is the rule working,
+   not a broken gate.
+
+   **(b) `-> Option<I::Item>` is TOOTHLESS at the mono seam.** Task 9 measured that
+   `fn first<I: Iterator>(mut it: I) -> Option<I::Item>`, called at *three* instantiations,
+   **survives** a mutation that makes monomorphization's normalization cache its first answer and
+   reuse it — output byte-identical. Two reasons compound: `Option<Int>` and `Option<String>`
+   lower to the same `MirTy` (a pointer to a heap sum), so a wrong `Item` is invisible after
+   lowering; and `main` is not generic, so the type checker's seam had already fixed the dispatch
+   types before mono ran.
+
+   So the fixture must **also** name the projection **bare**, where its identity survives to
+   `MirTy`:
+
+   ```nova
+   fn first_or<I: Iterator>(mut it: I, dflt: I::Item) -> I::Item
+   ```
+
+   That shape dies in Cranelift under the same mutation. **Task 10 must carry `first_or`'s shape
+   into the fixture, not only `first`'s** — a projection wrapped in a heap type cannot
+   discriminate the mono seam, and this is the same trap as an impl binding `type Item = Int`
+   being unable to catch a missing substitution.
 4. A trait with **two** associated types, to prove `index` is used rather than assumed zero.
 5. Iterating a `Vec` to exhaustion so `next` returns `None` at the end, and a `Vec::new()` whose
    first `next` is already `None`.
