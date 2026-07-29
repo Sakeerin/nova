@@ -311,17 +311,33 @@ A new `tests/runtime/assoc_types.{nova,stdout}` fixture under `nova run`, `nova 
    lowering; and `main` is not generic, so the type checker's seam had already fixed the dispatch
    types before mono ran.
 
-   So the fixture must **also** name the projection **bare**, where its identity survives to
-   `MirTy`:
+   So the fixture must **also** name the projection **bare**:
 
    ```nova
    fn first_or<I: Iterator>(mut it: I, dflt: I::Item) -> I::Item
    ```
 
-   That shape dies in Cranelift under the same mutation. **Task 10 must carry `first_or`'s shape
-   into the fixture, not only `first`'s** — a projection wrapped in a heap type cannot
-   discriminate the mono seam, and this is the same trap as an impl binding `type Item = Int`
-   being unable to catch a missing substitution.
+   **But the bare spelling is not sufficient either, and this correction's first version credited
+   it for the wrong reason.** Task 10 measured that `first_or` at `Vec<Int>` + `Vec<String>`
+   *survives* the caching mutation, and so does `Vec<Int>` + `Vec<Char>`. The reason is
+   `mir_ty`'s collapse (`crates/nova-mir/src/lib.rs:445-452`):
+
+   | `hir::Ty` | `MirTy` | Cranelift on x86-64 |
+   |---|---|---|
+   | `Int`, **`Char`** | `I64` | `i64` |
+   | `String`, `Fn`, `Sum`, `Record`, `Array` | `Ptr` | **`i64`** |
+   | `Bool` | `I8` | `i8` |
+   | `Float` | `F64` | `f64` |
+
+   Five of the seven `Ty` variants become the same machine type, so a wrong `Item` among them is
+   invisible in the Cranelift signature. **Only `Bool` and `Float` discriminate.** `Int` versus
+   `String` looks like a strong pair and tests nothing at this seam. The original measurement
+   killed the mutation only because Task 9's third instantiation happened to be `Vec<Bool>`.
+
+   **The general rule, which outlives this task: a monomorphization-seam test is only as good as
+   the `MirTy` classes it instantiates at.** Every future test of this seam must include a `Bool`
+   or a `Float` instance, and the bare spelling matters only because it keeps the projection's
+   type *in the signature at all* — it does not by itself make a wrong answer observable.
 4. A trait with **two** associated types, to prove `index` is used rather than assumed zero.
 5. Iterating a `Vec` to exhaustion so `next` returns `None` at the end, and a `Vec::new()` whose
    first `next` is already `None`.

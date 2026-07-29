@@ -429,13 +429,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `nova-hir` — a free function over a slice, which is the one signature both
     the type checker (`&self.impls`) and monomorphization (`&module.impls`) can
     satisfy. It is never called from `unify`.
-  - Normalization runs at **seven** sites in the type checker (the design
-    predicted three), at impl conformance, and after `subst` at
-    monomorphization. Conformance needed a **separate pass after the impl table
-    is complete**: `collect_impls` calls conformance ten lines before pushing
-    the `ImplInfo`, so normalizing in place cannot see the impl being checked,
-    and hoisting the push instead would make resolution depend on declaration
-    order — which Nova deliberately does not have for impls.
+  - Normalization runs **wherever a checked type is consumed** — considerably
+    more places in the type checker than the design's three predicted seams —
+    plus impl signature checking and, after `subst`, monomorphization. (No count
+    is given deliberately: three readers counting the call sites during review
+    got three different answers depending on whether they counted logical seams
+    or `self.normalize(` calls, and a number here would go stale on the next
+    task. `grep` is the authority.) Impl signature checking needed a **separate
+    pass after the impl table is complete**: `collect_impls` calls conformance
+    ten lines before pushing the `ImplInfo`, so normalizing in place cannot see
+    the impl being checked, and hoisting the push instead would make resolution
+    depend on declaration order — which Nova deliberately does not have for
+    impls.
   - **`Self` is no longer a legal generic-parameter name (`E0076`).** It had
     been accepted, so `impl<Self: It> W<Self>` type-checked with `Self` meaning
     an ordinary parameter rather than the impl's self type — two meanings for
@@ -459,11 +464,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     a generic bound, a supertrait bound, a trait default body delegating to a
     mutator, and string interpolation reaching a `fmt(mut self)` through a path
     that bypasses ordinary method dispatch entirely.
+
+    **This is a behaviour change, not only an addition.** Code that compiled
+    before may now report `E0060`: calling a `mut self` trait method on an
+    immutable binding was silently accepted and did mutate. The fix at a call
+    site is `let mut x = …`; at a function parameter it is `mut x: T` in the
+    signature — note the `E0060` message currently suggests `let mut` even for
+    a parameter, which is the wrong advice for that case and is queued. Nothing
+    in `std` relied on the permissive behaviour (all nine `mut self` methods
+    there are in inherent impls), and no gate fixture output moved.
   - Deliberately out of scope: `Map::iter()` yielding key/value pairs, which
-    needs tuples; generic associated types (`I::Item<Int>` is `E0012`); bounds
-    on an associated type (`type Item: Display` is `E0900`); and a projection in
-    an impl's self type, which is unselectable and invisible to overlap
-    checking.
+    needs tuples; generic associated types (`I::Item<Int>` is `E0012`); and
+    bounds on an associated type (`type Item: Display` is `E0900`).
   - **`Iterator` in `std/core`, `VecIter<T>` and `Vec::iter()` in
     `std/collections`** — the consumer the whole increment exists for.
     `pub trait Iterator { type Item  fn next(mut self) -> Option<Self::Item> }`,
