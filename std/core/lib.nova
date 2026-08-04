@@ -151,12 +151,13 @@ pub trait Hash { fn hash(self) -> Int }
 // nova-spec/20-STDLIB.md used, because `::` is already how Nova reaches into a
 // type (`Vec::new`, `T::default`) while `.` is field access everywhere else.
 //
-// NOT YET, all deliberately deferred rather than overlooked: no `for x in it`
-// desugar, no default methods (`map`/`filter`/`fold`/`collect`), no
-// `IntoIterator`, and no implementor other than `VecIter` in std/collections.
+// NOT YET, all deliberately deferred rather than overlooked: no default
+// methods on the trait itself (`map`/`filter`/`fold`/`collect` — see
+// `MapIter`/`FilterIter` below, built directly until a later task wires them
+// up as `.map()`/`.filter()`), and no `IntoIterator`.
 // `Map::iter` is not merely unwritten but impossible — it would yield a pair
-// and Nova has no tuples. Iterating therefore means a hand-written `while`
-// plus a `match` on the `Option`.
+// and Nova has no tuples. Iterating means a hand-written `while` plus a
+// `match` on the `Option`, or now, `for x in it`.
 //
 // Unlike the six traits above, this one is implemented for **no** primitive, so
 // `next` is not taken away from user code on `Int`/`Float`/`Bool`/`Char`/
@@ -166,6 +167,54 @@ pub trait Hash { fn hash(self) -> Int }
 pub trait Iterator {
     type Item
     fn next(mut self) -> Option<Self::Item>
+}
+
+// A lazy `map`: yields `f(x)` for each `x` the inner iterator yields.
+//
+// `f: fn(I::Item) -> U` is why `I` carries a bound. A bound on a record's type
+// parameter is a resolution scope, not a constraint (ADR 0007): it lets this
+// field name `I::Item` at all. It is not checked when a `MapIter` is built —
+// `impl<I: Iterator, U> Iterator for MapIter<I, U>` below is what makes a
+// `MapIter` iterable, so a `MapIter<Int, U>` merely has no impl and is inert.
+//
+// Holds `it` by pointer, like every record, so it SHARES the source iterator
+// rather than copying it — advancing this adapter advances the source, and
+// mutating the source mid-iteration is observable. Same alias visibility
+// `VecIter` documents; preventing it needs borrow tracking Nova lacks.
+pub record MapIter<I: Iterator, U> { it: I, f: fn(I::Item) -> U }
+
+impl<I: Iterator, U> Iterator for MapIter<I, U> {
+    type Item = U
+    fn next(mut self) -> Option<U> {
+        let n = self.it.next()
+        if n.is_none() { None } else {
+            // Bound to a local first: `(self.f)(x)` is `E0014: no method f`.
+            let g = self.f
+            Some(g(n.unwrap()))
+        }
+    }
+}
+
+// A lazy `filter`: yields only the elements `keep` accepts.
+//
+// `type Item = I::Item` is a projection-valued binding — the associated type is
+// itself a projection — which is the `Assoc { on: Assoc }` shape Phase 2.2c
+// could only reach from a hand-built unit test. This is its first appearance in
+// real source.
+pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
+
+impl<I: Iterator> Iterator for FilterIter<I> {
+    type Item = I::Item
+    fn next(mut self) -> Option<I::Item> {
+        // `while true`, not `loop`: Nova has no `loop` keyword.
+        while true {
+            let n = self.it.next()
+            if n.is_none() { return None }
+            let p = self.keep
+            if p(n.unwrap()) { return Some(n.unwrap()) }
+        }
+        None
+    }
 }
 
 impl Display for Int    { fn fmt(self) -> String { "${self}" } }

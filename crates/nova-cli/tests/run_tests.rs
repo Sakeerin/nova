@@ -2827,3 +2827,52 @@ fn a_trait_bound_needs_an_impl_that_fits_structurally_not_just_by_head() {
         .success()
         .stdout("7\n");
 }
+
+/// `MapIter` and `FilterIter` (iterator-finishing plan, Task 3): the two lazy
+/// adapters `std/core` provides, each a record plus an `Iterator` impl,
+/// constructed directly here rather than through `.map()`/`.filter()` — Task 4
+/// adds those — so this task is verifiable on its own. Covers three things at
+/// once: `MapIter` alone, `FilterIter` alone, and the two chained (`MapIter`
+/// wrapping a `FilterIter` wrapping a `VecIter`).
+///
+/// The chain's output is `Bool`, deliberately: `mir_ty` collapses `Int`,
+/// `Char`, `String` and every heap type to one machine class (`MirTy::I64`/
+/// `Ptr`), so an `Int`-only pipeline cannot distinguish "yields the right
+/// value" from "yields *some* value of the same machine shape". `Bool` is
+/// `MirTy::I8` — a different machine class from the vector's `Int` — so a
+/// `MapIter` that forwarded the unmapped inner item, or a `FilterIter` whose
+/// `Item` bound to a concrete `Int` instead of chasing `I::Item`, both have
+/// somewhere to go visibly wrong instead of coincidentally still working.
+///
+/// The chain is also the first real-source appearance of the `Assoc { on:
+/// Assoc }` shape: the outer `MapIter<I, U>`'s field `f: fn(I::Item) -> U`
+/// needs `I::Item` where `I = FilterIter<VecIter<Int>>`, and `FilterIter`'s
+/// own `type Item = I::Item` is itself a projection rather than a concrete
+/// type — so resolving it chases through a second impl (`VecIter<Int>`'s)
+/// before landing on `Int`.
+#[test]
+fn iterator_adapters_chain_and_are_lazy() {
+    let src = "fn main() {\n\
+                   let mut v = Vec::new()\n\
+                   v.push(1)\n\
+                   v.push(2)\n\
+                   v.push(3)\n\
+                   let mut m = MapIter { it: v.iter(), f: |n| n * 10 }\n\
+                   for x in m { println(\"${x}\") }\n\
+                   let mut f = FilterIter { it: v.iter(), keep: |n| n > 1 }\n\
+                   for x in f { println(\"keep ${x}\") }\n\
+                   let mut c = MapIter { it: FilterIter { it: v.iter(), keep: |n| n > 1 }, f: |n| n > 2 }\n\
+                   for b in c { println(\"chain ${b}\") }\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-adapters");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    // chain yields Bool: filter keeps 2,3 then map gives false,true
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("10\n20\n30\nkeep 2\nkeep 3\nchain false\nchain true\n");
+}

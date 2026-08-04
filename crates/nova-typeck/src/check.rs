@@ -4571,7 +4571,18 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
-            let expected = field.ty.subst(&type_args);
+            // Normalization seam: a record's field may declare a projection on
+            // the record's own bounded type parameter (`f: fn(I::Item) -> U`),
+            // and `type_args` carries this literal's fresh per-field inference
+            // vars — so once an earlier field (`it: I`) has pinned one of them
+            // to a concrete type via `unify` below, a later field's `subst`
+            // can leave a projection rooted in that now-concrete type. Plain
+            // `subst` cannot see that; `instantiate` applies the current
+            // bindings and, only if a projection remains, resolves it through
+            // the impl table — the same seam `check_direct_call` and
+            // `emit_trait_call` use for a generic function or trait method's
+            // parameter and return types.
+            let expected = self.instantiate(&field.ty, &type_args, &fcx.icx, init.name.span);
             let value = match &init.value {
                 Some(v) => self.check_expr(fcx, v),
                 // Shorthand `{ x }` binds the local named `x`.
@@ -4640,7 +4651,13 @@ impl<'a> Checker<'a> {
         let mut ordered = Vec::with_capacity(record.fields.len());
         let mut missing = Vec::new();
         for (idx, field) in record.fields.iter().enumerate() {
-            let field_ty = field.ty.subst(&type_args);
+            // Same normalization seam as above: these types flow straight into
+            // `MakeRecord`'s `hir::Expr`s and from there to `mir_ty`, which maps
+            // a surviving `Assoc` to `MirTy::Unit` — silently dropping a
+            // parameter rather than reporting anything (see `nova-mir::mir_ty`'s
+            // doc comment). Leaving a field's stored type un-normalized here
+            // would not be a diagnostic gap but a miscompile.
+            let field_ty = self.instantiate(&field.ty, &type_args, &fcx.icx, span);
             if let Some(local) = provided.get(&field.name) {
                 ordered.push(hir::Expr {
                     kind: hir::ExprKind::Local(*local),
