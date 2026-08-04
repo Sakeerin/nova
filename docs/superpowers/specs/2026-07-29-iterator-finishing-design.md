@@ -94,10 +94,23 @@ in the enclosing `Expr.ty`, which lowering discards, and MIR erases records to `
 monomorphization visits only instances reachable from `main`, so enforcement would fire
 *sometimes*, which is a subtler defect than not firing at all.
 
-**Why that is safe here.** Correctness comes from the impl, not the record:
-`impl<I: Iterator, U> Iterator for MapIter<I, U>` requires the bound, so a `MapIter<Int, U>` has
-**no `Iterator` impl**. It constructs, and it is inert — `m.next()` is an ordinary
-`E0014: no method 'next'`. Nothing is silently wrong; the bogus instantiation is merely useless.
+**Why that is safe here — and it is stronger than "inert".** Correctness comes from the impl, not
+the record: `impl<I: Iterator, U> Iterator for MapIter<I, U>` requires the bound, so a
+`MapIter<Int, U>` cannot satisfy it. **Corrected after Task 1's review measured it**: this section
+first said `m.next()` gives `E0014: no method 'next'`. It does not. The real behaviour is
+
+```
+error[E0013]: trait bound `NoIt: It` is not satisfied when instantiating `W_T.It.v`
+```
+
+— a bound violation reported at **monomorphization**, because the impl matches structurally and
+its bound is then discharged exactly where every other bound in Nova is discharged.
+
+That is a better outcome than the one this design argued for. The record bound is not enforced at
+construction, but the *impl's* bound is enforced at first use, so a bogus instantiation is not
+silently useless — it is a loud, specific diagnostic naming the type and the trait. The honesty
+concern below is correspondingly smaller: the language never pretends the instantiation is
+fine, it just defers the complaint to the point of use.
 
 **The risk to design against.** "Accepted and quietly ignored" is this project's most-repeated
 defect: impl-level `const`s discarded (fixed `3c8127e`), record bounds themselves, record field
@@ -190,7 +203,7 @@ The increment's user interface is its errors.
 |---|---|
 | `for x in <not a range, not an Iterator>` | reworded `E0900`. Today's text — "`for` loops over anything but an integer range" — becomes false when §4 lands. The new text must name both accepted forms **and** mention `.iter()`, because `for x in v` is the mistake people will make. |
 | `record M<I: NoSuchTrait>` | `E0001` on the trait name, not a silent skip |
-| `MapIter<Int, U>` then `.next()` | `E0014: no method 'next'`, by design (§3.2). **The implementing task must read the emitted message and add a note if it misleads** — the user's real error is that `Int` is not an `Iterator`, not that a method is missing. Record the decision either way; do not leave it unexamined. |
+| `MapIter<Int, U>` then `.next()` | **`E0013: trait bound 'Int: Iterator' is not satisfied when instantiating …`**, at monomorphization — *not* `E0014`, which is what this row claimed before Task 1's review measured it. The impl matches structurally, so its bound is discharged where every bound is. This is the better outcome: the diagnostic names the type and the trait rather than complaining a method is missing. |
 | `record M<I: Iterator> { v: Int }` — bound on a parameter no field type uses | **Accepted silently.** Rejecting it was considered and declined: the bound is inert, harmless, and detecting "unused by any field type" is a second analysis for no user benefit. Noted here so its absence is a decision rather than an oversight. |
 | An iterable whose `Iterator` bound is unsatisfied | `E0013` at monomorphization, as everywhere else |
 
@@ -210,7 +223,7 @@ The increment's user interface is its errors.
    classes**. An `Int`/`String` pair tests nothing at the monomorphization seam.
 
 Separately as `#[test]`s, since a fixture cannot contain a compile failure: the reworded `E0900`;
-`E0001` for an unresolvable record bound; and the inert-instantiation `E0014`.
+`E0001` for an unresolvable record bound; and the inert-instantiation diagnostic, which is `E0013` at monomorphization, not `E0014` (measured; see the table above).
 
 ## 8. Risks
 

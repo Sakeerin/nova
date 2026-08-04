@@ -135,7 +135,8 @@ No new files in `crates/`. `hir::RecordType` is deliberately **not** modified �
         // The spec's §3.2 decision, pinned so it cannot drift silently in
         // either direction. `Int` is not an `It`, and building `M<Int, …>` is
         // accepted: the bound is a resolution scope, not a constraint. Safety
-        // comes from the impl instead — see the E0014 test below.
+        // comes from the impl instead: using a `M<Int>` reports E0013 at
+        // monomorphization, where every bound is discharged.
         let r = check_src(
             "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
              record M<I: It> { it: I }\n\
@@ -720,7 +721,7 @@ For at least three of the seven fixture items, apply a mutation that should brea
 - **Context:** a lazy adapter needs `fn(I::Item) -> U` in a record field; in a record declaration `I` has no bound, so the projection is `E0001`; adding the bound was `E0900`, rejected since Phase 2.2a. The `A`-parameter workaround type-checks but cannot be driven, because nothing ties `A` to `I::Item` and Nova has no equality constraints.
 - **Decision:** a bound on a record's type parameter is a **resolution scope**, not a constraint. Records only; sum types keep `E0900`.
 - **Why not enforced:** `MakeRecord` carries no type arguments — the instantiation survives only in the enclosing `Expr.ty`, which lowering discards, and MIR erases records to `Ptr`. Monomorphization visits only instances reachable from `main`, so enforcement would fire *sometimes*, which is subtler than not firing at all. This is Phase 2.2a's assessment, re-affirmed.
-- **Why that is safe:** correctness comes from the impl. `MapIter<Int, U>` has no `Iterator` impl, so it constructs and is inert; `.next()` on it is an ordinary `E0014`.
+- **Why that is safe:** correctness comes from the impl. A `MapIter<Int, U>` cannot satisfy `impl<I: Iterator, U> Iterator for MapIter<I, U>`, so using it reports **`E0013: trait bound not satisfied when instantiating ...`** at monomorphization, where every bound in Nova is discharged. **Measured by Task 1's review; this plan and the spec both claimed `E0014` (no method), which is wrong.** The outcome is stronger than "inert": the diagnostic names the type and the trait, so a bogus instantiation is never silently useless.
 - **Consequences, stated plainly:** a record bound looks like a constraint and is not one. Name this as the risk, and name the family it belongs to — impl-level `const`s discarded, record bounds, record field visibility, `pub` on methods — all "accepted and quietly ignored" defects this project has fixed. State that the mitigation is documentation in three places rather than code, and that a future increment may replace it with real enforcement if `MakeRecord` ever carries type arguments.
 - **Alternatives considered:** eager `map`/`filter` returning `Vec` (no projection needed, allocates per stage); rejecting a bound on a parameter no field type uses (declined — inert, and a second analysis for no user benefit); threading type args through `MakeRecord` (much larger, and 2.2a's objection stands).
 
@@ -771,7 +772,7 @@ git commit -m "test(gate): iterator fixture; docs: ADR 0007, spec, CHANGELOG"
 | §4 the `for` desugar | 2 |
 | §5 adapters | 3 |
 | §5 consumers | 4 |
-| §6 diagnostics | 2 Step 1 (reworded `E0900`), 1 Step 1 (`E0001`), 5 Step 6 (the `E0014` decision) |
+| §6 diagnostics | 2 Step 1 (reworded `E0900`), 1 Step 1 (`E0001`), 5 Step 6 (the inert-instantiation `E0013`, corrected from `E0014`) |
 | §7 gate, items 1–6 | 5 Step 1 |
 | §7 the `#[test]`s a fixture cannot hold | 1 and 2's test blocks |
 | §8 risks 1–4 | 1 Step 4's comment, 5 Step 6 (ADR consequences), 2 Step 1's range guard, 4 Step 3's `collect` comment |
