@@ -2950,3 +2950,235 @@ fn a_map_iter_calls_f_lazily_not_all_up_front() {
         .success()
         .stdout("call\ngot 10\ndone\n");
 }
+
+/// Task 4 (iterator-finishing plan): the six default methods `Iterator`
+/// provides so callers reach `MapIter`/`FilterIter` without ever naming them —
+/// `map`, `filter`, `fold`, `count`, `any`, `collect`. Chains `filter` into
+/// `map` into `collect` (a `Vec`), then separately drives `fold`/`count`/`any`
+/// each over their own fresh `.iter()`, since every consumer here exhausts
+/// its receiver and a second call needs a fresh cursor.
+///
+/// The last line is deliberate, not incidental: it chains `map` to `Bool` (so
+/// the item type actually changes partway down the pipeline) and only then
+/// consumes with `any`, so that consumer sees a **`Bool`** item rather than
+/// the `Int` every earlier line uses — the one assertion here that could
+/// catch a wrong item type surviving to the monomorphization seam instead of
+/// merely a wrong count or a coincidentally-right value.
+///
+/// `assert_runs_with` does not exist in this file; this follows the same
+/// inline `nova run` pattern every neighboring test in this module uses
+/// (e.g. `a_map_iter_calls_f_lazily_not_all_up_front` above).
+///
+/// **Deviates from the plan's literal source.** The plan's Step 1 chains
+/// `fold`/`count`/`any`/`collect` straight onto a call result — e.g.
+/// `v.iter().fold(0, |a, x| a + x)` — but all four take `mut self`, and
+/// `place_root` (`crates/nova-typeck/src/check.rs`) classifies a call result
+/// as `PlaceRoot::NotAPlace`: "Any other base (call result, literal, block,
+/// …) is a temporary with no assignable root." That is not a new gap this
+/// task introduces — it is the exact consequence `trait Iterator`'s own doc
+/// comment already names ("an iterator must be held in a `mut` binding or
+/// arrive as a `mut` parameter, or the call is `E0060`") — but the plan's own
+/// example source violates it, and so cannot compile as written: every line
+/// below that calls one of the four consumers first binds its receiver to
+/// its own `let mut` local. `map`/`filter` need no such local since both take
+/// plain `self`. The values and the expected stdout are unchanged from the
+/// plan.
+#[test]
+fn iterator_default_methods_work_and_chain() {
+    let src = "fn main() {\n\
+      let mut v = Vec::new()\n\
+      v.push(1)\n\
+      v.push(2)\n\
+      v.push(3)\n\
+      let mut chained = v.iter().filter(|n| n > 1).map(|n| n * 10)\n\
+      let got = chained.collect()\n\
+      println(\"${got.len()}\")\n\
+      println(\"${got.get(0).unwrap()}\")\n\
+      let mut it1 = v.iter()\n\
+      println(\"${it1.fold(0, |a, x| a + x)}\")\n\
+      let mut it2 = v.iter()\n\
+      println(\"${it2.count()}\")\n\
+      let mut it3 = v.iter()\n\
+      println(\"${it3.any(|n| n > 2)}\")\n\
+      let mut it4 = v.iter()\n\
+      println(\"${it4.any(|n| n > 9)}\")\n\
+      let mut it5 = v.iter().map(|n| n > 2)\n\
+      println(\"${it5.any(|b| b)}\")\n\
+    }";
+    let dir = std::env::temp_dir().join("nova-iterator-default-methods");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("2\n20\n6\n3\ntrue\nfalse\ntrue\n");
+}
+
+/// Task 4 Step 5: laziness is the property the `Iterator::map` *default
+/// method* exists to preserve, and nothing above can see it — a lazy and an
+/// eager `.map()` produce identical values as long as nothing observes *when*
+/// the source is pulled from. `a_map_iter_calls_f_lazily_not_all_up_front`
+/// (above, from Task 3) already puts the side effect in the mapping closure
+/// `f` and already goes through a directly-built `MapIter { .. }` literal, not
+/// `.map()`. This test puts the side effect in the *source* iterator's own
+/// `next` instead, and reaches the adapter through `.map()` — the one new
+/// piece Task 4 adds — so it is `map`'s default-method body
+/// (`MapIter { it: self, f: f }`, nothing more) that is on trial, not
+/// `MapIter::next` a second time.
+///
+/// `PrintSrc` is a hand-written `Iterator` whose `next` prints `pull N` before
+/// yielding `N`. `.map(|x| x * 10)` is built and then a marker (`built`)
+/// prints *before* the result is touched at all. An eager `.map()` would have
+/// had to drain `PrintSrc` to build its result, so every `pull` would print
+/// before `built` does. A lazy one prints `built` with no `pull` at all yet,
+/// and then exactly one `pull` per `.next()` call, interleaved with that
+/// call's mapped result — not three `pull`s up front followed by three
+/// results. That interleaving, not merely the final values, is what "lazy"
+/// means operationally.
+#[test]
+fn iterator_map_default_method_is_lazy_over_a_side_effecting_source() {
+    let src = "record PrintSrc { n: Int, max: Int }\n\
+               impl Iterator for PrintSrc {\n\
+                   type Item = Int\n\
+                   fn next(mut self) -> Option<Int> {\n\
+                       if self.n >= self.max { return None }\n\
+                       println(\"pull ${self.n}\")\n\
+                       let x = self.n\n\
+                       self.n = self.n + 1\n\
+                       Some(x)\n\
+                   }\n\
+               }\n\
+               fn main() {\n\
+                   let src = PrintSrc { n: 0, max: 3 }\n\
+                   let mut m = src.map(|x| x * 10)\n\
+                   println(\"built\")\n\
+                   println(\"${m.next().unwrap()}\")\n\
+                   println(\"${m.next().unwrap()}\")\n\
+                   println(\"${m.next().unwrap()}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-map-default-is-lazy");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("built\npull 0\n0\npull 1\n10\npull 2\n20\n");
+}
+
+/// Needed to make Step 6 mutation (b) mean anything, and missing from the
+/// plan: `any`'s own doc comment says it "short-circuits, which is why it is
+/// not written over `fold`", but neither the plan's Step 1 test nor
+/// `iterator_map_default_method_is_lazy_over_a_side_effecting_source` above
+/// observes that. Step 1's two `any` calls match on the *last* element (`3`)
+/// or not at all, so a full scan and a short-circuiting scan return the same
+/// `Bool` either way — the mutation the plan itself prescribes (rewriting
+/// `any` over `fold`, which visits every element) is invisible to every test
+/// this task otherwise has. Without this, mutation (b) would be applied,
+/// "pass" against the existing suite, and be reported as caught when it was
+/// not — exactly the false confidence the quality bar warns about.
+///
+/// `CountingSrc` prints on every `next`, same technique as the `map` laziness
+/// test above but with the match in the *middle* (`n > 1` first matches at
+/// `2` of `0..5`) rather than at an edge, so a short-circuiting `any` prints
+/// exactly `pull 0`, `pull 1`, `pull 2` and stops, where a full scan (e.g.
+/// `any` rewritten over `fold`) would also print `pull 3` and `pull 4` before
+/// the same `true`.
+#[test]
+fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
+    let src = "record CountingSrc { n: Int, max: Int }\n\
+               impl Iterator for CountingSrc {\n\
+                   type Item = Int\n\
+                   fn next(mut self) -> Option<Int> {\n\
+                       if self.n >= self.max { return None }\n\
+                       println(\"pull ${self.n}\")\n\
+                       let x = self.n\n\
+                       self.n = self.n + 1\n\
+                       Some(x)\n\
+                   }\n\
+               }\n\
+               fn main() {\n\
+                   let mut src = CountingSrc { n: 0, max: 5 }\n\
+                   println(\"${src.any(|n| n > 1)}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-any-short-circuits");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("pull 0\npull 1\npull 2\ntrue\n");
+}
+
+/// A design question carried from Task 2's review, not merely assumed:
+/// `fold`/`any`/`collect` are default methods on `Iterator` itself, so their
+/// bodies see `Self` at `Param(0)` (`crates/nova-typeck/src/check.rs`, the
+/// `MethodOwner::TraitDefault` arm) exactly as a free function's own bounded
+/// type parameter does. Task 3's mutation testing already observed the
+/// diagnostic name for that placeholder directly — `` `Option<T0::Item>` `` in
+/// Finding 8 of `task-3-report.md` — and Task 2 documented that a generic
+/// `fn f<T: Iterator>(mut it: T)` binds its loop variable at that same
+/// unnormalized projection, so an operation requiring `T::Item` concretely
+/// (`n + x`, string interpolation) is `E0010`/`E0013` there — not a
+/// regression, since the hand-written `while`+`match` equivalent behaves
+/// identically.
+///
+/// So: do `fold`, `any` and `collect` actually work when called on a
+/// *generic* `I: Iterator`, not only on a concrete `VecIter`, given that
+/// their own signatures name `Self::Item` in a parameter or return type the
+/// same way `first_or`'s `dflt: I::Item` does in
+/// `a_generic_function_over_iterator_resolves_item_per_instantiation`? Answer,
+/// measured directly rather than inferred from the above: **yes, as long as
+/// the item is used opaquely.** `count_via_fold` never inspects `x` (`|a, x|
+/// a + 1`), `any_via_generic` never inspects it either (`|x| true`), and
+/// `len_via_collect` only calls `.len()` on the `Vec<I::Item>` `collect`
+/// hands back — none of that requires `I::Item` to resolve to anything
+/// concrete, so all three type-check, monomorphize and run correctly. Trying
+/// to use the item concretely inside such a generic helper — `|a, x| a + x`,
+/// or interpolating `x` — reproduces the exact `T0::Item`/E0010 and
+/// `?0`/E0013 shapes Task 2 and Task 3 already documented, confirmed by
+/// hand-testing both during this task, and is not re-pinned here since Task
+/// 2's own test already owns that limitation; nothing about Task 4 changes
+/// it. That does mean `v.iter().map(f).fold(...)` works while a generic
+/// `fn sums<I: Iterator>(mut it: I) -> Int { it.fold(0, |a, x| a + x) }`
+/// does not — a real, pre-existing gap, worth stating plainly rather than
+/// leaving implicit.
+#[test]
+fn iterator_default_methods_work_through_a_generic_iterator_bound() {
+    let src = "fn count_via_fold<I: Iterator>(mut it: I) -> Int {\n\
+                   it.fold(0, |a, x| a + 1)\n\
+               }\n\
+               fn any_via_generic<I: Iterator>(mut it: I) -> Bool {\n\
+                   it.any(|x| true)\n\
+               }\n\
+               fn len_via_collect<I: Iterator>(mut it: I) -> Int {\n\
+                   it.collect().len()\n\
+               }\n\
+               fn main() {\n\
+                   let mut v = Vec::new()\n\
+                   v.push(1)\n\
+                   v.push(2)\n\
+                   v.push(3)\n\
+                   println(\"${count_via_fold(v.iter())}\")\n\
+                   println(\"${any_via_generic(v.iter())}\")\n\
+                   println(\"${len_via_collect(v.iter())}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-default-methods-generic-bound");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("3\ntrue\n3\n");
+}

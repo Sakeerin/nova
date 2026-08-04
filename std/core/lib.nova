@@ -151,13 +151,14 @@ pub trait Hash { fn hash(self) -> Int }
 // nova-spec/20-STDLIB.md used, because `::` is already how Nova reaches into a
 // type (`Vec::new`, `T::default`) while `.` is field access everywhere else.
 //
-// NOT YET, all deliberately deferred rather than overlooked: no default
-// methods on the trait itself (`map`/`filter`/`fold`/`collect` — see
-// `MapIter`/`FilterIter` below, built directly until a later task wires them
-// up as `.map()`/`.filter()`), and no `IntoIterator`.
-// `Map::iter` is not merely unwritten but impossible — it would yield a pair
-// and Nova has no tuples. Iterating means a hand-written `while` plus a
-// `match` on the `Option`, or now, `for x in it`.
+// `map`/`filter`/`fold`/`count`/`any`/`collect` are default methods below,
+// so a caller reaches `MapIter`/`FilterIter` (see below) through `.map()`/
+// `.filter()` and never has to name them directly. Still NOT YET, and still
+// deliberately deferred rather than overlooked: `IntoIterator`, so `for x in
+// v` does not work — write `v.iter()`. `Map::iter` is not merely unwritten
+// but impossible — it would yield a pair and Nova has no tuples. Iterating
+// means a hand-written `while` plus a `match` on the `Option`, or `for x in
+// it`, or now one of the six methods below.
 //
 // Unlike the six traits above, this one is implemented for **no** primitive, so
 // `next` is not taken away from user code on `Int`/`Float`/`Bool`/`Char`/
@@ -167,6 +168,70 @@ pub trait Hash { fn hash(self) -> Int }
 pub trait Iterator {
     type Item
     fn next(mut self) -> Option<Self::Item>
+
+    // --- adapters (lazy: nothing is consumed until a consumer runs) ---
+
+    fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U> {
+        MapIter { it: self, f: f }
+    }
+
+    fn filter(self, keep: fn(Self::Item) -> Bool) -> FilterIter<Self> {
+        FilterIter { it: self, keep: keep }
+    }
+
+    // --- consumers (each drives the iterator to exhaustion or short-circuits) ---
+
+    // The fold primitive. `count` and `collect` could be written over it;
+    // `any` cannot, because `fold` visits every element and `any` must stop.
+    fn fold<A>(mut self, init: A, f: fn(A, Self::Item) -> A) -> A {
+        let mut acc = init
+        while true {
+            let n = self.next()
+            if n.is_none() { return acc }
+            let g = f
+            acc = g(acc, n.unwrap())
+        }
+        acc
+    }
+
+    // `count`, not `len`: this consumes the iterator, where `Vec::len` is cheap
+    // and non-destructive. Naming it `len` would invite the wrong assumption.
+    fn count(mut self) -> Int {
+        let mut n = 0
+        while true {
+            let x = self.next()
+            if x.is_none() { return n }
+            n = n + 1
+        }
+        n
+    }
+
+    // Short-circuits, which is why it is not written over `fold`.
+    fn any(mut self, p: fn(Self::Item) -> Bool) -> Bool {
+        while true {
+            let n = self.next()
+            if n.is_none() { return false }
+            let q = p
+            if q(n.unwrap()) { return true }
+        }
+        false
+    }
+
+    // Returns a `Vec`, which makes `std/core` depend on `std/collections` for
+    // the first time. Accepted deliberately: one method, one type, and the
+    // whole-program merge means there is no layering mechanism to violate, only
+    // a convention. The alternative was `Vec::from_iter(it)` in
+    // `std/collections`, which keeps `std/core` free of collections and reads
+    // worse at the call site.
+    fn collect(mut self) -> Vec<Self::Item> {
+        let mut out = Vec::new()
+        while true {
+            let n = self.next()
+            if n.is_none() { return out }
+            out.push(n.unwrap())
+        }
+        out
+    }
 }
 
 // A lazy `map`: yields `f(x)` for each `x` the inner iterator yields.
