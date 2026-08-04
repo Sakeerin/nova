@@ -90,6 +90,28 @@ the unifier, the projection is resolved wherever the impl table *is* in scope:
 `unify` gains exactly one arm: two `Assoc`s unify when their `assoc` `DefId`s are equal and their `on`
 unify. No other pairing can arise, because everything else was normalized first.
 
+> **CORRECTION (2026-07-29, from the follow-on increment): "three seams" is wrong — the table above
+> is incomplete, and the phrase in this section's own heading understates the design.** Three seams
+> were the three *this* increment needed, because in 2.2c a projection could only ever appear in a
+> signature. The follow-on increment made a bound on a **record's** type parameter resolve
+> projections in its field types, so `record MapIter<I: Iterator, U> { f: fn(I::Item) -> U }` became
+> writable — and the **record-literal construction site** turned out to need normalization too. It
+> had been using a raw `Ty::subst` where `check_direct_call` and `emit_trait_call` use the
+> `instantiate` helper, so constructing *any* such record failed with a spurious `E0010`. A second
+> site, the record-field **read** path (`record_field_index_and_ty`), has the same defect.
+>
+> Neither was reachable in 2.2c, which is why eleven tasks and two whole-branch reviews did not find
+> them: no record field could name a projection until the follow-on increment made it possible.
+>
+> **The durable lesson is about the shape of this claim, not the count.** "Normalized at N seams" is
+> a closed-world statement about where projections can appear, and that world reopens whenever a new
+> *position* becomes legal. The authoritative list is not a number in a design doc but an enumeration
+> of `Ty::subst` call sites reachable by a projection — the follow-on increment's Task 3 review
+> produced one, distinguishing genuine gaps from sites that are unreachable (sum-type parameter
+> bounds are still `E0900`) and from sites where non-normalization is deliberate
+> (`check_impl_conformance`, where both alternatives were measured and found wrong). Consult that
+> enumeration, not this table, and re-derive it whenever a new position for a projection is added.
+
 **This follows the grain of the codebase rather than fighting it.** Trait *bounds* are already
 discharged at monomorphization (`E0013`, `crates/nova-mir/src/mono.rs:117`) rather than in
 `check_src`. Projection resolution uses the same seam for the same reason: mono is the first
