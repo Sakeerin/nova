@@ -39,6 +39,22 @@ enum MethodRes {
     Ambiguous,
 }
 
+/// The `next` a `for` loop drives, as [`Checker::iterator_next`] resolved it.
+///
+/// The `Option` sum and its two variant indices travel with the method because
+/// they are read off the *same* trait declaration: a caller that looked them up
+/// separately could pair a `next` from one trait with the variant numbering of
+/// another sum, which lowers to a `match` switching on the wrong tags.
+struct IteratorNext {
+    trait_id: DefId,
+    method_idx: u32,
+    /// The sum `next` returns — `Option` in std, but only its shape is required.
+    option: DefId,
+    /// Index of the one-field `Some` variant, and of the empty `None` variant.
+    some: u32,
+    none: u32,
+}
+
 /// How a trait call names its `Self` type — the *only* difference between a
 /// method call (`x.cmp(y)`) and an associated-function call (`Int::default()`).
 ///
@@ -3814,8 +3830,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `for i in lo..hi { body }` desugars to a counter-driven `while`:
-    /// `{ let i = lo; let end = hi; while i < end { body; i = i + 1 } }`
     fn check_array_literal(
         &mut self,
         fcx: &mut FnCtx,
@@ -3906,7 +3920,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// (`<=` for an inclusive range). Phase 1 iterables are integer ranges.
+    /// `for i in lo..hi { body }` desugars to a counter-driven `while`:
+    /// `{ let i = lo; let end = hi; while i < end { body; i = i + 1 } }`
+    /// (`<=` for an inclusive range). Any other iterable is an iterator —
+    /// see [`Checker::check_for_iterator`].
+    ///
+    /// The first two lines were stranded on `check_array_literal`, which had been
+    /// inserted into the middle of this comment; rejoined here.
     fn check_for(
         &mut self,
         fcx: &mut FnCtx,
@@ -3916,11 +3936,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let ast::Expr::Range { lo, hi, inclusive } = &iter.value else {
-            self.unsupported(
-                iter.span,
-                "`for` loops over anything but an integer range (`a..b`)",
-            );
-            return error_expr(span);
+            return self.check_for_iterator(fcx, pattern, iter, body, span);
         };
 
         let lo = self.check_expr(fcx, lo);
@@ -3937,18 +3953,7 @@ impl<'a> Checker<'a> {
         let end = fcx.new_local_unscoped("__end".to_string(), Ty::Int, false, span);
 
         fcx.scopes.push(FxHashMap::default());
-        let (var_name, var_span) = match &pattern.value {
-            ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
-            ast::Pattern::Wildcard => ("_".to_string(), pattern.span),
-            _ => {
-                self.error(
-                    "E0022",
-                    "a `for` loop variable must be a name or `_`",
-                    pattern.span,
-                );
-                ("_".to_string(), pattern.span)
-            }
-        };
+        let (var_name, var_span) = self.for_loop_var(pattern);
         let i = fcx.new_local(var_name, Ty::Int, false, var_span);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
@@ -4065,6 +4070,255 @@ impl<'a> Checker<'a> {
             ty: Ty::Unit,
             span,
         }
+    }
+
+    /// The name and span a `for` loop binds its element to. Shared by the range
+    /// and iterator desugars: they bind at different types but accept exactly
+    /// the same pattern forms, so `E0022` — and the choice to fall back to `_`
+    /// and keep checking the body rather than bail — is stated once here instead
+    /// of in two copies that can drift.
+    ///
+    /// A `mut` on the pattern is deliberately dropped: a `for` loop variable is
+    /// immutable in both desugars, so `for mut i in …` gets the same immutable
+    /// binding (and the same `E0060` on assignment) as `for i in …`.
+    fn for_loop_var(&mut self, pattern: &Spanned<ast::Pattern>) -> (String, Span) {
+        match &pattern.value {
+            ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
+            ast::Pattern::Wildcard => ("_".to_string(), pattern.span),
+            _ => {
+                self.error(
+                    "E0022",
+                    "a `for` loop variable must be a name or `_`",
+                    pattern.span,
+                );
+                ("_".to_string(), pattern.span)
+            }
+        }
+    }
+
+    /// `for x in it { body }` desugars to
+    /// `{ let mut __it = it
+    ///    while true { match __it.next() { Some(x) => body, None => break } } }`.
+    ///
+    /// `while true`, not `loop`: Nova has no `loop` keyword — `loop { … }`
+    /// parses as an identifier followed by a record literal.
+    ///
+    /// `__it` is unscoped (so it can neither collide with nor shadow a source
+    /// identifier) and `mut` (so `next`'s `mut self` receiver is satisfied
+    /// without the user writing `mut`, per ADR 0005 §1). The user's `x` stays
+    /// immutable, exactly as in the range form, so assigning it is `E0060`.
+    ///
+    /// The `Iterator` bound is discharged at monomorphization (`E0013`) like
+    /// every other bound, not here — so this deliberately does **not** check
+    /// that the iterable implements `Iterator`. It needs an impl only to learn
+    /// the item type, and adding a bound check would diverge from how every
+    /// other bound in the language behaves.
+    ///
+    /// What it therefore keys on is `next`'s *shape*, not std's `Iterator`'s
+    /// identity — the same duck-typing [`Checker::try_display`] uses for `fmt`,
+    /// and forced by the same thing: the checker has no name-based handle on a
+    /// std trait, and a user `trait It { type Item  fn next(…) }` is as good an
+    /// iterator as std's. std/core already documents that `next` is *not*
+    /// soft-reserved, so a user trait declaring one on a primitive makes
+    /// `for x in 3` legal; that is the accepted consequence, not an oversight.
+    fn check_for_iterator(
+        &mut self,
+        fcx: &mut FnCtx,
+        pattern: &Spanned<ast::Pattern>,
+        iter: &Spanned<ast::Expr>,
+        body: &Spanned<ast::Block>,
+        span: Span,
+    ) -> hir::Expr {
+        // One name for the hidden iterator. The local, the path `place_root`
+        // resolves, and the scope entry it resolves through must all agree, so
+        // they read it from here rather than repeating a literal three times.
+        const IT: &str = "__it";
+
+        let iterable = self.check_expr(fcx, iter);
+        let iter_ty = fcx.icx.apply(&iterable.ty);
+        // The iterable's own mistake has already been reported. `Ty::Error` has
+        // no head, so resolution below would fail and add `E0900` on top —
+        // two diagnostics for one mistake.
+        if matches!(iter_ty, Ty::Error) {
+            return error_expr(span);
+        }
+        let Some(next) = self.iterator_next(fcx, &iter_ty) else {
+            self.unsupported(
+                iter.span,
+                "`for` loops over anything but an integer range (`a..b`) or a value \
+                 implementing `Iterator` (try `.iter()`)",
+            );
+            return error_expr(span);
+        };
+
+        // The iterator is live for the whole loop and `next` takes `mut self`,
+        // so `__it` is `mut`; it is unscoped so no source identifier can reach
+        // it or be shadowed by it.
+        let it_local = fcx.new_local_unscoped(IT.to_string(), iter_ty.clone(), true, span);
+        let receiver = hir::Expr {
+            kind: hir::ExprKind::Local(it_local),
+            ty: iter_ty,
+            span: iter.span,
+        };
+        // `emit_trait_call` classifies its receiver with `place_root`, which
+        // resolves an *AST* name against the scopes — the checked `hir::Expr`
+        // has lost the shape it needs. So the receiver has to be spelled as a
+        // path and be findable for the one call emitted below. The scope is
+        // pushed and popped around that single call: no source expression is
+        // checked inside it, so `__it` stays unreachable from user code, while
+        // `place_root` still reads the local's real `is_mut` — dropping the
+        // `mut` above is `E0060`, not a silently accepted mutation.
+        let it_ast = Spanned::new(
+            ast::Expr::Path(ast::Path::single(Spanned::new(IT.to_string(), iter.span))),
+            iter.span,
+        );
+        fcx.scopes.push(FxHashMap::default());
+        fcx.scopes
+            .last_mut()
+            .expect("just pushed")
+            .insert(IT.to_string(), it_local);
+        let next_call = self.emit_trait_call(
+            fcx,
+            next.trait_id,
+            next.method_idx,
+            TraitCallSelf::Receiver(receiver, &it_ast),
+            Vec::new(),
+            span,
+        );
+        fcx.scopes.pop();
+
+        // `next`'s declared `Option<Self::Item>` comes back from
+        // `emit_trait_call` with `Self` substituted and the projection already
+        // normalized against the impl that call selected, so this *result's*
+        // argument list is the item type. Reading it off the call is what keeps
+        // the desugar on one impl-selection path: resolving `Self::Item` again
+        // here would be the second lookup that has twice drifted out of step
+        // with `match_args` and shipped as a miscompile.
+        let item_ty = match fcx.icx.apply(&next_call.ty) {
+            Ty::Sum { def_id, args } if def_id == next.option => self
+                .sums
+                .iter()
+                .find(|s| s.def_id == next.option)
+                .and_then(|s| s.variants.get(next.some as usize))
+                .and_then(|v| v.fields.first())
+                .map(|payload| payload.subst(&args))
+                .unwrap_or(Ty::Error),
+            // `emit_trait_call` bailed (it reported why). `Ty::Error` unifies
+            // with anything, so the body is still checked for its own mistakes
+            // without the loop variable manufacturing new ones.
+            _ => Ty::Error,
+        };
+
+        fcx.scopes.push(FxHashMap::default());
+        let (var_name, var_span) = self.for_loop_var(pattern);
+        let elem = fcx.new_local(var_name, item_ty, false, var_span);
+        fcx.loop_depth += 1;
+        let body_hir = self.check_block(fcx, &body.value, body.span);
+        fcx.loop_depth -= 1;
+        fcx.scopes.pop();
+
+        let unit = |kind| hir::Expr {
+            kind,
+            ty: Ty::Unit,
+            span,
+        };
+        let variant = |v, binders| hir::Pattern::Variant {
+            sum: next.option,
+            variant: v,
+            binders,
+        };
+        let arms = vec![
+            hir::Arm {
+                pattern: variant(next.some, vec![Some(elem)]),
+                // Wrapped in a block so the arm is `Unit` whatever the body
+                // evaluates to — the range desugar discards the body's value
+                // the same way, by making it a statement.
+                body: unit(hir::ExprKind::Block {
+                    stmts: vec![body_hir],
+                    trailing: None,
+                }),
+                span: body.span,
+            },
+            hir::Arm {
+                pattern: variant(next.none, Vec::new()),
+                body: hir::Expr {
+                    kind: hir::ExprKind::Break,
+                    ty: Ty::Never,
+                    span,
+                },
+                span,
+            },
+        ];
+        let while_expr = unit(hir::ExprKind::While {
+            cond: Box::new(hir::Expr {
+                kind: hir::ExprKind::BoolLit(true),
+                ty: Ty::Bool,
+                span,
+            }),
+            body: Box::new(unit(hir::ExprKind::Match {
+                scrutinee: Box::new(next_call),
+                arms,
+            })),
+        });
+        let bind_it = unit(hir::ExprKind::Let {
+            local: it_local,
+            init: Box::new(iterable),
+        });
+        unit(hir::ExprKind::Block {
+            stmts: vec![bind_it, while_expr],
+            trailing: None,
+        })
+    }
+
+    /// Resolve the `next` a `for` loop will drive on a value of type `recv_ty`.
+    /// `None` — which is what makes `for` reject the iterable — when the type
+    /// has no method of that name, when more than one trait provides one, or
+    /// when the one it finds is not shaped like `Iterator::next`.
+    ///
+    /// Resolution goes through [`Checker::resolve_method_on`], the checker's one
+    /// method-lookup routine, which filters candidate impls by
+    /// `ImplInfo::match_args` and not by head alone.
+    fn iterator_next(&self, fcx: &FnCtx, recv_ty: &Ty) -> Option<IteratorNext> {
+        let MethodRes::Trait(trait_id, method_idx) = self.resolve_method_on(recv_ty, fcx, "next")
+        else {
+            return None;
+        };
+        let tm = self
+            .traits
+            .iter()
+            .find(|t| t.def_id == trait_id)?
+            .methods
+            .get(method_idx as usize)?;
+        // `next(mut self) -> Option<…>`: no further arguments, and no generics
+        // of its own, so the item type is ground the moment `Self` is known
+        // rather than an inference variable the loop body has to pin down.
+        if !tm.params.is_empty() || tm.generics != 0 {
+            return None;
+        }
+        // An `Option`-shaped return: exactly the two variants `Some(x)` and
+        // `None`. Read off the *declaration*, before any call is emitted, so a
+        // wrongly shaped `next` reports only `E0900` and not also whatever
+        // `emit_trait_call` would have said about its receiver or arity.
+        let Ty::Sum { def_id, .. } = tm.ret else {
+            return None;
+        };
+        let sum = self.sums.iter().find(|s| s.def_id == def_id)?;
+        if sum.variants.len() != 2 {
+            return None;
+        }
+        Some(IteratorNext {
+            trait_id,
+            method_idx,
+            option: def_id,
+            some: sum
+                .variants
+                .iter()
+                .position(|v| v.name == "Some" && v.fields.len() == 1)? as u32,
+            none: sum
+                .variants
+                .iter()
+                .position(|v| v.name == "None" && v.fields.is_empty())? as u32,
+        })
     }
 
     /// Check a closure literal `|params| body`, lifting it into its own
@@ -8783,6 +9037,151 @@ mod tests {
     fn range_outside_for_reports_e0900() {
         let r = check_src("fn main() { let r = 0..5 }");
         assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+    }
+
+    // The iterable is `make_once()` and not the record literal `Once { … }`
+    // the plan wrote, in this test and the two below: the parser parses the
+    // `for` iterable in a `no_struct_literal` context (as Rust does), so
+    // `for x in Once { v: 7 } { … }` takes the record literal's brace as the
+    // loop body and cannot parse at all. Parenthesising does not help either —
+    // Nova's paren-grouping inherits the flag rather than resetting it. A call
+    // and a `let`-bound local are also the two receiver shapes real code uses
+    // (`v.iter()` is a call), and they are the two `place_root` classifications
+    // — `NotAPlace` and `ImmutableLocal` — that a desugar handing the *source*
+    // iterable to the mutable-receiver check would wrongly reject.
+    #[test]
+    fn a_for_loop_iterates_an_iterator() {
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record Once { v: Int, done: Bool }\n\
+             impl It for Once { type Item = Int\n\
+              fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true\n Some(self.v) } } }\n\
+             fn make_once() -> Once { Once { v: 7, done: false } }\n\
+             fn main() { for x in make_once() { println(\"${x}\") } }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    /// Not in the plan; added because the plan's own mutation (c) — dropping the
+    /// `None => break` arm — survives every one of its other assertions.
+    /// Exhaustiveness analysis runs over *source* `match` expressions, not over
+    /// one the checker synthesized, so a desugar that can never leave the loop
+    /// type-checks completely clean and only fails at runtime: measured, the
+    /// program prints its real elements and then dies on the switch's default
+    /// `Terminator::Trap` (exit 132, `Illegal instruction`) — it does **not**
+    /// hang. Swapping the `Some` and `None` variant indices likewise survives
+    /// every diagnostic-based assertion. Both are structural faults, so this
+    /// reads the structure the checker built rather than the diagnostics it
+    /// didn't emit.
+    #[test]
+    fn a_for_loop_over_an_iterator_breaks_on_none() {
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record Once { v: Int, done: Bool }\n\
+             impl It for Once { type Item = Int\n\
+              fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true\n Some(self.v) } } }\n\
+             fn make_once() -> Once { Once { v: 7, done: false } }\n\
+             fn main() { for x in make_once() { println(\"${x}\") } }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+        let arms = exprs_in(&r.module, "main")
+            .into_iter()
+            .find_map(|e| match &e.kind {
+                hir::ExprKind::Match { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .expect("the desugar built a `match` on `next()`");
+        assert_eq!(arms.len(), 2, "{arms:?}");
+        // The variant a pattern names, by *name* and binder count. Reading the
+        // name and not just the binder count matters: `None` and a `Some` written
+        // with no binders both have zero binders, so a binder-count assertion
+        // alone lets the two indices be swapped — measured, that mutation
+        // survives it.
+        let names = |p: &hir::Pattern| match p {
+            hir::Pattern::Variant {
+                sum,
+                variant,
+                binders,
+            } => {
+                let s = r.module.sum(*sum).expect("the scrutinee's sum");
+                (s.variants[*variant as usize].name.clone(), binders.len())
+            }
+            other => panic!("a variant pattern, not {other:?}"),
+        };
+        let (exit, elem): (Vec<&hir::Arm>, Vec<&hir::Arm>) = arms
+            .iter()
+            .partition(|a| matches!(a.body.kind, hir::ExprKind::Break));
+        assert_eq!(exit.len(), 1, "exactly one arm leaves the loop: {arms:?}");
+        assert_eq!(names(&exit[0].pattern), ("None".to_string(), 0));
+        assert_eq!(names(&elem[0].pattern), ("Some".to_string(), 1));
+    }
+
+    #[test]
+    fn a_for_loop_over_a_range_still_works() {
+        // This task edits the function the range loop lives in, so the range
+        // path needs its own assertion here rather than relying on the older
+        // range tests being run.
+        let r = check_src("fn main() { for i in 0..3 { println(\"${i}\") } }");
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_for_loops_variable_binds_at_the_projected_item_type() {
+        // `x` must be the normalized `Self::Item` (here `Bool`), not the
+        // projection and not an inference variable. Bool rather than Int
+        // deliberately: `mir_ty` collapses Int and Char to the same machine
+        // type, so a wrong item type among them is invisible downstream.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record OnceB { v: Bool, done: Bool }\n\
+             impl It for OnceB { type Item = Bool\n\
+              fn next(mut self) -> Option<Bool> { if self.done { None } else { self.done = true\n Some(self.v) } } }\n\
+             fn main() { let it = OnceB { v: true, done: false }\n\
+              for x in it { let y: Int = x\n let _ = y } }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0010")
+            .expect("E0010: the loop variable is Bool, not Int");
+        assert!(d.message.contains("Bool"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_for_loops_variable_is_immutable() {
+        // Same rule the range loop already enforces. Without it the desugar
+        // could hand out a mutable binding by accident.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record Once { v: Int, done: Bool }\n\
+             impl It for Once { type Item = Int\n\
+              fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true\n Some(self.v) } } }\n\
+             fn main() { let it = Once { v: 7, done: false }\n\
+              for x in it { x = 1 } }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0060"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_for_loop_over_a_non_iterator_names_both_accepted_forms() {
+        // The existing message says "anything but an integer range", which
+        // becomes false the moment this task lands. `for x in v` is the mistake
+        // people will actually make, so the text must mention `.iter()`.
+        let r = check_src("fn main() { for x in 3 { println(\"${x}\") } }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 for a non-range non-iterator");
+        assert!(
+            d.message.contains("iter()"),
+            "points at the fix: {}",
+            d.message
+        );
     }
 
     #[test]
