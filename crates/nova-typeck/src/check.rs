@@ -393,26 +393,35 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Reject a trait bound written on a record's or sum type's *own* generic
-    /// parameter (`record Keyed<K: Hash, V>`, `type Wrap<T: Hash> = …`).
+    /// Reject a trait bound written on a sum type's *own* generic parameter
+    /// (`type Wrap<T: Hash> = …`).
     ///
-    /// Such a bound parses but nothing honours it: neither [`hir::RecordType`]
-    /// nor [`hir::SumType`] carries a `bounds` field, and monomorphization
-    /// discharges only *function* and *impl* bounds (`nova-mir`'s `mono.rs`
-    /// walks a worklist of function instances). Enforcing it would need a notion
-    /// of "record instantiation site" that no pass has — a record's type
-    /// arguments survive only inside the enclosing expression's `Ty`,
-    /// `ExprKind::MakeRecord` does not record them, and MIR erases them to
-    /// `Ptr` — so, exactly as for `trait B where Self: A`, the construct is
-    /// rejected loudly rather than left reading as meaningful. Put the bound on
-    /// an `impl` block instead, which *is* enforced (this is what
-    /// `std/collections`' `Map<K, V>` does).
+    /// Record type parameters used to go through this too, but no longer do:
+    /// since the iterator-finishing plan's Task 1, a bound on a record's
+    /// parameter is instead resolved by `resolve_bounds` + `expand_bounds` in
+    /// `collect_records` and passed to `convert_ty`, as a **resolution scope**
+    /// for a projection in a field type (`f: fn(I::Item) -> U`) — not a
+    /// constraint. See the comment at that call site for why enforcement is
+    /// still out of scope. Sum types have no such use case yet (no variant
+    /// payload needs to name a projection on the sum's own parameter), so the
+    /// bound stays rejected here.
+    ///
+    /// Such a bound parses but nothing honours it: [`hir::SumType`] carries no
+    /// `bounds` field, and monomorphization discharges only *function* and
+    /// *impl* bounds (`nova-mir`'s `mono.rs` walks a worklist of function
+    /// instances). Enforcing it would need a notion of "sum type instantiation
+    /// site" that no pass has — a sum type's type arguments survive only
+    /// inside the enclosing expression's `Ty`, `ExprKind::MakeVariant` does not
+    /// record them, and MIR erases them to `Ptr` — so, exactly as for `trait B
+    /// where Self: A`, the construct is rejected loudly rather than left
+    /// reading as meaningful. Put the bound on an `impl` block instead, which
+    /// *is* enforced (this is what `std/collections`' `Map<K, V>` does).
     ///
     /// One diagnostic per bounded parameter, so a second offender is not hidden
     /// behind the first. The bound names are deliberately **not** resolved: an
     /// unknown trait here would stack an `E0001` cascade on top of the real
-    /// error. `owner` is the plural noun phrase for the message, e.g.
-    /// "record type parameters".
+    /// error. `owner` is the plural noun phrase for the message; the one
+    /// caller left passes "sum type parameters".
     fn reject_type_param_bounds(&mut self, generics: &[ast::TypeParam], owner: &str) {
         for g in generics {
             if g.bounds.is_empty() {
@@ -454,16 +463,26 @@ impl<'a> Checker<'a> {
             };
             self.cur_module = self.defs.module_of(*item_index);
             self.check_duplicate_generics(&decl.generics, "type");
-            self.reject_type_param_bounds(&decl.generics, "record type parameters");
             let generics = generic_scope(&decl.generics);
+            // A bound on a record's type parameter is a RESOLUTION SCOPE, not a
+            // constraint: it exists so a field type may name a projection on
+            // that parameter (`f: fn(I::Item) -> U`), which is what makes a
+            // lazy iterator adapter expressible. It is deliberately NOT checked
+            // at construction — `MakeRecord` carries no type arguments, and
+            // monomorphization visits only instances reachable from `main`, so
+            // enforcement would fire *sometimes*, which is worse than not at
+            // all (the Phase 2.2a assessment; ADR 0007 records it). Safety comes
+            // from the impl: `impl<I: Iterator, U> Iterator for MapIter<I, U>`
+            // requires the bound, so a `MapIter<Int, U>` simply has no
+            // `Iterator` impl and is inert.
+            let mut bounds = self.resolve_bounds(&decl.generics);
+            self.expand_bounds(&mut bounds);
             let fields = decl
                 .fields
                 .iter()
                 .map(|f| hir::RecordField {
                     name: f.name.value.clone(),
-                    // No bounds: `reject_type_param_bounds` above rejects any
-                    // bound on a record's generic parameters outright.
-                    ty: self.convert_ty(&f.ty, &generics, &[]),
+                    ty: self.convert_ty(&f.ty, &generics, &bounds),
                 })
                 .collect();
             self.records.push(hir::RecordType {
@@ -8922,26 +8941,31 @@ mod tests {
     }
 
     #[test]
-    fn record_type_param_bound_reports_e0900() {
-        // `record Keyed<K: Hash2, V>` parses, but nothing honours the bound:
+    fn record_type_param_bound_no_longer_reports_e0900() {
+        // Pre-Task-1 (iterator-finishing plan), this was rejected outright:
+        // `record Keyed<K: Hash2, V>` parsed, but nothing honoured the bound —
         // `hir::RecordType` has no `bounds` field and monomorphization only
-        // discharges *function* bounds, so this used to compile and run with
-        // `NoHash` — a bound that means nothing. Rejected outright, exactly as
-        // `trait B where Self: A` is, rather than left reading as meaningful.
+        // discharges *function* bounds — so it used to compile and run with
+        // `NoHash` (which does not implement `Hash2`), a bound that meant
+        // nothing. That silent acceptance was worse than an error, so it was
+        // rejected, exactly as `trait B where Self: A` is.
+        //
+        // Since Task 1, the bound is a resolution scope rather than a
+        // constraint (see the comment in `collect_records`): it exists so a
+        // field type may name a projection on the bounded parameter, and is
+        // deliberately not enforced at construction. So this now compiles
+        // clean, `NoHash`'s missing `Hash2` impl notwithstanding.
+        // `a_record_bound_is_not_enforced_at_construction` (below, in this
+        // module) pins the same decision with a projection-shaped bound; this
+        // test keeps the original two-parameter, real-trait-method shape as a
+        // second, differently shaped guard on the same decision.
         let r = check_src(
             "trait Hash2 { fn h(self) -> Int }\n\
              record Keyed<K: Hash2, V> { k: K, v: V }\n\
              record NoHash { n: Int }\n\
              fn main() { let x = Keyed { k: NoHash { n: 1 }, v: 2 }\n println(\"${x.v}\") }",
         );
-        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
-        // Exactly one, on the one bounded parameter — not one per parameter.
-        assert_eq!(
-            error_codes(&r).iter().filter(|c| **c == "E0900").count(),
-            1,
-            "{:?}",
-            r.diagnostics
-        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
     }
 
     #[test]
@@ -8959,31 +8983,34 @@ mod tests {
     }
 
     #[test]
-    fn record_type_param_bound_e0900_reports_every_bounded_param() {
-        // One diagnostic per bounded parameter, so a multi-parameter record
-        // does not hide the second offender behind the first.
+    fn multiple_record_type_param_bounds_no_longer_report_e0900() {
+        // Pre-Task-1, one E0900 fired *per* bounded parameter, so a
+        // multi-parameter record did not hide a second offender behind the
+        // first. Since Task 1 (see `record_type_param_bound_no_longer_reports_e0900`
+        // just above), the bound is a resolution scope rather than a rejected
+        // constraint, for every bounded parameter — not just the first — so
+        // this guards against a partial regression that reintroduced the
+        // rejection for, say, only a record's first bounded parameter.
         let r = check_src(
             "trait A { fn a(self) -> Int }\n\
              trait B { fn b(self) -> Int }\n\
              record Two<K: A, V: B> { k: K, v: V }\n\
              fn main() { }",
         );
-        assert_eq!(
-            error_codes(&r).iter().filter(|c| **c == "E0900").count(),
-            2,
-            "{:?}",
-            r.diagnostics
-        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
     }
 
     #[test]
     fn bounds_on_supported_positions_do_not_report_e0900() {
-        // The E0900 above must fire *only* for a bound on a record's or sum
-        // type's own parameter. Bounds on functions, impl blocks, generic trait
-        // methods and `where` clauses are all supported and are used throughout
-        // `std/`, which every program compiles — a false positive here would
-        // break the whole stdlib. An unbounded generic record/sum (how `std`
-        // actually writes `Vec<T>` / `Map<K, V>`) must stay clean too.
+        // The E0900 above must fire *only* for a bound on a sum type's own
+        // parameter (since Task 1 of the iterator-finishing plan, a record's
+        // own parameter no longer reports it at all — see
+        // `record_type_param_bound_no_longer_reports_e0900`). Bounds on
+        // functions, impl blocks, generic trait methods and `where` clauses
+        // are all supported and are used throughout `std/`, which every
+        // program compiles — a false positive here would break the whole
+        // stdlib. An unbounded generic record/sum (how `std` actually writes
+        // `Vec<T>` / `Map<K, V>`) must stay clean too.
         let r = check_src(
             "trait Show { fn show(self) -> String }\n\
              impl Show for Int { fn show(self) -> String { \"i\" } }\n\
@@ -9009,6 +9036,88 @@ mod tests {
             r.diagnostics
         );
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_record_field_may_name_a_projection_on_a_bounded_parameter() {
+        // The blocker this whole increment exists to remove. Without the bound
+        // resolving here, a lazy `map` adapter cannot be written at all: its
+        // field must be typed `fn(I::Item) -> U`.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<I: It, U> { it: I, f: fn(I::Item) -> U }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_record_bound_naming_an_unknown_trait_is_e0001() {
+        // Resolution must report, not skip. A silently-dropped bound would put
+        // this increment straight back into the "accepted and quietly ignored"
+        // family the spec's §3.2 warns about.
+        let r = check_src(
+            "record M<I: NoSuchTrait> { it: I }\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001 for an unresolvable record bound");
+        assert!(
+            d.message.contains("NoSuchTrait"),
+            "names the trait: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_projection_on_an_unbounded_record_parameter_is_still_e0001() {
+        // The bound is what makes the projection resolvable, so without one the
+        // old error must remain. This is the guard against "resolve projections
+        // against every trait in scope", which would accept nonsense.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<I, U> { it: I, f: fn(I::Item) -> U }\n\
+             fn main() { }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0001"),
+            "an unbounded parameter has no `Item`: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_bound_on_a_sum_type_parameter_is_still_e0900() {
+        // Records only. Nothing in this increment needs a bound on a sum
+        // parameter, and leaving the rejection in place halves the surface.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             type S<I: It> = | A(I) | B\n\
+             fn main() { }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900 still rejects a bound on a sum type parameter");
+        assert!(d.message.contains("sum type"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_record_bound_is_not_enforced_at_construction() {
+        // The spec's §3.2 decision, pinned so it cannot drift silently in
+        // either direction. `Int` is not an `It`, and building `M<Int, …>` is
+        // accepted: the bound is a resolution scope, not a constraint. Safety
+        // comes from the impl instead — see the E0014 test below.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<I: It> { it: I }\n\
+             fn main() { let m = M { it: 3 }\n let _ = m }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
     }
 
     #[test]
