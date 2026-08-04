@@ -173,9 +173,19 @@ pub trait Iterator {
 //
 // `f: fn(I::Item) -> U` is why `I` carries a bound. A bound on a record's type
 // parameter is a resolution scope, not a constraint (ADR 0007): it lets this
-// field name `I::Item` at all. It is not checked when a `MapIter` is built —
-// `impl<I: Iterator, U> Iterator for MapIter<I, U>` below is what makes a
-// `MapIter` iterable, so a `MapIter<Int, U>` merely has no impl and is inert.
+// field name `I::Item` at all, and it is not itself checked when a `MapIter`
+// is built — `impl<I: Iterator, U> Iterator for MapIter<I, U>` below is what
+// makes a `MapIter` iterable, not this declaration.
+//
+// That does not make a `MapIter<Int, U>` buildable, though: `f`'s own field
+// type names `I::Item`, and `Int::Item` has nothing to resolve to (`Int` has
+// no `Iterator` impl), so `f`'s declared type never normalizes and no
+// closure — none, for any `f` — can unify against it. `MapIter<Int, U>` is
+// unconstructible, not merely inert: the bound was meant to leave
+// construction unconstrained, with only *use* as an iterator blocked, but a
+// field that actually names the projection enforces it at construction
+// anyway — earlier and more strictly than that — by a mechanism that has
+// nothing to do with the bound itself.
 //
 // Holds `it` by pointer, like every record, so it SHARES the source iterator
 // rather than copying it — advancing this adapter advances the source, and

@@ -4582,6 +4582,25 @@ impl<'a> Checker<'a> {
             // the impl table — the same seam `check_direct_call` and
             // `emit_trait_call` use for a generic function or trait method's
             // parameter and return types.
+            //
+            // Same admitted hole as `instantiate`'s own doc comment describes
+            // for a call (above, `fn instantiate`): the pinning variable has to
+            // already be solved. `for init in fields` walks the *literal's*
+            // written order, not declaration order, so this only resolves
+            // `I::Item` when the field that pins `I` (`it: I`) is written
+            // before the field naming the projection (`f: fn(I::Item) -> U`)
+            // in the literal. `M { f: |x| x + 1, it: Counter { n: 0 } }` — the
+            // same fields, reversed — still fails with the pre-fix symptom
+            // (an unresolved `Assoc` reaching `unify`), because `type_args`'s
+            // slot for `I` is still a free variable when `f`'s turn comes.
+            // Wider than the call case: a function's parameter order is fixed
+            // by its signature, but a record literal's field order is free
+            // syntax with no natural declaration-order requirement, so a
+            // caller has no signature to read this constraint off of.
+            // `a_record_field_initializer_is_order_sensitive_when_it_names_a_
+            // projection` (this file's test module) pins the current
+            // behavior so a future fix to field-order independence flips it
+            // deliberately rather than silently.
             let expected = self.instantiate(&field.ty, &type_args, &fcx.icx, init.name.span);
             let value = match &init.value {
                 Some(v) => self.check_expr(fcx, v),
@@ -4721,7 +4740,8 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         let recv = self.check_expr(fcx, target);
         let recv_ty = fcx.icx.apply(&recv.ty);
-        if let Some((index, field_ty)) = self.record_field_index_and_ty(fcx, &recv_ty, &field.value)
+        if let Some((index, field_ty)) =
+            self.record_field_index_and_ty(fcx, &recv_ty, &field.value, span)
         {
             return hir::Expr {
                 kind: hir::ExprKind::FieldGet {
@@ -4783,6 +4803,7 @@ impl<'a> Checker<'a> {
         fcx: &mut FnCtx,
         recv_ty: &Ty,
         field: &str,
+        span: Span,
     ) -> Option<(u32, Ty)> {
         let Ty::Record { def_id, args } = fcx.icx.apply(recv_ty) else {
             return None;
@@ -4791,8 +4812,20 @@ impl<'a> Checker<'a> {
         let index = record.fields.iter().position(|f| f.name == field)?;
         // The field's declared type is written in terms of the record's own
         // type parameters, so it must be substituted with this instantiation's
-        // arguments before it means anything to the caller.
-        let field_ty = record.fields.get(index)?.ty.subst(&args);
+        // arguments before it means anything to the caller. Cloned out of
+        // `record` (rather than substituted in place) so the borrow of
+        // `self.records` ends here, before the `&mut self` call below.
+        let declared_ty = record.fields[index].ty.clone();
+        // Normalization seam, the read-side mirror of the one
+        // `check_record_literal` needed for construction: by the time a field
+        // is *read* (`m.f`, `c.hit`), `recv_ty`'s arguments may already be
+        // concrete (`m`/`c` were already built), so a field type naming a
+        // projection on the record's own bounded parameter (`f: fn(I::Item)
+        // -> U`, `hit: I::Item`) can substitute to an unnormalized `Assoc`
+        // just as a field *initializer*'s expected type could. Plain `subst`
+        // cannot see that; `instantiate` applies the current bindings and, if
+        // a projection remains, resolves it through the impl table.
+        let field_ty = self.instantiate(&declared_ty, &args, &fcx.icx, span);
         Some((index as u32, field_ty))
     }
 
@@ -5902,7 +5935,8 @@ impl<'a> Checker<'a> {
         // Resolve the field to its index and declared type through the same
         // lookup `FieldGet` uses for reads, so reads and writes cannot disagree
         // about layout.
-        let Some((index, field_ty)) = self.record_field_index_and_ty(fcx, &recv_ty, &field.value)
+        let Some((index, field_ty)) =
+            self.record_field_index_and_ty(fcx, &recv_ty, &field.value, span)
         else {
             // Same wording as the read path (`no_field_message`), including
             // its separate not-a-record case.
@@ -9631,6 +9665,49 @@ mod tests {
              fn main() { let m = M { it: Counter { n: 0 }, f: |x| x + 1 }\n let _ = m }",
         );
         assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_record_field_initializer_is_order_sensitive_when_it_names_a_projection() {
+        // A known, documented limitation of the fix above (see the comment at
+        // its call site in `check_record_literal`), not a regression: this
+        // pins *current* behavior so a future fix to field-order independence
+        // has to touch this test deliberately rather than leave it silently
+        // wrong.
+        //
+        // `check_record_literal` walks `for init in fields` in the *literal's
+        // written* order. The sibling test just above writes `it` before `f`,
+        // so by the time `f`'s expected type is computed, `it: Counter { n: 0
+        // }` has already pinned `I` to `Counter` via `unify`, and `instantiate`
+        // has something concrete to normalize `I::Item` against. Here the two
+        // fields are swapped — same record, same values, same closure — so
+        // `I` is still a free inference variable when `f`'s turn comes:
+        // `instantiate`'s own `has_assoc()` check finds the projection, but
+        // `icx.apply` on an unbound variable is a no-op, so there is nothing
+        // yet to normalize *through*. The result is the exact pre-fix
+        // symptom: an `E0010` naming an unresolved `Assoc`, cascading into
+        // `E0011`s for the variables it left unpinned.
+        //
+        // This is the same class of hole `instantiate`'s own doc comment
+        // already admits for a call (`fn f<I: It>(y: I::Item, x: I)` still
+        // fails) — but wider here, since a function's parameter order is
+        // fixed by its signature while a record literal's field order is free
+        // syntax with nothing to read an ordering requirement off of.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<I: It, U> { it: I, f: fn(I::Item) -> U }\n\
+             record Counter { n: Int }\n\
+             impl It for Counter { type Item = Int\n fn next(mut self) -> Option<Int> { None } }\n\
+             fn main() { let m = M { f: |x| x + 1, it: Counter { n: 0 } }\n let _ = m }",
+        );
+        assert!(
+            error_codes(&r).contains(&"E0010"),
+            "documents a known limitation (field order matters when a field \
+             names a projection); if this now fails, the limitation is fixed \
+             and this test should be updated to assert a clean compile \
+             instead: {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]

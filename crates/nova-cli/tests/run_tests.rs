@@ -2876,3 +2876,77 @@ fn iterator_adapters_chain_and_are_lazy() {
         .success()
         .stdout("10\n20\n30\nkeep 2\nkeep 3\nchain false\nchain true\n");
 }
+
+/// `record_field_index_and_ty` (`crates/nova-typeck/src/check.rs`) had the
+/// same raw-`subst`-instead-of-`instantiate` gap `check_record_literal` did
+/// above, on the field *read* path rather than construction: reading `m.f`
+/// or `c.hit` back out of an already-built, now-concretely-typed record
+/// substituted a projection on the record's own bounded parameter without
+/// normalizing it, so `g(5)` and `x + 1` below failed structurally even
+/// though `m`/`c` themselves built without complaint. Two shapes in one
+/// test, since the bug needed a concrete instance of each to show up: a
+/// function-typed field (`f: fn(I::Item) -> U`) read out and called, and a
+/// plain field (`hit: I::Item`) read out and used directly.
+#[test]
+fn a_record_field_read_resolves_a_projection_through_a_now_concrete_parameter() {
+    let src = "trait It { type Item\n\
+                   fn next(mut self) -> Option<Self::Item> }\n\
+               record M<I: It, U> { it: I, f: fn(I::Item) -> U }\n\
+               record Cache<I: It> { it: I, hit: I::Item }\n\
+               record Counter { n: Int }\n\
+               impl It for Counter {\n\
+                   type Item = Int\n\
+                   fn next(mut self) -> Option<Int> { None }\n\
+               }\n\
+               fn main() {\n\
+                   let m = M { it: Counter { n: 0 }, f: |x| x + 1 }\n\
+                   let g = m.f\n\
+                   println(\"${g(5)}\")\n\
+                   let c = Cache { it: Counter { n: 0 }, hit: 7 }\n\
+                   let x = c.hit\n\
+                   println(\"${x + 1}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-record-field-read-projection");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("6\n8\n");
+}
+
+/// `MapIter::next` maps exactly one element per call, on demand — it is not
+/// merely correct about *which* values come out (the tests above), it is lazy
+/// about *when* `f` runs. `f` here is side-effecting (`println("call")`) so
+/// that is directly observable: the `for` loop's desugar calls `next` once,
+/// prints the mapped result, then `break`s. A lazy `MapIter` therefore prints
+/// exactly one `call` before `got 10`; an eager one — say, a `MapIter` that
+/// drained and mapped its whole source at construction, buffering the
+/// results — would print `call` three times (once per element of `v`)
+/// before the loop ever ran at all, since building `m` would need to finish
+/// that up front.
+#[test]
+fn a_map_iter_calls_f_lazily_not_all_up_front() {
+    let src = "fn main() {\n\
+                   let mut v = Vec::new()\n\
+                   v.push(1)\n\
+                   v.push(2)\n\
+                   v.push(3)\n\
+                   let mut m = MapIter { it: v.iter(), f: |n| { println(\"call\") n * 10 } }\n\
+                   for x in m { println(\"got ${x}\") break }\n\
+                   println(\"done\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-map-iter-laziness");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("call\ngot 10\ndone\n");
+}
