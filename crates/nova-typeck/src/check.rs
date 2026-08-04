@@ -121,9 +121,20 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     // one containing `Self` would give the name two meanings at once.
     checker.reject_self_type_params();
     checker.collect_type_arities();
+    // Before `collect_records`: since Task 1 of the iterator-finishing plan,
+    // `collect_records` resolves each record's bounds and calls
+    // `expand_bounds`, which folds transitive supertraits in from
+    // `Checker::supertraits` — the very table `collect_supertraits` builds.
+    // Moved ahead of `collect_records` (and `collect_sums`, which never reads
+    // it but has no reason to run first either) so that table is populated
+    // before the first `expand_bounds` call, not just before
+    // `collect_traits`'s. `collect_supertraits` itself only reads trait
+    // declarations via `self.defs` (already fully resolved before `check`
+    // runs) and `decl.supertraits`, so it has no ordering dependency on
+    // `collect_type_arities`, `collect_records`, or `collect_sums`.
+    checker.collect_supertraits();
     checker.collect_records();
     checker.collect_sums();
-    checker.collect_supertraits();
     checker.collect_traits();
     checker.collect_impls();
     checker.collect_signatures();
@@ -558,9 +569,11 @@ impl<'a> Checker<'a> {
     }
 
     /// Resolve every trait's declared supertraits (`trait B: A`) into
-    /// [`Checker::supertraits`]. Runs before [`Checker::collect_traits`] so the
-    /// whole supertrait graph is known by the time the first bound list is
-    /// expanded, whatever order the traits are declared in.
+    /// [`Checker::supertraits`]. Runs before [`Checker::collect_traits`] *and*
+    /// [`Checker::collect_records`] (the first two callers that expand a bound
+    /// list) so the whole supertrait graph is known by the time the first
+    /// `expand_bounds` call is made, whatever order the traits are declared
+    /// in.
     ///
     /// Deduplicated per trait, mirroring [`Checker::resolve_bounds`]: a repeated
     /// trait id reads as two providers of the same method and yields a false
@@ -9116,6 +9129,27 @@ mod tests {
             "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
              record M<I: It> { it: I }\n\
              fn main() { let m = M { it: 3 }\n let _ = m }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_record_bound_resolves_a_projection_through_a_supertrait() {
+        // `collect_records` calls `expand_bounds` after `resolve_bounds`, so a
+        // record's bound list carries transitive supertraits exactly like a
+        // function's or an impl's does (see the comment at the `by_index`
+        // match arm in `convert_ty`, around line 2275: "`expand_bounds` has
+        // already folded supertraits into every entry here"). `Sub: It`
+        // declares no `Item` itself — only its supertrait `It` does — so
+        // resolving `I::Item` against a bound of just `Sub` requires that
+        // fold-in. This is TDD-by-mutation Step 7's second case: skipping
+        // `expand_bounds` while still passing `&bounds` (rather than `&[]`)
+        // reproduces the exact failure this test pins.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             trait Sub: It { fn extra(self) -> Int }\n\
+             record M<I: Sub> { f: fn(I::Item) -> Int }\n\
+             fn main() { }",
         );
         assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
     }
