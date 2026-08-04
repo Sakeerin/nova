@@ -9595,6 +9595,45 @@ mod tests {
     }
 
     #[test]
+    fn a_record_field_initializer_normalizes_a_projection_once_its_parameter_is_concrete() {
+        // Regression test for a bug found implementing the iterator-finishing
+        // plan's Task 3 (`MapIter`/`FilterIter` in std/core/lib.nova): building
+        // a concrete instance of a record whose field type names a projection
+        // on the record's own bounded parameter. `a_record_field_may_name_a_
+        // projection_on_a_bounded_parameter`, above, only ever checks the
+        // *declaration* — its `fn main() {}` is empty and never constructs one.
+        //
+        // `check_record_literal` used to compute each field's expected type
+        // with a raw `field.ty.subst(&type_args)`, with no normalization step.
+        // Once `it: Counter { n: 0 }` pins `I` to the concrete `Counter`, `f`'s
+        // declared type substitutes to `fn(Assoc { on: Counter, name: "Item" })
+        // -> ?U` — an *unnormalized* projection — and unifying that against the
+        // closure's real type `fn(Int) -> Int` failed structurally, since
+        // `unify` never normalizes (see `Checker::normalize`'s doc comment,
+        // "Never called from `unify`"). `|x| x + 1`, not the bare identity
+        // `|x| x`, is deliberate: a fully generic closure would unify against
+        // the unnormalized projection just as well as against `Int` (a fresh
+        // variable binds to either), so nothing would fail and this test would
+        // pass regardless of the bug. Forcing `x: Int` through `+` is what
+        // makes the mismatch (`Int` against `Assoc { .. }`) structural, and so
+        // visible.
+        //
+        // Fixed by routing both of `check_record_literal`'s field-type call
+        // sites through `instantiate` (subst, then apply current bindings and,
+        // if a projection remains, normalize through the impl table) instead of
+        // a raw `subst` — the same seam `check_direct_call` and
+        // `emit_trait_call` already used.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<I: It, U> { it: I, f: fn(I::Item) -> U }\n\
+             record Counter { n: Int }\n\
+             impl It for Counter { type Item = Int\n fn next(mut self) -> Option<Int> { None } }\n\
+             fn main() { let m = M { it: Counter { n: 0 }, f: |x| x + 1 }\n let _ = m }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
     fn a_record_bound_resolves_a_projection_through_a_supertrait() {
         // `collect_records` calls `expand_bounds` after `resolve_bounds`, so a
         // record's bound list carries transitive supertraits exactly like a
