@@ -8996,6 +8996,32 @@ mod tests {
     }
 
     #[test]
+    fn sum_type_param_bound_e0900_reports_every_bounded_param() {
+        // `reject_type_param_bounds` is still live for sum types (Task 1 only
+        // dropped the record caller) and its own doc comment promises "one
+        // diagnostic per bounded parameter, so a second offender is not
+        // hidden behind the first." The record-side version of this guard,
+        // `record_type_param_bound_e0900_reports_every_bounded_param`, was
+        // rewritten by Task 1 to assert an *empty* diagnostic list instead of
+        // a count of two, since records no longer reject the bound at all —
+        // which left no test anywhere in this file asserting an `E0900`
+        // *count* greater than one. This is that guard, moved to the path
+        // that still has the behavior it checks.
+        let r = check_src(
+            "trait A { fn a(self) -> Int }\n\
+             trait B { fn b(self) -> Int }\n\
+             type Two<K: A, V: B> = | X(K) | Y(V)\n\
+             fn main() { }",
+        );
+        assert_eq!(
+            error_codes(&r).iter().filter(|c| **c == "E0900").count(),
+            2,
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
     fn multiple_record_type_param_bounds_no_longer_report_e0900() {
         // Pre-Task-1, one E0900 fired *per* bounded parameter, so a
         // multi-parameter record did not hide a second offender behind the
@@ -9059,6 +9085,25 @@ mod tests {
         let r = check_src(
             "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
              record M<I: It, U> { it: I, f: fn(I::Item) -> U }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_record_bound_resolves_when_the_bounded_parameter_is_not_first() {
+        // `resolve_bounds` returns one `Vec<DefId>` per generic parameter, in
+        // declaration order, and `convert_ty` looks up a projection's bound
+        // list by the same positional index that `generic_scope` assigned
+        // (check.rs:6465: `generics.iter().enumerate()`). Every other test in
+        // this file puts its bound on parameter index 0 (`M<I: It, U>`,
+        // `M<I: It>`, `M<I: Sub>`), so a mutation that dropped unbounded
+        // parameters' empty entries before indexing — shifting every later
+        // index — would pass the whole suite. `U` (unbounded) is declared
+        // first here specifically so `I`'s bound sits at index 1.
+        let r = check_src(
+            "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+             record M<U, I: It> { it: I, f: fn(I::Item) -> U }\n\
              fn main() { }",
         );
         assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
