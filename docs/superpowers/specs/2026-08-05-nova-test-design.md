@@ -45,8 +45,8 @@ risk and Task 1 must probe them before anything depends on them.**
 | Is a synthetic `hir::Function` named `main` constructible? | Yes — `nova-mir/src/mono.rs:648` builds one in its own unit tests, which fixes the required shape. |
 | How are curated intrinsics declared? | The `builtins!` macro at `nova-resolver/src/lib.rs:62` generates `Builtin::ALL`; `STD_ONLY: [Builtin; 8]` (`:169`) is the subset seeded only into std modules' scopes, not user scopes. |
 | CLI subcommand shape | `enum Command { Parse, Run, Build, Check }` at `nova-cli/src/main.rs:24`, clap-derived. |
-| **Can a free generic fn with two bounds call a method from each?** | **UNMEASURED.** `impl<T: Hash + Eq>` exists (`std/collections/lib.nova:347`) but no *free function* in std has two bounds. `assert_eq<T: Eq + Debug>` needs `a.ne(b)` from one bound and `a.dbg()` from the other, in one signature. |
-| **Can `${a.dbg()}` interpolate?** | **UNMEASURED.** `dbg` returns `String`, and `String` is `Display`, so it should. But interpolation goes through `try_display`'s duck-typed `fmt` lookup, and `Option<Int>` is a known case that cannot be interpolated. |
+| Can a free generic fn with two bounds call a method from each? | **Yes.** `fn assert_eq2<T: Eq + Debug>(a: T, b: T)` calling `a.ne(b)` and `a.dbg()` compiles and runs, instantiated at `Int`, `Bool` **and** `String` — three distinct `MirTy` classes (`I64`, `I8`, `Ptr`). No free function in std had two bounds before (`impl<T: Hash + Eq>` at `std/collections/lib.nova:347` was the closest precedent), so this was the design's largest unknown. |
+| Can `${a.dbg()}` interpolate? | **Yes.** `panic("assertion failed: ${a.dbg()} != ${b.dbg()}")` produces `nova: panic: assertion failed: 1 != 3`, exit 127 — landing on the "panicked" row of §5 exactly as required. |
 
 ---
 
@@ -250,10 +250,13 @@ exit as "failed", which is precisely the design this document rejects.
 
 ## 9. Risks
 
-1. **The two unmeasured probe rows.** If a free generic fn with two bounds cannot call a method
-   from each, `assert_eq`'s spec signature is unbuildable and the fallback is two separate
-   single-bound helpers or a concrete-type-per-primitive set. Task 1 must probe this *first*,
-   because it changes `std/test`'s shape.
+1. ~~**The two unmeasured probe rows.**~~ **Closed before planning.** Both were measured after this
+   design was approved: `assert_eq<T: Eq + Debug>` is buildable exactly as `20-STDLIB.md` §11 spells
+   it, verified at `Int`/`Bool`/`String`, with `${a.dbg()}` interpolating correctly and a failure
+   landing on §5's "panicked" row. The contingency this risk described — splitting into
+   single-bound helpers or a concrete-type-per-primitive set — is not needed. Recorded rather than
+   deleted, because the *reason* it was a risk still holds for the next such signature: no free
+   function in std had two bounds, so this was unprecedented rather than merely untested.
 2. **Test index stability.** The runner addresses tests by index across separate processes. Any
    nondeterminism in collection order — a `HashMap` iteration anywhere on the path — silently runs
    the wrong test and reports the wrong name. Collection must be source-ordered and that ordering
