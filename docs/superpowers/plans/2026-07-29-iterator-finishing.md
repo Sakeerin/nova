@@ -135,8 +135,10 @@ No new files in `crates/`. `hir::RecordType` is deliberately **not** modified �
         // The spec's §3.2 decision, pinned so it cannot drift silently in
         // either direction. `Int` is not an `It`, and building `M<Int, …>` is
         // accepted: the bound is a resolution scope, not a constraint. Safety
-        // comes from the impl instead: using a `M<Int>` reports E0013 at
-        // monomorphization, where every bound is discharged.
+        // does NOT come from a bound check on this shape — `M`'s field type is
+        // a bare `I`, so there is no projection to survive and no bounded
+        // method instantiated, and this program runs. See ADR 0007's three
+        // cases; this is case 3, the residual hole, deliberately pinned.
         let r = check_src(
             "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
              record M<I: It> { it: I }\n\
@@ -345,8 +347,10 @@ Add it immediately after `check_for`. It builds the same shape as the range desu
     /// without the user writing `mut`, per ADR 0005 §1). The user's `x` stays
     /// immutable, exactly as in the range form, so assigning it is `E0060`.
     ///
-    /// The `Iterator` bound is discharged at monomorphization (`E0013`) like
-    /// every other bound, not here.
+    /// A non-`Iterator` iterable is rejected *here*, at typeck, as `E0900`
+    /// ("`for` loops over anything but an integer range … are not supported
+    /// yet") — not deferred to monomorphization. Earlier drafts said `E0013`
+    /// at mono; measured false.
     fn check_for_iterator(
         &mut self,
         fcx: &mut FnCtx,
@@ -707,7 +711,7 @@ Copy the `assoc_types_run` / `assoc_types_build_standalone` / `assoc_types_under
 
 Run: `cargo build --workspace && cargo test --workspace --no-fail-fast`
 
-Expected: 616 + 3 = 619, 0 failed; **fifteen** gate configurations green (5 fixtures × 3), with the twelve pre-existing ones byte-identical.
+Expected: **fifteen** gate configurations green (5 fixtures × 3), with the twelve pre-existing ones byte-identical, and 0 failed. Do not pin a total test count here: Task 4's fix rounds moved it (623 → 629 → 630), so any number written in this plan is already stale. Take the pre-change total from your own baseline run and require exactly +3 from the registrations plus whatever Step 6a adds.
 
 - [ ] **Step 5: Prove the fixture discriminates**
 
@@ -721,7 +725,30 @@ For at least three of the seven fixture items, apply a mutation that should brea
 - **Context:** a lazy adapter needs `fn(I::Item) -> U` in a record field; in a record declaration `I` has no bound, so the projection is `E0001`; adding the bound was `E0900`, rejected since Phase 2.2a. The `A`-parameter workaround type-checks but cannot be driven, because nothing ties `A` to `I::Item` and Nova has no equality constraints.
 - **Decision:** a bound on a record's type parameter is a **resolution scope**, not a constraint. Records only; sum types keep `E0900`.
 - **Why not enforced:** `MakeRecord` carries no type arguments — the instantiation survives only in the enclosing `Expr.ty`, which lowering discards, and MIR erases records to `Ptr`. Monomorphization visits only instances reachable from `main`, so enforcement would fire *sometimes*, which is subtler than not firing at all. This is Phase 2.2a's assessment, re-affirmed.
-- **Why that is safe:** correctness comes from the impl. A `MapIter<Int, U>` cannot satisfy `impl<I: Iterator, U> Iterator for MapIter<I, U>`, so using it reports **`E0013: trait bound not satisfied when instantiating ...`** at monomorphization, where every bound in Nova is discharged. **Measured by Task 1's review; this plan and the spec both claimed `E0014` (no method), which is wrong.** The outcome is stronger than "inert": the diagnostic names the type and the trait, so a bogus instantiation is never silently useless.
+- **Why that is safe — three cases, each measured, do not collapse them.** Earlier drafts of this plan and the spec claimed one uniform answer (`E0014`, then `E0013`). Both were wrong, and the second was wrong in a specific way worth recording: `E0013` **was** measured, but on a *function's* bound (`fn f<I: It>`, `run_tests.rs:2804`) and on a record whose field type does not name a projection — then transcribed onto `MapIter`, whose field type does. Different shape, different diagnostic. The real behaviour, all three probed on the shipped compiler:
+
+  1. **The bound's purpose is to make a projection resolvable in a field type** — i.e. `MapIter { it: I, f: fn(I::Item) -> U }` and `FilterIter`, the only shapes this increment actually ships. A wrong instantiation is caught **at construction**, even if the value is never driven:
+
+     ```
+     let m = MapIter { it: 5, f: |x| x }
+     error[E0079]: `Int::Item` is still an unresolved associated type after
+                   instantiating `main`; no impl in scope binds it for this Self type
+     ```
+
+     Not the bound check — the **surviving-projection check built in Phase 2.2c Task 7**. Substituting `I := Int` leaves `Int::Item` in the field type, no impl binds it, and mono rejects it. This is *earlier and stronger* than the plan previously claimed, and it is the case that matters for the stdlib.
+
+  2. **The bound is not reflected in any field type, but is exercised through a bounded impl method** — `record Boxed<K: Hash + Eq, V> { k: K, v: V }` with `impl<K: Hash + Eq, V> Boxed<K, V> { fn key(self) -> K }`. `E0013` at that method's instantiation, one per unsatisfied bound:
+
+     ```
+     error[E0013]: trait bound `NoHash: Hash` is not satisfied when instantiating `Boxed_K_V.key`
+     error[E0013]: trait bound `NoHash: Eq` is not satisfied when instantiating `Boxed_K_V.key`
+     ```
+
+  3. **The bound is not reflected in any field type and is never exercised** — the same `Boxed`, constructed with a type implementing nothing, then only its *unbounded* field read. **Compiles, runs, prints, no diagnostic.** This is the residual hole and the ADR must state it plainly rather than imply case 2 always saves you.
+
+  So the previous sentence "a bogus instantiation is never silently useless" is **false** — case 3 is exactly that. Write the three cases; do not write a single verdict.
+
+- **This safety argument is currently unpinned by any test.** `check.rs:9622` points at "the E0014 test below" — wrong code *and* no such test exists; the nearest `E0013` test (`run_tests.rs:2804`) pins a function's bound on a record with no bounds at all. Step 6a below closes this.
 - **Consequences, stated plainly:** a record bound looks like a constraint and is not one. Name this as the risk, and name the family it belongs to — impl-level `const`s discarded, record bounds, record field visibility, `pub` on methods — all "accepted and quietly ignored" defects this project has fixed. State that the mitigation is documentation in three places rather than code, and that a future increment may replace it with real enforcement if `MakeRecord` ever carries type arguments.
 - **Alternatives considered:** eager `map`/`filter` returning `Vec` (no projection needed, allocates per stage); rejecting a bound on a parameter no field type uses (declined — inert, and a second analysis for no user benefit); threading type args through `MakeRecord` (much larger, and 2.2a's objection stands).
 
@@ -733,6 +760,25 @@ For at least three of the seven fixture items, apply a mutation that should brea
   - **Why it is safe.** `let mut it = self` *aliases* rather than copies — this compiler has no move semantics and records are heap objects passed by pointer, so the caller's iterator genuinely advances through a consumer. Measured two ways, including a record exposing its own cursor field to distinguish aliased from copied from fully-scanned. Pinned by a test. **If a future change gives Nova move semantics, re-derive this** — the whole argument rests on the copy not happening.
   - **Consequence to state plainly.** A consumer now accepts a temporary, so `v.iter().count()` compiles. That is the intent. It also means a consumer cannot be prevented from running on a value the caller no longer holds — harmless here, since consuming an iterator you have discarded is exactly what a chain does.
   - **The `for`-desugar precedent** is the same trick and should be cited: it binds its hidden iterator to a `mut` local for the same reason.
+
+- [ ] **Step 6a: Pin the three cases, and correct four stale claims in shipped code**
+
+The ADR you just wrote asserts a safety property that **no test currently checks** and that four code comments currently contradict. Close both halves.
+
+**Add three tests** (`crates/nova-cli/tests/run_tests.rs` — all three need monomorphization, so they cannot be `check_src` unit tests in `nova-typeck`; `E0079` and `E0013` are both mono diagnostics):
+
+1. `MapIter { it: 5, f: |x| x }` → `E0079` naming `Int::Item`, asserted **without driving the iterator**, since firing at construction is the property. This is the case the stdlib depends on and it is entirely unpinned today.
+2. A `Boxed`-shaped record whose bound no field type uses, driven through a bounded impl method → `E0013`. Assert on the bound spelling (`` `NoHash: Hash` ``), not just the code.
+3. The residual hole: the same record, constructed with a non-conforming type, only its unbounded field read → **succeeds**, with the expected stdout. Assert success explicitly. A test that pins an accepted gap is what stops it being rediscovered as a bug later, and stops a future enforcement change landing silently.
+
+**Correct four stale claims.** Each says a bound on a record's type parameter is `E0900`, which Task 1 falsified:
+
+- `crates/nova-typeck/src/check.rs:9622` — "see the E0014 test below": wrong code *and* a dangling reference. Repoint it at the tests you just added.
+- `crates/nova-typeck/src/check.rs:4111` (`check_for_iterator`'s doc) — "The `Iterator` bound is discharged at monomorphization (`E0013`) like every other bound, not here." **Measured false:** `for x in 5` is `error[E0900]: `for` loops over anything but an integer range … are not supported yet`, at typeck. The check *is* here.
+- `std/collections/lib.nova:83-85` (above `VecIter`) and `:329-331` (above `Set`) — both assert the `E0900` rule. `:329-331` says "is **now** a hard error", which reads as freshly verified.
+- `std/collections/lib.nova:130-132` (above `Map`) — **surgical, do not rewrite wholesale.** The conclusion ("a bound on a *record*'s type parameter is a hard error, `E0900` — `record Map<K: Hash + Eq, V>` does not compile") is false. But the mechanism sentence that follows it — "`nova-hir`'s `RecordType` keeps only a generic count and `nova-mir`'s `mono` checks bounds solely against a function's own `bounds`, so that position has no way to enforce anything" — **is still true and must survive**: verified at `crates/nova-hir/src/lib.rs:870-876` (`RecordType` has `generics: u32` and no bounds field) and `crates/nova-mir/src/mono.rs:103` (`for (i, bounds) in func.bounds.iter()`). It is also exactly the mechanism ADR 0007's "why not enforced" cites. Replace the verdict, keep the mechanism, and point at ADR 0007.
+
+`nova-spec/20-STDLIB.md`'s stale `mut self` claim is Step 7's job, not this step's.
 
 - [ ] **Step 7: Update `nova-spec` and the CHANGELOG**
 
@@ -771,7 +817,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
 ```
 
-All four clean; 619 tests, 0 failed; fifteen gate configurations green.
+All four clean; 0 failed; fifteen gate configurations green. Report the total you measured rather than matching a number written here — see Step 4.
 
 ```bash
 git add tests/runtime/iterator.nova tests/runtime/iterator.stdout \
@@ -795,7 +841,7 @@ git commit -m "test(gate): iterator fixture; docs: ADR 0007, spec, CHANGELOG"
 | §4 the `for` desugar | 2 |
 | §5 adapters | 3 |
 | §5 consumers | 4 |
-| §6 diagnostics | 2 Step 1 (reworded `E0900`), 1 Step 1 (`E0001`), 5 Step 6 (the inert-instantiation `E0013`, corrected from `E0014`) |
+| §6 diagnostics | 2 Step 1 (reworded `E0900`), 1 Step 1 (`E0001`), 5 Step 6 (the three-case story: `E0079` at construction for the projection-shaped adapters, `E0013` via a bounded impl method, silently accepted otherwise — corrected from a single `E0014`, then a single `E0013`), 5 Step 6a (pins all three) |
 | §7 gate, items 1–6 | 5 Step 1 |
 | §7 the `#[test]`s a fixture cannot hold | 1 and 2's test blocks |
 | §8 risks 1–4 | 1 Step 4's comment, 5 Step 6 (ADR consequences), 2 Step 1's range guard, 4 Step 3's `collect` comment |

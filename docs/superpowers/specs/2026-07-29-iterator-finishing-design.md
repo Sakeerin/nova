@@ -94,23 +94,43 @@ in the enclosing `Expr.ty`, which lowering discards, and MIR erases records to `
 monomorphization visits only instances reachable from `main`, so enforcement would fire
 *sometimes*, which is a subtler defect than not firing at all.
 
-**Why that is safe here — and it is stronger than "inert".** Correctness comes from the impl, not
-the record: `impl<I: Iterator, U> Iterator for MapIter<I, U>` requires the bound, so a
-`MapIter<Int, U>` cannot satisfy it. **Corrected after Task 1's review measured it**: this section
-first said `m.next()` gives `E0014: no method 'next'`. It does not. The real behaviour is
+**Why that is safe here — three cases, not one.** This section has now been wrong twice, in the
+same way each time: a diagnostic measured on one record shape was written up as the uniform answer
+for all of them. It first said `E0014: no method 'next'`. Task 1's review corrected that to
+`E0013` — but measured it on `W<T>`, a wrapper whose field type does **not** name a projection,
+and on `fn f<I: It>`, a *function's* bound. `MapIter`'s field type *does* name a projection, and
+that changes which check fires. All three cases below were probed on the shipped compiler.
+
+**Case 1 — the bound exists to make a projection resolvable in a field type.** This is
+`MapIter { it: I, f: fn(I::Item) -> U }` and `FilterIter`: the only shapes the stdlib ships. A
+wrong instantiation is caught **at construction**, without the value ever being driven:
 
 ```
-error[E0013]: trait bound `NoIt: It` is not satisfied when instantiating `W_T.It.v`
+let m = MapIter { it: 5, f: |x| x }
+error[E0079]: `Int::Item` is still an unresolved associated type after instantiating `main`;
+              no impl in scope binds it for this Self type
 ```
 
-— a bound violation reported at **monomorphization**, because the impl matches structurally and
-its bound is then discharged exactly where every other bound in Nova is discharged.
+That is not the bound check — it is the **surviving-projection check built in Phase 2.2c Task 7**.
+Substituting `I := Int` leaves `Int::Item` in the field type and no impl binds it. Earlier *and*
+more reliable than this design claimed, and it needs no method call to trigger.
 
-That is a better outcome than the one this design argued for. The record bound is not enforced at
-construction, but the *impl's* bound is enforced at first use, so a bogus instantiation is not
-silently useless — it is a loud, specific diagnostic naming the type and the trait. The honesty
-concern below is correspondingly smaller: the language never pretends the instantiation is
-fine, it just defers the complaint to the point of use.
+**Case 2 — the bound is absent from every field type but is exercised through a bounded impl
+method.** `record Boxed<K: Hash + Eq, V> { k: K, v: V }` plus
+`impl<K: Hash + Eq, V> Boxed<K, V> { fn key(self) -> K }`, instantiated with a type implementing
+neither, gives one `E0013` per unsatisfied bound at that method's instantiation:
+
+```
+error[E0013]: trait bound `NoHash: Hash` is not satisfied when instantiating `Boxed_K_V.key`
+error[E0013]: trait bound `NoHash: Eq` is not satisfied when instantiating `Boxed_K_V.key`
+```
+
+**Case 3 — the bound is absent from every field type and never exercised.** The same `Boxed`,
+constructed with a non-conforming type, with only its unbounded field read: **compiles, runs,
+prints, no diagnostic.** No projection survives, so `E0079` has nothing to catch; no bounded
+method is instantiated, so `E0013` never runs. This is the residual hole.
+
+So the claim this section used to make — that a bogus instantiation is "never silently useless" — is false: case 3 is exactly that. The decision still stands, because case 1 covers every shape the stdlib actually ships and covers it earlier than a bound check would. But the hole is real and must be stated, not implied away.
 
 **The risk to design against.** "Accepted and quietly ignored" is this project's most-repeated
 defect: impl-level `const`s discarded (fixed `3c8127e`), record bounds themselves, record field
@@ -203,7 +223,9 @@ The increment's user interface is its errors.
 |---|---|
 | `for x in <not a range, not an Iterator>` | reworded `E0900`. Today's text — "`for` loops over anything but an integer range" — becomes false when §4 lands. The new text must name both accepted forms **and** mention `.iter()`, because `for x in v` is the mistake people will make. |
 | `record M<I: NoSuchTrait>` | `E0001` on the trait name, not a silent skip |
-| `MapIter<Int, U>` then `.next()` | **`E0013: trait bound 'Int: Iterator' is not satisfied when instantiating …`**, at monomorphization — *not* `E0014`, which is what this row claimed before Task 1's review measured it. The impl matches structurally, so its bound is discharged where every bound is. This is the better outcome: the diagnostic names the type and the trait rather than complaining a method is missing. |
+| `MapIter<Int, U>` — constructed, never driven | **`E0079`: `Int::Item` is still an unresolved associated type**, at monomorphization. This row has been wrong twice: first `E0014`, then `E0013` (Task 1's review measured `E0013` on a differently-shaped record and on a function's bound, then transcribed it here). Because `MapIter`'s field type names `I::Item`, the surviving-projection check fires at construction — no method call needed. See §3.2 case 1. |
+| A record bound absent from every field type, used via a bounded impl method | `E0013`, one per unsatisfied bound, naming the type and the trait. §3.2 case 2. |
+| The same, never used | **Accepted, compiles and runs, no diagnostic.** §3.2 case 3 — the residual hole this decision accepts. |
 | `record M<I: Iterator> { v: Int }` — bound on a parameter no field type uses | **Accepted silently.** Rejecting it was considered and declined: the bound is inert, harmless, and detecting "unused by any field type" is a second analysis for no user benefit. Noted here so its absence is a decision rather than an oversight. |
 | An iterable whose `Iterator` bound is unsatisfied | `E0013` at monomorphization, as everywhere else |
 
@@ -223,7 +245,7 @@ The increment's user interface is its errors.
    classes**. An `Int`/`String` pair tests nothing at the monomorphization seam.
 
 Separately as `#[test]`s, since a fixture cannot contain a compile failure: the reworded `E0900`;
-`E0001` for an unresolvable record bound; and the inert-instantiation diagnostic, which is `E0013` at monomorphization, not `E0014` (measured; see the table above).
+`E0001` for an unresolvable record bound; and all three instantiation cases from §3.2 — `E0079` at construction for a projection-shaped field, `E0013` via a bounded impl method, and silent acceptance otherwise. Pin all three: the third is what stops an accepted gap being rediscovered as a bug, and none of them is pinned today.
 
 ## 8. Risks
 
