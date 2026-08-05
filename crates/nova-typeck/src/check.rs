@@ -4887,9 +4887,16 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolve a field name on a record type to its `(index, substituted type)`.
+    /// Resolve a field name on a record type to its `(index, instantiated type)`.
     /// Shared by the field read and field write paths so they cannot disagree
-    /// about layout or generic substitution.
+    /// about layout or about how a field's declared type is instantiated.
+    ///
+    /// "Instantiated", not merely "substituted": the type goes through
+    /// `instantiate`, which substitutes the record's type arguments, applies the
+    /// current inference bindings, and normalizes a projection that survives
+    /// both. That matters because a field type may name a projection on one of
+    /// the record's own bounded parameters (`f: fn(I::Item) -> U`), and `unify`
+    /// never normalizes — see `instantiate`'s own doc comment.
     ///
     /// Emits no diagnostics: a `None` means "no such field on this type", and
     /// each caller phrases that in its own terms.

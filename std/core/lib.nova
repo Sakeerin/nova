@@ -170,9 +170,9 @@ pub trait Hash { fn hash(self) -> Int }
 //
 // Deliberately no count and no method list here. Both used to be written out —
 // "the **six** traits above" and `fmt`/`eq`/`cmp`/`clone`/`default` — and both
-// were wrong by the time anyone read them: there are seven traits above, and
-// the list silently omitted `dbg` and `hash`. "Six" was correct until `Hash`
-// landed in Phase 2.2a, and the list was never complete. A hand-maintained
+// were wrong by the time anyone read them: `Hash` landing in Phase 2.2a left
+// the tally short, and the list silently omitted `dbg` and `hash`. "Six" was
+// correct when written, and the list was never complete. A hand-maintained
 // tally of "the traits above", in the one file that gains traits, drifts by
 // construction; grep `^pub trait` above this line for the current set, and the
 // `impl <Trait> for <primitive>` block near the bottom of this file for which
