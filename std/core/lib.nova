@@ -162,11 +162,21 @@ pub trait Hash { fn hash(self) -> Int }
 // means a hand-written `while` plus a `match` on the `Option`, or `for x in
 // it`, or now one of the six methods below.
 //
-// Unlike the six traits above, this one is implemented for **no** primitive, so
+// Unlike the traits above, this one is implemented for **no** primitive, so
 // `next` is not taken away from user code on `Int`/`Float`/`Bool`/`Char`/
-// `String` the way `fmt`/`eq`/`cmp`/`clone`/`default` are (ADR 0004,
-// "Method names are not soft-reserved"). A user `trait Feed { fn next(...) }`
-// stays usable on those types.
+// `String` the way each of *their* methods is (ADR 0004, "Method names are not
+// soft-reserved"). A user `trait Feed { fn next(...) }` stays usable on those
+// types.
+//
+// Deliberately no count and no method list here. Both used to be written out —
+// "the **six** traits above" and `fmt`/`eq`/`cmp`/`clone`/`default` — and both
+// were wrong by the time anyone read them: there are seven traits above, and
+// the list silently omitted `dbg` and `hash`. "Six" was correct until `Hash`
+// landed in Phase 2.2a, and the list was never complete. A hand-maintained
+// tally of "the traits above", in the one file that gains traits, drifts by
+// construction; grep `^pub trait` above this line for the current set, and the
+// `impl <Trait> for <primitive>` block near the bottom of this file for which
+// of their methods each primitive really has.
 pub trait Iterator {
     type Item
     fn next(mut self) -> Option<Self::Item>
@@ -189,11 +199,17 @@ pub trait Iterator {
     // does not need its *own* receiver to already be a mutable place; it only
     // needs a mutable place to drive `next` through, and it makes its own with
     // `let mut it = self`. Records are heap objects with no copy semantics
-    // anywhere in this compiler, so `it` is an alias of exactly the storage
-    // `self` pointed to, not a copy — advancing `it` advances the same
-    // iterator the caller passed in.
+    // anywhere in this compiler, so for a record `Self` `it` is an alias of
+    // exactly the storage `self` pointed to, not a copy — advancing `it`
+    // advances the same iterator the caller passed in.
     // `an_iterators_own_storage_still_advances_when_a_consumer_takes_
     // plain_self` (`crates/nova-cli/tests/run_tests.rs`) pins the aliasing.
+    //
+    // "For a record `Self`" is a real condition, not a hedge: nothing in this
+    // trait requires one. `impl Iterator for Int` compiles, a primitive is
+    // passed by value, so the rebind copies and all four consumers **diverge**
+    // rather than returning a wrong number. Pre-existing (hand-driving such an
+    // impl loops forever too) and measured — see ADR 0007 §2, "Why it is safe".
     //
     // This is what lets `v.iter().filter(f).map(g).collect()` — the form this
     // feature exists to make possible — compile at all: `.filter()`/`.map()`
@@ -292,15 +308,35 @@ pub trait Iterator {
 // is built — `impl<I: Iterator, U> Iterator for MapIter<I, U>` below is what
 // makes a `MapIter` iterable, not this declaration.
 //
-// That does not make a `MapIter<Int, U>` buildable, though: `f`'s own field
-// type names `I::Item`, and `Int::Item` has nothing to resolve to (`Int` has
-// no `Iterator` impl), so `f`'s declared type never normalizes and no
-// closure — none, for any `f` — can unify against it. `MapIter<Int, U>` is
-// unconstructible, not merely inert: the bound was meant to leave
-// construction unconstrained, with only *use* as an iterator blocked, but a
-// field that actually names the projection enforces it at construction
-// anyway — earlier and more strictly than that — by a mechanism that has
-// nothing to do with the bound itself.
+// That does not make a `MapIter<Int, U>` freely buildable, though: `f`'s own
+// field type names `I::Item`, and `Int::Item` has nothing to resolve to (`Int`
+// has no `Iterator` impl), so `f`'s declared type never normalizes. What
+// happens then depends on the closure and on reachability, and it is ADR 0007
+// §1 (case 1, and its routing table) that has the mechanism — read it there
+// rather than reconstructing it from here. Two things this comment used to get
+// wrong, both measured:
+//
+//   - "no closure — none, for any `f` — can unify against it" is **false**.
+//     `MapIter { it: 5, f: |x| x }` produces no unification error at all:
+//     typeck accepts it and monomorphization refuses it with
+//     `error[E0079]: 'Int::Item' is still an unresolved associated type after
+//     instantiating 'main'`. A fresh inference variable binds to an
+//     unnormalized projection just as happily as to a concrete type. Only an
+//     *annotated* closure fails to unify — `f: |x: Int| x` is
+//     `error[E0010]: field 'f' expects 'fn(Int::Item) -> ?N' but found
+//     'fn(Int) -> Int'`, plus four `E0011`s for the variables it left free.
+//   - "unconstructible" full stop, and "caught at construction" full stop, are
+//     **false when the construction is not reachable from `main`**, because the
+//     mechanism is monomorphization and it inherits monomorphization's reach. A
+//     `MapIter { it: 5, f: |x| x }` inside a function `main` never calls is
+//     accepted: `nova check` exits 0 with no diagnostic and the program runs.
+//     ADR 0007 §1 states the qualifier and shows the measurement.
+//
+// So: a bad instantiation of these two shapes is refused wherever it is
+// actually instantiated, and nowhere else. That is still earlier and stronger
+// than the bound itself promises — the bound was meant to leave construction
+// unconstrained and block only *use* as an iterator — and it still has nothing
+// to do with the bound.
 //
 // Holds `it` by pointer, like every record, so it SHARES the source iterator
 // rather than copying it — advancing this adapter advances the source, and
@@ -329,8 +365,14 @@ impl<I: Iterator, U> Iterator for MapIter<I, U> {
 //
 // `I`'s bound is a resolution scope here for the same reason it is on `MapIter`
 // above — it is what lets `keep` name `I::Item` at all, and it is not checked
-// when a `FilterIter` is built. See `MapIter`'s comment and ADR 0007 for the
-// full account, including why `FilterIter<Int>` is nonetheless unconstructible.
+// when a `FilterIter` is built. See `MapIter`'s comment and ADR 0007 §1 (case 1
+// and its routing table) for the full account, including what actually happens
+// to a `FilterIter<Int>`: it is refused wherever it is instantiated — measured,
+// `FilterIter { it: 5, keep: |x| true }` in `main` is one `E0079` from
+// monomorphization, and `keep: |x: Int| true` is instead one `E0010` naming
+// `fn(Int::Item) -> Bool` — but **not** when the construction site is
+// unreachable from `main`, since the mechanism is monomorphization. This
+// comment previously said "unconstructible" without that qualifier.
 pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
 
 impl<I: Iterator> Iterator for FilterIter<I> {

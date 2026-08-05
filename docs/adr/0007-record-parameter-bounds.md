@@ -378,6 +378,42 @@ would report as `3` both times.
 argument rests on the copy not happening. Nothing in the type system says so;
 it is a property of the current lowering.
 
+**And it is only safe because `Self` is a record — which the trait does not
+require.** The paragraph above says "records are heap objects passed by
+pointer", and that is exactly the condition. `Self` need not be a record:
+`impl Iterator for Int` compiles today, and for a primitive `Self` the rebind
+**copies**, because a primitive is passed by value. Measured, with an
+`impl Iterator for Int` whose `next` decrements `self` and returns it:
+
+```nova
+let mut a = 3
+let n = a.next()     // Some(2)
+                     // a is still 3
+```
+
+`next`'s own `mut self` receiver already copies, so `a` never advances — and
+then every consumer built on `let mut it = self` drives an iterator that resets
+on each call and **never terminates**. Measured on this impl: `count()`,
+`fold(0, |acc, x| acc + 1)`, `collect()` and `any(|x| x > 99)` were each killed
+at a 20-second timeout with no output. (`any` is the one that can still return:
+a predicate that matches early short-circuits — `any(|x| x > 1)` gives `true`.)
+
+This is **pre-existing behaviour, not a regression from this decision**. The
+hand-written `while` plus `match` form on the same impl loops forever too —
+verified by adding a counter and a `break` at a million iterations, which fired.
+Nothing about plain `self` caused it; a primitive `Self` was already
+un-drivable, and the four consumers only make the same defect reachable through
+one call instead of four lines.
+
+It is recorded here because **a hang is a worse failure mode than a wrong
+value**, and this section previously warned only about the milder one (a future
+move-semantics change producing a silent copy, which would show up as a
+consumer returning the wrong number). A copy is already happening today, on a
+`Self` type this trait accepts, and the symptom is divergence. If a future
+increment wants primitive `Self` types to work, the fix is at the receiver
+(`next` needs a mutable *place*, which a by-value primitive receiver cannot
+give it), not in the consumers.
+
 ### What bounds the loss
 
 Three things, all of them limits that already existed:

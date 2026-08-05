@@ -241,8 +241,17 @@ fn main() {
     // type names a projection on the parameter an earlier field pins: with `f`
     // written before `it`, `I` is not yet concrete when `f` is checked, so the
     // same literal is rejected. Measured on THIS block with the two fields
-    // swapped: **exactly one `E0010`** (`field 'f' expects 'fn(?9::Item) ->
-    // ?10' but found 'fn(Int) -> Int'`) and no second diagnostic.
+    // swapped: **exactly one `E0010`** (`field 'f' expects 'fn(?N::Item) -> ?M'
+    // but found 'fn(Int) -> Int'`) and no second diagnostic.
+    //
+    // The `?N`/`?M` are deliberately not real numerals. An earlier version of
+    // this comment quoted `?9`/`?10`, which were measured on a smaller program
+    // and were never this block's — re-measured here, the same swap gives
+    // `?45`/`?46`. An inference-variable index counts every variable `main`
+    // allocated before that point, so *any* edit earlier in `main` renumbers
+    // them, in a fixture whose whole purpose is to keep growing. The shape
+    // (`fn(?N::Item) -> ?M`, an unresolved projection on an unsolved variable)
+    // is the load-bearing part and the part that stays true.
     //
     // Whether that `E0010` also drags `E0011`s behind it is a property of the
     // surrounding shape, not of the swap, so do not carry a count from one

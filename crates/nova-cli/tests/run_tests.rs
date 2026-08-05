@@ -3352,6 +3352,146 @@ fn an_iterators_own_storage_still_advances_when_a_consumer_takes_plain_self() {
         .stdout("true\n3\n3\n3\n");
 }
 
+/// `continue` inside `for x in <an iterator>`. Nothing covered it anywhere:
+/// `tests/runtime/break_continue.nova` is range-only and `tests/runtime/
+/// iterator.nova` has no `continue` at all. Written here rather than added to
+/// that fixture so the gate's checked-in `.stdout` stays untouched.
+///
+/// Worth its own test because the two `for` desugars get this right by
+/// *opposite* mechanisms, so a test of one says nothing about the other. The
+/// range form has to deliberately hoist its increment above the body, precisely
+/// because a `continue` would otherwise jump past it (its own comments in
+/// `check_for_range`, `crates/nova-typeck/src/check.rs`, say so). The iterator
+/// form gets it for free: `next()` is the `match` scrutinee, so it sits *in* the
+/// body and a `continue` re-enters through it. That freeness is fragile in a
+/// specific, plausible way: hoisting `next()` out of the body so the `while true`
+/// placeholder can carry a real condition forces the advance to the *end* of the
+/// body, which is exactly where a `continue` jumps past it — the range desugar's
+/// hazard, imported. That restructure is a refactor rather than a one-line
+/// mutation, so it was **not** run here; what was measured is narrower and
+/// enough to justify the test. Removing `check_for_iterator`'s
+/// `fcx.loop_depth` bracket fails this test and
+/// `a_map_iter_calls_f_lazily_not_all_up_front` and nothing else in the
+/// workspace — so `break` in this position already had exactly one pin, and
+/// `continue` had none anywhere: before this test the only `continue` in any
+/// fixture or suite was over an integer *range*.
+///
+/// `break` is exercised in the same loop, and the totals discriminate: skipping
+/// `2` and stopping before `4` gives `1 + 3 = 4`, which no other combination of
+/// "continue ignored" (`1+2+3 = 6`), "break ignored" (`1+3+4+5 = 13`) or "both
+/// ignored" (`15`) produces. The element counter separates a `continue` that
+/// skipped the rest of the body from one that skipped the *iteration*.
+#[test]
+fn continue_and_break_work_inside_a_for_loop_over_an_iterator() {
+    let src = "fn main() {\n\
+                   let mut v = Vec::new()\n\
+                   v.push(1)\n\
+                   v.push(2)\n\
+                   v.push(3)\n\
+                   v.push(4)\n\
+                   v.push(5)\n\
+                   let mut total = 0\n\
+                   let mut seen = 0\n\
+                   for x in v.iter() {\n\
+                       seen = seen + 1\n\
+                       if x == 2 { continue }\n\
+                       if x == 4 { break }\n\
+                       total = total + x\n\
+                   }\n\
+                   println(\"total=${total} seen=${seen}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-for-continue");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("total=4 seen=4\n");
+}
+
+/// `for x in it` where `it: I` is a **generic parameter bounded by `Iterator`**.
+/// Nothing covered it: `a_generic_function_over_iterator_resolves_item_per_
+/// instantiation` above drives `next()` by hand, and every `for`-over-iterator
+/// test binds a concrete receiver.
+///
+/// It is the one `for` path whose loop variable binds at an **unnormalized**
+/// projection. `check_for_iterator` reads the item type off `next`'s result with
+/// a raw `payload.subst(&args)` — correct by design, since inside a generic
+/// function there is no impl to normalize against yet — so `x`'s type stays
+/// `Assoc { on: Param(i) }` all the way to monomorphization, and seam 3 is the
+/// only thing that ever resolves it. That is exactly the configuration whose
+/// failure mode was this area's worst historical bug: a projection reaching
+/// `mir_ty` as `MirTy::Unit`, which drops the parameter from the Cranelift
+/// signature rather than reporting anything.
+///
+/// **Instantiated at `Bool` and at `Float`, not just `Int`.** `mir_ty` maps
+/// `Int` and `Char` to `I64` and every heap type to `Ptr` (also `i64` on
+/// x86-64), so an `Int` item type is the weakest possible choice — a wrong
+/// answer hides inside its own machine class. `Bool` is `I8` and `Float` is
+/// `F64`; `Float` is the strictly stronger of the two, because it crosses
+/// register banks, where `Bool`'s only values (0 and 1) survive an `I64`
+/// confusion intact.
+///
+/// Two shapes, because counting alone would not notice a wrong item type.
+/// `count_via_for` only increments, so it pins that the loop *runs* the right
+/// number of times over a bounded generic. `first_via_for` carries the loop
+/// variable back out at `Option<I::Item>` and lets `main` consume it
+/// concretely — `if b.unwrap()` needs a real `Bool` and `${f.unwrap()}`
+/// dispatches `Display` on a real `Float`. The `Bool` source yields `true`
+/// first on purpose: a payload dropped or zeroed by a `MirTy::Unit` item type
+/// would read back as `false`, so `true` is the value that cannot be faked.
+#[test]
+fn a_for_loop_over_a_generic_iterator_bound_binds_its_item_at_each_instantiation() {
+    let src = "record BoolSrc { n: Int }\n\
+               impl Iterator for BoolSrc {\n\
+                   type Item = Bool\n\
+                   fn next(mut self) -> Option<Bool> {\n\
+                       if self.n >= 3 { return None }\n\
+                       self.n = self.n + 1\n\
+                       Some(self.n == 1)\n\
+                   }\n\
+               }\n\
+               record FloatSrc { n: Int }\n\
+               impl Iterator for FloatSrc {\n\
+                   type Item = Float\n\
+                   fn next(mut self) -> Option<Float> {\n\
+                       if self.n >= 2 { return None }\n\
+                       self.n = self.n + 1\n\
+                       Some(2.5)\n\
+                   }\n\
+               }\n\
+               fn first_via_for<I: Iterator>(it: I) -> Option<I::Item> {\n\
+                   for x in it { return Some(x) }\n\
+                   None\n\
+               }\n\
+               fn count_via_for<I: Iterator>(it: I) -> Int {\n\
+                   let mut n = 0\n\
+                   for x in it { n = n + 1 }\n\
+                   n\n\
+               }\n\
+               fn main() {\n\
+                   let b = first_via_for(BoolSrc { n: 0 })\n\
+                   if b.unwrap() { println(\"bool=true\") } else { println(\"bool=false\") }\n\
+                   let f = first_via_for(FloatSrc { n: 0 })\n\
+                   println(\"float=${f.unwrap()}\")\n\
+                   println(\"bools=${count_via_for(BoolSrc { n: 0 })}\")\n\
+                   println(\"floats=${count_via_for(FloatSrc { n: 0 })}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-for-generic-bound");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("bool=true\nfloat=2.5\nbools=3\nfloats=2\n");
+}
+
 /// Iteration end-to-end gate (Phase 2.2d, Task 5). One program covering every
 /// item of the increment's gate list — `for` over a `Vec` via `.iter()`, `for`
 /// over an integer range (a regression guard, since Task 2 rewrote the function

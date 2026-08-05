@@ -148,6 +148,17 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
     // declarations via `self.defs` (already fully resolved before `check`
     // runs) and `decl.supertraits`, so it has no ordering dependency on
     // `collect_type_arities`, `collect_records`, or `collect_sums`.
+    //
+    // It did change the *order* diagnostics are rendered in, and nothing sorts
+    // `self.diagnostics` before rendering, so pass order is emission order.
+    // Measured on one program carrying an unresolvable supertrait, a duplicate
+    // record generic and a sum-type bound: `E0001` -> `E0403` -> `E0900` now,
+    // `E0403` -> `E0900` -> `E0001` with this call back in its old slot (the
+    // move was re-run in both directions to confirm it, not inferred from the
+    // pass list). Cosmetic — every diagnostic is still reported, with its own
+    // span — and recorded rather than fixed: stabilizing order would mean
+    // sorting by span, which is a separate decision affecting every diagnostic
+    // in the compiler.
     checker.collect_supertraits();
     checker.collect_records();
     checker.collect_sums();
@@ -2565,6 +2576,41 @@ impl<'a> Checker<'a> {
     /// determines it must come first. `fn f<I: It>(y: I::Item, x: I)` still fails
     /// — see the design doc §4.2, whose claim that `Assoc { on: Var(_) }` is
     /// unreachable holds for receivers but not for this shape.
+    ///
+    /// # One known site that should call this and does not
+    ///
+    /// [`Checker::emit_inherent_call`] substitutes an inherent method's
+    /// parameter types (`let expected = param.subst(&type_args)`) and its return
+    /// type (`let ret = sig.ret.subst(&type_args)`) with **no** normalization,
+    /// although it has already unified the receiver against the impl's self type
+    /// a few lines above — so the projection's root is concrete by then and this
+    /// helper's precondition is met. [`Checker::emit_trait_call`] routes the same
+    /// two positions through here. The asymmetry rejects a valid program:
+    ///
+    /// ```text
+    /// record W<T> { v: T }
+    /// impl<I: Iterator> W<I> { fn echo(self, d: I::Item) -> I::Item { d } }
+    /// // with `Cur: Iterator, Item = Bool` and `w: W<Cur>`:
+    /// //   w.echo(true)
+    /// //   => error[E0010]: argument has type `Bool` but `Cur::Item` was expected
+    /// ```
+    ///
+    /// Measured, both directions: routing those two lines through `instantiate`
+    /// makes that program compile and run, with the whole workspace suite still
+    /// green and every gate configuration passing; reverting brings the `E0010`
+    /// straight back. **Left unfixed on purpose.** It is a behaviour
+    /// change — programs that are rejected today would start compiling — so it
+    /// needs its own test and its own review, and it is *not* a defect this
+    /// increment introduced: it needs only an impl-block bound plus Phase 2.2c
+    /// associated types, no feature from the record-parameter-bounds work.
+    ///
+    /// This is recorded here because the enumeration of raw-`subst` sites
+    /// reachable by a projection — the thing the 2.2c design doc's own
+    /// correction says to consult *instead of* a seam count — was believed
+    /// complete at five and is not. `emit_assoc_call` has the same textual
+    /// shape but is a different case: with no receiver there is nothing to pin
+    /// the impl's parameters, so it fails as `?N::Item` (this helper's admitted
+    /// hole above), not as a missing normalization.
     fn instantiate(&mut self, ty: &Ty, args: &[Ty], icx: &InferCtx, span: Span) -> Ty {
         let ty = ty.subst(args);
         if !ty.has_assoc() {
@@ -4078,9 +4124,21 @@ impl<'a> Checker<'a> {
     /// and keep checking the body rather than bail — is stated once here instead
     /// of in two copies that can drift.
     ///
-    /// A `mut` on the pattern is deliberately dropped: a `for` loop variable is
-    /// immutable in both desugars, so `for mut i in …` gets the same immutable
-    /// binding (and the same `E0060` on assignment) as `for i in …`.
+    /// A `for` loop variable is immutable in both desugars, so assigning it is
+    /// `E0060` — measured: `for i in 0..3 { i = i + 1 }` is
+    /// `error[E0060]: cannot assign to immutable variable 'i'`.
+    ///
+    /// The `..` in the `Ident` arm below discards `ast::Pattern::Ident`'s
+    /// `is_mut`, and that discard is **currently unreachable from source**: the
+    /// parser rejects a `mut` in this position before any pattern exists, so
+    /// there is no binding to make immutable and no `E0060` to compare against.
+    /// Measured, both spellings: `for mut i in 0..3` and `for mut x in v.iter()`
+    /// are each `error[P0001]: expected pattern (in statement), found 'mut'`.
+    /// An earlier version of this comment said `for mut i in …` "gets the same
+    /// immutable binding (and the same `E0060` on assignment) as `for i in …`",
+    /// which describes a program that cannot be written. The discard stays as
+    /// the right answer for if the parser ever accepts the form — not as a
+    /// statement about today's behaviour.
     fn for_loop_var(&mut self, pattern: &Spanned<ast::Pattern>) -> (String, Span) {
         match &pattern.value {
             ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
@@ -4676,12 +4734,43 @@ impl<'a> Checker<'a> {
         let mut ordered = Vec::with_capacity(record.fields.len());
         let mut missing = Vec::new();
         for (idx, field) in record.fields.iter().enumerate() {
-            // Same normalization seam as above: these types flow straight into
-            // `MakeRecord`'s `hir::Expr`s and from there to `mir_ty`, which maps
-            // a surviving `Assoc` to `MirTy::Unit` — silently dropping a
-            // parameter rather than reporting anything (see `nova-mir::mir_ty`'s
-            // doc comment). Leaving a field's stored type un-normalized here
-            // would not be a diagnostic gap but a miscompile.
+            // Same normalization seam as above, but **defence in depth, not a
+            // load-bearing seam — and no test pins it.** Deliberate, and
+            // recorded as such rather than left to look like a mutation that
+            // got away (the convention `instantiate`'s own doc comment sets for
+            // its `has_assoc` guard).
+            //
+            // Measured: replacing this line with the pre-increment
+            // `field.ty.subst(&type_args)` leaves the entire suite green — zero
+            // failures, every gate configuration included — and the two probes
+            // that exercise the shape are byte-identical either way
+            // (`MapIter { it: 5, f: |x| x }` is one `E0079` from mono;
+            // `f: |x: Int| x` is one `E0010` plus four `E0011`).
+            //
+            // The reason is structural, so it is not a coverage gap that a new
+            // test would close. These types do flow into `MakeRecord`'s
+            // `hir::Expr`s, but `Specializer::expr` (`crates/nova-mir/src/mono.rs`)
+            // rewrites `ty: self.ty(&expr.ty)` on **every** expression node it
+            // clones, and `MakeRecord`'s field exprs go through `self.exprs`
+            // like any other operand. `Specializer::ty` substitutes *and*
+            // normalizes, recording `E0079` when a projection cannot resolve.
+            // So a raw `subst` here cannot reach `mir_ty`: normalization seam 3
+            // re-normalizes it first, and the worst case is a diagnostic, never
+            // the `MirTy::Unit` an earlier version of this comment claimed
+            // ("would not be a diagnostic gap but a miscompile" — measured
+            // false, by the mutation above).
+            //
+            // Contrast the sibling seam at `let expected = …` above, which is
+            // the real one: there the type is unified against a field
+            // initializer *inside typeck*, so failing to normalize is a
+            // spurious `E0010` that mono never gets to see — a genuine
+            // diagnostic gap, and pinned by
+            // `a_record_field_initializer_normalizes_a_projection_once_its_
+            // parameter_is_concrete`. Keep both routed through `instantiate`
+            // anyway: one seam per read of `field.ty` is the invariant that
+            // makes this function easy to reason about, and relying on a
+            // downstream crate to clean up after this one is a coupling worth
+            // paying a redundant call to avoid.
             let field_ty = self.instantiate(&field.ty, &type_args, &fcx.icx, span);
             if let Some(local) = provided.get(&field.name) {
                 ordered.push(hir::Expr {
@@ -9241,6 +9330,108 @@ mod tests {
         );
     }
 
+    /// `check_for_iterator` pushes a scope holding its hidden `__it` local so
+    /// that `emit_trait_call`'s `place_root` can resolve the receiver as a
+    /// *path*, then pops it before the body is checked. That pop is the whole
+    /// hygiene mechanism, and it had **no coverage**: with the single
+    /// `fcx.scopes.pop()` line deleted, this test is the *only* failure in the
+    /// whole workspace — measured, not inferred — and this compiles and prints
+    /// `stole 2`:
+    ///
+    /// ```nova
+    /// for x in v.iter() { match __it.next() { Some(y) => println("stole ${y}"), None => … } }
+    /// ```
+    ///
+    /// Worth pinning specifically because the *range* desugar's version of the
+    /// same property is structurally safer and yet is the one with a test
+    /// (`for_loop_does_not_shadow_user_end`): its hidden locals are made with
+    /// `new_local_unscoped` and never enter a scope at all, so there is nothing
+    /// to leak. The iterator desugar cannot do that — `place_root` resolves an
+    /// AST name against the scopes — so it inserts and then relies on a matching
+    /// pop, which is exactly the shape that one deleted line breaks.
+    ///
+    /// Both directions are asserted, because they fail differently. `__it`
+    /// unreachable from the body is `E0001`; a user's own `__it` staying visible
+    /// and *unshadowed* is the same leak seen from the other side — under the
+    /// mutation the body's `__it` resolves to the hidden `VecIter`, so the
+    /// second half reports `E0013` (no `Display`) rather than compiling clean.
+    #[test]
+    fn a_for_loops_hidden_iterator_local_is_not_reachable_from_the_body() {
+        let decls = "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
+                     record Once { v: Int, done: Bool }\n\
+                     impl It for Once { type Item = Int\n\
+                      fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true\n Some(self.v) } } }\n\
+                     fn make_once() -> Once { Once { v: 7, done: false } }\n";
+        let stolen = check_src(
+            &(decls.to_string()
+                + "fn main() { for x in make_once() {\n\
+                    match __it.next() { Some(y) => println(\"stole ${y}\"), None => println(\"none\") } } }"),
+        );
+        let d = stolen
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0001")
+            .expect("E0001: `__it` is not a name the body can see");
+        assert!(d.message.contains("__it"), "names it: {}", d.message);
+
+        // And it does not shadow a user's own binding of that name either: the
+        // scope the desugar pushes is gone before the body is checked, so
+        // `__it` here is still the `Int`.
+        let shadowed = check_src(
+            &(decls.to_string()
+                + "fn main() { let __it = 99\n\
+                    for x in make_once() { println(\"${x} ${__it}\") }\n\
+                    println(\"${__it}\") }"),
+        );
+        assert_eq!(
+            error_codes(&shadowed),
+            Vec::<&str>::new(),
+            "{:?}",
+            shadowed.diagnostics
+        );
+    }
+
+    /// `iterator_next`'s `if sum.variants.len() != 2` guard, which nothing
+    /// pinned. It is reachable from ordinary source: `Some`/`None` are not
+    /// reserved, so a user can declare a three-variant sum that still has an
+    /// `Option`-shaped pair inside it and return that from `next`. Measured —
+    /// `type Tri = | Some(Int) | None | Third` compiles and `Third` is
+    /// constructible, so the shape below is writable, not hypothetical.
+    ///
+    /// The guard is load-bearing, not defensive. Without it the desugar reads
+    /// `Some`/`None` off by name and builds a **two**-arm match over a
+    /// three-variant sum, and exhaustiveness never runs on a synthesized match
+    /// (see `a_for_loop_over_an_iterator_breaks_on_none`'s doc comment, which
+    /// measured exactly that for a different mutation): a `Third` would reach
+    /// the switch's default `Terminator::Trap` at runtime with no diagnostic
+    /// anywhere. Measured, with the guard deleted: this test is the *only*
+    /// failure in the whole workspace, and the program below then passes
+    /// `nova check` with **zero** diagnostics and dies at run time with
+    /// `Illegal instruction` (exit 132).
+    ///
+    /// So this asserts the rejection, and does it by code *and* by message,
+    /// since `E0900` is this file's code for every unsupported form.
+    #[test]
+    fn a_next_returning_a_three_variant_sum_is_not_an_iterator() {
+        let r = check_src(
+            "type Tri = | Some(Int) | None | Third\n\
+             record R { n: Int }\n\
+             trait It3 { fn next(mut self) -> Tri }\n\
+             impl It3 for R { fn next(mut self) -> Tri { Third } }\n\
+             fn main() { let r = R { n: 0 }\n for x in r { println(\"${x}\") } }",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .expect("E0900: a three-variant return is not `Option`-shaped");
+        assert!(
+            d.message.contains("Iterator"),
+            "the not-an-iterator message, not some other E0900: {}",
+            d.message
+        );
+    }
+
     #[test]
     fn conforming_impl_with_args_ok() {
         let r = check_src(
@@ -9456,13 +9647,20 @@ mod tests {
         // `reject_type_param_bounds` is still live for sum types (Task 1 only
         // dropped the record caller) and its own doc comment promises "one
         // diagnostic per bounded parameter, so a second offender is not
-        // hidden behind the first." The record-side version of this guard,
-        // `record_type_param_bound_e0900_reports_every_bounded_param`, was
-        // rewritten by Task 1 to assert an *empty* diagnostic list instead of
-        // a count of two, since records no longer reject the bound at all —
-        // which left no test anywhere in this file asserting an `E0900`
-        // *count* greater than one. This is that guard, moved to the path
-        // that still has the behavior it checks.
+        // hidden behind the first." Task 1 removed the record caller, so the
+        // record-side version of this guard could not survive as a count: it
+        // became *this* test, on the sum-type path that still has the
+        // behavior, and the empty-diagnostic-list assertion that replaced it
+        // for records lives in a separate test,
+        // `multiple_record_type_param_bounds_no_longer_report_e0900` (just
+        // below). Without this one, no test anywhere in this file would assert
+        // an `E0900` *count* greater than one.
+        //
+        // An earlier version of this comment named a
+        // `record_type_param_bound_e0900_reports_every_bounded_param` as
+        // having been "rewritten by Task 1" — no test of that name exists, in
+        // this file or anywhere else, so the citation pointed a reader at
+        // nothing. Both surviving tests are named above instead.
         let r = check_src(
             "trait A { fn a(self) -> Int }\n\
              trait B { fn b(self) -> Int }\n\
@@ -9550,8 +9748,11 @@ mod tests {
     fn a_record_bound_resolves_when_the_bounded_parameter_is_not_first() {
         // `resolve_bounds` returns one `Vec<DefId>` per generic parameter, in
         // declaration order, and `convert_ty` looks up a projection's bound
-        // list by the same positional index that `generic_scope` assigned
-        // (check.rs:6465: `generics.iter().enumerate()`). Every other test in
+        // list by the same positional index that `generic_scope` assigned —
+        // that free function is a three-line `generics.iter().enumerate()`, and
+        // it is named rather than cited by line because the previous version of
+        // this comment pointed at a line number that had since gone blank.
+        // Every other test in
         // this file puts its bound on parameter index 0 (`M<I: It, U>`,
         // `M<I: It>`, `M<I: Sub>`), so a mutation that dropped unbounded
         // parameters' empty entries before indexing — shifting every later
@@ -9758,9 +9959,11 @@ mod tests {
     fn a_record_bound_resolves_a_projection_through_a_supertrait() {
         // `collect_records` calls `expand_bounds` after `resolve_bounds`, so a
         // record's bound list carries transitive supertraits exactly like a
-        // function's or an impl's does (see the comment at the `by_index`
-        // match arm in `convert_ty`, around line 2275: "`expand_bounds` has
-        // already folded supertraits into every entry here"). `Sub: It`
+        // function's or an impl's does (see `convert_ty`'s two-segment path
+        // case, the `Some(idx)` arm of its `match by_index`: "`expand_bounds`
+        // has already folded supertraits into every entry here" — named by
+        // function and arm rather than by line, because the line number this
+        // comment used to quote was already two dozen lines stale). `Sub: It`
         // declares no `Item` itself — only its supertrait `It` does — so
         // resolving `I::Item` against a bound of just `Sub` requires that
         // fold-in. This is TDD-by-mutation Step 7's second case: skipping

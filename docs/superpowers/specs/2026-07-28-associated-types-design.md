@@ -111,6 +111,36 @@ unify. No other pairing can arise, because everything else was normalized first.
 > bounds are still `E0900`) and from sites where non-normalization is deliberate
 > (`check_impl_conformance`, where both alternatives were measured and found wrong). Consult that
 > enumeration, not this table, and re-derive it whenever a new position for a projection is added.
+>
+> **FURTHER CORRECTION (whole-branch review of the follow-on increment): that enumeration is itself
+> incomplete, and the replacement claim made the same mistake as the claim it replaced.** A **sixth**
+> raw-`subst` site reachable by a projection exists in `emit_inherent_call`
+> (`crates/nova-typeck/src/check.rs`), which substitutes an inherent method's parameter and return
+> types with no normalization even though it has already unified the receiver against the impl's self
+> type — so, unlike `emit_assoc_call`, the projection's root really is concrete and `instantiate`'s
+> precondition really is met. `emit_trait_call` routes the same two positions through `instantiate`.
+> It rejects a valid program:
+>
+> ```nova
+> record W<T> { v: T }
+> impl<I: Iterator> W<I> { fn echo(self, d: I::Item) -> I::Item { d } }
+> // w: W<Cur>, Cur: Iterator with type Item = Bool
+> // w.echo(true)  =>  error[E0010]: argument has type `Bool` but `Cur::Item` was expected
+> ```
+>
+> Measured both ways: routing those two lines through `instantiate` compiles and runs it with the
+> whole workspace suite green and every gate configuration passing; reverting brings the `E0010`
+> straight back. **Deliberately not applied** — it is a behaviour change
+> (previously-rejected programs would start compiling) needing its own test and review — and it is
+> **pre-existing**, requiring only an impl-block bound plus 2.2c associated types, no feature from the
+> record-parameter-bounds increment. It is recorded in `instantiate`'s own doc comment, which is where
+> a maintainer looking at this decision will be.
+>
+> So the durable lesson above survives but was stated too comfortably: replacing "N seams" with "an
+> enumeration produced once" is still a closed-world claim, just with a longer half-life. An
+> enumeration is only as complete as the last grep, and this one was taken before an impl-block bound
+> plus a projection-typed *parameter* was tried. Any statement of this kind — count or list — belongs
+> next to the code it constrains, with its measurement, and is to be re-derived rather than cited.
 
 **This follows the grain of the codebase rather than fighting it.** Trait *bounds* are already
 discharged at monomorphization (`E0013`, `crates/nova-mir/src/mono.rs:117`) rather than in
