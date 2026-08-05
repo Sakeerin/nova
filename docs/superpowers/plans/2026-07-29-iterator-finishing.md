@@ -725,9 +725,32 @@ For at least three of the seven fixture items, apply a mutation that should brea
 - **Consequences, stated plainly:** a record bound looks like a constraint and is not one. Name this as the risk, and name the family it belongs to — impl-level `const`s discarded, record bounds, record field visibility, `pub` on methods — all "accepted and quietly ignored" defects this project has fixed. State that the mitigation is documentation in three places rather than code, and that a future increment may replace it with real enforcement if `MakeRecord` ever carries type arguments.
 - **Alternatives considered:** eager `map`/`filter` returning `Vec` (no projection needed, allocates per stage); rejecting a bound on a parameter no field type uses (declined — inert, and a second analysis for no user benefit); threading type args through `MakeRecord` (much larger, and 2.2a's objection stands).
 
+**Add a second section to this ADR, for a decision made during implementation:** why `Iterator`'s four consumers take plain `self` rather than `mut self`.
+
+  - **Context.** They were specified as `mut self`, since each must advance the iterator. But ADR 0005 deliberately rejects a *temporary* receiver for a `mut self` method, so `v.iter().filter(f).map(g).collect()` — the exact form this increment was designed around — was `error[E0060]: 'collect' mutates its receiver, which cannot be a temporary`. Adapters chained fine (they take `self`); only the consumers broke the chain.
+  - **Decision.** The four consumers take `self` and open with `let mut it = self`, driving `it`. `next` remains the only `mut self` method — it is the one a caller invokes repeatedly on a binding they hold.
+  - **Why this is not an erosion of ADR 0005.** It routes around the rule rather than weakening it. Verify and record that `mut self` still rejects a temporary on every route: an inherent method, a trait method, and `next` itself. All three were measured as `E0060` when this decision was made.
+  - **Why it is safe.** `let mut it = self` *aliases* rather than copies — this compiler has no move semantics and records are heap objects passed by pointer, so the caller's iterator genuinely advances through a consumer. Measured two ways, including a record exposing its own cursor field to distinguish aliased from copied from fully-scanned. Pinned by a test. **If a future change gives Nova move semantics, re-derive this** — the whole argument rests on the copy not happening.
+  - **Consequence to state plainly.** A consumer now accepts a temporary, so `v.iter().count()` compiles. That is the intent. It also means a consumer cannot be prevented from running on a value the caller no longer holds — harmless here, since consuming an iterator you have discarded is exactly what a chain does.
+  - **The `for`-desugar precedent** is the same trick and should be cited: it binds its hidden iterator to a `mut` local for the same reason.
+
 - [ ] **Step 7: Update `nova-spec` and the CHANGELOG**
 
-In `nova-spec/20-STDLIB.md`, `Iterator`'s block at `:93-104` lists `// default methods: map, filter, collect, fold, ...` as a comment. Replace that with the six methods as shipped, with their real signatures, and delete the comment. Keep the existing `::` and `mut self` notes.
+In `nova-spec/20-STDLIB.md`, `Iterator`'s block at `:93-104` lists `// default methods: map, filter, collect, fold, ...` as a comment. Replace that with the six methods as shipped, with their real signatures, and delete the comment. Keep the existing `::` note.
+
+**Get the receivers right — they are not what this plan originally specified.** Task 4 changed the four consumers from `mut self` to plain `self`, so the shipped signatures are:
+
+```nova
+fn next(mut self) -> Option<Self::Item>              // the ONLY mut self
+fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U>
+fn filter(self, keep: fn(Self::Item) -> Bool) -> FilterIter<Self>
+fn fold<A>(self, init: A, f: fn(A, Self::Item) -> A) -> A
+fn count(self) -> Int
+fn any(self, p: fn(Self::Item) -> Bool) -> Bool
+fn collect(self) -> Vec<Self::Item>
+```
+
+The `mut self` note that survives applies to `next` alone. Read the shipped `std/core/lib.nova` rather than trusting this block — it has been wrong once already.
 
 In `CHANGELOG.md`, under the existing `### Added (Phase 2 …)`, add the increment. It must state:
 
