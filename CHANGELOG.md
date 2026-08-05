@@ -651,16 +651,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     than merely convenient.
   - **The gate:** `tests/runtime/iterator.{nova,stdout}`, run three ways
     (`iterator_run`, `iterator_build_standalone`, `iterator_under_gc_stress`) —
-    a fifth committed fixture beside `collections`, `std_core`, `strings` and
-    `assoc_types`. Every generic block in it is instantiated at `Bool` **and** at
+    joining `collections`, `std_core`, `strings` and `assoc_types` among the
+    fixtures driven through all three of those configurations. Every generic
+    block in it is instantiated at `Bool` **and** at
     `Float`, which is not decoration: `mir_ty` collapses `Int` and `Char` to
     `MirTy::I64` and every heap type to `MirTy::Ptr`, so those are one machine
     class and a wrong `Item` hides in them. Measured on this fixture — an
     `Int`-only reduction of it survives a mutation that makes monomorphization's
     normalization cache its first answer **byte-identically**, and of the two
     distinguishable classes only the `Float` lines catch that one while the `Bool`
-    lines pass. Which class has teeth depends on the mutation, so the fixture
-    carries both.
+    lines pass. `Float` is the strictly stronger of the two — `Bool` is `MirTy::I8`
+    and its only values 0 and 1 survive an `I64` confusion intact in the low byte
+    of a register, whereas `Float` is `MirTy::F64` and crosses register banks — so
+    the fixture carries both but the `Float` half is the one that must not be
+    trimmed. (`assoc_types`' header records its own kill on the `Bool` half of the
+    *same* mutation, so what flips which class catches it is the usage shape, not
+    the mutation.)
 
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 

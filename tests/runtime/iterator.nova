@@ -66,19 +66,39 @@
 // distinguishable classes only `Float` catches it: the `Bool` lines pass under
 // mutation D unchanged. So the `Float` half of item 7 is not redundant with
 // the `Bool` half, and a `Bool`-only item 7 would have shipped this fixture
-// with a hole. (`tests/runtime/assoc_types.nova`'s header records the
-// converse for *its* mutation C, where adding a `Vec<Bool>` was what killed
-// it. Which of the two classes has teeth depends on the mutation, so carry
-// both.)
+// with a hole.
+//
+// `tests/runtime/assoc_types.nova`'s header records the converse for *its*
+// mutation C, where adding a `Vec<Bool>` was what killed it — but note that
+// its mutation C and this file's mutation D are the SAME mutation (mono's
+// normalization caching its first answer). So the variable that flips which
+// class catches it is the **usage shape**, not the mutation, and the ordering
+// between the two classes is not symmetric:
+//   - `Specializer::ty` early-returns on `!substituted.has_assoc()`
+//     (`crates/nova-mir/src/mono.rs:337`), so only a projection-BEARING type
+//     reaches normalization at all — a shape that never puts a projection on
+//     the wire cannot observe the mutation from any instantiation.
+//   - `Option<X>` is a `Ty::Sum`, which `mir_ty` maps to `MirTy::Ptr` for
+//     EVERY `X`, so a projection reached only through an `Option` hides a
+//     wrong answer completely regardless of the class inside it.
+//   - `Bool` is `MirTy::I8`, and its only two values 0 and 1 survive an `I64`
+//     confusion intact in the low byte of a GPR; `Float` is `MirTy::F64` and
+//     CROSSES REGISTER BANKS.
+// So `Float` is strictly stronger than `Bool` here, and `Bool` silently agrees
+// with `Int` whenever the confusion happens to be value-preserving. Carry both
+// anyway: `Bool` is the class `assoc_types` measured its own kill on, so
+// dropping it would discard a measurement rather than a duplicate. But the half
+// that must never be trimmed is the `Float` one.
 //
 // Two mutations were designed for this file and **discarded as unfalsifiable**
 // rather than reported as passes, because each breaks something unrelated
 // first and its failure is indistinguishable from a different bug:
 //   - The exclusive range's condition, `BinOp::Lt` -> `BinOp::Le` in
 //     `check_for` — intended for FOR_RANGE. `for i in 0..len` is load-bearing
-//     throughout std (`Vec::grow`, `Debug for String`, six places in
-//     `std/strings`), so it aborts inside std before this fixture prints a
-//     single line, and it fails `collections_run`, `strings_run`,
+//     throughout std — the inline grow inside `Vec::push`, `Debug for
+//     String`'s `dbg`, and `chars_to_string`, `reverse`, `split`, `join` and
+//     `repeat` in `std/strings` — so it aborts inside std before this fixture
+//     prints a single line, and it fails `collections_run`, `strings_run`,
 //     `std_core_run`, `for_loops_run` and `assoc_types_run` identically.
 //     FOR_RANGE is still correct to have as a regression guard — Task 2 edited
 //     the function that dispatches a `for` head — but no mutation this fixture
@@ -92,13 +112,22 @@
 //
 // One authoring note, since it will bite the next person: a closure passed to
 // `fold` needs its parameters ANNOTATED when the body is arithmetic that works
-// at more than one numeric type. `fs.iter().fold(0.0, |a, x| a + x)` over a
+// at more than one NUMERIC type. `fs.iter().fold(0.0, |a, x| a + x)` over a
 // `Vec<Float>` is `E0010: argument has type 'fn(Int, Int) -> Int' but
 // 'fn(Float, Float) -> Float' was expected` — the expected type is right and
 // the closure's own inference defaulted to `Int`. `|a: Float, x: Float|`
 // fixes it. Pre-existing, unrelated to this increment, and the reason the
 // `Float` folds below carry annotations while the `map`/`filter` closures do
 // not (their bodies mention a `Float` literal, which pins them).
+//
+// The rule is exactly that narrow, so do not generalise it into "annotate
+// every `fold`": the `Bool` folds below deliberately carry NO annotations.
+// `||` and `&&` are not numeric and admit only `Bool`, so there is no second
+// candidate type to default to — `bs.iter().fold(false, |a, b| a || b)` and
+// `fold(true, |a, b| a && b)` over a `Vec<Bool>` compile as written and print
+// `or=true and=false`. They were annotated in an earlier draft of this file
+// for symmetry with the `Float` folds; the annotations were measured
+// unnecessary and removed, with this `.stdout` byte-identical either way.
 
 // A hand-written `Iterator` that is not a `VecIter`, so `for` and the six
 // methods see an implementor whose `Item` is not tied to a container's element
@@ -211,9 +240,20 @@ fn main() {
     // record-literal field initializer is ORDER-SENSITIVE when a later field's
     // type names a projection on the parameter an earlier field pins: with `f`
     // written before `it`, `I` is not yet concrete when `f` is checked, so the
-    // same literal is `E0010` plus a cascading `E0011`. Pinned by
+    // same literal is rejected. Measured on THIS block with the two fields
+    // swapped: **exactly one `E0010`** (`field 'f' expects 'fn(?9::Item) ->
+    // ?10' but found 'fn(Int) -> Int'`) and no second diagnostic.
+    //
+    // Whether that `E0010` also drags `E0011`s behind it is a property of the
+    // surrounding shape, not of the swap, so do not carry a count from one
+    // shape to another. The failed unification leaves `I` and `U` free, and
+    // `E0011` fires only for the ones nothing later pins. Here nothing
+    // cascades: `it: inner` still pins `I`, and the `next()`/`unwrap_or(miss)`
+    // chain below pins `U`. The same swap in a literal that is bound and never
+    // driven leaves both free — `let m = MapIter { f: |n| n + 1, it: v.iter()
+    // }` then `let _ = m` measures one `E0010` and **six** `E0011`s. Pinned by
     // `a_record_field_initializer_is_order_sensitive_when_it_names_a_projection`
-    // in `crates/nova-typeck/src/check.rs`.
+    // in `crates/nova-typeck/src/check.rs`, which is the undriven shape.
     //
     // Both are also bound to locals first because a record literal cannot be a
     // `for` head at all — `for x in NotIt { z: 1 }` is `P0001: expected
@@ -255,7 +295,7 @@ fn main() {
     for b in bs.iter() { bseen = "${bseen}${b}," }
     println("bool for=${bseen}")
     println("bool count=${bs.iter().count()} any_hit=${bs.iter().any(|b| b)} any_miss=${bs.iter().any(|b| !b && b)}")
-    println("bool fold_or=${bs.iter().fold(false, |a: Bool, b: Bool| a || b)} fold_and=${bs.iter().fold(true, |a: Bool, b: Bool| a && b)}")
+    println("bool fold_or=${bs.iter().fold(false, |a, b| a || b)} fold_and=${bs.iter().fold(true, |a, b| a && b)}")
     let bfilter = bs.iter().filter(|b| b).collect()
     println("bool filter len=${bfilter.len()} a=${bfilter.get(0).unwrap_or(false)} b=${bfilter.get(1).unwrap_or(false)} past=${bfilter.get(2).unwrap_or(false)}")
     let bnot = bs.iter().map(|b| !b).collect()

@@ -326,6 +326,11 @@ impl<I: Iterator, U> Iterator for MapIter<I, U> {
 // itself a projection — which is the `Assoc { on: Assoc }` shape Phase 2.2c
 // could only reach from a hand-built unit test. This is its first appearance in
 // real source.
+//
+// `I`'s bound is a resolution scope here for the same reason it is on `MapIter`
+// above — it is what lets `keep` name `I::Item` at all, and it is not checked
+// when a `FilterIter` is built. See `MapIter`'s comment and ADR 0007 for the
+// full account, including why `FilterIter<Int>` is nonetheless unconstructible.
 pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
 
 impl<I: Iterator> Iterator for FilterIter<I> {

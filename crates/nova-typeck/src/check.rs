@@ -9714,7 +9714,23 @@ mod tests {
         // `icx.apply` on an unbound variable is a no-op, so there is nothing
         // yet to normalize *through*. The result is the exact pre-fix
         // symptom: an `E0010` naming an unresolved `Assoc`, cascading into
-        // `E0011`s for the variables it left unpinned.
+        // `E0011`s for the variables it left unpinned. Measured on *this*
+        // source: one `E0010` and six `E0011`s. The assertion below
+        // deliberately checks only the `E0010` — the cascade is a consequence
+        // of the failure, not the property under test, and pinning its exact
+        // shape would make this test fail for uninteresting reasons.
+        //
+        // **The cascade is a property of this shape, not of the field swap,
+        // so do not carry it to another one.** `E0011` fires only for the
+        // variables *nothing later pins*, and here `m` is bound and never
+        // used, so `I` and `U` both stay free. Swap the same two fields in a
+        // literal that is subsequently driven and the cascade disappears
+        // entirely: `tests/runtime/iterator.nova`'s CHAIN block measures
+        // exactly one `E0010` and zero `E0011`s from this same swap, because
+        // its `it:` initializer still pins `I` and its `next()` calls pin `U`.
+        // That fixture's comment briefly claimed a cascade transcribed from
+        // here; the count was never true there. Same over-generalization ADR
+        // 0007 §1 exists to record.
         //
         // This is the same class of hole `instantiate`'s own doc comment
         // already admits for a call (`fn f<I: It>(y: I::Item, x: I)` still

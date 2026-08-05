@@ -190,10 +190,11 @@ Three cases, three answers; there is no single verdict to write.
   ignored" defects, all found by probing rather than predicted. This one differs
   only in being *chosen* and written down, which is the entire purpose of this
   file.
-- **The mitigation is documentation in three places, not code**: this ADR, the
-  comments above `MapIter` and `FilterIter` in `std/core/lib.nova`, and the
-  `CHANGELOG` entry. That is a weaker mitigation than a check and is accepted as
-  such.
+- **The mitigation is documentation, not code**: this ADR, the adapter comments
+  in `std/core/lib.nova` — the full explanation lives above `MapIter`, the shape
+  that forced the decision, with `FilterIter` pointing at it rather than
+  restating it — and the `CHANGELOG` entry. That is a weaker mitigation than a
+  check and is accepted as such.
 - **A future increment may replace it with real enforcement.** The prerequisite
   is concrete: `MakeRecord` would have to carry the record's type arguments
   through lowering, at which point the check has somewhere to live. That is a
