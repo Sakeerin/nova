@@ -141,6 +141,54 @@ into argument-type or arity noise.
   `Map` — while `o.inner.bump()` on an immutable `o` is rejected at the root.
 - **A temporary receiver is rejected**: `make().bump()` is `NotAPlace` and
   reports `E0060`, because the mutation could not be observed by anyone.
+
+- **AMENDED 2026-07-29 (Phase 2.2d): std may now launder a mutation through a
+  plain `self` receiver, and `std/core`'s `Iterator` consumers do.** The
+  self-enforcement promised two bullets above — "every std API that mutates must
+  declare `mut self`; an accessor that forgets it will not compile" — **is no
+  longer true.** `Iterator`'s `fold`, `count`, `any` and `collect` each mutate
+  their receiver, declare plain `self`, and compile, by opening with
+  `let mut it = self` and driving `it`.
+
+  *Why.* Those four must advance the iterator, so `mut self` was the obvious
+  declaration. But `mut self` rejects a *temporary* receiver — the bullet
+  directly above — which made `v.iter().filter(f).map(g).collect()` an `E0060`.
+  That is the form the Phase 2.2d increment was designed around, so the API's
+  documented shape did not compile.
+
+  *What was given up, precisely.* `place_root` returns three verdicts, and
+  `mut self` rejects two of them: `NotAPlace` (the temporary) and
+  `ImmutableLocal`. Only the first was the problem; the second was collateral.
+  So this is now accepted and silently advances an immutable binding:
+
+  ```nova
+  let it = Cursor { n: 0, max: 3 }   // no `mut`
+  it.count()   // 3
+  it.count()   // 0   <- advanced, no diagnostic
+  ```
+
+  Under `mut self` the first call was `E0060: 'next' mutates its receiver, but
+  'it' is immutable` — which is the exact shape §1's Context cites as the reason
+  this rule exists. **That loss is real and it was not the goal.** Nova has no
+  third receiver form that accepts a temporary while rejecting an immutable
+  local, so the two could not be separated.
+
+  *What bounds it.* The mechanism is untouched — `mut self` still reports `E0060`
+  on a temporary and on an immutable local, verified on an inherent method, a
+  trait method, and `next` itself. `next` remains `mut self`, so iterating by
+  hand still requires a mutable binding. No new iterator state becomes reachable:
+  a `let mut` binding could always be partially consumed and reused. And the
+  compiler already launders precisely this way in its own `for` desugar
+  (`check_for_iterator` binds `let mut __it = <expr>`), so `for x in <immutable
+  local>` already advanced that local before this change — the escape hatch
+  pre-existed, and `Iterator`'s consumers are its first *library* use.
+
+  *If Nova ever gains move semantics, re-derive this.* The whole argument rests
+  on `let mut it = self` aliasing rather than copying, which holds only because
+  records are heap objects passed by pointer (`hir::Ty::Record` maps to
+  `MirTy::Ptr`) and this compiler has no move semantics. Measured three ways,
+  including a record exposing its own cursor field so that aliased, copied and
+  fully-scanned are three distinguishable outcomes. See ADR 0007 §2.
 - **Trait-method calls were not covered at first. They are now.** Originally
   `MethodRes::Trait` dispatch resolved to `(trait_id, method_index)`, and for a
   generic receiver (`fn f<T: Tr>(x: T) { x.m() }`) there was no single impl whose
