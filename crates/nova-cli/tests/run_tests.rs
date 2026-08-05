@@ -2548,8 +2548,17 @@ fn a_user_record_can_implement_the_std_iterator_trait() {
 /// Task 8 pinned the rule on a synthetic `trait Bump`. This pins it on the
 /// shipped trait, which is what a user actually meets, and is the reason
 /// `let mut it` appears in every test above rather than being incidental
-/// style. Without it a caller could silently advance an iterator someone else
-/// believes is unread.
+/// style. Without it, a caller could silently advance an iterator someone
+/// else believes is unread through `next` itself — which is still exactly
+/// what this test pins.
+///
+/// It is *not* what every method on this trait pins any longer.
+/// `fold`/`count`/`any`/`collect` (added later, see `std/core/lib.nova`'s
+/// comment above `fold`) deliberately dropped this same requirement so they
+/// could run on a temporary receiver, and a side effect of that is a
+/// non-`mut` binding being silently advanced through any of the four just the
+/// same — `iterator_any_short_circuits_and_does_not_scan_past_the_first_
+/// match` below pins that as accepted, current behavior, not an oversight.
 #[test]
 fn calling_next_on_an_immutable_vec_iterator_reports_e0060() {
     let src = "fn main() {\n\
@@ -3084,12 +3093,18 @@ fn iterator_map_default_method_is_lazy_over_a_side_effecting_source() {
 /// the same `true`.
 ///
 /// `src` is deliberately **not** `mut` (unlike an earlier round of this
-/// test): `any` now takes plain `self` and rebinds internally, so it no
-/// longer needs the caller's own binding to already be mutable — re-run after
-/// the `mut self` -> `self` design change specifically to confirm the
-/// short-circuit itself is unaffected, since the receiver rebinding
-/// (`let mut it = self`) sits directly in the path this test exercises. The
-/// expected stdout is unchanged from before that change.
+/// test), and that is not merely "no longer necessary" — it is the point of
+/// keeping it this way. Dropping `mut self` from `any` relaxed *two* of
+/// `place_root`'s classifications, not only the temporary-receiver one this
+/// whole design targeted: a caller's own binding no longer has to be declared
+/// `mut` either. So this test doubles as the pin for that: a non-`mut` `src`
+/// is silently advanced by `.any()` below with no diagnostic, which is
+/// accepted, current behavior — not an oversight, and not something a future
+/// change should tighten back to `E0060` without a deliberate decision to do
+/// so. Also re-run after the `mut self` -> `self` design change specifically
+/// to confirm the short-circuit itself survived the receiver rebinding
+/// (`let mut it = self`, which sits directly in the path this test
+/// exercises); the expected stdout is unchanged from before that change.
 #[test]
 fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
     let src = "record CountingSrc { n: Int, max: Int }\n\
@@ -3146,12 +3161,22 @@ fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
 /// to use the item concretely inside such a generic helper — `|a, x| a + x`,
 /// or interpolating `x` — reproduces the exact `T0::Item`/E0010 and
 /// `?0`/E0013 shapes Task 2 and Task 3 already documented, confirmed by
-/// hand-testing both during this task, and is not re-pinned here since Task
-/// 2's own test already owns that limitation; nothing about Task 4 changes
-/// it. That does mean `v.iter().map(f).fold(...)` works while a generic
+/// hand-testing both during this task. That does mean `v.iter().map(f)
+/// .fold(...)` works while a generic
 /// `fn sums<I: Iterator>(mut it: I) -> Int { it.fold(0, |a, x| a + x) }`
 /// does not — a real, pre-existing gap, worth stating plainly rather than
 /// leaving implicit.
+///
+/// **Correction, caught in review:** an earlier round of this comment claimed
+/// the negative case above was "not re-pinned here since Task 2's own test
+/// already owns that limitation." It does not, and nothing anywhere pinned
+/// it: `a_generic_function_over_iterator_resolves_item_per_instantiation`
+/// (Task 2) is purely positive — `I::Item` flows through `first`/`first_or`'s
+/// signatures and is returned or matched, never operated on concretely — so
+/// no existing test asserted the negative case failed, only that this task's
+/// own hand-testing observed it once and moved on.
+/// `a_generic_iterator_bound_cannot_use_its_item_concretely_in_fold`, below,
+/// closes that.
 ///
 /// None of the three helpers below declare `mut it: I` any more (an earlier
 /// round of this test did): `fold`/`any`/`collect` take plain `self` now, so
@@ -3189,6 +3214,37 @@ fn iterator_default_methods_work_through_a_generic_iterator_bound() {
         .stdout("3\ntrue\n3\n");
 }
 
+/// The negative half of the design question above, pinned rather than only
+/// described. Task 2 documented (and this task's own hand-testing
+/// re-confirmed) that a generic `fn f<T: Iterator>(mut it: T)` binds a value
+/// of type `T::Item` at the unnormalized projection, so an operation
+/// requiring it concretely — here, `+` inside `fold`'s own closure — is
+/// `E0010` naming that projection by its internal placeholder (`T0::Item`,
+/// the same name Task 3's mutation testing observed independently in a
+/// different diagnostic). Not a regression: the hand-written `while`+`match`
+/// equivalent behaves identically, and this was true before Task 4 added a
+/// single default method. Pinned so a future change to how generic default
+/// methods normalize `Self::Item` either keeps failing this exact way on
+/// purpose, or flips this assertion deliberately — not silently, in either
+/// direction.
+#[test]
+fn a_generic_iterator_bound_cannot_use_its_item_concretely_in_fold() {
+    let src = "fn sum_via_fold<I: Iterator>(it: I) -> Int {\n\
+                   it.fold(0, |a, x| a + x)\n\
+               }\n\
+               fn main() {}";
+    let dir = std::env::temp_dir().join("nova-iterator-generic-item-not-concrete");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    let assert = nova().arg("check").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error[E0010]") && stderr.contains("T0::Item"),
+        "stderr: {stderr}"
+    );
+}
+
 /// The design this task was chosen on, pinned at exactly the shape a user
 /// will write: `v.iter().filter(…).map(…).collect()` as one expression, no
 /// intermediate binding anywhere in the chain. This was `E0060` (`collect`
@@ -3201,6 +3257,19 @@ fn iterator_default_methods_work_through_a_generic_iterator_bound() {
 /// methods and several values at once): this test's only job is to fail
 /// loudly and specifically if the advertised chained form ever stops
 /// compiling, rather than being one assertion among many in a larger test.
+///
+/// The second chain closes a coverage gap review found: `collect` is the one
+/// new method whose own *return type* names the projection
+/// (`Vec<Self::Item>`), which makes it the most exposed of the six to the
+/// monomorphization seam — `mir_ty` collapses `Int`/`Char`/`String`/every heap
+/// type into one machine class, so only `Bool`/`Float` actually discriminate
+/// a wrong item type from a coincidentally-right one (the same reasoning
+/// Task 3 applied to its own chain, and the brief applied to `any` above but
+/// never to `collect`). Every `collect` call elsewhere in this task's tests
+/// collects `Int`; this one collects `Bool` instead
+/// (`v.iter().map(|n| n > 2)`), so a `collect` that silently forwarded the
+/// source's `Int` items instead of the mapped `Bool` ones has something to go
+/// visibly wrong.
 #[test]
 fn iterator_adapter_chain_compiles_and_runs_as_a_single_expression() {
     let src = "fn main() {\n\
@@ -3211,6 +3280,9 @@ fn iterator_adapter_chain_compiles_and_runs_as_a_single_expression() {
       let got = v.iter().filter(|n| n > 1).map(|n| n * 10).collect()\n\
       println(\"${got.len()}\")\n\
       println(\"${got.get(0).unwrap()}\")\n\
+      let bools = v.iter().map(|n| n > 2).collect()\n\
+      println(\"${bools.len()}\")\n\
+      println(\"${bools.get(2).unwrap()}\")\n\
     }";
     let dir = std::env::temp_dir().join("nova-iterator-chain-single-expression");
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -3221,7 +3293,7 @@ fn iterator_adapter_chain_compiles_and_runs_as_a_single_expression() {
         .arg(&path)
         .assert()
         .success()
-        .stdout("2\n20\n");
+        .stdout("2\n20\n3\ntrue\n");
 }
 
 /// The go/no-go check for the `mut self` -> `self` design change: `fold`,

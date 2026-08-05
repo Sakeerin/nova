@@ -143,8 +143,10 @@ pub trait Hash { fn hash(self) -> Int }
 // either not advance or advance invisibly. It is also the first `mut self` in
 // any `impl Trait for Type` in std — closing the trait-method half of the
 // mutable-receiver rule was a hard gate before this trait could be declared at
-// all (ADR 0005 §1). The consequence for callers: an iterator must be held in
-// a `mut` binding or arrive as a `mut` parameter, or the call is `E0060`.
+// all (ADR 0005 §1). The consequence for callers: calling `next` itself needs
+// the iterator held in a `mut` binding or arriving as a `mut` parameter, or
+// the call is `E0060` — true of `next` specifically, and no longer true of
+// the four default consumer methods below (see the comment above `fold`).
 //
 // `Option<Self::Item>` is the projection this whole increment exists to make
 // expressible. It is deliberately spelled with `::` and not the `.` that
@@ -186,22 +188,44 @@ pub trait Iterator {
     // binding they hold), but a consumer runs to exhaustion in one call, so it
     // does not need its *own* receiver to already be a mutable place; it only
     // needs a mutable place to drive `next` through, and it makes its own with
-    // `let mut it = self`, the same trick `for x in <expr>`'s desugar uses
-    // (`let mut __it = <expr>`, `crates/nova-typeck/src/check.rs`'s
-    // `check_for_iterator`). Records are heap objects with no copy semantics
+    // `let mut it = self`. Records are heap objects with no copy semantics
     // anywhere in this compiler, so `it` is an alias of exactly the storage
-    // `self` pointed to, not a copy — advancing `it` is advancing the same
-    // iterator the caller passed in, exactly as if `self` itself had been
-    // `mut`. `an_iterators_own_storage_still_advances_when_a_consumer_takes_
-    // plain_self` (`crates/nova-cli/tests/run_tests.rs`) pins this.
+    // `self` pointed to, not a copy — advancing `it` advances the same
+    // iterator the caller passed in.
+    // `an_iterators_own_storage_still_advances_when_a_consumer_takes_
+    // plain_self` (`crates/nova-cli/tests/run_tests.rs`) pins the aliasing.
     //
     // This is what lets `v.iter().filter(f).map(g).collect()` — the form this
     // feature exists to make possible — compile at all: `.filter()`/`.map()`
     // each return a temporary, and only a plain-`self` method can be called on
     // one (`place_root` classifies a call result `PlaceRoot::NotAPlace`, and a
-    // `mut self` receiver requires `PlaceRoot::Mutable`). A `mut self` here
-    // would make every one of these four methods `E0060` the moment it is
-    // chained straight off an adapter instead of a named `mut` binding.
+    // `mut self` receiver requires `PlaceRoot::Mutable`).
+    //
+    // Dropping `mut self` relaxes *two* of `place_root`'s classifications, not
+    // only the one this design needed: `NotAPlace` (the temporary above, the
+    // actual goal) and, as a side effect, `ImmutableLocal` too — a caller may
+    // now hold the iterator in a binding that is never declared `mut` at all,
+    // and one of these four methods still silently advances or fully consumes
+    // it:
+    //
+    //   let it = some_record   // NOT mut
+    //   it.count()             // 3
+    //   it.count()             // 0 -- silently advanced, no diagnostic
+    //
+    // Under `mut self` the first call alone was `E0060`. This is not a new
+    // capability, only a wider door to an old one: the compiler's own
+    // `for x in <expr>` desugar already launders exactly this way
+    // (`check_for_iterator`, `crates/nova-typeck/src/check.rs`:
+    // `let mut __it = <expr>`), so `for x in <an immutable local>` already
+    // advanced that local before this trait had a single default method —
+    // this is that laundering's first appearance in a *library* API, not a
+    // new mechanism. Nor does any new iterator *state* become reachable: a
+    // `mut` binding could always be partially consumed and reused. The only
+    // thing that changed is which receivers these four methods accept
+    // syntactically.
+    // `iterator_any_short_circuits_and_does_not_scan_past_the_first_match`
+    // (`crates/nova-cli/tests/run_tests.rs`) pins a non-`mut` receiver being
+    // silently advanced through `any` as accepted, current behavior.
 
     // The fold primitive. `count` and `collect` could be written over it;
     // `any` cannot, because `fold` visits every element and `any` must stop.
