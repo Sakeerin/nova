@@ -100,8 +100,27 @@ pub trait Iterator {
     // not compile (`E0060`, cannot assign to a field of immutable self). The
     // consequence for callers is that an iterator must be held in a `mut`
     // binding or arrive as a `mut` parameter.
-    // default methods: map, filter, collect, fold, ...
+    //
+    // `next` is the ONLY `mut self` method here, and the note above applies to
+    // it alone. The six defaults below take plain `self` — see ADR 0007 §2 for
+    // why, and for what that gives up.
+
+    // Adapters: lazy, nothing is consumed until a consumer runs.
+    fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U>
+    fn filter(self, keep: fn(Self::Item) -> Bool) -> FilterIter<Self>
+
+    // Consumers: each drives the iterator to exhaustion, or short-circuits.
+    fn fold<A>(self, init: A, f: fn(A, Self::Item) -> A) -> A
+    fn count(self) -> Int
+    fn any(self, p: fn(Self::Item) -> Bool) -> Bool
+    fn collect(self) -> Vec<Self::Item>
 }
+
+// The adapters `map` and `filter` return, in std/core beside the trait. Each
+// carries a bound on its type parameter purely so the field type may name
+// `I::Item` — a resolution scope, not a constraint (ADR 0007 §1).
+pub record MapIter<I: Iterator, U> { it: I, f: fn(I::Item) -> U }
+pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
 
 // === Primitives have inherent impls === //
 // Int, Float, Bool, Char, String all impl: Display, Debug, Eq, Clone, Hash

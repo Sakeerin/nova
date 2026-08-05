@@ -3351,3 +3351,217 @@ fn an_iterators_own_storage_still_advances_when_a_consumer_takes_plain_self() {
         .success()
         .stdout("true\n3\n3\n3\n");
 }
+
+/// Iteration end-to-end gate (Phase 2.2d, Task 5). One program covering every
+/// item of the increment's gate list — `for` over a `Vec` via `.iter()`, `for`
+/// over an integer range (a regression guard, since Task 2 rewrote the function
+/// that dispatches a `for` head), exhaustion plus one further `next()`, an
+/// empty source whose *first* `next()` is already `None`, a two-stage
+/// `.filter().map()` chain, all six default methods, and every generic block
+/// instantiated at `Bool` **and** at `Float`.
+///
+/// That last item is the load-bearing one and the reason this fixture is not
+/// simply the `Int` pipeline a reader would write first. `mir_ty` maps `Int`
+/// *and* `Char` to `MirTy::I64` and `String`/`Fn`/`Record`/`Sum`/`Array` to
+/// `MirTy::Ptr` — `pointer_type()`, `types::I64` on x86-64 — so at the level a
+/// backend can see, `Int`, `Char`, `String` and every heap type are one type,
+/// and an `Item` resolved to the wrong one of them is invisible after
+/// lowering. Only `Bool` (`I8`) and `Float` (`F64`) have machine classes a
+/// wrong answer cannot hide in. `tests/runtime/assoc_types.nova`'s header
+/// records the measurement that established this; this fixture's own header
+/// carries its mutation-to-line map.
+#[test]
+fn iterator_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/iterator.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/iterator.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through the object-file backend. Not redundant with
+/// `iterator_run` for the reason `strings_build_standalone`'s comment gives —
+/// `nova run` resolves runtime symbols through `nova_runtime::symbols()` while
+/// `nova build` links `nova_runtime.lib` by export name and never consults that
+/// table — and for one specific to this gate: an `Item` resolved to the wrong
+/// machine class fails in **code generation**, not in the type checker, so the
+/// two backends are the two places it can fail differently.
+#[test]
+fn iterator_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/iterator.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/iterator.nova", "iterator");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation) — a
+/// gate criterion, not belt-and-braces. A `.filter().map()` chain is a *tower*
+/// of records, so the backing array is reachable only as
+/// `MapIter` -> `FilterIter` -> `VecIter` -> `Vec` -> `data` while every `next`
+/// allocates a fresh `Option` and `collect` grows a `Vec` — a strictly deeper
+/// rooting chain than `assoc_types_under_gc_stress`'s three levels. The
+/// collector scans the stack plus callee-saved registers, which is what makes
+/// an adapter held across a call a root; a missed root at any link loses
+/// elements silently rather than crashing.
+#[test]
+fn iterator_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/iterator.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/iterator.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+// === Task 5 Step 6a: the three cases ADR 0007 section 1's safety argument
+// rests on, none of which had a test.
+//
+// A bound on a record's type parameter is a **resolution scope, not a
+// constraint** (ADR 0007): it makes a projection nameable in a field type and
+// is not itself checked when the record is built. That decision is only
+// defensible because of what happens instead — and "what happens instead" was
+// written down twice before it was measured, wrong both times (first as a
+// uniform `E0014`, then as a uniform `E0013`). It is not uniform. It is three
+// different answers depending on whether the bound reaches a field type, and
+// the third of them is a hole.
+//
+// All three need monomorphization, so none can be a `check_src` unit test in
+// `nova-typeck`: `E0079` and `E0013` are both raised in `nova-mir`'s `mono`,
+// after typeck has finished, and case 3 has to run to completion.
+
+/// **Case 1 — the shape the stdlib actually ships, and the one that was
+/// entirely unpinned.** `MapIter`/`FilterIter` carry a bound *because a field
+/// type names a projection on it* (`f: fn(I::Item) -> U`). Substituting
+/// `I := Int` leaves `Int::Item` in that field's declared type, nothing binds
+/// `Item` for `Int`, and monomorphization rejects it — `E0079`, the
+/// surviving-projection check built in Phase 2.2c Task 7.
+///
+/// Asserted **without driving the iterator**, because firing at *construction*
+/// is the property. That makes the real behaviour earlier and stronger than
+/// "the bound is unenforced" suggests, and it is why the ADR does not have to
+/// argue that a bogus `MapIter` is merely inert: for this shape it cannot be
+/// built at all.
+///
+/// Checked by the `Int::Item` spelling, not only by the code: `E0079` is also
+/// the backstop for a projection surviving mono by any other route, so the code
+/// alone would not distinguish this cause from that one.
+#[test]
+fn a_wrong_instantiation_of_a_projection_shaped_record_is_e0079_at_construction() {
+    // No `.next()`, no `for`, no consumer — the value is built and dropped.
+    let src = "fn main() {\n\
+                   let m = MapIter { it: 5, f: |x| x }\n\
+                   println(\"built\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-record-bound-e0079");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error[E0079]") && stderr.contains("`Int::Item`"),
+        "stderr: {stderr}"
+    );
+    // And it really is at construction: nothing ran.
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        !stdout.contains("built"),
+        "rejected before `main` ran: {stdout}"
+    );
+}
+
+/// **Case 2 — the bound reaches no field type, but is exercised through a
+/// bounded impl method.** `Boxed<K: Hash + Eq, V>`'s bound is inert on the
+/// record itself (neither `k: K` nor `v: V` names a projection), so nothing
+/// stops `Boxed { k: NoHash { .. }, v: 7 }` being built. The
+/// `impl<K: Hash + Eq, V>` block's bound is real, and instantiating `key` with
+/// a `K` implementing neither trait is `E0013` — one diagnostic per unsatisfied
+/// bound.
+///
+/// This is the shape an earlier round of the plan transcribed onto `MapIter`
+/// and got wrong. `E0013` *was* measured, but on a record whose field types
+/// name no projection, so case 1's earlier and stricter `E0079` never fires
+/// here. Different shape, different diagnostic — which is why both are pinned
+/// rather than one standing in for the other.
+///
+/// Asserted on the **bound spelling** (NoHash: Hash), not just the code:
+/// `E0013` is the code for every unsatisfied bound in the language, so the code
+/// alone would still pass if the diagnostic named the wrong trait or the wrong
+/// type. Both bounds are checked, since reporting only the first would be a
+/// silent regression in a diagnostic whose whole value is completeness.
+#[test]
+fn an_unused_record_bound_is_still_enforced_through_a_bounded_impl_method() {
+    let src = "record Boxed<K: Hash + Eq, V> { k: K\n\
+               v: V }\n\
+               impl<K: Hash + Eq, V> Boxed<K, V> {\n\
+                   fn key(self) -> K { self.k }\n\
+               }\n\
+               record NoHash { z: Int }\n\
+               fn main() {\n\
+                   let b = Boxed { k: NoHash { z: 1 }, v: 7 }\n\
+                   let k = b.key()\n\
+                   println(\"${k.z}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-record-bound-e0013");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("error[E0013]") && stderr.contains("`NoHash: Hash`"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("`NoHash: Eq`"),
+        "one diagnostic per unsatisfied bound, not just the first: {stderr}"
+    );
+}
+
+/// **Case 3 — the residual hole, pinned as accepted.** The same `Boxed`, the
+/// same non-conforming `K`, but only the *unbounded* field is read, so no
+/// bounded method is ever instantiated. It compiles, runs and prints. No
+/// diagnostic anywhere.
+///
+/// So the claim "a bogus instantiation is never silently useless" — which an
+/// earlier round of this plan asserted — is **false**, and this test is what
+/// stops that being rediscovered as a bug. It also stops a future enforcement
+/// change landing silently: threading type arguments through `MakeRecord` would
+/// turn this program into an error, which should be a deliberate act with a
+/// test to change rather than a quiet tightening.
+///
+/// Success is asserted **explicitly**, on the exact stdout. A test that merely
+/// omitted an error assertion would also pass if the program failed to compile
+/// for some unrelated reason.
+#[test]
+fn a_record_bound_no_field_type_uses_is_silently_accepted_when_never_exercised() {
+    let src = "record Boxed<K: Hash + Eq, V> { k: K\n\
+               v: V }\n\
+               impl<K: Hash + Eq, V> Boxed<K, V> {\n\
+                   fn key(self) -> K { self.k }\n\
+               }\n\
+               record NoHash { z: Int }\n\
+               fn main() {\n\
+                   let b = Boxed { k: NoHash { z: 1 }, v: 7 }\n\
+                   println(\"${b.v}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-record-bound-accepted");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("7\n");
+}

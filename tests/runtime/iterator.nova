@@ -1,0 +1,312 @@
+// Iteration end-to-end (Phase 2.2d) — the increment's gate.
+//
+// Run three ways: `nova run` (JIT), `nova build` (object backend), and
+// `NOVA_GC_STRESS=1`. The stress run is not belt-and-braces here either: a
+// `.filter().map()` chain is a *tower* of records, so the backing array is
+// reachable only as `MapIter` -> `FilterIter` -> `VecIter` -> `Vec` -> `data`
+// while every `next` allocates a fresh `Option` (and `collect` grows a `Vec`).
+// A collector whose root scan misses one link in that tower loses elements
+// silently rather than crashing.
+//
+// Nothing in this file may panic — a panic aborts the process and silently
+// truncates the rest of the gate, so every `Option` is opened with
+// `unwrap_or`/`is_some`/`is_none` or a `match`, never `unwrap`. Same
+// convention as `tests/runtime/assoc_types.nova`.
+//
+// Maps to the plan's Task 5 Step 1 gate list item by item:
+//   1. `for` over a `Vec` via `.iter()`                       -> FOR_VEC
+//   2. `for` over an integer range, STILL WORKING             -> FOR_RANGE
+//   3. exhaustion, then one further `next()` is `None`        -> EXHAUST
+//   4. an empty source whose FIRST `next()` is `None`         -> EMPTY
+//   5. a two-stage `.filter().map()` chain, adapter-on-adapter -> CHAIN
+//   6. all six default methods                                -> SIX
+//   7. every generic block at `Bool` or at `Float`            -> BOOL, FLOAT
+//
+// Item 2 is not filler. Task 2 rewrote the very function that dispatches a
+// `for` head (`check_for_iterator` beside `check_for`, in
+// `crates/nova-typeck/src/check.rs`), so the range form is exactly the thing
+// that change could have broken without any new feature noticing.
+//
+// **Item 7 is the most important thing in this file, and it is not
+// decoration.** `mir_ty` maps `Int` AND `Char` to `MirTy::I64`, and
+// `String`/`Fn`/`Record`/`Sum`/`Array` to `MirTy::Ptr` — `pointer_type()`,
+// i.e. `types::I64` on x86-64. So at the level a backend can see, `Int`,
+// `Char`, `String` and every heap type are the SAME type, and an item type
+// resolved to the wrong one of them is invisible after lowering. Only `Bool`
+// (`I8`) and `Float` (`F64`) have machine classes a wrong answer cannot hide
+// in. An `Int`-only iterator fixture cannot see a wrong `Item` at the
+// monomorphization seam at all; `tests/runtime/assoc_types.nova`'s header
+// records the measurement that established this.
+//
+// Mutations run against this file, each applied to the shipped compiler and
+// each confirmed to make the fixture fail under all three configurations.
+// Recorded because a fixture line that survives a broken compiler is worse
+// than no line — it reads as coverage. The line named is where the wrong value
+// appears, not merely where the count moves.
+//   A. `Vec::iter`'s cursor start, `i: 0` -> `i: 1`
+//      (`std/collections/lib.nova`)                          -> FOR_VEC,
+//                                                               EXHAUST, SIX,
+//                                                               BOOL, FLOAT
+//   B. `FilterIter::next`'s `if p(n.unwrap())` -> `if true`  -> CHAIN (all
+//                                                               three drive
+//                                                               forms), SIX,
+//                                                               BOOL, FLOAT
+//   C. `Iterator::count`'s `n = n + 1` deleted               -> EXHAUST
+//                                                               (consumed),
+//                                                               SIX, BOOL,
+//                                                               FLOAT
+//   D. monomorphization's normalization caching its first answer
+//      process-wide (`Specializer::ty`, `crates/nova-mir/src/mono.rs`)
+//                                                            -> FLOAT ONLY
+//
+// **Mutation D is the one that justifies item 7, and its result is sharper
+// than expected.** An `Int`-only reduction of this file — items 1 to 6 with
+// the BOOL and FLOAT sections deleted — survives it **byte-identically**,
+// which is the measurement item 7 exists to answer. And of the two
+// distinguishable classes only `Float` catches it: the `Bool` lines pass under
+// mutation D unchanged. So the `Float` half of item 7 is not redundant with
+// the `Bool` half, and a `Bool`-only item 7 would have shipped this fixture
+// with a hole. (`tests/runtime/assoc_types.nova`'s header records the
+// converse for *its* mutation C, where adding a `Vec<Bool>` was what killed
+// it. Which of the two classes has teeth depends on the mutation, so carry
+// both.)
+//
+// Two mutations were designed for this file and **discarded as unfalsifiable**
+// rather than reported as passes, because each breaks something unrelated
+// first and its failure is indistinguishable from a different bug:
+//   - The exclusive range's condition, `BinOp::Lt` -> `BinOp::Le` in
+//     `check_for` — intended for FOR_RANGE. `for i in 0..len` is load-bearing
+//     throughout std (`Vec::grow`, `Debug for String`, six places in
+//     `std/strings`), so it aborts inside std before this fixture prints a
+//     single line, and it fails `collections_run`, `strings_run`,
+//     `std_core_run`, `for_loops_run` and `assoc_types_run` identically.
+//     FOR_RANGE is still correct to have as a regression guard — Task 2 edited
+//     the function that dispatches a `for` head — but no mutation this fixture
+//     *discriminates* was found for it, and the reason is that the range form
+//     cannot regress quietly in the first place.
+//   - `MapIter::next` forwarding its inner item unmapped (`Some(n.unwrap())`)
+//     — intended for item 7. It does not type-check inside `std/core` at all
+//     (`E0010`: `next` should return `Option<T1>` but its body has type
+//     `Option<T0::Item>`), so every program fails identically and nothing about
+//     this fixture is on trial.
+//
+// One authoring note, since it will bite the next person: a closure passed to
+// `fold` needs its parameters ANNOTATED when the body is arithmetic that works
+// at more than one numeric type. `fs.iter().fold(0.0, |a, x| a + x)` over a
+// `Vec<Float>` is `E0010: argument has type 'fn(Int, Int) -> Int' but
+// 'fn(Float, Float) -> Float' was expected` — the expected type is right and
+// the closure's own inference defaulted to `Int`. `|a: Float, x: Float|`
+// fixes it. Pre-existing, unrelated to this increment, and the reason the
+// `Float` folds below carry annotations while the `map`/`filter` closures do
+// not (their bodies mention a `Float` literal, which pins them).
+
+// A hand-written `Iterator` that is not a `VecIter`, so `for` and the six
+// methods see an implementor whose `Item` is not tied to a container's element
+// type. Also the only shape that can expose its own cursor, which is how
+// EXHAUST observes that a consumed iterator stays consumed.
+record Countdown { n: Int }
+
+impl Iterator for Countdown {
+    type Item = Int
+    fn next(mut self) -> Option<Self::Item> {
+        if self.n <= 0 { return None }
+        self.n = self.n - 1
+        Some(self.n)
+    }
+}
+
+fn main() {
+    // `unwrap_or`'s sentinel, bound to a local because a line starting with
+    // `-` after a block is absorbed as binary subtraction.
+    let miss = 0 - 1
+
+    // === FOR_VEC — item 1: `for` over a `Vec` via `.iter()`. There is no
+    // `IntoIterator`, so `for x in v` does not work and `.iter()` is the
+    // spelling; the call result is the `for` head directly, with no
+    // intermediate binding, because that is what a user writes.
+    let mut v: Vec<Int> = Vec::new()
+    v.push(10)
+    v.push(20)
+    v.push(40)
+    let mut seen = ""
+    for x in v.iter() { seen = "${seen}${x}," }
+    println("for_vec ${seen}")
+
+    // A user implementor through the same desugar, so `for` is not pinned only
+    // against std's own `VecIter`.
+    let cd = Countdown { n: 3 }
+    let mut cdseq = ""
+    for x in cd { cdseq = "${cdseq}${x}," }
+    println("for_user ${cdseq}")
+
+    // === FOR_RANGE — item 2: the integer-range form, STILL WORKING. Task 2
+    // edited the function that dispatches a `for` head, so this is a
+    // regression guard, not a feature demo. Both an ascending range and an
+    // empty one (`3..3`), since the empty case is where an off-by-one in the
+    // range lowering shows up.
+    let mut r = ""
+    for i in 0..4 { r = "${r}${i}," }
+    println("for_range ${r}")
+    let mut r2 = "none"
+    for i in 3..3 { r2 = "${r2}${i}," }
+    println("for_range_empty ${r2}")
+
+    // === EXHAUST — item 3: iterate to the end, then confirm ONE FURTHER
+    // `next()` is `None`. Six `next()` calls over three elements rather than
+    // stopping at the first `None`, so `None` REPEATING is pinned and a
+    // non-advancing `next` is observable instead of hanging. Values 10/20/40
+    // rather than 10/20/30 because with 10/20/30 a non-advancing iterator sums
+    // to the same 60 over six turns and only `nones` would notice.
+    let mut it = v.iter()
+    let mut total = 0
+    let mut nones = 0
+    let mut k = 0
+    while k < 6 {
+        match it.next() {
+            Some(x) => total = total + x,
+            None => nones = nones + 1,
+        }
+        k = k + 1
+    }
+    println("exhaust total=${total} nones=${nones}")
+
+    // The same property on a consumer rather than by hand: `count` drives to
+    // exhaustion, and because `let mut it2 = self` inside it ALIASES the
+    // caller's record (records are heap objects, no copy semantics), the
+    // second `count` sees an already-consumed iterator. `0`, not `3`.
+    let mut cd2 = Countdown { n: 3 }
+    let first_count = cd2.count()
+    println("exhaust_consumed first=${first_count} again=${cd2.count()}")
+
+    // === EMPTY — item 4: a `Vec::new()` whose FIRST `next()` is already
+    // `None`. A separate behaviour from exhausting a non-empty source, because
+    // the cursor never advances at all — the guard is reached with
+    // `i == len == 0`, an index EXHAUST never visits. The annotation is
+    // required: an empty `Vec::new()` has nothing to infer its element type
+    // from.
+    let mut e: Vec<Int> = Vec::new()
+    let mut ei = e.iter()
+    let e0 = ei.next()
+    println("empty first_is_none=${e0.is_none()} value=${e0.unwrap_or(miss)}")
+    // And through the two forms a user reaches for.
+    let mut e2: Vec<Int> = Vec::new()
+    println("empty count=${e2.iter().count()} any=${e2.iter().any(|n| n > 0)}")
+    let mut eseen = "none"
+    for x in e2.iter() { eseen = "${eseen}${x}," }
+    println("empty for=${eseen}")
+
+    // === CHAIN — item 5: a two-stage `.filter().map()`, proving
+    // adapter-on-adapter: the outer `MapIter`'s `I` is a `FilterIter`, whose
+    // own `type Item = I::Item` is itself a projection, so resolving the
+    // outer adapter's `f: fn(I::Item) -> U` chases through two impls before
+    // landing on `Int`. Driven three ways — `for`, a chained `collect`, and a
+    // hand-driven `next` — because they are three different seams: the
+    // desugar, a consumer's `let mut it = self`, and a direct receiver call.
+    let mut cseen = ""
+    for x in v.iter().filter(|n| n > 10).map(|n| n + 1) { cseen = "${cseen}${x}," }
+    println("chain for=${cseen}")
+    let cgot = v.iter().filter(|n| n > 10).map(|n| n + 1).collect()
+    println("chain collect len=${cgot.len()} a=${cgot.get(0).unwrap_or(miss)} b=${cgot.get(1).unwrap_or(miss)} past=${cgot.get(2).unwrap_or(miss)}")
+    // `it:` first, `keep:`/`f:` after — the order matters and is not style. A
+    // record-literal field initializer is ORDER-SENSITIVE when a later field's
+    // type names a projection on the parameter an earlier field pins: with `f`
+    // written before `it`, `I` is not yet concrete when `f` is checked, so the
+    // same literal is `E0010` plus a cascading `E0011`. Pinned by
+    // `a_record_field_initializer_is_order_sensitive_when_it_names_a_projection`
+    // in `crates/nova-typeck/src/check.rs`.
+    //
+    // Both are also bound to locals first because a record literal cannot be a
+    // `for` head at all — `for x in NotIt { z: 1 }` is `P0001: expected
+    // expression (in statement), found ':'`, and parenthesising does not help.
+    let inner = FilterIter { it: v.iter(), keep: |n| n > 10 }
+    let mut outer = MapIter { it: inner, f: |n| n + 1 }
+    let n1 = outer.next()
+    let n2 = outer.next()
+    let n3 = outer.next()
+    println("chain by_hand a=${n1.unwrap_or(miss)} b=${n2.unwrap_or(miss)} exhausted=${n3.is_none()}")
+
+    // === SIX — item 6: all six default methods. Each consumer exhausts its
+    // receiver, so each line gets its own fresh `.iter()`. Every one is
+    // written as a chain onto a call result with no intermediate binding —
+    // the form the increment was designed around, and the form that was
+    // `E0060` until the four consumers moved from `mut self` to plain `self`.
+    let sixmap = v.iter().map(|n| n + 1).collect()
+    println("six map len=${sixmap.len()} a=${sixmap.get(0).unwrap_or(miss)} c=${sixmap.get(2).unwrap_or(miss)}")
+    let sixfilter = v.iter().filter(|n| n > 15).collect()
+    println("six filter len=${sixfilter.len()} a=${sixfilter.get(0).unwrap_or(miss)}")
+    println("six fold=${v.iter().fold(0, |a, x| a + x)}")
+    println("six count=${v.iter().count()}")
+    println("six any_hit=${v.iter().any(|n| n > 30)} any_miss=${v.iter().any(|n| n > 90)}")
+    let sixcollect = v.iter().collect()
+    println("six collect len=${sixcollect.len()} b=${sixcollect.get(1).unwrap_or(miss)}")
+
+    // === BOOL — item 7, first half. `Bool` is `MirTy::I8`, so every generic
+    // block below is instantiated at a machine class `Int` cannot be mistaken
+    // for: `VecIter<Bool>`, `MapIter<_, Bool>`, `FilterIter<VecIter<Bool>>`,
+    // and all six methods. The `map` to `Bool` from an `Int` source is the
+    // sharpest of these — the item type CHANGES partway down the pipeline, so
+    // a `MapIter::next` that forwarded its inner item unmapped has an `I8`
+    // hole to fall into rather than an `I64` one to hide in.
+    let mut bs: Vec<Bool> = Vec::new()
+    bs.push(true)
+    bs.push(false)
+    bs.push(true)
+    let mut bseen = ""
+    for b in bs.iter() { bseen = "${bseen}${b}," }
+    println("bool for=${bseen}")
+    println("bool count=${bs.iter().count()} any_hit=${bs.iter().any(|b| b)} any_miss=${bs.iter().any(|b| !b && b)}")
+    println("bool fold_or=${bs.iter().fold(false, |a: Bool, b: Bool| a || b)} fold_and=${bs.iter().fold(true, |a: Bool, b: Bool| a && b)}")
+    let bfilter = bs.iter().filter(|b| b).collect()
+    println("bool filter len=${bfilter.len()} a=${bfilter.get(0).unwrap_or(false)} b=${bfilter.get(1).unwrap_or(false)} past=${bfilter.get(2).unwrap_or(false)}")
+    let bnot = bs.iter().map(|b| !b).collect()
+    println("bool map a=${bnot.get(0).unwrap_or(true)} b=${bnot.get(1).unwrap_or(false)} c=${bnot.get(2).unwrap_or(true)}")
+    let bchain = bs.iter().filter(|b| b).map(|b| !b).collect()
+    println("bool chain len=${bchain.len()} a=${bchain.get(0).unwrap_or(true)} b=${bchain.get(1).unwrap_or(true)} past=${bchain.get(2).unwrap_or(true)}")
+    // `Int` source -> `Bool` items: the item type changes mid-pipeline.
+    let itob = v.iter().map(|n| n > 15).collect()
+    println("bool from_int a=${itob.get(0).unwrap_or(true)} b=${itob.get(1).unwrap_or(false)} c=${itob.get(2).unwrap_or(false)}")
+    println("bool from_int any=${v.iter().map(|n| n > 15).any(|b| b)} count=${v.iter().map(|n| n > 15).count()}")
+    let mut bhand = bs.iter()
+    let bn = bhand.next()
+    println("bool by_hand some=${bn.is_some()} value=${bn.unwrap_or(false)}")
+
+    // === FLOAT — item 7, second half. `Float` is `MirTy::F64`, the only other
+    // machine class in the language, and unlike `Bool` it is a *wider*
+    // register class — a wrong `Item` here is a Cranelift type error rather
+    // than a silently truncated one. Values are chosen so every printed result
+    // keeps a visible fractional part (`0.5`/`1.25`/`2.25`), because a `Float`
+    // whose result happens to be integral prints as `3`, not `3.0`, and would
+    // read identically to a wrongly-`Int` answer.
+    let mut fs: Vec<Float> = Vec::new()
+    fs.push(0.5)
+    fs.push(1.25)
+    fs.push(2.25)
+    let mut fseen = ""
+    for x in fs.iter() { fseen = "${fseen}${x}," }
+    println("float for=${fseen}")
+    println("float count=${fs.iter().count()} any_hit=${fs.iter().any(|x| x > 2.0)} any_miss=${fs.iter().any(|x| x > 9.0)}")
+    // Init `0.25`, not `0.0`: the three elements sum to exactly `4.0`, which
+    // prints as `4` and would read identically to a wrongly-`Int` answer. With
+    // `0.25` the total is `4.25` and the fractional part is on the page.
+    println("float fold=${fs.iter().fold(0.25, |a: Float, x: Float| a + x)}")
+    let ffilter = fs.iter().filter(|x| x > 1.0).collect()
+    println("float filter len=${ffilter.len()} a=${ffilter.get(0).unwrap_or(9.75)} b=${ffilter.get(1).unwrap_or(9.75)} past=${ffilter.get(2).unwrap_or(9.75)}")
+    let fmapped = fs.iter().map(|x| x + 0.25).collect()
+    println("float map a=${fmapped.get(0).unwrap_or(9.75)} b=${fmapped.get(1).unwrap_or(9.75)} c=${fmapped.get(2).unwrap_or(9.75)}")
+    let fchain = fs.iter().filter(|x| x > 1.0).map(|x| x + 0.25).collect()
+    println("float chain len=${fchain.len()} a=${fchain.get(0).unwrap_or(9.75)} b=${fchain.get(1).unwrap_or(9.75)} past=${fchain.get(2).unwrap_or(9.75)}")
+    // `Int` source -> `Float` items, and `Float` source -> `Bool` items, so
+    // both directions across the two distinguishable classes are exercised.
+    // The closure READS its `Int` argument (`if n > 15`) rather than returning
+    // a constant: Nova has no `as` casts, so an `Int` cannot be converted to a
+    // `Float`, and a constant-returning `|n| 0.5` would type-check without the
+    // source's items ever being consulted — proving nothing about the seam.
+    let itof = v.iter().map(|n| if n > 15 { 1.25 } else { 0.25 }).collect()
+    println("float from_int len=${itof.len()} a=${itof.get(0).unwrap_or(9.75)} b=${itof.get(1).unwrap_or(9.75)} c=${itof.get(2).unwrap_or(9.75)}")
+    println("float from_int fold=${v.iter().map(|n| if n > 15 { 1.25 } else { 0.25 }).fold(0.0, |a: Float, x: Float| a + x)}")
+    let ftob = fs.iter().map(|x| x > 1.0).collect()
+    println("float to_bool a=${ftob.get(0).unwrap_or(true)} b=${ftob.get(1).unwrap_or(false)} c=${ftob.get(2).unwrap_or(false)}")
+    let mut fhand = fs.iter()
+    let fn1 = fhand.next()
+    println("float by_hand some=${fn1.is_some()} value=${fn1.unwrap_or(9.75)}")
+}

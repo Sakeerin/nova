@@ -81,8 +81,13 @@ impl<T> Vec<T> {
 // an accident.
 //
 // As with `Map` and `Set` above, the `Iterator` contract lives on the `impl`
-// below, not on this record's generic parameter — a bound in that position is
-// `E0900`.
+// below, not on this record's generic parameter. A bound in that position is no
+// longer `E0900` — Phase 2.2d accepts it as a **resolution scope** so a field
+// type may name a projection on the parameter (ADR 0007 §1) — but it would buy
+// nothing here: `v: Vec<T>` and `i: Int` name no projection, so `T` needs no
+// bound to be convertible, and a bound in that position is not enforced at
+// construction. `std/core`'s `MapIter`/`FilterIter` are the records that do
+// need one.
 pub record VecIter<T> { v: Vec<T>, i: Int }
 
 impl<T> Iterator for VecIter<T> {
@@ -128,11 +133,17 @@ impl<T> Iterator for VecIter<T> {
 // into an all-tombstone scan.
 //
 // The `K: Hash + Eq` contract lives on the `impl` below, not on this record's
-// own generic parameters: a bound on a *record*'s type parameter is a hard
-// error, `E0900` — `record Map<K: Hash + Eq, V>` does not compile, because
-// `nova-hir`'s `RecordType` keeps only a generic count and `nova-mir`'s `mono`
-// checks bounds solely against a function's own `bounds`, so that position has
-// no way to enforce anything. On the impl it is real: instantiating any
+// own generic parameters. `record Map<K: Hash + Eq, V>` does compile as of
+// Phase 2.2d — a bound on a *record*'s type parameter is accepted as a
+// **resolution scope**, so that a field type may name a projection on the
+// parameter (ADR 0007 §1). What it is not is a **constraint**: it is not
+// checked when the record is built, because `nova-hir`'s `RecordType` keeps
+// only a generic count and `nova-mir`'s `mono` checks bounds solely against a
+// function's own `bounds`, so that position has no way to enforce anything.
+// (That mechanism is exactly what ADR 0007's "why it is not enforced" cites.)
+// Writing the bound here would therefore be decoration: no field of `Map`
+// names a projection, so nothing needs resolving, and the bound would promise
+// a check it does not perform. On the impl it is real: instantiating any
 // method with a key that is not `Hash + Eq` is E0013 at monomorphization,
 // which is pinned by `map_key_without_hash_reports_e0013` in nova-mir's
 // lowering tests.
@@ -327,8 +338,10 @@ impl<K: Hash + Eq, V> Map<K, V> {
 // the probing, tombstone and growth logic in exactly one place.
 //
 // As with `Map` (see the note above it), the `T: Hash + Eq` contract lives on
-// the `impl`, not on this record's generic parameter: a bound on a record
-// parameter is now a hard error, `E0900`.
+// the `impl`, not on this record's generic parameter. A bound there is legal as
+// of Phase 2.2d but is a resolution scope rather than a constraint (ADR 0007
+// §1), and `map: Map<T, Bool>` names no projection, so it would resolve nothing
+// and enforce nothing.
 pub record Set<T> { map: Map<T, Bool> }
 
 impl<T: Hash + Eq> Set<T> {

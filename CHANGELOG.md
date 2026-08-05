@@ -585,6 +585,83 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
       made `nova check` hang on a two-line file — measured, and caught only
       because the plan required verifying the invariant it also asserted.
 
+- **Iteration (Phase 2.2d)** — `for x in it` over any `Iterator`, plus six
+  default methods, so iterating no longer means a hand-written `while` and a
+  `match` on the `Option`.
+  - **`for x in it` desugars to the loop you would have written**:
+    `let mut __it = it` and then `while true { match __it.next() { Some(x) =>
+    body, None => break } }`. The hidden iterator is bound `mut` regardless of
+    the source expression's mutability, so `for x in <an immutable local>`
+    advances that local; the loop variable itself stays immutable, exactly as in
+    the range form. The integer-range form (`for i in 0..n`) is unchanged and
+    still takes its own counter-driven path.
+  - **`for x in v` is NOT supported — write `for x in v.iter()`.** There is no
+    `IntoIterator`, deliberately, so a container is not an iterator. `for x in 5`
+    and every other non-iterator reports `E0900` naming both accepted forms. The
+    desugar keys on `next`'s *shape* rather than on std's `Iterator`'s identity —
+    the same duck-typing string interpolation uses for `fmt` — so a user trait
+    declaring `next` is as good an iterator as std's.
+  - **Six default methods**: `map`, `filter`, `fold`, `count`, `any`, `collect`.
+    `map` and `filter` are **lazy** — each returns an adapter record
+    (`MapIter<Self, U>`, `FilterIter<Self>`) that pulls one element per `next`,
+    so nothing is consumed until a consumer runs, and `f` is never called for
+    elements nobody asks for. `collect` returns `Vec<Self::Item>`; `any`
+    short-circuits (which is why it is not written over `fold`). Adapters chain
+    on adapters, so `v.iter().filter(f).map(g).collect()` works as one
+    expression.
+  - **`collect` makes `std/core` depend on `std/collections` for the first
+    time**, because it returns a `Vec`. Accepted deliberately: one method and one
+    type, and the whole-program merge means there is no layering *mechanism* to
+    violate, only a convention. The alternative, `Vec::from_iter(it)` in
+    `std/collections`, keeps `std/core` free of collections and reads worse at
+    every call site.
+  - **A bound on a record's type parameter now resolves projections in field
+    types, and is NOT enforced at construction** (`docs/adr/0007-record-parameter-bounds.md`
+    §1). `record MapIter<I: Iterator, U> { it: I, f: fn(I::Item) -> U }` used to
+    be `E0900`; it is now accepted, and the bound is a **resolution scope** —
+    it exists so the field type may name `I::Item` at all. It is deliberately
+    *not* a constraint, because `MakeRecord` carries no type arguments and MIR
+    erases records to `Ptr`, so there is nowhere for the check to live that would
+    fire reliably. This is the one thing in this increment a reader could
+    reasonably be surprised by, so: what happens instead is **three different
+    answers**, not one. Where a field type names the projection (std's two
+    adapters), a wrong instantiation is `E0079` **at construction**, even
+    undriven — earlier and stricter than the bound would have been. Where it does
+    not, but a bounded impl method is instantiated, it is `E0013`. Where neither
+    holds, it **compiles, runs and prints, with no diagnostic** — a residual hole,
+    pinned by a test as accepted so it cannot be rediscovered as a bug or closed
+    silently. A bound on a *sum type*'s parameter is still `E0900`.
+  - **`Iterator`'s four consumers take plain `self`, not `mut self`** (ADR 0007
+    §2, which amends ADR 0005 §1). `mut self` rejects a temporary receiver, so
+    `v.iter().filter(f).map(g).collect()` — the form this increment exists for —
+    was `E0060`. The consumers now open with `let mut it = self` and drive `it`.
+    `next` remains the only `mut self` method, so driving an iterator by hand
+    still needs a mutable binding. **The cost is real and is not the goal:** the
+    same relaxation also lets a consumer accept an *immutable* local and advance
+    it silently (`let it = …; it.count()` twice gives `3` then `0`, no
+    diagnostic). ADR 0005's promise that "every std API that mutates must declare
+    `mut self`" no longer holds, and ADR 0005 has been amended in place to say so.
+  - **Adapters share their source by pointer, so mutating a source mid-iteration
+    is observable.** A `MapIter` holds its inner iterator the way `VecIter` holds
+    its `Vec` — records are heap objects, and there is no copy anywhere — so
+    advancing an adapter advances its source, and a `push` to the underlying
+    vector partway through a chain is visible to it. The same alias visibility
+    `VecIter` already documented; preventing it needs borrow tracking Nova lacks.
+    It is also what makes `let mut it = self` inside a consumer correct rather
+    than merely convenient.
+  - **The gate:** `tests/runtime/iterator.{nova,stdout}`, run three ways
+    (`iterator_run`, `iterator_build_standalone`, `iterator_under_gc_stress`) —
+    a fifth committed fixture beside `collections`, `std_core`, `strings` and
+    `assoc_types`. Every generic block in it is instantiated at `Bool` **and** at
+    `Float`, which is not decoration: `mir_ty` collapses `Int` and `Char` to
+    `MirTy::I64` and every heap type to `MirTy::Ptr`, so those are one machine
+    class and a wrong `Item` hides in them. Measured on this fixture — an
+    `Int`-only reduction of it survives a mutation that makes monomorphization's
+    normalization cache its first answer **byte-identically**, and of the two
+    distinguishable classes only the `Float` lines catch that one while the `Bool`
+    lines pass. Which class has teeth depends on the mutation, so the fixture
+    carries both.
+
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 
 Filed here as well as under Added, because these change the meaning of code that

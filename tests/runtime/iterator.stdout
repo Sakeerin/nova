@@ -1,0 +1,37 @@
+for_vec 10,20,40,
+for_user 2,1,0,
+for_range 0,1,2,3,
+for_range_empty none
+exhaust total=70 nones=3
+exhaust_consumed first=3 again=0
+empty first_is_none=true value=-1
+empty count=0 any=false
+empty for=none
+chain for=21,41,
+chain collect len=2 a=21 b=41 past=-1
+chain by_hand a=21 b=41 exhausted=true
+six map len=3 a=11 c=41
+six filter len=2 a=20
+six fold=70
+six count=3
+six any_hit=true any_miss=false
+six collect len=3 b=20
+bool for=true,false,true,
+bool count=3 any_hit=true any_miss=false
+bool fold_or=true fold_and=false
+bool filter len=2 a=true b=true past=false
+bool map a=false b=true c=false
+bool chain len=2 a=false b=false past=true
+bool from_int a=false b=true c=true
+bool from_int any=true count=3
+bool by_hand some=true value=true
+float for=0.5,1.25,2.25,
+float count=3 any_hit=true any_miss=false
+float fold=4.25
+float filter len=2 a=1.25 b=2.25 past=9.75
+float map a=0.75 b=1.5 c=2.5
+float chain len=2 a=1.5 b=2.5 past=9.75
+float from_int len=3 a=0.25 b=1.25 c=1.25
+float from_int fold=2.75
+float to_bool a=false b=true c=true
+float by_hand some=true value=0.5

@@ -4108,11 +4108,17 @@ impl<'a> Checker<'a> {
     /// without the user writing `mut`, per ADR 0005 §1). The user's `x` stays
     /// immutable, exactly as in the range form, so assigning it is `E0060`.
     ///
-    /// The `Iterator` bound is discharged at monomorphization (`E0013`) like
-    /// every other bound, not here — so this deliberately does **not** check
-    /// that the iterable implements `Iterator`. It needs an impl only to learn
-    /// the item type, and adding a bound check would diverge from how every
-    /// other bound in the language behaves.
+    /// **The iterable is checked here, not at monomorphization.** An earlier
+    /// revision of this comment claimed the opposite — "the `Iterator` bound is
+    /// discharged at monomorphization (`E0013`) like every other bound, not
+    /// here" — and that is measured false: `for x in 5` is
+    /// `error[E0900]: 'for' loops over anything but an integer range ('a..b')
+    /// or a value implementing 'Iterator' (try '.iter()') are not supported
+    /// yet`, reported by the `iterator_next` lookup below, in typeck. There is
+    /// no `Iterator` *bound* to discharge anywhere: the desugar needs an impl
+    /// in hand to learn the item type at all, so failing to find one is
+    /// necessarily an error at this point rather than a constraint deferred to
+    /// mono.
     ///
     /// What it therefore keys on is `next`'s *shape*, not std's `Iterator`'s
     /// identity — the same duck-typing [`Checker::try_display`] uses for `fmt`,
@@ -9618,8 +9624,30 @@ mod tests {
     fn a_record_bound_is_not_enforced_at_construction() {
         // The spec's §3.2 decision, pinned so it cannot drift silently in
         // either direction. `Int` is not an `It`, and building `M<Int, …>` is
-        // accepted: the bound is a resolution scope, not a constraint. Safety
-        // comes from the impl instead — see the E0014 test below.
+        // accepted: the bound is a resolution scope, not a constraint.
+        //
+        // What makes that safe is NOT one uniform diagnostic. It is three
+        // different answers depending on whether the bound reaches a field
+        // type, and only the first two are diagnostics at all — see ADR 0007
+        // §1, whose three cases are pinned in `crates/nova-cli/tests/
+        // run_tests.rs` (they need monomorphization, so they cannot live
+        // here):
+        //   `a_wrong_instantiation_of_a_projection_shaped_record_is_e0079_at_
+        //    construction`               — a field type NAMES the projection
+        //                                  (std's `MapIter`/`FilterIter`):
+        //                                  `E0079` at construction.
+        //   `an_unused_record_bound_is_still_enforced_through_a_bounded_impl_
+        //    method`                     — no field type does, but a bounded
+        //                                  impl method is instantiated:
+        //                                  `E0013`.
+        //   `a_record_bound_no_field_type_uses_is_silently_accepted_when_
+        //    never_exercised`            — neither: accepted, runs, prints.
+        //                                  The residual hole, pinned as
+        //                                  accepted.
+        // `M` here is the third shape (`it: I` names no projection) and is
+        // never used, so it is case 3. Earlier revisions of this comment
+        // pointed at "the E0014 test below": wrong code, and no such test ever
+        // existed.
         let r = check_src(
             "trait It { type Item\n fn next(mut self) -> Option<Self::Item> }\n\
              record M<I: It> { it: I }\n\
