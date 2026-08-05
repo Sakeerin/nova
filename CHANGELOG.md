@@ -303,6 +303,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     non-`Hash` key is `E0013` at monomorphization. Reachability pruning rooted
     at `main` keeps a program that touches no collection from paying for any
     of it.
+    *(Superseded in Phase 2.2d for **records**: a bound on a record's type
+    parameter is now accepted, as a resolution scope for projections in field
+    types, and is not enforced at construction. The **sum-type** form is
+    unchanged and still `E0900`. `Map` and `Set` still carry their bounds on the
+    impl, so nothing about this entry's collections changed. See the Phase 2.2d
+    entry below and `docs/adr/0007-record-parameter-bounds.md` §1.)*
   - The whole module is exercised end-to-end by `tests/runtime/collections.nova`
     under `nova run`, `nova build` **and `NOVA_GC_STRESS=1`** (collect on every
     allocation): `Vec` across three growths, `Map` through two rehashes with the
@@ -710,7 +716,15 @@ already compiled. Full detail is in the associated-types entry above.
   `E0900` instead of being silently discarded. It parsed and then enforced
   nothing: `hir::RecordType`/`hir::SumType` carry no bounds, and monomorphization
   discharges only function and impl bounds, so `Keyed { k: NoHash { … }, v: 2 }`
-  compiled and ran with a `NoHash` that had no `Hash` impl. Enforcing the bound
+  compiled and ran with a `NoHash` that had no `Hash` impl.
+  *(Superseded in Phase 2.2d for **records only** — and note that the
+  `Keyed { k: NoHash { … }, v: 2 }` behaviour described here is deliberately back:
+  it is case 3 of `docs/adr/0007-record-parameter-bounds.md` §1, accepted so that
+  a field type may name a projection on a bounded parameter, which is what lazy
+  iterator adapters require. The mechanism sentence above — no bounds on
+  `RecordType`, mono discharging only function and impl bounds — is still exactly
+  true, and is the reason the bound is still not enforced. The **sum-type** half
+  of this entry stands unchanged.)* Enforcing the bound
   instead would need a notion of "record instantiation site" that no pass has —
   a record's type arguments survive only in the enclosing expression's `Ty`,
   `ExprKind::MakeRecord` does not record them, and MIR erases them — so the

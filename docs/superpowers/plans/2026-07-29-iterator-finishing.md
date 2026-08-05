@@ -727,7 +727,7 @@ For at least three of the seven fixture items, apply a mutation that should brea
 - **Why not enforced:** `MakeRecord` carries no type arguments — the instantiation survives only in the enclosing `Expr.ty`, which lowering discards, and MIR erases records to `Ptr`. Monomorphization visits only instances reachable from `main`, so enforcement would fire *sometimes*, which is subtler than not firing at all. This is Phase 2.2a's assessment, re-affirmed.
 - **Why that is safe — three cases, each measured, do not collapse them.** Earlier drafts of this plan and the spec claimed one uniform answer (`E0014`, then `E0013`). Both were wrong, and the second was wrong in a specific way worth recording: `E0013` **was** measured, but on a *function's* bound (`fn f<I: It>`, `run_tests.rs:2804`) and on a record whose field type does not name a projection — then transcribed onto `MapIter`, whose field type does. Different shape, different diagnostic. The real behaviour, all three probed on the shipped compiler:
 
-  1. **The bound's purpose is to make a projection resolvable in a field type** — i.e. `MapIter { it: I, f: fn(I::Item) -> U }` and `FilterIter`, the only shapes this increment actually ships. A wrong instantiation is caught **at construction**, even if the value is never driven:
+  1. **The bound's purpose is to make a projection resolvable in a field type** — i.e. `MapIter { it: I, f: fn(I::Item) -> U }` and `FilterIter`, the only shapes this increment actually ships. A wrong instantiation is caught **at the construction site, even if the value is never driven — provided that site is reachable from `main`** (the mechanism is monomorphization, so it inherits monomorphization's reach; the identical construction in an uncalled function is silently accepted):
 
      ```
      let m = MapIter { it: 5, f: |x| x }
@@ -777,7 +777,7 @@ The ADR you just wrote asserts a safety property that **no test currently checks
 
 **Add three tests** (`crates/nova-cli/tests/run_tests.rs` — all three need monomorphization, so they cannot be `check_src` unit tests in `nova-typeck`; `E0079` and `E0013` are both mono diagnostics):
 
-1. `MapIter { it: 5, f: |x| x }` → `E0079` naming `Int::Item`, asserted **without driving the iterator**, since firing at construction is the property. This is the case the stdlib depends on and it is entirely unpinned today.
+1. `MapIter { it: 5, f: |x| x }` → `E0079` naming `Int::Item`, asserted **without driving the iterator**, since firing at the construction site is the property. Construct it in `main`: the check is monomorphization-based, so the same literal in an uncalled function reports nothing. This is the case the stdlib depends on and it is entirely unpinned today.
 2. A `Boxed`-shaped record whose bound no field type uses, driven through a bounded impl method → `E0013`. Assert on the bound spelling (`` `NoHash: Hash` ``), not just the code.
 3. The residual hole: the same record, constructed with a non-conforming type, only its unbounded field read → **succeeds**, with the expected stdout. Assert success explicitly. A test that pins an accepted gap is what stops it being rediscovered as a bug later, and stops a future enforcement change landing silently.
 

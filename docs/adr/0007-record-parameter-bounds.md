@@ -113,13 +113,29 @@ diagnostic.** Generalizing a measurement past the shape it was taken on is the
 specific error, and it is the second time this project's documents have made it.
 
 The real behaviour, all three probed on the shipped compiler and each now pinned
-by a test in `crates/nova-cli/tests/run_tests.rs`:
+by a test in `crates/nova-cli/tests/run_tests.rs`.
+
+**What separates the cases is whether some field type names a *projection* on the
+bounded parameter — not whether the bound "reaches" a field type at all.** An
+earlier draft of these headings said the latter, which is wrong in this
+document's own examples: `Boxed<K: Hash + Eq, V> { k: K, v: V }` has `k: K`, so
+the bound plainly reaches a field type, yet `Boxed` is the case 2/3 example, not
+the case 1 example. A bare `T` in a field position carries no projection to
+survive substitution, so nothing fires at construction; `f: fn(I::Item) -> U`
+does. Route by that question:
+
+| A field type names a projection on the parameter? | Bound exercised via a bounded impl method? | Outcome |
+|---|---|---|
+| yes | — | **case 1** — `E0079` where instantiated |
+| no | yes | **case 2** — `E0013` at that method |
+| no | no | **case 3** — silently accepted |
 
 **Case 1 — the bound's purpose is to make a projection resolvable in a field
 type.** That is `MapIter { it: I, f: fn(I::Item) -> U }` and
 `FilterIter { it: I, keep: fn(I::Item) -> Bool }` — the only two shapes this
-increment ships. A wrong instantiation is caught **at construction**, even
-though the value is never driven:
+increment ships. A wrong instantiation is caught **at the construction site,
+without the value ever being driven — provided that site is reachable from
+`main`**:
 
 ```nova
 let m = MapIter { it: 5, f: |x| x }
@@ -142,8 +158,30 @@ with the bound. Pinned by
 which deliberately does not drive the iterator, because firing at construction
 is the property.
 
-**Case 2 — the bound reaches no field type, but is exercised through a bounded
-impl method.** `record Boxed<K: Hash + Eq, V> { k: K, v: V }` with
+**The reachability qualifier is load-bearing, and an earlier draft of this
+section omitted it.** Because the mechanism is monomorphization, it inherits
+monomorphization's reach — the same limit this decision already cites two
+sections above as the reason a partial bound check was rejected. Measured:
+
+```nova
+fn never_called() {
+    let m = MapIter { it: 5, f: |x| x }   // the identical construction
+    println("unreachable")
+}
+fn main() { println("ok") }
+```
+
+`nova check` exits 0 with no diagnostic; `nova run` prints `ok`. So case 1 has
+the *same* escape as case 3, and the honest statement is narrower than "caught at
+construction": a bad instantiation of a projection-shaped record is caught
+wherever it is actually instantiated, and nowhere else. This does not change the
+decision — every construction in `std` and in any program that runs one is
+reachable by definition — but the unqualified form was wrong, and it was wrong in
+this document's own signature way: measured inside `main`, written up as
+universal. Third time in this increment, first time by this author.
+
+**Case 2 — no field type names a projection on the bounded parameter, but the
+bound is exercised through a bounded impl method.** `record Boxed<K: Hash + Eq, V> { k: K, v: V }` with
 `impl<K: Hash + Eq, V> Boxed<K, V> { fn key(self) -> K }`. Building
 `Boxed { k: NoHash { … }, v: 7 }` is accepted; instantiating `key` is not, one
 diagnostic per unsatisfied bound:
@@ -158,9 +196,9 @@ Pinned by `an_unused_record_bound_is_still_enforced_through_a_bounded_impl_metho
 which asserts the bound *spelling* and not merely the code, since `E0013` is the
 code for every unsatisfied bound in the language.
 
-**Case 3 — the bound reaches no field type and is never exercised.** The same
-`Boxed`, the same non-conforming `K`, but only the *unbounded* field is read, so
-no bounded method is ever instantiated:
+**Case 3 — no field type names a projection on the bounded parameter, and the
+bound is never exercised.** The same `Boxed`, the same non-conforming `K`, but
+only the *unbounded* field is read, so no bounded method is ever instantiated:
 
 ```nova
 let b = Boxed { k: NoHash { z: 1 }, v: 7 }
@@ -183,7 +221,11 @@ Three cases, three answers; there is no single verdict to write.
 - **A record bound looks like a constraint and is not one.** That is the risk,
   named rather than softened. A reader who writes
   `record Holder<T: Display> { v: T }` will reasonably expect
-  `Holder { v: SomeNonDisplay }` to be rejected, and — case 3 — it is not.
+  `Holder { v: SomeNonDisplay }` to be rejected, and it is not. `v: T` is a bare
+  parameter, not a projection on one, so this is **case 3** by the table above —
+  measured: it compiles, runs, and prints. Note this is the example that makes
+  the "reaches a field type" wording untenable: the bound here reaches `v`, and
+  the answer is still case 3.
 - **It belongs to a family this project keeps finding and fixing:** impl-level
   `const`s parsed and discarded, record field visibility parsed and never
   enforced, `pub` on methods accepted and ignored. All "accepted and quietly

@@ -167,11 +167,23 @@ into argument-type or arity noise.
   it.count()   // 0   <- advanced, no diagnostic
   ```
 
-  Under `mut self` the first call was `E0060: 'next' mutates its receiver, but
-  'it' is immutable` — which is the exact shape §1's Context cites as the reason
-  this rule exists. **That loss is real and it was not the goal.** Nova has no
-  third receiver form that accepts a temporary while rejecting an immutable
-  local, so the two could not be separated.
+  Under `mut self` **both** calls were rejected, each as
+  `E0060: 'count' mutates its receiver, but 'it' is immutable` — which is the
+  exact shape §1's Context cites as the reason this rule exists. **That loss is
+  real and it was not the goal.** Nova has no third receiver form that accepts a
+  temporary while rejecting an immutable local, so the two could not be
+  separated.
+
+  (An earlier draft of this amendment quoted that diagnostic as naming `next`,
+  and as firing only on the first call. Both were wrong, and measured so: the
+  message is built by `MutTarget::Receiver(m).immutable_message` in
+  `crates/nova-typeck/src/check.rs`, which interpolates **the method actually
+  invoked** — so a `count()` call says `count`, not the `next` it would have
+  called internally — and the check runs per call site, so two calls give two
+  diagnostics. Writing up a diagnostic observed for one call shape as the answer
+  for a different one is the specific mistake this increment made repeatedly; it
+  is corrected here rather than quietly, because a wrong quotation in an ADR is
+  the kind of thing later work cites as settled.)
 
   *What bounds it.* The mechanism is untouched — `mut self` still reports `E0060`
   on a temporary and on an immutable local, verified on an inherent method, a

@@ -103,7 +103,11 @@ that changes which check fires. All three cases below were probed on the shipped
 
 **Case 1 — the bound exists to make a projection resolvable in a field type.** This is
 `MapIter { it: I, f: fn(I::Item) -> U }` and `FilterIter`: the only shapes the stdlib ships. A
-wrong instantiation is caught **at construction**, without the value ever being driven:
+wrong instantiation is caught **at the construction site, without the value ever being driven —
+provided that site is reachable from `main`**. The reachability qualifier was missing from an earlier
+draft and is load-bearing: the mechanism is monomorphization, so it inherits monomorphization's reach.
+Measured — the identical construction inside a function `main` never calls produces no diagnostic at
+all and the program runs. See ADR 0007 §1, which states this and its consequence in full.
 
 ```
 let m = MapIter { it: 5, f: |x| x }
@@ -223,7 +227,7 @@ The increment's user interface is its errors.
 |---|---|
 | `for x in <not a range, not an Iterator>` | reworded `E0900`. Today's text — "`for` loops over anything but an integer range" — becomes false when §4 lands. The new text must name both accepted forms **and** mention `.iter()`, because `for x in v` is the mistake people will make. |
 | `record M<I: NoSuchTrait>` | `E0001` on the trait name, not a silent skip |
-| `MapIter<Int, U>` — constructed, never driven | **`E0079`: `Int::Item` is still an unresolved associated type**, at monomorphization. This row has been wrong twice: first `E0014`, then `E0013` (Task 1's review measured `E0013` on a differently-shaped record and on a function's bound, then transcribed it here). Because `MapIter`'s field type names `I::Item`, the surviving-projection check fires at construction — no method call needed. See §3.2 case 1. |
+| `MapIter<Int, U>` — constructed, never driven | **`E0079`: `Int::Item` is still an unresolved associated type**, at monomorphization. This row has been wrong twice: first `E0014`, then `E0013` (Task 1's review measured `E0013` on a differently-shaped record and on a function's bound, then transcribed it here). Because `MapIter`'s field type names `I::Item`, the surviving-projection check fires at the construction site — no method call needed — **but only where that site is reachable from `main`**, a qualifier this row also lacked. See §3.2 case 1. |
 | A record bound absent from every field type, used via a bounded impl method | `E0013`, one per unsatisfied bound, naming the type and the trait. §3.2 case 2. |
 | The same, never used | **Accepted, compiles and runs, no diagnostic.** §3.2 case 3 — the residual hole this decision accepts. |
 | `record M<I: Iterator> { v: Int }` — bound on a parameter no field type uses | **Accepted silently.** Rejecting it was considered and declined: the bound is inert, harmless, and detecting "unused by any field type" is a second analysis for no user benefit. Noted here so its absence is a decision rather than an oversight. |
