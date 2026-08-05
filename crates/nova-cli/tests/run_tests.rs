@@ -2969,20 +2969,19 @@ fn a_map_iter_calls_f_lazily_not_all_up_front() {
 /// inline `nova run` pattern every neighboring test in this module uses
 /// (e.g. `a_map_iter_calls_f_lazily_not_all_up_front` above).
 ///
-/// **Deviates from the plan's literal source.** The plan's Step 1 chains
-/// `fold`/`count`/`any`/`collect` straight onto a call result — e.g.
-/// `v.iter().fold(0, |a, x| a + x)` — but all four take `mut self`, and
-/// `place_root` (`crates/nova-typeck/src/check.rs`) classifies a call result
-/// as `PlaceRoot::NotAPlace`: "Any other base (call result, literal, block,
-/// …) is a temporary with no assignable root." That is not a new gap this
-/// task introduces — it is the exact consequence `trait Iterator`'s own doc
-/// comment already names ("an iterator must be held in a `mut` binding or
-/// arrive as a `mut` parameter, or the call is `E0060`") — but the plan's own
-/// example source violates it, and so cannot compile as written: every line
-/// below that calls one of the four consumers first binds its receiver to
-/// its own `let mut` local. `map`/`filter` need no such local since both take
-/// plain `self`. The values and the expected stdout are unchanged from the
-/// plan.
+/// **Matches the plan's literal source exactly, unlike an earlier round of
+/// this test.** The plan's Step 1 chains `fold`/`count`/`any`/`collect`
+/// straight onto a call result — e.g. `v.iter().fold(0, |a, x| a + x)` — which
+/// first failed with `E0060` (`place_root`,
+/// `crates/nova-typeck/src/check.rs`, classifies a call result
+/// `PlaceRoot::NotAPlace`, and a `mut self` receiver requires
+/// `PlaceRoot::Mutable`). That was fixed at the design level, not by
+/// rewriting this test to dodge it: all four consumers now take plain `self`
+/// and rebind internally (`let mut it = self`, `trait Iterator`'s own doc
+/// comment above `fold` explains why this aliases rather than copies), so the
+/// receiver no longer has to already be a mutable place the caller named.
+/// With that landed, the plan's original source needs no `let mut` workaround
+/// at all and is reproduced here verbatim.
 #[test]
 fn iterator_default_methods_work_and_chain() {
     let src = "fn main() {\n\
@@ -2990,20 +2989,14 @@ fn iterator_default_methods_work_and_chain() {
       v.push(1)\n\
       v.push(2)\n\
       v.push(3)\n\
-      let mut chained = v.iter().filter(|n| n > 1).map(|n| n * 10)\n\
-      let got = chained.collect()\n\
+      let got = v.iter().filter(|n| n > 1).map(|n| n * 10).collect()\n\
       println(\"${got.len()}\")\n\
       println(\"${got.get(0).unwrap()}\")\n\
-      let mut it1 = v.iter()\n\
-      println(\"${it1.fold(0, |a, x| a + x)}\")\n\
-      let mut it2 = v.iter()\n\
-      println(\"${it2.count()}\")\n\
-      let mut it3 = v.iter()\n\
-      println(\"${it3.any(|n| n > 2)}\")\n\
-      let mut it4 = v.iter()\n\
-      println(\"${it4.any(|n| n > 9)}\")\n\
-      let mut it5 = v.iter().map(|n| n > 2)\n\
-      println(\"${it5.any(|b| b)}\")\n\
+      println(\"${v.iter().fold(0, |a, x| a + x)}\")\n\
+      println(\"${v.iter().count()}\")\n\
+      println(\"${v.iter().any(|n| n > 2)}\")\n\
+      println(\"${v.iter().any(|n| n > 9)}\")\n\
+      println(\"${v.iter().map(|n| n > 2).any(|b| b)}\")\n\
     }";
     let dir = std::env::temp_dir().join("nova-iterator-default-methods");
     std::fs::create_dir_all(&dir).expect("temp dir");
@@ -3089,6 +3082,14 @@ fn iterator_map_default_method_is_lazy_over_a_side_effecting_source() {
 /// exactly `pull 0`, `pull 1`, `pull 2` and stops, where a full scan (e.g.
 /// `any` rewritten over `fold`) would also print `pull 3` and `pull 4` before
 /// the same `true`.
+///
+/// `src` is deliberately **not** `mut` (unlike an earlier round of this
+/// test): `any` now takes plain `self` and rebinds internally, so it no
+/// longer needs the caller's own binding to already be mutable — re-run after
+/// the `mut self` -> `self` design change specifically to confirm the
+/// short-circuit itself is unaffected, since the receiver rebinding
+/// (`let mut it = self`) sits directly in the path this test exercises. The
+/// expected stdout is unchanged from before that change.
 #[test]
 fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
     let src = "record CountingSrc { n: Int, max: Int }\n\
@@ -3103,7 +3104,7 @@ fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
                    }\n\
                }\n\
                fn main() {\n\
-                   let mut src = CountingSrc { n: 0, max: 5 }\n\
+                   let src = CountingSrc { n: 0, max: 5 }\n\
                    println(\"${src.any(|n| n > 1)}\")\n\
                }";
     let dir = std::env::temp_dir().join("nova-iterator-any-short-circuits");
@@ -3151,15 +3152,20 @@ fn iterator_any_short_circuits_and_does_not_scan_past_the_first_match() {
 /// `fn sums<I: Iterator>(mut it: I) -> Int { it.fold(0, |a, x| a + x) }`
 /// does not — a real, pre-existing gap, worth stating plainly rather than
 /// leaving implicit.
+///
+/// None of the three helpers below declare `mut it: I` any more (an earlier
+/// round of this test did): `fold`/`any`/`collect` take plain `self` now, so
+/// nothing here requires the caller's own parameter to already be a mutable
+/// place either.
 #[test]
 fn iterator_default_methods_work_through_a_generic_iterator_bound() {
-    let src = "fn count_via_fold<I: Iterator>(mut it: I) -> Int {\n\
+    let src = "fn count_via_fold<I: Iterator>(it: I) -> Int {\n\
                    it.fold(0, |a, x| a + 1)\n\
                }\n\
-               fn any_via_generic<I: Iterator>(mut it: I) -> Bool {\n\
+               fn any_via_generic<I: Iterator>(it: I) -> Bool {\n\
                    it.any(|x| true)\n\
                }\n\
-               fn len_via_collect<I: Iterator>(mut it: I) -> Int {\n\
+               fn len_via_collect<I: Iterator>(it: I) -> Int {\n\
                    it.collect().len()\n\
                }\n\
                fn main() {\n\
@@ -3181,4 +3187,92 @@ fn iterator_default_methods_work_through_a_generic_iterator_bound() {
         .assert()
         .success()
         .stdout("3\ntrue\n3\n");
+}
+
+/// The design this task was chosen on, pinned at exactly the shape a user
+/// will write: `v.iter().filter(…).map(…).collect()` as one expression, no
+/// intermediate binding anywhere in the chain. This was `E0060` (`collect`
+/// mutates its receiver, which cannot be a temporary) until `fold`/`count`/
+/// `any`/`collect` moved from `mut self` to plain `self`, each rebinding
+/// internally (`let mut it = self`) instead of requiring the caller to have
+/// already named a mutable place — `trait Iterator`'s own doc comment above
+/// `fold` (`std/core/lib.nova`) explains why. Deliberately narrower than
+/// `iterator_default_methods_work_and_chain` above (which exercises all six
+/// methods and several values at once): this test's only job is to fail
+/// loudly and specifically if the advertised chained form ever stops
+/// compiling, rather than being one assertion among many in a larger test.
+#[test]
+fn iterator_adapter_chain_compiles_and_runs_as_a_single_expression() {
+    let src = "fn main() {\n\
+      let mut v = Vec::new()\n\
+      v.push(1)\n\
+      v.push(2)\n\
+      v.push(3)\n\
+      let got = v.iter().filter(|n| n > 1).map(|n| n * 10).collect()\n\
+      println(\"${got.len()}\")\n\
+      println(\"${got.get(0).unwrap()}\")\n\
+    }";
+    let dir = std::env::temp_dir().join("nova-iterator-chain-single-expression");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("2\n20\n");
+}
+
+/// The go/no-go check for the `mut self` -> `self` design change: `fold`,
+/// `count`, `any` and `collect` now rebind their receiver internally
+/// (`let mut it = self`) instead of requiring the caller's own binding to
+/// already be mutable. Records are heap objects with no copy semantics
+/// anywhere in this compiler (grepped for "moved value"/"use after move"/
+/// "linear type"/"affine type" across every crate during Task 4's original
+/// work; zero hits), so `it` is expected to alias exactly the storage `self`
+/// pointed to rather than copy it — but "expected" is not "verified," and
+/// this is precisely the kind of change a silent value-copy would make look
+/// identical for every test that only checks a consumer's *return* value.
+///
+/// `Cursor` exposes its own cursor field (`n`) directly, so this reads the
+/// iterator's storage back out through the *original* binding after a
+/// consumer has run on it, rather than inferring aliasing indirectly through
+/// a second `.next()` call. Two consumers, deliberately different: `any`
+/// short-circuits (stops at the first match, `x > 1` first true at `2`), so
+/// `a.n` reading `3` afterward (not `0`, a copy; not `5`, a full scan) proves
+/// aliasing *and* confirms the short-circuit itself survived the receiver
+/// rebinding, in one assertion. `count` runs to exhaustion, so `b.n` reading
+/// `3` afterward confirms the same aliasing on the other kind of consumer —
+/// one that always visits every element rather than stopping early.
+#[test]
+fn an_iterators_own_storage_still_advances_when_a_consumer_takes_plain_self() {
+    let src = "record Cursor { n: Int, max: Int }\n\
+               impl Iterator for Cursor {\n\
+                   type Item = Int\n\
+                   fn next(mut self) -> Option<Int> {\n\
+                       if self.n >= self.max { return None }\n\
+                       let x = self.n\n\
+                       self.n = self.n + 1\n\
+                       Some(x)\n\
+                   }\n\
+               }\n\
+               fn main() {\n\
+                   let mut a = Cursor { n: 0, max: 5 }\n\
+                   println(\"${a.any(|x| x > 1)}\")\n\
+                   println(\"${a.n}\")\n\
+                   let mut b = Cursor { n: 0, max: 3 }\n\
+                   println(\"${b.count()}\")\n\
+                   println(\"${b.n}\")\n\
+               }";
+    let dir = std::env::temp_dir().join("nova-iterator-consumer-aliases-storage");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, src).expect("write");
+    nova()
+        .arg("run")
+        .arg(&path)
+        .assert()
+        .success()
+        .stdout("true\n3\n3\n3\n");
 }

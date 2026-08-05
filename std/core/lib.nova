@@ -181,12 +181,35 @@ pub trait Iterator {
 
     // --- consumers (each drives the iterator to exhaustion or short-circuits) ---
 
+    // Plain `self`, not `mut self`, on all four consumers below — `next` is
+    // still `mut self` (it is the one method a caller invokes repeatedly on a
+    // binding they hold), but a consumer runs to exhaustion in one call, so it
+    // does not need its *own* receiver to already be a mutable place; it only
+    // needs a mutable place to drive `next` through, and it makes its own with
+    // `let mut it = self`, the same trick `for x in <expr>`'s desugar uses
+    // (`let mut __it = <expr>`, `crates/nova-typeck/src/check.rs`'s
+    // `check_for_iterator`). Records are heap objects with no copy semantics
+    // anywhere in this compiler, so `it` is an alias of exactly the storage
+    // `self` pointed to, not a copy — advancing `it` is advancing the same
+    // iterator the caller passed in, exactly as if `self` itself had been
+    // `mut`. `an_iterators_own_storage_still_advances_when_a_consumer_takes_
+    // plain_self` (`crates/nova-cli/tests/run_tests.rs`) pins this.
+    //
+    // This is what lets `v.iter().filter(f).map(g).collect()` — the form this
+    // feature exists to make possible — compile at all: `.filter()`/`.map()`
+    // each return a temporary, and only a plain-`self` method can be called on
+    // one (`place_root` classifies a call result `PlaceRoot::NotAPlace`, and a
+    // `mut self` receiver requires `PlaceRoot::Mutable`). A `mut self` here
+    // would make every one of these four methods `E0060` the moment it is
+    // chained straight off an adapter instead of a named `mut` binding.
+
     // The fold primitive. `count` and `collect` could be written over it;
     // `any` cannot, because `fold` visits every element and `any` must stop.
-    fn fold<A>(mut self, init: A, f: fn(A, Self::Item) -> A) -> A {
+    fn fold<A>(self, init: A, f: fn(A, Self::Item) -> A) -> A {
+        let mut it = self
         let mut acc = init
         while true {
-            let n = self.next()
+            let n = it.next()
             if n.is_none() { return acc }
             let g = f
             acc = g(acc, n.unwrap())
@@ -196,10 +219,11 @@ pub trait Iterator {
 
     // `count`, not `len`: this consumes the iterator, where `Vec::len` is cheap
     // and non-destructive. Naming it `len` would invite the wrong assumption.
-    fn count(mut self) -> Int {
+    fn count(self) -> Int {
+        let mut it = self
         let mut n = 0
         while true {
-            let x = self.next()
+            let x = it.next()
             if x.is_none() { return n }
             n = n + 1
         }
@@ -207,9 +231,10 @@ pub trait Iterator {
     }
 
     // Short-circuits, which is why it is not written over `fold`.
-    fn any(mut self, p: fn(Self::Item) -> Bool) -> Bool {
+    fn any(self, p: fn(Self::Item) -> Bool) -> Bool {
+        let mut it = self
         while true {
-            let n = self.next()
+            let n = it.next()
             if n.is_none() { return false }
             let q = p
             if q(n.unwrap()) { return true }
@@ -223,10 +248,11 @@ pub trait Iterator {
     // a convention. The alternative was `Vec::from_iter(it)` in
     // `std/collections`, which keeps `std/core` free of collections and reads
     // worse at the call site.
-    fn collect(mut self) -> Vec<Self::Item> {
+    fn collect(self) -> Vec<Self::Item> {
+        let mut it = self
         let mut out = Vec::new()
         while true {
-            let n = self.next()
+            let n = it.next()
             if n.is_none() { return out }
             out.push(n.unwrap())
         }
