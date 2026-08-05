@@ -3261,8 +3261,11 @@ fn a_generic_iterator_bound_cannot_use_its_item_concretely_in_fold() {
 /// The second chain closes a coverage gap review found: `collect` is the one
 /// new method whose own *return type* names the projection
 /// (`Vec<Self::Item>`), which makes it the most exposed of the six to the
-/// monomorphization seam — `mir_ty` collapses `Int`/`Char`/`String`/every heap
-/// type into one machine class, so only `Bool`/`Float` actually discriminate
+/// monomorphization seam — `mir_ty` collapses `Int`/`Char` into `MirTy::I64`
+/// and `String`/`Fn`/`Sum`/`Record`/`Array` into `MirTy::Ptr`, and since `Ptr`
+/// is `i64` on x86-64 those two classes are the same machine width (they do
+/// stay distinct at codegen). `Bool` is `I8` and `Float` is `F64`, disjoint
+/// from both, so only those two actually discriminate
 /// a wrong item type from a coincidentally-right one (the same reasoning
 /// Task 3 applied to its own chain, and the brief applied to `any` above but
 /// never to `collect`). Every `collect` call elsewhere in this task's tests
