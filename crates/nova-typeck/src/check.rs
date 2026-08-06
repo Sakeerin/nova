@@ -14312,4 +14312,97 @@ mod tests {
             [false, true, false]
         );
     }
+
+    // ---- fix round 1: import/module/extern carry attrs too -----------------
+    //
+    // Escalated after independent measurement: `@tset` before a function was
+    // E0082, but before an `import` it was masked by an unrelated E0001
+    // ("cannot find module"), and before an `extern` block it produced NO
+    // diagnostic at all — an unknown attribute compiled clean. The root cause
+    // was in `nova-ast`/`nova-parser`, not just `nova-resolver`: `Import`,
+    // `Module` and `ExternBlock` had no `attrs` field, so `try_parse_item`'s
+    // freshly-parsed `Vec<Attribute>` had nowhere to go for those three item
+    // kinds and was silently dropped before the resolver ever ran. Fixed by
+    // giving all three an `attrs` field (matching the other six exactly in
+    // placement and type) and extending `validate_attrs_reject_test` to walk
+    // them, rather than special-casing the parser to reject `@` there — every
+    // item may carry attributes; validation decides what is legal, uniformly.
+
+    #[test]
+    fn an_unknown_attribute_before_an_import_is_e0082_and_names_it() {
+        let r = check_src("@tset\nimport core\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0082")
+            .expect("E0082 for an unknown attribute before an import");
+        assert!(
+            d.message.contains("tset"),
+            "names the attribute: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("test"),
+            "lists the known set: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn an_unknown_attribute_before_a_module_is_e0082_and_names_it() {
+        let r = check_src("@tset\nmodule foo;\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0082")
+            .expect("E0082 for an unknown attribute before a module declaration");
+        assert!(
+            d.message.contains("tset"),
+            "names the attribute: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("test"),
+            "lists the known set: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn an_unknown_attribute_before_an_extern_block_is_e0082_and_names_it() {
+        let r = check_src("@tset\nextern { }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0082")
+            .expect("E0082 for an unknown attribute before an extern block");
+        assert!(
+            d.message.contains("tset"),
+            "names the attribute: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("test"),
+            "lists the known set: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn test_before_an_import_is_e0083() {
+        let r = check_src("@test\nimport core\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn test_before_a_module_is_e0083() {
+        let r = check_src("@test\nmodule foo;\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn test_before_an_extern_block_is_e0083() {
+        let r = check_src("@test\nextern { }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+    }
 }

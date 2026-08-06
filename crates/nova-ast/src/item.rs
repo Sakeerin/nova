@@ -196,6 +196,7 @@ pub struct ConstDecl {
 /// An `import` declaration.
 #[derive(Debug, Clone)]
 pub struct Import {
+    pub attrs: Vec<Attribute>,
     pub path: Spanned<Path>,
     pub kind: ImportKind,
 }
@@ -214,12 +215,14 @@ pub enum ImportKind {
 /// A `module` declaration (refers to another file).
 #[derive(Debug, Clone)]
 pub struct Module {
+    pub attrs: Vec<Attribute>,
     pub path: Spanned<Path>,
 }
 
 /// An `extern` block for FFI declarations.
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
+    pub attrs: Vec<Attribute>,
     pub abi: Option<String>,
     pub items: Vec<ExternItem>,
 }

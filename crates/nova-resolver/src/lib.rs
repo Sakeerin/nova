@@ -698,6 +698,15 @@ fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_m
 /// ignored, so a mistyped `@tset` cannot compile into a function that looks
 /// like a test and never runs as one. A well-formed `@test` function is
 /// pushed onto `tests`.
+///
+/// Every `Item` variant carries `attrs` and is validated here, `import`,
+/// `module` and `extern` included (fix round 1: `@tset` before an `extern`
+/// block used to compile with zero diagnostics, since neither the AST nor
+/// the parser gave those three item kinds anywhere to put a parsed
+/// attribute — see `nova-ast`'s `Import`/`Module`/`ExternBlock` and
+/// `nova-parser`'s `try_parse_item`). The rule is now uniform: every item may
+/// carry attributes, and validation — not the AST shape — decides what is
+/// legal, so there is no item kind left where a silent drop is possible.
 #[allow(clippy::too_many_arguments)]
 fn collect_item(
     defs: &mut Vec<Def>,
@@ -918,6 +927,7 @@ fn collect_item(
             }
         }
         Item::Extern(block) => {
+            validate_attrs_reject_test(&block.attrs, "an extern block", diagnostics);
             // Each declaration binds as a callable value under its (unmangled)
             // C symbol name. ABI / signature validity is checked in typeck.
             // Extern fns are module-private (the grammar has no `pub` on them).
@@ -948,8 +958,14 @@ fn collect_item(
                 );
             }
         }
-        // `import`s are handled in pass 2; `module` declarations carry no items.
-        Item::Import(_) | Item::Module(_) => {}
+        Item::Import(imp) => {
+            validate_attrs_reject_test(&imp.attrs, "an import", diagnostics);
+            // Otherwise handled in pass 2.
+        }
+        Item::Module(m) => {
+            validate_attrs_reject_test(&m.attrs, "a module declaration", diagnostics);
+            // Carries no items of its own to collect.
+        }
     }
 }
 
@@ -988,12 +1004,12 @@ fn unknown_attribute(attr: &Attribute) -> Diagnostic {
 }
 
 /// Validate the attributes of an item that can never itself be a test: every
-/// attrs-bearing item except a function (record, type declaration, trait,
-/// impl block, const — see [`validate_test_function`] for the function
-/// case). An unknown name is still `E0082`; `@test` on one of these is
-/// `E0083`, since only a function can ever run as a test. `kind` names the
-/// item for the message and already carries its article (e.g. `"a record"`,
-/// `"an impl block"`).
+/// item kind except a function (record, type declaration, trait, impl block,
+/// const, import, module, extern block — see [`validate_test_function`] for
+/// the function case). An unknown name is still `E0082`; `@test` on one of
+/// these is `E0083`, since only a function can ever run as a test. `kind`
+/// names the item for the message and already carries its article (e.g.
+/// `"a record"`, `"an impl block"`).
 fn validate_attrs_reject_test(attrs: &[Attribute], kind: &str, diagnostics: &mut Vec<Diagnostic>) {
     for attr in attrs {
         if attr.name.value == "test" {

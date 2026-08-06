@@ -311,17 +311,20 @@ impl<'a> Parser<'a> {
             }
             Token::Import => {
                 self.advance();
-                let imp = self.parse_import()?;
+                let mut imp = self.parse_import()?;
+                imp.attrs = attrs;
                 Item::Import(imp)
             }
             Token::Module => {
                 self.advance();
-                let m = self.parse_module()?;
+                let mut m = self.parse_module()?;
+                m.attrs = attrs;
                 Item::Module(m)
             }
             Token::Extern => {
                 self.advance();
-                let e = self.parse_extern_block()?;
+                let mut e = self.parse_extern_block()?;
+                e.attrs = attrs;
                 Item::Extern(e)
             }
             _ => {
@@ -834,6 +837,7 @@ impl<'a> Parser<'a> {
 
         self.eat(&Token::Semicolon);
         Some(Import {
+            attrs: Vec::new(),
             path: Spanned::new(path, path_span),
             kind,
         })
@@ -850,6 +854,7 @@ impl<'a> Parser<'a> {
         );
         self.eat(&Token::Semicolon);
         Some(Module {
+            attrs: Vec::new(),
             path: Spanned::new(path, span),
         })
     }
@@ -882,7 +887,11 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&Token::RBrace, "extern block")?;
-        Some(ExternBlock { abi, items })
+        Some(ExternBlock {
+            attrs: Vec::new(),
+            abi,
+            items,
+        })
     }
 }
 
