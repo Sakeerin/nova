@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Impl(
                     ImplBlock {
+                        attrs: [],
                         generics: [],
                         trait_: Some(
                             Spanned {
@@ -63,6 +64,7 @@ Some(
                         where_clause: [],
                         functions: [
                             Function {
+                                attrs: [],
                                 vis: Private,
                                 is_async: false,
                                 name: Spanned {
@@ -162,6 +164,7 @@ Some(
                         ],
                         consts: [
                             ConstDecl {
+                                attrs: [],
                                 vis: Private,
                                 name: Spanned {
                                     value: "N",

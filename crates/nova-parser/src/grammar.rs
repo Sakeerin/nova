@@ -7,9 +7,9 @@
 use nova_ast::{
     expr::{AssignOp, BinOp, Expr, FieldInit, Literal, MatchArm, StringPart, UnOp},
     item::{
-        AssocTypeBinding, ConstDecl, ExternBlock, ExternItem, Function, FunctionSig, ImplBlock,
-        Import, ImportKind, Module, Param, Record, RecordField, TraitDecl, TraitItem, TypeDecl,
-        TypeDef, Variant, Visibility, WhereBound,
+        AssocTypeBinding, Attribute, ConstDecl, ExternBlock, ExternItem, Function, FunctionSig,
+        ImplBlock, Import, ImportKind, Module, Param, Record, RecordField, TraitDecl, TraitItem,
+        TypeDecl, TypeDef, Variant, Visibility, WhereBound,
     },
     pattern::{FieldPat, Pattern},
     ty::{Type, TypeParam},
@@ -232,38 +232,81 @@ impl<'a> Parser<'a> {
         File { items }
     }
 
+    /// Parse zero or more leading `@name` / `@name(a, b)` attributes.
+    ///
+    /// Placement is not checked here — an attribute on a record parses and is
+    /// kept, so the resolver can report `E0083` with a span. The parser's job
+    /// is syntax; the known-attribute set is Task 2's.
+    fn parse_attributes(&mut self) -> Vec<Attribute> {
+        let mut attrs = Vec::new();
+        while self.peek() == &Token::At {
+            let start = self.peek_span();
+            self.advance();
+            let Some(name) = self.parse_ident("in attribute name") else {
+                break;
+            };
+            let mut args = Vec::new();
+            if self.peek() == &Token::LParen {
+                self.advance();
+                while self.peek() != &Token::RParen && !self.is_at_end() {
+                    let Some(arg) = self.parse_ident("in attribute arguments") else {
+                        break;
+                    };
+                    args.push(arg);
+                    if self.peek() == &Token::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&Token::RParen, "in attribute arguments");
+            }
+            let span = start; // widen only if the file has a span-join helper;
+                              // there is no `prev_span` in grammar.rs.
+            attrs.push(Attribute { name, args, span });
+        }
+        attrs
+    }
+
     fn try_parse_item(&mut self) -> Option<Spanned<Item>> {
         let start = self.peek_span();
+        let attrs = self.parse_attributes();
         let vis = self.parse_visibility();
 
         let item = match self.peek() {
             Token::Fn | Token::Async => {
-                let func = self.parse_function(vis)?;
+                let mut func = self.parse_function(vis)?;
+                func.attrs = attrs;
                 Item::Function(func)
             }
             Token::Record => {
                 self.advance();
-                let record = self.parse_record(vis)?;
+                let mut record = self.parse_record(vis)?;
+                record.attrs = attrs;
                 Item::Record(record)
             }
             Token::Type => {
                 self.advance();
-                let td = self.parse_type_decl(vis)?;
+                let mut td = self.parse_type_decl(vis)?;
+                td.attrs = attrs;
                 Item::Type(td)
             }
             Token::Trait => {
                 self.advance();
-                let tr = self.parse_trait_decl(vis)?;
+                let mut tr = self.parse_trait_decl(vis)?;
+                tr.attrs = attrs;
                 Item::Trait(tr)
             }
             Token::Impl => {
                 self.advance();
-                let impl_ = self.parse_impl_block()?;
+                let mut impl_ = self.parse_impl_block()?;
+                impl_.attrs = attrs;
                 Item::Impl(impl_)
             }
             Token::Const => {
                 self.advance();
-                let c = self.parse_const_decl(vis)?;
+                let mut c = self.parse_const_decl(vis)?;
+                c.attrs = attrs;
                 Item::Const(c)
             }
             Token::Import => {
@@ -333,6 +376,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block("function body")?;
 
         Some(Function {
+            attrs: Vec::new(),
             vis,
             is_async,
             name,
@@ -502,6 +546,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "record body")?;
         Some(Record {
+            attrs: Vec::new(),
             vis,
             name,
             generics,
@@ -547,6 +592,7 @@ impl<'a> Parser<'a> {
 
         self.eat(&Token::Semicolon);
         Some(TypeDecl {
+            attrs: Vec::new(),
             vis,
             name,
             generics,
@@ -611,6 +657,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "trait body")?;
         Some(TraitDecl {
+            attrs: Vec::new(),
             vis,
             name,
             generics,
@@ -729,6 +776,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "impl block")?;
         Some(ImplBlock {
+            attrs: Vec::new(),
             generics,
             trait_,
             ty,
@@ -747,6 +795,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr("const value")?;
         self.eat(&Token::Semicolon);
         Some(ConstDecl {
+            attrs: Vec::new(),
             vis,
             name,
             ty,

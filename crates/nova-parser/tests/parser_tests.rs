@@ -1,6 +1,25 @@
+use nova_ast::{File, Item};
 use nova_diagnostics::FileDb;
 use nova_lexer::lex;
-use nova_parser::parse;
+use nova_parser::{parse, ParseError};
+
+/// Parse a source string and return the AST plus parse errors.
+///
+/// `parse_file`'s `(bool, usize)` and `parse_fixture`'s `(bool, Vec<String>)`
+/// only summarize the result; neither returns the `File` itself, so neither
+/// can inspect fields like `f.attrs`. This helper does, and is used by all
+/// attribute tests below.
+fn parse_str(source: &str) -> (File, Vec<ParseError>) {
+    let mut db = FileDb::new();
+    let file_id = db.add("attr_test", source);
+    let (tokens, lex_errs) = lex(source, file_id);
+    assert!(lex_errs.is_empty(), "lex errors: {:?}", lex_errs);
+    let (ast, parse_errs) = parse(&tokens, file_id);
+    (
+        ast.expect("parse() should always return Some(File)"),
+        parse_errs,
+    )
+}
 
 fn parse_file(name: &str, source: &str) -> (bool, usize) {
     let mut db = FileDb::new();
@@ -75,6 +94,76 @@ fn fixture_generics() {
     let (ok, errs) = parse_fixture("generics");
     assert!(ok, "failed to parse generics.nova");
     assert!(errs.is_empty(), "parse errors in generics.nova: {:?}", errs);
+}
+
+#[test]
+fn a_bare_attribute_parses_onto_a_function() {
+    let (file, errs) = parse_str("@test\nfn t() { }\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("not a fn")
+    };
+    assert_eq!(f.attrs.len(), 1);
+    assert_eq!(f.attrs[0].name.value, "test");
+    assert!(f.attrs[0].args.is_empty());
+}
+
+#[test]
+fn an_attribute_with_arguments_parses() {
+    let (file, errs) = parse_str("@test(should_panic)\nfn t() { }\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("not a fn")
+    };
+    assert_eq!(f.attrs[0].args.len(), 1);
+    assert_eq!(f.attrs[0].args[0].value, "should_panic");
+}
+
+#[test]
+fn multiple_arguments_and_multiple_attributes_parse() {
+    // `@derive(Copy, Clone)` is the spec's other attribute form
+    // (nova-spec/12-TYPESYSTEM.md:199). It must PARSE here even though Task 2
+    // rejects it as unknown — separating syntax from the known set is what lets
+    // Task 2's E0082 name the attribute instead of the parser failing first.
+    let (file, errs) = parse_str("@derive(Copy, Clone)\n@test\nfn t() { }\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("not a fn")
+    };
+    assert_eq!(f.attrs.len(), 2);
+    assert_eq!(f.attrs[0].args.len(), 2);
+}
+
+#[test]
+fn an_attribute_precedes_pub() {
+    let (file, errs) = parse_str("@test\npub fn t() { }\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("not a fn")
+    };
+    assert_eq!(f.attrs.len(), 1);
+}
+
+#[test]
+fn an_attribute_on_a_record_parses_and_is_kept() {
+    // Not an error here — Task 2 decides placement. Kept so the resolver has a
+    // span to report against.
+    let (file, errs) = parse_str("@test\nrecord R { n: Int }\n");
+    assert!(errs.is_empty(), "{errs:?}");
+    let Item::Record(r) = &file.items[0].value else {
+        panic!("not a record")
+    };
+    assert_eq!(r.attrs.len(), 1);
+}
+
+#[test]
+fn a_bare_at_sign_is_a_parse_error_and_does_not_hang() {
+    // `parse_file`'s loop guarantees progress (grammar.rs:194-232) but that
+    // guarantee was added *after* a two-line file hung nova check for 15 s.
+    // A new token that can appear at item position is exactly the shape that
+    // broke it, so assert termination, not just the error.
+    let (_file, errs) = parse_str("@\nfn main() { }\n");
+    assert!(!errs.is_empty(), "expected a parse error for a bare `@`");
 }
 
 #[test]

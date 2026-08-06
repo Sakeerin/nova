@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Function(
                     Function {
+                        attrs: [],
                         vis: Private,
                         is_async: false,
                         name: Spanned {

@@ -1,11 +1,23 @@
 //! Top-level item AST nodes.
 
-use nova_diagnostics::Spanned;
+use nova_diagnostics::{Span, Spanned};
 
 use crate::{expr::Expr, ty::Type, Block, Path};
 
 /// Re-export from expr for convenience (AssignOp needed by callers of item).
 pub use crate::expr::AssignOp;
+
+/// An `@name` or `@name(arg, ...)` attribute on an item.
+///
+/// Arguments are bare identifiers, not expressions: the two forms the spec uses
+/// are `@test(should_panic)` and `@derive(Copy, Clone)`, both identifier lists.
+/// Widening this to expressions later is additive; narrowing it would not be.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: Spanned<String>,
+    pub args: Vec<Spanned<String>>,
+    pub span: Span,
+}
 
 /// Visibility of a declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +44,7 @@ pub struct WhereBound {
 /// A function or method declaration.
 #[derive(Debug, Clone)]
 pub struct Function {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub is_async: bool,
     pub name: Spanned<String>,
@@ -45,6 +58,7 @@ pub struct Function {
 /// A `record` (struct) declaration.
 #[derive(Debug, Clone)]
 pub struct Record {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
@@ -67,6 +81,7 @@ pub struct RecordField {
 /// ```
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
@@ -93,6 +108,7 @@ pub struct Variant {
 /// A `trait` declaration.
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
@@ -138,6 +154,7 @@ pub struct FunctionSig {
 /// An `impl` block.
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
+    pub attrs: Vec<Attribute>,
     pub generics: Vec<crate::ty::TypeParam>,
     /// If `Some`, this is a trait impl: `impl Trait for Type`.
     pub trait_: Option<Spanned<Path>>,
@@ -169,6 +186,7 @@ pub struct AssocTypeBinding {
 /// A `const` declaration.
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
     pub ty: Spanned<Type>,

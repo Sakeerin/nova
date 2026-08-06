@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Record(
                     Record {
+                        attrs: [],
                         vis: Private,
                         name: Spanned {
                             value: "Point",

@@ -1,6 +1,5 @@
 ---
 source: crates/nova-parser/tests/parser_tests.rs
-assertion_line: 303
 expression: ast
 ---
 Some(
@@ -9,6 +8,7 @@ Some(
             Spanned {
                 value: Trait(
                     TraitDecl {
+                        attrs: [],
                         vis: Private,
                         name: Spanned {
                             value: "It",
