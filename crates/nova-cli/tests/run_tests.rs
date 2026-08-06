@@ -3714,14 +3714,13 @@ fn a_record_bound_no_field_type_uses_is_silently_accepted_when_never_exercised()
 /// also what a human gets by running the binary directly with no variable
 /// set.
 ///
-/// Asserts **exact** stdout, not `contains`: the mutation table this task
+/// Asserts **exact** stdout, not `contains`. The mutation table this task
 /// carries includes `unwrap_or(0)` in place of `unwrap_or(-1)` inside
 /// `nova_rt_test_selector`, which makes a bare run silently execute test 0
-/// (printing nothing at all, since neither `alpha` nor `beta` prints)
-/// instead of the inventory. A `contains` check on the two names would not
-/// fail against that mutation — only pinning the exact bytes does, since
-/// "prints nothing" and "prints the inventory" are trivially distinguished
-/// by equality but not by substring search.
+/// (`alpha`) instead of printing the inventory. Verified directly: under
+/// that mutation, stdout goes from `"2\nalpha\nbeta\n"` to `""` (`alpha`'s
+/// own body is empty), which this exact-equality assertion correctly fails
+/// on.
 #[test]
 fn a_test_binary_with_no_index_prints_its_inventory() {
     let dir = std::env::temp_dir().join("nova-test-inventory");
@@ -3789,4 +3788,76 @@ fn a_test_binary_runs_exactly_the_selected_test() {
         .replace("\r\n", "\n");
     assert_eq!(out, "B\n");
     let _ = std::fs::remove_file(&exe);
+}
+
+/// A source file with both `@test` functions and its own `fn main()` must
+/// still run the selected test, not the user's `main`. Before this fix,
+/// `build_test_binary` appended the synthesized dispatcher to the *end* of
+/// `module.functions`, but `nova-mir/src/mono.rs`'s entry-point search
+/// (`.iter().find(|f| f.name == "main")`) takes the *first* match — so an
+/// earlier user `main` won, compiled and linked cleanly with no diagnostic
+/// anywhere, and the dispatcher became dead code mono never even emitted.
+/// `nova build`/`nova run` *require* a `main` (`E0601`), so a program with
+/// both tests and an entry point is the unremarkable case, not an edge one.
+#[test]
+fn a_test_binary_runs_the_selected_test_not_the_users_own_main() {
+    let dir = std::env::temp_dir().join("nova-test-user-main");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("user_main.nova");
+    std::fs::write(
+        &file,
+        "@test\nfn alpha() { println(\"TEST-RAN\") }\n\
+         fn main() { println(\"USER-MAIN-RAN\") }\n",
+    )
+    .expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["alpha"]
+    );
+
+    let assert = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone())
+        .expect("stdout is UTF-8")
+        .replace("\r\n", "\n");
+    assert_eq!(out, "TEST-RAN\n");
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// Two different source files that happen to share a file stem — `main.nova`
+/// is overwhelmingly the common fixture name, including 50-plus occurrences
+/// in this very file — must not collide on `build_test_binary`'s output
+/// path. Before this fix the output path was derived from the stem alone
+/// inside one shared directory, so two different `main.nova` files (in two
+/// different directories, as they always are among real fixtures) resolved
+/// to the identical path — a real race under `cargo test`'s default
+/// parallelism, and one Task 5's runner (which builds several fixtures)
+/// would hit directly.
+#[test]
+fn test_binary_output_paths_do_not_collide_across_same_stem_sources() {
+    let dir_a = std::env::temp_dir().join("nova-test-stem-collision-a");
+    let dir_b = std::env::temp_dir().join("nova-test-stem-collision-b");
+    std::fs::create_dir_all(&dir_a).expect("temp dir a");
+    std::fs::create_dir_all(&dir_b).expect("temp dir b");
+    let file_a = dir_a.join("main.nova");
+    let file_b = dir_b.join("main.nova");
+    std::fs::write(&file_a, "@test\nfn from_a() { }\n").expect("write a");
+    std::fs::write(&file_b, "@test\nfn from_b() { }\n").expect("write b");
+
+    let (exe_a, _) = nova_driver::build_test_binary(&file_a).expect("a compiles and links");
+    let (exe_b, _) = nova_driver::build_test_binary(&file_b).expect("b compiles and links");
+
+    assert_ne!(
+        exe_a, exe_b,
+        "two different main.nova files must not share an output path"
+    );
+    assert!(exe_a.exists(), "a's binary exists at {}", exe_a.display());
+    assert!(exe_b.exists(), "b's binary exists at {}", exe_b.display());
+    let _ = std::fs::remove_file(&exe_a);
+    let _ = std::fs::remove_file(&exe_b);
 }

@@ -9,6 +9,7 @@
 mod link;
 
 use std::collections::{HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -159,12 +160,32 @@ pub fn build_file_release(path: &Path, output: &Path) -> Result<Outcome<PathBuf>
     }
 }
 
+/// A name no Nova source can ever produce for a top-level function: the
+/// lexer's identifier grammar is `[a-zA-Z_][a-zA-Z0-9_]*` (`nova-lexer/src/
+/// lib.rs`'s `RawToken::Ident` regex), which cannot lex a `.` inside one
+/// `Ident` token — the same "impossible in surface syntax" property
+/// `nova_mir::mangle` already relies on (its symbols are `name.<def_id>`).
+/// `build_test_binary` uses this to rename a user's own `main`, if the
+/// source declares one, so it cannot be mistaken for the synthesized one.
+const SHADOWED_USER_MAIN_NAME: &str = "main.shadowed_by_nova_test";
+
 /// Compile `path` as a test binary (`nova test`, Task 5): `main` is
 /// synthesized to dispatch to exactly one collected `@test` by index
 /// (`Builtin::TestSelector`) rather than to the file's own `main` — a test
 /// file need not define one, since a missing `main` is enforced only at MIR
 /// lowering (`E0601` in `nova_mir::lower_module`), which the synthesized
 /// function supplies before that check ever runs.
+///
+/// If the source *does* declare its own `main`, that function is renamed
+/// (never removed — something else in the module may still call it by
+/// `DefId`) before the synthesized dispatcher is pushed, so the dispatcher
+/// is the only function left named `"main"`. This matters because
+/// `nova-mir/src/mono.rs`'s entry-point search is
+/// `module.functions.iter().find(|f| f.name == "main")` — the *first*
+/// match — while pushing onto `module.functions` puts the dispatcher
+/// *last*: without the rename, a source file with both `@test` functions
+/// and its own `main` would silently run the user's `main` instead of any
+/// test, compiling and linking cleanly with no diagnostic anywhere.
 ///
 /// Returns the built executable's path and the collected tests in source
 /// order, so a caller can run the binary once per test with `NOVA_TEST_INDEX`
@@ -179,6 +200,11 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
             if ctx.errors == 1 { "" } else { "s" }
         );
     };
+    for f in &mut module.functions {
+        if f.name == "main" {
+            f.name = SHADOWED_USER_MAIN_NAME.to_string();
+        }
+    }
     module
         .functions
         .push(synthesize_test_main(fresh_def_id, &tests));
@@ -197,7 +223,16 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
     let bytes = nova_codegen_cranelift::compile_object(&mir)
         .context("internal codegen error (this is a compiler bug)")?;
 
-    let dir = std::env::temp_dir().join("nova-test-bin");
+    // A caller-distinguishing directory, keyed on the *canonicalized* input
+    // path rather than its file stem: fixtures overwhelmingly share the
+    // name `main.nova` (50 occurrences in this workspace's own
+    // `nova-cli/tests/run_tests.rs` alone), so two different source files in
+    // two different directories must not resolve to the same output path —
+    // a real race under `cargo test`'s default parallelism (a locked-file
+    // link error on Windows; a binary overwritten mid-execution on Unix).
+    let dir = std::env::temp_dir()
+        .join("nova-test-bin")
+        .join(path_fingerprint(path));
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let output = dir.join(format!(
         "{}{}",
@@ -214,6 +249,20 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
     let _ = std::fs::remove_file(&obj_path);
     linked?;
     Ok((output, tests))
+}
+
+/// A short, deterministic fingerprint of `path`'s canonicalized form, for
+/// `build_test_binary`'s output directory. Canonicalizing first (falling
+/// back to the path as given if that fails — it cannot fail here in
+/// practice, since `build_test_binary` has already opened and read this
+/// file by the time this runs) means two different relative spellings of
+/// the same file collide on purpose, while two files that merely share a
+/// name in different directories do not.
+fn path_fingerprint(path: &Path) -> String {
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canon.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// A zero-width span at the dummy file: there is no source location for a
