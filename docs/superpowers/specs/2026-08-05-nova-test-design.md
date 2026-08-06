@@ -35,7 +35,7 @@ risk and Task 1 must probe them before anything depends on them.**
 
 | Question | Answer |
 |---|---|
-| Does `@` lex today? | **No.** `LexError::UnexpectedCharacter('@', span)` — `error.rs:30`. Non-fatal: the lexer collects it and continues, so adding the token needs no change to the error path. |
+| Does `@` lex today? | **Yes — `Token::At` has existed since Phase 0**, for `x @ pattern` bindings. `#[token("@")]` in `RawToken` and the bridging match arm are both already present. **This row originally said "No", citing `LexError::UnexpectedCharacter` — that was wrong, and it was wrong in this project's signature way: I read the lexer's *error enum*, saw an `UnexpectedCharacter` variant, and inferred what `@` would do instead of running it. Inference from source, written down as measurement.** Consequence for the plan: Task 1's "add the token" step was a no-op, correctly identified and skipped by its implementer. Nothing else changes — attributes still needed the AST field and the parser method. |
 | Does Nova have any attribute syntax? | **No.** No `#[…]` or `@…` in `nova-lexer` or `nova-ast`. |
 | What does `panic(msg)` do? | Prints `nova: panic: <msg>` to stderr, then `std::process::abort()` (`nova-runtime/src/lib.rs:287`, returns `!`). **Exit 127.** No unwinding anywhere in the runtime. |
 | Array out of bounds? | `nova: panic: array index 7 out of bounds for length 3`, **exit 127** — a checked panic. |
