@@ -1,4 +1,4 @@
-use nova_ast::{File, Item};
+use nova_ast::{File, Item, Visibility};
 use nova_diagnostics::FileDb;
 use nova_lexer::lex;
 use nova_parser::{parse, ParseError};
@@ -106,6 +106,14 @@ fn a_bare_attribute_parses_onto_a_function() {
     assert_eq!(f.attrs.len(), 1);
     assert_eq!(f.attrs[0].name.value, "test");
     assert!(f.attrs[0].args.is_empty());
+    // `Attribute.span` is what lets Task 2 report a misplaced attribute with a
+    // location; pin that it is real (non-empty) and points at the `@`, not a
+    // zero-width placeholder like `Span::point(0, file)`.
+    assert_eq!(f.attrs[0].span.start, 0, "span should start at the `@`");
+    assert!(
+        f.attrs[0].span.end > f.attrs[0].span.start,
+        "span should be non-empty"
+    );
 }
 
 #[test]
@@ -131,7 +139,15 @@ fn multiple_arguments_and_multiple_attributes_parse() {
         panic!("not a fn")
     };
     assert_eq!(f.attrs.len(), 2);
+    assert_eq!(f.attrs[0].name.value, "derive");
     assert_eq!(f.attrs[0].args.len(), 2);
+    // Order matters, not just count: a transposition bug (e.g. pushing an
+    // argument onto the front instead of the back) would silently reverse
+    // `@derive(Copy, Clone)` into `args = [Clone, Copy]` and nothing above
+    // would catch it.
+    assert_eq!(f.attrs[0].args[0].value, "Copy");
+    assert_eq!(f.attrs[0].args[1].value, "Clone");
+    assert_eq!(f.attrs[1].name.value, "test");
 }
 
 #[test]
@@ -142,6 +158,7 @@ fn an_attribute_precedes_pub() {
         panic!("not a fn")
     };
     assert_eq!(f.attrs.len(), 1);
+    assert_eq!(f.vis, Visibility::Pub);
 }
 
 #[test]
