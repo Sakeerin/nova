@@ -3705,3 +3705,88 @@ fn a_record_bound_no_field_type_uses_is_silently_accepted_when_never_exercised()
         .success()
         .stdout("7\n");
 }
+
+// === nova test: the synthesized dispatching `main` (Task 3) ===
+
+/// The synthesized `main` with no `NOVA_TEST_INDEX` set prints the
+/// inventory: a count line, then one name per line. This is how `nova test`
+/// (Task 5) will enumerate tests without a second compilation, and it is
+/// also what a human gets by running the binary directly with no variable
+/// set.
+///
+/// Asserts **exact** stdout, not `contains`: the mutation table this task
+/// carries includes `unwrap_or(0)` in place of `unwrap_or(-1)` inside
+/// `nova_rt_test_selector`, which makes a bare run silently execute test 0
+/// (printing nothing at all, since neither `alpha` nor `beta` prints)
+/// instead of the inventory. A `contains` check on the two names would not
+/// fail against that mutation — only pinning the exact bytes does, since
+/// "prints nothing" and "prints the inventory" are trivially distinguished
+/// by equality but not by substring search.
+#[test]
+fn a_test_binary_with_no_index_prints_its_inventory() {
+    let dir = std::env::temp_dir().join("nova-test-inventory");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("inventory.nova");
+    std::fs::write(&file, "@test\nfn alpha() { }\n@test\nfn beta() { }\n").expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "collection order feeds the printed inventory directly"
+    );
+
+    let assert = Command::new(&exe)
+        .env_remove("NOVA_TEST_INDEX")
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone())
+        .expect("stdout is UTF-8")
+        .replace("\r\n", "\n");
+    assert_eq!(out, "2\nalpha\nbeta\n");
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// `NOVA_TEST_INDEX=1` runs the second collected test and nothing else. The
+/// two tests print distinguishable markers, so running the wrong one — or
+/// both — is visible rather than merely a wrong count.
+///
+/// Asserts stdout is **exactly** `"B\n"`, not merely that `"B"` appears.
+/// Asserting presence alone would still pass if the dispatch ran *both*
+/// `alpha` and `beta` (stdout `"A\nB\n"` contains `"B"`), which is exactly
+/// the failure mode a mutated dispatch condition (e.g. comparing `sel + 1`
+/// against each index instead of `sel`) must be caught producing. Exact
+/// equality both asserts the selected test's output and stands in for a
+/// separate "and `A` is absent" check: no string equal to `"B\n"` also
+/// contains `"A"`.
+#[test]
+fn a_test_binary_runs_exactly_the_selected_test() {
+    let dir = std::env::temp_dir().join("nova-test-selected");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("selected.nova");
+    std::fs::write(
+        &file,
+        "@test\nfn alpha() { println(\"A\") }\n\
+         @test\nfn beta() { println(\"B\") }\n",
+    )
+    .expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["alpha", "beta"],
+        "index 1 below selects beta only if collection order is [alpha, beta]"
+    );
+
+    let assert = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "1")
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone())
+        .expect("stdout is UTF-8")
+        .replace("\r\n", "\n");
+    assert_eq!(out, "B\n");
+    let _ = std::fs::remove_file(&exe);
+}

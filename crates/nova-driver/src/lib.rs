@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use nova_codegen_cranelift::CompiledProgram;
-use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity};
-use nova_resolver::ModuleSource;
+use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity, Span};
+use nova_hir as hir;
+use nova_hir::Ty;
+use nova_resolver::{Builtin, DefId, ModuleSource, TestFn};
 
 /// Outcome of a pipeline invocation that may fail with user errors.
 pub enum Outcome<T> {
@@ -36,7 +38,7 @@ pub enum Outcome<T> {
 /// "well-formed" that `nova run` / `nova build` then reject.
 pub fn check_file(path: &Path) -> Result<Outcome<()>> {
     let mut ctx = FrontendContext::load(path)?;
-    let Some(module) = ctx.check()? else {
+    let Some((module, _tests, _fresh_def_id)) = ctx.check()? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
     if let Err(diags) = nova_mir::lower_module(&module) {
@@ -157,10 +159,207 @@ pub fn build_file_release(path: &Path, output: &Path) -> Result<Outcome<PathBuf>
     }
 }
 
+/// Compile `path` as a test binary (`nova test`, Task 5): `main` is
+/// synthesized to dispatch to exactly one collected `@test` by index
+/// (`Builtin::TestSelector`) rather than to the file's own `main` — a test
+/// file need not define one, since a missing `main` is enforced only at MIR
+/// lowering (`E0601` in `nova_mir::lower_module`), which the synthesized
+/// function supplies before that check ever runs.
+///
+/// Returns the built executable's path and the collected tests in source
+/// order, so a caller can run the binary once per test with `NOVA_TEST_INDEX`
+/// set without recompiling or re-deriving either the path or the inventory
+/// from the source again.
+pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
+    let mut ctx = FrontendContext::load(path)?;
+    let Some((mut module, tests, fresh_def_id)) = ctx.check()? else {
+        anyhow::bail!(
+            "could not compile due to {} previous error{}",
+            ctx.errors,
+            if ctx.errors == 1 { "" } else { "s" }
+        );
+    };
+    module
+        .functions
+        .push(synthesize_test_main(fresh_def_id, &tests));
+
+    let mir = match nova_mir::lower_module(&module) {
+        Ok(mir) => mir,
+        Err(diags) => {
+            ctx.render(&diags);
+            anyhow::bail!(
+                "could not compile due to {} previous error{}",
+                ctx.errors,
+                if ctx.errors == 1 { "" } else { "s" }
+            );
+        }
+    };
+    let bytes = nova_codegen_cranelift::compile_object(&mir)
+        .context("internal codegen error (this is a compiler bug)")?;
+
+    let dir = std::env::temp_dir().join("nova-test-bin");
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let output = dir.join(format!(
+        "{}{}",
+        FrontendContext::module_name(path),
+        std::env::consts::EXE_SUFFIX
+    ));
+
+    let obj_ext = if cfg!(windows) { "obj" } else { "o" };
+    let obj_path = intermediate(&output, obj_ext);
+    std::fs::write(&obj_path, bytes)
+        .with_context(|| format!("failed to write {}", obj_path.display()))?;
+
+    let linked = link::link_executable(&obj_path, &output);
+    let _ = std::fs::remove_file(&obj_path);
+    linked?;
+    Ok((output, tests))
+}
+
+/// A zero-width span at the dummy file: there is no source location for a
+/// hand-built `hir::Function`, so every node `synthesize_test_main` builds
+/// uses the same sentinel `FileId::DUMMY` documents itself for.
+fn dummy_span() -> Span {
+    Span::point(0, FileId::DUMMY)
+}
+
+fn expr(kind: hir::ExprKind, ty: Ty) -> hir::Expr {
+    hir::Expr {
+        kind,
+        ty,
+        span: dummy_span(),
+    }
+}
+
+/// Build the dispatching `main` that `build_test_binary` adds to the module.
+///
+/// Constructed directly as an `hir::Function` — mirroring the synthetic
+/// `main` `nova-mir/src/mono.rs`'s own unit tests build, field for field —
+/// rather than as generated Nova source. Generated source is how `std`
+/// reaches a program, but it would route through the resolver, which
+/// enforces `pub`, and `@test` functions are deliberately not `pub`;
+/// constructing the HIR directly sidesteps visibility rather than fighting
+/// it. Because `nova-mir/src/mono.rs`'s monomorphizer locates the entry point
+/// by the name `"main"`, not by `def_id`, nothing downstream needs to know
+/// this particular `main` was synthesized rather than parsed.
+///
+/// Body: bind `test_selector()` to local 0 (`sel`), then one
+/// `if sel == i { test_i() }` per collected test in source order, then
+/// (reached only when `sel` matched none of them — including whenever
+/// `sel < 0`, the documented sentinel) print the inventory: a count line,
+/// then one name per line.
+fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
+    let sel = hir::LocalId(0);
+
+    let mut stmts = vec![expr(
+        hir::ExprKind::Let {
+            local: sel,
+            init: Box::new(expr(
+                hir::ExprKind::Call {
+                    func: hir::Callee::Builtin(Builtin::TestSelector),
+                    type_args: Vec::new(),
+                    args: Vec::new(),
+                },
+                Ty::Int,
+            )),
+        },
+        Ty::Unit,
+    )];
+
+    for (i, t) in tests.iter().enumerate() {
+        let cond = expr(
+            hir::ExprKind::Binary {
+                op: hir::BinOp::Eq,
+                lhs: Box::new(expr(hir::ExprKind::Local(sel), Ty::Int)),
+                rhs: Box::new(expr(hir::ExprKind::IntLit(i as i64), Ty::Int)),
+            },
+            Ty::Bool,
+        );
+        let call = expr(
+            hir::ExprKind::Call {
+                func: hir::Callee::Def(t.def_id),
+                type_args: Vec::new(),
+                args: Vec::new(),
+            },
+            // Task 1/2 reject a non-`Unit`-returning `@test` function
+            // (E0084), so every callee here is `Unit`-typed.
+            Ty::Unit,
+        );
+        stmts.push(expr(
+            hir::ExprKind::If {
+                cond: Box::new(cond),
+                then: Box::new(call),
+                else_: None,
+            },
+            Ty::Unit,
+        ));
+    }
+
+    let println = |s: String| {
+        expr(
+            hir::ExprKind::Call {
+                func: hir::Callee::Builtin(Builtin::Println),
+                type_args: Vec::new(),
+                args: vec![expr(hir::ExprKind::StrLit(s), Ty::String)],
+            },
+            Ty::Unit,
+        )
+    };
+    let mut inventory = vec![println(tests.len().to_string())];
+    inventory.extend(tests.iter().map(|t| println(t.name.clone())));
+    let sel_is_negative = expr(
+        hir::ExprKind::Binary {
+            op: hir::BinOp::Lt,
+            lhs: Box::new(expr(hir::ExprKind::Local(sel), Ty::Int)),
+            rhs: Box::new(expr(hir::ExprKind::IntLit(0), Ty::Int)),
+        },
+        Ty::Bool,
+    );
+    stmts.push(expr(
+        hir::ExprKind::If {
+            cond: Box::new(sel_is_negative),
+            then: Box::new(expr(
+                hir::ExprKind::Block {
+                    stmts: inventory,
+                    trailing: None,
+                },
+                Ty::Unit,
+            )),
+            else_: None,
+        },
+        Ty::Unit,
+    ));
+
+    hir::Function {
+        def_id: main_id,
+        name: "main".to_string(),
+        generics: 0,
+        bounds: Vec::new(),
+        takes_env: false,
+        capture_count: 0,
+        params: 0,
+        locals: vec![hir::Local {
+            name: "sel".to_string(),
+            ty: Ty::Int,
+            is_mut: false,
+            span: dummy_span(),
+        }],
+        ret_ty: Ty::Unit,
+        body: expr(
+            hir::ExprKind::Block {
+                stmts,
+                trailing: None,
+            },
+            Ty::Unit,
+        ),
+        span: dummy_span(),
+    }
+}
+
 /// Run the front end and MIR lowering, rendering any diagnostics.
 fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
     let mut ctx = FrontendContext::load(path)?;
-    let Some(module) = ctx.check()? else {
+    let Some((module, _tests, _fresh_def_id)) = ctx.check()? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
     match nova_mir::lower_module(&module) {
@@ -293,8 +492,20 @@ impl FrontendContext {
     }
 
     /// Run load → lex → parse → resolve → typecheck across all modules.
-    /// Returns the merged typed module, or `None` if any stage reported errors.
-    fn check(&mut self) -> Result<Option<nova_hir::Module>> {
+    /// Returns the merged typed module, the `@test` functions collected along
+    /// the way (source order, per `nova_resolver::TestFn`'s doc comment), and
+    /// a `DefId` guaranteed unused by anything resolution allocated — or
+    /// `None` if any stage reported errors.
+    ///
+    /// The fresh `DefId` is `resolved.definitions.defs().len()`: `Definitions`
+    /// documents `defs` as one global counter shared by every definition kind
+    /// (functions, sums, records, traits, methods, externs, associated
+    /// types), allocated by `push_def` in strict `Vec::len()` order — so every
+    /// id resolution ever handed out is `< that length`, and this value
+    /// cannot collide with any of them. `build_test_binary` uses it to name a
+    /// synthesized `main` that cannot alias an id one of the `@test`
+    /// functions it calls by `DefId` already owns.
+    fn check(&mut self) -> Result<Option<(nova_hir::Module, Vec<TestFn>, DefId)>> {
         let modules = self.load_modules()?;
         if self.errors > 0 {
             return Ok(None);
@@ -323,12 +534,14 @@ impl FrontendContext {
         if self.errors > 0 {
             return Ok(None);
         }
+        let fresh_def_id = DefId(resolved.definitions.defs().len() as u32);
+        let tests = resolved.tests;
 
         let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
         self.render(&checked.diagnostics);
         if self.errors > 0 {
             return Ok(None);
         }
-        Ok(Some(checked.module))
+        Ok(Some((checked.module, tests, fresh_def_id)))
     }
 }
