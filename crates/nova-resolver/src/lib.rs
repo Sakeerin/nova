@@ -1038,12 +1038,24 @@ fn validate_attrs_reject_test(attrs: &[Attribute], kind: &str, diagnostics: &mut
 /// why that must hold exactly and
 /// `collected_tests_are_in_source_order_with_should_panic_attached` in
 /// `nova-typeck` for the test that pins it.
+///
+/// Pushes **at most one** `TestFn`, even if `f` carries more than one
+/// well-formed `@test` (syntactically legal — `f.attrs` is a plain `Vec`
+/// with no uniqueness constraint on `name`, the same reason `@derive(...)`
+/// and `@test` can coexist on one function). Without the `collected` guard
+/// below, `@test\n@test\nfn t() {}` would push the same `def_id`/name onto
+/// `tests` twice, and `nova test` would list and run one function as if it
+/// were two different tests. The first well-formed `@test`, in attribute
+/// order, is the one whose `should_panic` wins; later ones are still
+/// validated (an invalid argument or bad shape on a second `@test` still
+/// reports its own diagnostic) but never collected again.
 fn validate_test_function(
     f: &Function,
     def_id: DefId,
     diagnostics: &mut Vec<Diagnostic>,
     tests: &mut Vec<TestFn>,
 ) {
+    let mut collected = false;
     for attr in &f.attrs {
         if attr.name.value != "test" {
             diagnostics.push(unknown_attribute(attr));
@@ -1083,12 +1095,13 @@ fn validate_test_function(
             diagnostics.push(diag);
             well_formed = false;
         }
-        if well_formed {
+        if well_formed && !collected {
             tests.push(TestFn {
                 def_id,
                 name: f.name.value.clone(),
                 should_panic,
             });
+            collected = true;
         }
     }
 }

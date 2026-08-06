@@ -14250,13 +14250,36 @@ mod tests {
     #[test]
     fn test_on_a_function_with_parameters_is_e0084() {
         let r = check_src("@test\nfn t(x: Int) { }\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0084")
+            .expect("E0084 for a @test function with parameters");
+        // "have parameters" (not just "parameters") so this can't pass
+        // against a message that named "generic parameters" instead —
+        // "generic parameters" contains "parameters" as a substring but not
+        // "have parameters", since "have" is followed by "generic " there,
+        // not directly by "parameters".
+        assert!(
+            d.message.contains("have parameters"),
+            "names parameters specifically, not a generic \"bad signature\": {}",
+            d.message
+        );
     }
 
     #[test]
     fn test_on_a_function_returning_a_value_is_e0084() {
         let r = check_src("@test\nfn t() -> Int { 1 }\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0084")
+            .expect("E0084 for a @test function returning a value");
+        assert!(
+            d.message.contains("non-Unit return type"),
+            "names the return type specifically, not a generic \"bad signature\": {}",
+            d.message
+        );
     }
 
     #[test]
@@ -14264,7 +14287,16 @@ mod tests {
         // A test takes no arguments, so nothing could ever fix its type
         // parameter — monomorphization would have no instance to emit.
         let r = check_src("@test\nfn t<T>() { }\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0084")
+            .expect("E0084 for a generic @test function");
+        assert!(
+            d.message.contains("generic parameters"),
+            "names generic parameters specifically, not a generic \"bad signature\": {}",
+            d.message
+        );
     }
 
     #[test]
@@ -14275,6 +14307,11 @@ mod tests {
             .iter()
             .find(|d| d.code == "E0085")
             .expect("E0085 for an unknown @test argument");
+        assert!(
+            d.message.contains("shuold_panic"),
+            "names the offending value: {}",
+            d.message
+        );
         assert!(
             d.message.contains("should_panic"),
             "names the accepted arg: {}",
@@ -14391,18 +14428,63 @@ mod tests {
     #[test]
     fn test_before_an_import_is_e0083() {
         let r = check_src("@test\nimport core\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0083")
+            .expect("E0083 for @test before an import");
+        assert!(
+            d.message.contains("import"),
+            "names the item kind: {}",
+            d.message
+        );
     }
 
     #[test]
     fn test_before_a_module_is_e0083() {
         let r = check_src("@test\nmodule foo;\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0083")
+            .expect("E0083 for @test before a module declaration");
+        assert!(
+            d.message.contains("module"),
+            "names the item kind: {}",
+            d.message
+        );
     }
 
     #[test]
     fn test_before_an_extern_block_is_e0083() {
         let r = check_src("@test\nextern { }\nfn main() { }");
-        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0083")
+            .expect("E0083 for @test before an extern block");
+        assert!(
+            d.message.contains("extern"),
+            "names the item kind: {}",
+            d.message
+        );
+    }
+
+    // ---- fix round 2: a function with two @test attributes is one test ----
+    //
+    // `@test` twice on one function is syntactically legal (the parser puts
+    // no uniqueness constraint on attribute names — see
+    // `multiple_arguments_and_multiple_attributes_parse` in nova-parser for
+    // proof a function can carry multiple attributes at all). Without
+    // deduplication in `validate_test_function`, each well-formed `@test`
+    // independently pushes a `TestFn`, so the same def_id/name would be
+    // collected twice and `nova test` would list and run one function as two
+    // different tests.
+
+    #[test]
+    fn a_function_with_two_test_attributes_is_collected_once() {
+        let r = collect_tests_of("@test\n@test\nfn t() { }\nfn main() { }");
+        assert_eq!(r.len(), 1, "{:?}", r);
+        assert_eq!(r[0].name, "t");
     }
 }
