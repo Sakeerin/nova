@@ -3791,7 +3791,8 @@ impl<'a> Checker<'a> {
             | Builtin::StrChars
             | Builtin::StrFromChars
             | Builtin::StrToUpper
-            | Builtin::StrToLower => "",
+            | Builtin::StrToLower
+            | Builtin::TestSelector => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -6937,6 +6938,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrChars => (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
         Builtin::StrFromChars => (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
+        Builtin::TestSelector => (vec![], Ty::Int),
     }
 }
 
@@ -14076,6 +14078,10 @@ mod tests {
                 Builtin::StrToLower => (
                     (vec![Ty::String], Ty::String),
                     "`str_to_lower(self)` in `String::to_lower`",
+                ),
+                Builtin::TestSelector => (
+                    (vec![], Ty::Int),
+                    "the synthesized `main`'s dispatch, reading `NOVA_TEST_INDEX`",
                 ),
             }
         }

@@ -173,6 +173,8 @@ rt_funcs! {
     CheckBounds,
     /// `(str) -> !` — abort with a message.
     Panic,
+    /// `() -> i64`. See `Builtin::TestSelector`.
+    TestSelector,
 }
 
 impl RtFunc {
@@ -197,6 +199,7 @@ impl RtFunc {
             RtFunc::Alloc => "nova_rt_alloc",
             RtFunc::CheckBounds => "nova_rt_check_bounds",
             RtFunc::Panic => "nova_rt_panic_str",
+            RtFunc::TestSelector => "nova_rt_test_selector",
         }
     }
 
@@ -219,6 +222,7 @@ impl RtFunc {
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),
+            RtFunc::TestSelector => (vec![], MirTy::I64),
         }
     }
 }

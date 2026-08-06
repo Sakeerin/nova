@@ -127,6 +127,19 @@ builtins! {
     /// `str_to_lower(s: String) -> String` — full Unicode lowercase, for the
     /// same reason as [`Builtin::StrToUpper`]. Std-only.
     StrToLower,
+    /// `test_selector() -> Int` — which `@test` to run in this process, or a
+    /// negative value meaning "print the inventory instead".
+    ///
+    /// Reads `NOVA_TEST_INDEX`. A negative value is the sentinel rather than
+    /// "index >= count", because producing a negative needs no knowledge of the
+    /// count — and "greater than or equal" would require the runner to already
+    /// know the number it is asking for. An absent or unparseable variable
+    /// reads as negative, so running the test binary by hand with no variable
+    /// set prints its inventory rather than silently doing nothing.
+    ///
+    /// `STD_ONLY`, like `str_cmp`: seeded into std modules' scopes only, so it
+    /// never becomes a name a user program could call or collide with.
+    TestSelector,
 }
 
 impl Builtin {
@@ -144,6 +157,7 @@ impl Builtin {
             Builtin::StrFromChars => "str_from_chars",
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
+            Builtin::TestSelector => "test_selector",
         }
     }
 
@@ -166,7 +180,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 8] = [
+    pub const STD_ONLY: [Builtin; 9] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -175,6 +189,7 @@ impl Builtin {
         Builtin::StrFromChars,
         Builtin::StrToUpper,
         Builtin::StrToLower,
+        Builtin::TestSelector,
     ];
 }
 

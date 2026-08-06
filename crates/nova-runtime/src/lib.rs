@@ -290,6 +290,15 @@ pub unsafe extern "C" fn nova_rt_panic_str(s: *const NovaStr) -> ! {
     std::process::abort();
 }
 
+/// `test_selector() -> i64`. See `Builtin::TestSelector`.
+#[no_mangle]
+pub extern "C" fn nova_rt_test_selector() -> i64 {
+    std::env::var("NOVA_TEST_INDEX")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(-1)
+}
+
 /// All runtime symbols, for registration with the JIT (or a linker map).
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
@@ -315,6 +324,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
         ("nova_rt_check_bounds", nova_rt_check_bounds as *const u8),
         ("nova_rt_panic_str", nova_rt_panic_str as *const u8),
+        ("nova_rt_test_selector", nova_rt_test_selector as *const u8),
     ]
 }
 
