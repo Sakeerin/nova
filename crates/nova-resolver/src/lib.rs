@@ -12,8 +12,8 @@
 //! of the pipeline.
 
 use indexmap::IndexMap;
-use nova_ast::item::{ExternItem, Import, ImportKind, TypeDef};
-use nova_ast::{File, Item};
+use nova_ast::item::{Attribute, ExternItem, Import, ImportKind, TypeDef};
+use nova_ast::{File, Function, Item, Type};
 use nova_diagnostics::{Diagnostic, FileId, Span};
 use rustc_hash::FxHashMap;
 
@@ -390,6 +390,22 @@ fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
     id
 }
 
+/// A well-formed `@test` function, collected by [`collect_item`] in the same
+/// order [`resolve_program`]'s item walk visits it — source order (modules in
+/// registration order, items within a module in file order; see
+/// `collected_tests_are_in_source_order_with_should_panic_attached` in
+/// `nova-typeck` for why that order must be exact and stable). Task 3 reads
+/// this to build a dispatching `main` that runs one test per process,
+/// selected by index; Task 5 reads test names back out of the compiled
+/// binary, not from this struct directly — so an index and a name can never
+/// silently disagree between the two only if this order never does either.
+#[derive(Debug, Clone)]
+pub struct TestFn {
+    pub def_id: DefId,
+    pub name: String,
+    pub should_panic: bool,
+}
+
 /// Output of [`resolve`]: the namespace table, the merged file whose
 /// `item_index`es the definitions refer to (the input plus the implicit std
 /// modules, see [`STD_MODULES`]), and any diagnostics. Downstream stages must
@@ -400,15 +416,18 @@ pub struct ResolveResult {
     pub definitions: Definitions,
     pub file: File,
     pub diagnostics: Vec<Diagnostic>,
+    pub tests: Vec<TestFn>,
 }
 
-/// Output of [`resolve_program`]: the merged file, its namespaces, and any
-/// diagnostics. The merged file's `item_index`es are what `Definitions` refers
-/// to, so downstream stages consume both together.
+/// Output of [`resolve_program`]: the merged file, its namespaces, any
+/// diagnostics, and the `@test` functions collected along the way. The merged
+/// file's `item_index`es are what `Definitions` refers to, so downstream
+/// stages consume both together.
 pub struct ProgramResolution {
     pub file: File,
     pub definitions: Definitions,
     pub diagnostics: Vec<Diagnostic>,
+    pub tests: Vec<TestFn>,
 }
 
 /// Collect the item-level namespace of a single file.
@@ -430,6 +449,7 @@ pub fn resolve(file: &File) -> ResolveResult {
         definitions: prog.definitions,
         file: prog.file,
         diagnostics: prog.diagnostics,
+        tests: prog.tests,
     }
 }
 
@@ -454,6 +474,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
+    let mut tests = Vec::new();
 
     // Compile each implicit std module (in `STD_MODULES` order) so their
     // public types/traits/values get real DefIds and layouts (and are then
@@ -538,6 +559,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
                 &mut first_value,
                 &mut first_type,
                 &mut diagnostics,
+                &mut tests,
                 item_index,
                 &item.value,
             );
@@ -582,6 +604,7 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
         file: File { items: merged },
         definitions,
         diagnostics,
+        tests,
     }
 }
 
@@ -667,6 +690,14 @@ fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_m
 
 /// Collect one item's definitions into `scope` (and `exp` if `pub`), pushing
 /// global `Def`s into `defs`.
+///
+/// Also validates the item's `attrs` (Task 2): an unknown attribute name is
+/// always `E0082`, `@test` on anything other than a function is `E0083`, a
+/// `@test` function with parameters, generics, or a non-`Unit` return is
+/// `E0084`, and an unknown `@test(...)` argument is `E0085` — never silently
+/// ignored, so a mistyped `@tset` cannot compile into a function that looks
+/// like a test and never runs as one. A well-formed `@test` function is
+/// pushed onto `tests`.
 #[allow(clippy::too_many_arguments)]
 fn collect_item(
     defs: &mut Vec<Def>,
@@ -675,6 +706,7 @@ fn collect_item(
     first_value: &mut IndexMap<String, Span>,
     first_type: &mut IndexMap<String, Span>,
     diagnostics: &mut Vec<Diagnostic>,
+    tests: &mut Vec<TestFn>,
     item_index: usize,
     item: &Item,
 ) {
@@ -700,55 +732,60 @@ fn collect_item(
                 Res::Def(id),
                 is_pub(f.vis),
             );
+            validate_test_function(f, id, diagnostics, tests);
         }
-        Item::Type(t) => match &t.def {
-            TypeDef::Sum(variants) => {
-                let name = t.name.value.clone();
-                let span = t.name.span;
-                let pubv = is_pub(t.vis);
-                let variant_defs: Vec<VariantDef> = variants
-                    .iter()
-                    .map(|v| VariantDef {
-                        name: v.name.value.clone(),
-                        span: v.name.span,
-                        arity: v.fields.len(),
-                    })
-                    .collect();
-                let id = push_def(
-                    defs,
-                    Def {
-                        name: name.clone(),
-                        span,
-                        kind: DefKind::Sum {
-                            item_index,
-                            variants: variant_defs,
+        Item::Type(t) => {
+            validate_attrs_reject_test(&t.attrs, "a type declaration", diagnostics);
+            match &t.def {
+                TypeDef::Sum(variants) => {
+                    let name = t.name.value.clone();
+                    let span = t.name.span;
+                    let pubv = is_pub(t.vis);
+                    let variant_defs: Vec<VariantDef> = variants
+                        .iter()
+                        .map(|v| VariantDef {
+                            name: v.name.value.clone(),
+                            span: v.name.span,
+                            arity: v.fields.len(),
+                        })
+                        .collect();
+                    let id = push_def(
+                        defs,
+                        Def {
+                            name: name.clone(),
+                            span,
+                            kind: DefKind::Sum {
+                                item_index,
+                                variants: variant_defs,
+                            },
                         },
-                    },
-                );
-                insert_type(scope, exp, first_type, diagnostics, name, span, id, pubv);
-                // Variants live in the value namespace and inherit the type's
-                // visibility, so `Some(x)` / `Circle(1.0)` resolve unprefixed.
-                for (vi, v) in variants.iter().enumerate() {
-                    insert_value(
-                        scope,
-                        exp,
-                        first_value,
-                        diagnostics,
-                        v.name.value.clone(),
-                        v.name.span,
-                        Res::Variant(id, vi),
-                        pubv,
                     );
+                    insert_type(scope, exp, first_type, diagnostics, name, span, id, pubv);
+                    // Variants live in the value namespace and inherit the type's
+                    // visibility, so `Some(x)` / `Circle(1.0)` resolve unprefixed.
+                    for (vi, v) in variants.iter().enumerate() {
+                        insert_value(
+                            scope,
+                            exp,
+                            first_value,
+                            diagnostics,
+                            v.name.value.clone(),
+                            v.name.span,
+                            Res::Variant(id, vi),
+                            pubv,
+                        );
+                    }
+                }
+                TypeDef::Alias(_) => {
+                    diagnostics.push(unsupported(
+                        t.name.span,
+                        "type aliases are not supported yet in the Phase 1 compiler",
+                    ));
                 }
             }
-            TypeDef::Alias(_) => {
-                diagnostics.push(unsupported(
-                    t.name.span,
-                    "type aliases are not supported yet in the Phase 1 compiler",
-                ));
-            }
-        },
+        }
         Item::Const(c) => {
+            validate_attrs_reject_test(&c.attrs, "a const", diagnostics);
             let name = c.name.value.clone();
             let span = c.name.span;
             let id = push_def(
@@ -771,6 +808,7 @@ fn collect_item(
             );
         }
         Item::Record(r) => {
+            validate_attrs_reject_test(&r.attrs, "a record", diagnostics);
             let name = r.name.value.clone();
             let span = r.name.span;
             let id = push_def(
@@ -793,6 +831,7 @@ fn collect_item(
             );
         }
         Item::Trait(t) => {
+            validate_attrs_reject_test(&t.attrs, "a trait", diagnostics);
             let name = t.name.value.clone();
             let span = t.name.span;
             let pubv = is_pub(t.vis);
@@ -855,6 +894,7 @@ fn collect_item(
             }
         }
         Item::Impl(i) => {
+            validate_attrs_reject_test(&i.attrs, "an impl block", diagnostics);
             // Impls are globally coherent — collected program-wide, resolved by
             // type rather than by name, so they are not bound into any scope.
             let self_name = type_full_name(&i.ty.value);
@@ -911,6 +951,152 @@ fn collect_item(
         // `import`s are handled in pass 2; `module` declarations carry no items.
         Item::Import(_) | Item::Module(_) => {}
     }
+}
+
+/// Attribute names the compiler recognizes. An attribute whose name is not in
+/// this list is always `E0082` — parsing an attribute and then enforcing
+/// nothing about its name is exactly the failure mode `@test` must not be
+/// allowed: a misspelled `@tset` that compiled would define a function that
+/// looks like a test and never runs as one.
+const KNOWN_ATTRIBUTES: &[&str] = &["test"];
+
+/// Arguments `@test(...)` accepts. Anything else is `E0085`.
+const KNOWN_TEST_ARGS: &[&str] = &["should_panic"];
+
+/// `E0082`: `attr`'s name is not in [`KNOWN_ATTRIBUTES`]. Shared by every
+/// item kind that can carry attributes, so a typo is caught the same way no
+/// matter what it is attached to.
+///
+/// Labels `attr.name.span`, never `attr.span`: `attr.span` (see
+/// `nova-parser`'s `parse_attributes`) is set to the span of the leading `@`
+/// token alone — one byte wide, never covering the name that follows it — so
+/// underlining it would point at the `@` and leave the actual misspelled
+/// word unmarked. `attr.name` is a separate `Spanned<String>` built by
+/// `parse_ident`, with its own accurate span over just the identifier text,
+/// and is what every diagnostic in this file uses instead. `attr.span` is
+/// read nowhere in this module.
+fn unknown_attribute(attr: &Attribute) -> Diagnostic {
+    Diagnostic::error(
+        "E0082",
+        format!(
+            "unknown attribute `@{}`; known attributes are: {}",
+            attr.name.value,
+            KNOWN_ATTRIBUTES.join(", "),
+        ),
+    )
+    .with_primary_label(attr.name.span, "unknown attribute")
+}
+
+/// Validate the attributes of an item that can never itself be a test: every
+/// attrs-bearing item except a function (record, type declaration, trait,
+/// impl block, const — see [`validate_test_function`] for the function
+/// case). An unknown name is still `E0082`; `@test` on one of these is
+/// `E0083`, since only a function can ever run as a test. `kind` names the
+/// item for the message and already carries its article (e.g. `"a record"`,
+/// `"an impl block"`).
+fn validate_attrs_reject_test(attrs: &[Attribute], kind: &str, diagnostics: &mut Vec<Diagnostic>) {
+    for attr in attrs {
+        if attr.name.value == "test" {
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0083",
+                    format!("`@test` can only be applied to a function, not {kind}"),
+                )
+                .with_primary_label(attr.name.span, "not a function"),
+            );
+        } else if !KNOWN_ATTRIBUTES.contains(&attr.name.value.as_str()) {
+            diagnostics.push(unknown_attribute(attr));
+        }
+    }
+}
+
+/// Validate a function's attributes and, if it carries a well-formed `@test`,
+/// push a [`TestFn`] onto `tests`. `def_id` is the caller's already-collected
+/// `DefId` for `f` (from its own `push_def`), so a rejected `@test` still
+/// leaves the function itself resolved and callable like any other —
+/// rejection refuses only its *test-ness*, never its existence in the
+/// namespace.
+///
+/// Pushes onto `tests` in the order [`resolve_program`]'s item walk visits
+/// this function, which is source order — see [`TestFn`]'s doc comment for
+/// why that must hold exactly and
+/// `collected_tests_are_in_source_order_with_should_panic_attached` in
+/// `nova-typeck` for the test that pins it.
+fn validate_test_function(
+    f: &Function,
+    def_id: DefId,
+    diagnostics: &mut Vec<Diagnostic>,
+    tests: &mut Vec<TestFn>,
+) {
+    for attr in &f.attrs {
+        if attr.name.value != "test" {
+            diagnostics.push(unknown_attribute(attr));
+            continue;
+        }
+        let mut well_formed = true;
+        let mut should_panic = false;
+        for arg in &attr.args {
+            if arg.value == "should_panic" {
+                should_panic = true;
+            } else {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E0085",
+                        format!(
+                            "unknown `@test` argument `{}`; the accepted arguments are: {}",
+                            arg.value,
+                            KNOWN_TEST_ARGS.join(", "),
+                        ),
+                    )
+                    .with_primary_label(arg.span, "unknown argument"),
+                );
+                well_formed = false;
+            }
+        }
+        let violations = test_shape_violations(f);
+        if !violations.is_empty() {
+            let names: Vec<&str> = violations.iter().map(|(name, _)| *name).collect();
+            let mut diag = Diagnostic::error(
+                "E0084",
+                format!("a `@test` function may not have {}", names.join(", ")),
+            )
+            .with_primary_label(f.name.span, "invalid test signature");
+            for (name, span) in &violations {
+                diag = diag.with_secondary_label(*span, format!("{name} here"));
+            }
+            diagnostics.push(diag);
+            well_formed = false;
+        }
+        if well_formed {
+            tests.push(TestFn {
+                def_id,
+                name: f.name.value.clone(),
+                should_panic,
+            });
+        }
+    }
+}
+
+/// Ways a function's signature disqualifies it from `@test` (`E0084`):
+/// parameters, generics, or an explicit non-`Unit` return type. A test is
+/// called with no arguments and its result is discarded, so there is no
+/// caller that could ever supply the one or consume the other. A missing
+/// return type and an explicit `-> ()` are both `Unit` and neither is a
+/// violation — only an explicit *non*-`Unit` return type is.
+fn test_shape_violations(f: &Function) -> Vec<(&'static str, Span)> {
+    let mut violations = Vec::new();
+    if let (Some(first), Some(last)) = (f.params.first(), f.params.last()) {
+        violations.push(("parameters", first.name.span.merge(last.ty.span)));
+    }
+    if let (Some(first), Some(last)) = (f.generics.first(), f.generics.last()) {
+        violations.push(("generic parameters", first.name.span.merge(last.name.span)));
+    }
+    if let Some(rt) = &f.return_ty {
+        if !matches!(&rt.value, Type::Tuple(items) if items.is_empty()) {
+            violations.push(("a non-Unit return type", rt.span));
+        }
+    }
+    violations
 }
 
 /// Bind another module's public names into the importing module's scope.

@@ -7216,9 +7216,40 @@ mod tests {
     use nova_diagnostics::FileId;
     use nova_lexer::lex;
     use nova_parser::parse;
-    use nova_resolver::resolve;
+    use nova_resolver::{resolve, TestFn};
 
     fn check_src(src: &str) -> CheckResult {
+        let file_id = FileId::DUMMY;
+        let (tokens, lex_errors) = lex(src, file_id);
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (ast, parse_errors) = parse(&tokens, file_id);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let ast = ast.expect("no AST");
+        let resolved = resolve(&ast);
+        // Type-check against the merged file (input + the implicit prelude,
+        // which is `std/core` — see ADR 0004), whose `item_index`es the
+        // definitions refer to. Resolver diagnostics (Task 2's `@test`
+        // attribute validation among them: E0082-E0085) used to be asserted
+        // empty here and dropped; they are prepended into the returned
+        // `CheckResult` instead, in the same order the driver renders them
+        // (resolve, then check), since callers now legitimately exercise
+        // resolver-level errors through this helper. This is a no-op for
+        // every caller that never triggered a resolver diagnostic in the
+        // first place — which, before this change, was every caller, since
+        // the old assert would otherwise have failed their test.
+        let mut checked = check(&resolved.file, &resolved.definitions);
+        let mut diagnostics = resolved.diagnostics;
+        diagnostics.append(&mut checked.diagnostics);
+        checked.diagnostics = diagnostics;
+        checked
+    }
+
+    /// Resolve `src` and return its collected `@test` functions, in the order
+    /// `nova_resolver::resolve`'s item walk visited them — source order. Kept
+    /// separate from `check_src`/`CheckResult` (which has no field for this):
+    /// `TestFn` lives on the resolver's output, and this test needs nothing
+    /// from the checker.
+    fn collect_tests_of(src: &str) -> Vec<TestFn> {
         let file_id = FileId::DUMMY;
         let (tokens, lex_errors) = lex(src, file_id);
         assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
@@ -7231,10 +7262,7 @@ mod tests {
             "resolve errors: {:?}",
             resolved.diagnostics
         );
-        // Type-check against the merged file (input + the implicit prelude,
-        // which is `std/core` — see ADR 0004), whose `item_index`es the
-        // definitions refer to.
-        check(&resolved.file, &resolved.definitions)
+        resolved.tests
     }
 
     fn error_codes(result: &CheckResult) -> Vec<&str> {
@@ -14180,4 +14208,108 @@ mod tests {
     // `builtin_call_with_a_non_string_argument_reports_e0010`), and the part
     // that is genuinely per-builtin — the signature itself — is unit-tested
     // directly by `builtin_signatures_are_what_the_std_call_sites_use`.
+
+    // ---- `@test` attribute validation and collection (Task 2) --------------
+    //
+    // Task 1 made `@name(args)` parse and be stored on items, deliberately
+    // without validating them. These tests are the first thing to ever read
+    // `Attribute` at all: an unknown name is `E0082`, `@test` on anything but
+    // a function is `E0083`, a `@test` function with parameters, generics, or
+    // a non-`Unit` return is `E0084`, and an unknown `@test(...)` argument is
+    // `E0085`. A misspelled `@tset` must be a hard error rather than silently
+    // parsed and ignored — that would compile a function that looks like a
+    // test and never runs as one, which is the worst instance of this
+    // project's most-repeated defect ("parses, then enforces nothing").
+
+    #[test]
+    fn an_unknown_attribute_is_e0082_and_names_it() {
+        let r = check_src("@tset\nfn t() { }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0082")
+            .expect("E0082 for an unknown attribute");
+        assert!(
+            d.message.contains("tset"),
+            "names the attribute: {}",
+            d.message
+        );
+        assert!(
+            d.message.contains("test"),
+            "lists the known set: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn test_on_a_non_function_is_e0083() {
+        let r = check_src("@test\nrecord R { n: Int }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0083"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn test_on_a_function_with_parameters_is_e0084() {
+        let r = check_src("@test\nfn t(x: Int) { }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn test_on_a_function_returning_a_value_is_e0084() {
+        let r = check_src("@test\nfn t() -> Int { 1 }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn test_on_a_generic_function_is_e0084() {
+        // A test takes no arguments, so nothing could ever fix its type
+        // parameter — monomorphization would have no instance to emit.
+        let r = check_src("@test\nfn t<T>() { }\nfn main() { }");
+        assert!(error_codes(&r).contains(&"E0084"), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn an_unknown_test_argument_is_e0085() {
+        let r = check_src("@test(shuold_panic)\nfn t() { }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0085")
+            .expect("E0085 for an unknown @test argument");
+        assert!(
+            d.message.contains("should_panic"),
+            "names the accepted arg: {}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn a_well_formed_test_is_accepted() {
+        let r = check_src("@test\nfn t() { }\n@test(should_panic)\nfn u() { }\nfn main() { }");
+        assert_eq!(error_codes(&r), Vec::<&str>::new(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn collected_tests_are_in_source_order_with_should_panic_attached() {
+        // The runner addresses tests BY INDEX across separate processes
+        // (spec §4, risk 2). If collection order is not source order, or is
+        // not stable between the enumeration run and a test run, `nova test`
+        // silently runs one test and reports another's name. That failure is
+        // invisible to every other test in this file, so it is pinned here.
+        //
+        // Three tests, not two: with two, a reversed order and a swapped
+        // should_panic flag are indistinguishable. The middle one carries the
+        // flag so a reversal moves it.
+        let r = collect_tests_of(
+            "@test\nfn alpha() { }\n\
+             @test(should_panic)\nfn beta() { }\n\
+             @test\nfn gamma() { }\n\
+             fn main() { }",
+        );
+        let names: Vec<&str> = r.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
+        assert_eq!(
+            r.iter().map(|t| t.should_panic).collect::<Vec<_>>(),
+            [false, true, false]
+        );
+    }
 }
