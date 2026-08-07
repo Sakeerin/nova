@@ -205,6 +205,49 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         if !resolved_ok {
             continue;
         }
+        // An `async fn`'s body produces its OUTPUT type (`hir::Function::body`
+        // has type `T`), but its declared MIR return class comes from
+        // `ret_ty`, which is `Future<T>` (always `MirTy::Ptr`) — a mismatch
+        // that is invisible whenever `T` also maps to a `Ptr`-class register
+        // (e.g. `Int`/`Char`, both `MirTy::I64` on x86-64) but is a genuine
+        // register-class conflict whenever it does not (`Float` -> `MirTy::F64`
+        // is the case that surfaces it, measured as a Cranelift verifier ICE
+        // — "result 0 has type f64, must match function signature of i64" —
+        // reported as `internal codegen error (this is a compiler bug)`
+        // instead of a diagnostic). This is not specific to a body containing
+        // `.await`: `async fn f() -> Float { 1.5 }`, which has no `.await` at
+        // all, reaches this same mismatch the moment `main` calls it and
+        // discards the result — no further use of the value is needed.
+        //
+        // So the guard belongs here, on every reached `async fn`, not on the
+        // `Await` expression (the defensive arm in `lower.rs` covers that
+        // case only in case this one is ever bypassed). Keyed on
+        // `is_async` rather than "does `ret_ty` start with `Future`", for the
+        // same reason `hir::Function.is_async` exists at all: a non-async
+        // function may itself declare `-> Future<T>` and forward an async
+        // call's result unchanged (see `wrap_fn_value` in `nova-typeck`),
+        // and that case has no output/body-type mismatch to guard against.
+        if specialized.is_async {
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0088",
+                    format!(
+                        "`{}` cannot be compiled yet: `async fn` bodies require the async \
+                         state-machine transform, which has not landed",
+                        func.name
+                    ),
+                )
+                .with_primary_label(func.span, "async fn body cannot be lowered yet")
+                .with_note(
+                    "this fires whenever the function is reachable from `main`, in \
+                     `nova check` as well as `nova run`/`nova build`, since `nova check` \
+                     runs this same lowering stage so it never calls a program \
+                     well-formed that `nova run` would then reject"
+                        .to_string(),
+                ),
+            );
+            continue;
+        }
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
         match lower_function(&specialized, &name, module, entry, &mut request) {
             Ok(f) => mir.functions.push(f),

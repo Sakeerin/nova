@@ -951,9 +951,15 @@ pub struct Function {
     pub locals: Vec<Local>,
     pub ret_ty: Ty,
     /// Whether this function was declared `async`. `ret_ty` is already
-    /// `Ty::Future(output)` when true; this flag is what tells the MIR async
-    /// pass which functions to transform, since a non-async function may also
-    /// return a `Future` (by calling an async fn and not awaiting it).
+    /// `Ty::Future(output)` when true; this flag is what tells `nova-mir`
+    /// which functions to treat specially, since a non-async function may
+    /// also return a `Future` (by calling an async fn and not awaiting it),
+    /// so `ret_ty` alone can't distinguish them. Two current consumers:
+    /// `lower_module` rejects every reachable `is_async` function with a
+    /// diagnostic (the state-machine transform that would let it lower
+    /// correctly has not landed, Phase 2.3a Tasks 5-6), and that same
+    /// eventual transform is what this flag will tell apart from an
+    /// ordinary function once it exists.
     pub is_async: bool,
     pub body: Expr,
     pub span: Span,
@@ -1185,9 +1191,14 @@ pub enum ExprKind {
     ///
     /// The state-machine transform that lowers this into real suspend/resume
     /// control flow has not landed yet (Phase 2.3a Tasks 5-6). Until it does,
-    /// this is ordinary, valid-per-typeck input — not a compiler-bug case —
-    /// so MIR lowering (`nova-mir/src/lower.rs`) reports it as a diagnostic
-    /// rather than treating it as unreachable.
+    /// `.await` only ever appears inside an `async fn`'s body (enforced by
+    /// `nova-typeck`'s `fcx.in_async`), and every `async fn` reachable from
+    /// `main` is rejected with a diagnostic before its body is lowered at
+    /// all (`nova-mir/src/mono.rs`'s `lower_module`, keyed on
+    /// `Function::is_async`) — so this node itself never actually reaches
+    /// MIR lowering from valid source. `nova-mir/src/lower.rs` still handles
+    /// it defensively (a diagnostic, not a panic) in case that guard is ever
+    /// bypassed.
     Await(Box<Expr>),
 }
 

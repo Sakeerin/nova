@@ -564,13 +564,19 @@ impl<'a> Lowerer<'a> {
                 acc
             }
             K::Await(inner) => {
-                // The async state-machine transform (Phase 2.3a Tasks 5-6)
-                // is what turns a suspend point into real control flow; it
-                // has not landed. Unlike `mir_ty`'s defensive arms, this one
-                // is reachable from ordinary, valid-per-typeck source —
-                // `async fn g() -> Int { f().await }` typechecks today (Task
-                // 2) — so it is a diagnosed rejection, not a "should be
-                // impossible" case, and must not panic in this library path.
+                // Defense in depth, NOT the primary guard: `lower_module`'s
+                // worklist (`nova-mir/src/mono.rs`) rejects every `is_async`
+                // function — with its own `E0088` — before ever calling
+                // `lower_function` on its body, and `.await` only
+                // type-checks inside an async fn (`nova-typeck`'s
+                // `fcx.in_async`). Together those mean no valid-per-typeck
+                // program can reach an `Await` node here: by the time a
+                // function's body is being lowered at all, it has already
+                // been proven non-async. If this arm fires anyway, one of
+                // those two invariants broke elsewhere — still reported as a
+                // diagnostic, not a panic, since this is a library path (see
+                // `mir_ty`'s own comment on why its defensive arms must not
+                // panic either).
                 //
                 // The awaited operand is still lowered first so any error
                 // inside it is also reported, matching how every other arm
@@ -579,15 +585,14 @@ impl<'a> Lowerer<'a> {
                 self.diagnostics.push(
                     Diagnostic::error(
                         "E0088",
-                        "`.await` cannot be compiled yet: the async \
-                         state-machine transform has not landed",
+                        "`.await` reached MIR lowering, but its containing function \
+                         should already have been rejected as `async` before this point",
                     )
-                    .with_primary_label(e.span, "unsupported suspend point")
+                    .with_primary_label(e.span, "unexpected suspend point")
                     .with_note(
-                        "this fires whenever the containing function is reachable from \
-                         `main`, in `nova check` as well as `nova run`/`nova build` — \
-                         `nova check` runs this same lowering stage so it never calls a \
-                         program well-formed that `nova run` would then reject"
+                        "this indicates an internal inconsistency between the \
+                         async-function guard in `lower_module` and the `.await` \
+                         typing rule in `nova-typeck`, not an ordinary user error"
                             .to_string(),
                     ),
                 );

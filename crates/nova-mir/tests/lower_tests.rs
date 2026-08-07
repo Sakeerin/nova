@@ -1013,10 +1013,14 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
 }
 
 /// The async state-machine transform (Phase 2.3a Tasks 5-6) does not exist
-/// yet. A `.await` that MIR lowering actually has to visit -- because the
-/// containing function is reachable from `main`, unlike an async fn that is
-/// merely declared -- must be a diagnosed rejection, not a silent
-/// miscompile or a panic in this library path. Not exercised by
+/// yet. A reachable async fn -- one `main` actually calls -- must be a
+/// diagnosed rejection, not a silent miscompile or a panic. `g` here is
+/// rejected by the `is_async` guard in `lower_module` *before* its body is
+/// ever inspected for an `Await` node, so the message names `g` and
+/// "async fn", not `.await` specifically -- the guard fires on the function,
+/// not on finding an await expression inside it (see
+/// `async_fn_without_await_still_reports_e0088_at_int` below, which proves
+/// that by using a body with no `.await` at all). Not exercised by
 /// `mir_for`/`diagnostics_for` above: this needs the typeck-clean-but-MIR-
 /// rejected combination, and the message assertion, that neither helper
 /// gives access to.
@@ -1037,7 +1041,7 @@ fn reachable_await_reports_e0088() {
         checked.diagnostics
     );
     let diags = match lower_module(&checked.module) {
-        Ok(_) => panic!("expected MIR lowering to reject the reachable `.await`"),
+        Ok(_) => panic!("expected MIR lowering to reject the reachable async fn `g`"),
         Err(diags) => diags,
     };
     let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
@@ -1047,8 +1051,75 @@ fn reachable_await_reports_e0088() {
         )
     });
     assert!(
-        d.message.contains("await"),
-        "E0088 must name `.await` as the unsupported construct; got {:?}",
+        d.message.contains("`g`") && d.message.contains("async fn"),
+        "E0088 must name the rejected function (`g`) and that it is an async fn; got {:?}",
         d.message
     );
+}
+
+/// Proves the guard isn't keyed on finding an `Await` node: an async fn
+/// whose body has NO `.await` at all -- nothing for an expression-level
+/// check to ever see -- must still be rejected once reachable from `main`.
+///
+/// This is the exact shape of a defect a reviewer measured directly against
+/// an earlier version of this guard (which lived on `ExprKind::Await` in
+/// `nova-mir/src/lower.rs` instead of here): `async fn f() -> Float { 1.5 }`,
+/// merely called and discarded (`let x = f()`, no `.await` anywhere in the
+/// program), reached Cranelift and crashed with a verifier error --
+/// "result 0 has type f64, must match function signature of i64" -- reported
+/// as `internal codegen error (this is a compiler bug)` instead of a
+/// diagnostic. The root cause: an async fn's declared MIR return class comes
+/// from `ret_ty` (`Future<T>`, always `MirTy::Ptr`), but its body produces
+/// `T` directly, and `Ptr` vs. `T`'s real class only collide visibly when
+/// `T` isn't ALSO a `Ptr`-class register.
+///
+/// `Int` is used HERE, not `Float`, specifically to document why that
+/// defect went unmeasured in the first place: `Future<Int>` -> `Ptr` and the
+/// body's actual `Int` -> `I64` are both 64-bit general-purpose-register
+/// classes on x86-64, so Cranelift's verifier has nothing to catch there --
+/// the exact register-class coincidence the plan's Global Constraint about
+/// instantiating at `Float` exists to defeat. See the CLI-level
+/// `nova-cli/tests/run_tests.rs` tests for the end-to-end proof (at both
+/// `Int` and `Float`) that the ICE itself is gone.
+#[test]
+fn async_fn_without_await_still_reports_e0088_at_int() {
+    let file_id = FileId::DUMMY;
+    let src = "async fn f() -> Int { 1 }\nfn main() { let x = f() }";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let ast = ast.expect("no AST");
+    let resolved = resolve(&ast);
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck should accept this program: {:?}",
+        checked.diagnostics
+    );
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => panic!("expected MIR lowering to reject the reachable await-free async fn `f`"),
+        Err(diags) => diags,
+    };
+    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
+        panic!(
+            "expected E0088, got {:?}",
+            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        d.message.contains("`f`") && d.message.contains("async fn"),
+        "E0088 must name `f` and that it is an async fn; got {:?}",
+        d.message
+    );
+}
+
+/// The mirror image, pinning `lower_module`'s existing reachability
+/// semantics so the guard above cannot over-reject: an async fn that is
+/// merely DECLARED and never called from `main` is never enqueued by the
+/// monomorphization worklist, so the guard never runs on it and it must not
+/// appear in the output or in any diagnostic -- exactly like any other
+/// unreferenced function today.
+#[test]
+fn unreached_async_fn_compiles_cleanly() {
+    let mir = mir_for("async fn f() -> Int { 1 }\nfn main() { }");
+    assert_eq!(function_names(&mir), vec!["main"]);
 }
