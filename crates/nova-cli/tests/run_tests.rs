@@ -4103,3 +4103,236 @@ fn assert_ne_panics_when_equal_and_is_silent_when_different() {
     );
     let _ = std::fs::remove_file(&exe);
 }
+
+// === nova test: the `nova test [filter]` CLI subcommand (Task 5) ===
+//
+// Unlike `run`/`build`/`check`, `nova test` takes no `[file]` argument
+// (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`) — it always compiles
+// `src/main.nova` relative to the current directory, so every test below
+// writes its fixture there and points `nova()` at that directory with
+// `.current_dir`.
+
+/// A project directory with `src/main.nova` containing `source`, under a
+/// fresh, uniquely-named temp directory so parallel tests (and parallel runs
+/// of this same suite) never share one `nova test` project.
+fn write_test_project(unique_name: &str, source: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(unique_name);
+    std::fs::create_dir_all(dir.join("src")).expect("temp project dir");
+    std::fs::write(dir.join("src/main.nova"), source).expect("write fixture");
+    dir
+}
+
+/// A passing test and a failing one, reported distinctly in one run: the
+/// pass line says "ok", the failure line says "FAILED" and is followed by
+/// the exact panic message, and the summary counts each into its own
+/// bucket. Asserts the **entire** rendered stdout, not a substring of it —
+/// this project's own retrospective (`2026-08-05-nova-test-design.md` §1)
+/// found seven cases of a diagnostic checked by a single fragment that
+/// would have matched a completely wrong message just as well.
+#[test]
+fn nova_test_reports_a_pass_and_a_failure_distinctly() {
+    let dir = write_test_project(
+        "nova-test-cli-pass-fail",
+        "@test\nfn addition_works() { assert_eq(1 + 1, 2) }\n\
+         @test\nfn addition_is_broken() { assert_eq(1 + 1, 3) }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test addition_works ... ok\n\
+         test addition_is_broken ... FAILED\n\
+         \x20\x20\x20\x20nova: panic: assertion failed: 2 != 3\n\
+         \n\
+         test result: FAILED. 1 passed; 1 failed; 0 trapped; 2 total\n"
+    );
+}
+
+/// The load-bearing test on this branch (design doc §5, §9 risk 4; brief
+/// step 3). A division by zero exits nonzero with **no** `nova: panic:` line
+/// on stderr — a hard trap, not a checked panic — measured directly below
+/// rather than assumed. `@test(should_panic)` must NOT be satisfied by it:
+/// the report must call it "TRAPPED", never "ok" or plain "FAILED", and the
+/// summary must count it under `trapped`, not `passed` or `failed`.
+///
+/// Treating any nonzero exit as "panicked as expected" would let a
+/// miscompile masquerade as a passing test. That is not hypothetical on this
+/// project: `nova-typeck`'s
+/// `a_next_returning_a_three_variant_sum_is_not_an_iterator` test documents a
+/// real guard whose removal turned a clean type-check into exactly this
+/// exit-132-on-legal-source shape.
+///
+/// The expected exit code is **measured directly** in this test, not
+/// hard-coded: the code an aborted process reports is platform- and
+/// shell-dependent (design doc §9 risk 4 measured 127 and 132 for two
+/// different aborts through Git Bash on this same project), so pinning a
+/// literal number here would test one shell's translation of the exit code
+/// rather than what `nova test` itself observed through Rust's own process
+/// API. Measured once, independently, while building this test: the raw
+/// code Windows reports for this exact program is `-1073741795`
+/// (`0xC000001D`, `STATUS_ILLEGAL_INSTRUCTION` — Cranelift lowers a checked
+/// `sdiv` with a `ud2`-style trap rather than letting the hardware `#DE`
+/// fault propagate, which is also consistent with Git Bash's "Illegal
+/// instruction" wording for the same program) — a different value from both
+/// this project's own 127/132 Git Bash figures and this task's 0xC0000409 /
+/// 0xC0000005 figures, because none of the three measured the same thing:
+/// different program, different platform-vs-shell layer. That mismatch is
+/// exactly why the assertion below measures its own expectation instead of
+/// hard-coding any of those.
+#[test]
+fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
+    let dir = write_test_project(
+        "nova-test-cli-hard-trap",
+        "@test(should_panic)\nfn divides_by_zero() { let _ = 1 / 0 }\n",
+    );
+
+    // Measure the real exit code directly, the same way `nova test` itself
+    // will see it, rather than assuming a portable number.
+    let (exe, tests) = nova_driver::build_test_binary(&dir.join("src/main.nova"))
+        .expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["divides_by_zero"]
+    );
+    let direct = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .output()
+        .expect("run the trap directly");
+    assert!(
+        !direct.status.success(),
+        "a division by zero must exit nonzero"
+    );
+    let direct_stderr = String::from_utf8_lossy(&direct.stderr);
+    assert!(
+        !direct_stderr.contains("nova: panic:"),
+        "must be a hard trap with no panic message, not a checked panic: {direct_stderr}"
+    );
+    let code = direct
+        .status
+        .code()
+        .expect("a concrete exit code on this platform");
+    let _ = std::fs::remove_file(&exe);
+
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        format!(
+            "running 1 test\n\
+             test divides_by_zero ... TRAPPED (exit code {code})\n\
+             \n\
+             test result: FAILED. 0 passed; 0 failed; 1 trapped; 1 total\n"
+        )
+    );
+}
+
+/// `@test(should_panic)` passes when the panic is a *checked* one — array
+/// out of bounds, which panics via `nova_rt_check_bounds`
+/// (`nova-runtime/src/lib.rs`) — reported as an ordinary "ok", not called out
+/// as anything special. Pairs with the hard-trap test above: together they
+/// are the two halves of "should_panic passes on the middle row only, and
+/// only that row" (design doc §5).
+#[test]
+fn should_panic_passes_on_a_checked_panic() {
+    let dir = write_test_project(
+        "nova-test-cli-should-panic-checked",
+        "@test(should_panic)\nfn out_of_bounds_panics() { let xs = [1, 2, 3]\n let _ = xs[7] }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test out_of_bounds_panics ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n"
+    );
+}
+
+/// Not one of the four required tests, but the same "should_panic passes on
+/// the middle row only" rule (design doc §5) has a second edge this project's
+/// own gate list never separately exercises: a `should_panic` test that
+/// simply completes without panicking. `should_panic` inverting *only* the
+/// `Panicked` row (brief step 2) does not mean the `Passed` row is exempt
+/// from `should_panic`'s requirement — "passes on the middle row only" reads
+/// both ways. Left unhandled, a bug fix that accidentally removed the code
+/// path a `should_panic` test exists to guard would make that test keep
+/// "passing" forever, which is precisely the silent-regression failure mode
+/// `@test(should_panic)` exists to prevent.
+#[test]
+fn should_panic_fails_distinctly_when_the_test_does_not_panic() {
+    let dir = write_test_project(
+        "nova-test-cli-should-panic-not-panicking",
+        "@test(should_panic)\nfn does_not_actually_panic() { assert_eq(1, 1) }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test does_not_actually_panic ... FAILED (expected a panic, but the test passed)\n\
+         \n\
+         test result: FAILED. 0 passed; 1 failed; 0 trapped; 1 total\n"
+    );
+}
+
+/// `nova test <filter>` selects a strict substring-matched subset
+/// (`nova-spec/40-TOOLING.md:20`) and — this is the part a weaker test would
+/// miss — the unselected test genuinely does not run, not merely go
+/// unreported.
+///
+/// A filter bug that runs every test and only *prints* the selected ones
+/// would still pass a test that checks nothing but the two "kept" lines
+/// (task brief, step 1). To catch that shape too, `skip_c` (excluded by the
+/// filter `"keep"`) spends real wall-clock time if — and only if — it
+/// actually runs: a 40-billion-iteration loop, calibrated by direct
+/// measurement while writing this test at roughly 1.6 billion iterations per
+/// second on this machine (2 billion iterations measured at 1.257s via a
+/// throwaway `nova build` + run), so it costs about 25–30 seconds if
+/// executed and costs nothing at all if it is correctly skipped. The
+/// filtered run below is asserted to finish in well under that — measured at
+/// ~0.25s for the correctly-filtered path during development, so the 15
+/// second bound leaves a wide, non-flaky margin without ever hanging: the
+/// loop is large but finite, so even a buggy runner that does execute it
+/// completes (slowly) rather than never returning. `assert_eq(i, ...)` at
+/// the end (rather than discarding `i`) exists so the fast Cranelift
+/// backend cannot prove the loop dead and remove it.
+#[test]
+fn a_filter_selects_a_strict_subset_and_the_others_do_not_run() {
+    let dir = write_test_project(
+        "nova-test-cli-filter",
+        "@test\nfn keep_a() { assert_eq(1, 1) }\n\
+         @test\nfn keep_b() { assert_eq(2, 2) }\n\
+         @test\nfn skip_c() {\n\
+         \x20\x20\x20\x20let mut i = 0\n\
+         \x20\x20\x20\x20while i < 40000000000 { i = i + 1 }\n\
+         \x20\x20\x20\x20assert_eq(i, 40000000000)\n\
+         }\n",
+    );
+
+    let start = std::time::Instant::now();
+    let assert = nova()
+        .current_dir(&dir)
+        .arg("test")
+        .arg("keep")
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "the excluded test's ~25s loop must not have run; took {elapsed:?}"
+    );
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test keep_a ... ok\n\
+         test keep_b ... ok\n\
+         \n\
+         test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
+    );
+}

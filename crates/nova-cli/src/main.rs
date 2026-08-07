@@ -30,6 +30,8 @@ enum Command {
     Build(cmd::run::BuildCmd),
     /// Type-check a Nova program without running it.
     Check(cmd::run::CheckCmd),
+    /// Compile and run `@test` functions, one process per test.
+    Test(cmd::test::TestCmd),
 }
 
 fn main() -> Result<()> {
@@ -46,5 +48,6 @@ fn main() -> Result<()> {
         Command::Run(cmd) => cmd::run::run(cmd),
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
+        Command::Test(cmd) => cmd::test::run(cmd),
     }
 }
