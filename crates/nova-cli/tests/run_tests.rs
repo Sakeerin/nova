@@ -4634,3 +4634,120 @@ fn nova_test_reports_e0082_for_an_unknown_attribute() {
         "stderr: {stderr}"
     );
 }
+
+// === Whole-branch review, finding 1 (CRITICAL): `@test` functions must not
+// break `nova check` / `nova build` / `nova run` ===
+//
+// Before this fix, a `@test` function was an ordinary item in every
+// compilation unit regardless of `with_test_module` — `nova_resolver::
+// collect_item` collected it, gave it a `DefId`, and `nova_typeck::check`
+// type-checked its body exactly like any other function. That body is
+// written assuming `std/test`'s `assert`/`assert_eq`/`assert_ne` are in
+// scope; they are seeded only when compiling for `nova test`
+// (`nova_driver::FrontendContext::check`'s own doc comment). So a source
+// file containing so much as one `@test` function that called `assert_eq`
+// could not be `nova check`ed, `nova build`t, or `nova run` at all —
+// `error[E0001]: cannot find function `assert_eq`` on every call — even
+// though `nova test` itself compiled and ran the identical file correctly.
+// `nova check` is the editor path, so this reproduced on every keystroke in
+// any project with tests, and `nova build && nova test` could never both
+// succeed on one tree. Fixed by `nova_driver::strip_test_functions`, which
+// removes every top-level `@test` function from the compilation unit before
+// `nova_resolver::resolve_program` ever sees it, whenever `with_test_module`
+// is `false`.
+
+/// The reviewer's exact repro, reduced to a standalone fixture: a file with
+/// `@test` functions calling `assert_eq` must compile clean under `nova
+/// check`, `nova build` and `nova run` (previously: two `E0001`s under each,
+/// one per `assert_eq` call), and the identical, unmodified file must still
+/// run correctly under `nova test` — proving the fix removes `@test`
+/// functions from non-test compilation without disturbing their real
+/// execution. Asserts both halves, per the finding.
+#[test]
+fn test_functions_calling_assert_eq_do_not_break_check_build_or_run() {
+    let dir = write_test_project(
+        "nova-test-cli-critical-nontest-compile",
+        "@test\nfn addition_is_correct() { assert_eq(2 + 2, 4) }\n\
+         @test\nfn addition_is_wrong() { assert_eq(2 + 2, 5) }\n\
+         fn main() { println(\"hello\") }\n",
+    );
+    let file = dir.join("src/main.nova");
+
+    // `nova check`: previously two `E0001`s (one per `assert_eq` call).
+    nova().arg("check").arg(&file).assert().success();
+
+    // `nova build`: the same program, through the same broken path
+    // (`build_file` -> `lower_to_mir` -> `FrontendContext::check(false)`).
+    // The built binary runs the user's ordinary `main` — `@test` functions
+    // are absent from this compilation entirely, not merely unreachable.
+    let out_exe = dir.join(format!("built{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&out_exe)
+        .assert()
+        .success();
+    let run = Command::new(&out_exe).output().expect("run built binary");
+    assert!(run.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n"),
+        "hello\n"
+    );
+    let _ = std::fs::remove_file(&out_exe);
+
+    // `nova run`: same broken path via the JIT (`run_file` -> `compile_file`
+    // -> `FrontendContext::check(false)`).
+    nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("hello\n");
+
+    // The identical file, completely unmodified, still compiles and runs
+    // correctly under `nova test` — one pass, one fail, exact message.
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test addition_is_correct ... ok\n\
+         test addition_is_wrong ... FAILED\n\
+         \x20\x20\x20\x20nova: panic: assertion failed: 4 != 5\n\
+         \n\
+         test result: FAILED. 1 passed; 1 failed; 0 trapped; 2 total\n"
+    );
+}
+
+/// The same fix, but for a `@test` function that lives in an *imported*
+/// module rather than the entry file itself. `nova_driver::
+/// strip_test_functions` is applied to every module `load_modules` returns,
+/// not only the entry file's — a `@test` function reached only through
+/// `import` is just as capable of referencing `assert_eq` and hitting the
+/// identical `E0001` if it is not also stripped there.
+#[test]
+fn test_functions_in_an_imported_module_do_not_break_check_or_build() {
+    let dir = write_test_project(
+        "nova-test-cli-critical-nontest-compile-imported",
+        "import helper\nfn main() { println(\"hello\") }\n",
+    );
+    std::fs::write(
+        dir.join("src/helper.nova"),
+        "@test\nfn helper_test() { assert_eq(1 + 1, 2) }\n",
+    )
+    .expect("write imported module");
+    let file = dir.join("src/main.nova");
+
+    nova().arg("check").arg(&file).assert().success();
+
+    let out_exe = dir.join(format!("built-imported{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&out_exe)
+        .assert()
+        .success();
+    let _ = std::fs::remove_file(&out_exe);
+}

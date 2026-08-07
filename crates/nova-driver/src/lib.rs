@@ -565,9 +565,27 @@ impl FrontendContext {
         &mut self,
         with_test_module: bool,
     ) -> Result<Option<(nova_hir::Module, Vec<TestFn>, DefId)>> {
-        let modules = self.load_modules()?;
+        let mut modules = self.load_modules()?;
         if self.errors > 0 {
             return Ok(None);
+        }
+        // Whole-branch review, finding 1 (Critical): a `@test` function's
+        // body is written assuming `std/test`'s `assert`/`assert_eq`/
+        // `assert_ne` are in scope, which — per the doc comment above — is
+        // true only when `with_test_module` is `true`. Left in the
+        // compilation unit under `nova run`/`build`/`check`, such a body's
+        // calls to them fail to resolve (`E0001`), which means a program
+        // could never both `nova build` and `nova test` cleanly, and `nova
+        // check` (the editor path) reported spurious errors on every test in
+        // the project. Stripping the items here — before any of them reaches
+        // `nova_resolver::resolve_program` — removes the problem instead of
+        // working around it: a stripped function gets no `DefId`, no scope
+        // entry, and its body is never visited by anything downstream, the
+        // same "does not exist in this build" semantics as Rust's
+        // `#[cfg(test)]`. See `strip_test_functions`'s own doc comment for
+        // why this must happen *before* resolution rather than after.
+        if !with_test_module {
+            strip_test_functions(&mut modules);
         }
         // Register each embedded std module's source in the `FileDb` so a
         // syntax error inside one (a compiler bug, since they ship with the
@@ -613,5 +631,77 @@ impl FrontendContext {
             return Ok(None);
         }
         Ok(Some((checked.module, tests, fresh_def_id)))
+    }
+}
+
+/// Remove every top-level `@test` function from `modules`, in place.
+///
+/// Only ever called with `with_test_module = false` (`nova run`/`build`/
+/// `check`; never `build_test_binary`'s `nova test` path). A `@test`
+/// function is ordinary Nova source with no special compilation unit of its
+/// own — before this fix, `nova_resolver::resolve_program` collected it,
+/// gave it a `DefId`, and `nova_typeck::check` type-checked its body exactly
+/// like any other function, regardless of `with_test_module`. That body is
+/// written assuming `std/test`'s `assert`/`assert_eq`/`assert_ne` are in
+/// scope; they are seeded only under `nova test` (this file's own doc
+/// comment on `check`), so under every other compilation mode those calls
+/// failed to resolve (`E0001`) — a program containing so much as one test
+/// could not be built or checked at all, and `nova check` (the editor path)
+/// reported spurious errors on every test in the project on every keystroke.
+///
+/// **Removed here, before `resolve_program` ever runs**, rather than kept
+/// through resolution and typeck and discarded afterward. Two designs were
+/// available and only one is actually correct:
+///
+/// - *Strip before resolution* (this one): the function never gets a
+///   `DefId`, never enters its module's scope, and its body is never visited
+///   by anything — the same "does not exist in this build" semantics as
+///   Rust's `#[cfg(test)]`. Anything that still tries to call it by name
+///   (unusual, but not forbidden by anything in the language) gets the
+///   ordinary, well-tested "cannot find function" `E0001`, exactly as if the
+///   function had never been written.
+/// - *Strip after resolution* (e.g. filter `nova_typeck::check`'s per-`DefId`
+///   iteration instead): resolution would still assign the function a real
+///   `DefId` and scope entry, and `collect_signatures` runs before any
+///   per-function body pass, so *other*, kept, functions could still
+///   type-check a call to it successfully against a signature that then has
+///   no corresponding `hir::Function` body in the compiled module — a
+///   dangling `DefId` reference that MIR lowering has no defined behavior
+///   for. This is strictly worse than the bug being fixed: today's failure
+///   is a clean compile error; that failure mode would be a compiler panic
+///   or a silently broken binary, and only in the one case where non-test
+///   code happens to reference a test function by name.
+///
+/// Deliberately done in `nova-driver`, not `nova_resolver`, and keyed off
+/// this driver's own `with_test_module` rather than any new parameter on
+/// `nova_resolver::resolve_program`: `nova_resolver::resolve`/`resolve_program`
+/// are also called directly, with no notion of "compiling for `nova test`",
+/// by a large fraction of `nova-resolver`'s and `nova-typeck`'s own unit
+/// tests — including the very tests that pin `E0082`-`E0085` and `TestFn`
+/// collection on `@test` functions (`nova-typeck/src/check.rs`'s
+/// `an_unknown_attribute_is_e0082_and_names_it` and neighbors). Teaching
+/// `resolve_program` to drop `@test` items itself, gated on whether it was
+/// given `extra_std`, would silently empty out every one of those functions'
+/// subject items before validation ever ran, breaking them. Confining the
+/// strip to this driver function leaves `nova_resolver`'s validation and
+/// collection behavior — and every test that exercises it directly —
+/// completely unchanged; only the four real compilation entry points that
+/// pass `with_test_module = false` are affected, and `nova test` itself
+/// never calls this at all.
+///
+/// As a consequence, `nova_resolver::validate_test_function`'s attribute-
+/// shape diagnostics (`E0082`-`E0085`) do not fire for a stripped function
+/// under `nova build`/`check`/`run` — matching `#[cfg(test)]`, where an
+/// invalid test signature is likewise uncaught outside `cargo test`. `nova
+/// test` validates every `@test` function's shape regardless, since this
+/// function is never called on that path.
+fn strip_test_functions(modules: &mut [(String, nova_ast::File)]) {
+    for (_, file) in modules.iter_mut() {
+        file.items.retain(|item| {
+            !matches!(
+                &item.value,
+                nova_ast::Item::Function(f) if f.attrs.iter().any(|a| a.name.value == "test")
+            )
+        });
     }
 }
