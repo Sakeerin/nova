@@ -1375,6 +1375,10 @@ mod tests {
         assert!(p().has_assoc());
         assert!(Ty::Array(Box::new(p())).has_assoc());
         assert!(
+            Ty::Future(Box::new(p())).has_assoc(),
+            "a future's output counts too, not only an array's element"
+        );
+        assert!(
             Ty::Record {
                 def_id: DefId(1),
                 args: vec![Ty::Bool, p()],
@@ -1405,6 +1409,7 @@ mod tests {
         assert!(!Ty::Int.has_assoc());
         assert!(!Ty::Param(0).has_assoc());
         assert!(!Ty::Array(Box::new(Ty::Int)).has_assoc());
+        assert!(!Ty::Future(Box::new(Ty::Int)).has_assoc());
         assert!(!Ty::Fn {
             params: vec![Ty::Int],
             ret: Box::new(Ty::Bool),
@@ -1640,6 +1645,12 @@ mod tests {
         assert_eq!(
             normalize_ty(&Ty::Array(Box::new(p())), &impls),
             Ok(Ty::Array(Box::new(Ty::Int)))
+        );
+        // A `clone`-without-recursing arm would return this unchanged
+        // (`Ok(Ty::Future(Box::new(p())))`), leaving the projection intact.
+        assert_eq!(
+            normalize_ty(&Ty::Future(Box::new(p())), &impls),
+            Ok(Ty::Future(Box::new(Ty::Int)))
         );
         assert_eq!(
             normalize_ty(&rec(3, vec![p(), Ty::Bool]), &impls),

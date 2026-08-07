@@ -11987,6 +11987,117 @@ mod tests {
     }
 
     #[test]
+    fn future_used_as_a_call_qualifier_is_rejected() {
+        // Measured, not assumed (there is no reason to expect a specific code
+        // here a priori): `Future::x()` reports E0900 "module-qualified paths
+        // are not supported yet" -- the same generic fallback an ordinary
+        // undeclared-type qualifier gets. It is neither a `resolve_type`-style
+        // "unknown type" message nor a successful call.
+        //
+        // Kills a `"Future" => return Some(_)` mutant in `qualifier_self_ty`
+        // (e.g. a stray `Some(Ty::Error)`, or miscopying a neighbouring
+        // `"X" => return Some(Ty::X)` line): that would route into the
+        // assoc-fn-lookup branch instead, which -- finding nothing for `x`,
+        // and `resolve_type("Future")` still `None` since nothing declares it
+        // -- reports the *different* E0001 "no associated function `x` on
+        // type `Future`" and returns early, never reaching this fallback.
+        //
+        // Does NOT kill a mutant that deletes the arm outright: with nothing
+        // named `Future` declared, `resolve_type` also answers `None`, so
+        // deletion is a no-op here (confirmed by hand mutation). That mutant
+        // is killed by `future_qualifier_short_circuits_before_resolve_type`
+        // below instead, which gives `resolve_type` something to (wrongly)
+        // find.
+        let r = check_src("fn f() { Future::x() }\nfn main() { }");
+        assert_eq!(error_codes(&r), ["E0900"], "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn future_qualifier_short_circuits_before_resolve_type() {
+        // White-box, not a `check_src` integration test, because no Nova
+        // program can otherwise reach a divergence here: `qualifier_self_ty`'s
+        // return only becomes *observable* through `check_call` when a
+        // matching inherent/trait associated function is found for the
+        // qualifier, which needs a real `impl` block on a type named
+        // `Future` -- and such a block cannot be declared at all, since its
+        // header fails `convert_ty`'s arity check first (see
+        // `bare_future_without_a_type_argument_is_rejected`). Verified by
+        // hand: `check_src` on `record Future { v: Int }\nimpl Future { fn
+        // x() -> Int { 1 } }\nfn f() -> Int { Future::x() }\nfn main() {}`
+        // produces byte-identical diagnostics whether this arm exists or not.
+        //
+        // So this drives the method directly, past `check()` entirely:
+        // `resolve()` a program that legitimately declares `record Future {
+        // v: Int }` (a bare *declaration* succeeds; only a *type-position* or
+        // *impl-header* use of the name is intercepted) to get a real
+        // `Definitions` in which `resolve_type(module, "Future")` DOES find
+        // something, then build a minimal `Checker` around it and call the
+        // method under test.
+        //
+        // Kills the arm-deleted mutant, which the test above cannot: with the
+        // arm removed, this falls through to `resolve_type`, finds the record
+        // declared below, and returns `Some(Ty::Record { def_id, args: [] })`
+        // instead of `None` -- confirmed by hand mutation (deleting the arm
+        // changes this assertion's actual value from `None` to exactly that
+        // `Some(Record ..)`, caught below).
+        let file_id = FileId::DUMMY;
+        let src = "record Future { v: Int }\nfn main() { }";
+        let (tokens, lex_errors) = lex(src, file_id);
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (ast, parse_errors) = parse(&tokens, file_id);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let ast = ast.expect("no AST");
+        let resolved = resolve(&ast);
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "resolve errors: {:?}",
+            resolved.diagnostics
+        );
+        // A `Checker` with otherwise-empty tables: `qualifier_self_ty`'s
+        // `"Future"` arm returns before it would ever touch `fcx`,
+        // `self.impls`, or any other field a full `check()` pass would
+        // populate, so this needs only enough of a `Checker` to compile --
+        // mirroring `check()`'s own construction above.
+        let file = ast::File { items: Vec::new() };
+        let checker = Checker {
+            file: &file,
+            defs: &resolved.definitions,
+            cur_module: ModuleId(0),
+            sigs: FxHashMap::default(),
+            method_locs: FxHashMap::default(),
+            selfless: FxHashSet::default(),
+            mut_self: FxHashSet::default(),
+            sums: Vec::new(),
+            records: Vec::new(),
+            supertraits: FxHashMap::default(),
+            traits: Vec::new(),
+            impls: Vec::new(),
+            impl_self: None,
+            impl_selves: FxHashMap::default(),
+            extra_functions: Vec::new(),
+            next_closure_def: resolved.definitions.defs().len() as u32,
+            type_arity: FxHashMap::default(),
+            externs: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut fcx = FnCtx {
+            icx: InferCtx::default(),
+            locals: Vec::new(),
+            scopes: Vec::new(),
+            generics: FxHashMap::default(),
+            param_bounds: Vec::new(),
+            ret_ty: Ty::Unit,
+            loop_depth: 0,
+            pending_closures: Vec::new(),
+        };
+        assert_eq!(
+            checker.qualifier_self_ty(&mut fcx, "Future"),
+            None,
+            "the reserved qualifier must not resolve to a same-named user type"
+        );
+    }
+
+    #[test]
     fn a_user_written_self_type_parameter_is_rejected_in_an_impl() {
         // Was `a_user_written_self_type_parameter_makes_self_item_resolve_in_
         // an_impl`, which pinned that this program compiled clean. It did, and
@@ -12631,6 +12742,28 @@ mod tests {
             "trait It { type Item\n fn get(self) -> Int }\n\
              record W { v: Int }\n\
              impl It for W { type Item = [Self::Item]\n fn get(self) -> Int { 1 } }\n\
+             fn main() { }",
+        );
+        assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a_cyclic_associated_type_binding_nested_in_a_future_is_rejected() {
+        // The same shape as the test above, `Item = [Self::Item]`, but through
+        // `collect_self_projections`'s `Ty::Future` arm instead of its
+        // `Ty::Array` arm. Kills a mutant that drops the payload there (e.g.
+        // matching `Ty::Future(_)` and doing nothing, the way the pre-existing
+        // primitive arms correctly do for types with no self-projections to
+        // find): with no edge recorded back to `Item`, `reaches_self` would
+        // say there is no cycle, and the compiler would fall through to
+        // `normalize_ty`'s re-normalization instead of reporting it here --
+        // which is precisely the wrong-diagnostic failure mode this function's
+        // own doc comment warns about ("a compiler-limit message is the wrong
+        // thing to show a user who wrote a two-line cycle").
+        let r = check_src(
+            "trait It { type Item\n fn get(self) -> Int }\n\
+             record W { v: Int }\n\
+             impl It for W { type Item = Future<Self::Item>\n fn get(self) -> Int { 1 } }\n\
              fn main() { }",
         );
         assert_eq!(error_codes(&r), ["E0077"], "{:?}", r.diagnostics);
