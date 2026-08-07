@@ -4013,3 +4013,93 @@ fn assert_is_not_available_outside_nova_test() {
         "stderr: {stderr}"
     );
 }
+
+/// `assert(cond, msg)` panics with exactly `msg` when `cond` is false, and is
+/// silent when `cond` is true. Both cases are needed: a passing-only test
+/// would not catch `assert`'s condition being inverted (`if cond` instead of
+/// `if !cond`) — under that mutation `assert(true, ..)` panics and
+/// `assert(false, ..)` does not, and neither case alone tells the two apart
+/// from the correct behavior in a way an all-passing suite would notice.
+#[test]
+fn assert_panics_with_its_message_and_is_silent_when_true() {
+    let dir = std::env::temp_dir().join("nova-test-assert-basic");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("basic.nova");
+    std::fs::write(
+        &file,
+        "@test\nfn assert_pass() { assert(true, \"boom\") }\n\
+         @test\nfn assert_fail() { assert(false, \"boom\") }\n",
+    )
+    .expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["assert_pass", "assert_fail"]
+    );
+
+    let pass = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&pass.get_output().stdout).to_string();
+    assert_eq!(out, "", "assert(true, ..) must print nothing");
+
+    let fail = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "1")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&fail.get_output().stderr).replace("\r\n", "\n");
+    assert_eq!(
+        stderr.trim_end(),
+        "nova: panic: assertion failed: boom",
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// `assert_ne(a, b)` panics with a message naming both (rendered with `==`,
+/// since they are equal at the point it fires) when `a == b`, and is silent
+/// when they differ. Both cases matter for the same reason `assert`'s do: a
+/// swapped condition (`if a.eq(b)` written as `if a.ne(b)`, plausible as a
+/// copy-paste from `assert_eq`'s body) would still compile and would still
+/// pass an all-passing-inputs test.
+#[test]
+fn assert_ne_panics_when_equal_and_is_silent_when_different() {
+    let dir = std::env::temp_dir().join("nova-test-assert-ne-basic");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("basic.nova");
+    std::fs::write(
+        &file,
+        "@test\nfn ne_pass() { assert_ne(1, 2) }\n\
+         @test\nfn ne_fail() { assert_ne(1, 1) }\n",
+    )
+    .expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["ne_pass", "ne_fail"]
+    );
+
+    let pass = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&pass.get_output().stdout).to_string();
+    assert_eq!(out, "", "assert_ne(1, 2) must print nothing");
+
+    let fail = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "1")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&fail.get_output().stderr).replace("\r\n", "\n");
+    assert_eq!(
+        stderr.trim_end(),
+        "nova: panic: assertion failed: 1 == 1",
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_file(&exe);
+}
