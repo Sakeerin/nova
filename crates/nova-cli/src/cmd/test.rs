@@ -32,9 +32,24 @@ pub struct TestCmd {
 /// exit nonzero, but only one of them is what `@test(should_panic)` means,
 /// and conflating them would let a hard crash masquerade as an expected
 /// panic.
+///
+/// Every non-`Passed` variant carries the process's full captured `stdout`
+/// (and, for `Trapped`, `stderr` too — `Panicked` already carries the
+/// relevant part of stderr as `line`) so [`print_captured`] can show it.
+/// Whole-branch review, finding 3: before this, `Trapped` kept only the exit
+/// code — a trapping test reported `TRAPPED (exit code N)` and nothing else,
+/// no matter what its own `println` calls or the runtime had written to
+/// either stream — and a *failing* test's own `println` output was silently
+/// dropped too, since only the one matched panic line survived. Given this
+/// branch's central claim is that traps deserve their own outcome,
+/// surfacing them with *less* information than a failure was backwards.
+/// Cheap to carry: `Command::output()` already buffered both streams in
+/// full before `classify` ever runs.
 enum Outcome {
-    /// Exit 0.
-    Passed,
+    /// Exit 0. Carries `stdout` only so a should_panic test that passed
+    /// unexpectedly — `(Outcome::Passed, true)`, reported as `FAILED` below
+    /// — can still show what it printed; an ordinary pass never reads it.
+    Passed { stdout: String },
     /// Nonzero exit, and stderr said why: a line containing
     /// [`PANIC_MARKER`]. Three call sites in the runtime independently
     /// `eprintln!` a line with that exact substring, rather than one shared
@@ -47,17 +62,29 @@ enum Outcome {
     /// `should_panic_passes_on_a_checked_panic` reaches this marker through
     /// the bounds-check path and never calls `nova_rt_panic_str` at all, so
     /// the substring search — not a check against one specific emitter — is
-    /// what makes that test pass. Carries the matched line verbatim, so the
-    /// report shows exactly what the runtime said rather than a
-    /// reconstruction of it.
-    Panicked(String),
+    /// what makes that test pass. `line` carries the matched line verbatim,
+    /// so the report shows exactly what the runtime said rather than a
+    /// reconstruction of it; `stdout` carries anything the test itself
+    /// printed before panicking, previously discarded entirely.
+    Panicked { line: String, stdout: String },
     /// Nonzero exit with no such line: an illegal instruction, a segfault,
     /// anything the runtime did not choose to do. Carries the raw exit code
     /// for the report, but classification never depends on its *value* —
-    /// the mapping from `abort()` to an exit code is platform- and
-    /// shell-dependent (measured 127 and 132 for two different aborts on
-    /// this project, on Windows, through Git Bash; neither is portable).
-    Trapped(i32),
+    /// the mapping from a hard trap to an exit code is platform- and
+    /// shell-dependent (`1 / 0` measured as `132` via Git Bash and
+    /// `-1073741795` / `0xC000001D` via Rust's own process API for the
+    /// identical program — see ADR 0008 §2 — and neither figure is portable).
+    /// This is a genuine trap, not an `abort()`: a checked panic reaches
+    /// `nova_rt_panic_str`'s `std::process::abort()` and is `Panicked`
+    /// above; a trap like `1 / 0` is an illegal-instruction fault the CPU
+    /// raises directly and never reaches `abort()` at all, which is exactly
+    /// why it needs its own stderr (it has none of `Panicked`'s marker) as
+    /// well as its own stdout.
+    Trapped {
+        code: i32,
+        stdout: String,
+        stderr: String,
+    },
 }
 
 /// The one stable, portable signal a Nova panic (or panic-shaped runtime
@@ -71,13 +98,38 @@ const PANIC_MARKER: &str = "nova: panic:";
 /// an aborted process's exit code is not portable (see [`Outcome::Trapped`]),
 /// so it must never be asked "was this a panic?", only "was this clean?".
 fn classify(output: &Output) -> Outcome {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     if output.status.success() {
-        return Outcome::Passed;
+        return Outcome::Passed { stdout };
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     match stderr.lines().find(|line| line.contains(PANIC_MARKER)) {
-        Some(line) => Outcome::Panicked(line.trim().to_string()),
-        None => Outcome::Trapped(output.status.code().unwrap_or(-1)),
+        Some(line) => {
+            let line = line.trim().to_string();
+            Outcome::Panicked { line, stdout }
+        }
+        None => Outcome::Trapped {
+            code: output.status.code().unwrap_or(-1),
+            stdout,
+            stderr: stderr.into_owned(),
+        },
+    }
+}
+
+/// Print a non-passing test's captured output, the way `cargo test` prints
+/// captured output for a failure — but only ever for a stream that actually
+/// has something in it. An ordinary `assert_eq` failure or a `1 / 0` trap
+/// writes nothing to stdout and (for the trap) nothing to stderr either, so
+/// this prints nothing extra for either and every existing test's exact
+/// rendered output is unaffected; it only ever *adds* lines, for a test that
+/// actually produced output beyond what the summary line already shows.
+fn print_captured(label: &str, output: &str) {
+    if output.is_empty() {
+        return;
+    }
+    println!("    ---- {label} ----");
+    for line in output.lines() {
+        println!("    {line}");
     }
 }
 
@@ -132,11 +184,25 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         names.len(),
         tests.len()
     );
+    // Whole-branch review, finding 5 (minor): the two `ensure!`s above only
+    // ever compared *lengths* — `names.len() == count` and
+    // `names.len() == tests.len()` — never that the two lists actually agree
+    // *position by position*. The `should_panic`-by-index comment just below
+    // used to claim this was already covered ("see the `ensure!` above,
+    // which would have already failed"), which was not true: two
+    // same-length lists in different orders would satisfy both length checks
+    // and then silently misassociate `should_panic` with the wrong test.
+    // This is the check that makes that comment's claim actually hold.
+    anyhow::ensure!(
+        (0..count).all(|i| names[i] == tests[i].name),
+        "the compiled binary's inventory names disagree with the compiler's own test names at \
+         the same positions; this is a compiler bug"
+    );
 
     // should_panic, by position: `names` (read from the binary, above) and
     // `tests` (returned by `build_test_binary`) are both derived from the
     // identical source-ordered list at compile time, so index `i` names the
-    // same test in both — see the `ensure!` above, which would have already
+    // same test in both — see the `ensure!`s above, which would have already
     // failed if that invariant did not hold.
     let selected: Vec<usize> = (0..count)
         .filter(|&i| match &cmd.filter {
@@ -144,6 +210,22 @@ pub fn run(cmd: TestCmd) -> Result<()> {
             None => true,
         })
         .collect();
+
+    // Whole-branch review, finding 4: an *explicit* filter that matches
+    // nothing is a failure, not a quiet no-op. Before this, `nova test
+    // <typo>` printed `running 0 tests` / `test result: ok` and exited 0 —
+    // indistinguishable from an unfiltered run of a project with no tests at
+    // all, so a typo'd CI filter reported green having run nothing (ADR 0008
+    // §2's own residual-gaps list named this). An *unfiltered* run of a file
+    // with no tests is deliberately left alone: `count == 0` with
+    // `cmd.filter` absent still exits 0, since nothing was mistyped there.
+    if let Some(f) = &cmd.filter {
+        anyhow::ensure!(
+            !selected.is_empty(),
+            "no test name contains the filter `{f}` ({count} test{} available)",
+            if count == 1 { "" } else { "s" }
+        );
+    }
 
     println!(
         "running {} test{}",
@@ -163,25 +245,30 @@ pub fn run(cmd: TestCmd) -> Result<()> {
             .with_context(|| format!("failed to run {} for test `{name}`", exe.display()))?;
         let should_panic = tests[i].should_panic;
         match (classify(&result), should_panic) {
-            (Outcome::Passed, false) => {
+            (Outcome::Passed { .. }, false) => {
                 passed += 1;
                 println!("test {name} ... ok");
             }
             // should_panic means the test is only correct if it panics, so a
             // clean exit is a failure — reported distinctly from both an
             // ordinary failed assertion and a trap, since neither happened.
-            (Outcome::Passed, true) => {
+            // This is the one `Passed` case that is not an overall pass, so
+            // (finding 3) its captured stdout is shown like any other
+            // failure's, rather than silently discarded.
+            (Outcome::Passed { stdout }, true) => {
                 failed += 1;
                 println!("test {name} ... FAILED (expected a panic, but the test passed)");
+                print_captured("stdout", &stdout);
             }
-            (Outcome::Panicked(_), true) => {
+            (Outcome::Panicked { .. }, true) => {
                 passed += 1;
                 println!("test {name} ... ok");
             }
-            (Outcome::Panicked(line), false) => {
+            (Outcome::Panicked { line, stdout }, false) => {
                 failed += 1;
                 println!("test {name} ... FAILED");
                 println!("    {line}");
+                print_captured("stdout", &stdout);
             }
             // A trap is a failure whether or not `should_panic` is set: it
             // means the process executed an illegal instruction or crashed,
@@ -190,10 +277,24 @@ pub fn run(cmd: TestCmd) -> Result<()> {
             // ordinary assertion would erase that distinction for whoever
             // reads the output, which is the entire reason process isolation
             // is used here rather than an in-process runner that could not
-            // tell the two apart.
-            (Outcome::Trapped(code), _) => {
+            // tell the two apart. Finding 3: prints whatever the process
+            // captured on either stream, so a trap is never reported with
+            // less information than a failure — and so an anomaly like the
+            // intermittent 0xC0000005 seen elsewhere on this branch would
+            // self-document here if it recurs, instead of producing a bare
+            // number.
+            (
+                Outcome::Trapped {
+                    code,
+                    stdout,
+                    stderr,
+                },
+                _,
+            ) => {
                 trapped += 1;
                 println!("test {name} ... TRAPPED (exit code {code})");
+                print_captured("stdout", &stdout);
+                print_captured("stderr", &stderr);
             }
         }
     }

@@ -4751,3 +4751,137 @@ fn test_functions_in_an_imported_module_do_not_break_check_or_build() {
         .success();
     let _ = std::fs::remove_file(&out_exe);
 }
+
+// === Whole-branch review, finding 3 (Important): captured output must not
+// be discarded for a non-passing test ===
+//
+// Before this fix, `Outcome::Trapped` carried only the raw exit code — a
+// trapping test rendered `TRAPPED (exit code N)` and nothing else, no
+// matter what it (or the runtime) had written to either stream — and a
+// FAILED test's own `println` output was silently dropped too, since only
+// the one matched panic-marker line from stderr survived. `classify`
+// (`cmd/test.rs`) always had the full `Output` in hand; the fix carries it
+// through to the report via `print_captured`, printed only for a stream
+// that actually has something in it.
+
+/// A test that `println`s before its `assert_eq` fails: the failure summary
+/// still shows the panic message exactly as before, and now also shows what
+/// the test itself printed, which used to be discarded entirely.
+#[test]
+fn a_failing_tests_own_stdout_is_no_longer_discarded() {
+    let dir = write_test_project(
+        "nova-test-cli-captured-stdout-on-failure",
+        "@test\nfn prints_then_fails() {\n\
+         \x20\x20\x20\x20println(\"about to fail\")\n\
+         \x20\x20\x20\x20assert_eq(1, 2)\n\
+         }\n",
+    );
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test prints_then_fails ... FAILED\n\
+         \x20\x20\x20\x20nova: panic: assertion failed: 1 != 2\n\
+         \x20\x20\x20\x20---- stdout ----\n\
+         \x20\x20\x20\x20about to fail\n\
+         \n\
+         test result: FAILED. 0 passed; 1 failed; 0 trapped; 1 total\n"
+    );
+}
+
+/// A trap must show captured output too, not just the bare exit code — the
+/// entire point of this finding: reporting a trap with *less* information
+/// than an ordinary failure is backwards given this branch's central claim
+/// that traps deserve their own outcome. The exit code is measured
+/// directly, the same way `a_hard_trap_is_reported_as_a_trap_and_does_not_
+/// satisfy_should_panic` does, rather than assumed (design doc §9 risk 4:
+/// not portable).
+#[test]
+fn a_trapping_tests_captured_output_is_shown_not_discarded() {
+    let dir = write_test_project(
+        "nova-test-cli-captured-output-on-trap",
+        "@test(should_panic)\nfn prints_then_traps() {\n\
+         \x20\x20\x20\x20println(\"about to trap\")\n\
+         \x20\x20\x20\x20let _ = 1 / 0\n\
+         }\n",
+    );
+
+    let (exe, tests) = nova_driver::build_test_binary(&dir.join("src/main.nova"))
+        .expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["prints_then_traps"]
+    );
+    let direct = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .output()
+        .expect("run the trap directly");
+    let code = direct
+        .status
+        .code()
+        .expect("a concrete exit code on this platform");
+    let _ = std::fs::remove_file(&exe);
+
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        format!(
+            "running 1 test\n\
+             test prints_then_traps ... TRAPPED (exit code {code})\n\
+             \x20\x20\x20\x20---- stdout ----\n\
+             \x20\x20\x20\x20about to trap\n\
+             \n\
+             test result: FAILED. 0 passed; 0 failed; 1 trapped; 1 total\n"
+        )
+    );
+}
+
+// === Whole-branch review, finding 4 (Important): an explicit filter
+// matching zero tests must fail, not silently report success ===
+//
+// Before this fix, `nova test <typo>` printed `running 0 tests` / `test
+// result: ok` and exited 0 — indistinguishable from an unfiltered run of a
+// project with no tests at all, so a typo'd CI filter reported green having
+// run nothing (ADR 0008 §2's own residual-gaps list named this).
+
+/// `nova test <typo>` must exit nonzero and name the filter, not report
+/// success having run nothing.
+#[test]
+fn an_explicit_filter_matching_nothing_is_a_failure() {
+    let dir = write_test_project(
+        "nova-test-cli-filter-matches-nothing",
+        "@test\nfn addition_is_correct() { assert_eq(1 + 1, 2) }\n",
+    );
+    let assert = nova()
+        .current_dir(&dir)
+        .arg("test")
+        .arg("nosuchtest")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("no test name contains the filter `nosuchtest`"),
+        "stderr: {stderr}"
+    );
+    // Nothing ran: no `running N tests`, no per-test line, no summary.
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert_eq!(stdout, "", "stdout: {stdout}");
+}
+
+/// The one case finding 4 must NOT touch: an *unfiltered* run of a file with
+/// no tests at all is not an error — nothing was mistyped; there is simply
+/// nothing to run, same as before this fix.
+#[test]
+fn an_unfiltered_run_with_no_tests_still_succeeds() {
+    let dir = write_test_project("nova-test-cli-no-tests-at-all", "fn main() { }\n");
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 0 tests\n\
+         \n\
+         test result: ok. 0 passed; 0 failed; 0 trapped; 0 total\n"
+    );
+}
