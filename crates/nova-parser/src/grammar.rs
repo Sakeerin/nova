@@ -235,8 +235,13 @@ impl<'a> Parser<'a> {
     /// Parse zero or more leading `@name` / `@name(a, b)` attributes.
     ///
     /// Placement is not checked here — an attribute on a record parses and is
-    /// kept, so the resolver can report `E0083` with a span. The parser's job
-    /// is syntax; the known-attribute set is Task 2's.
+    /// kept; whether it belongs there is the resolver's decision, not the
+    /// parser's. Whole-branch review: the resolver reports `E0083` (and
+    /// every other attribute diagnostic) against `attr.name.span`, never
+    /// `attr.span` — the field this function builds, which is only the
+    /// leading `@` — so `E0083`'s span does not come from here. The parser's
+    /// job is syntax; the known-attribute set and its placement rules are
+    /// Task 2's (`nova-resolver`).
     fn parse_attributes(&mut self) -> Vec<Attribute> {
         let mut attrs = Vec::new();
         while self.peek() == &Token::At {
