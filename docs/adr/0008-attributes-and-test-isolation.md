@@ -76,6 +76,24 @@ there, and a test that isn't there produces no symptom at all. This is why
 the vocabulary is closed and violations are hard errors rather than the
 softer, more forward-compatible option most attribute systems choose.
 
+### Residual gaps, stated plainly rather than left to be inferred
+
+- **Discovery follows the entry file's `import` graph, not the package.**
+  `nova test` collects `@test` functions from `src/main.nova` and every
+  module it transitively `import`s (`nova-driver`'s `load_modules`) — the
+  same set of files an ordinary `nova build` of that entry point would
+  compile — not by scanning the whole source tree for every file that
+  defines one. A `@test` function in a module nothing imports is therefore
+  never discovered: it does not run, is not counted, and the run still
+  reports `running 0 tests` / `test result: ok` / **exit 0**, indistinguishable
+  from a project with no tests in that file at all. `nova-spec/20-STDLIB.md`
+  §11 used to claim `nova test` "discovers all `@test` functions across the
+  package"; corrected alongside this document to describe the import-graph
+  behavior instead. Package-wide discovery (walking the source tree rather
+  than the import graph) would close this gap but is future scope, not a
+  defect in what shipped — the risk is naming it here so a test file that
+  quietly stops being imported does not silently stop being run.
+
 ### Consequences
 
 - **Adding a new attribute is always a compiler change.** `KNOWN_ATTRIBUTES`
@@ -432,7 +450,9 @@ Four parts, each deliberate:
   by `a_test_binary_runs_the_selected_test_not_the_users_own_main`
   (`crates/nova-cli/tests/run_tests.rs`)
 - Spec: `nova-spec/20-STDLIB.md` §11 (corrected alongside this document —
-  `should_panic`'s example and `assert_throws`'s status);
+  `should_panic`'s example, `assert_throws`'s status, and the "discovers all
+  `@test` functions across the package" claim §1's residual gaps corrects
+  above);
   `nova-spec/50-TESTING.md` §§1.1-1.2 and 2.1 (the `tests/compile-pass` /
   `tests/compile-fail` harness) and separately §1.5 (the `tests/ui` harness,
   a different mechanism — WASM/Playwright, not §2.1's Rust integration

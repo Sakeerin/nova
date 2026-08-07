@@ -424,9 +424,9 @@ pub fn assert_ne<T: Eq + Debug>(a: T, b: T) { ... }
 
 **`should_panic` needs a *checked* panic — integer division by zero is not
 one.** An earlier revision of this example used `let _ = 1 / 0`. Measured on
-this compiler, that is a hard trap (an illegal-instruction abort, with no
-message and nothing written to stderr), not a call into the runtime's panic
-path. `@test(should_panic)` passes only when the test process both exits
+this compiler, that is a hard trap (an illegal-instruction trap, with no
+message and nothing written to stderr, that never reaches `abort()` at all),
+not a call into the runtime's panic path. `@test(should_panic)` passes only when the test process both exits
 nonzero *and* stderr contains a `nova: panic:` line; a division by zero
 satisfies the first and not the second, so under this rule it **fails**
 `should_panic` rather than passing it. Array-index-out-of-bounds panics
@@ -443,9 +443,16 @@ to catch one, inspect its value, and resume the calling test.
 panics; there is no supported way to assert *what* it panics with. See
 `docs/adr/0008-attributes-and-test-isolation.md` §2.
 
-`nova test` discovers all `@test` functions across the package and runs each
-one to completion, in its own process, before starting the next — **not in
-parallel**. Isolation, not speed, is why: a panic aborts its process with no
+`nova test` discovers `@test` functions by walking the entry file's
+(`src/main.nova`) `import` graph — the same set of modules an ordinary build
+of that entry point would pull in — **not** by scanning the package for
+every file that defines one. A `@test` function that lives in a module
+nothing imports is therefore never discovered: it does not run, is not
+counted, and `nova test` still reports `test result: ok` having executed
+zero of it (`docs/adr/0008-attributes-and-test-isolation.md` §1 records this
+as a known gap). Each discovered test runs to completion, in its own
+process, before starting the next — **not in parallel**. Isolation, not
+speed, is why: a panic aborts its process with no
 unwinding, so a runner sharing one process across tests (concurrently or
 not) could not survive one failing test to report on the rest.
 
