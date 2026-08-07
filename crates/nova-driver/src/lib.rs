@@ -394,6 +394,10 @@ fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
             span: dummy_span(),
         }],
         ret_ty: Ty::Unit,
+        // The synthesized `@test` harness entry point is plain generated
+        // dispatch code (a chain of `if sel == i { test_i() }`), never a
+        // user-written `async fn` — so it is never async.
+        is_async: false,
         body: expr(
             hir::ExprKind::Block {
                 stmts,

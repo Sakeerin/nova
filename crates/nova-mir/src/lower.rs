@@ -563,6 +563,41 @@ impl<'a> Lowerer<'a> {
                 }
                 acc
             }
+            K::Await(inner) => {
+                // The async state-machine transform (Phase 2.3a Tasks 5-6)
+                // is what turns a suspend point into real control flow; it
+                // has not landed. Unlike `mir_ty`'s defensive arms, this one
+                // is reachable from ordinary, valid-per-typeck source —
+                // `async fn g() -> Int { f().await }` typechecks today (Task
+                // 2) — so it is a diagnosed rejection, not a "should be
+                // impossible" case, and must not panic in this library path.
+                //
+                // The awaited operand is still lowered first so any error
+                // inside it is also reported, matching how every other arm
+                // above visits its children unconditionally.
+                self.lower_expr(inner);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "E0088",
+                        "`.await` cannot be compiled yet: the async \
+                         state-machine transform has not landed",
+                    )
+                    .with_primary_label(e.span, "unsupported suspend point")
+                    .with_note(
+                        "this fires whenever the containing function is reachable from \
+                         `main`, in `nova check` as well as `nova run`/`nova build` — \
+                         `nova check` runs this same lowering stage so it never calls a \
+                         program well-formed that `nova run` would then reject"
+                            .to_string(),
+                    ),
+                );
+                let ty = mir_ty(&e.ty);
+                if ty == MirTy::Unit {
+                    self.unit_temp()
+                } else {
+                    self.new_temp(ty)
+                }
+            }
         }
     }
 

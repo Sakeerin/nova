@@ -285,6 +285,12 @@ struct FnCtx {
     /// Reset to 0 inside a closure body (a `break`/`continue` there cannot
     /// target an outer loop).
     loop_depth: usize,
+    /// Whether the function body currently being checked is `async`, which is
+    /// what makes `.await` legal. Set from `f.is_async` on entry and reset to
+    /// `false` inside a closure body — the same discipline `loop_depth` uses
+    /// above, and for the same reason: a closure is its own non-async
+    /// function even when written inside an `async fn`.
+    in_async: bool,
     /// Closure / wrapper functions lifted out while checking this function's
     /// body; finalized with this context's `icx` and then emitted.
     pending_closures: Vec<hir::Function>,
@@ -846,9 +852,13 @@ impl<'a> Checker<'a> {
                     );
                     continue;
                 }
-                // `async` is unsupported at every method site; check it here so
-                // that declaration-only (`Required`) trait methods are covered
-                // too — the default-body pass below only visits `Provided` ones.
+                // Trait methods stay `E0900`-rejected even though free
+                // functions and impl/inherent methods no longer are (Phase
+                // 2.3a Task 2): trait async needs associated-type futures,
+                // out of scope here. Checked on the *table* entry, not only
+                // in the default-body pass below, so a declaration-only
+                // (`Required`) trait method — which the default-body pass
+                // never visits — is covered too.
                 if is_async {
                     self.unsupported(name.span, "async methods");
                 }
@@ -1241,9 +1251,6 @@ impl<'a> Checker<'a> {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
                     continue;
                 };
-                if f.is_async {
-                    self.unsupported(f.name.span, "async methods");
-                }
                 // The method's generic scope: the impl's parameters (`impl<T> …`)
                 // at indices [0, impl_count), then the method's own parameters
                 // (`fn map<U>`) at [impl_count, …). A single flat `type_args`
@@ -1286,6 +1293,18 @@ impl<'a> Checker<'a> {
                 // impl's and this method's generic parameters.
                 let (mut params, ret) =
                     self.method_sig_parts(&f.params, &f.return_ty, &scope, &bounds);
+                // An async method's declared return type is its future's
+                // OUTPUT — the spec's own `pub async fn join(self) -> T`
+                // reads `T`, not `Future<T>` — so the signature callers and
+                // `check_impl_method_signatures` compare against is
+                // `Future<ret>`, the same wrapping `collect_signatures` does
+                // for a free async fn. `check_fn_body` unwraps it back to
+                // `ret` to check the method's body.
+                let ret = if f.is_async {
+                    Ty::Future(Box::new(ret))
+                } else {
+                    ret
+                };
                 // `self` is stripped by `method_sig_parts` and re-inserted here as
                 // the receiver — but only for methods that actually declare one.
                 // For an associated function (`fn new() -> P`) inserting it would
@@ -1997,9 +2016,6 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.cur_module = self.defs.module_of(item_index);
-            if f.is_async {
-                self.unsupported(f.name.span, "async functions");
-            }
             self.check_duplicate_generics(&f.generics, "function");
             let generics = generic_scope(&f.generics);
             let mut bounds = self.resolve_bounds(&f.generics);
@@ -2015,6 +2031,15 @@ impl<'a> Checker<'a> {
                 .as_ref()
                 .map(|t| self.convert_ty(t, &generics, &bounds))
                 .unwrap_or(Ty::Unit);
+            // An async fn's declared return type is its future's OUTPUT, per
+            // the spec's own signatures (`pub async fn join(self) -> T`), so
+            // the signature every caller sees is `Future<ret>`. `check_fn_body`
+            // unwraps it back to `ret` to check this fn's own body.
+            let ret = if f.is_async {
+                Ty::Future(Box::new(ret))
+            } else {
+                ret
+            };
             self.sigs.insert(
                 def_id,
                 FnSig {
@@ -2828,14 +2853,40 @@ impl<'a> Checker<'a> {
             .collect();
         sig.params = params;
         let name = self.defs.def(def_id).name.clone();
+        // `sig.ret` is the fn's *signature* type — already `Future<output>`
+        // for an async fn, wrapped by `collect_signatures`/`collect_impls`.
+        // The BODY produces the output directly (`async fn f() -> Int { 1 }`
+        // has a body of type `Int`, not `Future<Int>`), so of the three
+        // same-contract reads the comment above describes, the two that face
+        // the body — `fcx.ret_ty` and this function's own unify below — must
+        // name `body_ret_ty`, not `sig.ret`; only `hir::Function::ret_ty`
+        // (the external-facing signature) keeps the wrapped type.
+        let body_ret_ty = if f.is_async {
+            match &sig.ret {
+                Ty::Future(out) => (**out).clone(),
+                // Unreachable by construction: `collect_signatures` and
+                // `collect_impls` wrap an async fn/method's `ret` in
+                // `Ty::Future` before it ever reaches `self.sigs`, and
+                // `normalize_within`'s `Future` arm recurses into the
+                // payload without changing the top-level constructor. Matched
+                // defensively rather than unwrapped, so a future change that
+                // breaks the invariant degrades instead of panicking in this
+                // library path — the same discipline `mir_ty` documents for
+                // its own should-be-impossible arm.
+                other => other.clone(),
+            }
+        } else {
+            sig.ret.clone()
+        };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
             locals: Vec::new(),
             scopes: vec![FxHashMap::default()],
             generics,
             param_bounds: sig.bounds.clone(),
-            ret_ty: sig.ret.clone(),
+            ret_ty: body_ret_ty.clone(),
             loop_depth: 0,
+            in_async: f.is_async,
             pending_closures: Vec::new(),
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
@@ -2843,14 +2894,14 @@ impl<'a> Checker<'a> {
         }
 
         let body = self.check_block(&mut fcx, &f.body.value, f.body.span);
-        if !fcx.icx.unify(&body.ty, &sig.ret) {
+        if !fcx.icx.unify(&body.ty, &body_ret_ty) {
             let span = body_result_span(&f.body);
             self.error(
                 "E0010",
                 format!(
                     "`{}` should return `{}` but its body has type `{}`",
                     name,
-                    self.show(&sig.ret, &fcx),
+                    self.show(&body_ret_ty, &fcx),
                     self.show(&body.ty, &fcx),
                 ),
                 span,
@@ -2867,6 +2918,7 @@ impl<'a> Checker<'a> {
             params: f.params.len() as u32,
             locals: fcx.locals,
             ret_ty: sig.ret,
+            is_async: f.is_async,
             body,
             span: f.name.span,
         };
@@ -2911,6 +2963,9 @@ impl<'a> Checker<'a> {
             param_bounds: Vec::new(),
             ret_ty: sig.ret.clone(),
             loop_depth: 0,
+            // A `const` value has no surface syntax for `async` (`ast::ConstDecl`
+            // has no `is_async` field), so `.await` is always illegal in one.
+            in_async: false,
             pending_closures: Vec::new(),
         };
         let value = self.check_expr(&mut fcx, value_ast);
@@ -2935,6 +2990,7 @@ impl<'a> Checker<'a> {
             params: 0,
             locals: fcx.locals,
             ret_ty: sig.ret,
+            is_async: false,
             body: value,
             span: value_ast.span,
         };
@@ -3259,7 +3315,46 @@ impl<'a> Checker<'a> {
             }
             ast::Expr::Field { target, field } => self.check_field(fcx, target, field, span),
             ast::Expr::Try(_) => self.unsupported_expr(span, "the `?` operator"),
-            ast::Expr::Await(_) => self.unsupported_expr(span, "`.await`"),
+            ast::Expr::Await(inner) => {
+                let e = self.check_expr(fcx, inner);
+                if !fcx.in_async {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "E0086",
+                            "`.await` is only allowed inside an `async fn`".to_string(),
+                        )
+                        .with_primary_label(span, "await outside an async function")
+                        .with_note(
+                            "make the enclosing function `async`, or drive the \
+                             future to completion with `block_on`"
+                                .to_string(),
+                        ),
+                    );
+                    return error_expr(span);
+                }
+                let out = match fcx.icx.apply(&e.ty) {
+                    Ty::Future(out) => (*out).clone(),
+                    Ty::Error => return error_expr(span),
+                    other => {
+                        self.diagnostics.push(
+                            Diagnostic::error(
+                                "E0087",
+                                format!(
+                                    "`.await` expects a future, found `{}`",
+                                    display_ty(&other, self.defs)
+                                ),
+                            )
+                            .with_primary_label(inner.span, "not a future"),
+                        );
+                        return error_expr(span);
+                    }
+                };
+                hir::Expr {
+                    kind: hir::ExprKind::Await(Box::new(e)),
+                    ty: out,
+                    span,
+                }
+            }
             ast::Expr::Cast { .. } => self.unsupported_expr(span, "`as` casts"),
         }
     }
@@ -4441,8 +4536,14 @@ impl<'a> Checker<'a> {
         // the enclosing function.
         let saved_loop_depth = fcx.loop_depth;
         fcx.loop_depth = 0;
+        // Likewise `.await`: Nova has no `async` closure syntax, so a closure
+        // is always its own non-async function, even one written inside an
+        // `async fn`'s body.
+        let saved_in_async = fcx.in_async;
+        fcx.in_async = false;
         let body_hir = self.check_expr(fcx, body);
         fcx.loop_depth = saved_loop_depth;
+        fcx.in_async = saved_in_async;
         if !fcx.icx.unify(&body_hir.ty, &ret_ty) {
             self.error(
                 "E0010",
@@ -4520,6 +4621,9 @@ impl<'a> Checker<'a> {
             params: param_count,
             locals: new_locals,
             ret_ty,
+            // Nova has no `async` closure syntax (see the reset in
+            // `check_closure`), so a lifted closure body is never async.
+            is_async: false,
             body: lifted_body,
             span,
         };
@@ -4593,6 +4697,10 @@ impl<'a> Checker<'a> {
             params: param_types.len() as u32,
             locals,
             ret_ty: ret.clone(),
+            // The wrapper's body is a synthetic forwarding `Call`, never a
+            // `.await` — irrespective of whether `target` itself is async
+            // (then `ret` is already its `Future<_>`, forwarded unchanged).
+            is_async: false,
             body,
             span,
         };
@@ -6769,7 +6877,7 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
             out.push(lhs);
             out.push(rhs);
         }
-        K::Unary { expr: e, .. } | K::ToStr(e) => out.push(e),
+        K::Unary { expr: e, .. } | K::ToStr(e) | K::Await(e) => out.push(e),
         K::Let { init, .. } => out.push(init),
         K::Assign { value, .. } => out.push(value),
         K::Block { stmts, trailing } => {
@@ -6852,7 +6960,7 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
             out.push(lhs);
             out.push(rhs);
         }
-        K::Unary { expr: e, .. } | K::ToStr(e) => out.push(e),
+        K::Unary { expr: e, .. } | K::ToStr(e) | K::Await(e) => out.push(e),
         K::Let { init, .. } => out.push(init),
         K::Assign { value, .. } => out.push(value),
         K::Block { stmts, trailing } => {
@@ -7191,7 +7299,8 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         hir::ExprKind::Unary { expr: inner, .. }
         | hir::ExprKind::ToStr(inner)
         | hir::ExprKind::Let { init: inner, .. }
-        | hir::ExprKind::Assign { value: inner, .. } => {
+        | hir::ExprKind::Assign { value: inner, .. }
+        | hir::ExprKind::Await(inner) => {
             finalize_expr(inner, icx, residual);
         }
         hir::ExprKind::Block { stmts, trailing } => {
@@ -7564,8 +7673,12 @@ mod tests {
 
     #[test]
     fn async_trait_method_declaration_reports_e0900() {
-        // `async` on a trait-method *declaration* (no body) must be rejected the
-        // same as on impl methods, default bodies, free fns, and externs.
+        // `async` on a trait-method *declaration* (no body) must still be
+        // rejected, same as a default (bodied) trait method and an extern fn —
+        // Phase 2.3a Task 2 lifts this same rejection for free functions and
+        // impl/inherent methods (see `async_inherent_method_is_accepted`), but
+        // trait methods are the half that stays rejected (see
+        // `async_trait_method_still_reports_e0900`).
         let r = check_src(
             "trait Foo { async fn bar(self) -> Int }\n\
              record Thing { v: Int }\n\
@@ -7605,6 +7718,207 @@ mod tests {
         );
         let n = error_codes(&r).iter().filter(|c| **c == "E0900").count();
         assert_eq!(n, 1, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn async_fn_returns_a_future_of_its_declared_type() {
+        // The declared return type is the future's OUTPUT, per the spec's own
+        // signatures (`pub async fn join(self) -> T`). So passing the CALL of an
+        // async fn where the output type is expected must be a mismatch.
+        let r = check_src(
+            "async fn f() -> Int { 1 }\n\
+             fn g() -> Int { f() }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0010"),
+            "calling an async fn yields Future<Int>, not Int; got {:?}",
+            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn awaiting_a_future_yields_its_output_type() {
+        // The positive case: inside an async fn, `.await` unwraps to the output
+        // and type-checks against it. Assert CLEAN, and assert on the messages so
+        // a spurious diagnostic is visible rather than counted.
+        let r = check_src(
+            "async fn f() -> Int { 1 }\n\
+             async fn g() -> Int { f().await }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn awaiting_yields_the_output_not_the_future() {
+        // Discriminates "await returns T" from "await returns Future<T>" by
+        // giving `g` a DIFFERENT Output type (Bool) than `f` (Int): a wrong
+        // `.await` result is named directly in an Int-vs-Bool mismatch here.
+        // (Measured: in the current implementation a total forgot-to-unwrap
+        // bug also happens to fail the clean test above, via its own
+        // body-vs-declared-return unify — but this test does not depend on
+        // that coincidence, and would still catch a subtler bug, e.g. one
+        // that always produces `Int`, which would pass the clean test by luck.)
+        let r = check_src(
+            "async fn f() -> Int { 1 }\n\
+             async fn g() -> Bool { f().await }\n\
+             fn main() {}",
+        );
+        let msgs: Vec<String> = r.diagnostics.iter().map(|d| d.message.clone()).collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("Int") && m.contains("Bool")),
+            "expected an Int-vs-Bool mismatch naming both types, got {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn await_outside_an_async_fn_reports_e0086() {
+        let r = check_src(
+            "async fn f() -> Int { 1 }\n\
+             fn g() -> Int { f().await }\n\
+             fn main() {}",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0086")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected E0086, got {:?}",
+                    r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+                )
+            });
+        // Assert the message names the actual problem. A code-only assertion here
+        // would survive swapping E0086's and E0087's message text.
+        assert!(
+            d.message.contains("async"),
+            "E0086 must explain that await requires an async fn; got {:?}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn await_on_a_non_future_reports_e0087() {
+        let r = check_src(
+            "async fn g() -> Int { let x = 1\n x.await }\n\
+             fn main() {}",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0087")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected E0087, got {:?}",
+                    r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            d.message.contains("Int"),
+            "E0087 must name the type that is not a future; got {:?}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn async_inherent_method_is_accepted() {
+        // NOT optional: the spec's JoinHandle::join is `pub async fn join(self) -> T`,
+        // an inherent async method. Task 7 cannot write std/task without this.
+        let r = check_src(
+            "record W { v: Int }\n\
+             impl W { async fn get(self) -> Int { self.v } }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn async_trait_method_still_reports_e0900() {
+        // Trait async needs associated-type futures; out of scope for 2.3a.
+        // This pins the HALF-lift: :852 becomes conditional, it does not vanish.
+        let r = check_src("trait T { async fn m(self) -> Int }\nfn main() {}");
+        assert!(r.diagnostics.iter().any(|d| d.code == "E0900"));
+    }
+
+    #[test]
+    fn async_extern_fn_still_reports_e0900() {
+        let r = check_src("extern \"C\" { async fn c_thing() -> Int }\nfn main() {}");
+        assert!(r.diagnostics.iter().any(|d| d.code == "E0900"));
+    }
+
+    #[test]
+    fn generic_async_fn_instantiates_at_float() {
+        // Float, not Int/Bool: mir_ty collapses Int/Char to I64 and five variants
+        // to Ptr (= i64 on x86-64), so an Int-vs-String pair tests nothing at any
+        // seam. Float is F64 and crosses register banks.
+        let r = check_src(
+            "async fn id<T>(x: T) -> T { x }\n\
+             async fn g() -> Float { id(1.5).await }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn closure_inside_async_fn_resets_in_async_so_await_is_e0086() {
+        // Nova has no `async` closure syntax, so a closure is its own non-async
+        // function even when written inside an `async fn`'s body — the same
+        // discipline `loop_depth` uses for `break`/`continue` (`check_closure`
+        // saves/resets/restores `fcx.in_async` around the closure body). Without
+        // that reset this `.await` would wrongly inherit `g`'s `in_async = true`
+        // and typecheck clean instead of reporting E0086.
+        // Written `|n: Int|`, not `||`: the lexer greedily tokenizes `||` as
+        // one `PipePipe` (logical-or) token rather than two `Pipe`s, so a
+        // truly zero-parameter closure is not spellable — an unrelated,
+        // pre-existing lexer fact (measured: `|| { .. }` fails to parse with
+        // "expected expression ... found `||`"), not anything this task
+        // changes. One unused parameter sidesteps it without adding anything
+        // relevant to what this test checks.
+        let r = check_src(
+            "async fn f() -> Int { 1 }\n\
+             async fn g() -> Int {\n\
+                 let h = |n: Int| { f().await }\n\
+                 0\n\
+             }\n\
+             fn main() {}",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0086")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected E0086, got {:?}",
+                    r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            d.message.contains("async"),
+            "E0086 must explain that await requires an async fn; got {:?}",
+            d.message
+        );
     }
 
     #[test]
@@ -12088,6 +12402,7 @@ mod tests {
             param_bounds: Vec::new(),
             ret_ty: Ty::Unit,
             loop_depth: 0,
+            in_async: false,
             pending_closures: Vec::new(),
         };
         assert_eq!(

@@ -1011,3 +1011,44 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
         "`char_to_int` lowers to a `Copy`"
     );
 }
+
+/// The async state-machine transform (Phase 2.3a Tasks 5-6) does not exist
+/// yet. A `.await` that MIR lowering actually has to visit -- because the
+/// containing function is reachable from `main`, unlike an async fn that is
+/// merely declared -- must be a diagnosed rejection, not a silent
+/// miscompile or a panic in this library path. Not exercised by
+/// `mir_for`/`diagnostics_for` above: this needs the typeck-clean-but-MIR-
+/// rejected combination, and the message assertion, that neither helper
+/// gives access to.
+#[test]
+fn reachable_await_reports_e0088() {
+    let file_id = FileId::DUMMY;
+    let src = "async fn f() -> Int { 1 }\n\
+               async fn g() -> Int { f().await }\n\
+               fn main() { let x = g() }";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let ast = ast.expect("no AST");
+    let resolved = resolve(&ast);
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck should accept this program: {:?}",
+        checked.diagnostics
+    );
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => panic!("expected MIR lowering to reject the reachable `.await`"),
+        Err(diags) => diags,
+    };
+    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
+        panic!(
+            "expected E0088, got {:?}",
+            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        d.message.contains("await"),
+        "E0088 must name `.await` as the unsupported construct; got {:?}",
+        d.message
+    );
+}

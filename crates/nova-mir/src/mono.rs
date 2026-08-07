@@ -382,6 +382,7 @@ impl Specializer<'_> {
                 })
                 .collect(),
             ret_ty: self.ty(&func.ret_ty),
+            is_async: func.is_async,
             body: self.expr(&func.body),
             span: func.span,
         }
@@ -559,6 +560,7 @@ impl Specializer<'_> {
             K::Return(v) => K::Return(self.opt(v.as_deref())),
             K::ToStr(inner) => K::ToStr(self.boxed(inner)),
             K::StrConcat(parts) => K::StrConcat(self.exprs(parts)),
+            K::Await(inner) => K::Await(self.boxed(inner)),
         };
         hir::Expr {
             kind,
@@ -643,6 +645,7 @@ mod tests {
                 span: dummy_span(),
             }],
             ret_ty: Ty::Unit,
+            is_async: false,
             body,
             span: dummy_span(),
         };
@@ -656,6 +659,7 @@ mod tests {
             params: 0,
             locals: Vec::new(),
             ret_ty: Ty::Unit,
+            is_async: false,
             body: expr(
                 K::Block {
                     stmts: vec![expr(

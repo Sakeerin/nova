@@ -950,6 +950,11 @@ pub struct Function {
     pub params: u32,
     pub locals: Vec<Local>,
     pub ret_ty: Ty,
+    /// Whether this function was declared `async`. `ret_ty` is already
+    /// `Ty::Future(output)` when true; this flag is what tells the MIR async
+    /// pass which functions to transform, since a non-async function may also
+    /// return a `Future` (by calling an async fn and not awaiting it).
+    pub is_async: bool,
     pub body: Expr,
     pub span: Span,
 }
@@ -1175,6 +1180,15 @@ pub enum ExprKind {
     ToStr(Box<Expr>),
     /// Concatenate `String` parts (from string interpolation).
     StrConcat(Vec<Expr>),
+    /// `e.await` inside an `async fn`. `e` has type `Future<T>` and the
+    /// `Await` expression has type `T`.
+    ///
+    /// The state-machine transform that lowers this into real suspend/resume
+    /// control flow has not landed yet (Phase 2.3a Tasks 5-6). Until it does,
+    /// this is ordinary, valid-per-typeck input — not a compiler-bug case —
+    /// so MIR lowering (`nova-mir/src/lower.rs`) reports it as a diagnostic
+    /// rather than treating it as unreachable.
+    Await(Box<Expr>),
 }
 
 /// One `match` arm.
