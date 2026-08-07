@@ -1038,12 +1038,24 @@ mod tests {
     fn a_re_entrant_block_on_panics() {
         // Nesting an executor inside a poll would run a task from inside
         // another task's frame. Diagnose it instead of corrupting the queue.
+        //
+        // `AssertUnwindSafe` is required: the closure captures a `*mut u8`,
+        // and raw pointers are not `UnwindSafe`, so a bare `catch_unwind`
+        // does not compile. Asserting unwind-safety is correct here — the
+        // pointer is GC-owned and no invariant spans the panic.
+        //
+        // This test assumes the unwind panic strategy, which is the
+        // workspace default. If a profile ever sets `panic = "abort"`, this
+        // must become a subprocess test instead; report that rather than
+        // deleting the test.
         unsafe extern "C" fn poll_reenters(_s: *mut u8, _c: *mut u8) -> i64 {
             let inner = make_future(poll_ready_now, 0);
             nova_rt_task_block_on(inner)
         }
         let fut = make_future(poll_reenters, 0);
-        let r = std::panic::catch_unwind(|| unsafe { nova_rt_task_block_on(fut) });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            nova_rt_task_block_on(fut)
+        }));
         assert!(r.is_err(), "re-entrant block_on must panic, not nest");
     }
 }
