@@ -4520,11 +4520,17 @@ fn read_gate_expected() -> String {
 /// gone from the normalized side. `split`/`join` on the same literal
 /// delimiter are exact inverses of one another (unlike `lines`/`join`), so
 /// every byte that isn't inside a rewritten line — including a trailing
-/// newline, or the lack of one — survives untouched. Every caller here feeds
-/// in text that has already had `"\r\n"` collapsed to `"\n"`
-/// (`read_gate_expected`, and each call site's own
-/// `.replace("\r\n", "\n")`), so plain `'\n'` splitting is exact; no `'\r'`
-/// ever reaches this function.
+/// newline, or the lack of one — survives untouched. Every actual call site
+/// (below, and in `nova_test_run`, `nova_test_build_standalone`,
+/// `nova_test_under_gc_stress`) already has `"\r\n"` collapsed to `"\n"`
+/// before calling this function: the unit test passes only `\n`-terminated
+/// literals, and each of the three gate tests calls
+/// `.replace("\r\n", "\n")` on the captured stdout it passes in. (The
+/// fixture's own text, loaded by `read_gate_expected`, is independently
+/// CRLF-normalized when read from disk — but it is never itself passed to
+/// this function; it is only the literal right-hand side `assert_eq!`
+/// compares this function's output against.) So plain `'\n'` splitting is
+/// exact here; no `'\r'` ever reaches this function.
 fn normalize_trap_codes(s: &str) -> String {
     const MARKER: &str = "TRAPPED (exit code ";
     s.split('\n')
