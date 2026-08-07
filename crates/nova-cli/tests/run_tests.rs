@@ -4525,7 +4525,11 @@ fn read_gate_expected() -> String {
 /// `nova_test_under_gc_stress`) already has `"\r\n"` collapsed to `"\n"`
 /// before calling this function: the unit test passes only `\n`-terminated
 /// literals, and each of the three gate tests calls
-/// `.replace("\r\n", "\n")` on the captured stdout it passes in. (The
+/// `.replace("\r\n", "\n")` on the text it passes in — captured stdout
+/// for `nova_test_run` and `nova_test_under_gc_stress`, but
+/// `nova_test_build_standalone`'s own synthesized report string (built
+/// from each subprocess's `result.stderr` and `result.status`; that
+/// function never reads `result.stdout`) for the third. (The
 /// fixture's own text, loaded by `read_gate_expected`, is independently
 /// CRLF-normalized when read from disk — but it is never itself passed to
 /// this function; it is only the literal right-hand side `assert_eq!`
@@ -4617,7 +4621,21 @@ fn nova_test_run() {
     let dir = write_gate_fixture_project("nova-test-gate-run");
     let assert = nova().current_dir(&dir).arg("test").assert().failure();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
-    assert_eq!(normalize_trap_codes(&stdout), expected);
+    // stderr is attached below too, alongside stdout, even though only stdout
+    // is compared: `.assert()` above has already captured it at no extra
+    // cost (no re-run), and an ADR-0008 occurrence on this freshly built
+    // binary could in principle leave stdout empty with its only diagnostic
+    // on stderr — in which case stdout alone would print nothing useful.
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert_eq!(
+        normalize_trap_codes(&stdout),
+        expected,
+        "gate output mismatch. Raw, un-normalized stdout follows — the exit \
+         codes in it are the evidence ADR 0008's open question needs, and \
+         normalization would otherwise replace them with placeholders. \
+         stderr follows too, in case stdout above is empty:\nstdout:\n{stdout}\n\
+         stderr:\n{stderr}"
+    );
 }
 
 /// The same fixture through `nova_driver::build_test_binary` called
@@ -4703,7 +4721,21 @@ fn nova_test_build_standalone() {
     ));
     let _ = std::fs::remove_file(&exe);
 
-    assert_eq!(normalize_trap_codes(&out.replace("\r\n", "\n")), expected);
+    // No separate stderr is attached here the way the other two gate tests'
+    // failure messages attach one: unlike those two, which run one top-level
+    // `nova` subprocess and could in principle see it produce empty stdout
+    // with a diagnostic only on stderr, this test's `out` is itself already
+    // assembled per-subprocess from each test binary's own `result.stderr`
+    // and `result.status` (see the loop above) — a TRAPPED line's real exit
+    // code is already inlined into `out` directly from that `result.status`,
+    // so `out` alone carries the evidence an ADR-0008 occurrence would leave.
+    assert_eq!(
+        normalize_trap_codes(&out.replace("\r\n", "\n")),
+        expected,
+        "gate output mismatch. Raw, un-normalized report follows — the exit \
+         codes in it are the evidence ADR 0008's open question needs, and \
+         normalization would otherwise replace them with placeholders:\n{out}"
+    );
 }
 
 /// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation).
@@ -4726,7 +4758,20 @@ fn nova_test_under_gc_stress() {
         .assert()
         .failure();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
-    assert_eq!(normalize_trap_codes(&stdout), expected);
+    // Same reasoning as `nova_test_run`'s comment above its own `stderr`
+    // capture: already captured by `.assert()` at no extra cost, and
+    // attached below in case an ADR-0008 occurrence leaves stdout empty with
+    // its only diagnostic on stderr.
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert_eq!(
+        normalize_trap_codes(&stdout),
+        expected,
+        "gate output mismatch. Raw, un-normalized stdout follows — the exit \
+         codes in it are the evidence ADR 0008's open question needs, and \
+         normalization would otherwise replace them with placeholders. \
+         stderr follows too, in case stdout above is empty:\nstdout:\n{stdout}\n\
+         stderr:\n{stderr}"
+    );
 }
 
 /// Gate item 5 ("a filter run"), composed with the real multi-item fixture
