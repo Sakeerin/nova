@@ -36,10 +36,20 @@ enum Outcome {
     /// Exit 0.
     Passed,
     /// Nonzero exit, and stderr said why: a line containing
-    /// [`PANIC_MARKER`], emitted by `nova_rt_panic_str`
-    /// (`nova-runtime/src/lib.rs`) and nothing else. Carries that line
-    /// verbatim, so the report shows exactly what the runtime said rather
-    /// than a reconstruction of it.
+    /// [`PANIC_MARKER`]. Three call sites in the runtime independently
+    /// `eprintln!` a line with that exact substring, rather than one shared
+    /// function being the only emitter: `nova_rt_panic_str`
+    /// (`nova-runtime/src/lib.rs`, user `panic(...)` and every `std/test`
+    /// assertion), `nova_rt_check_bounds` (same file, array index out of
+    /// bounds), and `gc::alloc`'s oversized-allocation guard
+    /// (`nova-runtime/src/gc.rs`). [`classify`]'s plain substring search
+    /// catches all three uniformly, which is not incidental:
+    /// `should_panic_passes_on_a_checked_panic` reaches this marker through
+    /// the bounds-check path and never calls `nova_rt_panic_str` at all, so
+    /// the substring search — not a check against one specific emitter — is
+    /// what makes that test pass. Carries the matched line verbatim, so the
+    /// report shows exactly what the runtime said rather than a
+    /// reconstruction of it.
     Panicked(String),
     /// Nonzero exit with no such line: an illegal instruction, a segfault,
     /// anything the runtime did not choose to do. Carries the raw exit code
@@ -50,9 +60,10 @@ enum Outcome {
     Trapped(i32),
 }
 
-/// The one stable, portable signal a Nova panic leaves behind. Emitted by
-/// `nova_rt_panic_str` and nothing else, so its presence on stderr — not the
-/// process's exit code — is what [`classify`] keys on.
+/// The one stable, portable signal a Nova panic (or panic-shaped runtime
+/// abort — see [`Outcome::Panicked`] for its three independent emitters)
+/// leaves behind. Its presence on stderr — not the process's exit code — is
+/// what [`classify`] keys on.
 const PANIC_MARKER: &str = "nova: panic:";
 
 /// Classify a finished test process. The exit code decides clean vs.

@@ -4336,3 +4336,83 @@ fn a_filter_selects_a_strict_subset_and_the_others_do_not_run() {
          test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
     );
 }
+
+// === Fix round 1 (review): two "correct but unpinned" gaps ===
+
+/// `should_panic` must be looked up **by the same index the test itself just
+/// ran at**, not always at position 0. Every should_panic fixture above has
+/// exactly one `@test` function, always at index 0 — `tests[i].should_panic`
+/// and the bug `tests[0].should_panic` are indistinguishable at index 0, so
+/// none of them could have caught a mis-association. This fixture puts
+/// `should_panic` in the middle, at index 1, flanked by two ordinary
+/// (`should_panic = false`) tests, so three different plausible
+/// index-mistakes are all independently visible:
+///
+/// - a constant `tests[0]`: `beta_panics_checked` (index 1) would be
+///   evaluated against index 0's `false`, turning its "ok" into "FAILED".
+/// - `tests[i - 1]`: the same failure as above for index 1, *and*
+///   `gamma_ok` (index 2) would be evaluated against index 1's `true`,
+///   turning its "ok" into "FAILED (expected a panic, but the test passed)".
+/// - `tests[i + 1]`: `alpha_ok` (index 0) would be evaluated against index
+///   1's `true` (same "expected a panic" failure), and `beta_panics_checked`
+///   itself would be evaluated against index 2's `false` (same "FAILED" as
+///   the constant-0 case).
+///
+/// So this single fixture's exact-output assertion fails under any of the
+/// three shapes, not just the literal one the review reproduced.
+#[test]
+fn should_panic_is_matched_to_its_own_test_not_to_index_zero() {
+    let dir = write_test_project(
+        "nova-test-cli-should-panic-by-index",
+        "@test\nfn alpha_ok() { assert_eq(1, 1) }\n\
+         @test(should_panic)\nfn beta_panics_checked() { let xs = [1, 2, 3]\n let _ = xs[9] }\n\
+         @test\nfn gamma_ok() { assert_eq(2, 2) }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 3 tests\n\
+         test alpha_ok ... ok\n\
+         test beta_panics_checked ... ok\n\
+         test gamma_ok ... ok\n\
+         \n\
+         test result: ok. 3 passed; 0 failed; 0 trapped; 3 total\n"
+    );
+}
+
+/// The filter matches a substring **anywhere** in the name, not only as a
+/// prefix. `a_filter_selects_a_strict_subset_and_the_others_do_not_run`'s
+/// filter `"keep"` happens to be a literal prefix of both names it selects,
+/// so mutating `.contains` to `.starts_with` there still passes. Here
+/// neither matching name *starts with* `"alpha"` — it sits in the middle of
+/// one and at the end of the other — so `.starts_with("alpha")` would select
+/// neither, shrinking `running 2 tests` to `running 0 tests` with no per-test
+/// lines at all: an unmistakable difference from the exact output asserted
+/// below.
+#[test]
+fn a_filter_matches_a_substring_anywhere_not_only_as_a_prefix() {
+    let dir = write_test_project(
+        "nova-test-cli-filter-substring-not-prefix",
+        "@test\nfn zzz_alpha_zzz() { assert_eq(1, 1) }\n\
+         @test\nfn keep_alpha() { assert_eq(2, 2) }\n\
+         @test\nfn unrelated_beta() { assert_eq(3, 3) }\n",
+    );
+
+    let assert = nova()
+        .current_dir(&dir)
+        .arg("test")
+        .arg("alpha")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test zzz_alpha_zzz ... ok\n\
+         test keep_alpha ... ok\n\
+         \n\
+         test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
+    );
+}
