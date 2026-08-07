@@ -4484,25 +4484,134 @@ fn read_gate_expected() -> String {
         .replace("\r\n", "\n")
 }
 
+/// Replace the two platform-specific numbers in a `TRAPPED (exit code N (0xH))`
+/// line with fixed placeholders, leaving every other line byte-identical.
+///
+/// The gate fixture (`tests/runtime/nova_test.stdout`) asserts the runner's
+/// full literal stdout, which is what makes it able to catch a collapsed
+/// panicked/trapped distinction. But one token in it cannot be portable:
+/// Windows translates a hardware fault into an NTSTATUS exit code
+/// (`0xC000001D`, `STATUS_ILLEGAL_INSTRUCTION`), while on Linux and macOS the
+/// same program dies from `SIGFPE` with no exit code at all, which
+/// `classify` (`cmd/test.rs:112`'s `unwrap_or(-1)`) renders as `-1`. CI's
+/// matrix (`.github/workflows/ci.yml`) runs ubuntu, windows and macos, so a
+/// fixture pinning either raw value cannot hold on the other two platforms.
+///
+/// Only the numbers are elided; the surrounding structure — the test name,
+/// the word `TRAPPED`, and the presence of both the decimal and the
+/// parenthesized hex — is preserved, so a change in the report's *shape*
+/// still fails the comparison. This is the same rule this file already
+/// follows for its two live-measuring trap tests,
+/// `a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic` and
+/// `a_trapping_tests_captured_output_is_shown_not_discarded`: never write a
+/// literal exit code into an expectation, because the code an aborted
+/// process reports is platform-dependent. Those two tests measure the real
+/// code directly from the platform they run on and are deliberately left
+/// untouched here, which is exactly why normalizing this fixture loses no
+/// coverage — the real value is still pinned, just not in this file.
+///
+/// Splits on plain `'\n'` rather than [`str::lines`]: `lines()` also
+/// swallows a trailing line terminator (`"a\n".lines().collect::<Vec<_>>()`
+/// is just `["a"]`, indistinguishable from splitting `"a"` with no newline
+/// at all), so `s.lines().collect::<Vec<_>>().join("\n")` silently drops a
+/// trailing newline the input had. Measured directly by temporarily making
+/// that swap: the test below's very first `assert_eq!` then fails with
+/// `left: "...<HEX>))"` vs. `right: "...<HEX>))\n"` — the trailing newline
+/// gone from the normalized side. `split`/`join` on the same literal
+/// delimiter are exact inverses of one another (unlike `lines`/`join`), so
+/// every byte that isn't inside a rewritten line — including a trailing
+/// newline, or the lack of one — survives untouched. Every caller here feeds
+/// in text that has already had `"\r\n"` collapsed to `"\n"`
+/// (`read_gate_expected`, and each call site's own
+/// `.replace("\r\n", "\n")`), so plain `'\n'` splitting is exact; no `'\r'`
+/// ever reaches this function.
+fn normalize_trap_codes(s: &str) -> String {
+    const MARKER: &str = "TRAPPED (exit code ";
+    s.split('\n')
+        .map(|line| match line.find(MARKER) {
+            // Rewrite only from the marker to the end of the parenthesized
+            // payload, so anything before `TRAPPED` (the test name) is kept.
+            // The `ends_with("))")` guard is what keeps a decoy line — one
+            // that merely mentions "exit code", or a TRAPPED line missing
+            // its hex form — from being rewritten. Verified directly against
+            // `tests/runtime/nova_test.stdout` (post `\r\n` -> `\n`
+            // normalization, as every caller applies): its one TRAPPED line
+            // is the only line in that fixture ending in `"))"`.
+            Some(i) if line.ends_with("))") => {
+                format!("{}{}<CODE> (<HEX>))", &line[..i], MARKER)
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn normalize_trap_codes_elides_only_the_platform_specific_numbers() {
+    // The gate fixture cannot hold a real exit code: Windows reports an
+    // NTSTATUS (-1073741795 / 0xC000001D for an illegal instruction) while a
+    // signal-killed process on Linux/macOS has no code at all and renders as
+    // -1. Both must normalize to the same text, or the fixture can only ever
+    // match one platform.
+    let win = "test t ... TRAPPED (exit code -1073741795 (0xC000001D))\n";
+    let unix = "test t ... TRAPPED (exit code -1 (0xFFFFFFFF))\n";
+    assert_eq!(normalize_trap_codes(win), normalize_trap_codes(unix));
+    assert_eq!(
+        normalize_trap_codes(win),
+        "test t ... TRAPPED (exit code <CODE> (<HEX>))\n"
+    );
+
+    // STRUCTURE MUST SURVIVE. If the runner ever stopped printing the hex
+    // form, or dropped the "TRAPPED" word, or lost the test name, the
+    // normalized text must change so the fixture comparison fails. A
+    // normalizer that collapsed the whole line to a constant would hide
+    // exactly the regressions this fixture exists to catch.
+    assert_ne!(
+        normalize_trap_codes(win),
+        normalize_trap_codes("test t ... TRAPPED (exit code -1073741795)\n")
+    );
+    assert_ne!(
+        normalize_trap_codes(win),
+        normalize_trap_codes("test OTHER ... TRAPPED (exit code -1073741795 (0xC000001D))\n")
+    );
+    assert_ne!(
+        normalize_trap_codes(win),
+        normalize_trap_codes("test t ... FAILED (exit code -1073741795 (0xC000001D))\n")
+    );
+
+    // Lines with no trap must pass through byte-identically -- the fixture's
+    // other five lines (the header, two `ok`s, a FAILED with its panic
+    // message, and the summary) are fully portable and must stay asserted
+    // exactly.
+    let untouched = "running 4 tests\ntest a ... ok\n\ntest result: FAILED. 2 passed; 1 failed; 1 trapped; 4 total\n";
+    assert_eq!(normalize_trap_codes(untouched), untouched);
+
+    // A panic message that merely mentions the words must not be rewritten.
+    let decoy = "    nova: panic: exit code -5 is wrong\n";
+    assert_eq!(normalize_trap_codes(decoy), decoy);
+}
+
 /// Through the full `nova` CLI, exactly as a user would invoke it.
 /// `.failure()` is correct, not a mistake: the fixture deliberately contains
 /// a failing assertion and a hard trap (see its own header comment), so
 /// `nova test` itself must exit nonzero even though two of its four tests
-/// pass. The full literal stdout is asserted — not a pass/fail count and not
-/// a substring — because a runner that collapsed the panicked/trapped
+/// pass. The full stdout is asserted — not a pass/fail count and not a
+/// substring — because a runner that collapsed the panicked/trapped
 /// distinction would still exit nonzero here (the unrelated failing
 /// `assert_eq` guarantees that), so only the exact per-test lines catch the
 /// regression this fixture exists to protect against (task brief, item 4).
+/// Captured and run through `normalize_trap_codes` rather than asserted with
+/// `assert_cmd`'s `.stdout(expected)` predicate, which cannot normalize:
+/// the trapped test's exit code is platform-specific (see
+/// `normalize_trap_codes`'s doc comment), so it is the one part of stdout
+/// not compared completely literally.
 #[test]
 fn nova_test_run() {
     let expected = read_gate_expected();
     let dir = write_gate_fixture_project("nova-test-gate-run");
-    nova()
-        .current_dir(&dir)
-        .arg("test")
-        .assert()
-        .failure()
-        .stdout(expected);
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(normalize_trap_codes(&stdout), expected);
 }
 
 /// The same fixture through `nova_driver::build_test_binary` called
@@ -4517,7 +4626,11 @@ fn nova_test_run() {
 /// captured `String` with `assert_eq!`, rather than asserting on an
 /// `assert_cmd::Command` the way `nova_test_run` does — matching the brief's
 /// note that "the build variant compares captured stdout rather than
-/// asserting on the command."
+/// asserting on the command." `out` itself is still built from the real,
+/// live exit code the child process reported (see the `TRAPPED` arm below)
+/// exactly as `cmd/test.rs::run` would print it; only the final `assert_eq!`
+/// runs it through `normalize_trap_codes`, for the same cross-platform
+/// reason `nova_test_run` does.
 #[test]
 fn nova_test_build_standalone() {
     let expected = read_gate_expected();
@@ -4584,7 +4697,7 @@ fn nova_test_build_standalone() {
     ));
     let _ = std::fs::remove_file(&exe);
 
-    assert_eq!(out.replace("\r\n", "\n"), expected);
+    assert_eq!(normalize_trap_codes(&out.replace("\r\n", "\n")), expected);
 }
 
 /// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation).
@@ -4593,18 +4706,21 @@ fn nova_test_build_standalone() {
 /// rather than replacing it, so setting the variable on the outer
 /// `nova test` invocation reaches every process it spawns too — the same
 /// propagation Task 4 independently confirmed for this exact mechanism
-/// (`std::process::Command::env`, not a proxy for it).
+/// (`std::process::Command::env`, not a proxy for it). Compared through
+/// `normalize_trap_codes` the same way `nova_test_run` is, and for the same
+/// reason — see its comment.
 #[test]
 fn nova_test_under_gc_stress() {
     let expected = read_gate_expected();
     let dir = write_gate_fixture_project("nova-test-gate-gc-stress");
-    nova()
+    let assert = nova()
         .env("NOVA_GC_STRESS", "1")
         .current_dir(&dir)
         .arg("test")
         .assert()
-        .failure()
-        .stdout(expected);
+        .failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(normalize_trap_codes(&stdout), expected);
 }
 
 /// Gate item 5 ("a filter run"), composed with the real multi-item fixture
