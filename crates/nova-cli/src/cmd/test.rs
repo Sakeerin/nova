@@ -142,8 +142,18 @@ fn print_captured(label: &str, output: &str) {
 /// signed `i32`, so `0xC0000005` (`STATUS_ACCESS_VIOLATION`, the process never
 /// reached its entry point) shows up as `-1073741819`, and `0xC000001D`
 /// (`STATUS_ILLEGAL_INSTRUCTION`, the deterministic fault a trapping test
-/// raises) as `-1073741795`. Decimal alone is unrecognizable; hex-formatting the
-/// signed value directly sign-extends it. Hence both, with the `as u32` cast.
+/// raises) as `-1073741795`. Decimal alone is unrecognizable.
+///
+/// The `as u32` cast is measured to be a no-op at this type, not a fix for
+/// sign extension: Rust's `UpperHex` for a *signed* integer already formats
+/// its two's-complement bit pattern at the type's own width, so
+/// `format!("{:X}", code)` and `format!("{:X}", code as u32)` are
+/// byte-identical for every `i32` value (verified directly against rustc
+/// 1.95.0, debug and `-O`). Sign-extending to something like
+/// `0xFFFFFFFFC0000005` would require `code` to first be widened to a wider
+/// signed type (e.g. `i64`), which nothing here does. The cast stays as
+/// documentation of intent and as a guard should `code` ever become that
+/// wider type; see `mod tests` below for why no test can pin its presence.
 fn format_exit_code(code: i32) -> String {
     format!("code {code} (0x{:08X})", code as u32)
 }
@@ -351,9 +361,19 @@ mod tests {
     fn an_exit_code_is_rendered_in_decimal_and_as_an_unsigned_hex_ntstatus() {
         // `.code()` hands back a Windows NTSTATUS reinterpreted as a signed
         // i32, so 0xC0000005 arrives as -1073741819. Printing only decimal
-        // loses the recognizable form, and hex-formatting the i32 WITHOUT the
-        // `as u32` cast sign-extends to 0xFFFFFFFFC0000005. Both mistakes are
-        // easy to reintroduce, so both are pinned here.
+        // loses the recognizable form; dropping the `(0x{:08X})` suffix
+        // entirely is the mistake this test pins.
+        //
+        // The `as u32` cast in `format_exit_code` is NOT pinned by this
+        // test, and cannot be by any test: measured directly (rustc 1.95.0,
+        // debug and `-O`) that `format!("{:X}", code)` and
+        // `format!("{:X}", code as u32)` are byte-identical for every `i32`
+        // value, because Rust's `UpperHex` for a signed integer already
+        // formats the two's-complement bit pattern at the type's own width
+        // rather than sign-extending to a wider one — there is no
+        // `0xFFFFFFFFC0000005` to observe here. The cast is kept as
+        // documentation and as a guard should `code`'s type ever widen, not
+        // because dropping it changes this function's output today.
         //
         // STATUS_ACCESS_VIOLATION -- the anomaly's signature: the process
         // never reached its entry point.
