@@ -133,6 +133,21 @@ fn print_captured(label: &str, output: &str) {
     }
 }
 
+/// Render a child process's exit code in both decimal and unsigned hex.
+///
+/// Load-bearing for one specific open question (ADR 0008): an intermittent,
+/// never-reproduced failure in which a freshly linked test binary produces
+/// completely empty output. The evidence that separates its candidate causes is
+/// the raw code — on Windows a fault arrives as an NTSTATUS reinterpreted as a
+/// signed `i32`, so `0xC0000005` (`STATUS_ACCESS_VIOLATION`, the process never
+/// reached its entry point) shows up as `-1073741819`, and `0xC000001D`
+/// (`STATUS_ILLEGAL_INSTRUCTION`, the deterministic fault a trapping test
+/// raises) as `-1073741795`. Decimal alone is unrecognizable; hex-formatting the
+/// signed value directly sign-extends it. Hence both, with the `as u32` cast.
+fn format_exit_code(code: i32) -> String {
+    format!("code {code} (0x{:08X})", code as u32)
+}
+
 /// `nova test`'s only positional argument is the filter
 /// (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`, unlike
 /// `run`/`build`/`check`), so the entry file is always the project default.
@@ -155,7 +170,15 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         .env_remove("NOVA_TEST_INDEX")
         .output()
         .with_context(|| format!("failed to run {}", exe.display()))?;
+    // Captured eagerly, not just on the error paths below: every one of the
+    // four checks between here and the loop can fail on a malformed
+    // inventory, and each failure message needs the same evidence — the
+    // exit status and stderr the child actually produced — which is exactly
+    // what was missing the last four times a freshly linked test binary
+    // produced empty output for no diagnosed reason (ADR 0008).
+    let status = inventory.status;
     let stdout = String::from_utf8_lossy(&inventory.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&inventory.stderr).into_owned();
     let mut lines = stdout.lines();
     let count: usize = lines
         .next()
@@ -164,14 +187,14 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         .parse()
         .with_context(|| {
             format!(
-                "{}'s inventory did not start with a test count: {stdout:?}",
+                "{}'s inventory did not start with a test count ({status}): stdout {stdout:?}, stderr {stderr:?}",
                 exe.display()
             )
         })?;
     let names: Vec<String> = lines.take(count).map(str::to_string).collect();
     anyhow::ensure!(
         names.len() == count,
-        "{} reported {count} test{} but printed only {} name{}",
+        "{} reported {count} test{} but printed only {} name{} ({status}; stderr {stderr:?})",
         exe.display(),
         if count == 1 { "" } else { "s" },
         names.len(),
@@ -180,7 +203,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     anyhow::ensure!(
         names.len() == tests.len(),
         "the compiled binary's inventory ({} tests) disagrees with the compiler's own count \
-         ({}); this is a compiler bug",
+         ({}); this is a compiler bug (inventory process {status})",
         names.len(),
         tests.len()
     );
@@ -196,7 +219,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     anyhow::ensure!(
         (0..count).all(|i| names[i] == tests[i].name),
         "the compiled binary's inventory names disagree with the compiler's own test names at \
-         the same positions; this is a compiler bug"
+         the same positions; this is a compiler bug (inventory process {status})"
     );
 
     // should_panic, by position: `names` (read from the binary, above) and
@@ -292,7 +315,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
                 _,
             ) => {
                 trapped += 1;
-                println!("test {name} ... TRAPPED (exit code {code})");
+                println!("test {name} ... TRAPPED (exit {})", format_exit_code(code));
                 print_captured("stdout", &stdout);
                 print_captured("stderr", &stderr);
             }
@@ -317,5 +340,37 @@ pub fn run(cmd: TestCmd) -> Result<()> {
             "{failed} test{} failed, {trapped} trapped",
             if failed == 1 { "" } else { "s" }
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_exit_code_is_rendered_in_decimal_and_as_an_unsigned_hex_ntstatus() {
+        // `.code()` hands back a Windows NTSTATUS reinterpreted as a signed
+        // i32, so 0xC0000005 arrives as -1073741819. Printing only decimal
+        // loses the recognizable form, and hex-formatting the i32 WITHOUT the
+        // `as u32` cast sign-extends to 0xFFFFFFFFC0000005. Both mistakes are
+        // easy to reintroduce, so both are pinned here.
+        //
+        // STATUS_ACCESS_VIOLATION -- the anomaly's signature: the process
+        // never reached its entry point.
+        assert_eq!(
+            format_exit_code(-1073741819),
+            "code -1073741819 (0xC0000005)"
+        );
+        // STATUS_ILLEGAL_INSTRUCTION -- the deterministic trap fault this must
+        // be told apart from. If these two rendered the same, ADR 0008's whole
+        // argument would be unverifiable.
+        assert_ne!(format_exit_code(-1073741819), format_exit_code(-1073741795));
+        assert_eq!(
+            format_exit_code(-1073741795),
+            "code -1073741795 (0xC000001D)"
+        );
+        // An ordinary small failure code must stay readable rather than being
+        // rendered as a giant unsigned value.
+        assert_eq!(format_exit_code(1), "code 1 (0x00000001)");
     }
 }

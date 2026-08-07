@@ -4213,6 +4213,7 @@ fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
         .status
         .code()
         .expect("a concrete exit code on this platform");
+    let hex = code as u32;
     let _ = std::fs::remove_file(&exe);
 
     let assert = nova().current_dir(&dir).arg("test").assert().failure();
@@ -4221,7 +4222,7 @@ fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
         stdout,
         format!(
             "running 1 test\n\
-             test divides_by_zero ... TRAPPED (exit code {code})\n\
+             test divides_by_zero ... TRAPPED (exit code {code} (0x{hex:08X}))\n\
              \n\
              test result: FAILED. 0 passed; 0 failed; 1 trapped; 1 total\n"
         )
@@ -4567,7 +4568,11 @@ fn nova_test_build_standalone() {
         } else {
             trapped += 1;
             let code = result.status.code().unwrap_or(-1);
-            out.push_str(&format!("test {} ... TRAPPED (exit code {code})\n", t.name));
+            let hex = code as u32;
+            out.push_str(&format!(
+                "test {} ... TRAPPED (exit code {code} (0x{hex:08X}))\n",
+                t.name
+            ));
         }
     }
     out.push('\n');
@@ -4836,6 +4841,7 @@ fn a_trapping_tests_captured_output_is_shown_not_discarded() {
         .status
         .code()
         .expect("a concrete exit code on this platform");
+    let hex = code as u32;
     let _ = std::fs::remove_file(&exe);
 
     let assert = nova().current_dir(&dir).arg("test").assert().failure();
@@ -4844,7 +4850,7 @@ fn a_trapping_tests_captured_output_is_shown_not_discarded() {
         stdout,
         format!(
             "running 1 test\n\
-             test prints_then_traps ... TRAPPED (exit code {code})\n\
+             test prints_then_traps ... TRAPPED (exit code {code} (0x{hex:08X}))\n\
              \x20\x20\x20\x20---- stdout ----\n\
              \x20\x20\x20\x20about to trap\n\
              \n\

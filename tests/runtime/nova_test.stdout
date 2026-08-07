@@ -3,6 +3,6 @@ test addition_is_correct ... ok
 test addition_is_wrong ... FAILED
     nova: panic: assertion failed: 4 != 5
 test array_out_of_bounds_panics ... ok
-test division_by_zero_traps ... TRAPPED (exit code -1073741795)
+test division_by_zero_traps ... TRAPPED (exit code -1073741795 (0xC000001D))
 
 test result: FAILED. 2 passed; 1 failed; 1 trapped; 4 total
