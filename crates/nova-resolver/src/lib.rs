@@ -459,7 +459,7 @@ pub fn resolve(file: &File) -> ResolveResult {
     // one of them gets the same `FileId::DUMMY` sentinel used throughout the
     // test suite — one per `STD_MODULES` entry, in order.
     let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
-    let prog = resolve_program(&sources, &std_files);
+    let prog = resolve_program(&sources, &std_files, None);
     ResolveResult {
         definitions: prog.definitions,
         file: prog.file,
@@ -482,26 +482,55 @@ pub fn resolve(file: &File) -> ResolveResult {
 /// not compiled in (the driver always supplies one id per `STD_MODULES`
 /// entry, so this is not expected to happen).
 ///
+/// `extra_std` is `Some((`[`STD_TEST_MODULE`]`, file_id))` under `nova test`
+/// and `None` otherwise (the driver decides). When present it is treated as
+/// one more std module — glob-imported into every other module exactly like
+/// [`STD_MODULES`]'s three, and on the receiving end of their glob-imports too
+/// (so `assert_eq`'s bounds can name `Eq`/`Debug` with no `import`) — but it
+/// is threaded through this one parameter rather than folded into
+/// `STD_MODULES` itself, so that array's length stays fixed regardless of
+/// compilation mode; every other consumer of `STD_MODULES` (and the driver's
+/// one-`FileId`-per-entry allocation) is therefore unaffected by its
+/// existence.
+///
 /// `item_index`es in the returned [`ProgramResolution::file`] are global
 /// (module items concatenated in `modules` order, plus the implicit std
-/// modules last, in [`STD_MODULES`] order).
-pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> ProgramResolution {
+/// modules last, in [`STD_MODULES`] order, plus `extra_std` if present).
+pub fn resolve_program(
+    modules: &[ModuleSource],
+    std_files: &[FileId],
+    extra_std: Option<((&str, &str), FileId)>,
+) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
     let mut tests = Vec::new();
 
-    // Compile each implicit std module (in `STD_MODULES` order) so their
+    // The fixed three plus, only when the caller passed one, the extra std
+    // module — combined here so the rest of this function has one uniform
+    // list to iterate instead of a special case for a fourth entry.
+    let std_entries: Vec<(&str, &str)> = STD_MODULES
+        .iter()
+        .copied()
+        .chain(extra_std.map(|(entry, _)| entry))
+        .collect();
+    let std_file_ids: Vec<FileId> = std_files
+        .iter()
+        .copied()
+        .chain(extra_std.map(|(_, file_id)| file_id))
+        .collect();
+
+    // Compile each implicit std module (in `std_entries` order) so their
     // public types/traits/values get real DefIds and layouts (and are then
     // glob-imported into every other module below). Each ships with the
     // compiler, so a parse failure here is a compiler bug — but it is
     // reported against a real file so it is debuggable, and a module that
     // fails to parse outright is skipped entirely (`None`) rather than
     // silently merged in as empty.
-    let std_modules: Vec<Option<File>> = STD_MODULES
+    let std_modules: Vec<Option<File>> = std_entries
         .iter()
-        .zip(std_files.iter())
-        .map(|((_, src), &file_id)| {
+        .zip(std_file_ids.iter())
+        .map(|(&(_, src), &file_id)| {
             let (ast, diags) = std_module(src, file_id);
             diagnostics.extend(diags);
             ast
@@ -518,12 +547,12 @@ pub fn resolve_program(modules: &[ModuleSource], std_files: &[FileId]) -> Progra
             file: m.file,
         })
         .chain(
-            STD_MODULES
+            std_entries
                 .iter()
                 .zip(std_modules.iter())
-                .filter_map(|((name, _), file)| {
+                .filter_map(|(&(name, _), file)| {
                     file.as_ref().map(|file| ModuleSource {
-                        name: (*name).to_string(),
+                        name: name.to_string(),
                         file,
                     })
                 }),
@@ -643,6 +672,12 @@ pub const STD_MODULES: [(&str, &str); 3] = [
         include_str!("../../../std/strings/lib.nova"),
     ),
 ];
+
+/// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
+/// that array stays fixed-length: every consumer iterates it and the driver
+/// allocates one `FileId` per entry, so a conditional member would make
+/// `FileId` allocation depend on compilation mode.
+pub const STD_TEST_MODULE: (&str, &str) = ("$std.test", include_str!("../../../std/test/lib.nova"));
 
 /// Lex and parse one embedded std module. Its source ships with the compiler,
 /// so any failure is a compiler bug — but it is reported against `file_id` so
@@ -1463,7 +1498,7 @@ mod tests {
             },
         ];
         let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
-        resolve_program(&sources, &std_files)
+        resolve_program(&sources, &std_files, None)
     }
 
     fn error_codes(diags: &[Diagnostic]) -> Vec<&str> {

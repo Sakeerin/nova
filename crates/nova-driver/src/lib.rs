@@ -39,7 +39,7 @@ pub enum Outcome<T> {
 /// "well-formed" that `nova run` / `nova build` then reject.
 pub fn check_file(path: &Path) -> Result<Outcome<()>> {
     let mut ctx = FrontendContext::load(path)?;
-    let Some((module, _tests, _fresh_def_id)) = ctx.check()? else {
+    let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
     if let Err(diags) = nova_mir::lower_module(&module) {
@@ -193,7 +193,7 @@ const SHADOWED_USER_MAIN_NAME: &str = "main.shadowed_by_nova_test";
 /// from the source again.
 pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
     let mut ctx = FrontendContext::load(path)?;
-    let Some((mut module, tests, fresh_def_id)) = ctx.check()? else {
+    let Some((mut module, tests, fresh_def_id)) = ctx.check(true)? else {
         anyhow::bail!(
             "could not compile due to {} previous error{}",
             ctx.errors,
@@ -408,7 +408,7 @@ fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
 /// Run the front end and MIR lowering, rendering any diagnostics.
 fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
     let mut ctx = FrontendContext::load(path)?;
-    let Some((module, _tests, _fresh_def_id)) = ctx.check()? else {
+    let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
     match nova_mir::lower_module(&module) {
@@ -546,6 +546,13 @@ impl FrontendContext {
     /// a `DefId` guaranteed unused by anything resolution allocated — or
     /// `None` if any stage reported errors.
     ///
+    /// `with_test_module` seeds `std/test` (`assert`/`assert_eq`/`assert_ne`)
+    /// alongside the fixed three, so it is glob-imported the same way — but
+    /// only when `true`. `build_test_binary` is the only caller that passes
+    /// `true`; `check_file` and `lower_to_mir` (behind `check_file`,
+    /// `compile_file`, `build_file`, `build_file_release`) pass `false`, so
+    /// those names never resolve in an ordinary compile.
+    ///
     /// The fresh `DefId` is `resolved.definitions.defs().len()`: `Definitions`
     /// documents `defs` as one global counter shared by every definition kind
     /// (functions, sums, records, traits, methods, externs, associated
@@ -554,7 +561,10 @@ impl FrontendContext {
     /// cannot collide with any of them. `build_test_binary` uses it to name a
     /// synthesized `main` that cannot alias an id one of the `@test`
     /// functions it calls by `DefId` already owns.
-    fn check(&mut self) -> Result<Option<(nova_hir::Module, Vec<TestFn>, DefId)>> {
+    fn check(
+        &mut self,
+        with_test_module: bool,
+    ) -> Result<Option<(nova_hir::Module, Vec<TestFn>, DefId)>> {
         let modules = self.load_modules()?;
         if self.errors > 0 {
             return Ok(None);
@@ -571,6 +581,17 @@ impl FrontendContext {
                 self.db.add(format!("<std/{short}>"), src)
             })
             .collect();
+        // `std/test`, registered the same way but only under `nova test`
+        // (`with_test_module`): a fourth `FileId` allocated *conditionally*,
+        // which is fine precisely because it rides alongside `STD_MODULES`
+        // rather than being folded into it — nothing computes an index from
+        // `STD_MODULES.len()` expecting it to already include this entry.
+        let extra_std = with_test_module.then(|| {
+            let (name, src) = nova_resolver::STD_TEST_MODULE;
+            let short = name.strip_prefix("$std.").unwrap_or(name);
+            let file_id = self.db.add(format!("<std/{short}>"), src);
+            (nova_resolver::STD_TEST_MODULE, file_id)
+        });
         let sources: Vec<ModuleSource> = modules
             .iter()
             .map(|(name, file)| ModuleSource {
@@ -578,7 +599,7 @@ impl FrontendContext {
                 file,
             })
             .collect();
-        let resolved = nova_resolver::resolve_program(&sources, &std_files);
+        let resolved = nova_resolver::resolve_program(&sources, &std_files, extra_std);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {
             return Ok(None);

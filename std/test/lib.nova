@@ -1,0 +1,33 @@
+// std/test — assertions for `@test` functions.
+//
+// Seeded ONLY when compiling under `nova test` (see `STD_TEST_MODULE`), not
+// into every program. A top-level `pub fn assert` in an always-embedded module
+// would be glob-imported and take the names `assert`, `assert_eq` and
+// `assert_ne` in every module of every program — the same hazard that made
+// `join` hang off the separator (`",".join(parts)`) rather than being a free
+// function. The cost is that `assert` is unavailable in ordinary code; `panic`
+// already serves that need.
+//
+// Failure is `panic`, which aborts with exit non-zero and `nova: panic: ...` on
+// stderr. That is the "panicked" outcome `nova test` looks for, and it is why
+// there is no `assert_throws` here: catching a panic needs unwinding, and
+// `nova_rt_panic_str` calls `std::process::abort()`. `@test(should_panic)` is
+// the supported way to assert that something panics.
+
+pub fn assert(cond: Bool, msg: String) {
+    if !cond {
+        panic("assertion failed: ${msg}")
+    }
+}
+
+pub fn assert_eq<T: Eq + Debug>(a: T, b: T) {
+    if a.ne(b) {
+        panic("assertion failed: ${a.dbg()} != ${b.dbg()}")
+    }
+}
+
+pub fn assert_ne<T: Eq + Debug>(a: T, b: T) {
+    if a.eq(b) {
+        panic("assertion failed: ${a.dbg()} == ${b.dbg()}")
+    }
+}

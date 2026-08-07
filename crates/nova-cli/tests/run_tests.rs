@@ -3861,3 +3861,155 @@ fn test_binary_output_paths_do_not_collide_across_same_stem_sources() {
     let _ = std::fs::remove_file(&exe_a);
     let _ = std::fs::remove_file(&exe_b);
 }
+
+// === std/test: assert, assert_eq, assert_ne (Task 4) ===
+
+/// `assert_eq` must report BOTH values. A message that dropped one would
+/// still look like a failure report, and every other assertion in std/test
+/// would still "work" — so this asserts on the rendered text, not just that
+/// the process panicked.
+///
+/// Asserts the message is **exactly** `"nova: panic: assertion failed: 1 !=
+/// 3"`, not `contains("1") && contains("3")`. Those are single characters and
+/// would match a line number, a byte offset, a file path, or the test index
+/// too, so a two-fragment `contains` check passes against a completely
+/// garbled message. This is the defect that has produced every Important
+/// finding on this branch so far.
+#[test]
+fn assert_eq_failure_names_both_values() {
+    let dir = std::env::temp_dir().join("nova-test-assert-eq-both-values");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("both_values.nova");
+    std::fs::write(&file, "@test\nfn t() { assert_eq(1, 3) }\n").expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["t"]
+    );
+
+    let assert = Command::new(&exe)
+        .env("NOVA_TEST_INDEX", "0")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).replace("\r\n", "\n");
+    assert_eq!(
+        stderr.trim_end(),
+        "nova: panic: assertion failed: 1 != 3",
+        "stderr: {stderr}"
+    );
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// `assert_eq<T: Eq + Debug>` instantiated at `Bool` and `Float`, not only
+/// `Int`. `mir_ty` maps `Int` and `Char` to `MirTy::I64` and every heap type
+/// to `MirTy::Ptr`, so only `Bool` (`I8`) and `Float` (`F64`) are disjoint
+/// from both — and `Float` is the stronger of the two because it crosses
+/// register banks while `Bool`'s 0/1 would survive an `I64` mix-up intact.
+/// `String` is included too, since it is the one heap type whose `Debug`
+/// output (quoted) differs textually from its `Display` output.
+///
+/// Each type gets a PASSING case and a FAILING one. Passing cases alone prove
+/// nothing: `assert_eq(1, 1)`, `(true, true)`, `(0.5, 0.5)` and `("a", "a")`
+/// all succeed even if `assert_eq` never compares its arguments — implement
+/// `Eq::ne` as `{ false }` and every one of them still passes. The failing
+/// case is what proves the comparison actually happened; the passing case
+/// only proves it does not fire spuriously.
+#[test]
+fn assert_eq_works_at_bool_and_float_not_only_int() {
+    let dir = std::env::temp_dir().join("nova-test-assert-eq-types");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("types.nova");
+    std::fs::write(
+        &file,
+        "@test\nfn int_pass() { assert_eq(1, 1) }\n\
+         @test\nfn int_fail() { assert_eq(1, 2) }\n\
+         @test\nfn bool_pass() { assert_eq(true, true) }\n\
+         @test\nfn bool_fail() { assert_eq(true, false) }\n\
+         @test\nfn float_pass() { assert_eq(0.5, 0.5) }\n\
+         @test\nfn float_fail() { assert_eq(0.5, 1.5) }\n\
+         @test\nfn string_pass() { assert_eq(\"a\", \"a\") }\n\
+         @test\nfn string_fail() { assert_eq(\"a\", \"b\") }\n",
+    )
+    .expect("write");
+
+    let (exe, tests) =
+        nova_driver::build_test_binary(&file).expect("test binary compiles and links");
+    assert_eq!(
+        tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec![
+            "int_pass",
+            "int_fail",
+            "bool_pass",
+            "bool_fail",
+            "float_pass",
+            "float_fail",
+            "string_pass",
+            "string_fail",
+        ],
+        "collection order fixes which index below selects which case"
+    );
+
+    // (index, expected panic message; `None` means this index must pass with
+    // no output at all, since a passing `assert_eq` prints nothing).
+    let cases: [(usize, Option<&str>); 8] = [
+        (0, None),
+        (1, Some("nova: panic: assertion failed: 1 != 2")),
+        (2, None),
+        (3, Some("nova: panic: assertion failed: true != false")),
+        (4, None),
+        (5, Some("nova: panic: assertion failed: 0.5 != 1.5")),
+        (6, None),
+        (7, Some("nova: panic: assertion failed: \"a\" != \"b\"")),
+    ];
+
+    for (index, expected_panic) in cases {
+        let assert = Command::new(&exe)
+            .env("NOVA_TEST_INDEX", index.to_string())
+            .assert();
+        match expected_panic {
+            None => {
+                let assert = assert.success();
+                let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+                assert_eq!(
+                    out, "",
+                    "a passing assert_eq must print nothing (index {index})"
+                );
+            }
+            Some(msg) => {
+                let assert = assert.failure();
+                let stderr =
+                    String::from_utf8_lossy(&assert.get_output().stderr).replace("\r\n", "\n");
+                assert_eq!(stderr.trim_end(), msg, "index {index}");
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&exe);
+}
+
+/// `assert`/`assert_eq`/`assert_ne` must NOT leak into an ordinary program:
+/// `std/test` is seeded only under `nova test` (`build_test_binary`), not
+/// into `nova run`/`nova check`/`nova build`. A top-level `pub fn assert` in
+/// an always-embedded module would be glob-imported into every module of
+/// every program and take the name away from user code permanently.
+///
+/// Asserts the diagnostic message NAMES `assert`, not just that the compile
+/// failed with code `E0001` — a bare code check would pass against an
+/// `E0001` raised for any unrelated reason (e.g. a typo the fixture didn't
+/// intend to introduce).
+#[test]
+fn assert_is_not_available_outside_nova_test() {
+    let dir = std::env::temp_dir().join("nova-test-assert-not-available");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("main.nova");
+    std::fs::write(&path, "fn main() { assert(true, \"x\") }\n").expect("write");
+
+    let assert = nova().arg("run").arg(&path).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0001"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("cannot find function `assert` in this scope"),
+        "stderr: {stderr}"
+    );
+}
