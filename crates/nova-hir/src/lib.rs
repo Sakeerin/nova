@@ -35,6 +35,17 @@ pub enum Ty {
         params: Vec<Ty>,
         ret: Box<Ty>,
     },
+    /// A future produced by calling an `async fn`; the payload is the
+    /// function's declared return type (the future's *output*).
+    ///
+    /// Compiler-constructed only: there is no surface syntax that builds one,
+    /// and no impls may be written on it (`head()` returns `None`). At runtime
+    /// it is the same 2-word fat pointer as a function value —
+    /// `{ poll_code, state_ptr }` — which is why it sits beside `Ty::Fn` here
+    /// rather than being a record in `std/core`. Nova has no lang-item
+    /// mechanism: `Option` and `Result` are ordinary prelude sums the compiler
+    /// does not know by name, so a std record could not be recognized.
+    Future(Box<Ty>),
     /// A user-defined sum type with generic arguments.
     Sum {
         def_id: DefId,
@@ -106,6 +117,7 @@ impl Ty {
                 args: a.iter().map(|t| t.subst(args)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(elem.subst(args))),
+            Ty::Future(out) => Ty::Future(Box::new(out.subst(args))),
             Ty::Assoc { on, assoc } => Ty::Assoc {
                 on: Box::new(on.subst(args)),
                 assoc: *assoc,
@@ -125,6 +137,7 @@ impl Ty {
                 args.iter().any(|a| a.mentions_param(idx))
             }
             Ty::Array(elem) => elem.mentions_param(idx),
+            Ty::Future(out) => out.mentions_param(idx),
             Ty::Assoc { on, .. } => on.mentions_param(idx),
             _ => false,
         }
@@ -137,6 +150,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_params) || ret.has_params(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_params),
             Ty::Array(elem) => elem.has_params(),
+            Ty::Future(out) => out.has_params(),
             Ty::Assoc { on, .. } => on.has_params(),
             _ => false,
         }
@@ -149,6 +163,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_vars) || ret.has_vars(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
             Ty::Array(elem) => elem.has_vars(),
+            Ty::Future(out) => out.has_vars(),
             Ty::Assoc { on, .. } => on.has_vars(),
             _ => false,
         }
@@ -167,6 +182,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_assoc) || ret.has_assoc(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_assoc),
             Ty::Array(elem) => elem.has_assoc(),
+            Ty::Future(out) => out.has_assoc(),
             _ => false,
         }
     }
@@ -193,6 +209,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_error) || ret.has_error(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_error),
             Ty::Array(elem) => elem.has_error(),
+            Ty::Future(out) => out.has_error(),
             Ty::Assoc { on, .. } => on.has_error(),
             _ => false,
         }
@@ -260,6 +277,7 @@ impl Ty {
                     && a1.iter().zip(a2).all(|(p, g)| p.match_pattern(g, out))
             }
             (Ty::Array(e1), Ty::Array(e2)) => e1.match_pattern(e2, out),
+            (Ty::Future(o1), Ty::Future(o2)) => o1.match_pattern(o2, out),
             (
                 Ty::Fn {
                     params: p1,
@@ -603,6 +621,9 @@ fn normalize_within(
         Ty::Array(elem) => Ok(Ty::Array(Box::new(normalize_within(
             elem, impls, depth, steps,
         )?))),
+        Ty::Future(out) => Ok(Ty::Future(Box::new(normalize_within(
+            out, impls, depth, steps,
+        )?))),
         Ty::Int
         | Ty::Float
         | Ty::Bool
@@ -659,6 +680,7 @@ fn shift_params(t: &Ty, by: u32) -> Ty {
             args: args.iter().map(|a| shift_params(a, by)).collect(),
         },
         Ty::Array(elem) => Ty::Array(Box::new(shift_params(elem, by))),
+        Ty::Future(out) => Ty::Future(Box::new(shift_params(out, by))),
         other => other.clone(),
     }
 }
@@ -682,6 +704,7 @@ fn occurs(k: u32, t: &Ty, subst: &[Option<Ty>]) -> bool {
         }
         Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(|a| occurs(k, a, subst)),
         Ty::Array(elem) => occurs(k, &elem, subst),
+        Ty::Future(out) => occurs(k, &out, subst),
         _ => false,
     }
 }
@@ -730,6 +753,7 @@ fn unify_patterns(a: &Ty, b: &Ty, subst: &mut Vec<Option<Ty>>) -> bool {
                 && a1.iter().zip(a2).all(|(x, y)| unify_patterns(x, y, subst))
         }
         (Ty::Array(e1), Ty::Array(e2)) => unify_patterns(e1, e2, subst),
+        (Ty::Future(o1), Ty::Future(o2)) => unify_patterns(o1, o2, subst),
         (
             Ty::Fn {
                 params: p1,
@@ -1386,6 +1410,40 @@ mod tests {
             ret: Box::new(Ty::Bool),
         }
         .has_assoc());
+    }
+
+    #[test]
+    fn future_recurses_into_its_output_type() {
+        // Each predicate must look THROUGH the Future, not past it. A `_ => false`
+        // catch-all would pass a test that only ever asked about Future<Int>.
+        let p = || Ty::Param(0);
+        assert!(Ty::Future(Box::new(p())).has_params());
+        assert!(!Ty::Future(Box::new(Ty::Int)).has_params());
+        assert!(Ty::Future(Box::new(Ty::Var(0))).has_vars());
+        assert!(!Ty::Future(Box::new(Ty::Int)).has_vars());
+        assert!(Ty::Future(Box::new(Ty::Error)).has_error());
+        assert!(!Ty::Future(Box::new(Ty::Int)).has_error());
+        assert!(Ty::Future(Box::new(p())).mentions_param(0));
+        assert!(!Ty::Future(Box::new(p())).mentions_param(1));
+    }
+
+    #[test]
+    fn future_substitutes_its_output_type() {
+        let subbed = Ty::Future(Box::new(Ty::Param(0))).subst(&[Ty::Float]);
+        assert_eq!(subbed, Ty::Future(Box::new(Ty::Float)));
+    }
+
+    #[test]
+    fn future_match_pattern_binds_through_the_output() {
+        // Recovers T from Future<T> against a concrete Future<Bool>.
+        let mut out = Vec::new();
+        assert!(Ty::Future(Box::new(Ty::Param(0)))
+            .match_pattern(&Ty::Future(Box::new(Ty::Bool)), &mut out));
+        assert_eq!(out, vec![Some(Ty::Bool)]);
+        // And refuses a structural mismatch rather than binding anything.
+        let mut out2 = Vec::new();
+        assert!(!Ty::Future(Box::new(Ty::Param(0)))
+            .match_pattern(&Ty::Array(Box::new(Ty::Bool)), &mut out2));
     }
 
     // === normalize_ty ===

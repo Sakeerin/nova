@@ -2390,6 +2390,24 @@ impl<'a> Checker<'a> {
                     }
                     return Ty::Param(idx);
                 }
+                // `Future<T>` — the one built-in type name with an argument.
+                // Handled ahead of the nullary `prim` table below, whose
+                // `args.is_empty()` guard means the opposite here.
+                if name == "Future" {
+                    if args.len() != 1 {
+                        self.error(
+                            "E0012",
+                            format!(
+                                "`Future` takes exactly one type argument, found {}",
+                                args.len()
+                            ),
+                            ty.span,
+                        );
+                        return Ty::Error;
+                    }
+                    let out = self.convert_ty(&args[0], generics, bounds);
+                    return Ty::Future(Box::new(out));
+                }
                 let prim = match name {
                     "Int" => Some(Ty::Int),
                     "Float" => Some(Ty::Float),
@@ -5082,6 +5100,11 @@ impl<'a> Checker<'a> {
             "Bool" => return Some(Ty::Bool),
             "Char" => return Some(Ty::Char),
             "String" => return Some(Ty::String),
+            // `Future` is compiler-constructed and carries no associated
+            // functions; `Future::f()` is not a qualifier. Returning None here
+            // (rather than falling through to resolve_type) keeps the
+            // diagnostic about the qualifier instead of about a missing type.
+            "Future" => return None,
             _ => {}
         }
         let def_id = self.defs.resolve_type(self.cur_module, name)?;
@@ -6597,6 +6620,7 @@ fn collect_self_projections(ty: &Ty, self_ty: &Ty, out: &mut Vec<DefId>) {
             }
         }
         Ty::Array(elem) => collect_self_projections(elem, self_ty, out),
+        Ty::Future(fut_out) => collect_self_projections(fut_out, self_ty, out),
         Ty::Int
         | Ty::Float
         | Ty::Bool
@@ -11879,6 +11903,86 @@ mod tests {
             !r.diagnostics.iter().any(|d| d.message.contains("Nope")),
             "`Nope` must not be individually resolved or diagnosed: {:?}",
             r.diagnostics
+        );
+    }
+
+    #[test]
+    fn future_displays_with_its_output_type_in_a_real_diagnostic() {
+        // display_ty must render the output, not a bare "Future". Two different
+        // futures printing the same string is the `T{i}` debt this project already
+        // carries in diagnostics; do not add another instance of it.
+        //
+        // Asserted through a real mismatch message rather than by calling
+        // display_ty directly: `CheckResult` is `{ module, diagnostics }` and
+        // exposes no `Definitions`, so a direct call would need a second resolve
+        // in the test. Going through the diagnostic is also the stronger test —
+        // it is the path a user actually sees.
+        let r = check_src(
+            "fn take(x: Future<Int>) -> Int { 1 }\n\
+             fn f(y: Future<Float>) -> Int { take(y) }\n\
+             fn main() {}",
+        );
+        let msgs: Vec<String> = r.diagnostics.iter().map(|d| d.message.clone()).collect();
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Future<Int>") && m.contains("Future<Float>")),
+            "expected a message naming both futures by their output types, got {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn bare_future_without_a_type_argument_is_rejected() {
+        // `Future` takes exactly one argument. Both the zero-argument and the
+        // two-argument spellings must be diagnosed, not silently accepted --
+        // this is the arity path that no existing built-in type name exercises,
+        // because Int/Float/Bool/Char/String are all nullary.
+        let r = check_src("fn f(x: Future) -> Int { 1 }\nfn main() {}");
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0012"),
+            "expected E0012, got {:?}",
+            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn future_with_two_type_arguments_is_rejected() {
+        let r = check_src("fn f(x: Future<Int, Bool>) -> Int { 1 }\nfn main() {}");
+        assert!(r.diagnostics.iter().any(|d| d.code == "E0012"));
+    }
+
+    #[test]
+    fn future_of_int_and_future_of_float_do_not_unify() {
+        // The unifier must descend into the output type. An arm that unified any
+        // two Futures would make `Future<Int>` and `Future<Float>` interchangeable.
+        let r = check_src(
+            "fn take(x: Future<Int>) -> Int { 1 }\n\
+             fn f(y: Future<Float>) -> Int { take(y) }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0010"),
+            "expected a type mismatch, got {:?}",
+            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn future_of_int_unifies_with_itself() {
+        // The discriminating half of the test above, and NOT redundant with it:
+        // an implementation whose `Future` unify arm always FAILED would satisfy
+        // the mismatch test perfectly. Only this one rejects that.
+        let r = check_src(
+            "fn take(x: Future<Int>) -> Int { 1 }\n\
+             fn f(y: Future<Int>) -> Int { take(y) }\n\
+             fn main() {}",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "Future<Int> must unify with Future<Int>, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
         );
     }
 

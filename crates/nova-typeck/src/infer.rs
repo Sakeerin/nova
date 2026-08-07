@@ -48,6 +48,7 @@ impl InferCtx {
                 args: args.iter().map(|a| self.apply(a)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(self.apply(&elem))),
+            Ty::Future(out) => Ty::Future(Box::new(self.apply(&out))),
             Ty::Assoc { on, assoc } => Ty::Assoc {
                 on: Box::new(self.apply(&on)),
                 assoc,
@@ -67,6 +68,7 @@ impl InferCtx {
                 args.iter().any(|a| self.occurs(v, a))
             }
             Ty::Array(elem) => self.occurs(v, &elem),
+            Ty::Future(out) => self.occurs(v, &out),
             Ty::Assoc { on, .. } => self.occurs(v, &on),
             _ => false,
         }
@@ -156,6 +158,7 @@ impl InferCtx {
                         .all(|(x, y)| self.unify(x, y))
             }
             (Ty::Array(e1), Ty::Array(e2)) => self.unify(&e1.clone(), &e2.clone()),
+            (Ty::Future(o1), Ty::Future(o2)) => self.unify(&o1.clone(), &o2.clone()),
             (Ty::Assoc { on: o1, assoc: a1 }, Ty::Assoc { on: o2, assoc: a2 }) => {
                 a1 == a2 && self.unify(&o1.clone(), &o2.clone())
             }

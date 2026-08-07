@@ -62,6 +62,7 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
             }
         }
         Ty::Array(elem) => format!("[{}]", display_ty(elem, defs)),
+        Ty::Future(out) => format!("Future<{}>", display_ty(out, defs)),
         Ty::Param(i) => format!("T{i}"),
         Ty::Assoc { on, assoc } => {
             format!("{}::{}", display_ty(on, defs), defs.def(*assoc).name)

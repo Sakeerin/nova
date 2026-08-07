@@ -280,6 +280,7 @@ fn type_name(ty: &Ty, module: &hir::Module) -> String {
             .map(|r| r.name.clone())
             .unwrap_or_else(|| "?".to_string()),
         Ty::Array(elem) => format!("[{}]", type_name(elem, module)),
+        Ty::Future(out) => format!("Future<{}>", type_name(out, module)),
         Ty::Assoc { on, assoc } => {
             let name = module
                 .traits
@@ -755,6 +756,35 @@ mod tests {
             diagnostics[0].message.contains("`W::Item`"),
             "{}",
             diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn mangle_ty_distinguishes_futures_by_output_type() {
+        // A Future's mangled name must depend on its output type. `Ty::Assoc`
+        // mangling to a constant "X" already shipped as a miscompile on this
+        // project: two instantiations collided on one symbol and both dispatched
+        // to the first's code. A constant here reproduces that exactly.
+        let a = crate::mangle_ty(&hir::Ty::Future(Box::new(hir::Ty::Int)));
+        let b = crate::mangle_ty(&hir::Ty::Future(Box::new(hir::Ty::Float)));
+        let c = crate::mangle_ty(&hir::Ty::Future(Box::new(hir::Ty::Bool)));
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        // And distinct from the array mangling of the same element type, so the
+        // two single-argument constructors cannot collide either.
+        assert_ne!(a, crate::mangle_ty(&hir::Ty::Array(Box::new(hir::Ty::Int))));
+    }
+
+    #[test]
+    fn mir_ty_maps_future_to_ptr() {
+        // A future value is the fat pointer { poll_code, state_ptr }.
+        // MirTy::Unit would be catastrophic and silent: unit parameters are
+        // DROPPED from the Cranelift signature, which is how the 2.2c projection
+        // bug produced wrong values with exit 0 and no diagnostic.
+        assert_eq!(
+            crate::mir_ty(&hir::Ty::Future(Box::new(hir::Ty::Int))),
+            crate::MirTy::Ptr
         );
     }
 }

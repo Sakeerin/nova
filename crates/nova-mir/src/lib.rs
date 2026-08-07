@@ -453,7 +453,8 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         | hir::Ty::Fn { .. }
         | hir::Ty::Sum { .. }
         | hir::Ty::Record { .. }
-        | hir::Ty::Array(_) => MirTy::Ptr,
+        | hir::Ty::Array(_)
+        | hir::Ty::Future(_) => MirTy::Ptr,
         hir::Ty::Unit | hir::Ty::Never => MirTy::Unit,
         // Post-typeck these should not occur; map defensively. `Assoc` is
         // normalized away by `mono` before lowering, and a projection that
@@ -522,6 +523,11 @@ fn mangle_ty(ty: &hir::Ty) -> String {
             }
         }
         hir::Ty::Array(elem) => format!("A{}E", mangle_ty(elem)),
+        // `U` is not otherwise used as a leading letter here (nullary:
+        // i/f/b/c/s/u/n; compound: F/S/R/A above), and the mangling must be
+        // output-dependent like `Array`'s `A{elem}E` rather than a shared
+        // placeholder — see `mangle_ty_distinguishes_futures_by_output_type`.
+        hir::Ty::Future(out) => format!("U{}E", mangle_ty(out)),
         // Post-typeck these should not occur; map defensively, matching
         // `mir_ty`'s convention above (`Assoc` is normalized away by `mono`
         // before a type reaches mangling).
