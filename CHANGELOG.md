@@ -674,6 +674,82 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     *same* mutation, so what flips which class catches it is the usage shape, not
     the mutation.)
 
+- `@name(args)` attributes on items (Phase 2.2e): a leading `@name` or
+  `@name(arg, ...)` immediately before a function, record, type declaration,
+  trait, impl block, const, `import`, `module`, or `extern` block — every
+  item kind that can carry one is validated the same way. Arguments are bare
+  identifiers, not arbitrary expressions or `key = value` pairs. The
+  recognized vocabulary is closed: an attribute name outside it is always
+  `E0082`, never silently accepted. This matters most for `@test` itself — a
+  mistyped `@tset` that compiled would define a function that looks like a
+  test and never runs as one, the least visible member of this project's
+  "parses, then enforces nothing" family (a record-parameter bound that
+  bounds nothing when unused, an impl-level `const` parsed and discarded,
+  `pub` on a method accepted and ignored, record field visibility parsed and
+  never enforced). Adding a new attribute is therefore always a compiler
+  change, not something a library can register on its own
+  (`docs/adr/0008-attributes-and-test-isolation.md` §1).
+- `@test` and `@test(should_panic)` (Phase 2.2e): mark a function as a test,
+  collected in source order. `@test` on anything but a function is `E0083`;
+  a `@test` function declaring parameters, generics, or an explicit
+  non-`Unit` return type is `E0084`; an unknown `@test(...)` argument is
+  `E0085`.
+- `nova test [filter]` (Phase 2.2e): compiles the program once to a
+  standalone test binary, then runs each collected `@test` function in its
+  own process, one at a time — never in parallel and never sharing a process
+  with another test, because a panic aborts with no unwinding anywhere in
+  this runtime, so a shared-process runner could not survive one failing
+  test to report on the rest. A finished test process is reported `ok`,
+  `FAILED` (with the panic message printed beneath it), or `TRAPPED` (an
+  exit code and nothing else — an illegal instruction, a segfault, whatever
+  the runtime did not choose to do). The discriminator is whether stderr
+  contains a `nova: panic:` line, never the raw exit code, which was
+  measured to disagree with itself across independent ways of observing the
+  identical failing program on one machine
+  (`docs/adr/0008-attributes-and-test-isolation.md` §2).
+  **A hard trap is reported distinctly from a panic and does not satisfy
+  `should_panic`** — integer division by zero is the example that matters,
+  since it traps directly rather than reaching a checked panic path.
+  `@test(should_panic)` inverts only the `Panicked` outcome; a trapped test
+  still reads `TRAPPED` and still fails the run, and so does a
+  `should_panic` test that neither panics nor traps. `[filter]` selects
+  tests whose name contains the given substring anywhere, not only as a
+  prefix; a filter matching no test still exits 0. `nova test` itself exits
+  nonzero if anything failed or trapped.
+  **A program's own `fn main` is shadowed under `nova test`, not treated as
+  the entry point** — every pre-existing `main` is renamed before the test
+  dispatcher is installed, so a program with both `@test` functions and an
+  ordinary entry point (the common case: `nova build`/`nova run` both
+  require a `main`, so a real program having one already is unremarkable)
+  compiles its `main` but `nova test` never executes it. Not part of the
+  original design — a Critical defect found and fixed during implementation
+  (`docs/adr/0008-attributes-and-test-isolation.md` §3).
+- `std/test` (Phase 2.2e): `assert`, `assert_eq` and `assert_ne`, each
+  failing via `panic` with a message naming what was compared
+  (`assert_eq`/`assert_ne` require `Eq + Debug`). Seeded only when compiling
+  under `nova test`, not into every program: always embedding them would
+  take `assert`, `assert_eq` and `assert_ne` away from every module of every
+  ordinary program via glob import, the same hazard `join` hanging off the
+  separator already avoided (`std/strings`, Phase 2.2b). Outside
+  `nova test` those names are simply unresolved (`E0001`).
+- Deferred, each for a stated reason rather than left unmentioned
+  (`nova-spec/20-STDLIB.md` §11, `docs/adr/0008-attributes-and-test-
+  isolation.md` §2): `assert_throws` (this runtime has no unwinding, so a
+  panic cannot be caught, inspected, and recovered from —
+  `@test(should_panic)` is the only supported way to assert that something
+  panics, and there is no supported way to assert *what* it panics with);
+  `@bench` (unrecognized by the resolver today — writing it reports
+  `E0082`, the same as any other unknown attribute); parallel test
+  execution and a per-test timeout (deferred together — a hanging test
+  currently blocks `nova test` indefinitely, indistinguishable from slow
+  work); and `nova test --doc` (`nova-spec/20-STDLIB.md` §15).
+- Recorded, not implemented here: `nova-spec/50-TESTING.md` §§1.1-1.2 and
+  2.1 describe a `tests/compile-pass` / `tests/compile-fail` / `tests/ui`
+  harness (`insta`-snapshotted compiler diagnostics, WASM/Playwright UI
+  tests) that does not exist yet. `nova test` runs `@test` functions written
+  in Nova; it is a different mechanism aimed at a different layer, and its
+  existence does not narrow the gap `50-TESTING.md` §2.1 describes.
+
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 
 Filed here as well as under Added, because these change the meaning of code that

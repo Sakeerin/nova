@@ -4416,3 +4416,221 @@ fn a_filter_matches_a_substring_anywhere_not_only_as_a_prefix() {
          test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
     );
 }
+
+// === Task 6: `nova test` end-to-end gate ===
+//
+// `tests/runtime/nova_test.{nova,stdout}`, run three ways like every other
+// `tests/runtime` fixture (`nova_test_run`, `nova_test_build_standalone`,
+// `nova_test_under_gc_stress` — the registrations that take this workspace's
+// gate-configuration count from 15 to 18). Unlike `iterator`/`assoc_types`/
+// `strings`/`collections`/`std_core`, there is no JIT-vs-object-backend split
+// available to give the trio's middle member a distinct meaning:
+// `nova_driver::build_test_binary` always compiles through the object
+// backend (the same one `nova build` uses; see its doc comment), so
+// `nova run`'s JIT path is never exercised by `nova test` at all.
+// `nova_test_build_standalone` therefore tests the compiled binary directly —
+// bypassing the `nova` CLI subprocess for the compile-and-orchestrate step,
+// the same way `a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_
+// should_panic` above does for a single test, generalized here to all four.
+//
+// Two of the task brief's seven gate items are deliberately NOT inside
+// `nova_test.nova` itself:
+//   - A filtered run over this exact fixture is `nova_test_filter_run`
+//     below — a filter selects a *subset* of the file, so it is not a fourth
+//     way to run the whole thing, and Task 5's own tests already pin the
+//     filter mechanism (substring, anywhere, not a prefix check); this test's
+//     job is only to confirm filtering composes with the real fixture.
+//   - An unknown attribute rejected as `E0082` is
+//     `nova_test_reports_e0082_for_an_unknown_attribute` below, against its
+//     own single-line fixture. It cannot live in `nova_test.nova`: `E0082` is
+//     a compile error, and that file must compile cleanly for its other four
+//     tests to run at all.
+
+/// Copies the checked-in gate fixture's source into a temp project's
+/// `src/main.nova`, since `nova test`'s only positional argument is a filter
+/// (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`, unlike
+/// `run`/`build`/`check`) — the entry file is always `src/main.nova` relative
+/// to the current directory (`cmd/test.rs`'s `test_entry_file`). `unique_name`
+/// keeps concurrent `cargo test` threads from colliding on one directory,
+/// same convention as `write_test_project`.
+fn write_gate_fixture_project(unique_name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(unique_name);
+    std::fs::create_dir_all(dir.join("src")).expect("temp project dir");
+    let source = std::fs::read_to_string(repo_root().join("tests/runtime/nova_test.nova"))
+        .expect("gate fixture exists");
+    std::fs::write(dir.join("src/main.nova"), source).expect("write fixture");
+    dir
+}
+
+fn read_gate_expected() -> String {
+    std::fs::read_to_string(repo_root().join("tests/runtime/nova_test.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n")
+}
+
+/// Through the full `nova` CLI, exactly as a user would invoke it.
+/// `.failure()` is correct, not a mistake: the fixture deliberately contains
+/// a failing assertion and a hard trap (see its own header comment), so
+/// `nova test` itself must exit nonzero even though two of its four tests
+/// pass. The full literal stdout is asserted — not a pass/fail count and not
+/// a substring — because a runner that collapsed the panicked/trapped
+/// distinction would still exit nonzero here (the unrelated failing
+/// `assert_eq` guarantees that), so only the exact per-test lines catch the
+/// regression this fixture exists to protect against (task brief, item 4).
+#[test]
+fn nova_test_run() {
+    let expected = read_gate_expected();
+    let dir = write_gate_fixture_project("nova-test-gate-run");
+    nova()
+        .current_dir(&dir)
+        .arg("test")
+        .assert()
+        .failure()
+        .stdout(expected);
+}
+
+/// The same fixture through `nova_driver::build_test_binary` called
+/// directly, running the produced binary itself rather than going through
+/// the `nova` CLI's subprocess at all. `crates/nova-cli` has no `[lib]`
+/// target (only a `[[bin]]`), so an integration test cannot call
+/// `cmd::test::run` directly — calling the driver crate and reconstructing
+/// the report is the closest equivalent to `iterator_build_standalone`'s
+/// "exercise a different code path than `_run`" intent that is actually
+/// available here. Reconstructs the exact report `cmd/test.rs::run` would
+/// print (mirroring its `classify` + reporting loop) and compares the
+/// captured `String` with `assert_eq!`, rather than asserting on an
+/// `assert_cmd::Command` the way `nova_test_run` does — matching the brief's
+/// note that "the build variant compares captured stdout rather than
+/// asserting on the command."
+#[test]
+fn nova_test_build_standalone() {
+    let expected = read_gate_expected();
+    let dir = write_gate_fixture_project("nova-test-gate-build-standalone");
+    let (exe, tests) = nova_driver::build_test_binary(&dir.join("src/main.nova"))
+        .expect("test binary compiles and links");
+
+    let mut out = format!(
+        "running {} test{}\n",
+        tests.len(),
+        if tests.len() == 1 { "" } else { "s" }
+    );
+    let (mut passed, mut failed, mut trapped) = (0usize, 0usize, 0usize);
+    // `NOVA_TEST_INDEX` addresses a test by its position in `tests` — source
+    // order, which is also dispatch order in the synthesized `main`
+    // (`nova_driver::synthesize_test_main`) — so the enumeration index `i`,
+    // not `t.def_id`, is what selects it.
+    for (i, t) in tests.iter().enumerate() {
+        let result = Command::new(&exe)
+            .env("NOVA_TEST_INDEX", i.to_string())
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {} for `{}`: {e}", exe.display(), t.name));
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let panic_line = stderr.lines().find(|line| line.contains("nova: panic:"));
+        if result.status.success() {
+            if t.should_panic {
+                failed += 1;
+                out.push_str(&format!(
+                    "test {} ... FAILED (expected a panic, but the test passed)\n",
+                    t.name
+                ));
+            } else {
+                passed += 1;
+                out.push_str(&format!("test {} ... ok\n", t.name));
+            }
+        } else if let Some(line) = panic_line {
+            if t.should_panic {
+                passed += 1;
+                out.push_str(&format!("test {} ... ok\n", t.name));
+            } else {
+                failed += 1;
+                out.push_str(&format!(
+                    "test {} ... FAILED\n    {}\n",
+                    t.name,
+                    line.trim()
+                ));
+            }
+        } else {
+            trapped += 1;
+            let code = result.status.code().unwrap_or(-1);
+            out.push_str(&format!("test {} ... TRAPPED (exit code {code})\n", t.name));
+        }
+    }
+    out.push('\n');
+    let total = tests.len();
+    let all_ok = failed == 0 && trapped == 0;
+    out.push_str(&format!(
+        "test result: {}. {passed} passed; {failed} failed; {trapped} trapped; {total} total\n",
+        if all_ok { "ok" } else { "FAILED" }
+    ));
+    let _ = std::fs::remove_file(&exe);
+
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation).
+/// Each `@test` runs in its own process (`cmd/test.rs`'s whole design), and
+/// `std::process::Command::env` only ever ADDS to an inherited environment
+/// rather than replacing it, so setting the variable on the outer
+/// `nova test` invocation reaches every process it spawns too — the same
+/// propagation Task 4 independently confirmed for this exact mechanism
+/// (`std::process::Command::env`, not a proxy for it).
+#[test]
+fn nova_test_under_gc_stress() {
+    let expected = read_gate_expected();
+    let dir = write_gate_fixture_project("nova-test-gate-gc-stress");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .current_dir(&dir)
+        .arg("test")
+        .assert()
+        .failure()
+        .stdout(expected);
+}
+
+/// Gate item 5 ("a filter run"), composed with the real multi-item fixture
+/// rather than a fresh throwaway one. Task 5's own
+/// `a_filter_selects_a_strict_subset_and_the_others_do_not_run` and
+/// `a_filter_matches_a_substring_anywhere_not_only_as_a_prefix` already pin
+/// the filter *mechanism* (substring match, anywhere in the name, proven not
+/// to be merely a prefix check); this test's job is narrower — confirm
+/// filtering still composes correctly against this specific fixture.
+/// `"is_correct"` is a substring of exactly one of the four names, so a
+/// selected count other than 1 is immediately visible.
+#[test]
+fn nova_test_filter_run() {
+    let dir = write_gate_fixture_project("nova-test-gate-filter");
+    let assert = nova()
+        .current_dir(&dir)
+        .arg("test")
+        .arg("is_correct")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test addition_is_correct ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n"
+    );
+}
+
+/// Gate item 6 ("an unknown attribute rejected as `E0082`"), exercised
+/// through `nova test` specifically rather than only `nova check` / the
+/// resolver's own unit tests (which already cover `E0082` exhaustively —
+/// Task 2). It cannot live inside `nova_test.nova`: `E0082` is a compile
+/// error, and that file must compile cleanly for its other four tests to run
+/// at all. Asserts the diagnostic's actual text, not only its code, matching
+/// this branch's standing rule that a bare code check would still pass if
+/// the message body were replaced with something unrelated.
+#[test]
+fn nova_test_reports_e0082_for_an_unknown_attribute() {
+    let dir = write_test_project("nova-test-gate-e0082", "@tset\nfn foo() { }\n");
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("E0082"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("unknown attribute `@tset`; known attributes are: test"),
+        "stderr: {stderr}"
+    );
+}

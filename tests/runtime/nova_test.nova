@@ -1,0 +1,63 @@
+// `nova test`, end-to-end gate (the increment `docs/adr/0008-attributes-and-
+// test-isolation.md` records). Six of this design's seven gate items are
+// exercised directly in this one file, run three ways like every other
+// `tests/runtime` fixture — `nova_test_run` (the `nova` CLI's `test`
+// subcommand end to end), `nova_test_build_standalone`
+// (`nova_driver::build_test_binary` called directly, executing the produced
+// binary itself), and `nova_test_under_gc_stress` (`NOVA_GC_STRESS=1`,
+// collect on every allocation). There is no JIT-vs-object-backend split to
+// exploit the way `iterator.nova`'s trio does: `build_test_binary` always
+// compiles through the same object backend `nova build` uses, so
+// `nova_test_build_standalone` instead tests the compiled binary directly,
+// bypassing the CLI subprocess rather than a different backend.
+//
+// The remaining two gate items are NOT in this file, each for a reason that
+// is itself part of the design, not an oversight:
+//   - A filtered run over this exact fixture is `nova_test_filter_run`
+//     (`run_tests.rs`) — a filter selects a *subset* of this file, so it is
+//     not a fourth way to run the whole thing.
+//   - An unknown attribute rejected as E0082 is
+//     `nova_test_reports_e0082_for_an_unknown_attribute` (`run_tests.rs`),
+//     against its own single-line fixture — it cannot appear here, because
+//     E0082 is a compile error and this file must compile cleanly for its
+//     other four tests to run at all.
+//
+// Item order below is source order, which is dispatch order
+// (`nova_resolver::TestFn`'s collection order, `nova_driver`'s synthesized
+// `main`): a passing test, a failing one whose whole rendered message is
+// pinned, a `should_panic` test that panics via a *checked* path (array
+// bounds), and a `should_panic` test that does not — the one this fixture
+// exists to protect.
+//
+// **`division_by_zero_traps` is the load-bearing test in this file** (task
+// brief). `1 / 0` traps directly on this compiler rather than reaching the
+// runtime's checked-panic path — measured: no `nova: panic:` line appears on
+// stderr at all (ADR 0008 §2) — so `should_panic` must NOT be satisfied by
+// it. It is reported as `TRAPPED`, never `ok` and never plain `FAILED`. Every
+// *other* test in this file would render identically under a runner that
+// collapsed the panicked/trapped distinction (treating any nonzero exit as
+// "panicked as expected"); only this line tells the two runners apart, which
+// is exactly what the task brief means by "items 1-3 all pass against a
+// runner that treats any nonzero exit as failure, which is the design this
+// increment rejects."
+
+@test
+fn addition_is_correct() {
+    assert_eq(2 + 2, 4)
+}
+
+@test
+fn addition_is_wrong() {
+    assert_eq(2 + 2, 5)
+}
+
+@test(should_panic)
+fn array_out_of_bounds_panics() {
+    let xs = [1, 2, 3]
+    let _ = xs[9]
+}
+
+@test(should_panic)
+fn division_by_zero_traps() {
+    let _ = 1 / 0
+}

@@ -407,8 +407,9 @@ fn add_works() {
 }
 
 @test(should_panic)
-fn divide_by_zero_panics() {
-    let _ = 1 / 0
+fn out_of_bounds_panics() {
+    let xs = [1, 2, 3]
+    let _ = xs[9]
 }
 
 @bench
@@ -419,10 +420,34 @@ fn bench_fib() {
 pub fn assert(cond: Bool, msg: String) { if !cond { panic!(msg) } }
 pub fn assert_eq<T: Eq + Debug>(a: T, b: T) { ... }
 pub fn assert_ne<T: Eq + Debug>(a: T, b: T) { ... }
-pub fn assert_throws<F: fn() -> T, T>(f: F, expected: String) { ... }
 ```
 
-`nova test` discovers all `@test` functions across the package and runs them in parallel.
+**`should_panic` needs a *checked* panic — integer division by zero is not
+one.** An earlier revision of this example used `let _ = 1 / 0`. Measured on
+this compiler, that is a hard trap (an illegal-instruction abort, with no
+message and nothing written to stderr), not a call into the runtime's panic
+path. `@test(should_panic)` passes only when the test process both exits
+nonzero *and* stderr contains a `nova: panic:` line; a division by zero
+satisfies the first and not the second, so under this rule it **fails**
+`should_panic` rather than passing it. Array-index-out-of-bounds panics
+through a checked runtime path instead (`nova_rt_check_bounds`) and does
+satisfy `should_panic`, which is why it replaces the earlier example above.
+See `docs/adr/0008-attributes-and-test-isolation.md` §2 for the full
+classification rule and the measurement behind it.
+
+`assert_throws` is **not implemented, and cannot be, under this compiler's
+test isolation.** The runtime has no unwinding anywhere — a panic calls
+`std::process::abort()` directly (`nova_rt_panic_str`) — so there is no way
+to catch one, inspect its value, and resume the calling test.
+`@test(should_panic)` is the only supported way to assert that a test
+panics; there is no supported way to assert *what* it panics with. See
+`docs/adr/0008-attributes-and-test-isolation.md` §2.
+
+`nova test` discovers all `@test` functions across the package and runs each
+one to completion, in its own process, before starting the next — **not in
+parallel**. Isolation, not speed, is why: a panic aborts its process with no
+unwinding, so a runner sharing one process across tests (concurrently or
+not) could not survive one failing test to report on the rest.
 
 ---
 
