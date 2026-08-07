@@ -149,28 +149,52 @@ absent is `Trapped`. The exit code is carried on `Trapped` for display only;
 nothing in the classification reads its value.
 
 **Why the exit code specifically is disqualified, stated as measurement
-rather than caution.** The same failing program — `let _ = 1 / 0`, run
-through the identical build — produced disagreeing numbers from every source
-that looked at it, on the *same* machine:
+rather than caution.** For the `1 / 0` trap itself, on this machine, through
+the identical build, exactly two values were ever measured — not three, and
+not a set of mutually disagreeing figures:
 
-| Source | Value | What it actually observed |
+| Source | Value | What it observed |
 |---|---|---|
-| Git Bash, `$?` after running the program | `132` | the shell's translation of the abort |
+| Git Bash, `$?` after running the program | `132` | the shell's POSIX-style translation of the abort |
 | Rust's own `std::process::Command`, `.status.code()` | `-1073741795` (`0xC000001D`, `STATUS_ILLEGAL_INSTRUCTION`) | the raw Windows exit value, unmediated |
-| Earlier probes into a legitimate Nova panic vs. an unrelated crash | `0xC0000409` / `0xC0000005` | a *different* program's fastfail-abort vs. an unexplained access violation |
 
 Independently re-measured while writing this ADR, on this branch's own gate
 fixture (`tests/runtime/nova_test.nova`'s `division_by_zero_traps`): raw
 exit code `-1073741795` through Rust's process API, bit-for-bit the same
-value Task 5 measured on a different fixture — corroborating that the number
-is at least stable for *this* trap on *this* machine, which makes the
-disagreement above more informative, not less: three sources did not
-disagree about a fuzzy measurement, they measured three different layers of
-the same event and none of them agree with each other. A number this
-unstable *even across observation points on one machine* cannot be a
-classification key, let alone across platforms. `nova: panic:` on stderr is
-written by the runtime itself, in Nova's own control, which is what makes it
-the portable signal instead.
+value Task 5 measured on a different fixture. **These two numbers are not
+even clearly a disagreement.** Git Bash reports a process killed by a
+signal as `128 + signal`, and `132 = 128 + 4`, where `4` is `SIGILL` under
+the POSIX signal numbering Git Bash emulates — consistent with
+`STATUS_ILLEGAL_INSTRUCTION` on the Windows side and with Git Bash's own
+"Illegal instruction" wording for this identical program (Task 5's
+measurement). Read that way, `132` and `0xC000001D` are plausibly two
+encodings of one fact — an illegal-instruction trap — observed through two
+different layers, not two figures that contradict each other.
+
+*(An earlier draft of this section also folded in `0xC0000409` and
+`0xC0000005` as though they were further measurements of this same `1 / 0`
+trap. They were not, and citing them here was this ADR's own mistake,
+corrected rather than left for a reader to re-discover: both figures come
+from a *different* investigation entirely — Task 4's report on a genuine
+`assert`/`assert_ne` panic's `std::process::abort()` exit
+(`0xC0000409`) and a separate, unexplained, non-reproducing crash
+(`0xC0000005`, `STATUS_ACCESS_VIOLATION`) — on different fixtures, neither
+of them `1 / 0`. They are real numbers from real investigations on this
+branch, just not evidence about *this* trap; see Task 4's and Task 5's own
+reports for what they actually measured.)*
+
+The argument against using the exit code does not depend on the two
+`1 / 0` figures disagreeing, and is simpler than that framing suggested:
+**the exit code alone cannot distinguish a checked panic from a hard
+trap**, whether or not a given pair of measurements happens to agree. A
+legitimate Nova panic also exits nonzero — `nova_rt_panic_str` calls the
+same `std::process::abort()` a trap never reaches at all — so a classifier
+keyed on "which specific nonzero value is this" would need a maintained,
+platform-specific table of abort-shaped codes, with no guarantee a future
+trap or panic doesn't produce a new one. `nova: panic:` on stderr, by
+contrast, is written by the runtime itself, under Nova's own control, on
+exactly the outcomes that should count as a panic — which is what makes it
+the reliable signal, independent of exit-code agreement.
 
 **Correcting a claim that would otherwise have been enshrined here: the
 marker is not emitted only by `nova_rt_panic_str`.** Three call sites print
@@ -409,7 +433,10 @@ Four parts, each deliberate:
   (`crates/nova-cli/tests/run_tests.rs`)
 - Spec: `nova-spec/20-STDLIB.md` §11 (corrected alongside this document —
   `should_panic`'s example and `assert_throws`'s status);
-  `nova-spec/50-TESTING.md` §2.1 (the compile-pass/compile-fail/UI harness
-  this increment does not implement or replace — see the `CHANGELOG` entry)
+  `nova-spec/50-TESTING.md` §§1.1-1.2 and 2.1 (the `tests/compile-pass` /
+  `tests/compile-fail` harness) and separately §1.5 (the `tests/ui` harness,
+  a different mechanism — WASM/Playwright, not §2.1's Rust integration
+  test) — neither is implemented or replaced by this increment; see the
+  `CHANGELOG` entry
 - Related: ADR 0007 §2 (a primitive `Self`'s `next` copying rather than
   advancing — the residual-gaps hang example in §2 above)

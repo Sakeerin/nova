@@ -703,9 +703,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `FAILED` (with the panic message printed beneath it), or `TRAPPED` (an
   exit code and nothing else — an illegal instruction, a segfault, whatever
   the runtime did not choose to do). The discriminator is whether stderr
-  contains a `nova: panic:` line, never the raw exit code, which was
-  measured to disagree with itself across independent ways of observing the
-  identical failing program on one machine
+  contains a `nova: panic:` line, never the raw exit code — the exit code is
+  mediated by the platform and the shell and carries no message of its own,
+  so on its own it cannot distinguish a checked panic from a hard trap
   (`docs/adr/0008-attributes-and-test-isolation.md` §2).
   **A hard trap is reported distinctly from a panic and does not satisfy
   `should_panic`** — integer division by zero is the example that matters,
@@ -743,12 +743,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   execution and a per-test timeout (deferred together — a hanging test
   currently blocks `nova test` indefinitely, indistinguishable from slow
   work); and `nova test --doc` (`nova-spec/20-STDLIB.md` §15).
-- Recorded, not implemented here: `nova-spec/50-TESTING.md` §§1.1-1.2 and
-  2.1 describe a `tests/compile-pass` / `tests/compile-fail` / `tests/ui`
-  harness (`insta`-snapshotted compiler diagnostics, WASM/Playwright UI
-  tests) that does not exist yet. `nova test` runs `@test` functions written
-  in Nova; it is a different mechanism aimed at a different layer, and its
-  existence does not narrow the gap `50-TESTING.md` §2.1 describes.
+- Recorded, not implemented here: `nova-spec/50-TESTING.md` specifies a
+  `tests/compile-pass` / `tests/compile-fail` harness (§§1.1-1.2, with the
+  Rust integration-test shape — `insta`-snapshotted compiler diagnostics —
+  in §2.1) and, separately, a `tests/ui` harness (§1.5: WASM tests via
+  `wasm-bindgen-test`, headless-browser tests via Playwright); neither
+  exists yet. `nova test` runs `@test` functions written in Nova; it is a
+  different mechanism aimed at a different layer, and its existence
+  narrows neither gap.
 
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 
