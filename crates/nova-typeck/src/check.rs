@@ -7730,10 +7730,31 @@ mod tests {
              fn g() -> Int { f() }\n\
              fn main() {}",
         );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0010")
+            .unwrap_or_else(|| {
+                panic!(
+                    "calling an async fn yields Future<Int>, not Int; got {:?}",
+                    r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+                )
+            });
+        // A code-only assertion here would survive a reversal (declared and
+        // actual body types swapped in the message) or a wrong-layer bug
+        // (e.g. the body type shown as bare `Int` instead of `Future<Int>`,
+        // which would mean the E0010 fired for some other reason than the
+        // one this test exists to pin). Tying each type name to its role via
+        // the surrounding words, not just checking both names appear
+        // somewhere, is what catches a reversal: after swapping, the message
+        // would contain "return `Future<Int>`" and "type `Int`" instead.
+        // Measured, not assumed: `` `g` should return `Int` but its body has
+        // type `Future<Int>` ``.
         assert!(
-            r.diagnostics.iter().any(|d| d.code == "E0010"),
-            "calling an async fn yields Future<Int>, not Int; got {:?}",
-            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+            d.message.contains("return `Int`") && d.message.contains("has type `Future<Int>`"),
+            "E0010 must name the declared return type (`Int`) and the actual \
+             body type (`Future<Int>`) in their correct roles; got {:?}",
+            d.message
         );
     }
 
@@ -7852,13 +7873,40 @@ mod tests {
         // Trait async needs associated-type futures; out of scope for 2.3a.
         // This pins the HALF-lift: :852 becomes conditional, it does not vanish.
         let r = check_src("trait T { async fn m(self) -> Int }\nfn main() {}");
-        assert!(r.diagnostics.iter().any(|d| d.code == "E0900"));
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .unwrap_or_else(|| panic!("expected E0900, got {:?}", r.diagnostics));
+        // A code-only assertion here would survive the message changing to
+        // name a different unsupported construct entirely (e.g. if this
+        // E0900 came from the unrelated "where clauses on trait methods"
+        // check instead, which fires on the same kind of source). Measured,
+        // not assumed: "async methods are not supported yet".
+        assert!(
+            d.message.contains("async methods"),
+            "E0900 must identify async methods as the unsupported construct; got {:?}",
+            d.message
+        );
     }
 
     #[test]
     fn async_extern_fn_still_reports_e0900() {
         let r = check_src("extern \"C\" { async fn c_thing() -> Int }\nfn main() {}");
-        assert!(r.diagnostics.iter().any(|d| d.code == "E0900"));
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0900")
+            .unwrap_or_else(|| panic!("expected E0900, got {:?}", r.diagnostics));
+        // Measured, not assumed: "async extern functions are not supported
+        // yet". Distinguishes this from the trait-method message above (and
+        // from an extern block's OTHER E0900 sites, e.g. an unsupported ABI
+        // or generic extern fn) rather than accepting any E0900 on the input.
+        assert!(
+            d.message.contains("async extern functions"),
+            "E0900 must identify async extern functions as the unsupported construct; got {:?}",
+            d.message
+        );
     }
 
     #[test]

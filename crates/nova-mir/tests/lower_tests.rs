@@ -1123,3 +1123,93 @@ fn unreached_async_fn_compiles_cleanly() {
     let mir = mir_for("async fn f() -> Int { 1 }\nfn main() { }");
     assert_eq!(function_names(&mir), vec!["main"]);
 }
+
+/// Pins a shape covered so far only at the typeck level
+/// (`async_inherent_method_is_accepted` in `nova-typeck`, which never
+/// reaches `lower_module`): an async INHERENT METHOD, called on an instance
+/// from `main`, must be rejected the same as a free async fn. Worth its own
+/// test because a method's `hir::Function.name` is qualified with its
+/// owning type (measured: `` `W.get` ``, not `` `get` ``) -- a guard that
+/// worked only for `hir::Callee::Def` free-function paths, or that mangled
+/// or looked up the name differently for methods, could regress silently
+/// while every free-fn test here kept passing. Tasks 5-6 will rework this
+/// guard's exact placement, and dispatch-shape regressions are exactly what
+/// a rework can introduce without touching a single free-fn test.
+#[test]
+fn reachable_async_inherent_method_reports_e0088() {
+    let file_id = FileId::DUMMY;
+    let src = "record W { v: Int }\n\
+               impl W { async fn get(self) -> Int { self.v } }\n\
+               fn main() { let w = W { v: 1 }\n let y = w.get() }";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let ast = ast.expect("no AST");
+    let resolved = resolve(&ast);
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck should accept this program: {:?}",
+        checked.diagnostics
+    );
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => panic!("expected MIR lowering to reject the reachable inherent async method"),
+        Err(diags) => diags,
+    };
+    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
+        panic!(
+            "expected E0088, got {:?}",
+            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        d.message.contains("`W.get`") && d.message.contains("async fn"),
+        "E0088 must name the rejected method (`W.get`) and that it is an async fn; got {:?}",
+        d.message
+    );
+}
+
+/// Pins the other shape covered so far only at the typeck level
+/// (`generic_async_fn_instantiates_at_float` in `nova-typeck`, same gap): a
+/// GENERIC async fn, reached through one concrete instantiation, must be
+/// rejected too -- monomorphization produces a fresh, specialized
+/// `hir::Function` per instantiation (see `Specializer::function`), so a
+/// guard that ran before specialization, or that inspected the wrong copy
+/// of the function, could see an unspecialized (still-generic) `Ty` and
+/// behave differently than it does for a concrete, non-generic async fn.
+/// Instantiated at `Float`, per this branch's mandate for any check tied to
+/// register class (see `async_fn_without_await_still_reports_e0088_at_int`'s
+/// doc comment) -- though the guard here is keyed on `is_async`, not on any
+/// type's register class, so `Float` is precautionary, not load-bearing, for
+/// this specific test.
+#[test]
+fn reachable_generic_async_fn_instantiation_reports_e0088() {
+    let file_id = FileId::DUMMY;
+    let src = "async fn id<T>(x: T) -> T { x }\nfn main() { let y = id(1.5) }";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let ast = ast.expect("no AST");
+    let resolved = resolve(&ast);
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck should accept this program: {:?}",
+        checked.diagnostics
+    );
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => {
+            panic!("expected MIR lowering to reject the reachable generic async fn instantiation")
+        }
+        Err(diags) => diags,
+    };
+    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
+        panic!(
+            "expected E0088, got {:?}",
+            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        d.message.contains("`id`") && d.message.contains("async fn"),
+        "E0088 must name the rejected generic fn (`id`) and that it is an async fn; got {:?}",
+        d.message
+    );
+}
