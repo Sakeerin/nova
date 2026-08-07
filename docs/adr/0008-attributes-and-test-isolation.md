@@ -173,7 +173,7 @@ not a set of mutually disagreeing figures:
 
 | Source | Value | What it observed |
 |---|---|---|
-| Git Bash, `$?` after running the program | `132` | the shell's POSIX-style translation of the abort |
+| Git Bash, `$?` after running the program | `132` | the shell's POSIX-style translation of the illegal-instruction trap |
 | Rust's own `std::process::Command`, `.status.code()` | `-1073741795` (`0xC000001D`, `STATUS_ILLEGAL_INSTRUCTION`) | the raw Windows exit value, unmediated |
 
 Independently re-measured while writing this ADR, on this branch's own gate

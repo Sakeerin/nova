@@ -4349,17 +4349,32 @@ fn a_filter_selects_a_strict_subset_and_the_others_do_not_run() {
 /// index-mistakes are all independently visible:
 ///
 /// - a constant `tests[0]`: `beta_panics_checked` (index 1) would be
-///   evaluated against index 0's `false`, turning its "ok" into "FAILED".
-/// - `tests[i - 1]`: the same failure as above for index 1, *and*
-///   `gamma_ok` (index 2) would be evaluated against index 1's `true`,
-///   turning its "ok" into "FAILED (expected a panic, but the test passed)".
-/// - `tests[i + 1]`: `alpha_ok` (index 0) would be evaluated against index
-///   1's `true` (same "expected a panic" failure), and `beta_panics_checked`
-///   itself would be evaluated against index 2's `false` (same "FAILED" as
-///   the constant-0 case).
+///   evaluated against index 0's `false`, turning its "ok" into "FAILED" —
+///   a graceful wrong-verdict content mismatch. Measured: `nova test`
+///   completes normally and prints a full, well-formed report with exactly
+///   this one line wrong.
+/// - `tests[i - 1]`: **not** a graceful content mismatch — measured to be a
+///   genuine Rust panic that crashes the `nova` process outright, before
+///   evaluating anything. `i - 1` is computed on a `usize`, and the very
+///   first iteration is `i = 0` (`alpha_ok`), so it underflows immediately:
+///   `thread 'main' panicked at ...: attempt to subtract with overflow`,
+///   exit code 101. Measured stdout is only the `running 3 tests` header —
+///   `beta_panics_checked` and `gamma_ok` never get a chance to print
+///   anything, let alone the wrong thing.
+/// - `tests[i + 1]`: also a genuine Rust panic, measured one iteration
+///   later. `alpha_ok` (index 0) is evaluated against index 1's `true`
+///   ("FAILED (expected a panic, but the test passed)") and
+///   `beta_panics_checked` (index 1) against index 2's `false` ("FAILED"
+///   with its own bounds-panic message) — both print exactly as a
+///   content-mismatch framing would predict — but then `gamma_ok` (index 2)
+///   reads `tests[3]`, past the end of this 3-element array, and the `nova`
+///   process panics with `index out of bounds: the len is 3 but the index
+///   is 3` before any `test result:` summary line prints.
 ///
 /// So this single fixture's exact-output assertion fails under any of the
-/// three shapes, not just the literal one the review reproduced.
+/// three shapes — the first because the content is wrong, the other two
+/// because the `nova` process crashes and never reaches a `test result:`
+/// line at all — not just the literal one the review reproduced.
 #[test]
 fn should_panic_is_matched_to_its_own_test_not_to_index_zero() {
     let dir = write_test_project(
