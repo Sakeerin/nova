@@ -3,10 +3,10 @@
 //! Neither Nova codegen backend emits stack maps or per-slot type information,
 //! so the collector cannot know precisely where roots or heap pointers live.
 //! It is therefore *conservative*: any machine word (on the stack, in a
-//! callee-saved register, or inside a scanned heap object) whose value falls
-//! within a live allocation keeps that allocation alive. This can retain a
-//! little garbage (an integer that happens to look like a pointer) but never
-//! frees a reachable object.
+//! callee-saved register, inside a scanned heap object, or explicitly
+//! registered -- see below) whose value falls within a live allocation keeps
+//! that allocation alive. This can retain a little garbage (an integer that
+//! happens to look like a pointer) but never frees a reachable object.
 //!
 //! Collection is triggered from [`alloc`] once allocation since the last cycle
 //! crosses a growth threshold (or on every allocation under `NOVA_GC_STRESS`,
@@ -185,8 +185,16 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
 
 /// Register `ptr` as a root until [`remove_root`]. Idempotent per address is
 /// **not** assumed: registering twice requires removing twice, so callers must
-/// pair them exactly. The executor does (one add at spawn, one remove at
-/// completion).
+/// pair them exactly. The executor is expected to (one add at spawn, one
+/// remove at completion) -- stated as an intended contract, not a claim about
+/// existing code, since the executor is not on this branch yet.
+///
+/// Same-thread only: `PINNED` is thread-local, like `HEAP`, so a `remove_root`
+/// on a different thread than the matching `add_root` silently leaves the
+/// registration behind on the original thread -- the exact leak
+/// `remove_root_actually_unroots` exists to catch, but invisible to it, since
+/// that test never crosses threads. This matters if a future executor ever
+/// migrates a task between worker threads.
 ///
 /// `gc` is a private module (see `lib.rs`), so until the executor lands and
 /// calls this from non-test code, it is unreachable outside `#[cfg(test)]`,
@@ -196,22 +204,21 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
 /// target, where `dead_code` does not fire (the tests call this directly) so
 /// the expectation is "unfulfilled" there instead -- the two targets need
 /// opposite answers from the same attribute. Plain `#[allow]` is the one that
-/// is correct for both.
-#[allow(
-    dead_code,
-    reason = "consumed by the async executor (Task 4), not yet on this branch"
-)]
+/// is correct for both. `reason = "…"` inside `#[allow]` was tried too and
+/// dropped: it requires Rust 1.81, and this workspace's `Cargo.toml` declares
+/// `rust-version = "1.78"` (measured directly) -- so it would compile here,
+/// on whatever `stable` happens to be, while failing at the crate's own
+/// declared MSRV. The justification lives in this prose comment instead.
+#[allow(dead_code)]
 pub fn add_root(ptr: *mut u8) {
     PINNED.with(|p| p.borrow_mut().push(ptr as usize));
 }
 
 /// Unregister one registration of `ptr`. Removing an address that was never
 /// registered is a no-op rather than a panic — the runtime must not abort a
-/// user's program over its own bookkeeping.
-#[allow(
-    dead_code,
-    reason = "consumed by the async executor (Task 4), not yet on this branch"
-)]
+/// user's program over its own bookkeeping. Same-thread only, like
+/// [`add_root`] -- see its doc comment.
+#[allow(dead_code)]
 pub fn remove_root(ptr: *mut u8) {
     PINNED.with(|p| {
         let mut v = p.borrow_mut();
@@ -444,54 +451,16 @@ mod tests {
             h.live_bytes = 0;
             h.next_gc = INITIAL_THRESHOLD;
         });
+        // A registry test that fails before its trailing `remove_root` leaves
+        // a stale registration on this thread otherwise (no UB -- `mark_word`
+        // never dereferences a candidate -- but it corrupts the next test's
+        // `PINNED.with(|p| p.borrow().len())` check, e.g. in the pairing tests
+        // below).
+        PINNED.with(|p| p.borrow_mut().clear());
     }
 
     fn count() -> usize {
         HEAP.with(|h| h.borrow().objects.len())
-    }
-
-    /// Carry a heap address across a `collect()` call below without leaving
-    /// its literal bits in a place the conservative scanner would treat as a
-    /// root.
-    ///
-    /// Several tests below need the numeric address of an object *after*
-    /// calling the real `collect()`, to look it up with `object_info` or hand
-    /// it to `remove_root`. A `usize` that must be read again after a call
-    /// has to survive that call, and this collector's own definition of
-    /// "conservative" (module doc comment, top of file) means the compiler
-    /// necessarily preserves a surviving value somewhere the scanner looks: a
-    /// stack slot, or a callee-saved register the `setjmp` shim flushes to
-    /// one. A plain `usize` copy of the address is bit-identical to a real
-    /// pointer to it, so it is then indistinguishable from a genuine root —
-    /// which would make `object_info` report the object alive whether or not
-    /// the registry (or anything else) is actually the thing keeping it
-    /// there.
-    ///
-    /// This is measured, not hypothetical: the first version of the tests
-    /// below carried `addr` across `collect()` as a plain `usize`, and with
-    /// that shape `an_unregistered_object_is_swept` and
-    /// `remove_root_actually_unroots` both failed (the object was never
-    /// swept), while separately neutering `add_root` into a no-op left
-    /// `a_registered_root_survives_a_collection_with_no_stack_reference`,
-    /// `a_registered_root_keeps_its_transitive_children_alive`, and
-    /// `the_registry_survives_more_than_one_collection` all still passing —
-    /// i.e. every test that used a plain `usize` this way was either
-    /// unpassable or passed regardless of whether the registry did anything.
-    ///
-    /// The complement is its own inverse, and for every address a live heap
-    /// allocation can actually have in this process it lands far outside any
-    /// tracked object's `[addr, addr + size)` range (real addresses are
-    /// nowhere near `usize::MAX`), so `mark_word` never mistakes the hidden
-    /// form for a root in transit.
-    fn hide(addr: usize) -> usize {
-        !addr
-    }
-
-    /// Inverse of [`hide`]. A distinct name at call sites, even though the
-    /// operation is identical, so a `hide`/`reveal` pair reads as encode/decode
-    /// rather than as an unexplained bitwise flip.
-    fn reveal(hidden: usize) -> usize {
-        !hidden
     }
 
     #[test]
@@ -575,197 +544,432 @@ mod tests {
         assert_eq!(count(), 1);
     }
 
+    // The two tests below exercise `add_root`/`remove_root`'s own bookkeeping
+    // (via `PINNED`'s length) directly, without going through `collect()`, so
+    // -- unlike the tests in `mod registry` below -- they run on every
+    // platform, including the two (Linux, macOS) where `collect()` itself is
+    // a no-op (see `mod registry`'s doc comment).
+
     #[test]
-    fn a_registered_root_survives_a_collection_with_no_stack_reference() {
-        // The exact scenario: an object reachable ONLY through the registry.
-        // `black_box` is not enough on its own here -- the point is that after
-        // the pointer is registered we must NOT keep it in a live local that the
-        // conservative stack scan would find anyway, or the test passes with the
-        // registry doing nothing.
-        //
-        // Two distinct hazards were measured while building this test, each
-        // independently capable of making it pass against a no-op registry:
-        //
-        // 1. `addr` (needed after `collect()`, for `object_info`/`remove_root`)
-        //    must survive the call, and this collector's own definition of
-        //    "conservative" (module doc comment) means a `usize` that survives
-        //    a call is necessarily preserved somewhere the scanner looks --
-        //    a stack slot, or a callee-saved register the setjmp shim flushes
-        //    to one. A plain copy, bit-identical to the object's address, is
-        //    then an accidental root in its own right. Fixed by carrying it
-        //    across as `hide(addr)` instead of `addr` (see `hide`'s doc
-        //    comment).
-        // 2. `let obj = null_mut();` -- shadowing, not reassigning -- declares
-        //    a SECOND, distinct stack slot in this unoptimized build; the
-        //    FIRST slot, still holding the original pointer, is never
-        //    overwritten and stays live for the rest of the frame. Measured
-        //    directly: with shadowing, `an_unregistered_object_is_swept` and
-        //    `remove_root_actually_unroots` both failed -- their objects were
-        //    never swept -- even though the first of those two never calls
-        //    `add_root` at all. Fixed by making `obj` `mut` and reassigning in
-        //    place, so the null overwrites the same slot the original pointer
-        //    occupied.
-        let mut obj = alloc(64, true);
+    fn registering_the_same_address_twice_requires_removing_it_twice() {
+        // add_root's doc comment states this is multiset, not set, semantics.
+        // Correct by inspection (`push`/`rposition`+`swap_remove`), but had no
+        // regression guard: a future "simplification" to a `HashSet`-backed
+        // registry, or to `Vec::retain`/`dedup`, would silently change this,
+        // and Task 4's executor is exactly the kind of caller (spawn once,
+        // could plausibly register twice under a bug) this would bite.
+        reset();
+        let obj = alloc(16, true);
         add_root(obj);
-        let hidden = hide(obj as usize);
-        obj = std::ptr::null_mut::<u8>();
-        std::hint::black_box(obj);
-        std::hint::black_box(hidden);
-
-        collect();
-
-        let addr = reveal(hidden);
-        assert!(
-            object_info(addr).is_some(),
-            "a registered root was swept; the registry is not seeding the mark set"
-        );
-        remove_root(addr as *mut u8);
-    }
-
-    #[test]
-    fn an_unregistered_object_is_swept() {
-        // The discriminating half. Without this, the test above passes even if
-        // collect() never frees anything at all. It is also the test that
-        // caught both hazards documented on
-        // `a_registered_root_survives_a_collection_with_no_stack_reference`:
-        // `obj` is `mut` and nulled by reassignment (not `let`-shadowed), and
-        // `addr` crosses `collect()` hidden rather than as a plain `usize`.
-        let mut obj = alloc(64, true);
-        let hidden = hide(obj as usize);
-        obj = std::ptr::null_mut::<u8>();
-        std::hint::black_box(obj);
-        std::hint::black_box(hidden);
-
-        collect();
-
-        let addr = reveal(hidden);
-        assert!(
-            object_info(addr).is_none(),
-            "an unreachable, unregistered object survived; this test cannot \
-             discriminate a working registry from a collector that frees nothing"
-        );
-    }
-
-    #[test]
-    fn remove_root_actually_unroots() {
-        // Otherwise add/remove is a leak, and every completed task's state is
-        // retained for the process lifetime. See
-        // `a_registered_root_survives_a_collection_with_no_stack_reference` for
-        // why `obj` is `mut`+reassigned and `addr` crosses `collect()` hidden.
-        let mut obj = alloc(64, true);
-        let hidden = hide(obj as usize);
         add_root(obj);
         remove_root(obj);
-        obj = std::ptr::null_mut::<u8>();
-        std::hint::black_box(obj);
-        std::hint::black_box(hidden);
-
-        collect();
-
-        let addr = reveal(hidden);
-        assert!(object_info(addr).is_none(), "remove_root did not unroot");
-    }
-
-    /// Allocate `parent`/`child`, link `child` under `parent`, register
-    /// `parent`, and hand back both addresses hidden (see [`hide`]). Used only
-    /// by `a_registered_root_keeps_its_transitive_children_alive`.
-    ///
-    /// A separate, never-inlined function, deliberately: every raw pointer
-    /// this scenario needs (`parent`, `child`, the cast receiver for the
-    /// write, the value written) stays local to this call and is never
-    /// returned. Measured that this matters and a same-frame version does
-    /// not: with everything inlined into the test itself -- `mut`-reassigned
-    /// locals, `hide`d addresses, even the write's operands routed through
-    /// named temporaries and a 4 KiB stack buffer stomped over the frame
-    /// before collecting -- `parent` still measurably survived a collection
-    /// with `add_root` reduced to a no-op. Explicitly zeroing every
-    /// callee-saved general-purpose register this build's inline-asm would
-    /// let a program touch -- `rsi`, `rdi`, `r12`-`r15` -- did not clear it
-    /// either (`rbx` is reserved by rustc/LLVM on this target and refused as
-    /// an asm operand; `rbp` and the callee-saved `xmm6`-`xmm15` were not
-    /// tried). So the exact register is not identified, only narrowed to
-    /// "some callee-saved register (or, less likely, some other stack slot
-    /// this pass didn't reach) this same-frame shape leaves live" -- but the
-    /// mechanism that fixes it is not in question: unlike a stack slot, a
-    /// callee-saved register that a deeper call uses is saved on that call's
-    /// entry and restored to the *caller's* pre-call value on return, by the
-    /// calling convention every correctly-compiled function must honor -- not
-    /// left holding whatever the callee last put there. Putting the whole
-    /// scenario behind exactly one such call, returning only `hide`d
-    /// integers, resolved it.
-    #[inline(never)]
-    fn setup_registered_parent_and_child() -> (usize, usize) {
-        let mut parent = alloc(16, true);
-        let mut child = alloc(32, true);
-        let child_addr = hide(child as usize);
-        let parent_addr = hide(parent as usize);
-        let mut child_bits = child as usize;
-        let mut parent_ptr = parent as *mut usize;
-        unsafe { parent_ptr.write(child_bits) };
-        add_root(parent);
-        child = std::ptr::null_mut::<u8>();
-        parent = std::ptr::null_mut::<u8>();
-        child_bits = 0;
-        parent_ptr = std::ptr::null_mut::<usize>();
-        std::hint::black_box(child);
-        std::hint::black_box(parent);
-        std::hint::black_box(child_bits);
-        std::hint::black_box(parent_ptr);
-        (parent_addr, child_addr)
-    }
-
-    #[test]
-    fn a_registered_root_keeps_its_transitive_children_alive() {
-        // The registry seeds the mark set; marking must then TRACE. A registry
-        // that marked only the registered object itself would free a suspended
-        // task's locals while keeping its state header -- the exact bug, one
-        // level down, and invisible to the first test.
-        //
-        // All of `parent`, `child`, and every raw pointer derived from them
-        // lives and dies inside `setup_registered_parent_and_child` -- see its
-        // doc comment for why that call boundary, specifically, is what makes
-        // this test trustworthy. This function only ever holds the hidden
-        // (`hide`d) addresses.
-        let (parent_addr, child_addr) = setup_registered_parent_and_child();
-        std::hint::black_box(parent_addr);
-        std::hint::black_box(child_addr);
-
-        collect();
-
-        assert!(
-            object_info(reveal(child_addr)).is_some(),
-            "a child reachable only through a registered root was swept"
+        assert_eq!(
+            PINNED.with(|p| p.borrow().len()),
+            1,
+            "removing once should leave exactly one registration of a twice-registered address"
         );
-        remove_root(reveal(parent_addr) as *mut u8);
+        remove_root(obj);
+        assert_eq!(
+            PINNED.with(|p| p.borrow().len()),
+            0,
+            "the second remove_root should clear the second registration"
+        );
     }
 
     #[test]
-    fn the_registry_survives_more_than_one_collection() {
-        // ROOTS (gc.rs:95) is a SCRATCH buffer cleared at the start of every
-        // cycle. If the registry were folded into it, the first collection would
-        // consume it and the second would sweep the root. That failure mode is
-        // invisible to any single-collection test.
-        //
-        // See `a_registered_root_survives_a_collection_with_no_stack_reference`
-        // for why `obj` is `mut`+reassigned and `addr` crosses each `collect()`
-        // call hidden.
-        let mut obj = alloc(64, true);
+    fn removing_an_unregistered_address_does_not_panic_or_change_the_registry() {
+        // remove_root's doc comment states this is a no-op, not a panic.
+        // Correct by inspection (`rposition` returning `None` short-circuits
+        // the `swap_remove`), but likewise had no regression guard.
+        reset();
+        let obj = alloc(16, true);
         add_root(obj);
-        let hidden = hide(obj as usize);
-        obj = std::ptr::null_mut::<u8>();
-        std::hint::black_box(obj);
-        std::hint::black_box(hidden);
-
-        collect();
-        collect();
-        collect();
-
-        let addr = reveal(hidden);
-        assert!(
-            object_info(addr).is_some(),
-            "the registry did not survive repeated collections; it is probably \
-             sharing the scratch ROOTS buffer"
+        let never_registered = alloc(16, true);
+        remove_root(never_registered);
+        assert_eq!(
+            PINNED.with(|p| p.borrow().len()),
+            1,
+            "removing an address that was never registered changed the registry"
         );
-        remove_root(addr as *mut u8);
+        remove_root(obj);
+    }
+
+    /// Tests exercising the real, stack-scanning `collect()` (every test
+    /// above uses the deterministic `collect_with_roots` instead), to prove
+    /// `PINNED` is correctly integrated into that path: seeded before the
+    /// scan, surviving repeated collections, and its roots traced rather than
+    /// merely marked.
+    ///
+    /// **Gated to Windows.** `stack_base` (`:433` in this file) only
+    /// implements precise stack bounds there; off Windows it returns `None`,
+    /// so `collect()` (`:264`, early return at `:273-275`) sets
+    /// `alloc_since_gc = 0` and returns *before* even looking at `PINNED` --
+    /// no scan, no mark, no sweep, on any platform this collector doesn't yet
+    /// support. Measured directly (Critical review finding): with these
+    /// tests left ungated, on Linux/macOS `an_unregistered_object_is_swept`
+    /// and `remove_root_actually_unroots` fail outright (nothing is ever
+    /// swept), while the three `..._survives_...`/`..._alive` tests pass
+    /// vacuously -- identically to what `add_root` being `{}` would produce,
+    /// which is the one thing a test in this file must never do. This is not
+    /// hypothetical: `.github/workflows/ci.yml` runs `cargo test --workspace
+    /// --all-features` on `ubuntu-latest`, `windows-latest`, and
+    /// `macos-latest`, so this would land red (and green for the wrong
+    /// reason) on two of three CI jobs. `collect_with_roots` was considered
+    /// as a platform-independent alternative and rejected: it bypasses
+    /// `collect()`'s `PINNED`-seeding step entirely, which is the one thing
+    /// this module needs to prove, so a `collect_with_roots`-based version
+    /// would only re-test what `transitive_marking_keeps_referenced_objects`
+    /// (above) already covers.
+    ///
+    /// **Not gated for `--release`, and not fully sound there.** This
+    /// project's CI (same file) runs plain `cargo test`, never with
+    /// `--release`; every test here is verified against that (the only
+    /// configuration CI runs). `cargo test --release -p nova-runtime` is a
+    /// separate, known-incomplete story: `hide`/`reveal`'s `#[inline(never)]`
+    /// (below) fixes the specific optimizer collapse it targets, verified for
+    /// four of the six tests here, but `remove_root_actually_unroots` and
+    /// `an_unregistered_parent_and_child_are_swept` still fail under
+    /// `--release` by a mechanism not identified despite trying -- see their
+    /// own comments.
+    #[cfg(windows)]
+    mod registry {
+        use super::*;
+
+        /// Carry a heap address across a `collect()` call below without
+        /// leaving its literal bits in a place the conservative scanner would
+        /// treat as a root. `#[inline(never)]` so this holds under
+        /// optimization too -- see the third paragraph below.
+        ///
+        /// Several tests below need the numeric address of an object *after*
+        /// calling the real `collect()`, to look it up with `object_info` or
+        /// hand it to `remove_root`. A `usize` that must be read again after a
+        /// call has to survive that call, and this collector's own definition
+        /// of "conservative" (module doc comment, top of file) means the
+        /// compiler necessarily preserves a surviving value somewhere the
+        /// scanner looks: a stack slot, or a callee-saved register the
+        /// `setjmp` shim flushes to one. A plain `usize` copy of the address
+        /// is bit-identical to a real pointer to it, so it is then
+        /// indistinguishable from a genuine root -- which would make
+        /// `object_info` report the object alive whether or not the registry
+        /// (or anything else) is actually the thing keeping it there.
+        ///
+        /// Isolated, not just observed alongside the shadowing hazard fixed
+        /// elsewhere in this file (an earlier version of this comment cited
+        /// the wrong evidence for that reason -- see below): with locals
+        /// already `mut`+reassigned (the shadowing hazard closed) but `addr`
+        /// carried as a plain `usize` instead of `hide(addr)`,
+        /// `an_unregistered_object_is_swept` fails in a debug build, and
+        /// `a_registered_root_survives_a_collection_with_no_stack_reference`
+        /// passes even with `add_root` reduced to a no-op. Both were re-run
+        /// with `hide`/`reveal` restored and passed/failed correctly again.
+        /// (Correction: an earlier version of this comment cited those same
+        /// two test names as evidence for this hazard without having isolated
+        /// it from the shadowing hazard -- at the time, both hazards were
+        /// simultaneously present or simultaneously-confounded in every
+        /// observation, so that citation supported the shadowing hazard at
+        /// least as well as this one. The conclusion -- that hiding the
+        /// address is independently necessary -- was correct; the cited
+        /// evidence for it was not isolated and has been replaced with the
+        /// isolating experiment described here.)
+        ///
+        /// Also required under `--release`: measured directly, when `hide`
+        /// and `reveal` were plain, freely inlinable `fn`s (no
+        /// `#[inline(never)]`), `cargo test --release -p nova-runtime` failed
+        /// `an_unregistered_object_is_swept` and the three
+        /// `..._survives_...`/`..._alive` tests below (all four use `hide`
+        /// directly on a value that only this hiding is meant to protect). An
+        /// optimizer that inlines both and proves `reveal(hide(x)) == x` is
+        /// free to keep the original `x` live across `collect()` instead of
+        /// ever materializing the hidden form, which defeats the whole point.
+        /// `#[inline(never)]` keeps the two calls opaque to each other so the
+        /// compiler cannot make that substitution; re-measured with it
+        /// present, those four tests pass under `--release`.
+        ///
+        /// Not a complete fix for the whole file, and this comment does not
+        /// claim it is: `remove_root_actually_unroots` and
+        /// `an_unregistered_parent_and_child_are_swept` (below) still fail
+        /// under `--release` by a mechanism this `#[inline(never)]` does not
+        /// reach -- see the comment on the former for what was tried. Neither
+        /// is this module's job to fully solve under this task; see this
+        /// module's own doc comment for why `--release` is not what this
+        /// project's CI runs.
+        ///
+        /// The complement is its own inverse, and for every address a live
+        /// heap allocation can actually have in this process it lands far
+        /// outside any tracked object's `[addr, addr + size)` range (real
+        /// addresses are nowhere near `usize::MAX`), so `mark_word` never
+        /// mistakes the hidden form for a root in transit.
+        #[inline(never)]
+        fn hide(addr: usize) -> usize {
+            !addr
+        }
+
+        /// Inverse of [`hide`]. A distinct name at call sites, even though
+        /// the operation is identical, so a `hide`/`reveal` pair reads as
+        /// encode/decode rather than as an unexplained bitwise flip.
+        /// `#[inline(never)]` for the same reason as `hide`.
+        #[inline(never)]
+        fn reveal(hidden: usize) -> usize {
+            !hidden
+        }
+
+        #[test]
+        fn a_registered_root_survives_a_collection_with_no_stack_reference() {
+            // The exact scenario: an object reachable ONLY through the registry.
+            // `black_box` is not enough on its own here -- the point is that after
+            // the pointer is registered we must NOT keep it in a live local that the
+            // conservative stack scan would find anyway, or the test passes with the
+            // registry doing nothing.
+            //
+            // Two distinct hazards were measured while building this test, each
+            // independently capable of making it pass against a no-op registry:
+            //
+            // 1. `addr` (needed after `collect()`, for `object_info`/`remove_root`)
+            //    must survive the call, and this collector's own definition of
+            //    "conservative" (module doc comment) means a `usize` that survives
+            //    a call is necessarily preserved somewhere the scanner looks --
+            //    a stack slot, or a callee-saved register the setjmp shim flushes
+            //    to one. A plain copy, bit-identical to the object's address, is
+            //    then an accidental root in its own right. Fixed by carrying it
+            //    across as `hide(addr)` instead of `addr` (see `hide`'s doc
+            //    comment).
+            // 2. `let obj = null_mut();` -- shadowing, not reassigning -- declares
+            //    a SECOND, distinct stack slot in this unoptimized build; the
+            //    FIRST slot, still holding the original pointer, is never
+            //    overwritten and stays live for the rest of the frame. Measured
+            //    directly: with shadowing, `an_unregistered_object_is_swept` and
+            //    `remove_root_actually_unroots` both failed -- their objects were
+            //    never swept -- even though the first of those two never calls
+            //    `add_root` at all. Fixed by making `obj` `mut` and reassigning in
+            //    place, so the null overwrites the same slot the original pointer
+            //    occupied.
+            let mut obj = alloc(64, true);
+            add_root(obj);
+            let hidden = hide(obj as usize);
+            obj = std::ptr::null_mut::<u8>();
+            std::hint::black_box(obj);
+            std::hint::black_box(hidden);
+
+            collect();
+
+            let addr = reveal(hidden);
+            assert!(
+                object_info(addr).is_some(),
+                "a registered root was swept; the registry is not seeding the mark set"
+            );
+            remove_root(addr as *mut u8);
+        }
+
+        #[test]
+        fn an_unregistered_object_is_swept() {
+            // The discriminating half. Without this, the test above passes even if
+            // collect() never frees anything at all. It is also the test that
+            // caught both hazards documented on
+            // `a_registered_root_survives_a_collection_with_no_stack_reference`:
+            // `obj` is `mut` and nulled by reassignment (not `let`-shadowed), and
+            // `addr` crosses `collect()` hidden rather than as a plain `usize`.
+            let mut obj = alloc(64, true);
+            let hidden = hide(obj as usize);
+            obj = std::ptr::null_mut::<u8>();
+            std::hint::black_box(obj);
+            std::hint::black_box(hidden);
+
+            collect();
+
+            let addr = reveal(hidden);
+            assert!(
+                object_info(addr).is_none(),
+                "an unreachable, unregistered object survived; this test cannot \
+             discriminate a working registry from a collector that frees nothing"
+            );
+        }
+
+        #[test]
+        fn remove_root_actually_unroots() {
+            // Otherwise add/remove is a leak, and every completed task's state is
+            // retained for the process lifetime. See
+            // `a_registered_root_survives_a_collection_with_no_stack_reference` for
+            // why `obj` is `mut`+reassigned and `addr` crosses `collect()` hidden.
+            //
+            // Known not to hold under `cargo test --release`: measured that
+            // `object_info` still finds the object, with `PINNED` independently
+            // confirmed empty both before and after `collect()` (so the leak is
+            // an accidental stack/register root, not a `remove_root` bug). Tried
+            // and did not fix it: routing `add_root`/`remove_root` through a
+            // dedicated `#[inline(never)]` helper; outlining the entire setup
+            // (allocate, hide, register, unregister, null) into a
+            // `#[inline(never)]` function returning only the hidden address, the
+            // same shape that fixed the transitive test's register leak; and
+            // stomping an 8 KiB stack buffer between that call and `collect()`.
+            // The mechanism is not identified. Not chased further: this
+            // project's CI (`.github/workflows/ci.yml`) runs plain `cargo test`,
+            // never `--release`, so this is a real gap, not a currently-shipping
+            // false green.
+            let mut obj = alloc(64, true);
+            let hidden = hide(obj as usize);
+            add_root(obj);
+            remove_root(obj);
+            obj = std::ptr::null_mut::<u8>();
+            std::hint::black_box(obj);
+            std::hint::black_box(hidden);
+
+            collect();
+
+            let addr = reveal(hidden);
+            assert!(object_info(addr).is_none(), "remove_root did not unroot");
+        }
+
+        /// Allocate `parent`/`child`, link `child` under `parent`, optionally
+        /// register `parent`, and hand back both addresses hidden (see
+        /// [`hide`]). Shared by the positive test
+        /// (`a_registered_root_keeps_its_transitive_children_alive`,
+        /// `register = true`) and its negative control
+        /// (`an_unregistered_parent_and_child_are_swept`, `register = false`)
+        /// so both go through the identical shape and only the one bit that
+        /// matters differs.
+        ///
+        /// A separate, never-inlined function, deliberately: every raw
+        /// pointer this scenario needs (`parent`, `child`, the cast receiver
+        /// for the write, the value written) stays local to this call and is
+        /// never returned. Measured that this matters and a same-frame
+        /// version does not: with everything inlined into the test itself --
+        /// `mut`-reassigned locals, `hide`d addresses, even the write's
+        /// operands routed through named temporaries and a 4 KiB stack buffer
+        /// stomped over the frame before collecting -- `parent` still
+        /// measurably survived a collection with `add_root` reduced to a
+        /// no-op. Explicitly zeroing every callee-saved general-purpose
+        /// register this build's inline-asm would let a program touch --
+        /// `rsi`, `rdi`, `r12`-`r15` -- did not clear it either (`rbx` is
+        /// reserved by rustc/LLVM on this target and refused as an asm
+        /// operand; `rbp` and the callee-saved `xmm6`-`xmm15` were not
+        /// tried). So the exact register is not identified, only narrowed to
+        /// "some callee-saved register (or, less likely, some other stack
+        /// slot this pass didn't reach) this same-frame shape leaves live" --
+        /// but the mechanism that fixes it is not in question: unlike a stack
+        /// slot, a callee-saved register that a deeper call uses is saved on
+        /// that call's entry and restored to the *caller's* pre-call value on
+        /// return, by the calling convention every correctly-compiled
+        /// function must honor -- not left holding whatever the callee last
+        /// put there. Putting the whole scenario behind exactly one such
+        /// call, returning only `hide`d integers, resolved it.
+        ///
+        /// This test's soundness rests on `#[inline(never)]` actually being
+        /// honored (an inlined copy reintroduces the same-frame leak this
+        /// function exists to avoid) and on the frame this call builds not
+        /// coincidentally being fully overwritten by `collect()`'s own stack
+        /// usage before the scan -- neither is enforced by the type system.
+        /// `an_unregistered_parent_and_child_are_swept` is the canary for
+        /// both: it runs the identical function and would start failing if
+        /// either stopped holding.
+        #[inline(never)]
+        fn setup_parent_and_child(register: bool) -> (usize, usize) {
+            let mut parent = alloc(16, true);
+            let mut child = alloc(32, true);
+            let child_addr = hide(child as usize);
+            let parent_addr = hide(parent as usize);
+            let mut child_bits = child as usize;
+            let mut parent_ptr = parent as *mut usize;
+            unsafe { parent_ptr.write(child_bits) };
+            if register {
+                add_root(parent);
+            }
+            child = std::ptr::null_mut::<u8>();
+            parent = std::ptr::null_mut::<u8>();
+            child_bits = 0;
+            parent_ptr = std::ptr::null_mut::<usize>();
+            std::hint::black_box(child);
+            std::hint::black_box(parent);
+            std::hint::black_box(child_bits);
+            std::hint::black_box(parent_ptr);
+            (parent_addr, child_addr)
+        }
+
+        #[test]
+        fn a_registered_root_keeps_its_transitive_children_alive() {
+            // The registry seeds the mark set; marking must then TRACE. A
+            // registry that marked only the registered object itself would
+            // free a suspended task's locals while keeping its state header
+            // -- the exact bug, one level down, and invisible to the first
+            // test.
+            //
+            // All of `parent`, `child`, and every raw pointer derived from
+            // them lives and dies inside `setup_parent_and_child` -- see its
+            // doc comment for why that call boundary, specifically, is what
+            // makes this test trustworthy. This function only ever holds the
+            // hidden (`hide`d) addresses.
+            let (parent_addr, child_addr) = setup_parent_and_child(true);
+            std::hint::black_box(parent_addr);
+            std::hint::black_box(child_addr);
+
+            collect();
+
+            assert!(
+                object_info(reveal(child_addr)).is_some(),
+                "a child reachable only through a registered root was swept"
+            );
+            remove_root(reveal(parent_addr) as *mut u8);
+        }
+
+        #[test]
+        fn an_unregistered_parent_and_child_are_swept() {
+            // The negative control for the test above -- see
+            // `setup_parent_and_child`'s doc comment. Without this, the test
+            // above passing proves nothing beyond "this particular frame
+            // shape didn't happen to leak this time": `#[inline(never)]`
+            // going unhonored, or the frame layout shifting so `collect()`'s
+            // own stack usage no longer overwrites the same slots, would make
+            // it pass whether or not the registry does anything, exactly like
+            // the un-negated hazards this file has already measured twice.
+            //
+            // This canary is doing real work, not just a formality: measured,
+            // this test itself fails under `cargo test --release`, the same
+            // way `remove_root_actually_unroots` does and by a mechanism
+            // neither test's investigation identified -- see that test's
+            // comment for what was tried. Left as a known `--release` gap;
+            // this module's doc comment covers why that is not what this
+            // project's CI runs.
+            let (_parent_addr, child_addr) = setup_parent_and_child(false);
+            std::hint::black_box(child_addr);
+
+            collect();
+
+            assert!(
+                object_info(reveal(child_addr)).is_none(),
+                "a child of an unregistered, unreachable parent survived; \
+                 setup_parent_and_child's same-frame hiding is not sound here"
+            );
+        }
+
+        #[test]
+        fn the_registry_survives_more_than_one_collection() {
+            // ROOTS (gc.rs:95) is a SCRATCH buffer cleared at the start of
+            // every cycle. If the registry were folded into it, the first
+            // collection would consume it and the second would sweep the
+            // root. That failure mode is invisible to any single-collection
+            // test.
+            //
+            // See
+            // `a_registered_root_survives_a_collection_with_no_stack_reference`
+            // for why `obj` is `mut`+reassigned and `addr` crosses each
+            // `collect()` call hidden.
+            let mut obj = alloc(64, true);
+            add_root(obj);
+            let hidden = hide(obj as usize);
+            obj = std::ptr::null_mut::<u8>();
+            std::hint::black_box(obj);
+            std::hint::black_box(hidden);
+
+            collect();
+            collect();
+            collect();
+
+            let addr = reveal(hidden);
+            assert!(
+                object_info(addr).is_some(),
+                "the registry did not survive repeated collections; it is probably \
+                 sharing the scratch ROOTS buffer"
+            );
+            remove_root(addr as *mut u8);
+        }
     }
 }
