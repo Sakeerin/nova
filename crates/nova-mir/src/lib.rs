@@ -175,6 +175,15 @@ rt_funcs! {
     Panic,
     /// `() -> i64`. See `Builtin::TestSelector`.
     TestSelector,
+    /// `(ptr to { poll_code, state }) -> i64` — queue a task, return its id.
+    TaskSpawn,
+    /// `(ptr to { poll_code, state }) -> i64` — drive the executor until this
+    /// future completes; returns its output slot.
+    TaskBlockOn,
+    /// `(i64 task_id) -> i8` — whether a spawned task has completed.
+    TaskIsDone,
+    /// `(i64 task_id) -> i64` — a completed task's output.
+    TaskTakeOutput,
 }
 
 impl RtFunc {
@@ -200,6 +209,10 @@ impl RtFunc {
             RtFunc::CheckBounds => "nova_rt_check_bounds",
             RtFunc::Panic => "nova_rt_panic_str",
             RtFunc::TestSelector => "nova_rt_test_selector",
+            RtFunc::TaskSpawn => "nova_rt_task_spawn",
+            RtFunc::TaskBlockOn => "nova_rt_task_block_on",
+            RtFunc::TaskIsDone => "nova_rt_task_is_done",
+            RtFunc::TaskTakeOutput => "nova_rt_task_take_output",
         }
     }
 
@@ -223,6 +236,9 @@ impl RtFunc {
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TestSelector => (vec![], MirTy::I64),
+            RtFunc::TaskSpawn | RtFunc::TaskBlockOn => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::TaskIsDone => (vec![MirTy::I64], MirTy::I8),
+            RtFunc::TaskTakeOutput => (vec![MirTy::I64], MirTy::I64),
         }
     }
 }

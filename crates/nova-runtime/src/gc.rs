@@ -196,20 +196,8 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
 /// that test never crosses threads. This matters if a future executor ever
 /// migrates a task between worker threads.
 ///
-/// `gc` is a private module (see `lib.rs`), so until the executor lands and
-/// calls this from non-test code, it is unreachable outside `#[cfg(test)]`,
-/// where it already is used. `#[expect(dead_code)]` was tried first, to make
-/// the lint itself flag this comment as stale once the executor calls this;
-/// measured to not work here, because `--all-targets` also builds the test
-/// target, where `dead_code` does not fire (the tests call this directly) so
-/// the expectation is "unfulfilled" there instead -- the two targets need
-/// opposite answers from the same attribute. Plain `#[allow]` is the one that
-/// is correct for both. `reason = "…"` inside `#[allow]` was tried too and
-/// dropped: it requires Rust 1.81, and this workspace's `Cargo.toml` declares
-/// `rust-version = "1.78"` (measured directly) -- so it would compile here,
-/// on whatever `stable` happens to be, while failing at the crate's own
-/// declared MSRV. The justification lives in this prose comment instead.
-#[allow(dead_code)]
+/// Consumed by `task.rs`'s executor: `spawn` calls this once per task and
+/// pairs it with exactly one [`remove_root`] on that task's completion.
 pub fn add_root(ptr: *mut u8) {
     PINNED.with(|p| p.borrow_mut().push(ptr as usize));
 }
@@ -218,7 +206,6 @@ pub fn add_root(ptr: *mut u8) {
 /// registered is a no-op rather than a panic — the runtime must not abort a
 /// user's program over its own bookkeeping. Same-thread only, like
 /// [`add_root`] -- see its doc comment.
-#[allow(dead_code)]
 pub fn remove_root(ptr: *mut u8) {
     PINNED.with(|p| {
         let mut v = p.borrow_mut();
@@ -249,6 +236,34 @@ pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
             .find(|o| o.addr == addr)
             .map(|o| (o.size, o.scan))
     })
+}
+
+/// Test-only: force a real, stack-scanning collection cycle immediately,
+/// bypassing [`maybe_collect`]'s allocation-threshold trigger, so a test can
+/// assert on a collection's outcome deterministically rather than allocating
+/// until one happens to fire. A thin wrapper around the same [`collect`]
+/// `alloc` itself uses, so a caller outside this module (`task.rs`'s tests)
+/// names its intent -- "run a real collection now, for this test" -- instead
+/// of reaching for the allocation-triggered entry point directly.
+///
+/// `#[inline(always)]` is load-bearing here, not a speed hint: this
+/// collector's scan walks the live stack (module doc comment, top of file),
+/// so a caller's already-nulled local surviving a collection depends on
+/// *something* between the null and the scan overwriting that local's old
+/// stack slot before the scan reads it -- for the tests this function exists
+/// for, that something is `collect()`'s own stack usage one frame up. A real
+/// (non-inlined) call to this wrapper inserts an extra frame between such a
+/// caller and `collect()`, shifting every address `collect()` itself touches
+/// one frame further from the caller's -- which changes whether that
+/// overwrite still happens to land on the right bytes. `task.rs`'s
+/// root-registration tests are the direct evidence: with this a plain `fn`,
+/// they falsely retain an already-nulled, never-registered object; inlined,
+/// they correctly sweep it. The task report for that module records the
+/// isolating experiment.
+#[cfg(test)]
+#[inline(always)]
+pub(crate) fn collect_for_test() {
+    collect();
 }
 
 fn maybe_collect(incoming: usize) {

@@ -12,6 +12,14 @@
 //! routes through [`gc::alloc`], which reclaims unreachable objects.
 
 mod gc;
+/// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,
+/// `POLL_READY`, `STATE_SLOT_TAG`, `STATE_SLOT_TEMPS`) are not all read by
+/// this crate's own runtime logic -- some exist purely as the documented
+/// contract codegen (Task 5's `async_lower.rs`) must reproduce. A private
+/// module would make those `pub` items unreachable from outside the crate,
+/// which both defeats their purpose and makes rustc's `dead_code` lint treat
+/// them as genuinely dead, since nothing inside this crate alone uses them.
+pub mod task;
 
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
 #[repr(C)]
