@@ -215,7 +215,9 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         //
         // Both are `E0088`, and both name the function and that it is an
         // `async fn`: the code identifies the class of "async is not finished
-        // here yet", and the note says which part.
+        // here yet", and the `reason` interpolated into the *message* says which
+        // part. The shared `note` below says only that the check is
+        // reachability-based, and is the same for both.
         //
         // Rejecting keyed on `is_async` (plus a reason), never on "does
         // `ret_ty` start with `Future`": a non-async function may itself

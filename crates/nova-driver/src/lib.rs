@@ -815,15 +815,24 @@ mod async_end_to_end {
         let program = nova_codegen_cranelift::compile_jit(&mir).expect("JIT compile");
         program.run();
 
+        // A poll function returning a status that is neither POLL_PENDING nor
+        // POLL_READY does not reach this assertion at all, and does not present
+        // as a test failure either. `poll_one` panics naming the value, and that
+        // panic then has to unwind out through the JIT-compiled `main` frame --
+        // Cranelift output with no landing pads -- so **the process dies** and
+        // the harness reports only that the test exited abnormally. Run the one
+        // test with `-- --nocapture` to see the executor's message, which does
+        // name the offending status.
+        //
         // SAFETY: `PROBE_TASK_ID` was registered by the `TaskSpawn` above, on
         // this same thread -- `program.run()` ran the synthesized `main`
         // in-process.
         assert_eq!(
             unsafe { nova_runtime::task::nova_rt_task_is_done(PROBE_TASK_ID) },
             1,
-            "the future must have completed: the executor only marks a task \
-             done on POLL_READY, so a poll fn returning anything else panics \
-             instead of reaching here"
+            "the future was registered but never completed, without the \
+             executor rejecting its status -- so it was left queued rather \
+             than polled"
         );
         // SAFETY: same task id, now known complete, and taken exactly once.
         unsafe { nova_runtime::task::nova_rt_task_take_output(PROBE_TASK_ID) }

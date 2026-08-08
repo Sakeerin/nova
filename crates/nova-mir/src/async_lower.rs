@@ -142,13 +142,94 @@ fn split_into_poll_and_wrapper(f: &mut Function) -> Function {
     f.blocks = blocks.into_iter().map(|b| sp.block(b)).collect();
     f.temps = sp.temps;
 
+    // **The two halves of the state object's size must agree.** The allocation
+    // was sized above, from the pre-transform temp count, *before* the rewrite
+    // ran; the slot indices were just chosen by `Spiller::slot`. Nothing in the
+    // types connects them, so a rewrite that addresses one slot more than the
+    // wrapper paid for writes past the allocation — and that has no diagnostic,
+    // no verifier error, and no test that can see it, because a test asserting
+    // the expected size recomputes it from the same formula the bug changed.
+    //
+    // This compares emitted code against emitted code: the highest slot any
+    // access actually names, against the exact byte count the wrapper actually
+    // allocated. Adding a slot (a per-await resume tag, an awaited future's
+    // handle) therefore has to grow `state_slot_count` in the same edit.
+    debug_assert!(
+        highest_state_slot(&f.blocks, STATE) < wrapper.state_slots,
+        "`{}$poll` addresses state slot {}, which is past the {} slots ({} \
+         bytes) its wrapper allocated: a slot added to the rewrite must be \
+         added to `state_slot_count` in the same edit",
+        f.name,
+        highest_state_slot(&f.blocks, STATE),
+        wrapper.state_slots,
+        wrapper.state_slots as i64 * 8,
+    );
+    debug_assert!(
+        highest_state_slot(&wrapper.function.blocks, wrapper.state) < wrapper.state_slots,
+        "`{}` seeds state slot {}, which is past the {} slots it allocated",
+        f.name,
+        highest_state_slot(&wrapper.function.blocks, wrapper.state),
+        wrapper.state_slots,
+    );
+
     f.name.push_str("$poll");
     f.takes_env = true;
     f.params = 1;
     f.capture_count = 0;
     f.ret = MirTy::I64;
     f.is_async = false;
-    wrapper
+    wrapper.function
+}
+
+/// The highest state-object slot index any field access in `blocks` addresses
+/// through `state`.
+///
+/// Filtering on the record temp is what makes this a *state* slot count rather
+/// than a field-index count: a rewritten body's own record accesses (an
+/// `async fn` reading `self.v`, say) are `RecordField`s too, against a scratch
+/// temp, with an index that belongs to the user's record and not to this layout.
+/// In a poll function no body statement can name [`STATE`] by accident — the
+/// rewrite replaces every body operand with a scratch temp, and those start at
+/// index 2.
+///
+/// Returns [`STATE_SLOT_TAG`] when there is no access at all, which is in bounds
+/// for every state object by [`STATE_MIN_SIZE`].
+fn highest_state_slot(blocks: &[Block], state: Temp) -> u32 {
+    blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            Stmt::RecordField { record, index, .. } | Stmt::SetField { record, index, .. }
+                if *record == state =>
+            {
+                Some(*index)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(STATE_SLOT_TAG)
+}
+
+/// How many 8-byte slots a state object needs for a body with `n_temps` temps.
+///
+/// The single place this is decided. A rewrite that needs another slot grows
+/// this, and the `debug_assert!`s in [`split_into_poll_and_wrapper`] fail if it
+/// does not.
+fn state_slot_count(n_temps: usize) -> u32 {
+    STATE_SLOT_TEMPS + n_temps as u32
+}
+
+/// A wrapper, plus the two facts the state-size cross-check needs from the
+/// function that built it.
+struct Wrapper {
+    function: Function,
+    /// The slot count baked into this wrapper's allocation — carried out rather
+    /// than recomputed, so the check compares against the number the emitted
+    /// code actually used.
+    state_slots: u32,
+    /// The temp holding the state pointer, so the wrapper's own seeding stores
+    /// can be told apart from its stores to the future value.
+    state: Temp,
 }
 
 /// Build the function that keeps the original symbol: allocate the state,
@@ -156,7 +237,7 @@ fn split_into_poll_and_wrapper(f: &mut Function) -> Function {
 ///
 /// Reads `f` while it is still the pre-transform body, so it must run before
 /// [`split_into_poll_and_wrapper`] mutates it.
-fn build_wrapper(f: &Function) -> Function {
+fn build_wrapper(f: &Function) -> Wrapper {
     // The temps the ABI hands this function: the environment pointer, if it
     // has one, then the real parameters — numbered exactly as `lower_function`
     // numbered them, which is what makes seeding them into slot `i` line up
@@ -165,12 +246,17 @@ fn build_wrapper(f: &Function) -> Function {
     let mut temps: Vec<MirTy> = f.temps[..abi_count].to_vec();
     let mut stmts: Vec<Stmt> = Vec::new();
 
-    // `(STATE_SLOT_TEMPS + n_temps) * 8` bytes, through `nova_rt_alloc` —
-    // which is `gc::alloc(.., true)`, i.e. SCANNED. That is load-bearing, not
-    // incidental: a heap-valued output written to `STATE_SLOT_OUTPUT` is kept
-    // alive only by the collector tracing through this object, and an
-    // unscanned one is marked but never traced.
-    let bytes = (STATE_SLOT_TEMPS as usize + f.temps.len()) as i64 * 8;
+    // `state_slot_count(n_temps) * 8` bytes, through `nova_rt_alloc` — which is
+    // `gc::alloc(.., true)`, i.e. SCANNED. That is load-bearing, not incidental:
+    // a heap-valued output written to `STATE_SLOT_OUTPUT` is kept alive only by
+    // the collector tracing through this object, and an unscanned one is marked
+    // but never traced.
+    //
+    // Sized here, from the pre-transform temp count, before the rewrite that
+    // chooses the slot indices has run. `split_into_poll_and_wrapper` checks the
+    // two against each other afterwards.
+    let state_slots = state_slot_count(f.temps.len());
+    let bytes = state_slots as i64 * 8;
     debug_assert!(
         bytes >= STATE_MIN_SIZE,
         "a state object must hold at least the tag and output slots, since the \
@@ -233,21 +319,25 @@ fn build_wrapper(f: &Function) -> Function {
         ty: MirTy::Ptr,
     });
 
-    Function {
-        name: f.name.clone(),
-        params: f.params,
-        takes_env: f.takes_env,
-        // The wrapper loads nothing from an environment record: it only
-        // forwards the pointer into a state slot, so the body's own capture
-        // loads (now inside the poll function) still find them.
-        capture_count: 0,
-        temps,
-        ret: MirTy::Ptr,
-        is_async: false,
-        blocks: vec![Block {
-            stmts,
-            term: Terminator::Return(Some(future)),
-        }],
+    Wrapper {
+        function: Function {
+            name: f.name.clone(),
+            params: f.params,
+            takes_env: f.takes_env,
+            // The wrapper loads nothing from an environment record: it only
+            // forwards the pointer into a state slot, so the body's own capture
+            // loads (now inside the poll function) still find them.
+            capture_count: 0,
+            temps,
+            ret: MirTy::Ptr,
+            is_async: false,
+            blocks: vec![Block {
+                stmts,
+                term: Terminator::Return(Some(future)),
+            }],
+        },
+        state_slots,
+        state,
     }
 }
 
@@ -504,11 +594,22 @@ fn visit_temps(stmt: &mut Stmt, f: &mut impl FnMut(&mut Temp, Role)) {
 
 /// Whether `body` contains a suspend point anywhere inside it.
 ///
-/// **The boundary this pass can express.** `lower_module` rejects a reachable
-/// `async fn` with `E0088` exactly when this is true, and transforms it
-/// exactly when it is false, so "handled" and "rejected" are decided by one
-/// predicate rather than by two conditions that could drift apart. Whatever
-/// makes the true case expressible owns removing both together.
+/// **One of the two conditions that decide the async boundary.** `lower_module`
+/// transforms a reachable `async fn` iff *both* of these hold, and rejects it
+/// with `E0088` otherwise:
+///
+/// 1. it is **not the program entry point** — the transform gives the entry
+///    symbol to the future-building wrapper, and both backends call `main` for
+///    its effects and discard its result, so an `async fn main` would compile to
+///    a program that runs no user code at all; and
+/// 2. **this predicate is false** — a body with a suspend point in it needs the
+///    resumable half of the transform.
+///
+/// Those are two separate conditions with two separate reasons, spelled out
+/// separately at the call site (`mono.rs`'s worklist). This is not the whole
+/// boundary on its own: an `async fn main` with no `.await` anywhere in it is
+/// rejected while this returns `false`. Whatever makes each case expressible
+/// owns removing that case's rejection along with it.
 ///
 /// Recurses through every expression form rather than scanning the body's
 /// top-level statement list: a suspend point buried in a loop condition or a
@@ -920,15 +1021,85 @@ mod tests {
     }
 
     #[test]
+    fn every_return_becomes_its_own_completion_and_a_trap_stays_a_trap() {
+        // Two terminator shapes an `async fn` body reaches easily -- an early
+        // `return` gives two `Return`s, and a diverging or exhaustive-match arm
+        // gives a `Trap` -- and neither is exercised by a single-block fixture.
+        //
+        // Both need pinning for opposite reasons. Every `Return` must get its
+        // OWN output store and status: rewriting only the first would leave the
+        // second returning whatever the body last computed, which the executor
+        // would then reject as an out-of-range status at run time. A `Trap` must
+        // NOT be turned into a completion: it aborts, and rewriting it into
+        // `POLL_READY` would complete the task with an unwritten output slot.
+        let mut m = module_with_async_const_fn(MirTy::F64, &[]);
+        {
+            let f = &mut m.functions[0];
+            let second = Temp(f.temps.len() as u32);
+            f.temps.push(MirTy::F64);
+            f.blocks.push(Block {
+                stmts: vec![Stmt::ConstFloat(second, 2.5)],
+                term: Terminator::Return(Some(second)),
+            });
+            f.blocks.push(Block {
+                stmts: Vec::new(),
+                term: Terminator::Trap,
+            });
+        }
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+
+        let statuses: Vec<Temp> = poll
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.term {
+                Terminator::Return(Some(t)) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses.len(),
+            2,
+            "both returns must survive: {:?}",
+            poll.blocks
+        );
+        for t in &statuses {
+            assert!(
+                stmts_of(poll)
+                    .any(|s| matches!(s, Stmt::ConstInt(d, v) if d == t && *v == POLL_READY)),
+                "each return must carry its own POLL_READY constant: {:?}",
+                poll.blocks
+            );
+        }
+        let output_stores = stmts_of(poll)
+            .filter(|s| matches!(s, Stmt::SetField { index, .. } if *index == STATE_SLOT_OUTPUT))
+            .count();
+        assert_eq!(
+            output_stores, 2,
+            "each completion writes the output slot on its own path, since only \
+             one of them runs: {:?}",
+            poll.blocks
+        );
+        assert_eq!(
+            poll.blocks
+                .iter()
+                .filter(|b| matches!(b.term, Terminator::Trap))
+                .count(),
+            1,
+            "the trap must stay a trap, not become a completion: {:?}",
+            poll.blocks
+        );
+    }
+
+    #[test]
     fn the_wrapper_writes_the_entry_resume_tag() {
-        // Deleting this store passes every other test in the workspace, because
-        // `gc::alloc` hands back zeroed memory and nothing in an await-free poll
-        // function reads the tag at all -- measured by mutation. So the store is
-        // an intent that only an assertion can hold. The invariant is that a
-        // fresh future starts in its first state, and this store is the only
-        // thing that makes that a property of the generated code rather than of
-        // the allocator's zeroing — which stops being enough as soon as
-        // anything reads the tag.
+        // The invariant is that a fresh future starts in its first state. An
+        // await-free poll function never reads the tag, and `gc::alloc` hands
+        // back zeroed memory, so nothing about *behaviour* depends on this store
+        // yet -- which is exactly why it needs an assertion rather than a test
+        // of an observable effect. It is the only thing making the entry tag a
+        // property of the generated code instead of the allocator's zeroing, and
+        // zeroing stops being enough as soon as anything reads the tag.
         let mut m = module_with_async_const_fn(MirTy::I64, &[]);
         transform(&mut m);
         let wrapper = find(&m, "f.15");
@@ -1071,10 +1242,11 @@ mod tests {
     }
 
     #[test]
-    fn contains_await_is_the_boundary_between_transformed_and_rejected() {
-        // The single predicate `lower_module` keys its `E0088` rejection on
-        // and this pass keys its coverage on, so the two can never disagree
-        // about which functions the transform handles.
+    fn contains_await_answers_the_suspend_point_half_of_the_boundary() {
+        // One of the two conditions `lower_module` decides the boundary with;
+        // the other is "is this the entry point" (`an_async_main_reports_e0088`
+        // in `tests/lower_tests.rs`). Both are needed: an `async fn main` is
+        // rejected while this returns `false`.
         assert!(!contains_await(&body_of("async fn f() -> Int { 1 }")));
         assert!(contains_await(&body_of(
             "async fn g() -> Int { 1 }\nasync fn f() -> Int { g().await }"

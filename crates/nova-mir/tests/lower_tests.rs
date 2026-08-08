@@ -1130,9 +1130,10 @@ fn unreached_async_fn_compiles_cleanly() {
 /// reaches `lower_module`): an async INHERENT METHOD, called on an instance
 /// from `main`, must be transformed the same as a free async fn. Worth its own
 /// test because a method's `hir::Function.name` is qualified with its owning
-/// type (measured: `` `W.get` ``, not `` `get` ``) and it takes `self` as a
-/// real parameter -- so it exercises the wrapper's parameter seeding on a
-/// dispatch path no free-fn test touches.
+/// type -- `` `W.get` ``, not `` `get` ``, which the symbol prefix asserted
+/// below pins rather than merely assumes -- and it takes `self` as a real
+/// parameter, so it exercises the wrapper's parameter seeding on a dispatch
+/// path no free-fn test touches.
 #[test]
 fn a_reachable_async_inherent_method_is_transformed() {
     let mir = mir_for(

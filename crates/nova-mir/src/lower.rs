@@ -589,19 +589,24 @@ impl<'a> Lowerer<'a> {
                 acc
             }
             K::Await(inner) => {
-                // Defense in depth, NOT the primary guard: `lower_module`'s
-                // worklist (`nova-mir/src/mono.rs`) rejects every `is_async`
-                // function — with its own `E0088` — before ever calling
-                // `lower_function` on its body, and `.await` only
-                // type-checks inside an async fn (`nova-typeck`'s
-                // `fcx.in_async`). Together those mean no valid-per-typeck
-                // program can reach an `Await` node here: by the time a
-                // function's body is being lowered at all, it has already
-                // been proven non-async. If this arm fires anyway, one of
-                // those two invariants broke elsewhere — still reported as a
-                // diagnostic, not a panic, since this is a library path (see
-                // `mir_ty`'s own comment on why its defensive arms must not
-                // panic either).
+                // Defense in depth, NOT the primary guard. An `async fn` IS
+                // lowered here now, when it is await-free (`async_lower`
+                // rewrites it afterwards) — so the invariant is no longer
+                // "a body being lowered has been proven non-async". It is
+                // narrower and comes from a different check: `lower_module`'s
+                // worklist (`nova-mir/src/mono.rs`) rejects a reachable
+                // `async fn` with `E0088` when
+                // `async_lower::contains_await(&body)` is true, and that
+                // predicate walks the whole body — so a function whose body is
+                // lowered at all has been proven to contain no `Await` node
+                // anywhere. `.await` outside an `async fn` is separately
+                // impossible (`nova-typeck`'s `fcx.in_async`).
+                //
+                // If this arm fires anyway, one of those two invariants broke
+                // elsewhere — most likely `contains_await` failing to recurse
+                // into some expression form — still reported as a diagnostic,
+                // not a panic, since this is a library path (see `mir_ty`'s own
+                // comment on why its defensive arms must not panic either).
                 //
                 // The awaited operand is still lowered first so any error
                 // inside it is also reported, matching how every other arm

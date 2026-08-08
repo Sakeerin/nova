@@ -1189,16 +1189,19 @@ pub enum ExprKind {
     /// `e.await` inside an `async fn`. `e` has type `Future<T>` and the
     /// `Await` expression has type `T`.
     ///
-    /// The state-machine transform that lowers this into real suspend/resume
-    /// control flow has not landed yet (Phase 2.3a Tasks 5-6). Until it does,
-    /// `.await` only ever appears inside an `async fn`'s body (enforced by
-    /// `nova-typeck`'s `fcx.in_async`), and every `async fn` reachable from
-    /// `main` is rejected with a diagnostic before its body is lowered at
-    /// all (`nova-mir/src/mono.rs`'s `lower_module`, keyed on
-    /// `Function::is_async`) — so this node itself never actually reaches
-    /// MIR lowering from valid source. `nova-mir/src/lower.rs` still handles
-    /// it defensively (a diagnostic, not a panic) in case that guard is ever
-    /// bypassed.
+    /// The half of the state-machine transform that lowers this into real
+    /// suspend/resume control flow has not landed yet. An `async fn` with no
+    /// `.await` in it *is* compiled (`nova-mir/src/async_lower.rs` rewrites it
+    /// into a poll function plus a future-building wrapper); one that contains
+    /// this node is rejected with a diagnostic, and rejected as a whole
+    /// function, before its body is lowered at all
+    /// (`nova-mir/src/mono.rs`'s `lower_module`, keyed on `Function::is_async`
+    /// together with `async_lower::contains_await`, which walks the whole
+    /// body). `.await` also only ever appears inside an `async fn`'s body
+    /// (enforced by `nova-typeck`'s `fcx.in_async`). So this node never
+    /// actually reaches MIR lowering from valid source, and
+    /// `nova-mir/src/lower.rs` handles it defensively (a diagnostic, not a
+    /// panic) in case that reasoning is ever bypassed.
     Await(Box<Expr>),
 }
 
