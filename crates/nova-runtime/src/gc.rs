@@ -266,6 +266,40 @@ pub(crate) fn collect_for_test() {
     collect();
 }
 
+/// Guards every test that calls the real, stack-scanning [`collect`]: this
+/// module's own `mod registry` below, and `task.rs`'s `root_registration`.
+/// `libtest` runs each `#[test]` fn on its own freshly spawned OS thread, so
+/// without this, multiple such tests' threads can be alive at once; holding
+/// this lock for a whole test body (from before its setup clears a local, to
+/// after its `collect()` call reads the result) removes that as a source of
+/// cross-test interference. It does not change anything about `collect()`
+/// itself, and it does not, by itself, prove that source is the *only* one --
+/// see the task report for what was and was not measured to change as a
+/// result.
+///
+/// Private: callers outside this module go through [`lock_scan_test`], not
+/// this directly, so the poisoning policy below lives in exactly one place.
+#[cfg(all(test, windows))]
+static SCAN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`SCAN_TEST_LOCK`] for the calling test's entire remaining body --
+/// bind the return value to a local that is not dropped early (`let _guard =
+/// ...`, never `let _ = ...`), so the lock is held past setup, the `collect()`
+/// call, and the assertion, and is released on the test's panic path exactly
+/// as it is on its success path (`MutexGuard`'s `Drop` runs during unwinding).
+///
+/// Poisoning is deliberately ignored (`unwrap_or_else(|e| e.into_inner())`,
+/// not `.unwrap()`): this lock protects only "don't run two of these tests at
+/// once," not any shared data its `()` payload could leave inconsistent, so a
+/// prior holder panicking (failing its own assertion, say) is not a reason to
+/// fail every later scan test too with an unrelated "lock poisoned" error --
+/// exactly the kind of misleading-diagnostic-on-top-of-a-real-failure this
+/// branch's reviews keep finding.
+#[cfg(all(test, windows))]
+pub(crate) fn lock_scan_test() -> std::sync::MutexGuard<'static, ()> {
+    SCAN_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn maybe_collect(incoming: usize) {
     let over = HEAP.with(|h| {
         let h = h.borrow();
@@ -761,6 +795,7 @@ mod tests {
             // Ignored under `-O` alongside its negative control, for the reason
             // given on the attribute above -- this test itself is reliable under
             // `-O`; it is ignored only to avoid running unpaired.
+            let _guard = lock_scan_test();
             let mut obj = alloc(64, true);
             add_root(obj);
             let hidden = hide(obj as usize);
@@ -802,6 +837,7 @@ mod tests {
             // than a second instance of the deterministic `hide`/`reveal`
             // collapse `#[inline(never)]` already closed. Not root-caused
             // further; see the task report.
+            let _guard = lock_scan_test();
             let mut obj = alloc(64, true);
             let hidden = hide(obj as usize);
             obj = std::ptr::null_mut::<u8>();
@@ -842,6 +878,7 @@ mod tests {
             // premature free this whole file exists to rule out. The root cause
             // is an accidental conservative root somewhere in this test's own
             // frame or in a register the `setjmp` shim flushes; not identified.
+            let _guard = lock_scan_test();
             let mut obj = alloc(64, true);
             let hidden = hide(obj as usize);
             add_root(obj);
@@ -952,6 +989,7 @@ mod tests {
             // Windows gate exists to prevent: an `is_some()` assertion with no
             // paired `is_none()` to prove the collector can free anything at
             // all in that build.
+            let _guard = lock_scan_test();
             let (parent_addr, child_addr) = setup_parent_and_child(true);
             std::hint::black_box(parent_addr);
             std::hint::black_box(child_addr);
@@ -986,6 +1024,7 @@ mod tests {
             // as `remove_root_actually_unroots` -- see that test's comment.
             // The test above is ignored alongside it for the reason given on
             // its own attribute.
+            let _guard = lock_scan_test();
             let (_parent_addr, child_addr) = setup_parent_and_child(false);
             std::hint::black_box(child_addr);
 
@@ -1019,6 +1058,7 @@ mod tests {
             // `collect()` call hidden, and for why this is release-ignored
             // (this test itself is reliable under `-O`; only its shared
             // negative control is not).
+            let _guard = lock_scan_test();
             let mut obj = alloc(64, true);
             add_root(obj);
             let hidden = hide(obj as usize);

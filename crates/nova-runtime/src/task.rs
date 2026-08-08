@@ -563,6 +563,11 @@ mod tests {
             // through the executor's root registration (no Nova stack slot,
             // no register -- see `setup_task_state`), must survive a real
             // collection.
+            //
+            // `lock_scan_test`: serializes with every other test that calls
+            // the real `collect()` (this module's sibling below, and
+            // `gc.rs`'s own `mod registry`) -- see its doc comment in `gc.rs`.
+            let _guard = gc::lock_scan_test();
             let hidden = setup_task_state(true);
 
             gc::collect_for_test();
@@ -582,6 +587,7 @@ mod tests {
             // against a collector that frees nothing at all. Identical
             // shape to the positive test except `spawn = false`, so the
             // state object is never registered and has no other root.
+            let _guard = gc::lock_scan_test();
             let hidden = setup_task_state(false);
 
             gc::collect_for_test();
