@@ -1018,10 +1018,40 @@ mod tests {
         );
     }
 
+> **CORRECTED AFTER TASK 3. The skeleton below is known-broken — read this first.**
+>
+> Task 3 wrote the same "null out the local, then `black_box`" technique and
+> **measured that it does not work**: three of its five tests passed with
+> `add_root` reduced to a no-op. Three independent leaks were found — a plain
+> `usize` copy surviving the call; **`let`-shadowing not clearing the original
+> stack slot** (exactly what `let fut = std::ptr::null_mut()` below does, it binds
+> a new name rather than overwriting); and a **callee-saved register** retaining
+> the value within one stack frame.
+>
+> **Against a conservative collector, "I dropped the reference" is not a testable
+> claim.** The only reliable way to prove an object unreachable is to ensure no
+> in-range bit pattern for it exists anywhere in the frame or in registers. Task 3
+> built the tooling in `crates/nova-runtime/src/gc.rs`: `hide`/`reveal` (bitwise
+> complement, both `#[inline(never)]`), `mut`-plus-reassignment instead of
+> shadowing, and an `#[inline(never)]` setup fn to put the risky frame behind a
+> call boundary. Reuse them; they may need `pub(crate)`.
+>
+> **Prove your version discriminates**: neuter `gc::add_root`, confirm the test
+> FAILS, revert, rebuild. If it still passes, the test is worthless.
+>
+> **Gate it `#[cfg(windows)]`.** `stack_base()` returns `None` elsewhere, so
+> `collect()` returns before marking and any `is_some()` assertion passes
+> vacuously — Task 3 shipped exactly that and it red-lighted 2 of the 3 CI jobs.
+>
+> **Add the negative partner test** (an unspawned, unregistered state object must
+> be swept by the same collection). The positive assertion alone passes both
+> against an executor that registers nothing and against a collector that frees
+> nothing.
+
     #[test]
     fn a_spawned_tasks_state_is_registered_as_a_gc_root() {
-        // The Task 3 registry, wired. Collect while the task is parked and
-        // with no local holding its state, then confirm it is still there.
+        // KNOWN-BROKEN SKELETON — the assertion's shape is right, the way it
+        // makes the object unreachable is not. See the box above.
         let fut = make_future(poll_suspend_once, 0);
         let state = unsafe { (fut as *mut usize).add(1).read() };
         unsafe { nova_rt_task_spawn(fut) };
