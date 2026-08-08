@@ -330,8 +330,13 @@ fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
                 type_args: Vec::new(),
                 args: Vec::new(),
             },
-            // Task 1/2 reject a non-`Unit`-returning `@test` function
-            // (E0084), so every callee here is `Unit`-typed.
+            // `nova-resolver`'s `test_shape_violations` rejects a `@test`
+            // function that is `async` or returns non-`Unit` (E0084), so every
+            // callee here is an ordinary `Unit`-typed function. Both halves are
+            // load-bearing: the direct call below neither awaits nor polls, so
+            // an `async` callee would be the future-building wrapper and this
+            // `if` would allocate a state object and discard it, running none
+            // of the test's body.
             Ty::Unit,
         );
         stmts.push(expr(
@@ -723,11 +728,14 @@ fn strip_test_functions(modules: &mut [(String, nova_ast::File)]) {
 /// points.
 ///
 /// **Why `main` is synthesized in MIR instead of written in Nova.** Nothing in
-/// the language can reach `block_on` yet: `Future` is not a nameable type
-/// (`nova-typeck`'s `resolve_type` returns `None` for it) and an `extern`
-/// signature accepts only `Int`, `Float` and `Bool`, so no `.nova` source can
-/// name a future, pass one, or await one. Task 7's `std/task` is what closes
-/// that. Until then the only way to *execute* a generated poll function is to
+/// the language can reach `block_on` yet. Not because a future cannot be
+/// *named* — `Future` is a nameable type, handled by `nova-typeck`'s
+/// `convert_ty` ahead of its primitive table, so `fn take(f: Future<Int>)`
+/// type-checks — but because nothing in source can *drive* one: there is no
+/// poll or await outside an `async fn`, and an `extern` signature accepts only
+/// `Int`, `Float` and `Bool`, so no foreign function can be handed one either.
+/// Task 7's `std/task` is what closes that. Until then the only way to
+/// *execute* a generated poll function is to
 /// build the calling code at the level where futures do exist — MIR — which is
 /// exactly the level `nova-cli`'s `nova run` tests cannot reach. So those tests
 /// assert that such a program compiles and runs; these assert that it computes

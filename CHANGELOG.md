@@ -756,15 +756,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Future<T>` of its declared return type, and `.await` inside another
   `async fn` suspends until that future produces its value. `Future<T>` is a
   compiler-known type rather than a std record — the compiler knows no
-  library type by name, so there is no other place it could live — and it is
-  not nameable in source: it appears in diagnostics and in `std/task`'s
-  signatures, but a program cannot write it. Both backends compile the same
+  library type by name, so there is no other place it could live — and it **is**
+  nameable in source: `fn take(f: Future<Int>) -> Int { block_on(f) }`
+  type-checks and runs. What a program cannot do is *construct* one without
+  calling an `async fn`: there is no future literal and no constructor, and
+  `Future` is not FFI-safe, so an `extern` signature cannot mention one either.
+  Both backends compile the same
   transform, because it runs on the monomorphized MIR module that Cranelift
   and LLVM both consume. `.await` outside an `async fn` is `E0086`;
   `.await` on a non-future is `E0087` and names the type. `async` on a
-  *trait* method (declaration, default body, or impl) and on an `extern`
-  function is still `E0900`; async **inherent** methods are supported. Async
-  closures are not in the grammar at all.
+  *trait* method is still refused, but by two different checks: in a trait
+  declaration and in a default body it is `E0900`, while in an **impl** it is
+  `E0072` — an `async fn` returns `Future<T>` and the trait declared `T`, so
+  trait conformance rejects it as a return-type mismatch. `async` on an
+  `extern` function is `E0900`. Async **inherent** methods are supported. Async
+  closures are not in the grammar at all. A `@test` function may not be
+  `async` (`E0084`): a test's result is discarded rather than awaited, so an
+  `async` one's body would never run — write `@test fn t() { block_on(f()) }`,
+  which the diagnostic itself says.
 - **The execution model is single-threaded cooperative state machines, which
   reverses `docs/phase-2-plan.md` decision 1** (`docs/adr/0009-async-execution-model.md`
   §1). That plan recommended thread-per-task over Tokio as the pragmatic
@@ -804,9 +813,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **`block_on` drains the whole queue**, so it implicitly joins everything
   spawned on the thread (unlike tokio's, which returns as soon as its own
   future resolves) **and does not terminate if any queued task never becomes
-  ready** — unreachable in 2.3a, where every suspension resumes on the next
-  turn, and reachable with the first primitive that can park on an external
-  event, which is what owes the park set and the deadlock diagnostic; **no
+  ready** — no ordinary async program reaches this, since every suspension
+  resumes on the next turn, but it **is reachable today** by forging a
+  `JoinHandle`: the record's fields are public and task ids are `0, 1, 2, …` in
+  spawn order with `block_on`'s own root spawned first, so
+  `JoinHandle { id: 0, fut: … }` inside that root makes `join` wait for the task
+  that is doing the waiting. `nova check` reports `ok` and `nova run` hangs with
+  empty output. The forgeable id is a known gap assigned to the next increment;
+  the park set and the deadlock diagnostic are still owed by whatever adds the
+  first primitive that can park on an external event; **no
   cancellation** of any kind, so dropping a `JoinHandle` does nothing;
   **every temp is spilled into the state object**, not only those live across
   a suspend, which is what buys the transform out of liveness analysis at the

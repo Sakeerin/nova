@@ -8025,6 +8025,49 @@ mod tests {
         );
     }
 
+    /// An `async` method in a trait *impl* is refused as a return-type
+    /// mismatch, not as `E0900`.
+    ///
+    /// The `E0900` check was removed from `collect_impls`, so what catches this
+    /// is trait-conformance: an `async fn` returns `Future<T>`, the trait
+    /// declared `T`, and those are different types. The refusal is what matters
+    /// and it is legible on its own, but the *code* is `E0072` — pinned here
+    /// because the sibling above covers only the declaration, which is why the
+    /// claim that `E0900` applies "in a trait declaration, a default body, and
+    /// an impl alike" was able to stand in two documents while being false for
+    /// the third position. The trait's own `m` is deliberately **not** `async`:
+    /// were it async, `E0900` would fire on the declaration and mask which
+    /// check refused the impl.
+    #[test]
+    fn async_trait_impl_method_is_refused_as_a_return_type_mismatch() {
+        let r = check_src(
+            "trait T { fn m(self) -> Int }\n\
+             record C { v: Int }\n\
+             impl T for C { async fn m(self) -> Int { self.v } }\n\
+             fn main() {}",
+        );
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0072")
+            .unwrap_or_else(|| panic!("expected E0072, got {:?}", r.diagnostics));
+        // Naming both types, not just the code: the message is the whole reason
+        // this refusal is acceptable without a dedicated diagnostic, so a
+        // version of it that said only "signature mismatch" would not be.
+        assert!(
+            d.message.contains("Future<Int>") && d.message.contains("declares `Int`"),
+            "the mismatch must name the future and what the trait declared; got {:?}",
+            d.message
+        );
+        // And it must NOT be reported as the unsupported-construct code, which
+        // is what the corrected documentation now says.
+        assert!(
+            !error_codes(&r).contains(&"E0900"),
+            "an impl-side async method is not `E0900`; got {:?}",
+            r.diagnostics
+        );
+    }
+
     #[test]
     fn async_extern_fn_still_reports_e0900() {
         let r = check_src("extern \"C\" { async fn c_thing() -> Int }\nfn main() {}");
@@ -15061,6 +15104,49 @@ mod tests {
             d.message.contains("generic parameters"),
             "names generic parameters specifically, not a generic \"bad signature\": {}",
             d.message
+        );
+    }
+
+    /// An `async` `@test` is rejected, not run.
+    ///
+    /// The runner calls a `@test` function directly and discards its result, so
+    /// an `async` one hands back a future that nothing polls: were the shape
+    /// accepted, the call would allocate a state object, the body would not run,
+    /// and a guaranteed-failing assertion inside it would report `ok` — the same
+    /// failure `nova-mir`'s `mono.rs` describes for an `async` entry point.
+    ///
+    /// Rejected rather than shimmed because
+    /// `docs/superpowers/specs/2026-08-07-phase-2-3a-async-core-design.md` §10
+    /// specifies `@test fn t() { block_on(f()) }` as the way async code is
+    /// tested, with no change to the runner; the defect was that `@test async
+    /// fn` was silently accepted instead of refused. `nova-cli`'s
+    /// `nova_test_runs_an_async_body_via_block_on_and_pins_a_wrong_answer`
+    /// is the other half — that the supported shape really does run and really
+    /// does fail on a wrong answer.
+    #[test]
+    fn test_on_an_async_function_is_e0084() {
+        let r = check_src("@test\nasync fn t() { }\nfn main() { }");
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "E0084")
+            .expect("E0084 for an async @test function");
+        assert!(
+            d.message.contains("an `async` body"),
+            "names async specifically, not a generic \"bad signature\": {}",
+            d.message
+        );
+        // The note has to be actionable on its own: a user who reads it must be
+        // able to write the working form without opening the docs, so it is
+        // required to name `block_on` *and* to spell the replacement as source.
+        let notes = d.notes.join(" ");
+        assert!(
+            notes.contains("block_on"),
+            "the note names the working alternative: {notes}"
+        );
+        assert!(
+            notes.contains("@test fn t()"),
+            "the note spells the replacement out as source: {notes}"
         );
     }
 

@@ -887,10 +887,14 @@ fn check_rejects_impl_missing_a_supertrait() {
 /// **What this does and does not prove.** It proves the whole program
 /// compiles, links through the JIT, and runs to a clean exit -- so the
 /// wrapper's state allocation and fat-pointer construction are real machine
-/// code that executes. It does NOT prove the async fn's BODY ran: nothing in
-/// Nova can poll a future yet (`Future` is not a nameable type and an
-/// `extern` signature accepts only Int/Float/Bool), so `f()`'s future here is
-/// built and dropped. `nova-driver`'s `async_end_to_end` module is where the
+/// code that executes. It does NOT prove the async fn's BODY ran: at the time
+/// this test was written nothing in Nova could poll a future — `Future` is a
+/// nameable type, but naming one is not driving one, there is no await outside
+/// an `async fn`, and an `extern` signature accepts only Int/Float/Bool — so
+/// `f()`'s future here is built and dropped. `std/task`'s `block_on` is what
+/// later made driving a future reachable from source; this fixture deliberately
+/// does not use it, because what it pins is the await-free wrapper compiling and
+/// running at `Float`. `nova-driver`'s `async_end_to_end` module is where the
 /// body is actually driven to completion and its `Float` value checked, in
 /// process, because that needs MIR-level calling code no `.nova` file can
 /// express until Task 7's `std/task`.
@@ -1111,9 +1115,20 @@ fn gate_async_tasks_run() {
         .stdout(expected);
 }
 
-/// The same fixture through `nova build`, because the two backends build the
-/// state object's layout and the poll ABI from independent declarations: a
-/// disagreement between them is a finding, not something to normalize away.
+/// The same fixture through `nova build`, i.e. a standalone linked executable
+/// rather than the JIT: object emission, the real linker, and a process whose
+/// entry point is the compiled program rather than the compiler.
+///
+/// **This does not cross a backend boundary.** `build_and_run` invokes
+/// `nova build` with no `--release`, and `--release` is what selects the LLVM
+/// backend (`cmd/run.rs`'s `BuildCmd`); without it `nova build` uses the same
+/// Cranelift backend `nova run` JITs with. So the state object's layout and the
+/// poll ABI — which `nova-mir` and `nova-runtime` declare independently and both
+/// backends reproduce — are exercised here from the Cranelift side only. **No
+/// test executes async machine code emitted by LLVM**; that backend's async
+/// coverage is IR-string assertions, with no run. Adding the release-backend
+/// async run is follow-up work, deliberately not done in the fix wave that
+/// corrected this comment.
 #[test]
 fn gate_async_tasks_build_standalone() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/async_tasks.stdout"))
@@ -1124,18 +1139,26 @@ fn gate_async_tasks_build_standalone() {
 }
 
 /// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
-/// allocation) — the established third member of every gate trio, and on this
-/// fixture the one that carries the most weight.
+/// allocation) — the established third member of every gate trio.
 ///
-/// A suspended task's state object is reachable from no stack and no register:
-/// its only root is the executor's entry in the collector's `PINNED` registry.
-/// Collecting on every allocation is therefore what distinguishes "the registry
-/// is populated" from "the registry is honoured" end to end, on real generated
-/// code rather than a hand-built object — and the eight unit tests that assert
-/// on a real collection's outcome are `#[ignore]`d for reasons unrelated to the
-/// registry (ADR 0010), so this configuration is where a dropped root becomes
-/// visible in an ordinary `cargo test` run. The fixture yields inside both
-/// spawned tasks, so a state object genuinely outlives a suspension here.
+/// **What this proves:** no premature free anywhere in a live async chain while
+/// the collector runs at every allocation, end to end on generated code. The
+/// fixture yields inside both spawned tasks, so state objects, their spilled
+/// temps and their heap-valued contents all survive across real suspensions and
+/// real collections, and the program still produces its exact expected output.
+///
+/// **What it does not prove: that the `PINNED` registry is honoured.** That
+/// would need a suspended state object reachable from *nothing but* the
+/// registry, and no state object in this fixture is. `nova_rt_task_block_on`
+/// holds the root future's fat pointer as a live parameter for the whole drive,
+/// so a conservative stack scan finds it; word 1 of it is the root state, whose
+/// temp slots hold both `JoinHandle` records, each holding a `fut` whose word 1
+/// is a spawned state. Every state in the chain therefore has a traced path from
+/// the stack independent of the registry. The `#[ignore]`d collection tests
+/// (ADR 0010) and not this configuration are the coverage of `PINNED` being
+/// honoured, which is what `.github/workflows/ci.yml` and ADR 0010 already say.
+/// The registry being *populated* is covered ungated, by `nova-runtime`'s
+/// `gc::root_count` assertions.
 #[test]
 fn gate_async_tasks_under_gc_stress() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/async_tasks.stdout"))
@@ -5175,6 +5198,100 @@ fn nova_test_reports_e0082_for_an_unknown_attribute() {
     assert!(
         stderr.contains("unknown attribute `@tset`; known attributes are: test"),
         "stderr: {stderr}"
+    );
+}
+
+// === Final whole-branch review, condition 1 (CRITICAL): `@test async fn` must
+// be refused, and the supported shape must still work ===
+//
+// `@test async fn` used to compile and report `ok` while running none of its
+// body: the runner's dispatcher calls the collected symbol directly, and for an
+// `async fn` that symbol is the future-building wrapper, so the call allocated a
+// state object and returned a future nothing polled. A guaranteed-failing
+// assertion inside such a test reported green.
+//
+// The fix refuses the shape (`E0084`) rather than shimming the dispatcher,
+// because `@test fn t() { block_on(f()) }` is the shape the `nova test` design
+// and Phase 2.3a's own design (§10) both specify for testing async code — the
+// defect was acceptance, not a missing feature. The two tests below are the
+// halves of that claim and only mean something together: the first that the
+// refusal fires with an actionable diagnostic, the second that async code is
+// still testable *and* that a wrong answer inside the supported shape really
+// does fail. Without the second, the first would be indistinguishable from
+// closing off async testing entirely.
+
+/// The refusal fires through `nova test`, with a diagnostic that names the
+/// working alternative.
+///
+/// End to end rather than only in `nova-typeck`
+/// (`test_on_an_async_function_is_e0084`) because the dispatcher this protects
+/// lives in `nova-driver` and is reached only on this path: a refusal that held
+/// in the resolver's own tests but not here would leave the original defect
+/// intact for every actual user of `nova test`.
+#[test]
+fn nova_test_rejects_an_async_test_function() {
+    let dir = write_test_project(
+        "nova-test-async-rejected",
+        "async fn helper() -> Int { 41 }\n\
+         @test\nasync fn t() { assert_eq(helper().await, 999) }\n",
+    );
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(stderr.contains("E0084"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("a `@test` function may not have an `async` body"),
+        "the message must name `async`, not a generic bad signature: {stderr}"
+    );
+    // The note is the load-bearing half for a user: without it the refusal
+    // reads as "async cannot be tested". Both fragments are asserted because
+    // naming `block_on` without showing where it goes is not actionable.
+    assert!(
+        stderr.contains("block_on"),
+        "the diagnostic must name the working alternative: {stderr}"
+    );
+    assert!(
+        stderr.contains("@test fn t()"),
+        "the diagnostic must spell the replacement out as source: {stderr}"
+    );
+    // The refusal must be a compile error, so nothing can be reported as a
+    // test result at all -- a diagnostic printed beside a green `ok` line would
+    // be the original defect with extra noise.
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout);
+    assert!(
+        !stdout.contains("... ok"),
+        "no test may be reported as passing: {stdout}"
+    );
+}
+
+/// The supported shape runs the async body, and a wrong answer inside it FAILS.
+///
+/// `helper` suspends at a real `yield_now().await` before producing its value,
+/// so passing here cannot be satisfied by a future that was built and dropped:
+/// the state machine has to be resumed after a suspension for `41` to exist at
+/// all. The failing twin pins the same thing from the other side — the rendered
+/// `41 != 999` is the value that came back out of the future, so a runner that
+/// silently skipped the body could not produce it.
+///
+/// Asserts the entire rendered stdout rather than a fragment, the same reason
+/// `nova_test_reports_a_pass_and_a_failure_distinctly` does.
+#[test]
+fn nova_test_runs_an_async_body_via_block_on_and_pins_a_wrong_answer() {
+    let dir = write_test_project(
+        "nova-test-async-block-on",
+        "async fn helper() -> Int {\n  yield_now().await\n  41\n}\n\
+         @test\nfn an_async_body_runs_under_block_on() { assert_eq(block_on(helper()), 41) }\n\
+         @test\nfn a_wrong_answer_inside_block_on_fails() { assert_eq(block_on(helper()), 999) }\n",
+    );
+    let assert = nova().current_dir(&dir).arg("test").assert().failure();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test an_async_body_runs_under_block_on ... ok\n\
+         test a_wrong_answer_inside_block_on_fails ... FAILED\n\
+         \x20\x20\x20\x20nova: panic: assertion failed: 41 != 999\n\
+         \n\
+         test result: FAILED. 1 passed; 1 failed; 0 trapped; 2 total\n"
     );
 }
 

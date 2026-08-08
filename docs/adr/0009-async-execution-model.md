@@ -129,20 +129,43 @@ afterwards.
   `block_on`, which returns as soon as its own future resolves — here nothing
   else would ever advance a task left pending, so returning early would strand
   it. And a task that reports `POLL_PENDING` forever is re-queued forever, so the
-  loop **hangs**. In 2.3a every suspension is `yield_now`-shaped and resumes on
-  the next turn, so this is not reachable today; it becomes reachable with the
-  first primitive that can park on an external event (an `await` on a channel
-  nothing sends to). Whatever adds such a primitive owns the fix — a park set
-  plus a deadlock diagnostic when the ready queue is empty and the park set is
-  not. A busy re-poll loop cannot tell "not ready yet" from "never will be".
+  loop **hangs**. Every *suspension* in 2.3a is `yield_now`-shaped and resumes on
+  the next turn, so no ordinary async program reaches the hang — **but it is
+  reachable today**, via a forged `JoinHandle` rather than via a parking
+  primitive. `JoinHandle`'s fields are public and task ids are `0, 1, 2, …` in
+  spawn order, and `run_to_completion` spawns the `block_on` root *first*, so
+  `JoinHandle { id: 0, fut: … }` written inside that root names the root itself.
+  `join`'s `while !task_is_done(id) { yield_now().await }` then waits for the
+  task that is doing the waiting: a valid id, so nothing aborts, and it never
+  becomes done. Measured on this branch, 2026-08-09: `nova check` reports `ok`
+  and `nova run` hangs indefinitely with empty stdout and stderr (`timeout 8` →
+  exit 124). The earlier disclosure of this shape said only that a hand-built
+  handle with a *bogus* id aborts, which is true of an id no task ever had
+  (`nova_rt_task_is_done`'s unknown-id `abort_with`) and is the wrong half of
+  the hazard: a valid-but-wrong id does not abort, it deadlocks. **The
+  forgeable-id design is assigned to the next increment**, not fixed here. The
+  park-set gap is unchanged and still owed by whatever adds the first primitive
+  that can park on an external event (an `await` on a channel nothing sends to)
+  — a park set plus a deadlock diagnostic when the ready queue is empty and the
+  park set is not. A busy re-poll loop cannot tell "not ready yet" from "never
+  will be".
 - **No cancellation.** `nova-spec/13-RUNTIME.md` §4.4 specifies structured
   cancellation — dropping a handle cancels the child, plus an explicit
   `task.cancel()`. None of it exists. A `JoinHandle` is a plain value-semantics
   record; dropping it does nothing.
-- **Async trait methods are still rejected** (`E0900`, "async methods"), in a
-  trait declaration, a default body, and an impl alike, as are async `extern`
-  functions ("async extern functions"). Async *inherent* methods are accepted.
-  Async closures are not in the grammar at all.
+- **Async trait methods are still rejected, but by two different checks.** In a
+  trait *declaration* and in a *default body* it is `E0900` ("async methods"),
+  as it is for async `extern` functions ("async extern functions"). In an
+  **impl** it is `E0072`: the `E0900` check is not applied there, and what
+  refuses it is trait conformance — an `async fn` returns `Future<T>` while the
+  trait declared `T`, rendered as ``method `m` returns `Future<Int>` but trait
+  `T` declares `Int` ``. Both positions are refused and both diagnostics are
+  legible, so this is one gap and not two, but the codes differ and only the
+  declaration's is `E0900`
+  (`async_trait_method_still_reports_e0900` and
+  `async_trait_impl_method_is_refused_as_a_return_type_mismatch`, `nova-typeck`).
+  Async *inherent* methods are accepted. Async closures are not in the grammar
+  at all.
 - **Every temp is spilled into the state object, not only those live across a
   suspend.** This is what buys the transform out of liveness analysis: no local
   lives in a register or on the stack across a suspension *by construction*. The
@@ -186,10 +209,21 @@ afterwards.
   decision with its own evidence: **ADR 0010**. It is not about the registry —
   the failure direction is over-retention, from a stale stack word in an
   already-returned frame — but it does mean this model's rooting behaviour under
-  a real collection is covered in the ordinary test step only by
-  `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`, which asserts
-  on `gc::root_count` and never collects, plus the end-to-end
-  `gate_async_tasks_under_gc_stress` configuration.
+  a real collection has **no ungated coverage at all**. What runs in an ordinary
+  test step is `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`,
+  which asserts on `gc::root_count` and never collects, so it covers the registry
+  being *populated*, not honoured. The end-to-end
+  `gate_async_tasks_under_gc_stress` configuration does not close that: it
+  collects on every allocation and proves no premature free in a live async
+  chain, but every state object in its fixture is also reachable from the stack
+  independently of the registry — `nova_rt_task_block_on` holds the root future's
+  fat pointer as a live parameter for the whole drive, and the rest of the chain
+  hangs off it — so removing the registry would not change its result. Measured
+  on this branch, 2026-08-09: with `gc::add_root` neutered to a no-op, all three
+  `gate_async_tasks_*` tests still pass while the four `root_count` unit tests
+  fail. That corrects an earlier statement of this residual, which listed the
+  gc-stress configuration as part of the coverage; `run_tests.rs`'s comment on
+  that test carries the same correction.
 
 ### Consequences
 

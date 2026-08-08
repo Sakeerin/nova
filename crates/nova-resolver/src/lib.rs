@@ -803,11 +803,11 @@ fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_m
 ///
 /// Also validates the item's `attrs` (Task 2): an unknown attribute name is
 /// always `E0082`, `@test` on anything other than a function is `E0083`, a
-/// `@test` function with parameters, generics, or a non-`Unit` return is
-/// `E0084`, and an unknown `@test(...)` argument is `E0085` — never silently
-/// ignored, so a mistyped `@tset` cannot compile into a function that looks
-/// like a test and never runs as one. A well-formed `@test` function is
-/// pushed onto `tests`.
+/// `@test` function that is `async` or has parameters, generics, or a
+/// non-`Unit` return is `E0084`, and an unknown `@test(...)` argument is
+/// `E0085` — never silently ignored, so a mistyped `@tset` cannot compile into
+/// a function that looks like a test and never runs as one. A well-formed
+/// `@test` function is pushed onto `tests`.
 ///
 /// Every `Item` variant carries `attrs` and is validated here, `import`,
 /// `module` and `extern` included (fix round 1: `@tset` before an `extern`
@@ -1089,6 +1089,19 @@ const KNOWN_ATTRIBUTES: &[&str] = &["test"];
 /// Arguments `@test(...)` accepts. Anything else is `E0085`.
 const KNOWN_TEST_ARGS: &[&str] = &["should_panic"];
 
+/// The `E0084` note attached when a `@test` function is `async`
+/// (see [`test_shape_violations`]).
+///
+/// A note rather than a longer message because it has to be *actionable on its
+/// own*: the whole point of rejecting the shape is that the user's next edit
+/// should be the working one, so the replacement pattern is spelled out as
+/// source rather than described, and `block_on`'s role in it is named.
+const TEST_ASYNC_NOTE: &str = "an `async fn` returns a future, and a `@test` function's result is \
+     discarded rather than awaited, so an `async` test's body would never run; \
+     write the test as a synchronous one that drives the future itself, e.g. \
+     `@test fn t() { assert_eq(block_on(f()), 42) }` — `block_on` runs `f()`'s \
+     future to completion and produces its value";
+
 /// `E0082`: `attr`'s name is not in [`KNOWN_ATTRIBUTES`]. Shared by every
 /// item kind that can carry attributes, so a typo is caught the same way no
 /// matter what it is attached to.
@@ -1200,7 +1213,12 @@ fn validate_test_function(
             )
             .with_primary_label(f.name.span, "invalid test signature");
             for (name, span) in &violations {
-                diag = diag.with_secondary_label(*span, format!("{name} here"));
+                if let Some(span) = span {
+                    diag = diag.with_secondary_label(*span, format!("{name} here"));
+                }
+            }
+            if f.is_async {
+                diag = diag.with_note(TEST_ASYNC_NOTE);
             }
             diagnostics.push(diag);
             well_formed = false;
@@ -1216,23 +1234,41 @@ fn validate_test_function(
     }
 }
 
-/// Ways a function's signature disqualifies it from `@test` (`E0084`):
-/// parameters, generics, or an explicit non-`Unit` return type. A test is
-/// called with no arguments and its result is discarded, so there is no
+/// Ways a function's signature disqualifies it from `@test` (`E0084`): an
+/// `async` body, parameters, generics, or an explicit non-`Unit` return type. A
+/// test is called with no arguments and its result is discarded, so there is no
 /// caller that could ever supply the one or consume the other. A missing
 /// return type and an explicit `-> ()` are both `Unit` and neither is a
 /// violation — only an explicit *non*-`Unit` return type is.
-fn test_shape_violations(f: &Function) -> Vec<(&'static str, Span)> {
+///
+/// `async` is rejected for the same reason and one more: an `async fn` returns
+/// a future, and a discarded future is never awaited, so the body of an
+/// `async` `@test` could not run at all. Rejecting it is what the `nova test`
+/// design specified from the start (`@test fn t() { block_on(f()) }` is the
+/// supported way to test async code); accepting it silently is what
+/// `TEST_ASYNC_NOTE` exists to steer a user out of.
+///
+/// The `async` violation carries no span because the AST records `is_async` as
+/// a bare `bool` with no span of its own, and the `async` keyword precedes the
+/// name, so `f.name.span` would point a label at the wrong token. `None` is
+/// therefore "no better span than the primary label's", not "no location".
+fn test_shape_violations(f: &Function) -> Vec<(&'static str, Option<Span>)> {
     let mut violations = Vec::new();
+    if f.is_async {
+        violations.push(("an `async` body", None));
+    }
     if let (Some(first), Some(last)) = (f.params.first(), f.params.last()) {
-        violations.push(("parameters", first.name.span.merge(last.ty.span)));
+        violations.push(("parameters", Some(first.name.span.merge(last.ty.span))));
     }
     if let (Some(first), Some(last)) = (f.generics.first(), f.generics.last()) {
-        violations.push(("generic parameters", first.name.span.merge(last.name.span)));
+        violations.push((
+            "generic parameters",
+            Some(first.name.span.merge(last.name.span)),
+        ));
     }
     if let Some(rt) = &f.return_ty {
         if !matches!(&rt.value, Type::Tuple(items) if items.is_empty()) {
-            violations.push(("a non-Unit return type", rt.span));
+            violations.push(("a non-Unit return type", Some(rt.span)));
         }
     }
     violations
