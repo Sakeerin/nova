@@ -169,8 +169,13 @@ unsafe fn read_future(future: *mut u8) -> (PollFn, *mut u8) {
 }
 
 /// Register `future` as a new task: read its fat pointer, root its state
-/// object (see the module doc comment for why `gc::add_root`/`remove_root`
-/// pair with spawn/completion), enqueue it, and return its id.
+/// object, enqueue it, and return its id.
+///
+/// The `gc::add_root` here is paired with exactly one `gc::remove_root` in
+/// [`take_output_internal`] -- **not** at completion. See [`poll_one`] for why
+/// the root has to outlive completion, and [`take_output_internal`] for what
+/// that ordering costs. This module owns that policy; `gc.rs` states only the
+/// registry's own multiset contract and deliberately not who pairs it or when.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).

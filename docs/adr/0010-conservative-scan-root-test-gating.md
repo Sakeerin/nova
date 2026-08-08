@@ -125,9 +125,19 @@ changes which stale bytes are still readable.
    inside a task whose scope is something else.
 3. **CI runs them as an advisory, `continue-on-error` step**
    (`.github/workflows/ci.yml`), separate from `cargo test --workspace
-   --all-features`. Without it, the executor's mandated `gc::add_root`
-   mutation — deleting the call from `spawn` — is killed by nothing CI
-   executes at all, which is strictly worse than a step that is sometimes red.
+   --all-features`. Without it, nothing CI executes checks that `PINNED` is
+   *honoured* by a real collection: the registry could be populated correctly
+   and ignored entirely by the marker, and no other test would notice. An
+   advisory step that is sometimes red is strictly better than no coverage of
+   the seeding at all.
+
+   This is deliberately narrower than "the only coverage of `gc::add_root`".
+   That the executor registers its root, and releases it exactly once, is
+   asserted directly on the registry by `nova-runtime`'s
+   `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`, which
+   needs no collection and so is neither `#[ignore]`d nor `#[cfg(windows)]` —
+   it runs in the ordinary test step on all three legs. Deleting
+   `gc::add_root` from `spawn` fails *that* test, not these eight.
 4. **That step must not use `--test-threads=1`.** Serialization is remedy 2
    above in a different costume, and was measured to make this flakiness two
    orders of magnitude worse.

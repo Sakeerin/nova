@@ -183,29 +183,37 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
     p
 }
 
-/// Register `ptr` as a root until [`remove_root`]. Idempotent per address is
-/// **not** assumed: registering twice requires removing twice, so callers must
-/// pair them exactly. The executor is expected to (one add at spawn, one
-/// remove at completion) -- stated as an intended contract, not a claim about
-/// existing code, since the executor is not on this branch yet.
+/// Register `ptr` as a root until [`remove_root`].
 ///
-/// Same-thread only: `PINNED` is thread-local, like `HEAP`, so a `remove_root`
-/// on a different thread than the matching `add_root` silently leaves the
-/// registration behind on the original thread -- the exact leak
-/// `remove_root_actually_unroots` exists to catch, but invisible to it, since
-/// that test never crosses threads. This matters if a future executor ever
-/// migrates a task between worker threads.
+/// **Multiset, not set.** Each call adds one registration, so an address
+/// registered twice remains a root until it has been removed twice. This
+/// function does not deduplicate, and registrations carry no identity beyond
+/// the address. Pairing adds with removes is entirely the caller's duty; the
+/// registry has no notion of who registered an address or at what point in
+/// that caller's lifecycle, and deliberately says nothing about it --
+/// a pairing policy belongs to the module that owns the policy, not here.
+/// `registering_the_same_address_twice_requires_removing_it_twice` pins the
+/// multiset semantics against a future "simplification" to a set.
 ///
-/// Consumed by `task.rs`'s executor: `spawn` calls this once per task and
-/// pairs it with exactly one [`remove_root`] on that task's completion.
+/// **Same-thread only.** `PINNED` is thread-local, like `HEAP`, so a
+/// [`remove_root`] issued on a different thread than the matching `add_root`
+/// silently leaves the registration behind on the original thread rather than
+/// failing -- a leak `remove_root_actually_unroots` catches within one thread
+/// but cannot see across two, since it never crosses threads.
 pub fn add_root(ptr: *mut u8) {
     PINNED.with(|p| p.borrow_mut().push(ptr as usize));
 }
 
-/// Unregister one registration of `ptr`. Removing an address that was never
-/// registered is a no-op rather than a panic — the runtime must not abort a
-/// user's program over its own bookkeeping. Same-thread only, like
-/// [`add_root`] -- see its doc comment.
+/// Cancel exactly one registration of `ptr` made by [`add_root`].
+///
+/// Removing an address that was never registered, or removing it more times
+/// than it was registered, is a no-op rather than a panic — the runtime must
+/// not abort a user's program over its own bookkeeping. *Which* of several
+/// identical registrations is cancelled is unobservable, since they differ in
+/// nothing but existence, so removing the most recently added match
+/// (`rposition` + `swap_remove`) is an implementation choice rather than part
+/// of the contract. Same-thread only, like [`add_root`] -- see its doc
+/// comment.
 pub fn remove_root(ptr: *mut u8) {
     PINNED.with(|p| {
         let mut v = p.borrow_mut();
@@ -243,14 +251,16 @@ pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
 ///
 /// [`add_root`] is a multiset, not a set -- two registrations require two
 /// [`remove_root`] calls -- so a caller pairing them has an exact count to
-/// assert, not merely a yes/no. This exists so a test can check that pairing
-/// **without** running a collection: `task.rs`'s executor must keep a
-/// completed task's state rooted until its output is taken, and asserting
-/// that through `collect()` would inherit the conservative scan's
-/// intermittent over-retention (`docs/adr/0010-conservative-scan-root-test-gating.md`)
-/// for an invariant that is really about this `Vec`'s contents. Reading the
-/// registry directly is both deterministic and platform-independent, where a
-/// `collect()`-based assertion is neither.
+/// assert, not merely a yes/no. This exists so such a caller can assert its
+/// own pairing **without** running a collection. What that pairing should be
+/// is the calling module's to state, not this one's; what this function
+/// provides is a way to check it deterministically, because a
+/// `collect()`-based assertion would instead inherit the conservative scan's
+/// intermittent over-retention
+/// (`docs/adr/0010-conservative-scan-root-test-gating.md`) for an invariant
+/// that is really about this `Vec`'s contents, and could pass on an
+/// accidental stack root. Reading the registry directly is deterministic and
+/// platform-independent, where a `collect()`-based assertion is neither.
 #[cfg(test)]
 pub(crate) fn root_count(addr: usize) -> usize {
     PINNED.with(|p| p.borrow().iter().filter(|&&a| a == addr).count())
@@ -597,9 +607,10 @@ mod tests {
         // add_root's doc comment states this is multiset, not set, semantics.
         // Correct by inspection (`push`/`rposition`+`swap_remove`), but had no
         // regression guard: a future "simplification" to a `HashSet`-backed
-        // registry, or to `Vec::retain`/`dedup`, would silently change this,
-        // and Task 4's executor is exactly the kind of caller (spawn once,
-        // could plausibly register twice under a bug) this would bite.
+        // registry, or to `Vec::retain`/`dedup`, would silently change this.
+        // Any caller that pairs one add with one remove per object is what
+        // that would bite -- a bug registering an address twice would then be
+        // fully unrooted by the first removal, rather than still held.
         reset();
         let obj = alloc(16, true);
         add_root(obj);

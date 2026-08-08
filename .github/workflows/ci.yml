@@ -25,12 +25,21 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
 
-      # The eight `#[ignore]`d GC root tests are the ONLY coverage of
-      # `gc::add_root` being wired into the executor's spawn path, and the step
-      # above runs none of them -- so without this step, deleting that call
-      # from `spawn` is killed by nothing CI executes at all. They assert on
-      # the outcome of a real, conservative stack scan and intermittently
-      # over-retain (never a false free); see
+      # The eight `#[ignore]`d GC root tests are the only coverage of `PINNED`
+      # actually being HONOURED by a real collection -- the registry could be
+      # populated perfectly and ignored by the marker, and only these eight
+      # would notice. The step above runs none of them.
+      #
+      # Note what this step is NOT the only guard for: that the executor
+      # registers its root at all is covered unconditionally, on all three
+      # legs, by nova-runtime's
+      # `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`, which
+      # asserts on the registry directly and is neither ignored nor
+      # Windows-gated. Deleting `gc::add_root` from `spawn` therefore fails the
+      # step above, not this one.
+      #
+      # These eight assert on the outcome of a real, conservative stack scan
+      # and intermittently over-retain (never a false free); see
       # docs/adr/0010-conservative-scan-root-test-gating.md for the mechanism
       # and the two remedies that were measured to make it worse.
       #
