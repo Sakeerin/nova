@@ -1,4 +1,5 @@
-//! The async state-machine transform, part 1: `async fn`s with no `.await`.
+//! The async state-machine transform: an `async fn` becomes a resumable poll
+//! function.
 //!
 //! A post-monomorphization pass over the finished [`Module`]. Each function
 //! [`crate::Function::is_async`] flags is split into two:
@@ -16,17 +17,37 @@
 //! Running on the finished module rather than during lowering means the pass
 //! sees no generics and lands once for both codegen backends.
 //!
+//! # How a body is split
+//!
+//! A body's suspend points arrive as [`Stmt::Await`] markers. Each block is cut
+//! at every one of them, and each cut expands into three blocks: one that polls
+//! the awaited future, one that suspends, and one that carries on. The poll
+//! function's entry becomes a [`Terminator::Switch`] on the resume tag, sending
+//! tag 0 to the body's original entry and tag *k* to await *k*'s poll block — an
+//! existing terminator, so neither backend needs a new construct.
+//!
+//! Awaiting means polling: a future value *is* the `{ poll_code, state }` fat
+//! pointer `Stmt::CallIndirect` already knows how to call, and calling it passes
+//! the inner state object as the leading environment argument, which is exactly
+//! `PollFn`'s first parameter. On `POLL_READY` the continuation copies the
+//! awaited value out of the inner state object's own output slot. On
+//! `POLL_PENDING` the suspend stores **this await's own tag**, not the next one:
+//! an inner future may report pending any number of times, and a tag one higher
+//! would resume the task past a suspend point that never finished — reading an
+//! output slot nothing has written, which completes with a wrong value rather
+//! than failing.
+//!
 //! # Why every value goes to the state object
 //!
 //! Nothing in an await-free body needs to be spilled: with no suspend point,
 //! no value can be live across one. The spill is unconditional anyway because
-//! the resumable form of this transform splits a body at its await points into
-//! blocks that run in *different* invocations of the poll function, and a value
-//! left in a temp across such a split is read on a path where nothing defined
-//! it — which the Cranelift frontend resolves as a block parameter fed from a
-//! predecessor that never executes, i.e. garbage, with no diagnostic. Spilling
-//! everything removes the liveness question instead of answering it, and does
-//! so for a shape this half of the transform can already be tested against.
+//! the split puts blocks that run in *different* invocations of the poll
+//! function either side of a suspend, and a value left in a temp across such a
+//! split is read on a path where nothing defined it — which the Cranelift
+//! frontend resolves as a block parameter fed from a predecessor that never
+//! executes, i.e. garbage, with no diagnostic. Spilling everything removes the
+//! liveness question instead of answering it, for every body rather than only
+//! the ones a liveness analysis would get right.
 //!
 //! # A panic must not cross a poll function's boundary
 //!
@@ -34,14 +55,26 @@
 //! without aborting, but a Cranelift- or LLVM-emitted frame has no landing pads
 //! and no drop glue, so an unwind *through* a poll function would skip whatever
 //! the executor's bookkeeping needs. What this pass contributes to that
-//! requirement is narrow and checkable: **it introduces no call at all into a
-//! poll function.** Every statement it emits is a field load, a field store or
-//! an integer constant; the only calls in a poll body are the ones the
-//! `async fn` already contained, under the same discipline as any other Nova
-//! function (`nova_rt_panic_str` and `nova_rt_check_bounds` abort rather than
-//! unwind, and a `Terminator::Trap` becomes a trap instruction). The one call
-//! this pass adds — the state object's allocation — is in the wrapper, which is
-//! an ordinary Nova function and not a poll function.
+//! requirement is narrow and checkable: **the only call it introduces into a
+//! poll function is the indirect poll of an awaited future.** Everything else it
+//! emits is a field load, a field store, an integer constant or a terminator,
+//! and the other calls in a poll body are the ones the `async fn` already
+//! contained, under the same discipline as any other Nova function
+//! (`nova_rt_panic_str` and `nova_rt_check_bounds` abort rather than unwind, and
+//! a `Terminator::Trap` becomes a trap instruction).
+//!
+//! That one call is sound by induction rather than by inspection, because its
+//! callee is a value and not a symbol. What the value can be is narrow: a
+//! `Future` originates only in a call to an `async fn`, since `Future` is not a
+//! nameable source type and an `extern` signature cannot mention one — so no
+//! foreign function pointer can reach an await, and the callee is always a
+//! `$poll` function this pass generated, under this same paragraph's discipline.
+//! Whatever first lets a future's poll code come from outside this pass owns
+//! re-establishing that.
+//!
+//! The state object's allocation is a call too, and stays outside this argument
+//! by being in the wrapper, which is an ordinary Nova function and not a poll
+//! function.
 //!
 //! # The layout this pass builds
 //!
@@ -51,8 +84,7 @@
 //! `nova-codegen-cranelift` depends on both and is where they are pinned
 //! together (`the_state_layout_matches_nova_runtimes`).
 
-use crate::{Block, Function, MirTy, Module, RtFunc, Stmt, Temp, Terminator};
-use nova_hir as hir;
+use crate::{Block, BlockId, Function, MirTy, Module, RtFunc, Stmt, Temp, Terminator};
 
 /// The resume tag, at byte offset 0: which of a poll function's states to
 /// enter. Written by the wrapper; a resumable poll function dispatches on it.
@@ -67,10 +99,8 @@ pub const STATE_SLOT_TEMPS: u32 = 2;
 /// read and written for every future, including one whose `async fn` returns
 /// unit and has no temps.
 pub const STATE_MIN_SIZE: i64 = STATE_SLOT_TEMPS as i64 * 8;
-/// A poll function has not produced a value yet. Unreachable from this pass —
-/// an await-free body cannot suspend — and declared here because the executor
-/// rejects any status that is neither this nor [`POLL_READY`], so both halves
-/// of that pair belong in one place.
+/// A poll function has not produced a value: it stopped at an await whose future
+/// was not ready, and recorded a resume tag that returns to that same await.
 pub const POLL_PENDING: i64 = 0;
 /// A poll function has written its final value to [`STATE_SLOT_OUTPUT`].
 pub const POLL_READY: i64 = 1;
@@ -83,6 +113,29 @@ pub const FUTURE_SLOT_STATE: u32 = 1;
 /// The state object pointer inside a generated poll function: its environment
 /// parameter, which `takes_env` places at temp 0.
 const STATE: Temp = Temp(0);
+/// The task context pointer inside a generated poll function: its one real
+/// parameter, which `takes_env` places at temp 1.
+const TASK_CTX: Temp = Temp(1);
+
+/// The block a resumable poll function enters at, where it switches on the
+/// resume tag. MIR's entry is `BlockId(0)` by definition, so the dispatch has to
+/// take that id and every block the body already had has to be renumbered past
+/// it.
+const DISPATCH: BlockId = BlockId(0);
+/// The one block a resumable poll function sends every unrecognized resume tag
+/// and every unrecognized inner poll status to. Holding no statements is what
+/// lets all of them share it, and [`Terminator::Trap`] aborts rather than
+/// unwinding.
+const BAD_DISCRIMINANT: BlockId = BlockId(1);
+/// How many blocks a resumable poll function reserves ahead of the body's own:
+/// [`DISPATCH`] and [`BAD_DISCRIMINANT`].
+const RESERVED_BLOCKS: u32 = 2;
+/// How many blocks one await expands to, beyond the piece of its own block that
+/// runs before it: the poll, the suspend, and the continuation.
+const BLOCKS_PER_AWAIT: u32 = 3;
+/// The lowest tag a suspend may store. Tag 0 is the entry state — what the
+/// wrapper writes into a fresh state object — so the resume tags start above it.
+const FIRST_RESUME_TAG: i64 = 1;
 
 /// Rewrite every `async fn` in `module` into a poll function plus a wrapper.
 ///
@@ -93,8 +146,9 @@ const STATE: Temp = Temp(0);
 ///
 /// # Preconditions
 ///
-/// Every flagged function's body is free of suspend points ([`contains_await`]
-/// is the predicate, and `lower_module` rejects the rest with `E0088`).
+/// Every suspend point in a flagged function's body is a [`Stmt::Await`] marker,
+/// which is what `lower::lower_expr` emits for `.await`. There is no body shape
+/// this pass rejects.
 pub(crate) fn transform(module: &mut Module) {
     let mut wrappers: Vec<Function> = Vec::new();
     for f in &mut module.functions {
@@ -139,8 +193,21 @@ fn split_into_poll_and_wrapper(f: &mut Function) -> Function {
         orig: &orig_temps,
     };
     let blocks = std::mem::take(&mut f.blocks);
-    f.blocks = blocks.into_iter().map(|b| sp.block(b)).collect();
+    f.blocks = sp.body(blocks);
     f.temps = sp.temps;
+
+    // Every await must have been consumed by the split. A surviving marker
+    // reaches a codegen backend, which has no machine code for it — reported
+    // there as a malformed-MIR error, but the pass that was supposed to remove
+    // it is where the mistake is.
+    debug_assert!(
+        !f.blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .any(|s| matches!(s, Stmt::Await { .. })),
+        "`{}$poll` still holds an await marker after the split",
+        f.name
+    );
 
     // **The two halves of the state object's size must agree.** The allocation
     // was sized above, from the pre-transform temp count, *before* the rewrite
@@ -349,14 +416,66 @@ fn push_temp(temps: &mut Vec<MirTy>, ty: MirTy) -> Temp {
     t
 }
 
-/// Rewrites a pre-transform body so that every value it names lives in the
-/// state object instead of a temp.
+/// Rewrites a pre-transform body into the poll function's: every value it names
+/// moves into the state object, and every suspend point becomes the control flow
+/// that polls, suspends and resumes.
+///
+/// The split and the spill are one pass because each needs what the other
+/// consumes. The split reads an await's *original* temp ids to name the state
+/// slots its future and result live in — which is exactly what the spill
+/// replaces with scratch temps — and the spill has to run over the pieces the
+/// split produced, since the piece a statement lands in is where its reloads
+/// have to go.
 struct Spiller<'a> {
     /// The poll function's temp list, grown one entry per load and per result.
     temps: Vec<MirTy>,
     /// The pre-transform temp classes, indexed by original temp id — which is
     /// also the index into the state object's temp slots.
     orig: &'a [MirTy],
+}
+
+/// One suspend point lifted out of a block's statement list.
+struct AwaitPoint {
+    /// Where the awaited value goes, or `None` when the awaited output is unit.
+    dst: Option<Temp>,
+    /// The pre-transform temp holding the awaited `{ poll_code, state }` value.
+    future: Temp,
+}
+
+/// Split one pre-transform block's statements at its suspend points.
+///
+/// Returns the straight-line runs between the awaits — always exactly one more
+/// than there are awaits, so a block whose last statement is an await still has
+/// a continuation to resume into — and the awaits themselves, in order.
+///
+/// Lifting the awaits out here, rather than substituting through them like every
+/// other statement, is what lets the sequence each one expands to address state
+/// slots by the *original* temp ids: [`visit_temps`] would already have replaced
+/// them with scratch temps that name no slot at all.
+fn split_at_awaits(stmts: Vec<Stmt>) -> (Vec<Vec<Stmt>>, Vec<AwaitPoint>) {
+    let mut segments: Vec<Vec<Stmt>> = vec![Vec::new()];
+    let mut awaits: Vec<AwaitPoint> = Vec::new();
+    for s in stmts {
+        match s {
+            Stmt::Await { dst, future } => {
+                awaits.push(AwaitPoint { dst, future });
+                segments.push(Vec::new());
+            }
+            other => segments
+                .last_mut()
+                .expect("segments starts with one entry and only ever grows")
+                .push(other),
+        }
+    }
+    (segments, awaits)
+}
+
+/// How many suspend points `b` contains.
+fn await_count(b: &Block) -> u32 {
+    b.stmts
+        .iter()
+        .filter(|s| matches!(s, Stmt::Await { .. }))
+        .count() as u32
 }
 
 /// Whether a statement's operand is consumed or produced. A load has to be
@@ -381,26 +500,267 @@ impl Spiller<'_> {
         STATE_SLOT_TEMPS + t.0
     }
 
-    /// Load original temp `t` out of its slot into a fresh scratch temp.
+    /// Load field `index` of `record` into a fresh scratch temp.
     ///
     /// A fresh temp per load site, never one reused across uses: a reused
     /// scratch would be a value living outside the state object across
-    /// statements, which is exactly what this pass exists to prevent.
-    fn reload(&mut self, out: &mut Vec<Stmt>, t: Temp) -> Temp {
-        let ty = self.orig_ty(t);
+    /// statements, which is exactly what this pass exists to prevent — and after
+    /// a split it could be a value living across a *suspend*, read on a resume
+    /// where nothing defined it.
+    fn load(&mut self, out: &mut Vec<Stmt>, record: Temp, index: u32, ty: MirTy) -> Temp {
         let dst = self.scratch(ty);
         out.push(Stmt::RecordField {
             dst,
-            record: STATE,
-            index: Self::slot(t),
+            record,
+            index,
             ty,
         });
         dst
     }
 
-    fn block(&mut self, b: Block) -> Block {
-        let mut stmts: Vec<Stmt> = Vec::with_capacity(b.stmts.len() * 3);
-        for mut s in b.stmts {
+    /// Load original temp `t` out of its state slot into a fresh scratch temp.
+    fn reload(&mut self, out: &mut Vec<Stmt>, t: Temp) -> Temp {
+        let ty = self.orig_ty(t);
+        self.load(out, STATE, Self::slot(t), ty)
+    }
+
+    /// A fresh scratch temp holding the i64 constant `v`.
+    fn const_i64(&mut self, out: &mut Vec<Stmt>, v: i64) -> Temp {
+        let t = self.scratch(MirTy::I64);
+        out.push(Stmt::ConstInt(t, v));
+        t
+    }
+
+    /// Rewrite a whole pre-transform body: split it at its suspend points, spill
+    /// every value it names, and give a resumable body its entry dispatch.
+    fn body(&mut self, orig: Vec<Block>) -> Vec<Block> {
+        let per_block: Vec<u32> = orig.iter().map(await_count).collect();
+        let total: u32 = per_block.iter().sum();
+        // An await-free body has exactly one state, so a dispatch on its tag
+        // would be the identity and moving its entry block would renumber every
+        // terminator target for no gain. Reserving nothing leaves such a body's
+        // block list exactly as it arrived.
+        let reserved = if total == 0 { 0 } else { RESERVED_BLOCKS };
+
+        // Where each original block's leading piece lands, decided before
+        // anything is emitted: a terminator can name a block that has not been
+        // rewritten yet, and a loop's back edge always does.
+        let mut next = reserved;
+        let starts: Vec<BlockId> = per_block
+            .iter()
+            .map(|a| {
+                let id = BlockId(next);
+                next += 1 + BLOCKS_PER_AWAIT * a;
+                id
+            })
+            .collect();
+
+        let mut out: Vec<Block> = Vec::with_capacity(next as usize);
+        for _ in 0..reserved {
+            // Placeholders. `BAD_DISCRIMINANT` is already exactly what it needs
+            // to be; `DISPATCH` is overwritten below, once every resume point
+            // exists to switch to.
+            out.push(Block {
+                stmts: Vec::new(),
+                term: Terminator::Trap,
+            });
+        }
+        let mut resume: Vec<BlockId> = Vec::with_capacity(total as usize);
+        for (i, b) in orig.into_iter().enumerate() {
+            debug_assert_eq!(
+                out.len() as u32,
+                starts[i].0,
+                "block {i}'s pieces must land at the id reserved for them, or \
+                 every terminator naming it is off by however far the two drifted"
+            );
+            self.block_pieces(b, &starts, &mut out, &mut resume);
+        }
+        debug_assert_eq!(
+            out.len() as u32,
+            next,
+            "the emitted block count must match the ids reserved for it"
+        );
+
+        if total > 0 {
+            debug_assert_eq!(
+                resume.len(),
+                total as usize,
+                "one resume point per await, in tag order"
+            );
+            let mut stmts = Vec::new();
+            let tag = self.load(&mut stmts, STATE, STATE_SLOT_TAG, MirTy::I64);
+            let arms = std::iter::once((0, starts[0]))
+                .chain(
+                    resume
+                        .into_iter()
+                        .enumerate()
+                        .map(|(k, b)| (FIRST_RESUME_TAG + k as i64, b)),
+                )
+                .collect();
+            out[DISPATCH.0 as usize] = Block {
+                stmts,
+                term: Terminator::Switch {
+                    disc: tag,
+                    arms,
+                    default: BAD_DISCRIMINANT,
+                },
+            };
+        }
+        out
+    }
+
+    /// Emit one original block's pieces: the statements before its first await,
+    /// then a poll / suspend / continuation triple per await.
+    ///
+    /// Appends each await's poll block to `resume`, in tag order.
+    fn block_pieces(
+        &mut self,
+        b: Block,
+        starts: &[BlockId],
+        out: &mut Vec<Block>,
+        resume: &mut Vec<BlockId>,
+    ) {
+        let base = out.len() as u32;
+        let Block {
+            stmts: body,
+            term: orig_term,
+        } = b;
+        let (segments, awaits) = split_at_awaits(body);
+        let mut segments = segments.into_iter();
+        let n = awaits.len();
+        // Whichever piece is last takes the block's original terminator, and
+        // exactly one does.
+        let mut orig_term = Some(orig_term);
+
+        // The leading piece. A resume skips it, which is the reason for cutting
+        // the block here rather than re-entering it from the top.
+        let mut stmts = Vec::new();
+        self.spill(
+            segments.next().expect("one segment more than awaits"),
+            &mut stmts,
+        );
+        if n == 0 {
+            let term = self.finish(&mut orig_term, &mut stmts, starts);
+            out.push(Block { stmts, term });
+            return;
+        }
+        out.push(Block {
+            stmts,
+            term: Terminator::Goto(BlockId(base + 1)),
+        });
+
+        for (k, aw) in awaits.into_iter().enumerate() {
+            let poll = BlockId(base + 1 + BLOCKS_PER_AWAIT * k as u32);
+            let suspend = BlockId(poll.0 + 1);
+            let cont = BlockId(poll.0 + 2);
+            let tag = FIRST_RESUME_TAG + resume.len() as i64;
+            resume.push(poll);
+
+            // The poll. Entered both by falling out of the code before the await
+            // and by a resume at `tag`, so it holds nothing but the poll itself:
+            // anything else here would run again on every re-poll.
+            debug_assert_eq!(out.len() as u32, poll.0, "the poll block's own id");
+            let mut stmts = Vec::new();
+            let future = self.reload(&mut stmts, aw.future);
+            let status = self.scratch(MirTy::I64);
+            stmts.push(Stmt::CallIndirect {
+                dst: Some(status),
+                callee: future,
+                params: vec![MirTy::Ptr],
+                ret: MirTy::I64,
+                args: vec![TASK_CTX],
+            });
+            out.push(Block {
+                stmts,
+                // Exactly the two statuses the ABI defines, and a trap for the
+                // rest: a generated poll function returns only these, so
+                // anything else is a compiler bug, and treating an unrecognized
+                // status as ready would complete the await out of an output slot
+                // nothing wrote.
+                term: Terminator::Switch {
+                    disc: status,
+                    arms: vec![(POLL_READY, cont), (POLL_PENDING, suspend)],
+                    default: BAD_DISCRIMINANT,
+                },
+            });
+
+            // The suspend. The tag stored is THIS await's own, so the next poll
+            // re-enters the block above and polls the same future again. A tag
+            // one higher would resume past a suspend point that never finished,
+            // and the continuation would then read an inner output slot nothing
+            // has written — a wrong value on a path that still completes.
+            let mut stmts = Vec::new();
+            let t = self.const_i64(&mut stmts, tag);
+            stmts.push(Stmt::SetField {
+                record: STATE,
+                index: STATE_SLOT_TAG,
+                value: t,
+                ty: MirTy::I64,
+            });
+            let pending = self.const_i64(&mut stmts, POLL_PENDING);
+            out.push(Block {
+                stmts,
+                term: Terminator::Return(Some(pending)),
+            });
+
+            // The continuation, reached only from the READY arm above — so the
+            // awaited value exists: word `FUTURE_SLOT_STATE` of the future is the
+            // inner state object, and `STATE_SLOT_OUTPUT` of *that* is the value.
+            // Copied into the await result's own temp slot before the statements
+            // that followed the await run.
+            let mut stmts = Vec::new();
+            match aw.dst {
+                Some(dst) if self.orig_ty(dst) != MirTy::Unit => {
+                    let ty = self.orig_ty(dst);
+                    let future = self.reload(&mut stmts, aw.future);
+                    let inner = self.load(&mut stmts, future, FUTURE_SLOT_STATE, MirTy::Ptr);
+                    let value = self.load(&mut stmts, inner, STATE_SLOT_OUTPUT, ty);
+                    stmts.push(Stmt::SetField {
+                        record: STATE,
+                        index: Self::slot(dst),
+                        value,
+                        ty,
+                    });
+                }
+                // A unit-output future has nothing to copy out: it writes an
+                // explicit zero into its own output slot, and the awaiting body
+                // has no temp to put it in.
+                _ => {}
+            }
+            self.spill(
+                segments.next().expect("one segment more than awaits"),
+                &mut stmts,
+            );
+            let term = if k + 1 < n {
+                // The next await's poll block, which is the very next one
+                // emitted.
+                Terminator::Goto(BlockId(cont.0 + 1))
+            } else {
+                self.finish(&mut orig_term, &mut stmts, starts)
+            };
+            out.push(Block { stmts, term });
+        }
+    }
+
+    /// Take the original terminator and rewrite it. Panics if a second piece
+    /// asks for it, which would mean two pieces of one block both claimed to be
+    /// its last.
+    fn finish(
+        &mut self,
+        orig_term: &mut Option<Terminator>,
+        out: &mut Vec<Stmt>,
+        starts: &[BlockId],
+    ) -> Terminator {
+        let term = orig_term
+            .take()
+            .expect("exactly one piece of a block takes its original terminator");
+        self.terminator(term, out, starts)
+    }
+
+    /// Move every value one straight-line run of statements names into the state
+    /// object, appending the rewritten statements to `out`.
+    fn spill(&mut self, stmts: Vec<Stmt>, out: &mut Vec<Stmt>) {
+        for mut s in stmts {
             let mut loads: Vec<Stmt> = Vec::new();
             let mut stores: Vec<Stmt> = Vec::new();
             visit_temps(&mut s, &mut |t, role| match role {
@@ -417,26 +777,40 @@ impl Spiller<'_> {
                     *t = dst;
                 }
             });
-            stmts.append(&mut loads);
-            stmts.push(s);
-            stmts.append(&mut stores);
+            out.append(&mut loads);
+            out.push(s);
+            out.append(&mut stores);
         }
+    }
 
-        let term = match b.term {
-            Terminator::Goto(target) => Terminator::Goto(target),
+    /// Rewrite one terminator: reload whatever it reads, renumber the blocks it
+    /// names through `starts`, and turn a `Return` into a completion.
+    fn terminator(
+        &mut self,
+        term: Terminator,
+        out: &mut Vec<Stmt>,
+        starts: &[BlockId],
+    ) -> Terminator {
+        // Every original terminator names the *start* of a block, and a split
+        // block's start is its leading piece — so this is the whole renumbering.
+        // A target left un-remapped lands in whatever block now carries the old
+        // id, which for a resumable poll function is a reserved one.
+        let at = |b: BlockId| starts[b.0 as usize];
+        match term {
+            Terminator::Goto(target) => Terminator::Goto(at(target)),
             Terminator::Branch { cond, then_, else_ } => Terminator::Branch {
-                cond: self.reload(&mut stmts, cond),
-                then_,
-                else_,
+                cond: self.reload(out, cond),
+                then_: at(then_),
+                else_: at(else_),
             },
             Terminator::Switch {
                 disc,
                 arms,
                 default,
             } => Terminator::Switch {
-                disc: self.reload(&mut stmts, disc),
-                arms,
-                default,
+                disc: self.reload(out, disc),
+                arms: arms.into_iter().map(|(v, b)| (v, at(b))).collect(),
+                default: at(default),
             },
             // Completion. The value goes to the output slot and the *return*
             // becomes the status, rather than returning the value directly:
@@ -447,8 +821,8 @@ impl Spiller<'_> {
                 match value {
                     Some(t) if self.orig_ty(t) != MirTy::Unit => {
                         let ty = self.orig_ty(t);
-                        let v = self.reload(&mut stmts, t);
-                        stmts.push(Stmt::SetField {
+                        let v = self.reload(out, t);
+                        out.push(Stmt::SetField {
                             record: STATE,
                             index: STATE_SLOT_OUTPUT,
                             value: v,
@@ -460,9 +834,8 @@ impl Spiller<'_> {
                     // explicit zero goes in rather than leaving the slot to
                     // whatever the allocator left there.
                     _ => {
-                        let z = self.scratch(MirTy::I64);
-                        stmts.push(Stmt::ConstInt(z, 0));
-                        stmts.push(Stmt::SetField {
+                        let z = self.const_i64(out, 0);
+                        out.push(Stmt::SetField {
                             record: STATE,
                             index: STATE_SLOT_OUTPUT,
                             value: z,
@@ -470,17 +843,14 @@ impl Spiller<'_> {
                         });
                     }
                 }
-                let ready = self.scratch(MirTy::I64);
-                stmts.push(Stmt::ConstInt(ready, POLL_READY));
+                let ready = self.const_i64(out, POLL_READY);
                 Terminator::Return(Some(ready))
             }
-            // Left as a trap, which aborts rather than unwinding — a panic
-            // must not cross a generated poll function's boundary, and this
-            // pass introduces no call that could raise one (see the module
+            // Left as a trap, which aborts rather than unwinding: a panic must
+            // not cross a generated poll function's boundary (see the module
             // doc comment).
             Terminator::Trap => Terminator::Trap,
-        };
-        Block { stmts, term }
+        }
     }
 }
 
@@ -537,6 +907,19 @@ fn visit_temps(stmt: &mut Stmt, f: &mut impl FnMut(&mut Temp, Role)) {
                 f(dst, Write);
             }
         }
+        // Not reached: [`Spiller::block_pieces`] takes every await out of the
+        // statement list before spilling what is left, because the await
+        // sequence it emits addresses state slots by the *original* temp ids
+        // this substitution would already have replaced. Classified honestly
+        // anyway rather than left to a panic, since the roles are the same ones
+        // `CallIndirect` above has — an await *is* an indirect call to a poll
+        // function — and this match is the one place that decides them.
+        Stmt::Await { dst, future } => {
+            f(future, Read);
+            if let Some(dst) = dst {
+                f(dst, Write);
+            }
+        }
         Stmt::MakeClosure { dst, captures, .. } => {
             for (c, _) in captures.iter_mut() {
                 f(c, Read);
@@ -589,81 +972,6 @@ fn visit_temps(stmt: &mut Stmt, f: &mut impl FnMut(&mut Temp, Role)) {
             f(index, Read);
             f(value, Read);
         }
-    }
-}
-
-/// Whether `body` contains a suspend point anywhere inside it.
-///
-/// **One of the two conditions that decide the async boundary.** `lower_module`
-/// transforms a reachable `async fn` iff *both* of these hold, and rejects it
-/// with `E0088` otherwise:
-///
-/// 1. it is **not the program entry point** — the transform gives the entry
-///    symbol to the future-building wrapper, and both backends call `main` for
-///    its effects and discard its result, so an `async fn main` would compile to
-///    a program that runs no user code at all; and
-/// 2. **this predicate is false** — a body with a suspend point in it needs the
-///    resumable half of the transform.
-///
-/// Those are two separate conditions with two separate reasons, spelled out
-/// separately at the call site (`mono.rs`'s worklist). This is not the whole
-/// boundary on its own: an `async fn main` with no `.await` anywhere in it is
-/// rejected while this returns `false`. Whatever makes each case expressible
-/// owns removing that case's rejection along with it.
-///
-/// Recurses through every expression form rather than scanning the body's
-/// top-level statement list: a suspend point buried in a loop condition or a
-/// string interpolation suspends just as much as one in tail position.
-///
-/// A closure written inside an `async fn` is a separate `hir::Function` and so
-/// is not in this tree — correctly, since `.await` inside a closure body is
-/// already rejected by `nova-typeck` (a closure is never `is_async`).
-pub(crate) fn contains_await(body: &hir::Expr) -> bool {
-    use hir::ExprKind as K;
-    let any = |es: &[hir::Expr]| es.iter().any(contains_await);
-    let opt = |e: &Option<Box<hir::Expr>>| e.as_deref().is_some_and(contains_await);
-    match &body.kind {
-        K::Await(_) => true,
-        K::IntLit(_)
-        | K::FloatLit(_)
-        | K::BoolLit(_)
-        | K::StrLit(_)
-        | K::CharLit(_)
-        | K::Unit
-        | K::Break
-        | K::Continue
-        | K::Local(_) => false,
-        K::MakeClosure { captures, .. } => any(captures),
-        K::Call { args, .. }
-        | K::MakeVariant { args, .. }
-        | K::MakeArray { elems: args }
-        | K::StrConcat(args) => any(args),
-        K::MakeRecord { fields, .. } => any(fields),
-        K::FieldGet { target, .. } | K::ArrayLen { target } => contains_await(target),
-        K::FieldSet { target, value, .. } => contains_await(target) || contains_await(value),
-        K::ArrayRepeat { init, len } => contains_await(init) || contains_await(len),
-        K::Index { target, index } => contains_await(target) || contains_await(index),
-        K::IndexSet {
-            target,
-            index,
-            value,
-        } => contains_await(target) || contains_await(index) || contains_await(value),
-        K::TraitCall { receiver, args, .. } => {
-            receiver.as_deref().is_some_and(contains_await) || any(args)
-        }
-        K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
-            contains_await(lhs) || contains_await(rhs)
-        }
-        K::Unary { expr, .. } | K::ToStr(expr) => contains_await(expr),
-        K::Let { init, .. } => contains_await(init),
-        K::Assign { value, .. } => contains_await(value),
-        K::Block { stmts, trailing } => any(stmts) || opt(trailing),
-        K::If { cond, then, else_ } => contains_await(cond) || contains_await(then) || opt(else_),
-        K::While { cond, body } => contains_await(cond) || contains_await(body),
-        K::Match { scrutinee, arms } => {
-            contains_await(scrutinee) || arms.iter().any(|a| contains_await(&a.body))
-        }
-        K::Return(value) => opt(value),
     }
 }
 
@@ -1216,70 +1524,859 @@ mod tests {
         assert_eq!(FUTURE_SLOT_STATE, 1);
     }
 
-    // === the suspension boundary ===
+    // === splitting at await points ===
 
-    fn body_of(src: &str) -> nova_hir::Expr {
-        use nova_diagnostics::FileId;
-        let (tokens, lex_errors) = nova_lexer::lex(src, FileId::DUMMY);
-        assert!(lex_errors.is_empty(), "lex: {lex_errors:?}");
-        let (ast, parse_errors) = nova_parser::parse(&tokens, FileId::DUMMY);
-        assert!(parse_errors.is_empty(), "parse: {parse_errors:?}");
-        let resolved = nova_resolver::resolve(&ast.expect("no AST"));
-        let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
-        assert!(
-            checked.diagnostics.is_empty(),
-            "typeck: {:?}",
-            checked.diagnostics
-        );
-        let f = checked
-            .module
-            .functions
+    /// A one-function `Module` holding an `async fn` with the given declared
+    /// body class, parameter count, temps and blocks — the shape
+    /// [`crate::lower::lower_function`] leaves before `transform` runs, for a
+    /// body built by hand here rather than compiled from source.
+    ///
+    /// Hand-built for the same reason [`module_with_async_const_fn`] is: the
+    /// input to `transform` stays fixed and visible, and a block layout with a
+    /// back edge into a block that gets split is expressible directly.
+    /// `tests/lower_tests.rs` covers the same shapes from real source.
+    fn async_module(ret: MirTy, params: u32, temps: Vec<MirTy>, blocks: Vec<Block>) -> Module {
+        Module {
+            functions: vec![Function {
+                name: "f.15".to_string(),
+                params,
+                takes_env: false,
+                capture_count: 0,
+                temps,
+                ret,
+                is_async: true,
+                blocks,
+            }],
+            externs: Vec::new(),
+        }
+    }
+
+    /// `async fn f() -> T { g().await }`: one suspend point, in the entry
+    /// block, whose result is what the body returns. Temp 0 holds the future
+    /// `g()` produced, temp 1 the awaited value.
+    fn module_with_async_fn_awaiting_once(out: MirTy) -> Module {
+        async_module(
+            out,
+            0,
+            vec![MirTy::Ptr, out],
+            vec![Block {
+                stmts: vec![
+                    Stmt::Call {
+                        dst: Some(Temp(0)),
+                        callee: "g.16".to_string(),
+                        args: Vec::new(),
+                    },
+                    Stmt::Await {
+                        dst: Some(Temp(1)),
+                        future: Temp(0),
+                    },
+                ],
+                term: Terminator::Return(Some(Temp(1))),
+            }],
+        )
+    }
+
+    /// `async fn f() -> T { g().await + h().await }`: two suspend points in one
+    /// block, so the second await's own leading piece is a piece of a piece —
+    /// and the two tags can be told apart.
+    fn module_with_async_fn_awaiting_twice(out: MirTy) -> Module {
+        async_module(
+            out,
+            0,
+            vec![MirTy::Ptr, out, MirTy::Ptr, out, out],
+            vec![Block {
+                stmts: vec![
+                    Stmt::Call {
+                        dst: Some(Temp(0)),
+                        callee: "g.16".to_string(),
+                        args: Vec::new(),
+                    },
+                    Stmt::Await {
+                        dst: Some(Temp(1)),
+                        future: Temp(0),
+                    },
+                    Stmt::Call {
+                        dst: Some(Temp(2)),
+                        callee: "h.17".to_string(),
+                        args: Vec::new(),
+                    },
+                    Stmt::Await {
+                        dst: Some(Temp(3)),
+                        future: Temp(2),
+                    },
+                    Stmt::Bin {
+                        dst: Temp(4),
+                        op: nova_hir::BinOp::Add,
+                        class: crate::OperandClass::Float,
+                        lhs: Temp(1),
+                        rhs: Temp(3),
+                    },
+                ],
+                term: Terminator::Return(Some(Temp(4))),
+            }],
+        )
+    }
+
+    /// `async fn f() -> T { while c { v = g().await }\n v }`: the suspend point
+    /// is inside a loop body, so one tag is resumed at repeatedly and the loop's
+    /// back edge targets a block the split renumbered.
+    fn module_with_async_fn_awaiting_in_a_loop(out: MirTy) -> Module {
+        async_module(
+            out,
+            0,
+            vec![MirTy::I8, MirTy::Ptr, out],
+            vec![
+                // 0: entry — falls into the header.
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Goto(BlockId(1)),
+                },
+                // 1: header — re-tests the condition on every iteration.
+                Block {
+                    stmts: vec![Stmt::ConstBool(Temp(0), true)],
+                    term: Terminator::Branch {
+                        cond: Temp(0),
+                        then_: BlockId(2),
+                        else_: BlockId(3),
+                    },
+                },
+                // 2: body — the await, then the back edge.
+                Block {
+                    stmts: vec![
+                        Stmt::Call {
+                            dst: Some(Temp(1)),
+                            callee: "g.16".to_string(),
+                            args: Vec::new(),
+                        },
+                        Stmt::Await {
+                            dst: Some(Temp(2)),
+                            future: Temp(1),
+                        },
+                    ],
+                    term: Terminator::Goto(BlockId(1)),
+                },
+                // 3: exit.
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return(Some(Temp(2))),
+                },
+            ],
+        )
+    }
+
+    /// `async fn f() -> T { match c { A => g().await, B => v } }`: the block
+    /// holding the await is reached through a `Switch`, which is the only
+    /// terminator shape whose targets live in a `Vec` rather than in named
+    /// fields — so it is the one the renumbering can miss on its own.
+    ///
+    /// The `B` arm leaves temp 2 undefined, which on that path would read the
+    /// allocator's zero. Never taken: the scrutinee is the constant 0. This
+    /// fixture is about which blocks the terminators name, not about the value.
+    fn module_with_async_fn_awaiting_in_a_match(out: MirTy) -> Module {
+        async_module(
+            out,
+            0,
+            vec![MirTy::I64, MirTy::Ptr, out],
+            vec![
+                // 0: the scrutinee and the dispatch over the arms.
+                Block {
+                    stmts: vec![Stmt::ConstInt(Temp(0), 0)],
+                    term: Terminator::Switch {
+                        disc: Temp(0),
+                        arms: vec![(0, BlockId(1)), (1, BlockId(2))],
+                        default: BlockId(3),
+                    },
+                },
+                // 1: the `A` arm — awaits, then joins.
+                Block {
+                    stmts: vec![
+                        Stmt::Call {
+                            dst: Some(Temp(1)),
+                            callee: "g.16".to_string(),
+                            args: Vec::new(),
+                        },
+                        Stmt::Await {
+                            dst: Some(Temp(2)),
+                            future: Temp(1),
+                        },
+                    ],
+                    term: Terminator::Goto(BlockId(4)),
+                },
+                // 2: the `B` arm.
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Goto(BlockId(4)),
+                },
+                // 3: the exhaustive-match default.
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Trap,
+                },
+                // 4: the join.
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return(Some(Temp(2))),
+                },
+            ],
+        )
+    }
+
+    /// `async fn f() { g().await }` with `g` returning unit: an await with no
+    /// value to copy out of the inner future's output slot.
+    fn module_with_async_fn_awaiting_unit() -> Module {
+        async_module(
+            MirTy::Unit,
+            0,
+            vec![MirTy::Ptr],
+            vec![Block {
+                stmts: vec![
+                    Stmt::Call {
+                        dst: Some(Temp(0)),
+                        callee: "g.16".to_string(),
+                        args: Vec::new(),
+                    },
+                    Stmt::Await {
+                        dst: None,
+                        future: Temp(0),
+                    },
+                ],
+                term: Terminator::Return(None),
+            }],
+        )
+    }
+
+    /// The arms of a poll function's entry dispatch, panicking if the entry
+    /// block is not one.
+    fn resume_arms(poll: &Function) -> Vec<(i64, BlockId)> {
+        match &poll.blocks[0].term {
+            Terminator::Switch { arms, .. } => arms.clone(),
+            other => panic!("the entry block must dispatch on the resume tag, found {other:?}"),
+        }
+    }
+
+    /// The block a resume point branches to for inner-poll status `status`.
+    fn status_arm(poll: &Function, resume: BlockId, status: i64) -> BlockId {
+        match &poll.blocks[resume.0 as usize].term {
+            Terminator::Switch { arms, .. } => *arms
+                .iter()
+                .find_map(|(v, b)| (*v == status).then_some(b))
+                .unwrap_or_else(|| {
+                    panic!("resume block {resume:?} has no arm for status {status}: {arms:?}")
+                }),
+            other => {
+                panic!("a resume point must branch on the inner poll's status, found {other:?}")
+            }
+        }
+    }
+
+    /// Every constant `block` stores into the resume-tag slot, resolved through
+    /// the `ConstInt` that produced it.
+    fn tag_stores(poll: &Function, block: BlockId) -> Vec<i64> {
+        let b = &poll.blocks[block.0 as usize];
+        b.stmts
             .iter()
-            .find(|f| f.name == "f")
-            .expect("`f` was checked");
-        assert!(f.is_async, "the fixture's `f` must be async");
-        f.body.clone()
+            .filter_map(|s| match s {
+                Stmt::SetField {
+                    record,
+                    index,
+                    value,
+                    ..
+                } if *record == STATE && *index == STATE_SLOT_TAG => Some(*value),
+                _ => None,
+            })
+            .map(|v| {
+                b.stmts
+                    .iter()
+                    .find_map(|s| match s {
+                        Stmt::ConstInt(d, k) if *d == v => Some(*k),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the tag stored must be a constant defined in the same block: {:?}",
+                            b.stmts
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Every block id any terminator in `f` names.
+    fn targets(f: &Function) -> Vec<BlockId> {
+        f.blocks
+            .iter()
+            .flat_map(|b| match &b.term {
+                Terminator::Goto(t) => vec![*t],
+                Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+                Terminator::Switch { arms, default, .. } => arms
+                    .iter()
+                    .map(|(_, b)| *b)
+                    .chain(std::iter::once(*default))
+                    .collect(),
+                Terminator::Return(_) | Terminator::Trap => Vec::new(),
+            })
+            .collect()
     }
 
     #[test]
-    fn contains_await_answers_the_suspend_point_half_of_the_boundary() {
-        // One of the two conditions `lower_module` decides the boundary with;
-        // the other is "is this the entry point" (`an_async_main_reports_e0088`
-        // in `tests/lower_tests.rs`). Both are needed: an `async fn main` is
-        // rejected while this returns `false`.
-        assert!(!contains_await(&body_of("async fn f() -> Int { 1 }")));
-        assert!(contains_await(&body_of(
-            "async fn g() -> Int { 1 }\nasync fn f() -> Int { g().await }"
-        )));
+    fn one_await_produces_two_resume_states_dispatched_by_a_switch() {
+        let mut m = module_with_async_fn_awaiting_once(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let arms = resume_arms(poll);
+        assert!(
+            arms.len() >= 2,
+            "one await means two resume states, got {arms:?}"
+        );
+        // The tags must be DISTINCT. A switch whose arms all target one block is
+        // the mutation this test exists to kill.
+        let distinct: std::collections::HashSet<_> = arms.iter().map(|(_, b)| *b).collect();
+        assert_eq!(
+            distinct.len(),
+            arms.len(),
+            "resume arms must target distinct blocks: {arms:?}"
+        );
     }
 
     #[test]
-    fn contains_await_looks_inside_nested_expressions() {
-        // A predicate that only inspected the body's top-level statement list
-        // would pass the test above (the await IS the trailing expression
-        // there) and still let a suspend point through from anywhere real code
-        // puts one. Each of these buries the `.await` under a different
-        // expression form.
-        for src in [
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { if true { g().await } else { 0 } }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { let mut i = 0\n while i < 1 { i = g().await }\n i }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { g().await + 1 }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { match g().await { _ => 0 } }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { return g().await }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> String { \"${g().await}\" }",
-            "async fn g() -> Int { 1 }\n\
-             async fn f() -> Int { let a = [g().await, 2]\n a[0] }",
-        ] {
-            assert!(
-                contains_await(&body_of(src)),
-                "a buried `.await` must still be found: {src}"
+    fn a_suspend_stores_a_resume_tag_before_returning_pending() {
+        // Without the store, the task resumes at state 0 forever -- an infinite
+        // loop, not a wrong value, which is why an output-only assertion misses
+        // it.
+        let mut m = module_with_async_fn_awaiting_once(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let stores_tag = poll.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(s, Stmt::SetField { record, index, .. }
+                    if *record == STATE && *index == STATE_SLOT_TAG)
+            })
+        });
+        assert!(stores_tag, "a suspend must record a resume tag");
+    }
+
+    #[test]
+    fn a_pending_inner_future_suspends_at_the_tag_that_returns_to_the_same_await() {
+        // **The same-tag rule.** When the inner future reports PENDING, the tag
+        // stored must be the one whose resume arm comes BACK to this await --
+        // not the one belonging to the await after it. Storing `tag + 1` resumes
+        // the task past a suspend point it never finished: the continuation then
+        // reads an output slot the inner future has not written, which is a
+        // wrong value on a path that still completes normally, so neither the
+        // poll statuses nor the block count nor the arm count can see it.
+        //
+        // Two awaits, so "this await's tag" and "the next await's tag" are
+        // different numbers. With one await, storing `tag + 1` would land on the
+        // switch's default and trap, which is a different (and louder) failure.
+        let mut m = module_with_async_fn_awaiting_twice(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let resumes: Vec<(i64, BlockId)> = resume_arms(poll)
+            .into_iter()
+            .filter(|(tag, _)| *tag != 0)
+            .collect();
+        assert_eq!(resumes.len(), 2, "two awaits, two resume tags: {resumes:?}");
+        for (tag, resume) in resumes {
+            let pending = status_arm(poll, resume, POLL_PENDING);
+            assert_eq!(
+                tag_stores(poll, pending),
+                vec![tag],
+                "the suspend reached from tag {tag}'s resume point must store \
+                 {tag} again, so the next poll retries the same await: {:?}",
+                poll.blocks
             );
         }
+    }
+
+    #[test]
+    fn the_resume_dispatch_switches_on_the_tag_slot_and_enters_the_body_at_tag_zero() {
+        // Three things a resume dispatch can get wrong independently of each
+        // other, all of them silent:
+        //
+        // - switching on something other than the tag slot (the output slot is
+        //   the adjacent index and is also an i64);
+        // - not reserving tag 0 for the body's own entry, which would make a
+        //   fresh future -- whose tag the wrapper sets to 0 -- resume at an
+        //   await whose future does not exist yet;
+        // - collapsing the later tags onto one block.
+        let mut m = module_with_async_fn_awaiting_twice(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let entry = &poll.blocks[0];
+        let disc = match &entry.term {
+            Terminator::Switch { disc, .. } => *disc,
+            other => panic!("the entry must dispatch on the resume tag, found {other:?}"),
+        };
+        assert!(
+            entry.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::RecordField { dst, record, index, ty }
+                    if *dst == disc && *record == STATE && *index == STATE_SLOT_TAG
+                        && *ty == MirTy::I64
+            )),
+            "the discriminant must be loaded from the tag slot: {:?}",
+            entry
+        );
+        let arms = resume_arms(poll);
+        assert_eq!(
+            arms.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "one arm for the entry state plus one per await, in order: {arms:?}"
+        );
+        let distinct: std::collections::HashSet<_> = arms.iter().map(|(_, b)| *b).collect();
+        assert_eq!(distinct.len(), 3, "every state is its own block: {arms:?}");
+    }
+
+    #[test]
+    fn awaiting_polls_the_inner_future_through_its_own_fat_pointer() {
+        // A future value *is* a `{ poll_code, state }` fat pointer, and
+        // `CallIndirect` already means `code_ptr(env_ptr, args...)` -- so an
+        // indirect call through the awaited future is a `PollFn` call, with the
+        // inner state object arriving as the env. The signature has to be
+        // exactly `(Ptr, Ptr) -> I64`: `params: [Ptr]` is task_ctx, the leading
+        // env is implicit, and `ret: I64` is the status. Forwarding this
+        // function's own task_ctx (temp 1) rather than a fresh null keeps the
+        // parameter meaningful once anything uses it.
+        let mut m = module_with_async_fn_awaiting_once(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let (callee, block) = poll
+            .blocks
+            .iter()
+            .find_map(|b| {
+                b.stmts.iter().find_map(|s| match s {
+                    Stmt::CallIndirect {
+                        dst: Some(_),
+                        callee,
+                        params,
+                        ret,
+                        args,
+                    } => {
+                        assert_eq!(params, &[MirTy::Ptr], "the one real param is task_ctx");
+                        assert_eq!(*ret, MirTy::I64, "an inner poll returns a status");
+                        assert_eq!(args, &[TASK_CTX], "task_ctx must be forwarded");
+                        Some((*callee, b))
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_else(|| panic!("the await must poll the inner future: {:?}", poll.blocks));
+        assert!(
+            block.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::RecordField { dst, record, index, ty }
+                    if *dst == callee && *record == STATE
+                        && *index == STATE_SLOT_TEMPS && *ty == MirTy::Ptr
+            )),
+            "the awaited future must be reloaded from its own temp slot in the \
+             same block as the call: {:?}",
+            block
+        );
+    }
+
+    #[test]
+    fn an_awaited_value_is_read_from_the_inner_futures_own_output_slot() {
+        // The chain that has to be exactly right, at `Float` because it is the
+        // one class that crosses register banks: word `FUTURE_SLOT_STATE` of the
+        // awaited future is the inner state object, and `STATE_SLOT_OUTPUT` of
+        // THAT object is the awaited value. Reading the future's word 1 *as* the
+        // value, or reading this function's own output slot, are both mistakes
+        // an `Int` fixture cannot distinguish, since every step is an i64-shaped
+        // load of an 8-byte slot.
+        let mut m = module_with_async_fn_awaiting_once(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let inner = stmts_of(poll)
+            .find_map(|s| match s {
+                Stmt::RecordField {
+                    dst,
+                    record,
+                    index,
+                    ty,
+                } if *index == FUTURE_SLOT_STATE && *record != STATE => {
+                    assert_eq!(*ty, MirTy::Ptr, "the inner state is a pointer");
+                    Some(*dst)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the await must load the inner state out of the future: {:?}",
+                    poll.blocks
+                )
+            });
+        let value = stmts_of(poll)
+            .find_map(|s| match s {
+                Stmt::RecordField {
+                    dst,
+                    record,
+                    index,
+                    ty,
+                } if *record == inner && *index == STATE_SLOT_OUTPUT => {
+                    assert_eq!(*ty, MirTy::F64, "the awaited value keeps its own class");
+                    Some(*dst)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the awaited value must come from the inner state's output \
+                     slot: {:?}",
+                    poll.blocks
+                )
+            });
+        assert!(
+            stmts_of(poll).any(|s| matches!(
+                s,
+                Stmt::SetField { record, index, value: v, ty }
+                    if *record == STATE && *index == STATE_SLOT_TEMPS + 1
+                        && *v == value && *ty == MirTy::F64
+            )),
+            "the awaited value must be stored into the await result's own temp \
+             slot, as an f64: {:?}",
+            poll.blocks
+        );
+    }
+
+    #[test]
+    fn an_awaited_value_reaches_its_slot_before_the_statements_that_read_it() {
+        // Order, which a whole-function scan of the statements cannot see. In the
+        // two-await fixture the second await's result is temp 3 and the very next
+        // statement reads it, so that await's continuation both stores and reads
+        // slot `STATE_SLOT_TEMPS + 3`.
+        //
+        // Emitted after the statements that followed the await, the copy out of
+        // the inner state object still exists, still names the right slot and
+        // still reads the right class, so nothing about its presence or its shape
+        // distinguishes it -- position is the only thing that does. What breaks
+        // is that the expression the await feeds reads whatever the slot held
+        // beforehand, which on a first pass is the allocator's zero.
+        let mut m = module_with_async_fn_awaiting_twice(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let second = resume_arms(poll)
+            .into_iter()
+            .find_map(|(tag, b)| (tag == FIRST_RESUME_TAG + 1).then_some(b))
+            .expect("a second resume tag");
+        let cont = status_arm(poll, second, POLL_READY);
+        let stmts = &poll.blocks[cont.0 as usize].stmts;
+        let slot = STATE_SLOT_TEMPS + 3;
+        let store = stmts
+            .iter()
+            .position(|s| {
+                matches!(s, Stmt::SetField { record, index, .. }
+                    if *record == STATE && *index == slot)
+            })
+            .unwrap_or_else(|| panic!("no store of the awaited value: {stmts:?}"));
+        let read = stmts
+            .iter()
+            .position(|s| {
+                matches!(s, Stmt::RecordField { record, index, .. }
+                    if *record == STATE && *index == slot)
+            })
+            .unwrap_or_else(|| {
+                panic!("the fixture's next statement must read the awaited value: {stmts:?}")
+            });
+        assert!(
+            store < read,
+            "the awaited value must be in its slot before anything reads it: {stmts:?}"
+        );
+    }
+
+    #[test]
+    fn an_inner_poll_status_that_is_neither_pending_nor_ready_traps() {
+        // The mirror of the executor's own strictness. A generated poll function
+        // returns exactly PENDING or READY, so an awaited future reporting
+        // anything else is a compiler bug -- and treating an unrecognized status
+        // as ready would complete the await from an output slot nothing wrote.
+        // A trap aborts, which is also what keeps a panic from having to cross
+        // this frame's boundary.
+        let mut m = module_with_async_fn_awaiting_once(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let resume = resume_arms(poll)
+            .into_iter()
+            .find_map(|(tag, b)| (tag != 0).then_some(b))
+            .expect("a resume arm");
+        let (arms, default) = match &poll.blocks[resume.0 as usize].term {
+            Terminator::Switch { arms, default, .. } => (arms.clone(), *default),
+            other => panic!("expected a status switch, found {other:?}"),
+        };
+        let mut values: Vec<i64> = arms.iter().map(|(v, _)| *v).collect();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            vec![POLL_PENDING, POLL_READY],
+            "exactly the two statuses the ABI defines may be recognized: {arms:?}"
+        );
+        assert!(
+            matches!(poll.blocks[default.0 as usize].term, Terminator::Trap),
+            "an unrecognized status must reach a trap, not fall into a state: {:?}",
+            poll.blocks
+        );
+    }
+
+    #[test]
+    fn a_unit_awaits_result_is_not_copied_out_of_the_inner_state() {
+        // Nothing to copy: a unit-output future writes an explicit zero to its
+        // output slot and the awaiting body has no temp to put it in. Asserted
+        // as "the poll function never chases a pointer other than the state
+        // object", which is what a spurious extraction would break.
+        let mut m = module_with_async_fn_awaiting_unit();
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        for s in stmts_of(poll) {
+            if let Stmt::RecordField { record, index, .. } = s {
+                assert_eq!(
+                    *record, STATE,
+                    "a unit await must not read field {index} of the inner \
+                     future: {:?}",
+                    poll.blocks
+                );
+            }
+        }
+        // It must still suspend and resume properly.
+        assert_eq!(resume_arms(poll).len(), 2, "{:?}", poll.blocks);
+    }
+
+    #[test]
+    fn an_await_in_a_loop_resumes_at_the_await_and_keeps_its_back_edge() {
+        // The same suspend point, resumed more than once. Two failures a
+        // straight-line fixture cannot reach:
+        //
+        // - The loop's back edge has to follow the renumbering the split
+        //   introduces. Left pointing at its pre-split id it lands in whatever
+        //   block now carries that number, which for a resumable poll function
+        //   is the shared trap block -- the loop would abort on its second
+        //   iteration.
+        // - The resume arm has to target the await's own poll block, not the
+        //   loop header. Resuming at the header would re-test the condition and
+        //   build a second future, abandoning the one already in flight.
+        let mut m = module_with_async_fn_awaiting_in_a_loop(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+
+        let header = poll
+            .blocks
+            .iter()
+            .position(|b| matches!(b.term, Terminator::Branch { .. }))
+            .expect("the loop header survives as a conditional branch");
+        assert!(
+            poll.blocks[header]
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::ConstBool(..))),
+            "the header must be the block that re-tests the condition: {:?}",
+            poll.blocks
+        );
+        assert!(
+            poll.blocks
+                .iter()
+                .any(|b| matches!(b.term, Terminator::Goto(t) if t.0 as usize == header)),
+            "the back edge must reach the renumbered header (block {header}): {:?}",
+            poll.blocks
+        );
+
+        let resume = resume_arms(poll)
+            .into_iter()
+            .find_map(|(tag, b)| (tag != 0).then_some(b))
+            .expect("a resume arm");
+        assert!(
+            poll.blocks[resume.0 as usize]
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::CallIndirect { .. })),
+            "resuming must re-poll the awaited future, not re-enter the loop \
+             header: {:?}",
+            poll.blocks
+        );
+    }
+
+    #[test]
+    fn every_exit_from_a_resumable_poll_fn_returns_a_constant_pending_or_ready() {
+        // The executor panics on any status that is neither, and that panic
+        // cannot unwind out of a generated frame -- it kills the process. So
+        // every `Return` must carry a constant one of the two, never the inner
+        // poll's status forwarded (which is only PENDING by coincidence on that
+        // path) and never a body value.
+        for mut m in every_awaiting_module() {
+            transform(&mut m);
+            let poll = find(&m, "f.15$poll");
+            let returned: Vec<Temp> = poll
+                .blocks
+                .iter()
+                .filter_map(|b| match &b.term {
+                    Terminator::Return(Some(t)) => Some(*t),
+                    _ => None,
+                })
+                .collect();
+            assert!(!returned.is_empty(), "{:?}", poll.blocks);
+            for t in returned {
+                assert_eq!(poll.temps[t.0 as usize], MirTy::I64, "a status is an i64");
+                let v = stmts_of(poll)
+                    .find_map(|s| match s {
+                        Stmt::ConstInt(d, v) if *d == t => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the returned temp %{} must be a status constant: {:?}",
+                            t.0, poll.blocks
+                        )
+                    });
+                assert!(
+                    v == POLL_PENDING || v == POLL_READY,
+                    "a poll function may return only PENDING or READY, found {v}: {:?}",
+                    poll.blocks
+                );
+            }
+        }
+    }
+
+    /// Every await fixture in this module, so a whole-function invariant is
+    /// checked against all of them rather than whichever one it was written for.
+    fn every_awaiting_module() -> Vec<Module> {
+        vec![
+            module_with_async_fn_awaiting_once(MirTy::F64),
+            module_with_async_fn_awaiting_twice(MirTy::F64),
+            module_with_async_fn_awaiting_in_a_loop(MirTy::F64),
+            module_with_async_fn_awaiting_in_a_match(MirTy::F64),
+            module_with_async_fn_awaiting_unit(),
+        ]
+    }
+
+    #[test]
+    fn no_terminator_names_a_reserved_block_except_a_status_switchs_default() {
+        // The renumbering, asserted as a property instead of by recomputing the
+        // block ids the split chose -- which would only restate the arithmetic
+        // that produced them.
+        //
+        // A resumable poll function keeps the two lowest ids for its dispatch and
+        // its trap block, so any *other* terminator still naming one of them is
+        // one the split failed to remap. Neither outcome is a crash at the seam:
+        // reaching the trap aborts, and re-entering the dispatch re-reads the tag
+        // and jumps somewhere plausible. `Switch` is the shape most exposed,
+        // because its targets are a `Vec` the remap has to walk rather than named
+        // fields the compiler would notice were unused.
+        //
+        // The one deliberate reference to a reserved block is `BAD_DISCRIMINANT`
+        // as a switch `default`, so that is the only exemption.
+        for mut m in every_awaiting_module() {
+            transform(&mut m);
+            let poll = find(&m, "f.15$poll");
+            for (i, b) in poll.blocks.iter().enumerate() {
+                let named: Vec<BlockId> = match &b.term {
+                    Terminator::Goto(t) => vec![*t],
+                    Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+                    Terminator::Switch { arms, default, .. } => arms
+                        .iter()
+                        .map(|(_, b)| *b)
+                        .chain((*default != BAD_DISCRIMINANT).then_some(*default))
+                        .collect(),
+                    Terminator::Return(_) | Terminator::Trap => Vec::new(),
+                };
+                for t in named {
+                    assert!(
+                        t.0 >= RESERVED_BLOCKS,
+                        "block {i} targets reserved block {t:?}, so the split did \
+                         not renumber it: {:?}",
+                        poll.blocks
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_split_leaves_no_await_marker_and_no_dangling_block_target() {
+        // Two whole-function invariants, over every await shape here. A
+        // surviving marker reaches a codegen backend, which has no machine code
+        // for it; a block target past the end of the block list indexes out of
+        // bounds inside the backend rather than being diagnosed.
+        for mut m in every_awaiting_module() {
+            transform(&mut m);
+            for f in &m.functions {
+                assert!(
+                    !stmts_of(f).any(|s| matches!(s, Stmt::Await { .. })),
+                    "`{}` still contains an await marker: {:?}",
+                    f.name,
+                    f.blocks
+                );
+                for t in targets(f) {
+                    assert!(
+                        (t.0 as usize) < f.blocks.len(),
+                        "`{}` jumps to {t:?}, past its {} blocks: {:?}",
+                        f.name,
+                        f.blocks.len(),
+                        f.blocks
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_await_free_body_gains_no_dispatch_block() {
+        // A body with one state needs no dispatch: switching on a tag that is
+        // always 0 is the identity, and moving the entry block would renumber
+        // every terminator target for nothing. This is also what keeps the
+        // exact load- and store-sequence assertions above describing the code
+        // that runs.
+        let mut m = module_with_async_const_fn(MirTy::F64, &[]);
+        let before = m.functions[0].blocks.len();
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        assert_eq!(
+            poll.blocks.len(),
+            before,
+            "the block list must be untouched: {:?}",
+            poll.blocks
+        );
+        assert!(
+            matches!(poll.blocks[0].term, Terminator::Return(_)),
+            "no tag dispatch may be introduced: {:?}",
+            poll.blocks
+        );
+    }
+
+    #[test]
+    fn a_suspend_needs_no_state_slot_beyond_the_bodys_own_temps() {
+        // The decision the state-size cross-check rests on: an await adds no
+        // slot. The resume tag is `STATE_SLOT_TAG`, which every state object
+        // already has, and the awaited future is an ordinary body temp with an
+        // ordinary temp slot -- so the allocation the wrapper sizes from the
+        // pre-transform temp count is still exactly right after the split. If a
+        // later change does need a slot, `state_slot_count` is the one place it
+        // goes, and the `debug_assert!`s in `split_into_poll_and_wrapper` fail
+        // until it is added there.
+        let mut m = module_with_async_fn_awaiting_twice(MirTy::F64);
+        let n_temps = m.functions[0].temps.len();
+        transform(&mut m);
+        let wrapper = find(&m, "f.15");
+        let expected = ((STATE_SLOT_TEMPS as usize + n_temps) * 8) as i64;
+        let sizes: Vec<i64> = stmts_of(wrapper)
+            .filter_map(|s| match s {
+                Stmt::CallRuntime {
+                    func: RtFunc::Alloc,
+                    args,
+                    ..
+                } => Some(args.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|t| {
+                stmts_of(wrapper).find_map(|s| match s {
+                    Stmt::ConstInt(d, v) if *d == t => Some(*v),
+                    _ => None,
+                })
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![expected],
+            "a resumable body's state object is still \
+             (STATE_SLOT_TEMPS + n_temps) * 8 bytes: {:?}",
+            wrapper.blocks
+        );
     }
 }

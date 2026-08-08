@@ -379,6 +379,19 @@ impl<'a> FnEmit<'a> {
                 let arglist = self.arg_list(args);
                 self.emit_call(*dst, ret, &format!("@\"{callee}\""), &arglist);
             }
+            // `Stmt::Await` is a marker `nova-mir`'s async state-machine
+            // transform consumes; there is no IR for it, because the state
+            // object the resumed body reads its values back out of is built by
+            // that transform and named by nothing here. Reported as a
+            // malformed-MIR error rather than as a panic, matching this
+            // emitter's other "MIR this backend cannot express" arms.
+            Stmt::Await { .. } => {
+                bail!(
+                    "an `.await` marker reached codegen: `nova-mir`'s async \
+                     state-machine transform must split every `async fn` body \
+                     at its await points before a module is emitted"
+                );
+            }
             Stmt::CallRuntime { dst, func, args } => {
                 let (_, ret) = func.signature();
                 let arglist = self.arg_list(args);

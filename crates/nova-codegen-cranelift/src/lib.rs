@@ -542,6 +542,20 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                     self.def_temp(*dst, v);
                 }
             }
+            // `Stmt::Await` is a marker `nova-mir`'s async state-machine
+            // transform consumes; there is no machine code for it, because the
+            // state object the resumed body reads its values back out of is
+            // built by that transform and named by nothing here. Reported as a
+            // malformed-MIR error rather than as a panic, matching the
+            // undeclared-callee arm above: this is a compiler bug, but codegen
+            // is a library path.
+            Stmt::Await { .. } => {
+                return Err(anyhow!(
+                    "an `.await` marker reached codegen: `nova-mir`'s async \
+                     state-machine transform must split every `async fn` body \
+                     at its await points before a module is emitted"
+                ));
+            }
             Stmt::CallRuntime { dst, func, args } => {
                 let id = self.rt(func.symbol());
                 let arg_vals = self.arg_values(args)?;

@@ -205,67 +205,42 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         if !resolved_ok {
             continue;
         }
-        // **The async boundary.** An await-free `async fn` is lowered here and
-        // then rewritten by `async_lower::transform` into a poll function plus
-        // a future-building wrapper. The two shapes that transform cannot yet
-        // express are rejected instead, each for its own reason — spelled out
-        // separately rather than folded into one `is_async` test, so which half
-        // of the boundary a program falls on is a stated decision and not a
-        // side effect of how the condition happens to be written.
+        // **The async boundary.** An `async fn` is lowered here and then
+        // rewritten by `async_lower::transform` into a poll function plus a
+        // future-building wrapper, whatever its body contains — a `.await` in it
+        // becomes a suspend point in that poll function. The one shape still
+        // rejected is `async fn main`, and not because the transform cannot
+        // express it.
         //
-        // Both are `E0088`, and both name the function and that it is an
-        // `async fn`: the code identifies the class of "async is not finished
-        // here yet", and the `reason` interpolated into the *message* says which
-        // part. The shared `note` below says only that the check is
-        // reachability-based, and is the same for both.
-        //
-        // Rejecting keyed on `is_async` (plus a reason), never on "does
-        // `ret_ty` start with `Future`": a non-async function may itself
-        // declare `-> Future<T>` and forward an async call's result unchanged
-        // (see `wrap_fn_value` in `nova-typeck`), and there is nothing to
-        // reject about that.
-        if specialized.is_async {
-            let reason = if def_id == entry {
-                // An `async fn main` would otherwise be accepted and do
-                // nothing at all: the transform gives the entry symbol to the
-                // *wrapper*, which allocates a state, returns a future, and
-                // never polls it — while the backends call `main` for its
-                // effects and discard whatever it returns. Silently running no
-                // user code is worse than a diagnostic.
-                Some(
-                    "an `async fn main` needs the driver to drive it to completion, \
-                     which has not landed",
-                )
-            } else if crate::async_lower::contains_await(&specialized.body) {
-                // The resumable half of the transform: splitting a body at its
-                // suspend points so a later poll resumes where the last one
-                // stopped. Until then a body with no `.await` in it is a
-                // complete state machine with one state, and a body with one
-                // is not expressible.
-                Some(
-                    "an `async fn` whose body contains `.await` needs the resumable \
-                     half of the state-machine transform, which has not landed",
-                )
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                diagnostics.push(
-                    Diagnostic::error(
-                        "E0088",
-                        format!("`{}` cannot be compiled yet: {reason}", func.name),
-                    )
-                    .with_primary_label(func.span, "this `async fn` cannot be lowered yet")
-                    .with_note(
-                        "this fires whenever the function is reachable from `main`, in \
-                         `nova check` as well as `nova run`/`nova build`, since `nova check` \
-                         runs this same lowering stage so it never calls a program \
-                         well-formed that `nova run` would then reject"
-                            .to_string(),
+        // Rejecting keyed on `is_async`, never on "does `ret_ty` start with
+        // `Future`": a non-async function may itself declare `-> Future<T>` and
+        // forward an async call's result unchanged (see `wrap_fn_value` in
+        // `nova-typeck`), and there is nothing to reject about that.
+        if specialized.is_async && def_id == entry {
+            // An `async fn main` would otherwise be accepted and do nothing at
+            // all: the transform gives the entry symbol to the *wrapper*, which
+            // allocates a state, returns a future, and never polls it — while
+            // the backends call `main` for its effects and discard whatever it
+            // returns. Silently running no user code is worse than a diagnostic.
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0088",
+                    format!(
+                        "`{}` cannot be compiled yet: an `async fn main` needs the \
+                         driver to drive it to completion, which has not landed",
+                        func.name
                     ),
-                );
-                continue;
-            }
+                )
+                .with_primary_label(func.span, "this `async fn` cannot be lowered yet")
+                .with_note(
+                    "this fires whenever the function is reachable from `main`, in \
+                     `nova check` as well as `nova run`/`nova build`, since `nova check` \
+                     runs this same lowering stage so it never calls a program \
+                     well-formed that `nova run` would then reject"
+                        .to_string(),
+                ),
+            );
+            continue;
         }
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
         match lower_function(&specialized, &name, module, entry, &mut request) {
@@ -275,16 +250,25 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     }
 
     if diagnostics.is_empty() {
-        // Every `async fn` that got this far is await-free, so the transform
-        // below rewrites all of them. Run on the finished module rather than
-        // per function inside the loop: it needs no generics resolved and lands
-        // once for both codegen backends.
+        // Run on the finished module rather than per function inside the loop:
+        // it needs no generics resolved and lands once for both codegen
+        // backends.
         crate::async_lower::transform(&mut mir);
         debug_assert!(
             mir.functions.iter().all(|f| !f.is_async),
             "the async transform must leave no function flagged: one that reaches \
              codegen still flagged is emitted under its own symbol with its BODY's \
              return class instead of a future's pointer (see `Function::is_async`)"
+        );
+        debug_assert!(
+            !mir.functions
+                .iter()
+                .flat_map(|f| &f.blocks)
+                .flat_map(|b| &b.stmts)
+                .any(|s| matches!(s, crate::Stmt::Await { .. })),
+            "the async transform must consume every await marker: no codegen \
+             backend can emit one, and a function that is not `is_async` cannot \
+             have had its awaits split (see `Stmt::Await`)"
         );
         Ok(mir)
     } else {

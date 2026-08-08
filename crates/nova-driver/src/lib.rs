@@ -765,6 +765,22 @@ mod async_end_to_end {
     /// the strongest available check on a `Float` output — it fails if the store
     /// or the load used the wrong class, the wrong offset, or the wrong width.
     fn run_async_fn(src: &str, name: &str, args: &[Arg]) -> i64 {
+        run_async_fn_with(src, name, args, &|_| {})
+    }
+
+    /// As [`run_async_fn`], with `fixup` applied to the lowered module before it
+    /// is compiled.
+    ///
+    /// The hook exists for exactly one thing: substituting a poll function that
+    /// actually suspends. Nothing compiled from Nova source can, in this phase —
+    /// every future's poll either completes on its first call or stops at an
+    /// await, and the awaits bottom out in an `async fn` with none, so the whole
+    /// chain reports `POLL_READY` on the first poll. The `POLL_PENDING` path
+    /// through a generated poll function is therefore unreachable from source
+    /// until a primitive that parks exists, and the only way to execute it now is
+    /// to hand the *awaiting* function -- real generated code, unmodified -- an
+    /// inner future whose poll pends.
+    fn run_async_fn_with(src: &str, name: &str, args: &[Arg], fixup: &dyn Fn(&mut Module)) -> i64 {
         assert!(
             !PROBED.with(|p| p.replace(true)),
             "one probe per test: see PROBE_TASK_ID"
@@ -811,6 +827,7 @@ mod async_end_to_end {
             "the transform must also have emitted `{wrapper}$poll`"
         );
 
+        fixup(&mut mir);
         replace_main(&mut mir, &wrapper, args);
         let program = nova_codegen_cranelift::compile_jit(&mir).expect("JIT compile");
         program.run();
@@ -1024,6 +1041,267 @@ mod async_end_to_end {
         assert_eq!(
             out & 0xff, 1,
             "the interpolated string must equal \"ab7cd\"; a parameter that did              not reach the body would build \"ab0cd\" and give 0: got {out:#x}"
+        );
+    }
+
+    /// Replace `<name>`'s generated poll function with one that reports
+    /// `POLL_PENDING` the first `pends` calls on a given state object and then
+    /// completes with `value`.
+    ///
+    /// Hand-built MIR obeying the same ABI the transform generates against: it
+    /// reads the resume tag out of slot `STATE_SLOT_TAG`, advances it, writes its
+    /// `Float` result to `STATE_SLOT_OUTPUT` and returns a status. Only the
+    /// *awaited* function is substituted; the function under test is the real
+    /// generated code, so what the probe exercises is its suspend and its resume.
+    ///
+    /// One state object per call to `<name>`, since each call allocates its own,
+    /// so a stub built with `pends = 1` pends once per await rather than once per
+    /// program.
+    fn replace_poll_with_a_pending_stub(mir: &mut Module, name: &str, pends: i64, value: f64) {
+        let prefix = format!("{name}.");
+        let poll = mir
+            .functions
+            .iter_mut()
+            .find(|f| f.name.starts_with(&prefix) && f.name.ends_with("$poll"))
+            .unwrap_or_else(|| panic!("no `$poll` for `{name}`"));
+
+        // Temp 0 is the state object (the poll ABI's env), temp 1 is task_ctx.
+        let mut temps = vec![MirTy::Ptr, MirTy::Ptr];
+        fn push(temps: &mut Vec<MirTy>, ty: MirTy) -> Temp {
+            let t = Temp(temps.len() as u32);
+            temps.push(ty);
+            t
+        }
+        let state = Temp(0);
+
+        // Block 0 dispatches on the tag: tag k (k < pends) goes to the k-th
+        // suspend block, and anything else -- which is tag `pends` -- completes.
+        let tag = push(&mut temps, MirTy::I64);
+        let dispatch = nova_mir::Block {
+            stmts: vec![Stmt::RecordField {
+                dst: tag,
+                record: state,
+                index: nova_mir::STATE_SLOT_TAG,
+                ty: MirTy::I64,
+            }],
+            term: Terminator::Switch {
+                disc: tag,
+                arms: (0..pends)
+                    .map(|k| (k, nova_mir::BlockId(k as u32 + 1)))
+                    .collect(),
+                default: nova_mir::BlockId(pends as u32 + 1),
+            },
+        };
+
+        let mut blocks = vec![dispatch];
+        for k in 0..pends {
+            let next = push(&mut temps, MirTy::I64);
+            let pending = push(&mut temps, MirTy::I64);
+            blocks.push(nova_mir::Block {
+                stmts: vec![
+                    Stmt::ConstInt(next, k + 1),
+                    Stmt::SetField {
+                        record: state,
+                        index: nova_mir::STATE_SLOT_TAG,
+                        value: next,
+                        ty: MirTy::I64,
+                    },
+                    Stmt::ConstInt(pending, nova_mir::POLL_PENDING),
+                ],
+                term: Terminator::Return(Some(pending)),
+            });
+        }
+        let out = push(&mut temps, MirTy::F64);
+        let ready = push(&mut temps, MirTy::I64);
+        blocks.push(nova_mir::Block {
+            stmts: vec![
+                Stmt::ConstFloat(out, value),
+                Stmt::SetField {
+                    record: state,
+                    index: nova_mir::STATE_SLOT_OUTPUT,
+                    value: out,
+                    ty: MirTy::F64,
+                },
+                Stmt::ConstInt(ready, nova_mir::POLL_READY),
+            ],
+            term: Terminator::Return(Some(ready)),
+        });
+
+        *poll = Function {
+            name: poll.name.clone(),
+            params: 1,
+            takes_env: true,
+            capture_count: 0,
+            temps,
+            ret: MirTy::I64,
+            is_async: false,
+            blocks,
+        };
+    }
+
+    /// **A real suspend and a real resume.** The awaited future pends twice, so
+    /// the awaiting function -- ordinary generated code -- returns `POLL_PENDING`
+    /// to the executor, is re-queued, and comes back into the same await twice
+    /// before the value arrives.
+    ///
+    /// This is the probe for the same-tag rule. A suspend that stored the tag
+    /// *after* its own would resume past this await: the second poll would
+    /// dispatch on a tag with no arm and reach the trap block, which aborts the
+    /// process rather than failing the assertion -- so a run that gets as far as
+    /// comparing a value has already proved the tag came back to the await.
+    ///
+    /// At `Float`, and with `+ 1.0` after the await, so the awaited value has to
+    /// have travelled through the inner state object's output slot as an f64 and
+    /// then been used: reading the slot before the inner future wrote it yields
+    /// `0.0`, giving `1.0` rather than `3.5`.
+    #[test]
+    fn an_await_on_a_twice_pending_future_resumes_at_the_same_await() {
+        let out = run_async_fn_with(
+            "async fn g() -> Float { 0.0 }\n\
+             async fn f() -> Float { g().await + 1.0 }\n\
+             fn main() { let x = f() }",
+            "f",
+            &[],
+            &|mir| replace_poll_with_a_pending_stub(mir, "g", 2, 2.5),
+        );
+        assert_eq!(
+            out as u64,
+            3.5f64.to_bits(),
+            "2.5 + 1.0 must come back from the resumed await; an output slot read \
+             before the inner future wrote it gives 1.0: got {out:#x}, want {:#x}",
+            3.5f64.to_bits()
+        );
+    }
+
+    /// An await **inside a loop**, suspending on every iteration: one suspend
+    /// point resumed at four separate times, with the loop's own accumulator and
+    /// counter living in state slots across each suspension.
+    ///
+    /// Three things only this shape reaches. The loop's back edge has to follow
+    /// the renumbering the split introduces, or it lands in the resumable poll
+    /// function's trap block on the second iteration. The resume has to re-enter
+    /// the await rather than the loop header, or the iteration count is wrong. And
+    /// the accumulator has to survive a *suspend*, not merely a block boundary --
+    /// the await-free loop probe above already covers the latter, and would pass
+    /// with the accumulator living in a register across the whole poll call.
+    ///
+    /// The result discriminates each: a lost accumulator gives `0.5`, a lost
+    /// counter loops forever or once, and a wrong awaited value gives `0.0`.
+    #[test]
+    fn an_await_inside_a_loop_suspends_and_resumes_on_every_iteration() {
+        let out = run_async_fn_with(
+            "async fn half() -> Float { 0.0 }\n\
+             async fn total(n: Int) -> Float {\n  \
+             let mut i = 0\n  \
+             let mut t = 0.0\n  \
+             while i < n { t = t + half().await\n i = i + 1 }\n  \
+             t\n\
+             }\n\
+             fn main() { let x = total(1) }",
+            "total",
+            &[Arg::Int(4)],
+            &|mir| replace_poll_with_a_pending_stub(mir, "half", 1, 0.5),
+        );
+        assert_eq!(
+            out as u64,
+            2.0f64.to_bits(),
+            "four iterations of 0.5 must accumulate to 2.0 across four \
+             suspensions: got {out:#x}, want {:#x}",
+            2.0f64.to_bits()
+        );
+    }
+
+    /// The ready path, with no stub anywhere: a suspend point whose inner future
+    /// completes on its first poll, so the await falls straight through to its
+    /// continuation. This is what every `.await` a `.nova` file can write does
+    /// today, and it is a different path through the status switch than the two
+    /// probes above take.
+    #[test]
+    fn an_await_on_an_already_ready_future_falls_through_to_its_continuation() {
+        let out = run_async_fn(
+            "async fn g(x: Float) -> Float { x * 2.0 }\n\
+             async fn f(a: Float) -> Float { g(a).await + 0.25 }\n\
+             fn main() { let x = f(1.0) }",
+            "f",
+            &[Arg::Float(1.5)],
+        );
+        assert_eq!(
+            out as u64,
+            3.25f64.to_bits(),
+            "1.5 * 2.0 + 0.25 = 3.25; the awaited value must be the inner \
+             future's own output, not its argument or zero: got {out:#x}, want {:#x}",
+            3.25f64.to_bits()
+        );
+    }
+
+    /// Two awaits in one body, so the resume tags have to be distinct and the
+    /// second await's continuation has to be reachable from the first's.
+    /// Subtraction, not addition: reversed continuations give `-1.5`.
+    #[test]
+    fn two_awaits_in_one_body_each_get_their_own_resume_state() {
+        let out = run_async_fn(
+            "async fn g(x: Float) -> Float { x }\n\
+             async fn f() -> Float { g(4.0).await - g(2.5).await }\n\
+             fn main() { let x = f() }",
+            "f",
+            &[],
+        );
+        assert_eq!(
+            out as u64,
+            1.5f64.to_bits(),
+            "4.0 - 2.5 = 1.5: got {out:#x}, want {:#x}",
+            1.5f64.to_bits()
+        );
+    }
+
+    /// An `.await` inside a `match` arm, executed. The suspend point is in a
+    /// block reached through the match's own tag `Switch`, whose arm targets the
+    /// split has to renumber -- an arm left naming its pre-split id reaches the
+    /// resumable poll function's trap block, which aborts the process rather than
+    /// producing a wrong value.
+    ///
+    /// The scrutinee is built inside the `async fn` rather than passed in, since
+    /// a probe argument can only be a scalar.
+    #[test]
+    fn an_await_inside_a_match_arm_runs_the_arm_it_selected() {
+        let out = run_async_fn(
+            "type Choice = | Left | Right\n\
+             async fn g(x: Float) -> Float { x }\n\
+             async fn f(a: Float) -> Float {\n  \
+             let c: Choice = Left\n  \
+             match c { Left => g(a).await + 1.0, Right => 0.0, }\n\
+             }\n\
+             fn main() { let x = f(1.0) }",
+            "f",
+            &[Arg::Float(2.5)],
+        );
+        assert_eq!(
+            out as u64,
+            3.5f64.to_bits(),
+            "the `Left` arm awaits and adds 1.0, so 2.5 gives 3.5; the `Right` \
+             arm would give 0.0: got {out:#x}, want {:#x}",
+            3.5f64.to_bits()
+        );
+    }
+
+    /// A unit-output await: nothing is copied out of the inner future's output
+    /// slot, but the inner future still has to be polled and the continuation
+    /// still has to run. The `Float` the body returns afterwards is what shows it
+    /// did.
+    #[test]
+    fn a_unit_output_await_still_polls_its_future_and_continues() {
+        let out = run_async_fn(
+            "async fn g() { }\n\
+             async fn f(a: Float) -> Float { g().await\n a + 1.0 }\n\
+             fn main() { let x = f(1.0) }",
+            "f",
+            &[Arg::Float(0.5)],
+        );
+        assert_eq!(
+            out as u64,
+            1.5f64.to_bits(),
+            "0.5 + 1.0 = 1.5 must run after the unit await: got {out:#x}, want {:#x}",
+            1.5f64.to_bits()
         );
     }
 

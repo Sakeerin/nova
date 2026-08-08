@@ -589,48 +589,33 @@ impl<'a> Lowerer<'a> {
                 acc
             }
             K::Await(inner) => {
-                // Defense in depth, NOT the primary guard. An `async fn` IS
-                // lowered here now, when it is await-free (`async_lower`
-                // rewrites it afterwards) — so the invariant is no longer
-                // "a body being lowered has been proven non-async". It is
-                // narrower and comes from a different check: `lower_module`'s
-                // worklist (`nova-mir/src/mono.rs`) rejects a reachable
-                // `async fn` with `E0088` when
-                // `async_lower::contains_await(&body)` is true, and that
-                // predicate walks the whole body — so a function whose body is
-                // lowered at all has been proven to contain no `Await` node
-                // anywhere. `.await` outside an `async fn` is separately
-                // impossible (`nova-typeck`'s `fcx.in_async`).
+                // A marker statement, not control flow. Performing the await —
+                // polling the awaited future, suspending while it is pending,
+                // resuming where it stopped — is `async_lower`'s block split,
+                // and every part of that sequence addresses the state object
+                // that split builds. There is no state object here, so lowering
+                // the suspend into control flow at this point would mean
+                // inventing that layout a second time, in a pass that runs
+                // before monomorphization and so before the awaited output's
+                // machine class is even known.
                 //
-                // If this arm fires anyway, one of those two invariants broke
-                // elsewhere — most likely `contains_await` failing to recurse
-                // into some expression form — still reported as a diagnostic,
-                // not a panic, since this is a library path (see `mir_ty`'s own
-                // comment on why its defensive arms must not panic either).
-                //
-                // The awaited operand is still lowered first so any error
-                // inside it is also reported, matching how every other arm
-                // above visits its children unconditionally.
-                self.lower_expr(inner);
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        "E0088",
-                        "`.await` reached MIR lowering, but its containing function \
-                         should already have been rejected as `async` before this point",
-                    )
-                    .with_primary_label(e.span, "unexpected suspend point")
-                    .with_note(
-                        "this indicates an internal inconsistency between the \
-                         async-function guard in `lower_module` and the `.await` \
-                         typing rule in `nova-typeck`, not an ordinary user error"
-                            .to_string(),
-                    ),
-                );
+                // No guard against `.await` outside an `async fn`: `nova-typeck`
+                // makes that unrepresentable (`fcx.in_async`), so there is
+                // nothing for this arm to reject.
+                let future = self.lower_expr(inner);
                 let ty = mir_ty(&e.ty);
-                if ty == MirTy::Unit {
-                    self.unit_temp()
+                let dst = if ty == MirTy::Unit {
+                    None
                 } else {
-                    self.new_temp(ty)
+                    Some(self.new_temp(ty))
+                };
+                self.push(Stmt::Await { dst, future });
+                match dst {
+                    Some(d) => d,
+                    // A unit-output await produces no value, matching how a
+                    // unit-returning call is lowered: `Stmt::Await`'s `dst` is
+                    // `None` and the expression's own result is a fresh unit.
+                    None => self.unit_temp(),
                 }
             }
         }

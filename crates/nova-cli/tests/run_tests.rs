@@ -960,12 +960,24 @@ fn run_accepts_an_await_free_async_fn_at_int() {
         .stdout("done\n");
 }
 
-/// The half of the boundary that stays rejected end to end: an `async fn`
-/// whose body contains `.await` needs Task 6's resumable transform. Asserted
-/// through the CLI as well as in `nova-mir`, because `nova check` and
-/// `nova run` must agree -- both run the same lowering stage.
+/// An `async fn` whose body contains `.await` now COMPILES and RUNS -- Phase
+/// 2.3a Task 6 replaced the last `.await`-shaped `E0088` rejection with the
+/// resumable transform. Both commands are asserted because `nova check` runs the
+/// same lowering stage and used to reject here too.
+///
+/// **What this does and does not prove.** It proves a body with a suspend point
+/// in it survives the whole pipeline into machine code that links and runs: the
+/// resume dispatch, the indirect poll of the inner future and the trap arms are
+/// all real instructions Cranelift accepted. It does NOT prove `g`'s body ran,
+/// for the same reason the await-free case above does not -- nothing in Nova can
+/// poll a future until Task 7's `std/task`, so `g()`'s future here is built and
+/// dropped. `nova-driver`'s `async_end_to_end` module is where a suspend and a
+/// resume are actually executed and the awaited `Float` checked.
+///
+/// At `Float`: `mir_ty` collapses `Int` onto the same class as every pointer, so
+/// an awaited value moved through the wrong one of them is invisible at `Int`.
 #[test]
-fn run_and_check_reject_an_async_fn_containing_await() {
+fn run_and_check_accept_and_run_an_async_fn_containing_await() {
     let dir = std::env::temp_dir().join("nova-async-with-await");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("with_await.nova");
@@ -977,25 +989,60 @@ fn run_and_check_reject_an_async_fn_containing_await() {
     )
     .expect("write test file");
 
-    for cmd in ["check", "run"] {
-        let assert = nova().arg(cmd).arg(&file).assert().failure();
-        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-        assert!(stderr.contains("E0088"), "nova {cmd} stderr: {stderr}");
-        assert!(
-            stderr.contains("`g`") && stderr.contains("async fn"),
-            "the diagnostic must name `g` and the construct: {stderr}"
-        );
-        assert!(
-            stderr.contains(".await"),
-            "the diagnostic must say what is unfinished -- a body containing \
-             `.await` -- so it is not read as `async fn` being unsupported \
-             outright: {stderr}"
-        );
-        assert!(
-            !stderr.contains("internal codegen error"),
-            "nova {cmd} must not reach the codegen ICE path: {stderr}"
-        );
-    }
+    nova().arg("check").arg(&file).assert().success();
+
+    let run_assert = nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("done\n");
+    let run_stderr = String::from_utf8_lossy(&run_assert.get_output().stderr).to_string();
+    assert!(
+        !run_stderr.contains("E0088"),
+        "an `async fn` containing `.await` must no longer be rejected: {run_stderr}"
+    );
+    assert!(
+        !run_stderr.contains("internal codegen error"),
+        "must not reach the codegen ICE path: {run_stderr}"
+    );
+    assert!(
+        !run_stderr.contains("this is a compiler bug"),
+        "must not reach the codegen ICE path: {run_stderr}"
+    );
+}
+
+/// An `.await` in a loop, end to end through the CLI: the same suspend point
+/// resumed on every iteration, and a back edge into a block the split
+/// renumbered. A back edge left pointing at its pre-split id reaches the
+/// resumable poll function's trap block, so this exits abnormally rather than
+/// printing -- which asserting on stdout catches and `.success()` alone might
+/// not, since a trap's exit status is platform-shaped.
+#[test]
+fn run_accepts_an_await_inside_a_loop() {
+    let dir = std::env::temp_dir().join("nova-async-await-loop");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("await_loop.nova");
+    std::fs::write(
+        &file,
+        "async fn one() -> Float { 1.0 }\n\
+         async fn total(n: Int) -> Float {\n\
+        \x20 let mut i = 0\n\
+        \x20 let mut t = 0.0\n\
+        \x20 while i < n { t = t + one().await\n i = i + 1 }\n\
+        \x20 t\n\
+         }\n\
+         fn main() { let x = total(3)\n  println(\"done\") }\n",
+    )
+    .expect("write test file");
+
+    nova().arg("check").arg(&file).assert().success();
+    nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("done\n");
 }
 
 /// An `async fn main` stays rejected, and this is the end-to-end reason: the

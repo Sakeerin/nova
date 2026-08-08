@@ -358,6 +358,28 @@ pub enum Stmt {
         ret: MirTy,
         args: Vec<Temp>,
     },
+    /// A suspend point — `future.await` — before the async state-machine
+    /// transform has turned it into control flow.
+    ///
+    /// **No statement reaching a codegen backend is this one.** It is a marker
+    /// that `async_lower`'s block split consumes, replacing it with the
+    /// sequence that actually performs an await: poll `future` through its own
+    /// fat pointer, return `POLL_PENDING` if the answer is pending, and
+    /// otherwise copy the awaited value out of the inner state object's output
+    /// slot into `dst`'s slot. Every part of that sequence addresses the state
+    /// object of the function containing the await, which does not exist until
+    /// the transform builds it — so the suspend cannot be lowered into control
+    /// flow where it is parsed without inventing that layout twice. Both
+    /// backends reject this variant rather than emitting anything for it.
+    ///
+    /// `future` holds a `{ poll_code, state }` two-word future value, the same
+    /// fat-pointer shape `MakeClosure` builds. `dst` is `None` exactly when the
+    /// awaited output is unit, matching `Call`'s convention for a call that
+    /// produces no value.
+    Await {
+        dst: Option<Temp>,
+        future: Temp,
+    },
     /// Call into the Nova runtime.
     CallRuntime {
         dst: Option<Temp>,

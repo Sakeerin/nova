@@ -1012,50 +1012,165 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     );
 }
 
-/// The RESUMABLE half of the state-machine transform (Phase 2.3a Task 6) does
-/// not exist yet: an async fn whose body contains `.await` must be a diagnosed
-/// rejection, not a silent miscompile or a panic. `g` is rejected and `f` --
-/// which is await-free -- is never reached at all, because a rejected function
-/// is skipped before its body is lowered and so never enqueues its callees.
+/// How many resume states `<name>`'s poll function dispatches between; 1 when
+/// its entry block is not a tag dispatch at all, which is what an await-free
+/// body gets.
+fn resume_states(mir: &nova_mir::Module, name: &str) -> usize {
+    let prefix = format!("{name}.");
+    let poll = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with(&prefix) && f.name.ends_with("$poll"))
+        .unwrap_or_else(|| panic!("no `$poll` for `{name}`: {:?}", function_names(mir)));
+    match &poll.blocks[0].term {
+        nova_mir::Terminator::Switch { arms, .. } => arms.len(),
+        _ => 1,
+    }
+}
+
+/// An `async fn` whose body contains `.await` is now COMPILED rather than
+/// rejected -- Phase 2.3a Task 6 replaced the last `.await`-shaped half of the
+/// `E0088` rejection with the resumable transform. `g` awaits `f`, so `g`'s poll
+/// function is a two-state machine dispatched by a `Switch` on the resume tag,
+/// and `f` -- which used never to be reached, because a rejected function is
+/// skipped before its body is lowered and so never enqueues its callees -- is
+/// transformed too.
 ///
-/// The message names `g` and "async fn" rather than `.await` specifically,
-/// because the rejection is of the whole function: the transform either
-/// expresses a body or it does not, and a diagnostic pointing at one
-/// suspend point would suggest deleting that one await would help.
-///
-/// Not exercised by `mir_for`/`diagnostics_for` above: this needs the
-/// typeck-clean-but-MIR-rejected combination, and the message assertion, that
-/// neither helper gives access to.
+/// At `Float`, for the same register-class reason the await-free case is: `Int`
+/// and every pointer-like type share `MirTy::I64`, so an awaited value moved
+/// through the wrong one of them is invisible there.
 #[test]
-fn reachable_await_reports_e0088() {
-    let file_id = FileId::DUMMY;
-    let src = "async fn f() -> Int { 1 }\n\
-               async fn g() -> Int { f().await }\n\
-               fn main() { let x = g() }";
-    let (tokens, _) = lex(src, file_id);
-    let (ast, _) = parse(&tokens, file_id);
-    let ast = ast.expect("no AST");
-    let resolved = resolve(&ast);
-    let checked = check(&resolved.file, &resolved.definitions);
-    assert!(
-        checked.diagnostics.is_empty(),
-        "typeck should accept this program: {:?}",
-        checked.diagnostics
+fn a_reachable_async_fn_containing_await_becomes_a_resumable_poll_fn() {
+    let mir = mir_for(
+        "async fn f() -> Float { 1.5 }\n\
+         async fn g() -> Float { f().await }\n\
+         fn main() { let x = g() }",
     );
-    let diags = match lower_module(&checked.module) {
-        Ok(_) => panic!("expected MIR lowering to reject the reachable async fn `g`"),
-        Err(diags) => diags,
-    };
-    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
-        panic!(
-            "expected E0088, got {:?}",
-            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
-        )
-    });
+    let names = function_names(&mir);
+    for name in ["f", "g"] {
+        let wrapper = mir
+            .functions
+            .iter()
+            .find(|f| f.name.starts_with(&format!("{name}.")) && !f.name.ends_with("$poll"))
+            .unwrap_or_else(|| panic!("no wrapper for `{name}`: {names:?}"));
+        assert_eq!(
+            wrapper.ret,
+            nova_mir::MirTy::Ptr,
+            "`{name}`'s original symbol must return a future"
+        );
+    }
+    assert_eq!(
+        resume_states(&mir, "g"),
+        2,
+        "one await means an entry state plus one resume state: {names:?}"
+    );
+    assert_eq!(
+        resume_states(&mir, "f"),
+        1,
+        "`f` is await-free, so it needs no dispatch: {names:?}"
+    );
+}
+
+/// The same program `nova check` sees: no diagnostic at all, since `nova check`
+/// runs this exact lowering stage.
+#[test]
+fn an_async_fn_containing_await_produces_no_diagnostics() {
+    let diags = diagnostics_for(
+        "async fn f() -> Float { 1.5 }\n\
+         async fn g() -> Float { f().await }\n\
+         fn main() { let x = g() }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// A `.await` buried under each expression form real code puts one in.
+///
+/// This replaces `nova-mir`'s `contains_await_looks_inside_nested_expressions`,
+/// which asserted the same shapes were *found* so the function could be
+/// rejected; now they must be split instead. Asserted as "the poll function
+/// dispatches on a resume tag", which is exactly what a body whose await was
+/// missed does not get -- and which no shallower check can fake, since
+/// `lower_expr` has to visit the subexpression to emit the marker at all.
+///
+/// The last case has two awaits in one expression, so it also pins that the
+/// state count follows the await count rather than being a fixed two.
+#[test]
+fn an_await_buried_in_any_expression_form_still_splits_the_body() {
+    for (body, states) in [
+        ("if true { g().await } else { 0 }", 2),
+        ("let mut i = 0\n while i < 1 { i = g().await }\n i", 2),
+        ("g().await + 1", 2),
+        ("match g().await { _ => 0 }", 2),
+        ("return g().await", 2),
+        ("let a = [g().await, 2]\n a[0]", 2),
+        ("g().await + g().await", 3),
+    ] {
+        let src = format!(
+            "async fn g() -> Int {{ 1 }}\n\
+             async fn f() -> Int {{ {body} }}\n\
+             fn main() {{ let x = f() }}"
+        );
+        let mir = mir_for(&src);
+        assert_eq!(
+            resume_states(&mir, "f"),
+            states,
+            "a buried `.await` must still split the body: {src}"
+        );
+    }
+    // A `String`-typed body, kept separate because its return type differs.
+    let mir = mir_for(
+        "async fn g() -> Int { 1 }\n\
+         async fn f() -> String { \"${g().await}\" }\n\
+         fn main() { let x = f() }",
+    );
+    assert_eq!(
+        resume_states(&mir, "f"),
+        2,
+        "an `.await` inside a string interpolation suspends too"
+    );
+}
+
+/// An `.await` inside a `match` ARM, which is the one position that puts the
+/// suspend point in a block reached through a `Switch`.
+///
+/// A `Switch`'s targets are a `Vec` the split has to walk, unlike `Goto`'s and
+/// `Branch`'s named fields, so it is the terminator whose renumbering can be
+/// missed on its own. Asserted here from real source as well as on a hand-built
+/// fixture, because only the real lowering decides which terminator a `match`
+/// actually produces -- a wildcard-only match over a primitive lowers to
+/// something else entirely.
+#[test]
+fn an_await_inside_a_match_arm_splits_a_block_reached_through_a_switch() {
+    let mir = mir_for(
+        "type Choice = | Left | Right\n\
+         async fn g() -> Int { 1 }\n\
+         async fn f(c: Choice) -> Int { match c { Left => g().await, Right => 0, } }\n\
+         fn main() { let x = f(Left) }",
+    );
+    let prefix = "f.";
+    let poll = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with(prefix) && f.name.ends_with("$poll"))
+        .unwrap_or_else(|| panic!("no `$poll` for `f`: {:?}", function_names(&mir)));
+    assert_eq!(
+        resume_states(&mir, "f"),
+        2,
+        "the arm's `.await` must still split the body"
+    );
+    // The body's own `Switch` has to have survived, or this program never
+    // exercised the arm-renumbering path it was written for.
+    let body_switches = poll
+        .blocks
+        .iter()
+        .skip(1)
+        .filter(|b| matches!(b.term, nova_mir::Terminator::Switch { .. }))
+        .count();
     assert!(
-        d.message.contains("`g`") && d.message.contains("async fn"),
-        "E0088 must name the rejected function (`g`) and that it is an async fn; got {:?}",
-        d.message
+        body_switches >= 2,
+        "expected the match's own tag Switch alongside the await's status \
+         Switch, found {body_switches}: {:?}",
+        poll.blocks
     );
 }
 
