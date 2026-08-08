@@ -772,8 +772,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `extern` function is `E0900`. Async **inherent** methods are supported. Async
   closures are not in the grammar at all. A `@test` function may not be
   `async` (`E0084`): a test's result is discarded rather than awaited, so an
-  `async` one's body would never run — write `@test fn t() { block_on(f()) }`,
-  which the diagnostic itself says.
+  `async` one's body would never run. Drive the future from a non-`async` test
+  instead, as the diagnostic's note spells out — `@test fn t() {
+  assert_eq(block_on(f()), 42) }`. The `assert_eq` is not decoration: a `@test`
+  body must have type `()`, so a bare `block_on(f())` returning a value is
+  itself `E0010`.
 - **The execution model is single-threaded cooperative state machines, which
   reverses `docs/phase-2-plan.md` decision 1** (`docs/adr/0009-async-execution-model.md`
   §1). That plan recommended thread-per-task over Tokio as the pragmatic
