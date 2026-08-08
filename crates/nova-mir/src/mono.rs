@@ -8,7 +8,7 @@ use nova_resolver::DefId;
 use rustc_hash::FxHashSet;
 
 use crate::lower::lower_function;
-use crate::{mangle, mir_ty, ExternDecl, MirTy, Module};
+use crate::{mangle, mir_ty, ExternDecl, Function, MirTy, Module, Temp};
 
 /// Lower a typed HIR module to monomorphized MIR.
 ///
@@ -35,6 +35,10 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     let mut mir = Module::default();
     let mut done: FxHashSet<String> = FxHashSet::default();
     let mut worklist: Vec<(DefId, Vec<Ty>)> = vec![(entry, Vec::new())];
+    // The symbol an `async fn main` was lowered under, once it has been
+    // lowered — the future-building wrapper `async_main_shim` calls. `None`
+    // for the ordinary case of a non-async entry point.
+    let mut async_entry: Option<String> = None;
 
     while let Some((def_id, type_args)) = worklist.pop() {
         let Some(func) = module.function(def_id) else {
@@ -74,11 +78,27 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         // The entry point keeps the bare symbol `main` (the backends look it up
         // by that name); every other function is mangled with its DefId so that
         // same-named items from different modules never collapse to one symbol.
-        let name = if def_id == entry {
+        //
+        // An `async fn main` is the one exception, and it is mangled like any
+        // other function: the async transform hands the entry symbol to the
+        // future-building *wrapper*, which allocates a state object, returns a
+        // future and never polls it, while the backends call `main` for its
+        // effects and discard what it returns. So `main` goes to
+        // `async_main_shim` below, which is what actually drives the future.
+        //
+        // Keyed on `is_async`, never on "does `ret_ty` start with `Future`": a
+        // non-async function may itself declare `-> Future<T>` and forward an
+        // async call's result unchanged (see `wrap_fn_value` in `nova-typeck`),
+        // and such a `main` needs no shim — it already returns without
+        // suspending.
+        let name = if def_id == entry && !func.is_async {
             "main".to_string()
         } else {
             mangle(def_id, &func.name, &type_args)
         };
+        if def_id == entry && func.is_async {
+            async_entry = Some(name.clone());
+        }
         if !done.insert(name.clone()) {
             continue;
         }
@@ -205,43 +225,6 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         if !resolved_ok {
             continue;
         }
-        // **The async boundary.** An `async fn` is lowered here and then
-        // rewritten by `async_lower::transform` into a poll function plus a
-        // future-building wrapper, whatever its body contains — a `.await` in it
-        // becomes a suspend point in that poll function. The one shape still
-        // rejected is `async fn main`, and not because the transform cannot
-        // express it.
-        //
-        // Rejecting keyed on `is_async`, never on "does `ret_ty` start with
-        // `Future`": a non-async function may itself declare `-> Future<T>` and
-        // forward an async call's result unchanged (see `wrap_fn_value` in
-        // `nova-typeck`), and there is nothing to reject about that.
-        if specialized.is_async && def_id == entry {
-            // An `async fn main` would otherwise be accepted and do nothing at
-            // all: the transform gives the entry symbol to the *wrapper*, which
-            // allocates a state, returns a future, and never polls it — while
-            // the backends call `main` for its effects and discard whatever it
-            // returns. Silently running no user code is worse than a diagnostic.
-            diagnostics.push(
-                Diagnostic::error(
-                    "E0088",
-                    format!(
-                        "`{}` cannot be compiled yet: an `async fn main` needs the \
-                         driver to drive it to completion, which has not landed",
-                        func.name
-                    ),
-                )
-                .with_primary_label(func.span, "this `async fn` cannot be lowered yet")
-                .with_note(
-                    "this fires whenever the function is reachable from `main`, in \
-                     `nova check` as well as `nova run`/`nova build`, since `nova check` \
-                     runs this same lowering stage so it never calls a program \
-                     well-formed that `nova run` would then reject"
-                        .to_string(),
-                ),
-            );
-            continue;
-        }
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
         match lower_function(&specialized, &name, module, entry, &mut request) {
             Ok(f) => mir.functions.push(f),
@@ -250,6 +233,11 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     }
 
     if diagnostics.is_empty() {
+        // Before the transform, so the shim is in place whichever order the two
+        // are read in: it is not `is_async`, so `transform` walks past it.
+        if let Some(wrapper) = async_entry {
+            mir.functions.push(async_main_shim(&wrapper));
+        }
         // Run on the finished module rather than per function inside the loop:
         // it needs no generics resolved and lands once for both codegen
         // backends.
@@ -273,6 +261,55 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         Ok(mir)
     } else {
         Err(diagnostics)
+    }
+}
+
+/// The `main` an `async fn main` gets: call the future-building wrapper
+/// `wrapper`, then hand the future to the executor.
+///
+/// This is what makes `async fn main` mean anything. An `async fn`'s body is
+/// rewritten into a poll function, and the symbol its callers were compiled
+/// against goes to a wrapper that returns a `{ poll_code, state }` future
+/// without polling it — so an entry point named that way would allocate a state
+/// object and exit, running none of the user's code, with exit 0 and no
+/// diagnostic. The wrapper is therefore mangled like any other function (see
+/// `lower_module`) and the entry symbol goes to this shim instead.
+///
+/// Built here rather than in the driver, and as MIR rather than as a
+/// synthesized `hir::Function`, so that every caller of `lower_module` gets it:
+/// `nova check`, `nova run`, `nova build` and this crate's own tests all reach
+/// the same shim, and none of them has to know that an entry point might need
+/// wrapping.
+///
+/// `Stmt::CallRuntime`'s `dst` is `None`, so the executor's `i64` return —
+/// which is the future's output slot — is discarded. That matches what happens
+/// to a non-async `fn main`'s return value, and it is why this shim does not
+/// need to know the output's machine class.
+fn async_main_shim(wrapper: &str) -> Function {
+    let future = Temp(0);
+    Function {
+        name: "main".to_string(),
+        params: 0,
+        takes_env: false,
+        capture_count: 0,
+        temps: vec![MirTy::Ptr],
+        ret: MirTy::Unit,
+        is_async: false,
+        blocks: vec![crate::Block {
+            stmts: vec![
+                crate::Stmt::Call {
+                    dst: Some(future),
+                    callee: wrapper.to_string(),
+                    args: Vec::new(),
+                },
+                crate::Stmt::CallRuntime {
+                    dst: None,
+                    func: crate::RtFunc::TaskBlockOn,
+                    args: vec![future],
+                },
+            ],
+            term: crate::Terminator::Return(None),
+        }],
     }
 }
 

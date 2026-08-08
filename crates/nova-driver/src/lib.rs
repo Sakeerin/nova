@@ -551,7 +551,7 @@ impl FrontendContext {
     /// `None` if any stage reported errors.
     ///
     /// `with_test_module` seeds `std/test` (`assert`/`assert_eq`/`assert_ne`)
-    /// alongside the fixed three, so it is glob-imported the same way — but
+    /// alongside every `STD_MODULES` entry, so it is glob-imported the same way — but
     /// only when `true`. `build_test_binary` is the only caller that passes
     /// `true`; `check_file` and `lower_to_mir` (behind `check_file`,
     /// `compile_file`, `build_file`, `build_file_release`) pass `false`, so
@@ -604,7 +604,7 @@ impl FrontendContext {
             })
             .collect();
         // `std/test`, registered the same way but only under `nova test`
-        // (`with_test_module`): a fourth `FileId` allocated *conditionally*,
+        // (`with_test_module`): one more `FileId` allocated *conditionally*,
         // which is fine precisely because it rides alongside `STD_MODULES`
         // rather than being folded into it — nothing computes an index from
         // `STD_MODULES.len()` expecting it to already include this entry.

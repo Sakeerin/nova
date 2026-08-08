@@ -1,0 +1,32 @@
+// Two spawned tasks that each suspend twice, so the executor's round-robin
+// interleaving is visible in the output, plus a `Float` result so the output
+// crosses register banks rather than riding the same i64 path every other
+// class does.
+
+async fn counter(name: String, n: Int) -> Int {
+    let mut i = 0
+    while i < n {
+        println("${name} step ${i}")
+        yield_now().await
+        i = i + 1
+    }
+    n
+}
+
+async fn half(x: Float) -> Float {
+    yield_now().await
+    x / 2.0
+}
+
+async fn run() -> Int {
+    let a = spawn(counter("a", 3))
+    let b = spawn(counter("b", 3))
+    let ra = a.join().await
+    let rb = b.join().await
+    ra + rb
+}
+
+fn main() {
+    println("total ${block_on(run())}")
+    println("half ${block_on(half(7.0))}")
+}

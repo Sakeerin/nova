@@ -78,20 +78,31 @@
 //! a `Terminator::Trap` becomes a trap instruction).
 //!
 //! That one call is sound by induction rather than by inspection, because its
-//! callee is a value and not a symbol. What the value can be is narrow: a
-//! `Future` originates only in a call to an `async fn`, since `Future` is not a
-//! nameable source type and an `extern` signature cannot mention one — so no
-//! foreign function pointer can reach an await, and the callee is always a
-//! `$poll` function this pass generated, under this same paragraph's discipline.
+//! callee is a value and not a symbol. What the value can be is narrow. `Future`
+//! is a *nameable* type — `fn take(f: Future<Int>)` type-checks — but naming it
+//! is not constructing one: the language has no future literal and no
+//! constructor, and an `extern` signature cannot mention one either (`Future` is
+//! not FFI-safe, `require_ffi_safe` in `nova-typeck`), so no foreign function
+//! pointer can reach an await.
 //!
-//! Two distinct changes would break that, and each owns re-establishing it:
-//! letting a future's poll code come from outside this pass (a foreign or
-//! hand-written `PollFn`), and making a runtime function that *can* unwind
-//! reachable from a poll body. The second is not hypothetical:
-//! `nova_rt_task_block_on` panics on re-entrancy, deliberately, and is exactly
-//! what a `std/task` binding would expose to Nova code — an `async fn` calling it
-//! would put that panic inside a poll frame with no landing pads. It is
-//! unreachable today only because nothing in the language can name it.
+//! Two sources of poll code therefore exist, and each carries the obligation
+//! itself:
+//!
+//! - The `$poll` functions this pass generates, under this same paragraph's
+//!   discipline — the induction step.
+//! - `nova_rt_task_yield_future`'s `poll_yield_once`, hand-written Rust in
+//!   `nova-runtime`, which is what `std/task`'s `yield_now` awaits because an
+//!   `async fn` body suspends only at an `.await` and nothing in the language is
+//!   a future that is not already ready. Its body reads and writes two words and
+//!   does nothing else, so it has no panic to suppress; that is stated on the
+//!   function.
+//!
+//! The other way to break the argument is to make a runtime function that *can*
+//! unwind reachable from a poll body. `nova_rt_task_block_on` was that function:
+//! it diagnosed re-entrancy with a `panic!`, and `std/task`'s `block_on` is
+//! exactly what makes it reachable — `async fn f() { block_on(g()) }` compiles.
+//! That diagnostic aborts instead, for this reason; see
+//! `nova-runtime`'s `abort_with`.
 //!
 //! The state object's allocation is a call too, and stays outside this argument
 //! by being in the wrapper, which is an ordinary Nova function and not a poll

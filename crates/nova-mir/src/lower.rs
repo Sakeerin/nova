@@ -10,6 +10,22 @@ use crate::{
     MAX_ARRAY_LEN,
 };
 
+/// How one [`Builtin`] reaches its implementation, decided by the exhaustive
+/// match in [`Lowerer::lower_call`].
+///
+/// A named enum rather than `Option<RtFunc>` because there is more than one
+/// reason a builtin has no runtime symbol, and the two are not
+/// interchangeable: mixing them up emits a register move where two loads
+/// belong, which has no diagnostic anywhere downstream.
+enum Lowering {
+    /// One `CallRuntime` to this runtime function.
+    Runtime(RtFunc),
+    /// The result *is* the argument, in a different `Ty` of the same `MirTy`.
+    Reinterpret,
+    /// Two typed field loads reaching a finished future's output slot.
+    FutureOutput,
+}
+
 /// Lower a specialized (generic-free) HIR function to MIR.
 ///
 /// `request` is called for every direct call / function reference so the
@@ -645,24 +661,36 @@ impl<'a> Lowerer<'a> {
             }
             hir::Callee::Builtin(b) => {
                 // Exhaustive rather than a `_` fallback so a new builtin has to
-                // decide here whether it is a runtime call; `None` is not
-                // "unhandled" but "handled without one".
-                let rt = match b {
-                    Builtin::Println => Some(RtFunc::Println),
-                    Builtin::Print => Some(RtFunc::Print),
-                    Builtin::Panic => Some(RtFunc::Panic),
-                    Builtin::StrCmp => Some(RtFunc::StrCmp),
-                    Builtin::StrHash => Some(RtFunc::StrHash),
-                    Builtin::CharToInt => None,
-                    Builtin::StrLenChars => Some(RtFunc::StrLenChars),
-                    Builtin::StrChars => Some(RtFunc::StrChars),
-                    Builtin::StrFromChars => Some(RtFunc::StrFromChars),
-                    Builtin::StrToUpper => Some(RtFunc::StrToUpper),
-                    Builtin::StrToLower => Some(RtFunc::StrToLower),
-                    Builtin::TestSelector => Some(RtFunc::TestSelector),
+                // decide here how it is implemented; every arm is a deliberate
+                // choice and none of them means "unhandled".
+                let how = match b {
+                    Builtin::Println => Lowering::Runtime(RtFunc::Println),
+                    Builtin::Print => Lowering::Runtime(RtFunc::Print),
+                    Builtin::Panic => Lowering::Runtime(RtFunc::Panic),
+                    Builtin::StrCmp => Lowering::Runtime(RtFunc::StrCmp),
+                    Builtin::StrHash => Lowering::Runtime(RtFunc::StrHash),
+                    Builtin::CharToInt => Lowering::Reinterpret,
+                    Builtin::StrLenChars => Lowering::Runtime(RtFunc::StrLenChars),
+                    Builtin::StrChars => Lowering::Runtime(RtFunc::StrChars),
+                    Builtin::StrFromChars => Lowering::Runtime(RtFunc::StrFromChars),
+                    Builtin::StrToUpper => Lowering::Runtime(RtFunc::StrToUpper),
+                    Builtin::StrToLower => Lowering::Runtime(RtFunc::StrToLower),
+                    Builtin::TestSelector => Lowering::Runtime(RtFunc::TestSelector),
+                    Builtin::TaskSpawn => Lowering::Runtime(RtFunc::TaskSpawn),
+                    Builtin::TaskIsDone => Lowering::Runtime(RtFunc::TaskIsDone),
+                    Builtin::TaskRelease => Lowering::Runtime(RtFunc::TaskRelease),
+                    // `task_drive` is typed `-> unit`, so `dst` is `None` and
+                    // the executor's `i64` return is discarded. That is the
+                    // point: the value it returns is the root future's output
+                    // slot as an `i64`, and `block_on`'s result reaches Nova
+                    // through `task_output` instead, in the output's own
+                    // machine class.
+                    Builtin::TaskDrive => Lowering::Runtime(RtFunc::TaskBlockOn),
+                    Builtin::TaskYieldFuture => Lowering::Runtime(RtFunc::TaskYieldFuture),
+                    Builtin::TaskOutput => Lowering::FutureOutput,
                 };
-                match rt {
-                    Some(func) => self.push(Stmt::CallRuntime {
+                match how {
+                    Lowering::Runtime(func) => self.push(Stmt::CallRuntime {
                         dst,
                         func,
                         args: arg_temps,
@@ -684,7 +712,7 @@ impl<'a> Lowerer<'a> {
                     // that rather than letting an impossible shape pass
                     // quietly (the whole suite runs in debug, so a violation
                     // fails immediately and visibly).
-                    None => {
+                    Lowering::Reinterpret => {
                         debug_assert!(
                             dst.is_some() && arg_temps.len() == 1,
                             "`{}` must lower with a dst and exactly one argument \
@@ -696,6 +724,46 @@ impl<'a> Lowerer<'a> {
                         );
                         if let (Some(dst), [src]) = (dst, arg_temps.as_slice()) {
                             self.push(Stmt::Copy { dst, src: *src });
+                        }
+                    }
+                    // `task_output(fut)`: word `FUTURE_SLOT_STATE` of the future
+                    // is its state object, and `STATE_SLOT_OUTPUT` of that is
+                    // the value the poll function wrote when it completed — the
+                    // same two loads `async_lower`'s await continuation emits,
+                    // against the same declared offsets, which is why they are
+                    // imported from there rather than restated.
+                    //
+                    // Two typed loads rather than a runtime call because this is
+                    // the only form in which the value can arrive in its own
+                    // machine class: the executor hands outputs back as `i64`,
+                    // and a `Float` output is an `F64`. Loading it under
+                    // `ret_class` is what keeps `block_on(half(7.0))` a float
+                    // rather than a reinterpreted bit pattern.
+                    //
+                    // Emitted only when there is somewhere to put the result: a
+                    // unit-valued output has no `dst` at all, and both backends
+                    // drop a `ty: Unit` access anyway.
+                    Lowering::FutureOutput => {
+                        debug_assert_eq!(
+                            arg_temps.len(),
+                            1,
+                            "`{}` takes exactly one future",
+                            b.name(),
+                        );
+                        if let (Some(dst), [future]) = (dst, arg_temps.as_slice()) {
+                            let state = self.new_temp(MirTy::Ptr);
+                            self.push(Stmt::RecordField {
+                                dst: state,
+                                record: *future,
+                                index: crate::async_lower::FUTURE_SLOT_STATE,
+                                ty: MirTy::Ptr,
+                            });
+                            self.push(Stmt::RecordField {
+                                dst,
+                                record: state,
+                                index: crate::async_lower::STATE_SLOT_OUTPUT,
+                                ty: ret_class,
+                            });
                         }
                     }
                 }

@@ -3905,7 +3905,13 @@ impl<'a> Checker<'a> {
             | Builtin::StrFromChars
             | Builtin::StrToUpper
             | Builtin::StrToLower
-            | Builtin::TestSelector => "",
+            | Builtin::TestSelector
+            | Builtin::TaskSpawn
+            | Builtin::TaskIsDone
+            | Builtin::TaskRelease
+            | Builtin::TaskDrive
+            | Builtin::TaskOutput
+            | Builtin::TaskYieldFuture => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7059,7 +7065,21 @@ fn error_expr(span: Span) -> hir::Expr {
 /// list that declares the enum, so *that* list cannot omit or duplicate a
 /// variant either (see its doc comment). Neither piece alone would close the
 /// gap; together they do.
+///
+/// **`Ty::Param(0)` here means "the caller's first type parameter", not "any
+/// type".** `unify` relates two `Ty::Param`s only when their indices are equal
+/// (`infer.rs`), so a signature mentioning `Param(0)` type-checks against a
+/// call site inside a generic function whose *first* type parameter is the one
+/// being passed, and against nothing else. That is exactly the shape
+/// `std/task`'s wrappers have (`fn spawn<T>(fut: Future<T>)` and friends), and
+/// it is what lets a builtin be generic at all without a signature
+/// instantiation step: monomorphization substitutes the call expression's own
+/// type along with every other, so `nova-mir` sees the concrete one. A
+/// `std/task` function that declared a second type parameter *before* `T`
+/// would fail here with `E0010` rather than miscompiling.
 fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
+    // `Future<T>` where `T` is the caller's first type parameter — see above.
+    let future_of_param0 = || Ty::Future(Box::new(Ty::Param(0)));
     match builtin {
         Builtin::Println | Builtin::Print => (vec![Ty::String], Ty::Unit),
         Builtin::Panic => (vec![Ty::String], Ty::Never),
@@ -7071,6 +7091,12 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrFromChars => (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::TestSelector => (vec![], Ty::Int),
+        Builtin::TaskSpawn => (vec![future_of_param0()], Ty::Int),
+        Builtin::TaskIsDone => (vec![Ty::Int], Ty::Bool),
+        Builtin::TaskRelease => (vec![Ty::Int], Ty::Unit),
+        Builtin::TaskDrive => (vec![future_of_param0()], Ty::Unit),
+        Builtin::TaskOutput => (vec![future_of_param0()], Ty::Param(0)),
+        Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
     }
 }
 
@@ -7847,6 +7873,115 @@ mod tests {
             "E0087 must name the type that is not a future; got {:?}",
             d.message
         );
+    }
+
+    /// `std/task`'s spawn-and-join surface, at `Float`.
+    ///
+    /// `Float` rather than `Int` deliberately: `mir_ty` maps `Int`, `Char`,
+    /// `String`, `Fn`, `Sum`, `Record` and `Array` all onto the same 64-bit
+    /// class, so an `Int` fixture proves nothing about a value that has to
+    /// travel through the executor's `i64` output slot. `Float` is the one class
+    /// that does not, and a `spawn`/`join` pair that lost the output's type
+    /// would show up here as a `Float`-vs-something mismatch rather than as a
+    /// clean compile with wrong bits at run time.
+    #[test]
+    fn std_task_spawn_and_join_typecheck() {
+        let r = check_src(
+            "async fn f() -> Float { 1.5 }\n\
+             async fn g() -> Float { let h = spawn(f())\n h.join().await }\n\
+             fn main() { }",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+        // Not vacuous on an empty diagnostic list alone: `Ty::Error` unifies
+        // with anything, so a `spawn` that failed to resolve would also produce
+        // no *further* diagnostics. Pin that `g`'s body really is typed `Float`.
+        let awaited = exprs_in(&r.module, "g")
+            .into_iter()
+            .find(|e| matches!(e.kind, hir::ExprKind::Await(_)))
+            .expect("`h.join().await` is an await");
+        assert_eq!(
+            awaited.ty,
+            Ty::Float,
+            "`join().await` on a `JoinHandle<Float>` must be typed `Float`"
+        );
+    }
+
+    /// `block_on` is how async is entered *from* sync code, so it must not be
+    /// mistaken for an await: `E0086` is the diagnostic for awaiting outside an
+    /// `async fn`, and a `block_on` that tripped it would leave no way to run
+    /// async code from `main` or from a `@test` function at all.
+    #[test]
+    fn block_on_outside_async_is_allowed() {
+        let r = check_src("async fn f() -> Int { 1 }\nfn main() { let x = block_on(f()) }");
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `yield_now` is an `async fn` returning unit, so it is only usable with
+    /// `.await` and only inside another `async fn` — the shape the gate fixture
+    /// depends on.
+    #[test]
+    fn yield_now_is_awaitable_inside_an_async_fn() {
+        let r = check_src(
+            "async fn f() -> Int { yield_now().await\n 1 }\n\
+             fn main() { let x = block_on(f()) }",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "expected no diagnostics, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// No std-only builtin is *callable* from a user module, which for the
+    /// `Future`-taking ones is a type-safety property and not only a
+    /// namespacing one.
+    ///
+    /// Their signatures mention `Ty::Param(0)`, meaning "the caller's first type
+    /// parameter" — which only exists inside a generic function. Called from an
+    /// ordinary `fn main`, such a builtin's result expression would be typed
+    /// `Param(0)` with nothing to substitute it, and `mir_ty` maps a surviving
+    /// `Param` to `MirTy::Unit`: a value silently dropped rather than a
+    /// diagnostic. So the fact that these names do not resolve in user code is
+    /// what keeps that unreachable, and it must not be quietly relaxed by moving
+    /// one to `Builtin::GLOBAL`.
+    ///
+    /// Driven off `Builtin::STD_ONLY` and `b.name()` rather than a list of
+    /// spellings, so a builtin added to that constant is covered the moment it
+    /// joins — and so renaming one cannot leave this passing against a name
+    /// nothing declares. `nova-resolver`'s `no_std_only_builtin_is_a_reserved_word`
+    /// is the other direction: a user *definition* of one of these names is
+    /// allowed.
+    #[test]
+    fn no_std_only_builtin_is_callable_from_user_code() {
+        for b in Builtin::STD_ONLY {
+            let name = b.name();
+            let r = check_src(&format!("fn main() {{ {name}() }}"));
+            assert!(
+                error_codes(&r).contains(&"E0001"),
+                "`{name}` must not resolve in a user module, got {:?}",
+                r.diagnostics
+                    .iter()
+                    .map(|d| (d.code.clone(), d.message.clone()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -14682,6 +14817,30 @@ mod tests {
                 Builtin::TestSelector => (
                     (vec![], Ty::Int),
                     "the synthesized `main`'s dispatch, reading `NOVA_TEST_INDEX`",
+                ),
+                Builtin::TaskSpawn => (
+                    (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Int),
+                    "`task_spawn(fut)` in `std/task`'s `spawn<T>`",
+                ),
+                Builtin::TaskIsDone => (
+                    (vec![Ty::Int], Ty::Bool),
+                    "`task_is_done(self.id)` in `JoinHandle<T>::join`",
+                ),
+                Builtin::TaskRelease => (
+                    (vec![Ty::Int], Ty::Unit),
+                    "`task_release(self.id)` in `JoinHandle<T>::join`",
+                ),
+                Builtin::TaskDrive => (
+                    (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Unit),
+                    "`task_drive(fut)` in `std/task`'s `block_on<T>`",
+                ),
+                Builtin::TaskOutput => (
+                    (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Param(0)),
+                    "`task_output(fut)` in `std/task`'s `block_on<T>` and `JoinHandle<T>::join`",
+                ),
+                Builtin::TaskYieldFuture => (
+                    (vec![], Ty::Future(Box::new(Ty::Unit))),
+                    "`task_yield_future().await` in `std/task`'s `yield_now`",
                 ),
             }
         }

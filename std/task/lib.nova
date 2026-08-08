@@ -1,0 +1,100 @@
+// Nova standard library — tasks.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import`. A user definition of the same name shadows the
+// one here (see docs/adr/0004-stdlib-compile-model.md).
+//
+// This module is the whole of the surface between Nova source and the
+// single-threaded cooperative executor in `crates/nova-runtime/src/task.rs`.
+// Every function here is a thin wrapper over a std-only builtin, and each
+// wrapper exists because the builtin it calls cannot be generic on its own: a
+// builtin's signature is a fixed list of types, so `Future<T>` in one of them
+// means "the first type parameter of whatever generic function is calling me"
+// (see `builtin_signature` in `nova-typeck`). That is why every generic
+// function below declares exactly one type parameter, and why it is `T`.
+//
+// The executor is single-threaded and has no wakers: a suspended task is simply
+// re-queued, so `spawn` starts nothing on its own and every task on a thread is
+// advanced only while a `block_on` call is running. See that module's own doc
+// comment, and ADR 0009.
+
+// A handle on a spawned task: its executor id, and the future it is driving.
+//
+// The future is held as well as the id because that is where a finished task's
+// value lives — word 1 of the future is the state object, and the output slot
+// of that state object is what the task's poll function wrote when it
+// completed. Reading it there rather than through the executor is what makes
+// `join` both idempotent and correct for every output type: idempotent because
+// nothing is consumed, and correct because the value arrives in its own machine
+// class rather than as the `Int` the executor hands outputs back as (see
+// `Builtin::TaskOutput`).
+//
+// Holding the future also keeps the state object reachable for as long as the
+// handle itself is: the record is a scanned heap object, so the collector
+// traces through it. That is what makes the value still readable after
+// `task_release` has ended the executor's own claim on it.
+//
+// No bound on `T` here: a bound on a record's type parameter is a resolution
+// scope and is not enforced at construction (ADR 0007), so any bound belongs on
+// the `impl` instead. There is none to state.
+pub record JoinHandle<T> { id: Int, fut: Future<T> }
+
+impl<T> JoinHandle<T> {
+    // Wait for the task to finish and produce its value.
+    //
+    // The wait is a `yield_now` loop rather than a park: the executor has no
+    // wakers, so there is nothing to register interest with, and re-queueing is
+    // how a task waits for anything. Each turn re-checks `task_is_done`, so a
+    // task that joins another one costs one poll per turn until it finishes.
+    //
+    // `task_release` before the read, not after: it ends the executor's claim
+    // on the state object, and the read below then depends only on the claim
+    // this handle has through `self.fut`. It is idempotent, so calling `join`
+    // twice on one handle releases once and reads the same value twice —
+    // deliberately, because Nova has no move checking, so `self` by value
+    // cannot stop a second call.
+    pub async fn join(self) -> T {
+        while !task_is_done(self.id) {
+            yield_now().await
+        }
+        task_release(self.id)
+        task_output(self.fut)
+    }
+}
+
+// Hand `fut` to this thread's executor and return a handle on it.
+//
+// Nothing runs yet. The task is queued, and the queue is drained by `block_on`
+// (or by a `yield_now` inside a task the current `block_on` is already
+// draining) — so a `spawn` with no `block_on` anywhere above it never runs at
+// all.
+pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {
+    JoinHandle { id: task_spawn(fut), fut: fut }
+}
+
+// Suspend the current task, letting every other queued task take a turn.
+//
+// The one function in this module whose body must suspend, and the reason
+// `task_yield_future` is a builtin: an `async fn` body suspends only at an
+// `.await`, and nothing else in the language is a future that is not already
+// ready. Each call awaits a fresh one, so two tasks yielding at the same time
+// do not share a resume point.
+pub async fn yield_now() {
+    task_yield_future().await
+}
+
+// Run this thread's executor until every queued task has finished, and produce
+// `fut`'s value. The way async code is entered from sync code.
+//
+// This drains the whole queue, not just `fut`: with no wakers and no driver
+// thread, a task left pending when this returned could never be advanced again.
+// So `block_on` implicitly joins everything spawned on this thread, which is
+// where it parts company with tokio's.
+//
+// **Not callable from inside an `async fn`.** A nested call would run a second
+// executor loop from inside the first one's frame; the runtime detects that and
+// ends the process with a diagnostic rather than corrupting the shared queue.
+pub fn block_on<T>(fut: Future<T>) -> T {
+    task_drive(fut)
+    task_output(fut)
+}

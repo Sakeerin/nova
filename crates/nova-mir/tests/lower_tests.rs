@@ -1318,20 +1318,113 @@ fn a_reachable_generic_async_fn_instantiation_is_transformed() {
     );
 }
 
-/// The half of the boundary that is still rejected, and the reason: an
-/// `async fn main` would otherwise be silently accepted and run NO user code
-/// at all. The transform gives the entry symbol to the wrapper, which
-/// allocates a state, returns a future and never polls it -- and both
-/// backends call `main` for its effects and discard what it returns. So this
-/// must be a diagnostic until the driver learns to drive it (Task 7).
+/// `std/task`'s `block_on<T>` at `T = Float`: the output arrives as a typed
+/// load off the future's own state object, not as the executor's `i64`.
 ///
-/// A `main` with no `.await` in it is used deliberately: the rejection is keyed
-/// on being the entry point, and nothing else. A `main` that awaited something
-/// would pass this test against a guard that rejected suspend points instead,
-/// which is the wrong reason -- an `async fn` containing `.await` is compiled
-/// everywhere except here.
+/// Instantiated at `Float` because that is the only class where the difference
+/// is visible in the MIR at all. `mir_ty` collapses `Int`, `Char` and every
+/// pointer-like type onto one 64-bit class, so at any of them a load typed
+/// `I64` and a load typed correctly are the same load; `F64` crosses register
+/// banks, so a `block_on` that routed its result through
+/// `nova_rt_task_block_on`'s return value would be handing an f64's bit pattern
+/// to code expecting a float, with exit 0 and no diagnostic.
+///
+/// Each of these defects needs its own assertion, and none of them implies
+/// another: driving the executor at all; not *also* taking the output through
+/// the runtime (which would unroot the state object the load below reads);
+/// loading at the output's own class rather than at `I64`; and chaining the two
+/// loads, since reading the output slot straight off the fat pointer would
+/// silently read word 1 of the *future* — the state object's address — instead.
 #[test]
-fn an_async_main_reports_e0088() {
+fn block_on_reads_its_output_from_the_state_object_at_the_outputs_own_class() {
+    let mir = mir_for(
+        "async fn half(x: Float) -> Float { x / 2.0 }\n\
+         fn main() { println(\"${block_on(half(7.0))}\") }",
+    );
+    let names = function_names(&mir);
+    let block_on = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("block_on."))
+        .unwrap_or_else(|| panic!("no `block_on` instance: {names:?}"));
+    let stmts: Vec<&nova_mir::Stmt> = block_on.blocks.iter().flat_map(|b| &b.stmts).collect();
+
+    assert!(
+        stmts.iter().any(|s| matches!(
+            s,
+            nova_mir::Stmt::CallRuntime {
+                func: nova_mir::RtFunc::TaskBlockOn,
+                dst: None,
+                ..
+            }
+        )),
+        "`block_on` must drive the executor and discard its `i64` return: {stmts:?}"
+    );
+    assert!(
+        !stmts.iter().any(|s| matches!(
+            s,
+            nova_mir::Stmt::CallRuntime {
+                func: nova_mir::RtFunc::TaskTakeOutput,
+                ..
+            }
+        )),
+        "the output must not also be taken through the runtime, which would \
+         unroot the state object this instance then reads: {stmts:?}"
+    );
+
+    let loads: Vec<(nova_mir::Temp, nova_mir::Temp, u32, nova_mir::MirTy)> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::RecordField {
+                dst,
+                record,
+                index,
+                ty,
+            } => Some((*dst, *record, *index, *ty)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loads.len(),
+        2,
+        "exactly two loads: the future's state word, then that state's output \
+         slot: {stmts:?}"
+    );
+    assert_eq!(
+        loads[0].3,
+        nova_mir::MirTy::Ptr,
+        "the state object's address is a pointer: {stmts:?}"
+    );
+    assert_eq!(
+        loads[1].3,
+        nova_mir::MirTy::F64,
+        "the output must be loaded AS an f64, not through the executor's i64: \
+         {stmts:?}"
+    );
+    assert_eq!(
+        loads[1].1, loads[0].0,
+        "the output load must go through the state object the first load \
+         produced, not straight off the future: {stmts:?}"
+    );
+}
+
+/// An `async fn main` gets the shim, and the shim is what owns the symbol
+/// `main`.
+///
+/// This is the shape that would otherwise compile and run NO user code at all:
+/// the transform gives the wrapper the symbol its callers were compiled
+/// against, and the wrapper allocates a state object, returns a future and
+/// never polls it, while both backends call `main` for its effects and discard
+/// what it returns. So the assertions are specifically that `main` is *not*
+/// the wrapper -- it must not return a pointer, it must contain the executor
+/// call, and the wrapper must exist under a mangled name for it to call.
+///
+/// A `main` with no `.await` in it is used deliberately: the wrapping is keyed
+/// on being the async entry point and nothing else, so a `main` that awaited
+/// something would also pass against an implementation that keyed on suspend
+/// points instead.
+#[test]
+fn an_async_main_is_wrapped_in_a_shim_that_drives_it() {
     let file_id = FileId::DUMMY;
     let src = "async fn main() { println(\"hi\") }";
     let (tokens, _) = lex(src, file_id);
@@ -1344,22 +1437,49 @@ fn an_async_main_reports_e0088() {
         "typeck should accept this program: {:?}",
         checked.diagnostics
     );
-    let diags = match lower_module(&checked.module) {
-        Ok(mir) => panic!(
-            "expected MIR lowering to reject `async fn main`, got {:?}",
-            function_names(&mir)
-        ),
-        Err(diags) => diags,
-    };
-    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
+    let mir = lower_module(&checked.module).unwrap_or_else(|diags| {
         panic!(
-            "expected E0088, got {:?}",
+            "an `async fn main` must lower, got {:?}",
             diags.iter().map(|d| &d.code).collect::<Vec<_>>()
         )
     });
+    let names = function_names(&mir);
+    let main = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .unwrap_or_else(|| panic!("no `main`: {names:?}"));
+    assert_eq!(
+        main.ret,
+        nova_mir::MirTy::Unit,
+        "`main` must be the shim, not the future-returning wrapper: {names:?}"
+    );
+    let drives: Vec<&str> = main
+        .blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter_map(|s| match s {
+            nova_mir::Stmt::CallRuntime { func, .. } => Some(func.symbol()),
+            nova_mir::Stmt::Call { callee, .. } => Some(callee.as_str()),
+            _ => None,
+        })
+        .collect();
     assert!(
-        d.message.contains("`main`") && d.message.contains("async fn main"),
-        "E0088 must name `main` and say what is unfinished about it; got {:?}",
-        d.message
+        drives.contains(&"nova_rt_task_block_on"),
+        "the shim must hand the future to the executor: {drives:?}"
+    );
+    let wrapper = drives
+        .iter()
+        .find(|s| s.starts_with("main."))
+        .unwrap_or_else(|| panic!("the shim must call the mangled wrapper: {drives:?}"));
+    assert!(
+        mir.functions.iter().any(|f| f.name == **wrapper),
+        "the wrapper the shim calls must exist: {names:?}"
+    );
+    assert!(
+        mir.functions
+            .iter()
+            .any(|f| f.name == format!("{wrapper}$poll")),
+        "the user's body must still have been split into a poll fn: {names:?}"
     );
 }

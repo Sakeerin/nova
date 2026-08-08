@@ -140,6 +140,53 @@ builtins! {
     /// `STD_ONLY`, like `str_cmp`: seeded into std modules' scopes only, so it
     /// never becomes a name a user program could call or collide with.
     TestSelector,
+    /// `task_spawn(fut: Future<T>) -> Int` — register a future with this
+    /// thread's executor and return its task id. Backs `std/task`'s `spawn`.
+    ///
+    /// A builtin because its parameter is a `Future<T>`, which no `extern` can
+    /// mention (`Future` is not FFI-safe, `require_ffi_safe` in `nova-typeck`)
+    /// and no Nova expression can construct. Like every `Future`-taking builtin
+    /// below it is typed with `Ty::Param(0)`, so it unifies only against a
+    /// *generic parameter of index zero* — which is why every `std/task`
+    /// function that calls one declares exactly one type parameter, and why a
+    /// second one declared before it is a compile error at the call site
+    /// (`E0010`) rather than anything quieter. Std-only, so `task_spawn` is not
+    /// a reserved word in user code.
+    TaskSpawn,
+    /// `task_is_done(id: Int) -> Bool` — whether a spawned task has completed.
+    /// Backs `JoinHandle::join`'s wait loop. Std-only.
+    TaskIsDone,
+    /// `task_release(id: Int)` — end the executor's claim on a spawned task's
+    /// state object, so a joined task's state is not rooted for the rest of the
+    /// process. Idempotent, which is what lets `join` be called twice on one
+    /// handle. Std-only.
+    TaskRelease,
+    /// `task_drive(fut: Future<T>)` — run this thread's executor until every
+    /// queued task has finished. Backs `std/task`'s `block_on`, paired with
+    /// [`Builtin::TaskOutput`] to read the value: the runtime returns the
+    /// output as an `i64`, which is not the machine class of a `Float`.
+    /// Std-only.
+    TaskDrive,
+    /// `task_output(fut: Future<T>) -> T` — the value a finished future wrote
+    /// to its state object's output slot.
+    ///
+    /// Unlike every other builtin here this is *not* a runtime call: it is two
+    /// typed field loads (`nova-mir`'s `lower_call`), which is the only way the
+    /// value can arrive in `T`'s own machine class — a `Float` output crosses
+    /// register banks, so routing it through the executor's `i64` return would
+    /// reinterpret its bits. Safe to read at any point after the future has
+    /// completed, and any number of times, because the value stays in the state
+    /// object and the future keeps that object alive. Std-only.
+    TaskOutput,
+    /// `task_yield_future() -> Future<unit>` — a fresh future that reports
+    /// pending once and then completes.
+    ///
+    /// The whole of what `std/task`'s `yield_now` awaits, and it has to be a
+    /// builtin because a Nova `async fn` body suspends *only* at an `.await`:
+    /// there is nothing in the language to await that is not already ready.
+    /// Its future is built by `nova_rt_task_yield_future`, the one poll
+    /// function `nova-mir`'s async transform did not generate. Std-only.
+    TaskYieldFuture,
 }
 
 impl Builtin {
@@ -158,6 +205,12 @@ impl Builtin {
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
             Builtin::TestSelector => "test_selector",
+            Builtin::TaskSpawn => "task_spawn",
+            Builtin::TaskIsDone => "task_is_done",
+            Builtin::TaskRelease => "task_release",
+            Builtin::TaskDrive => "task_drive",
+            Builtin::TaskOutput => "task_output",
+            Builtin::TaskYieldFuture => "task_yield_future",
         }
     }
 
@@ -171,16 +224,15 @@ impl Builtin {
     /// reserving one of these names in *every* module (as [`Builtin::GLOBAL`]
     /// does) would permanently take it away from user code to serve the
     /// standard library's own internals. Each member exists because Nova
-    /// source cannot express what it does — `String` has no length, indexing
-    /// or iteration, is not FFI-safe, and there is no `Char`/`Int`
-    /// conversion — so each is documented on its own variant above, next to
-    /// the capability it provides. This list is membership only; call sites
+    /// source cannot express what it does, and each is documented on its own
+    /// variant above, next to the capability it provides and the reason the
+    /// language cannot reach it. This list is membership only; call sites
     /// are a `grep` away and are deliberately not enumerated here: doing so
     /// produced stale or wrong counts in three places across three
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 9] = [
+    pub const STD_ONLY: [Builtin; 15] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -190,6 +242,12 @@ impl Builtin {
         Builtin::StrToUpper,
         Builtin::StrToLower,
         Builtin::TestSelector,
+        Builtin::TaskSpawn,
+        Builtin::TaskIsDone,
+        Builtin::TaskRelease,
+        Builtin::TaskDrive,
+        Builtin::TaskOutput,
+        Builtin::TaskYieldFuture,
     ];
 }
 
@@ -485,7 +543,7 @@ pub fn resolve(file: &File) -> ResolveResult {
 /// `extra_std` is `Some((`[`STD_TEST_MODULE`]`, file_id))` under `nova test`
 /// and `None` otherwise (the driver decides). When present it is treated as
 /// one more std module — glob-imported into every other module exactly like
-/// [`STD_MODULES`]'s three, and on the receiving end of their glob-imports too
+/// each [`STD_MODULES`] entry, and on the receiving end of their glob-imports too
 /// (so `assert_eq`'s bounds can name `Eq`/`Debug` with no `import`) — but it
 /// is threaded through this one parameter rather than folded into
 /// `STD_MODULES` itself, so that array's length stays fixed regardless of
@@ -506,9 +564,9 @@ pub fn resolve_program(
     let mut merged = Vec::new();
     let mut tests = Vec::new();
 
-    // The fixed three plus, only when the caller passed one, the extra std
-    // module — combined here so the rest of this function has one uniform
-    // list to iterate instead of a special case for a fourth entry.
+    // Every `STD_MODULES` entry plus, only when the caller passed one, the
+    // extra std module — combined here so the rest of this function has one
+    // uniform list to iterate instead of a special case for the extra entry.
     let std_entries: Vec<(&str, &str)> = STD_MODULES
         .iter()
         .copied()
@@ -661,7 +719,7 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 3] = [
+pub const STD_MODULES: [(&str, &str); 4] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
     (
         "$std.collections",
@@ -671,12 +729,14 @@ pub const STD_MODULES: [(&str, &str); 3] = [
         "$std.strings",
         include_str!("../../../std/strings/lib.nova"),
     ),
+    ("$std.task", include_str!("../../../std/task/lib.nova")),
 ];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
-/// that array stays fixed-length: every consumer iterates it and the driver
-/// allocates one `FileId` per entry, so a conditional member would make
-/// `FileId` allocation depend on compilation mode.
+/// that array's length does not depend on compilation mode: every consumer
+/// iterates it and the driver allocates one `FileId` per entry, so a
+/// conditional member would make `FileId` allocation depend on which
+/// subcommand is running.
 pub const STD_TEST_MODULE: (&str, &str) = ("$std.test", include_str!("../../../std/test/lib.nova"));
 
 /// Lex and parse one embedded std module. Its source ships with the compiler,

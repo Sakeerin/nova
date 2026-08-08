@@ -356,6 +356,14 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_task_take_output",
             task::nova_rt_task_take_output as *const u8,
         ),
+        (
+            "nova_rt_task_release",
+            task::nova_rt_task_release as *const u8,
+        ),
+        (
+            "nova_rt_task_yield_future",
+            task::nova_rt_task_yield_future as *const u8,
+        ),
     ]
 }
 

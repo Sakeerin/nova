@@ -207,8 +207,18 @@ rt_funcs! {
     TaskBlockOn,
     /// `(i64 task_id) -> i8` — whether a spawned task has completed.
     TaskIsDone,
-    /// `(i64 task_id) -> i64` — a completed task's output.
+    /// `(i64 task_id) -> i64` — a completed task's output, taken exactly once.
+    /// Declared for completeness of the executor's ABI; no MIR statement emits
+    /// it, because a task's output reaches Nova through the future's own state
+    /// object instead (`Builtin::TaskOutput`, whose class the runtime's `i64`
+    /// return cannot carry for a `Float`).
     TaskTakeOutput,
+    /// `(i64 task_id) -> unit` — end the executor's claim on a task's state
+    /// object without handing its output back. Idempotent.
+    TaskRelease,
+    /// `() -> ptr to { poll_code, state }` — a fresh future that reports
+    /// pending once and then completes. What `std/task`'s `yield_now` awaits.
+    TaskYieldFuture,
 }
 
 impl RtFunc {
@@ -238,6 +248,8 @@ impl RtFunc {
             RtFunc::TaskBlockOn => "nova_rt_task_block_on",
             RtFunc::TaskIsDone => "nova_rt_task_is_done",
             RtFunc::TaskTakeOutput => "nova_rt_task_take_output",
+            RtFunc::TaskRelease => "nova_rt_task_release",
+            RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
         }
     }
 
@@ -264,6 +276,8 @@ impl RtFunc {
             RtFunc::TaskSpawn | RtFunc::TaskBlockOn => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::TaskIsDone => (vec![MirTy::I64], MirTy::I8),
             RtFunc::TaskTakeOutput => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::TaskRelease => (vec![MirTy::I64], MirTy::Unit),
+            RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
         }
     }
 }

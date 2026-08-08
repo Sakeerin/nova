@@ -36,15 +36,16 @@ use std::collections::VecDeque;
 ///
 /// `"C-unwind"`, not plain `"C"`: a panic cannot cross a plain `"C"`
 /// function's boundary at all -- it aborts the whole process on the spot,
-/// regardless of the workspace's unwind panic strategy. This module's own
-/// hand-written test poll functions *are* ordinary panicking Rust, and
-/// `nova_rt_task_block_on`'s re-entrancy guard needs a panic starting inside
-/// one to reach a `catch_unwind` several frames up, through both this
-/// indirect call and `nova_rt_task_block_on`'s own boundary. Declaring the
-/// ABI `"C-unwind"` permits that. It changes nothing else: `"C-unwind"` was
-/// stabilized in Rust 1.71 (under this workspace's 1.78 MSRV) and marshals
-/// parameters and return values identically to `"C"`, so a generated call
-/// site is byte-identical either way.
+/// regardless of the workspace's unwind panic strategy. Some of this module's
+/// diagnostics are panics that a caller is meant to be able to observe --
+/// [`nova_rt_task_take_output`]'s take-once check, and [`poll_one`]'s
+/// rejection of a poll status the ABI does not define -- and each has to leave
+/// the `#[no_mangle]` entry point it starts under. Declaring the ABI
+/// `"C-unwind"` permits that, and every entry point here (this indirect call
+/// included) shares it so this module has one ABI rather than two. It changes
+/// nothing else: `"C-unwind"` was stabilized in Rust 1.71 (under this
+/// workspace's 1.78 MSRV) and marshals parameters and return values
+/// identically to `"C"`, so a generated call site is byte-identical either way.
 ///
 /// **Constraint on generated poll functions: a panic must not cross their
 /// boundary.** `"C-unwind"` says an unwind *may* pass through without
@@ -55,9 +56,27 @@ use std::collections::VecDeque;
 /// running nor finished. Anything in a generated poll function that could
 /// panic must therefore either be provably unable to (`nova_rt_check_bounds`
 /// and `nova_rt_panic_str` both `abort`, not unwind) or catch it before
-/// returning. The permission this ABI grants exists for the Rust-side entry
-/// points below, not for compiled Nova frames.
+/// returning. Every diagnostic in this module that a *well-formed compiled
+/// Nova program* can reach therefore goes through [`abort_with`] instead of
+/// panicking; the panics named above are reachable only from a Rust caller or
+/// from a compiler bug (see each one's own doc comment). The
+/// permission this ABI grants exists for the Rust-side entry points below, not
+/// for compiled Nova frames.
 pub type PollFn = unsafe extern "C-unwind" fn(state: *mut u8, task_ctx: *mut u8) -> i64;
+
+/// Report a violated contract and end the process, in the same style and with
+/// the same `nova: panic:` prefix as `nova_rt_panic_str` and
+/// `nova_rt_check_bounds`.
+///
+/// Aborting rather than panicking is what makes a check callable from compiled
+/// Nova code: a generated frame has no landing pads and no drop glue, and no
+/// unwind table describing it, so an unwind that started under one and passed
+/// through it would have to be resolved by an unwinder that has no description
+/// of that frame (see [`PollFn`]'s doc comment).
+fn abort_with(msg: &str) -> ! {
+    eprintln!("nova: panic: {msg}");
+    std::process::abort();
+}
 
 /// A [`PollFn`] returns this when it has not yet produced a value; the
 /// executor re-queues the task for another turn.
@@ -110,9 +129,11 @@ struct Task {
     state: *mut u8,
     done: bool,
     output: i64,
-    /// Whether [`nova_rt_task_take_output`] has already handed `output` out.
-    /// Taking is what releases this task's GC root (see
-    /// [`take_output_internal`]), so it must happen at most once.
+    /// Whether this task's GC root has already been released, by either
+    /// [`take_output_internal`] or [`release_internal`]. The root is one
+    /// `gc::add_root`, so it must be cancelled at most once; this flag is what
+    /// both paths check, which is also what makes `release_internal`
+    /// idempotent.
     taken: bool,
 }
 
@@ -256,6 +277,16 @@ unsafe fn poll_one(id: i64) {
         QUEUE.with(|queue| queue.borrow_mut().push_back(id));
         return;
     }
+    // Panics rather than aborting, unlike every other diagnostic here that a
+    // Nova program can reach: this one cannot be reached by a well-formed
+    // compiled program at all. A generated poll function's every exit returns
+    // `POLL_PENDING` or `POLL_READY` (`async_lower.rs` emits them as
+    // `ConstInt`s), so an out-of-range status means the compiler is broken,
+    // and the panic's observability is what lets
+    // `an_out_of_range_poll_status_panics_rather_than_completing_the_task`
+    // assert on the value. The unwind leaves through
+    // `nova_rt_task_block_on`'s `resume_unwind`, so it can cross a generated
+    // frame -- on a path whose precondition is already a compiler bug.
     if status != POLL_READY {
         panic!(
             "poll function for task {id} returned {status}, which is neither \
@@ -277,14 +308,49 @@ unsafe fn poll_one(id: i64) {
     });
 }
 
+/// Whether task `id` has completed. Aborts on an id no `spawn_internal` ever
+/// handed out, which a Nova program can reach by building a `JoinHandle` from
+/// an arbitrary `Int` rather than from `spawn`.
 fn is_done_internal(id: i64) -> bool {
-    TASKS.with(|tasks| {
-        tasks
-            .borrow()
-            .get(id as usize)
-            .expect("nova_rt_task_is_done: unknown task id")
-            .done
+    TASKS.with(|tasks| match tasks.borrow().get(id as usize) {
+        Some(task) => task.done,
+        None => abort_with(&format!("nova_rt_task_is_done: unknown task id {id}")),
     })
+}
+
+/// Release task `id`'s state-object root, handing nothing back. Idempotent.
+///
+/// This is [`take_output_internal`] with the take removed, and the two are not
+/// interchangeable in either direction. That one's second call is diagnosed
+/// precisely because it *would* hand back bits that may name a freed object;
+/// nothing leaves here, so nothing here can go stale, and a second call has
+/// nothing to get wrong. The two share `Task::taken`, so whichever runs first
+/// is the one that cancels the single `gc::add_root`.
+///
+/// The reason a caller can want the root released without the value is that
+/// the value does not only live in `Task::output`: it is also still in
+/// [`STATE_SLOT_OUTPUT`] of the state object, which is reachable from word
+/// [`FUTURE_SLOT_STATE`] of the future -- so a caller that holds the future
+/// holds the value, through the collector's ordinary tracing, and needs nothing
+/// from here but the end of the executor's own claim. `JoinHandle::join` is the
+/// intended caller; what it does with the value is its own business.
+fn release_internal(id: i64) {
+    let state = TASKS.with(|tasks| {
+        let mut tasks = tasks.borrow_mut();
+        let Some(task) = tasks.get_mut(id as usize) else {
+            abort_with(&format!("nova_rt_task_release: unknown task id {id}"));
+        };
+        if task.taken {
+            return None;
+        }
+        task.taken = true;
+        Some(task.state)
+    });
+    // Outside the borrow above, for the same reason `take_output_internal`
+    // orders its own `gc::remove_root` after releasing it.
+    if let Some(state) = state {
+        gc::remove_root(state);
+    }
 }
 
 /// Hand out task `id`'s output and release the GC root `spawn_internal`
@@ -309,10 +375,13 @@ fn is_done_internal(id: i64) -> bool {
 ///   twice must keep its own copy.
 ///
 /// The cost of releasing the root here rather than at completion: a spawned
-/// task whose output is *never* taken keeps its state object rooted for the
+/// task whose root is *never* released keeps its state object rooted for the
 /// rest of the process. That is a leak, not unsoundness, and it is the
 /// deliberate trade -- the alternative (unroot at completion) frees a
-/// heap-valued output while `Task::output` still names it.
+/// heap-valued output while `Task::output` still names it. Either this function
+/// or [`release_internal`] ends that claim; both check the same
+/// `Task::taken` flag, so a task's single root is cancelled at most once
+/// whichever of them a caller reaches.
 fn take_output_internal(id: i64) -> i64 {
     let (output, state) = TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
@@ -428,11 +497,17 @@ pub unsafe extern "C-unwind" fn nova_rt_task_spawn(future: *mut u8) -> i64 {
 /// Drive this thread's executor to quiescence and return `future`'s output.
 /// See [`run_to_completion`] for exactly what "quiescence" means here.
 ///
-/// `"C-unwind"`: see [`PollFn`]'s doc comment. This function is the one that
-/// actually panics on re-entrancy, so it is the one this ABI choice exists
-/// for: under plain `"C"`, the panic below is unable to leave this
-/// function's own frame at all, and the process aborts on the spot rather
-/// than unwinding to any caller.
+/// `"C-unwind"`: see [`PollFn`]'s doc comment. [`poll_one`]'s status
+/// diagnostic leaves through this function's `resume_unwind` below, so this is
+/// the boundary that permission is needed at.
+///
+/// **Re-entrancy ends the process rather than unwinding out of it.** A nested
+/// call means a poll function called `block_on`, and a poll function's frame is
+/// generated code with no unwind description, so a panic raised here would have
+/// to be unwound *through* that frame to reach any handler. `std/task`'s
+/// `block_on` makes this reachable from ordinary Nova source (`async fn f() {
+/// block_on(g()) }` compiles), which is exactly why the diagnostic is an
+/// [`abort_with`] and not a `panic!`.
 ///
 /// # Safety
 /// `future` must satisfy [`nova_rt_task_spawn`]'s contract exactly -- same
@@ -442,16 +517,15 @@ pub unsafe extern "C-unwind" fn nova_rt_task_spawn(future: *mut u8) -> i64 {
 /// [`STATE_SLOT_OUTPUT`] is read unconditionally on completion here too.
 ///
 /// # Panics
-/// If called while this thread is already inside a `nova_rt_task_block_on`
-/// call -- a poll function must not call `block_on` itself, which would run
-/// a second executor loop from inside the first one's frame and corrupt the
-/// shared queue rather than being diagnosed. Also if any polled task's poll
-/// function returns a status that is neither [`POLL_PENDING`] nor
-/// [`POLL_READY`] (see [`poll_one`]).
+/// If any polled task's poll function returns a status that is neither
+/// [`POLL_PENDING`] nor [`POLL_READY`] (see [`poll_one`]).
 #[no_mangle]
 pub unsafe extern "C-unwind" fn nova_rt_task_block_on(future: *mut u8) -> i64 {
     if IN_BLOCK_ON.with(|in_block_on| in_block_on.get()) {
-        panic!("nova_rt_task_block_on called re-entrantly: a poll function must not call block_on");
+        abort_with(
+            "nova_rt_task_block_on called re-entrantly: an async fn must not call block_on, \
+             which would run a second executor loop from inside the first one's frame",
+        );
     }
     IN_BLOCK_ON.with(|in_block_on| in_block_on.set(true));
     // `AssertUnwindSafe`: the closure only captures a `*mut u8`, which is
@@ -461,10 +535,9 @@ pub unsafe extern "C-unwind" fn nova_rt_task_block_on(future: *mut u8) -> i64 {
         // SAFETY: forwarding this function's own contract.
         unsafe { run_to_completion(future) }
     }));
-    // Cleared on every path out of this call, including a panic (from a
-    // nested re-entrant call, or from a poll function itself) unwinding
-    // through the `catch_unwind` above -- otherwise a single panicking
-    // `block_on` would leave every later call on this thread permanently
+    // Cleared on every path out of this call, including `poll_one`'s status
+    // diagnostic unwinding through the `catch_unwind` above -- otherwise one
+    // such `block_on` would leave every later call on this thread permanently
     // (and incorrectly) diagnosed as re-entrant.
     IN_BLOCK_ON.with(|in_block_on| in_block_on.set(false));
     match result {
@@ -510,6 +583,120 @@ pub unsafe extern "C-unwind" fn nova_rt_task_is_done(id: i64) -> i8 {
 #[no_mangle]
 pub unsafe extern "C-unwind" fn nova_rt_task_take_output(id: i64) -> i64 {
     take_output_internal(id)
+}
+
+/// End the executor's claim on task `id`'s state object. See
+/// [`release_internal`] for why this exists next to
+/// [`nova_rt_task_take_output`] rather than instead of it, and why calling it
+/// twice is a no-op rather than a diagnostic.
+///
+/// `"C-unwind"`: see [`nova_rt_task_is_done`]'s doc comment.
+///
+/// # Safety
+/// `id` must be an id previously returned by `nova_rt_task_spawn` on this
+/// same thread. An unknown id ends the process (see [`abort_with`]).
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_task_release(id: i64) {
+    release_internal(id);
+}
+
+/// The state object [`nova_rt_task_yield_future`] allocates: the tag and output
+/// slots, and nothing else.
+///
+/// [`poll_yield_once`] holds no value across its one suspension, so it needs no
+/// temp slots -- and [`STATE_MIN_SIZE`] is the floor regardless, because
+/// [`STATE_SLOT_OUTPUT`] is read unconditionally on completion.
+const YIELD_STATE_SIZE: usize = STATE_MIN_SIZE;
+
+/// Both slots [`poll_yield_once`] and the executor address must be inside
+/// [`YIELD_STATE_SIZE`]. A compile-time check rather than a test, because it is
+/// a relation between two constants in this file and nothing at run time can
+/// make it hold or fail differently: shrinking [`STATE_MIN_SIZE`], or moving
+/// [`STATE_SLOT_OUTPUT`] past it, must fail the build here rather than write one
+/// word past an allocation.
+const _: () = assert!(YIELD_STATE_SIZE >= (STATE_SLOT_OUTPUT + 1) * 8);
+
+/// Report [`POLL_PENDING`] on the first poll of a state object and
+/// [`POLL_READY`] on every later one.
+///
+/// The only [`PollFn`] in the system that `async_lower.rs` did not generate,
+/// and it exists because a Nova `async fn` body suspends *only* at an
+/// `.await`: `yield_now` has to await something that is not ready yet, and
+/// nothing expressible in Nova is. Its resumption is unconditional rather than
+/// tied to any event -- see this module's own doc comment on the absence of
+/// wakers.
+///
+/// **It must not unwind.** `async_lower.rs`'s argument that no unwind can
+/// cross a generated poll frame rests on every awaited future's poll code
+/// having been emitted by that pass; this is the one exception, so it carries
+/// the obligation directly. Its body is two raw word reads and one raw word
+/// write, with no allocation, no `TASKS`/`QUEUE` borrow and no fallible
+/// operation, so there is no panic to suppress.
+unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is a `YIELD_STATE_SIZE`-byte state object built by
+    // `nova_rt_task_yield_future`, so both slots below are in bounds.
+    let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+    if tag == 0 {
+        // SAFETY: same object, tag slot.
+        unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+        return POLL_PENDING;
+    }
+    // A unit-valued output, written explicitly for the same reason
+    // `async_lower.rs` writes one: the executor reads this slot on completion
+    // whether or not the future carries a value.
+    //
+    // SAFETY: same object, output slot -- in bounds by `YIELD_STATE_SIZE`.
+    unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+    POLL_READY
+}
+
+/// A fresh `Future<unit>` that pends once and then completes -- what
+/// `std/task`'s `yield_now` awaits.
+///
+/// **The state object is fresh on every call**, not a shared static: the whole
+/// value carried by one of these futures is its resume tag, so two suspensions
+/// alive at once would otherwise be one suspension, and the second task to
+/// poll would find the first task's tag already advanced and complete without
+/// ever having yielded.
+///
+/// Builds exactly the layout [`nova_rt_task_spawn`] documents and
+/// `async_lower.rs` independently emits: a scanned [`FUTURE_SIZE`]-byte fat
+/// pointer holding [`poll_yield_once`]'s address in word [`FUTURE_SLOT_POLL`]
+/// and the state object's address in word [`FUTURE_SLOT_STATE`], and a scanned
+/// state object of at least [`STATE_MIN_SIZE`] bytes. Reproducing a layout the
+/// compiler also emits is a silent miscompile when it is wrong, which is why
+/// `the_yield_futures_layout_is_the_one_the_abi_declares` asserts the tracked
+/// `(size, scan)` of both allocations rather than only the words written into
+/// them.
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_task_yield_future() -> *mut u8 {
+    // Bound as a `PollFn` before being written as a word, rather than cast from
+    // the function item directly: the coercion is what checks that this
+    // function's signature *is* the poll ABI, at the one place its address
+    // becomes an untyped word.
+    let poll: PollFn = poll_yield_once;
+    let state = gc::alloc(YIELD_STATE_SIZE, true);
+    // The allocation below can collect, and at that moment `state` is named
+    // only by this Rust frame -- which the collector reaches only through its
+    // conservative stack scan, and that scan has a real implementation on one
+    // platform (`gc.rs`'s `stack_base`). Registered across the call so the
+    // object's survival is a property of the root registry instead.
+    gc::add_root(state);
+    let fat = gc::alloc(FUTURE_SIZE, true);
+    // SAFETY: `fat` is a live, writable `FUTURE_SIZE`-byte block, so both
+    // words below are in bounds. Written before the root is released, so
+    // `state` is reachable from `fat` by the time it stops being a root.
+    unsafe {
+        (fat as *mut usize)
+            .add(FUTURE_SLOT_POLL)
+            .write(poll as usize);
+        (fat as *mut usize)
+            .add(FUTURE_SLOT_STATE)
+            .write(state as usize);
+    }
+    gc::remove_root(state);
+    fat
 }
 
 #[cfg(test)]
@@ -789,29 +976,225 @@ mod tests {
         );
     }
 
+    /// The re-entrancy guard is armed for exactly the span of one `block_on`
+    /// call, and a poll function running inside one can see that it is.
+    ///
+    /// The guard's own diagnostic ends the process (`abort_with`, because a
+    /// nested call means a *generated* frame is on the path an unwind would
+    /// have to take), so what is observable in-process is the flag it reads
+    /// rather than the abort. Both halves discriminate a real defect: a guard
+    /// that never armed would let a nested `block_on` run a second executor
+    /// loop from inside the first one's frame, and one that never disarmed
+    /// would end the process on the second, unrelated, `block_on` in a
+    /// program. The abort itself is asserted end to end, on a real compiled
+    /// program, by `nova-cli`'s `run_aborts_when_an_async_fn_calls_block_on`.
     #[test]
-    fn a_re_entrant_block_on_panics() {
-        // Nesting an executor inside a poll would run a task from inside
-        // another task's frame. Diagnose it instead of corrupting the queue.
-        //
-        // `AssertUnwindSafe` is required: the closure captures a `*mut u8`,
-        // and raw pointers are not `UnwindSafe`, so a bare `catch_unwind`
-        // does not compile. Asserting unwind-safety is correct here -- the
-        // pointer is GC-owned and no invariant spans the panic.
-        //
-        // This test assumes the unwind panic strategy, which is the
-        // workspace default (`Cargo.toml` sets no `panic = "abort"` profile
-        // override). If a profile ever adds one, this must become a
-        // subprocess test instead.
-        unsafe extern "C-unwind" fn poll_reenters(_s: *mut u8, _c: *mut u8) -> i64 {
-            let inner = make_future(poll_ready_now, 0);
-            unsafe { nova_rt_task_block_on(inner) }
+    fn the_re_entrancy_guard_is_armed_only_inside_block_on() {
+        thread_local! {
+            static SEEN: Cell<bool> = const { Cell::new(false) };
         }
-        let fut = make_future(poll_reenters, 0);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            nova_rt_task_block_on(fut)
-        }));
-        assert!(r.is_err(), "re-entrant block_on must panic, not nest");
+        unsafe extern "C-unwind" fn poll_observes_guard(state: *mut u8, _c: *mut u8) -> i64 {
+            SEEN.with(|s| s.set(IN_BLOCK_ON.with(|g| g.get())));
+            // SAFETY: `state` is a live state object (`make_future`'s contract).
+            unsafe { *(state as *mut i64).add(STATE_SLOT_OUTPUT) = 3 };
+            POLL_READY
+        }
+        assert!(
+            !IN_BLOCK_ON.with(|g| g.get()),
+            "the guard must not be armed before any block_on"
+        );
+        assert_eq!(
+            unsafe { nova_rt_task_block_on(make_future(poll_observes_guard, 0)) },
+            3
+        );
+        assert!(
+            SEEN.with(|s| s.get()),
+            "the guard must be armed while a poll function runs"
+        );
+        assert!(
+            !IN_BLOCK_ON.with(|g| g.get()),
+            "the guard must be disarmed once block_on returns"
+        );
+    }
+
+    /// `nova_rt_task_release` ends the executor's claim on a task's state
+    /// object and can be called any number of times.
+    ///
+    /// The exact root counts, not merely "eventually zero": releasing twice
+    /// must not cancel a *second* registration, which for a task whose future
+    /// was also handed to `nova_rt_task_spawn` a second time would unroot a
+    /// live task's state. Asserted on the registry rather than through a
+    /// collection, for the reason
+    /// `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`
+    /// documents.
+    #[test]
+    fn releasing_a_task_unroots_its_state_exactly_once_however_often_it_is_called() {
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        // A second registration of the same state, standing in for the same
+        // future having been spawned twice: it must survive the release below.
+        gc::add_root(state as *mut u8);
+        assert_eq!(gc::root_count(state), 2);
+
+        nova_rt_task_release(id);
+        assert_eq!(
+            gc::root_count(state),
+            1,
+            "release must cancel the executor's own registration"
+        );
+        nova_rt_task_release(id);
+        nova_rt_task_release(id);
+        assert_eq!(
+            gc::root_count(state),
+            1,
+            "a repeated release must be a no-op, not another remove_root"
+        );
+        gc::remove_root(state as *mut u8);
+    }
+
+    /// A released task's output is still readable out of the state object the
+    /// future points at -- which is what `JoinHandle::join` does, so that a
+    /// second `join` on one handle neither panics nor reads stale bits.
+    #[test]
+    fn a_released_tasks_output_slot_still_holds_its_value() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 1);
+        nova_rt_task_release(id);
+        // SAFETY: `fut` is a live future fat pointer; `state_of` reads its
+        // state word, and `STATE_SLOT_OUTPUT` is in bounds by `make_future`'s
+        // minimum size.
+        let out = unsafe { (state_of(fut) as *mut i64).add(STATE_SLOT_OUTPUT).read() };
+        assert_eq!(
+            out, 7,
+            "the value stays in the slot the poll fn wrote it to"
+        );
+    }
+
+    /// The exact layout `nova_rt_task_yield_future` builds, read back from the
+    /// collector's own records.
+    ///
+    /// This is the second place in the runtime that constructs a heap value the
+    /// *compiler* also constructs (`nova_rt_str_chars` was the first), and a
+    /// layout that disagrees with the compiler's is a silent miscompile rather
+    /// than a failure. So both allocations are checked against the tracked
+    /// `(size, scan)` and not only against the words stored in them: reading
+    /// words back cannot see an allocation that is too small but has slop after
+    /// it, and cannot see the `scan` flag at all -- and an unscanned state
+    /// object is marked but never traced (`gc.rs`'s `if !scan { continue; }`).
+    #[test]
+    fn the_yield_futures_layout_is_the_one_the_abi_declares() {
+        let fut = nova_rt_task_yield_future();
+        assert_eq!(
+            gc::object_info(fut as usize),
+            Some((FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = state_of(fut);
+        assert_eq!(
+            gc::object_info(state),
+            Some((STATE_MIN_SIZE, true)),
+            "the state object must be at least the tag and output slots, scanned"
+        );
+        // That `STATE_MIN_SIZE` really does cover the output slot is checked at
+        // compile time, next to `YIELD_STATE_SIZE`.
+        //
+        // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block.
+        let poll = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        let expected: PollFn = poll_yield_once;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
+    /// The suspension shape everything else depends on: pending exactly once.
+    #[test]
+    fn the_yield_future_pends_once_then_completes() {
+        let fut = nova_rt_task_yield_future();
+        // SAFETY: `fut` is a valid future fat pointer, built above.
+        let (poll, state) = unsafe { read_future(fut) };
+        // SAFETY: `state` is that future's own state object.
+        assert_eq!(
+            unsafe { poll(state, std::ptr::null_mut()) },
+            POLL_PENDING,
+            "the first poll must suspend, or `yield_now` never yields"
+        );
+        assert_eq!(
+            unsafe { poll(state, std::ptr::null_mut()) },
+            POLL_READY,
+            "the second poll must complete, or `yield_now` never returns"
+        );
+    }
+
+    /// Each call hands out its own state object, so two suspensions can be
+    /// alive at once.
+    ///
+    /// A shared static state would make the second future start at the first
+    /// one's advanced tag and complete without ever suspending -- which is the
+    /// failure asserted here, rather than merely that the addresses differ:
+    /// distinct addresses alone would also hold for two futures that shared
+    /// their tag through some other route.
+    #[test]
+    fn two_yield_futures_do_not_share_a_resume_tag() {
+        let a = nova_rt_task_yield_future();
+        let b = nova_rt_task_yield_future();
+        assert_ne!(
+            state_of(a),
+            state_of(b),
+            "each call allocates its own state"
+        );
+        // SAFETY: both are valid future fat pointers, built above.
+        let (poll_a, state_a) = unsafe { read_future(a) };
+        let (poll_b, state_b) = unsafe { read_future(b) };
+        // SAFETY: each `state` is its own future's state object.
+        assert_eq!(
+            unsafe { poll_a(state_a, std::ptr::null_mut()) },
+            POLL_PENDING
+        );
+        assert_eq!(
+            unsafe { poll_b(state_b, std::ptr::null_mut()) },
+            POLL_PENDING,
+            "polling one yield future must not advance another's tag"
+        );
+    }
+
+    /// The whole `yield_now` shape end to end at the executor level: a task
+    /// that awaits a yield future gets re-queued and finishes on its next turn.
+    #[test]
+    fn a_task_awaiting_a_yield_future_resumes_on_its_next_turn() {
+        // Shaped like the poll function `async fn f() { yield_now().await }`
+        // compiles to: the inner future lives in a temp slot, the entry poll
+        // creates it, and each poll forwards to it.
+        unsafe extern "C-unwind" fn poll_awaits_yield(state: *mut u8, ctx: *mut u8) -> i64 {
+            let slots = state as *mut i64;
+            // SAFETY: a `make_future(_, 1)` state object, so slot
+            // `STATE_SLOT_TEMPS` is in bounds.
+            let mut inner = unsafe { slots.add(STATE_SLOT_TEMPS).read() };
+            if inner == 0 {
+                inner = nova_rt_task_yield_future() as i64;
+                // SAFETY: same object, same slot.
+                unsafe { slots.add(STATE_SLOT_TEMPS).write(inner) };
+            }
+            // SAFETY: `inner` is a future this function just built or stored.
+            let (poll, inner_state) = unsafe { read_future(inner as *mut u8) };
+            // SAFETY: forwarding the poll ABI, `task_ctx` unchanged.
+            let status = unsafe { poll(inner_state, ctx) };
+            if status == POLL_PENDING {
+                return POLL_PENDING;
+            }
+            // SAFETY: same object, output slot.
+            unsafe { slots.add(STATE_SLOT_OUTPUT).write(11) };
+            POLL_READY
+        }
+        let fut = make_future(poll_awaits_yield, 1);
+        assert_eq!(
+            unsafe { nova_rt_task_block_on(fut) },
+            11,
+            "the executor must re-poll a task that awaited a yield future"
+        );
     }
 
     /// Windows-only, matching `gc.rs`'s own `mod registry` precedent, and for
