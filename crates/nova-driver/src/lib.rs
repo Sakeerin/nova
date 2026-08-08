@@ -709,3 +709,324 @@ fn strip_test_functions(modules: &mut [(String, nova_ast::File)]) {
         });
     }
 }
+
+/// End-to-end proof that a generated `async fn` actually *runs*: the future
+/// this compiler builds, JIT-compiled, driven by the real `nova-runtime`
+/// executor, with the value read back out of the state object's output slot.
+///
+/// This lives here rather than in `nova-codegen-cranelift` (which owns the
+/// MIR → native seam) or `nova-cli` (which owns `nova run`) because it needs
+/// both halves at once: the whole front end, to get real MIR out of real
+/// source, and an in-process runtime, to poll the resulting future and inspect
+/// the answer. `nova-driver` is the only crate that already has the front end
+/// and the JIT; `nova-runtime` is a dev-dependency for the executor entry
+/// points.
+///
+/// **Why `main` is synthesized in MIR instead of written in Nova.** Nothing in
+/// the language can reach `block_on` yet: `Future` is not a nameable type
+/// (`nova-typeck`'s `resolve_type` returns `None` for it) and an `extern`
+/// signature accepts only `Int`, `Float` and `Bool`, so no `.nova` source can
+/// name a future, pass one, or await one. Task 7's `std/task` is what closes
+/// that. Until then the only way to *execute* a generated poll function is to
+/// build the calling code at the level where futures do exist — MIR — which is
+/// exactly the level `nova-cli`'s `nova run` tests cannot reach. So those tests
+/// assert that such a program compiles and runs; these assert that it computes
+/// the right value.
+#[cfg(test)]
+mod async_end_to_end {
+    use nova_diagnostics::FileId;
+    use nova_mir::{Function, MirTy, Module, RtFunc, Stmt, Temp, Terminator};
+
+    /// One probe per test, because the executor's task table is a
+    /// `thread_local!` and libtest gives each `#[test]` its own thread: the
+    /// probe's own task is therefore always id 0. A second probe on the same
+    /// thread would shift the ids and make `take_output(0)` quietly return the
+    /// first probe's answer, so that is refused rather than reasoned about.
+    const PROBE_TASK_ID: i64 = 0;
+
+    thread_local! {
+        static PROBED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// An argument to pass to the async function under test.
+    enum Arg {
+        Int(i64),
+        Float(f64),
+    }
+
+    /// Compile `src`, call its `async fn <name>` with `args`, drive the
+    /// resulting future to completion through the real executor, and return
+    /// the raw 64 bits of its output slot.
+    ///
+    /// Raw bits, not a typed value: `STATE_SLOT_OUTPUT` is one 8-byte slot that
+    /// the poll function stores through with the output's own machine class, and
+    /// the executor copies out as an `i64` because it cannot tell a `Float` from
+    /// an `Int` from a pointer. Comparing against `f64::to_bits` is therefore
+    /// the strongest available check on a `Float` output — it fails if the store
+    /// or the load used the wrong class, the wrong offset, or the wrong width.
+    fn run_async_fn(src: &str, name: &str, args: &[Arg]) -> i64 {
+        assert!(
+            !PROBED.with(|p| p.replace(true)),
+            "one probe per test: see PROBE_TASK_ID"
+        );
+
+        let (tokens, lex_errors) = nova_lexer::lex(src, FileId::DUMMY);
+        assert!(lex_errors.is_empty(), "lex: {lex_errors:?}");
+        let (ast, parse_errors) = nova_parser::parse(&tokens, FileId::DUMMY);
+        assert!(parse_errors.is_empty(), "parse: {parse_errors:?}");
+        let resolved = nova_resolver::resolve(&ast.expect("no AST"));
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "resolve: {:?}",
+            resolved.diagnostics
+        );
+        let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "typeck: {:?}",
+            checked.diagnostics
+        );
+        let mut mir = nova_mir::lower_module(&checked.module).expect("MIR lowering");
+
+        // The wrapper: the half of the transform that kept the original
+        // mangled symbol. Its `$poll` sibling is deliberately NOT called
+        // directly -- going through the wrapper is what exercises the state
+        // allocation, the parameter seeding and the fat-pointer construction.
+        let prefix = format!("{name}.");
+        let wrapper = mir
+            .functions
+            .iter()
+            .map(|f| f.name.clone())
+            .find(|n| n.starts_with(&prefix) && !n.ends_with("$poll"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no wrapper for `{name}`; have {:?}",
+                    mir.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            mir.functions
+                .iter()
+                .any(|f| f.name == format!("{wrapper}$poll")),
+            "the transform must also have emitted `{wrapper}$poll`"
+        );
+
+        replace_main(&mut mir, &wrapper, args);
+        let program = nova_codegen_cranelift::compile_jit(&mir).expect("JIT compile");
+        program.run();
+
+        // SAFETY: `PROBE_TASK_ID` was registered by the `TaskSpawn` above, on
+        // this same thread -- `program.run()` ran the synthesized `main`
+        // in-process.
+        assert_eq!(
+            unsafe { nova_runtime::task::nova_rt_task_is_done(PROBE_TASK_ID) },
+            1,
+            "the future must have completed: the executor only marks a task \
+             done on POLL_READY, so a poll fn returning anything else panics \
+             instead of reaching here"
+        );
+        // SAFETY: same task id, now known complete, and taken exactly once.
+        unsafe { nova_runtime::task::nova_rt_task_take_output(PROBE_TASK_ID) }
+    }
+
+    /// Overwrite `main` with MIR that builds the future twice: once spawned as
+    /// the probe (whose output is left in place for the caller to take), and
+    /// once as `block_on`'s root, whose only job is to drain the queue so the
+    /// probe gets polled. Two separate futures, because one future must not be
+    /// registered as two tasks sharing a state object.
+    fn replace_main(mir: &mut Module, wrapper: &str, args: &[Arg]) {
+        let mut temps: Vec<MirTy> = Vec::new();
+        let mut stmts: Vec<Stmt> = Vec::new();
+        fn push(temps: &mut Vec<MirTy>, ty: MirTy) -> Temp {
+            let t = Temp(temps.len() as u32);
+            temps.push(ty);
+            t
+        }
+
+        let mut arg_temps = Vec::new();
+        for a in args {
+            match a {
+                Arg::Int(v) => {
+                    let t = push(&mut temps, MirTy::I64);
+                    stmts.push(Stmt::ConstInt(t, *v));
+                    arg_temps.push(t);
+                }
+                Arg::Float(v) => {
+                    let t = push(&mut temps, MirTy::F64);
+                    stmts.push(Stmt::ConstFloat(t, *v));
+                    arg_temps.push(t);
+                }
+            }
+        }
+
+        for spawn in [true, false] {
+            let fut = push(&mut temps, MirTy::Ptr);
+            stmts.push(Stmt::Call {
+                dst: Some(fut),
+                callee: wrapper.to_string(),
+                args: arg_temps.clone(),
+            });
+            let status = push(&mut temps, MirTy::I64);
+            stmts.push(Stmt::CallRuntime {
+                dst: Some(status),
+                func: if spawn {
+                    RtFunc::TaskSpawn
+                } else {
+                    RtFunc::TaskBlockOn
+                },
+                args: vec![fut],
+            });
+        }
+
+        let main = mir
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "main")
+            .expect("`main` was lowered");
+        *main = Function {
+            name: "main".to_string(),
+            params: 0,
+            takes_env: false,
+            capture_count: 0,
+            temps,
+            ret: MirTy::Unit,
+            is_async: false,
+            blocks: vec![nova_mir::Block {
+                stmts,
+                term: Terminator::Return(None),
+            }],
+        };
+    }
+
+    #[test]
+    fn an_await_free_async_fn_returning_int_runs_and_produces_its_value() {
+        let out = run_async_fn(
+            "async fn f() -> Int { 40 + 2 }\nfn main() { let x = f() }",
+            "f",
+            &[],
+        );
+        assert_eq!(out, 42);
+    }
+
+    /// **The `Float` case, and the one that matters most.** `mir_ty` collapses
+    /// `Int`, `Char` and every pointer-like type onto one 64-bit integer class,
+    /// so an `Int` probe passes even if the output is stored, loaded or
+    /// returned through the wrong one of them. `F64` is the only class that
+    /// crosses register banks, and the exact type at which this project already
+    /// shipped a reachable ICE: an `async fn f() -> Float { 1.5 }` merely
+    /// called from `main` hit a Cranelift verifier error that the `Int` version
+    /// silently survived.
+    #[test]
+    fn an_await_free_async_fn_returning_float_runs_and_produces_its_value() {
+        let out = run_async_fn(
+            "async fn f() -> Float { 1.5 }\nfn main() { let x = f() }",
+            "f",
+            &[],
+        );
+        assert_eq!(
+            out as u64,
+            1.5f64.to_bits(),
+            "the output slot must hold 1.5 as an f64 bit pattern, not an \
+             integer 1 or a truncation: got {out:#x}, want {:#x}",
+            1.5f64.to_bits()
+        );
+    }
+
+    /// Arguments reach the WRAPPER, not `poll` -- so a wrapper that forgets to
+    /// copy them into their state slots leaves the body reading the allocator's
+    /// zeroes. At `Float`, which also proves the seeding store and the body's
+    /// reload agree on the register class, not merely on the offset.
+    #[test]
+    fn an_async_fns_parameters_reach_its_body_through_the_state_object() {
+        let out = run_async_fn(
+            "async fn add(a: Float, b: Float) -> Float { a + b }\n\
+             fn main() { let x = add(1.0, 2.0) }",
+            "add",
+            &[Arg::Float(1.5), Arg::Float(2.25)],
+        );
+        assert_eq!(
+            out as u64,
+            3.75f64.to_bits(),
+            "1.5 + 2.25 must reach the body; a zeroed parameter slot yields \
+             0.0. Commutative, so `parameter_slots_are_seeded_in_order` \
+             covers ordering: got {out:#x}"
+        );
+    }
+
+    /// Ordering, which a commutative operator cannot see: `a - b` distinguishes
+    /// parameter slot 0 from slot 1.
+    #[test]
+    fn parameter_slots_are_seeded_in_order() {
+        let out = run_async_fn(
+            "async fn sub(a: Float, b: Float) -> Float { a - b }\n\
+             fn main() { let x = sub(1.0, 2.0) }",
+            "sub",
+            &[Arg::Float(10.0), Arg::Float(2.5)],
+        );
+        assert_eq!(
+            out as u64,
+            7.5f64.to_bits(),
+            "10.0 - 2.5 = 7.5; reversed slots would give -7.5: got {out:#x}"
+        );
+    }
+
+    /// A value carried across block boundaries entirely through state slots --
+    /// the property Task 6 relies on. A `while` loop's accumulator is written
+    /// in the body block and read in the header block, so if the spill were
+    /// incomplete this returns garbage or zero rather than the sum.
+    #[test]
+    fn a_loop_accumulator_survives_the_spill_across_blocks() {
+        let out = run_async_fn(
+            "async fn total(n: Int) -> Int {\n  \
+             let mut i = 0\n  \
+             let mut t = 0\n  \
+             while i < n { t = t + i\n i = i + 1 }\n  \
+             t\n\
+             }\n\
+             fn main() { let x = total(1) }",
+            "total",
+            &[Arg::Int(10)],
+        );
+        assert_eq!(out, 45, "0+1+..+9 = 45");
+    }
+
+    /// A heap value built INSIDE the poll function, then reduced to a scalar
+    /// output. The state object holds the interpolated `String`'s pointer in a
+    /// temp slot while `str_len_chars` is called on it, so this covers three
+    /// things no other probe here does: `nova_rt_alloc` running from inside a
+    /// generated poll function, a `Ptr`-class value round-tripping through a
+    /// state slot, and a runtime call in a poll body.
+    ///
+    /// A `String` OUTPUT is not asserted directly, because nothing public in
+    /// `nova-runtime` decodes a `NovaStr` -- the output slot would only be
+    /// readable as an opaque non-zero pointer, which a wrong slot could
+    /// accidentally satisfy. Comparing the string inside Nova and returning the
+    /// `Bool` checks the value instead, and adds the third distinct output class
+    /// (`MirTy::I8`, an 8-byte slot holding one byte) to the two above.
+    #[test]
+    fn a_heap_value_allocated_inside_the_poll_fn_round_trips_through_a_state_slot() {
+        let out = run_async_fn(
+            "async fn f(n: Int) -> Bool { let s = \"ab${n}cd\"
+ s == \"ab7cd\" }
+             fn main() { let x = f(1) }",
+            "f",
+            &[Arg::Int(7)],
+        );
+        assert_eq!(
+            out & 0xff, 1,
+            "the interpolated string must equal \"ab7cd\"; a parameter that did              not reach the body would build \"ab0cd\" and give 0: got {out:#x}"
+        );
+    }
+
+    /// A unit-returning `async fn` never touches the output slot itself, yet
+    /// the executor reads it on completion regardless. What is asserted here is
+    /// that the run completes at all: reaching `take_output` means the poll
+    /// function returned exactly `POLL_READY` and the executor's unconditional
+    /// read of `STATE_SLOT_OUTPUT` stayed inside a state object with the
+    /// fewest temp slots any body can have -- the `STATE_MIN_SIZE` case.
+    #[test]
+    fn a_unit_returning_async_fn_completes_and_reads_a_valid_output_slot() {
+        let out = run_async_fn("async fn f() { }\nfn main() { let x = f() }", "f", &[]);
+        assert_eq!(out, 0, "the explicit zero the transform stores for unit");
+    }
+}

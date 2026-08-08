@@ -75,9 +75,10 @@ pub(crate) fn lower_function(
         }
     }
 
+    let body_ret = body_return_ty(func);
     let result = lo.lower_expr(&func.body);
     if !diverges(&func.body) {
-        match mir_ty(&func.ret_ty) {
+        match mir_ty(body_ret) {
             MirTy::Unit => lo.terminate(Terminator::Return(None)),
             _ => lo.terminate(Terminator::Return(Some(result))),
         }
@@ -104,9 +105,33 @@ pub(crate) fn lower_function(
         takes_env: func.takes_env,
         capture_count: func.capture_count,
         temps: lo.temps,
-        ret: mir_ty(&func.ret_ty),
+        ret: mir_ty(body_ret),
+        is_async: func.is_async,
         blocks,
     })
+}
+
+/// The type this function's BODY produces, which is not always the type its
+/// signature returns.
+///
+/// An `async fn`'s `ret_ty` is `Future<T>` (always `MirTy::Ptr`) while its body
+/// has type `T`, so the two disagree wherever `T` is not itself pointer-class —
+/// `Float` (`MirTy::F64`) being the case that crosses register banks and so the
+/// only one a backend can catch. Lowering the body against the wrapped type
+/// produced a Cranelift verifier error there and, at `Int`, silently compiled.
+/// `async_lower::transform` then rewrites this function into a poll function
+/// (returning a status) plus a wrapper (returning the `Future<T>` pointer), so
+/// the class here is only ever the intermediate one.
+///
+/// Keyed on `is_async`, not on "does `ret_ty` start with `Future`": a plain
+/// function may itself declare `-> Future<T>` and forward an async call's
+/// result unchanged (`nova-typeck`'s `wrap_fn_value`), and its body really does
+/// produce the future.
+fn body_return_ty(func: &hir::Function) -> &Ty {
+    match &func.ret_ty {
+        Ty::Future(out) if func.is_async => out,
+        other => other,
+    }
 }
 
 fn diverges(e: &hir::Expr) -> bool {

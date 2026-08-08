@@ -14,10 +14,23 @@
 //! Sum values are boxed: `{ tag: i64, fields: 8 bytes each }`, allocated
 //! through the runtime. Strings and function values are opaque pointers.
 
+mod async_lower;
 mod lower;
 mod mono;
 
 pub use mono::lower_module;
+
+/// The async ABI this compiler generates against: the state object's slot
+/// layout, the future value's slot layout, and the poll statuses.
+///
+/// Re-exported from the crate root because `nova-runtime` declares the same
+/// layout independently — neither crate may depend on the other — and the pin
+/// that holds the two copies together has to live in a third crate that
+/// depends on both (`nova-codegen-cranelift`).
+pub use async_lower::{
+    FUTURE_SLOT_POLL, FUTURE_SLOT_STATE, POLL_PENDING, POLL_READY, STATE_MIN_SIZE,
+    STATE_SLOT_OUTPUT, STATE_SLOT_TAG, STATE_SLOT_TEMPS,
+};
 
 use nova_hir as hir;
 use nova_resolver::DefId;
@@ -79,6 +92,18 @@ pub struct Function {
     pub capture_count: u32,
     pub temps: Vec<MirTy>,
     pub ret: MirTy,
+    /// Still awaiting the async state-machine transform: this function was
+    /// lowered from an `async fn` body, so `ret` is the class of the value the
+    /// BODY produces, not of the `Future<T>` its signature declares.
+    ///
+    /// **No function reaching a codegen backend has this set.**
+    /// `lower_module` runs `async_lower::transform` over the finished module,
+    /// which rewrites every such function into a poll function plus a wrapper
+    /// and clears the flag. A function that still carried it would be emitted
+    /// under its original symbol with the wrong return class — invisible
+    /// wherever the output type happens to share a register class with a
+    /// pointer, a verifier error where it does not.
+    pub is_async: bool,
     pub blocks: Vec<Block>,
 }
 

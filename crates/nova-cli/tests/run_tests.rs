@@ -870,28 +870,36 @@ fn check_rejects_impl_missing_a_supertrait() {
     );
 }
 
-/// End-to-end regression for a defect a reviewer measured directly: an
-/// `async fn` with NO `.await` anywhere in it, merely called from `main`
-/// and its result discarded, used to reach Cranelift and crash instead of
-/// producing a diagnostic. Root cause: an async fn's declared MIR return
-/// class comes from `ret_ty` (`Future<T>`, always `MirTy::Ptr`), but its
-/// body produces `T` directly -- and at `T = Float` (`MirTy::F64`) those are
-/// different Cranelift register classes, so the verifier rejected the
-/// function with "result 0 has type f64, must match function signature of
-/// i64", surfaced as `internal codegen error (this is a compiler bug)`
-/// rather than a clean diagnostic. `nova check` did not catch it either
-/// (`ok`), because MIR lowering "succeeded" (the mismatch is only checked by
-/// Cranelift's verifier, which `nova check` never runs) -- so both commands
-/// are asserted here.
+/// An `async fn` with NO `.await` anywhere in it, merely called from `main`
+/// and its result discarded, now COMPILES and RUNS -- Phase 2.3a Task 5
+/// replaced the `E0088` rejection of this shape with the real state-machine
+/// transform.
 ///
-/// The fix moved the guard from `ExprKind::Await` (which this program never
-/// even constructs) to `hir::Function.is_async`, checked in
-/// `lower_module`'s worklist before a function's body is ever lowered.
-/// Asserting the ABSENCE of the old crash text, not just a nonzero exit
-/// code, is the point: a test that only checked `.failure()` would have
-/// passed against the ICE too.
+/// At `Float`, which is where the rejection came from in the first place: an
+/// async fn's declared MIR return class comes from `ret_ty` (`Future<T>`,
+/// always `MirTy::Ptr`) while its body produces `T` directly, and at
+/// `T = Float` (`MirTy::F64`) those are different Cranelift register classes,
+/// so the verifier rejected the function with "result 0 has type f64, must
+/// match function signature of i64", surfaced as `internal codegen error
+/// (this is a compiler bug)`. Both commands are still asserted, because
+/// `nova check` runs the same lowering stage and used to reject here too.
+///
+/// **What this does and does not prove.** It proves the whole program
+/// compiles, links through the JIT, and runs to a clean exit -- so the
+/// wrapper's state allocation and fat-pointer construction are real machine
+/// code that executes. It does NOT prove the async fn's BODY ran: nothing in
+/// Nova can poll a future yet (`Future` is not a nameable type and an
+/// `extern` signature accepts only Int/Float/Bool), so `f()`'s future here is
+/// built and dropped. `nova-driver`'s `async_end_to_end` module is where the
+/// body is actually driven to completion and its `Float` value checked, in
+/// process, because that needs MIR-level calling code no `.nova` file can
+/// express until Task 7's `std/task`.
+///
+/// Asserting the ABSENCE of the old crash text, not just `.success()`, is
+/// deliberate: `nova run` prints diagnostics to stderr and still could have
+/// exited zero on some paths.
 #[test]
-fn run_and_check_reject_await_free_async_fn_at_float_without_ice() {
+fn run_and_check_accept_and_run_an_await_free_async_fn_at_float() {
     let dir = std::env::temp_dir().join("nova-async-no-await-float");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("float_no_await.nova");
@@ -902,48 +910,38 @@ fn run_and_check_reject_await_free_async_fn_at_float_without_ice() {
     )
     .expect("write test file");
 
-    let check_assert = nova().arg("check").arg(&file).assert().failure();
-    let check_stderr = String::from_utf8_lossy(&check_assert.get_output().stderr).to_string();
-    assert!(
-        check_stderr.contains("E0088"),
-        "nova check stderr: {check_stderr}"
-    );
+    nova().arg("check").arg(&file).assert().success();
 
-    let run_assert = nova().arg("run").arg(&file).assert().failure();
+    let run_assert = nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("done\n");
     let run_stderr = String::from_utf8_lossy(&run_assert.get_output().stderr).to_string();
     assert!(
-        run_stderr.contains("E0088"),
-        "nova run stderr: {run_stderr}"
-    );
-    assert!(
-        run_stderr.contains("async fn"),
-        "the diagnostic should name the construct as an async fn: {run_stderr}"
-    );
-    assert!(
-        run_stderr.contains("`f`"),
-        "the diagnostic's message should name the rejected function: {run_stderr}"
+        !run_stderr.contains("E0088"),
+        "an await-free async fn must no longer be rejected: {run_stderr}"
     );
     assert!(
         !run_stderr.contains("internal codegen error"),
-        "must not reach the codegen ICE path any more: {run_stderr}"
+        "must not reach the codegen ICE path: {run_stderr}"
     );
     assert!(
         !run_stderr.contains("this is a compiler bug"),
-        "must not reach the codegen ICE path any more: {run_stderr}"
+        "must not reach the codegen ICE path: {run_stderr}"
     );
 }
 
-/// The same shape as the `Float` test above, but at `Int` -- documenting why
-/// the defect went unmeasured before it was fixed. `Future<Int>` and the
-/// body's actual `Int` both map to `MirTy::I64`/a general-purpose register
-/// on x86-64 (unlike `Float`, `MirTy::F64`), so this specific mismatch was
-/// invisible to Cranelift's verifier even before the fix: this program would
-/// have run to completion silently. This is the test that would have caught
-/// the original defect had it been written first, and it stays in the suite
-/// as the reason the plan mandates instantiating at `Float`, not `Int`, for
-/// this class of check.
+/// The same shape at `Int` -- kept as the record of why the original defect
+/// went unmeasured. `Future<Int>` and the body's actual `Int` both map to
+/// `MirTy::I64`/a general-purpose register on x86-64 (unlike `Float`,
+/// `MirTy::F64`), so the return-class mismatch was invisible to Cranelift's
+/// verifier: this exact program ran to completion silently even while it was
+/// miscompiled. It stays in the suite as the reason this branch mandates
+/// instantiating at `Float`, not `Int`, for anything tied to register class.
 #[test]
-fn run_rejects_await_free_async_fn_at_int() {
+fn run_accepts_an_await_free_async_fn_at_int() {
     let dir = std::env::temp_dir().join("nova-async-no-await-int");
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("int_no_await.nova");
@@ -954,16 +952,71 @@ fn run_rejects_await_free_async_fn_at_int() {
     )
     .expect("write test file");
 
-    let assert = nova().arg("run").arg(&file).assert().failure();
+    nova()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("done\n");
+}
+
+/// The half of the boundary that stays rejected end to end: an `async fn`
+/// whose body contains `.await` needs Task 6's resumable transform. Asserted
+/// through the CLI as well as in `nova-mir`, because `nova check` and
+/// `nova run` must agree -- both run the same lowering stage.
+#[test]
+fn run_and_check_reject_an_async_fn_containing_await() {
+    let dir = std::env::temp_dir().join("nova-async-with-await");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("with_await.nova");
+    std::fs::write(
+        &file,
+        "async fn f() -> Float { 1.5 }\n\
+         async fn g() -> Float { f().await }\n\
+         fn main() { let x = g()\n  println(\"done\") }\n",
+    )
+    .expect("write test file");
+
+    for cmd in ["check", "run"] {
+        let assert = nova().arg(cmd).arg(&file).assert().failure();
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+        assert!(stderr.contains("E0088"), "nova {cmd} stderr: {stderr}");
+        assert!(
+            stderr.contains("`g`") && stderr.contains("async fn"),
+            "the diagnostic must name `g` and the construct: {stderr}"
+        );
+        assert!(
+            stderr.contains(".await"),
+            "the diagnostic must say what is unfinished -- a body containing \
+             `.await` -- so it is not read as `async fn` being unsupported \
+             outright: {stderr}"
+        );
+        assert!(
+            !stderr.contains("internal codegen error"),
+            "nova {cmd} must not reach the codegen ICE path: {stderr}"
+        );
+    }
+}
+
+/// An `async fn main` stays rejected, and this is the end-to-end reason: the
+/// transform gives the entry symbol to the future-building WRAPPER, so
+/// accepting this program would run no user code at all -- exit 0, empty
+/// stdout, no diagnostic. Asserting the stdout is empty as well as the exit
+/// code being nonzero is what distinguishes "rejected" from "silently did
+/// nothing".
+#[test]
+fn run_rejects_an_async_main() {
+    let dir = std::env::temp_dir().join("nova-async-main");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("async_main.nova");
+    std::fs::write(&file, "async fn main() { println(\"hi\") }\n").expect("write test file");
+
+    let assert = nova().arg("run").arg(&file).assert().failure().stdout("");
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(stderr.contains("E0088"), "stderr: {stderr}");
     assert!(
-        stderr.contains("async fn"),
-        "the diagnostic should name the construct as an async fn: {stderr}"
-    );
-    assert!(
-        stderr.contains("`f`"),
-        "the diagnostic's message should name the rejected function: {stderr}"
+        stderr.contains("async fn main"),
+        "the diagnostic must say which shape is unfinished: {stderr}"
     );
 }
 

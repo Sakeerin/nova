@@ -21,5 +21,14 @@ nova-codegen-llvm = { path = "../nova-codegen-llvm" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# Test-only: the async end-to-end probe drives a JIT-compiled future through
+# the real executor and reads the task's output back, which needs the runtime's
+# own entry points. `nova-runtime` is already in the graph (via
+# `nova-codegen-cranelift`), so this declares no new build, only visibility --
+# and it is the same crate instance, which matters because the executor's task
+# table is a `thread_local!` shared with the JIT-compiled code.
+nova-runtime = { path = "../nova-runtime" }
+
 [target.'cfg(windows)'.dependencies]
 cc = { workspace = true }

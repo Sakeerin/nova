@@ -1012,18 +1012,20 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     );
 }
 
-/// The async state-machine transform (Phase 2.3a Tasks 5-6) does not exist
-/// yet. A reachable async fn -- one `main` actually calls -- must be a
-/// diagnosed rejection, not a silent miscompile or a panic. `g` here is
-/// rejected by the `is_async` guard in `lower_module` *before* its body is
-/// ever inspected for an `Await` node, so the message names `g` and
-/// "async fn", not `.await` specifically -- the guard fires on the function,
-/// not on finding an await expression inside it (see
-/// `async_fn_without_await_still_reports_e0088_at_int` below, which proves
-/// that by using a body with no `.await` at all). Not exercised by
-/// `mir_for`/`diagnostics_for` above: this needs the typeck-clean-but-MIR-
-/// rejected combination, and the message assertion, that neither helper
-/// gives access to.
+/// The RESUMABLE half of the state-machine transform (Phase 2.3a Task 6) does
+/// not exist yet: an async fn whose body contains `.await` must be a diagnosed
+/// rejection, not a silent miscompile or a panic. `g` is rejected and `f` --
+/// which is await-free -- is never reached at all, because a rejected function
+/// is skipped before its body is lowered and so never enqueues its callees.
+///
+/// The message names `g` and "async fn" rather than `.await` specifically,
+/// because the rejection is of the whole function: the transform either
+/// expresses a body or it does not, and a diagnostic pointing at one
+/// suspend point would suggest deleting that one await would help.
+///
+/// Not exercised by `mir_for`/`diagnostics_for` above: this needs the
+/// typeck-clean-but-MIR-rejected combination, and the message assertion, that
+/// neither helper gives access to.
 #[test]
 fn reachable_await_reports_e0088() {
     let file_id = FileId::DUMMY;
@@ -1057,59 +1059,58 @@ fn reachable_await_reports_e0088() {
     );
 }
 
-/// Proves the guard isn't keyed on finding an `Await` node: an async fn
-/// whose body has NO `.await` at all -- nothing for an expression-level
-/// check to ever see -- must still be rejected once reachable from `main`.
+/// An await-free `async fn`, reachable from `main`, is now COMPILED rather
+/// than rejected -- Phase 2.3a Task 5 replaced this half of the `E0088`
+/// rejection with the real transform. Instantiated at `Float`, which is where
+/// the failure this replaced actually showed: an async fn's declared MIR
+/// return class used to come from `ret_ty` (`Future<T>`, always `MirTy::Ptr`)
+/// while its body produces `T`, and the two only conflict visibly when `T`
+/// isn't ALSO pointer-class -- at `Float` (`MirTy::F64`) Cranelift's verifier
+/// rejected the function ("result 0 has type f64, must match function
+/// signature of i64"), and at `Int` it silently compiled.
 ///
-/// This is the exact shape of a defect a reviewer measured directly against
-/// an earlier version of this guard (which lived on `ExprKind::Await` in
-/// `nova-mir/src/lower.rs` instead of here): `async fn f() -> Float { 1.5 }`,
-/// merely called and discarded (`let x = f()`, no `.await` anywhere in the
-/// program), reached Cranelift and crashed with a verifier error --
-/// "result 0 has type f64, must match function signature of i64" -- reported
-/// as `internal codegen error (this is a compiler bug)` instead of a
-/// diagnostic. The root cause: an async fn's declared MIR return class comes
-/// from `ret_ty` (`Future<T>`, always `MirTy::Ptr`), but its body produces
-/// `T` directly, and `Ptr` vs. `T`'s real class only collide visibly when
-/// `T` isn't ALSO a `Ptr`-class register.
-///
-/// `Int` is used HERE, not `Float`, specifically to document why that
-/// defect went unmeasured in the first place: `Future<Int>` -> `Ptr` and the
-/// body's actual `Int` -> `I64` are both 64-bit general-purpose-register
-/// classes on x86-64, so Cranelift's verifier has nothing to catch there --
-/// the exact register-class coincidence the plan's Global Constraint about
-/// instantiating at `Float` exists to defeat. See the CLI-level
-/// `nova-cli/tests/run_tests.rs` tests for the end-to-end proof (at both
-/// `Int` and `Float`) that the ICE itself is gone.
+/// So this asserts the *shape that fixes it*, not merely that lowering
+/// succeeded: the wrapper keeps the original symbol and returns a pointer (a
+/// future), and the body moved to a `$poll` sibling that returns an i64
+/// status. A transform that emitted only one function under the original
+/// symbol, still returning `F64`, would pass an `is_ok()` assertion here and
+/// then hit exactly the old verifier error in codegen.
 #[test]
-fn async_fn_without_await_still_reports_e0088_at_int() {
-    let file_id = FileId::DUMMY;
-    let src = "async fn f() -> Int { 1 }\nfn main() { let x = f() }";
-    let (tokens, _) = lex(src, file_id);
-    let (ast, _) = parse(&tokens, file_id);
-    let ast = ast.expect("no AST");
-    let resolved = resolve(&ast);
-    let checked = check(&resolved.file, &resolved.definitions);
-    assert!(
-        checked.diagnostics.is_empty(),
-        "typeck should accept this program: {:?}",
-        checked.diagnostics
+fn an_await_free_async_fn_is_transformed_at_float() {
+    let mir = mir_for("async fn f() -> Float { 1.5 }\nfn main() { let x = f() }");
+    let names = function_names(&mir);
+    let wrapper = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("f.") && !f.name.ends_with("$poll"))
+        .unwrap_or_else(|| panic!("no wrapper for `f`: {names:?}"));
+    assert_eq!(
+        wrapper.ret,
+        nova_mir::MirTy::Ptr,
+        "the original symbol must return a future, not the body's Float"
     );
-    let diags = match lower_module(&checked.module) {
-        Ok(_) => panic!("expected MIR lowering to reject the reachable await-free async fn `f`"),
-        Err(diags) => diags,
-    };
-    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
-        panic!(
-            "expected E0088, got {:?}",
-            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
-        )
-    });
-    assert!(
-        d.message.contains("`f`") && d.message.contains("async fn"),
-        "E0088 must name `f` and that it is an async fn; got {:?}",
-        d.message
+    let poll = mir
+        .functions
+        .iter()
+        .find(|f| f.name == format!("{}$poll", wrapper.name))
+        .unwrap_or_else(|| panic!("no `$poll` for `f`: {names:?}"));
+    assert_eq!(
+        poll.ret,
+        nova_mir::MirTy::I64,
+        "the poll fn returns a status, so the Float never crosses an i64 return"
     );
+    assert!(poll.takes_env, "the poll fn's env is its state object");
+    assert_eq!(poll.params, 1, "poll's one real parameter is task_ctx");
+}
+
+/// The same program `nova check` sees: no diagnostic at all. Separate from the
+/// shape assertion above because `nova check` runs this exact lowering stage,
+/// so a rejection that only fired here would make `nova check` disagree with
+/// `nova run` about a well-formed program.
+#[test]
+fn an_await_free_async_fn_produces_no_diagnostics() {
+    let diags = diagnostics_for("async fn f() -> Float { 1.5 }\nfn main() { let x = f() }");
+    assert!(diags.is_empty(), "{diags:?}");
 }
 
 /// The mirror image, pinning `lower_module`'s existing reachability
@@ -1127,64 +1128,92 @@ fn unreached_async_fn_compiles_cleanly() {
 /// Pins a shape covered so far only at the typeck level
 /// (`async_inherent_method_is_accepted` in `nova-typeck`, which never
 /// reaches `lower_module`): an async INHERENT METHOD, called on an instance
-/// from `main`, must be rejected the same as a free async fn. Worth its own
-/// test because a method's `hir::Function.name` is qualified with its
-/// owning type (measured: `` `W.get` ``, not `` `get` ``) -- a guard that
-/// worked only for `hir::Callee::Def` free-function paths, or that mangled
-/// or looked up the name differently for methods, could regress silently
-/// while every free-fn test here kept passing. Tasks 5-6 will rework this
-/// guard's exact placement, and dispatch-shape regressions are exactly what
-/// a rework can introduce without touching a single free-fn test.
+/// from `main`, must be transformed the same as a free async fn. Worth its own
+/// test because a method's `hir::Function.name` is qualified with its owning
+/// type (measured: `` `W.get` ``, not `` `get` ``) and it takes `self` as a
+/// real parameter -- so it exercises the wrapper's parameter seeding on a
+/// dispatch path no free-fn test touches.
 #[test]
-fn reachable_async_inherent_method_reports_e0088() {
-    let file_id = FileId::DUMMY;
-    let src = "record W { v: Int }\n\
-               impl W { async fn get(self) -> Int { self.v } }\n\
-               fn main() { let w = W { v: 1 }\n let y = w.get() }";
-    let (tokens, _) = lex(src, file_id);
-    let (ast, _) = parse(&tokens, file_id);
-    let ast = ast.expect("no AST");
-    let resolved = resolve(&ast);
-    let checked = check(&resolved.file, &resolved.definitions);
-    assert!(
-        checked.diagnostics.is_empty(),
-        "typeck should accept this program: {:?}",
-        checked.diagnostics
+fn a_reachable_async_inherent_method_is_transformed() {
+    let mir = mir_for(
+        "record W { v: Int }\n\
+         impl W { async fn get(self) -> Int { self.v } }\n\
+         fn main() { let w = W { v: 1 }\n let y = w.get() }",
     );
-    let diags = match lower_module(&checked.module) {
-        Ok(_) => panic!("expected MIR lowering to reject the reachable inherent async method"),
-        Err(diags) => diags,
-    };
-    let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
-        panic!(
-            "expected E0088, got {:?}",
-            diags.iter().map(|d| &d.code).collect::<Vec<_>>()
-        )
-    });
+    let names = function_names(&mir);
+    let wrapper = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("W.get.") && !f.name.ends_with("$poll"))
+        .unwrap_or_else(|| panic!("no wrapper for `W.get`: {names:?}"));
+    assert_eq!(wrapper.ret, nova_mir::MirTy::Ptr);
+    assert_eq!(
+        wrapper.params, 1,
+        "the wrapper keeps `self` as its own parameter, since an async fn's \
+         arguments arrive at the wrapper and not at poll"
+    );
     assert!(
-        d.message.contains("`W.get`") && d.message.contains("async fn"),
-        "E0088 must name the rejected method (`W.get`) and that it is an async fn; got {:?}",
-        d.message
+        names.contains(&format!("{}$poll", wrapper.name).as_str()),
+        "no `$poll` for `W.get`: {names:?}"
     );
 }
 
 /// Pins the other shape covered so far only at the typeck level
-/// (`generic_async_fn_instantiates_at_float` in `nova-typeck`, same gap): a
-/// GENERIC async fn, reached through one concrete instantiation, must be
-/// rejected too -- monomorphization produces a fresh, specialized
-/// `hir::Function` per instantiation (see `Specializer::function`), so a
-/// guard that ran before specialization, or that inspected the wrong copy
-/// of the function, could see an unspecialized (still-generic) `Ty` and
-/// behave differently than it does for a concrete, non-generic async fn.
-/// Instantiated at `Float`, per this branch's mandate for any check tied to
-/// register class (see `async_fn_without_await_still_reports_e0088_at_int`'s
-/// doc comment) -- though the guard here is keyed on `is_async`, not on any
-/// type's register class, so `Float` is precautionary, not load-bearing, for
-/// this specific test.
+/// (`generic_async_fn_instantiates_at_float`, same gap): a GENERIC async fn,
+/// reached through one concrete instantiation, must be transformed too.
+/// Monomorphization produces a fresh, specialized `hir::Function` per
+/// instantiation (see `Specializer::function`), so a transform that ran
+/// before specialization, or inspected the wrong copy, could see an
+/// unspecialized (still-generic) `Ty`.
+///
+/// Instantiated at `Float`, and here that IS load-bearing rather than
+/// precautionary: `id`'s body returns its parameter, so the value makes a
+/// full round trip through the wrapper's parameter seeding, a state slot, and
+/// the output slot -- every one of which would still typecheck, and silently
+/// mis-store, at a class that shares a register bank with a pointer.
 #[test]
-fn reachable_generic_async_fn_instantiation_reports_e0088() {
+fn a_reachable_generic_async_fn_instantiation_is_transformed() {
+    let mir = mir_for("async fn id<T>(x: T) -> T { x }\nfn main() { let y = id(1.5) }");
+    let names = function_names(&mir);
+    let wrapper = mir
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("id.") && !f.name.ends_with("$poll"))
+        .unwrap_or_else(|| panic!("no wrapper for `id`: {names:?}"));
+    assert!(
+        wrapper.name.contains("$f"),
+        "the wrapper keeps the instantiation's mangled name, so two \
+         instantiations cannot collide on one symbol: {}",
+        wrapper.name
+    );
+    assert_eq!(wrapper.ret, nova_mir::MirTy::Ptr);
+    let poll = mir
+        .functions
+        .iter()
+        .find(|f| f.name == format!("{}$poll", wrapper.name))
+        .unwrap_or_else(|| panic!("no `$poll` for `id`: {names:?}"));
+    assert_eq!(poll.ret, nova_mir::MirTy::I64);
+    assert_eq!(
+        poll.temps[..2],
+        [nova_mir::MirTy::Ptr, nova_mir::MirTy::Ptr],
+        "the instantiated poll fn still has PollFn's `(state, task_ctx)` ABI, \
+         not the Float parameter its pre-transform self had at temp 0"
+    );
+}
+
+/// The half of the boundary that is still rejected, and the reason: an
+/// `async fn main` would otherwise be silently accepted and run NO user code
+/// at all. The transform gives the entry symbol to the wrapper, which
+/// allocates a state, returns a future and never polls it -- and both
+/// backends call `main` for its effects and discard what it returns. So this
+/// must be a diagnostic until the driver learns to drive it (Task 7).
+///
+/// A `main` with no `.await` in it is used deliberately: keyed on
+/// `contains_await` alone, this program would be accepted.
+#[test]
+fn an_async_main_reports_e0088() {
     let file_id = FileId::DUMMY;
-    let src = "async fn id<T>(x: T) -> T { x }\nfn main() { let y = id(1.5) }";
+    let src = "async fn main() { println(\"hi\") }";
     let (tokens, _) = lex(src, file_id);
     let (ast, _) = parse(&tokens, file_id);
     let ast = ast.expect("no AST");
@@ -1196,9 +1225,10 @@ fn reachable_generic_async_fn_instantiation_reports_e0088() {
         checked.diagnostics
     );
     let diags = match lower_module(&checked.module) {
-        Ok(_) => {
-            panic!("expected MIR lowering to reject the reachable generic async fn instantiation")
-        }
+        Ok(mir) => panic!(
+            "expected MIR lowering to reject `async fn main`, got {:?}",
+            function_names(&mir)
+        ),
         Err(diags) => diags,
     };
     let d = diags.iter().find(|d| d.code == "E0088").unwrap_or_else(|| {
@@ -1208,8 +1238,8 @@ fn reachable_generic_async_fn_instantiation_reports_e0088() {
         )
     });
     assert!(
-        d.message.contains("`id`") && d.message.contains("async fn"),
-        "E0088 must name the rejected generic fn (`id`) and that it is an async fn; got {:?}",
+        d.message.contains("`main`") && d.message.contains("async fn main"),
+        "E0088 must name `main` and say what is unfinished about it; got {:?}",
         d.message
     );
 }

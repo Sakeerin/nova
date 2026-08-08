@@ -386,3 +386,86 @@ fn every_rt_func_is_declared_with_its_real_signature() {
         );
     }
 }
+
+/// The async transform runs on the finished MIR module, so both backends get
+/// it from one place -- but "both" is a claim, and this is the half of it the
+/// Cranelift tests cannot make. It asserts the two signatures the runtime's
+/// `PollFn` and future value require, in the release backend's own output.
+///
+/// At `Float`: the wrapper must return `ptr` (a future) and the poll function
+/// `i64` (a status), so the body's `double` crosses neither. Those three types
+/// appearing on the right three definitions is exactly what a transform that
+/// emitted one function under the original symbol would get wrong.
+#[test]
+fn an_await_free_async_fn_emits_a_poll_fn_and_a_wrapper() {
+    let ir = ir_for("async fn f() -> Float { 1.5 }\nfn main() { let x = f() }");
+    assert_well_formed(&ir);
+    let poll = ir
+        .lines()
+        .find(|l| l.starts_with("define ") && l.contains("$poll\""))
+        .unwrap_or_else(|| panic!("no `$poll` definition:\n{ir}"));
+    assert!(
+        poll.starts_with("define i64 @\"") && poll.ends_with("(ptr %p0, ptr %p1) {"),
+        "the poll fn must be `(state, task_ctx) -> i64`, got `{poll}`"
+    );
+    let symbol = poll
+        .trim_start_matches("define i64 @\"")
+        .split('"')
+        .next()
+        .expect("a quoted symbol");
+    let wrapper_symbol = symbol.trim_end_matches("$poll");
+    assert!(
+        ir.contains(&format!("define ptr @\"{wrapper_symbol}\"() {{")),
+        "the original symbol must survive as a `() -> ptr` wrapper:\n{ir}"
+    );
+    // The wrapper's own future construction: the poll function's address in
+    // word 0, then the state pointer patched over the null in word 1.
+    assert!(
+        ir.contains(&format!("store ptr @\"{symbol}\", ptr ")),
+        "word 0 of the future must be the poll fn's address:\n{ir}"
+    );
+    // The body really did move, and the output store really is an f64 at the
+    // output slot's byte offset. Both are asserted inside the poll function's
+    // own text, so a wrapper that kept the body would fail the first and a
+    // transform that stored the output through the i64 status class or at the
+    // wrong offset would fail the second.
+    let poll_body = ir
+        .split(poll)
+        .nth(1)
+        .expect("text after the poll definition")
+        .split("\n}")
+        .next()
+        .expect("the poll fn's body")
+        .to_string();
+    let bits = format!("0x{:016X}", 1.5f64.to_bits());
+    assert!(
+        poll_body.contains(&bits),
+        "the body's constant ({bits}) must be inside the poll fn:{poll_body}"
+    );
+    // The output store: an f64, at the output slot's byte offset. A `double`
+    // leaving through the i64 status class, or landing on a temp slot
+    // (offset >= 16) instead, is exactly the miscompile this design avoids.
+    // Found by pairing the `getelementptr` that computes the offset with the
+    // instruction that stores through its result, so the assertion is about
+    // one address rather than about two independent substrings.
+    let out_offset = nova_mir::STATE_SLOT_OUTPUT as i64 * 8;
+    let lines: Vec<&str> = poll_body.lines().map(str::trim).collect();
+    let out_store = lines
+        .windows(2)
+        .find(|w| w[0].ends_with(&format!("i64 {out_offset}")) && w[1].starts_with("store "))
+        .map(|w| w[1])
+        .unwrap_or_else(|| panic!("no store at byte offset {out_offset}:{poll_body}"));
+    assert!(
+        out_store.starts_with("store double %"),
+        "the output store must carry the f64 class, not the i64 status class: \
+         `{out_store}`"
+    );
+    assert!(
+        poll_body.contains(&format!("store i64 {}, ptr ", nova_mir::POLL_READY)),
+        "the poll fn must set its status to the POLL_READY constant:{poll_body}"
+    );
+    assert!(
+        lines.last().is_some_and(|l| l.starts_with("ret i64 ")),
+        "the poll fn must return an i64 status:{poll_body}"
+    );
+}

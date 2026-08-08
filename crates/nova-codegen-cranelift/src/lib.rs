@@ -959,6 +959,78 @@ mod tests {
         );
     }
 
+    /// The state-object and future-value layouts are declared twice — once in
+    /// `nova-mir` (`async_lower.rs`), which generates code against them, and
+    /// once in `nova-runtime` (`task.rs`), whose executor reads the same bytes
+    /// by raw offset. Neither crate may depend on the other; this one depends
+    /// on both, so this is where the two copies are held together.
+    ///
+    /// **A test that asserted only literal values would not close this gap.**
+    /// `nova-mir`'s own `the_state_layout_constants_match_the_runtime` pins its
+    /// copy to `0`/`1`/`2`/…, which catches an edit to that copy alone but says
+    /// nothing about the other one: both copies could be renumbered together
+    /// and every literal-value assertion would still pass while the layout
+    /// silently changed under an already-compiled program. Equality between the
+    /// two is the property that actually matters, because a disagreement is a
+    /// silent miscompile — the poll function stores the output at one offset
+    /// and `poll_one` reads another, which for a scalar output means a wrong
+    /// answer and for a heap-valued one means a wild pointer.
+    ///
+    /// `STATE_MIN_SIZE` is included deliberately: it is the one constant that
+    /// is *derived* rather than written down, so it can drift from its own
+    /// definition on either side without any slot index changing.
+    ///
+    /// The `as usize` casts only widen — `nova-mir` types slot indices as `u32`
+    /// to match `Stmt::SetField`'s `index` field, `nova-runtime` types them as
+    /// `usize` to match pointer arithmetic — so a differing value can never
+    /// compare equal by truncation.
+    #[test]
+    fn the_state_layout_matches_nova_runtimes() {
+        use nova_runtime::task;
+        assert_eq!(
+            nova_mir::STATE_SLOT_TAG as usize,
+            task::STATE_SLOT_TAG,
+            "resume tag slot"
+        );
+        assert_eq!(
+            nova_mir::STATE_SLOT_OUTPUT as usize,
+            task::STATE_SLOT_OUTPUT,
+            "output slot -- read unconditionally on completion"
+        );
+        assert_eq!(
+            nova_mir::STATE_SLOT_TEMPS as usize,
+            task::STATE_SLOT_TEMPS,
+            "first per-temp slot"
+        );
+        assert_eq!(
+            nova_mir::STATE_MIN_SIZE as usize,
+            task::STATE_MIN_SIZE,
+            "smallest state object -- a shortfall here is a read past the \
+             allocation, and it compiles clean"
+        );
+        assert_eq!(
+            nova_mir::FUTURE_SLOT_POLL as usize,
+            task::FUTURE_SLOT_POLL,
+            "future word 0: the poll function's address"
+        );
+        assert_eq!(
+            nova_mir::FUTURE_SLOT_STATE as usize,
+            task::FUTURE_SLOT_STATE,
+            "future word 1: the state object's address"
+        );
+        assert_eq!(
+            nova_mir::POLL_PENDING,
+            task::POLL_PENDING,
+            "the executor re-queues on exactly this value"
+        );
+        assert_eq!(
+            nova_mir::POLL_READY,
+            task::POLL_READY,
+            "the executor completes a task on exactly this value and panics on \
+             anything else"
+        );
+    }
+
     /// The reverse direction is deliberately *not* asserted as equality:
     /// `symbols()` legitimately carries entries no `RtFunc` names, because
     /// codegen reaches some runtime functions without going through the enum
