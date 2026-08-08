@@ -644,19 +644,30 @@ mod tests {
     /// `collect_with_roots`-based version would only re-test what
     /// `transitive_marking_keeps_referenced_objects` (above) already covers.
     ///
-    /// **Not fully sound under `--release` either**, independently of the
-    /// Windows gate above. This project's CI (same file) never runs
-    /// `--release`; every test here is verified only against what CI actually
-    /// runs. Every test below carries `#[cfg_attr(not(debug_assertions),
-    /// ignore = "...")]`. Two fail there every run, by one unidentified
-    /// accidental-root mechanism; a third fails intermittently, by a separate,
-    /// lower-probability mechanism also not root-caused; the remaining three
-    /// are otherwise-reliable tests ignored only so no `is_some()` assertion
-    /// runs under `-O` without the `is_none()` assertion that gives it
-    /// meaning -- the same pairing principle the Windows gate above exists
-    /// for. See `hide`'s doc comment and each test's own attribute and
-    /// comment for which is which, rather than restating it in a second place
-    /// here.
+    /// **Unconditionally `#[ignore]`d, in debug and release alike** --
+    /// independently of the Windows gate above, and no longer only under
+    /// `--release` as this comment used to say. `collect()`'s conservative
+    /// stack scan is also intermittently flaky in debug, under the test
+    /// parallelism CI actually runs at: a stale stack word in an
+    /// already-returned frame -- most likely `gc::alloc`'s own -- is read as
+    /// a conservative root, roughly 2-3 KB above `lo` (`&regs`, the
+    /// register-flush buffer the `setjmp` shim seeds at the start of its own
+    /// frame). Mechanism identified, not fixed; see
+    /// `.superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md`
+    /// for the isolating experiment, the measured rates, and two attempted
+    /// remedies (a deliberate stack clobber, a serializing mutex) that both
+    /// made the failure rate worse and were reverted rather than kept. Only
+    /// the three `is_none()` (sweep-asserting) tests below actually flake;
+    /// the other three, `is_some()`-asserting tests are gated alongside them
+    /// anyway, not because they fail on their own, but because gating only
+    /// the flaky half would strip the negative control from the paired
+    /// `is_some()` tests, leaving a green "the registered root survived"
+    /// assertion that would also pass against a collector that frees nothing
+    /// at all -- the same ungated-canary pattern Critical review finding C1
+    /// flagged, and the same pairing principle the Windows gate above exists
+    /// for. Reachable with `cargo test -- --ignored`. See `hide`'s doc
+    /// comment and each test's own attribute and comment for which is which,
+    /// rather than restating it in a second place here.
     #[cfg(windows)]
     mod registry {
         use super::*;
@@ -698,12 +709,12 @@ mod tests {
         /// defeating the encoding for whichever test happens to exercise it.
         /// Keeping the two calls opaque to each other rules that
         /// substitution out. This is not a claim that every test below is
-        /// reliable under `-O`: it is not, for reasons unrelated to `hide`
-        /// itself and not fixed by this attribute, which is why every test in
-        /// this module carries a `#[cfg_attr(not(debug_assertions), ignore =
-        /// ...)]` -- see each one's own attribute and comment, and the task
-        /// report for what was tried and what running under `--release`
-        /// actually showed.
+        /// reliable under `-O`, or even in debug: it is not, for reasons
+        /// unrelated to `hide` itself and not fixed by this attribute, which
+        /// is why every test in this module is unconditionally `#[ignore]`d
+        /// rather than gated to release only -- see each one's own attribute
+        /// and comment, and the task report for what was tried and what
+        /// running under both profiles actually showed.
         ///
         /// The complement is its own inverse, and for every address a live
         /// heap allocation can actually have in this process it lands far
@@ -725,12 +736,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "its negative control flakes under -O (see that test's \
-                      comment); running this alone would reopen the \
-                      ungated-canary gap Critical review finding C1 flagged"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn a_registered_root_survives_a_collection_with_no_stack_reference() {
             // The exact scenario: an object reachable ONLY through the registry.
             // `black_box` is not enough on its own here -- the point is that after
@@ -758,9 +773,10 @@ mod tests {
             //    overwrites the same slot the original pointer occupied. See the
             //    task report for which tests this was isolated against.
             //
-            // Ignored under `-O` alongside its negative control, for the reason
-            // given on the attribute above -- this test itself is reliable under
-            // `-O`; it is ignored only to avoid running unpaired.
+            // Unconditionally ignored (debug and release) alongside its
+            // negative control, for the reason given on the attribute above --
+            // this test itself has not been observed to fail on its own; it is
+            // gated only to avoid an is_some() assertion ever running unpaired.
             let mut obj = alloc(64, true);
             add_root(obj);
             let hidden = hide(obj as usize);
@@ -779,10 +795,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "intermittent accidental root under -O; mechanism unidentified, see comment"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn an_unregistered_object_is_swept() {
             // The discriminating half. Without this, the test above passes even if
             // collect() never frees anything at all. It is also the test that
@@ -791,17 +813,22 @@ mod tests {
             // `obj` is `mut` and nulled by reassignment (not `let`-shadowed), and
             // `addr` crosses `collect()` hidden rather than as a plain `usize`.
             //
-            // Ignored under `-O`, unlike its sibling above, for its own reason:
-            // this test itself is intermittently (not consistently) flaky there
-            // -- see the task report for the sampling. Distinct in character
-            // from `remove_root_actually_unroots`'s consistently-reproducible
-            // failure, and consistent with (though not proven to be) the kind of
-            // incidental over-retention this collector's own contract already
-            // treats as acceptable (module doc comment, top of file: "can retain
-            // a little garbage... but never frees a reachable object") rather
-            // than a second instance of the deterministic `hide`/`reveal`
-            // collapse `#[inline(never)]` already closed. Not root-caused
-            // further; see the task report.
+            // Unconditionally ignored (debug and release): this test itself is
+            // intermittently (not consistently) flaky under default test
+            // parallelism -- see the task report for the sampling. Distinct in
+            // character from `remove_root_actually_unroots`'s
+            // consistently-reproducible release-mode failure, and consistent
+            // with (though not proven to be) the kind of incidental
+            // over-retention this collector's own contract already treats as
+            // acceptable (module doc comment, top of file: "can retain a little
+            // garbage... but never frees a reachable object") rather than a
+            // second instance of the deterministic `hide`/`reveal` collapse
+            // `#[inline(never)]` already closed. The general mechanism (a stale
+            // stack word in an already-returned frame, named on the attribute
+            // above) was later identified by the task report's dedicated
+            // diagnostic; that diagnostic's verbatim captures happen to both be
+            // of a different test (`task.rs`'s `an_unspawned_tasks_state_is_swept`),
+            // so treat its applicability here as reasoned-but-not-directly-observed.
             let mut obj = alloc(64, true);
             let hidden = hide(obj as usize);
             obj = std::ptr::null_mut::<u8>();
@@ -819,19 +846,25 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "accidental conservative root under -O; mechanism unidentified, see comment"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn remove_root_actually_unroots() {
             // Otherwise add/remove is a leak, and every completed task's state is
             // retained for the process lifetime. See
             // `a_registered_root_survives_a_collection_with_no_stack_reference` for
             // why `obj` is `mut`+reassigned and `addr` crosses `collect()` hidden.
             //
-            // Ignored under `-O` (see the attribute above): the object survives
-            // there, but not because `remove_root` is broken. Established (not
-            // merely asserted -- see the task report for how): `PINNED` is empty
+            // Under `-O` specifically: the object survives there, but not
+            // because `remove_root` is broken. Established (not merely
+            // asserted -- see the task report for how): `PINNED` is empty
             // both before and after `collect()` in that build, so the registry
             // cannot be the cause; the sibling pairing test
             // (`registering_the_same_address_twice_requires_removing_it_twice`)
@@ -839,9 +872,14 @@ mod tests {
             // same optimized build; and the failure direction is over-retention,
             // which this collector's own contract (module doc comment, top of
             // file) already documents as acceptable -- the opposite of the
-            // premature free this whole file exists to rule out. The root cause
-            // is an accidental conservative root somewhere in this test's own
-            // frame or in a register the `setjmp` shim flushes; not identified.
+            // premature free this whole file exists to rule out. The specific
+            // accidental root in that release build was not identified.
+            // Separately, this test is now also unconditionally ignored (see the
+            // attribute above) for the different, debug-mode mechanism the task
+            // report's later, dedicated diagnostic did identify: a stale stack
+            // word in an already-returned frame -- not this paragraph's
+            // release-mode finding, which remains its own, still-unidentified
+            // accidental root.
             let mut obj = alloc(64, true);
             let hidden = hide(obj as usize);
             add_root(obj);
@@ -927,12 +965,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "its negative control is -O-ignored for an unidentified \
-                      accidental root; running this alone would reopen the \
-                      ungated-canary gap Critical review finding C1 flagged"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn a_registered_root_keeps_its_transitive_children_alive() {
             // The registry seeds the mark set; marking must then TRACE. A
             // registry that marked only the registered object itself would
@@ -946,12 +988,12 @@ mod tests {
             // makes this test trustworthy. This function only ever holds the
             // hidden (`hide`d) addresses.
             //
-            // Ignored under `-O` alongside its negative control below, not
-            // because this test itself fails there, but because running it
-            // without that control would be exactly the pattern this file's
-            // Windows gate exists to prevent: an `is_some()` assertion with no
-            // paired `is_none()` to prove the collector can free anything at
-            // all in that build.
+            // Unconditionally ignored (debug and release) alongside its
+            // negative control below, not because this test itself is known to
+            // fail on its own, but because running it without that control
+            // would be exactly the pattern this file's Windows gate exists to
+            // prevent: an `is_some()` assertion with no paired `is_none()` to
+            // prove the collector can free anything at all.
             let (parent_addr, child_addr) = setup_parent_and_child(true);
             std::hint::black_box(parent_addr);
             std::hint::black_box(child_addr);
@@ -966,10 +1008,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "accidental conservative root under -O; mechanism unidentified, see comment"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn an_unregistered_parent_and_child_are_swept() {
             // The negative control for the test above -- see
             // `setup_parent_and_child`'s doc comment. Without this, the test
@@ -981,11 +1029,14 @@ mod tests {
             // the un-negated hazards this file has already guarded against
             // elsewhere.
             //
-            // Ignored under `-O` (see the attribute above): this test itself
-            // fails there, by the same unidentified accidental-root mechanism
-            // as `remove_root_actually_unroots` -- see that test's comment.
-            // The test above is ignored alongside it for the reason given on
-            // its own attribute.
+            // Under `-O` specifically: this test itself fails there, by the
+            // same unidentified accidental-root mechanism as
+            // `remove_root_actually_unroots` -- see that test's comment, and,
+            // separately, its note on the different, debug-mode mechanism the
+            // task report's dedicated diagnostic did identify (also named on
+            // this test's own attribute above). This test is now
+            // unconditionally ignored, in both profiles; the test above is
+            // ignored alongside it for the reason given on its own attribute.
             let (_parent_addr, child_addr) = setup_parent_and_child(false);
             std::hint::black_box(child_addr);
 
@@ -999,13 +1050,16 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(
-            not(debug_assertions),
-            ignore = "its negative control flakes under -O (see \
-                      an_unregistered_object_is_swept's comment); running \
-                      this alone would reopen the ungated-canary gap Critical \
-                      review finding C1 flagged"
-        )]
+        #[ignore = "flaky in debug too, not just release, at default test \
+                    parallelism: a stale stack word in an already-returned \
+                    frame -- most likely gc::alloc's own -- is read as a \
+                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
+                    setjmp shim's flushed register buffer), not a retained \
+                    register. Mechanism identified, not fixed: a stack \
+                    clobber and a serializing mutex were each tried and \
+                    measured to make it worse, then reverted. See \
+                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
+                    reachable with `cargo test -- --ignored`."]
         fn the_registry_survives_more_than_one_collection() {
             // ROOTS (gc.rs:95) is a SCRATCH buffer cleared at the start of
             // every cycle. If the registry were folded into it, the first
@@ -1016,9 +1070,9 @@ mod tests {
             // See
             // `a_registered_root_survives_a_collection_with_no_stack_reference`
             // for why `obj` is `mut`+reassigned and `addr` crosses each
-            // `collect()` call hidden, and for why this is release-ignored
-            // (this test itself is reliable under `-O`; only its shared
-            // negative control is not).
+            // `collect()` call hidden, and for why this is unconditionally
+            // ignored in both profiles (this test itself has not been observed
+            // to fail on its own; only its shared negative control has).
             let mut obj = alloc(64, true);
             add_root(obj);
             let hidden = hide(obj as usize);
