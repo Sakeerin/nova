@@ -37,6 +37,20 @@
 //! output slot nothing has written, which completes with a wrong value rather
 //! than failing.
 //!
+//! ## Awaiting one future twice
+//!
+//! Nothing here stops a body from awaiting the same future value twice
+//! (`let fut = g()` then `fut.await + fut.await`), and the result is that the
+//! inner poll function is re-entered at whatever tag its state object holds, so
+//! it re-runs everything after its own last suspend point — its side effects
+//! included. Rust makes the shape unrepresentable instead, by move-checking the
+//! future out of the awaiting expression.
+//!
+//! This is not a miscompile of the split: each await polls a future that says it
+//! is ready and reads the slot that future wrote. It is a missing *front-end*
+//! rule, and it belongs to whatever gives `Future` an ownership story. Named here
+//! because the split is what made the shape reachable.
+//!
 //! # Why every value goes to the state object
 //!
 //! Nothing in an await-free body needs to be spilled: with no suspend point,
@@ -69,8 +83,15 @@
 //! nameable source type and an `extern` signature cannot mention one — so no
 //! foreign function pointer can reach an await, and the callee is always a
 //! `$poll` function this pass generated, under this same paragraph's discipline.
-//! Whatever first lets a future's poll code come from outside this pass owns
-//! re-establishing that.
+//!
+//! Two distinct changes would break that, and each owns re-establishing it:
+//! letting a future's poll code come from outside this pass (a foreign or
+//! hand-written `PollFn`), and making a runtime function that *can* unwind
+//! reachable from a poll body. The second is not hypothetical:
+//! `nova_rt_task_block_on` panics on re-entrancy, deliberately, and is exactly
+//! what a `std/task` binding would expose to Nova code — an `async fn` calling it
+//! would put that panic inside a poll frame with no landing pads. It is
+//! unreachable today only because nothing in the language can name it.
 //!
 //! The state object's allocation is a call too, and stays outside this argument
 //! by being in the wrapper, which is an ordinary Nova function and not a poll
@@ -1401,13 +1422,13 @@ mod tests {
 
     #[test]
     fn the_wrapper_writes_the_entry_resume_tag() {
-        // The invariant is that a fresh future starts in its first state. An
-        // await-free poll function never reads the tag, and `gc::alloc` hands
-        // back zeroed memory, so nothing about *behaviour* depends on this store
-        // yet -- which is exactly why it needs an assertion rather than a test
-        // of an observable effect. It is the only thing making the entry tag a
-        // property of the generated code instead of the allocator's zeroing, and
-        // zeroing stops being enough as soon as anything reads the tag.
+        // The invariant is that a fresh future starts in its first state. This
+        // fixture is await-free, so its poll function never reads the tag, and
+        // `gc::alloc` hands back zeroed memory -- nothing about *behaviour*
+        // depends on this store here, which is exactly why it needs an assertion
+        // rather than a test of an observable effect. It is the only thing making
+        // the entry tag a property of the generated code instead of the
+        // allocator's zeroing.
         let mut m = module_with_async_const_fn(MirTy::I64, &[]);
         transform(&mut m);
         let wrapper = find(&m, "f.15");
@@ -1885,6 +1906,22 @@ mod tests {
                  {tag} again, so the next poll retries the same await: {:?}",
                 poll.blocks
             );
+            // And it must report PENDING. Returning READY here would complete the
+            // task out of an output slot the awaited future has not written, and
+            // the tag assertion above cannot see that: the store and the status
+            // are independent. Checked against the constant rather than against
+            // "not READY", since the executor accepts only the two.
+            let block = &poll.blocks[pending.0 as usize];
+            let status = match &block.term {
+                Terminator::Return(Some(t)) => *t,
+                other => panic!("a suspend must return a status, found {other:?}"),
+            };
+            assert!(
+                block.stmts.iter().any(|s| matches!(s, Stmt::ConstInt(d, v)
+                        if *d == status && *v == POLL_PENDING)),
+                "the suspend must return a constant POLL_PENDING defined in its \
+                 own block: {block:?}"
+            );
         }
     }
 
@@ -2190,6 +2227,32 @@ mod tests {
              header: {:?}",
             poll.blocks
         );
+
+        // The header's own two arms have to be renumbered as well, and nothing
+        // above reaches them: `Branch`'s targets are named fields, so leaving
+        // them alone is its own defect, and un-remapped they name the entry
+        // piece and the header itself -- both past the reserved ids, so the
+        // reserved-block property is blind to it, and both give a loop that
+        // never leaves. Identified by what each target *does* rather than by its
+        // id, so this also rejects the two being swapped.
+        let (then_, else_) = match &poll.blocks[header].term {
+            Terminator::Branch { then_, else_, .. } => (*then_, *else_),
+            other => panic!("expected the header's branch, found {other:?}"),
+        };
+        assert!(
+            poll.blocks[then_.0 as usize]
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Call { .. })),
+            "the taken arm must reach the loop body's leading piece, the block \
+             that builds the awaited future: {:?}",
+            poll.blocks
+        );
+        assert!(
+            matches!(poll.blocks[else_.0 as usize].term, Terminator::Return(_)),
+            "the untaken arm must reach the exit, which completes: {:?}",
+            poll.blocks
+        );
     }
 
     #[test]
@@ -2285,6 +2348,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_body_switchs_default_is_renumbered_along_with_its_arms() {
+        // `Switch::default` is a separate field from `Switch::arms`, so leaving
+        // only the default un-remapped is its own defect -- and the reserved-block
+        // property above cannot see it. That test exempts any default equal to
+        // `BAD_DISCRIMINANT` and otherwise only requires `>= RESERVED_BLOCKS`, and
+        // the match fixture's original default is `BlockId(3)`, which clears that
+        // bar while naming a completely different block.
+        //
+        // In the fixture the original default is the exhaustive-match trap, and
+        // after the split it is still the only `Trap`-terminated block the body
+        // has -- so "the default still reaches a trap" pins it exactly. Left
+        // un-remapped, `BlockId(3)` is the awaiting arm's leading piece, so the
+        // defect builds a second future and polls it instead of aborting. That is
+        // also why no runtime test can catch this one: the default is an
+        // unreachable exhaustive-match trap, so neither a source-level `match`
+        // test nor a driver probe ever branches through it.
+        let mut m = module_with_async_fn_awaiting_in_a_match(MirTy::F64);
+        transform(&mut m);
+        let poll = find(&m, "f.15$poll");
+        let defaults: Vec<BlockId> = poll
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.term {
+                Terminator::Switch { default, .. } if *default != BAD_DISCRIMINANT => {
+                    Some(*default)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "the fixture has exactly one `Switch` of its own, and its default must \
+             not have been collapsed onto the shared trap: {:?}",
+            poll.blocks
+        );
+        assert!(
+            matches!(poll.blocks[defaults[0].0 as usize].term, Terminator::Trap),
+            "the body `Switch`'s default must still reach the trap block it named \
+             before the split, at its new id: {:?}",
+            poll.blocks
+        );
     }
 
     #[test]

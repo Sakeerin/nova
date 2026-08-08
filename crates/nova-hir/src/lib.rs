@@ -954,12 +954,12 @@ pub struct Function {
     /// `Ty::Future(output)` when true; this flag is what tells `nova-mir`
     /// which functions to treat specially, since a non-async function may
     /// also return a `Future` (by calling an async fn and not awaiting it),
-    /// so `ret_ty` alone can't distinguish them. Two current consumers:
-    /// `lower_module` rejects every reachable `is_async` function with a
-    /// diagnostic (the state-machine transform that would let it lower
-    /// correctly has not landed, Phase 2.3a Tasks 5-6), and that same
-    /// eventual transform is what this flag will tell apart from an
-    /// ordinary function once it exists.
+    /// so `ret_ty` alone can't distinguish them — which is the whole reason
+    /// this flag exists rather than a test on `ret_ty`'s shape.
+    ///
+    /// What `nova-mir` does with it is that crate's contract
+    /// (`nova-mir/src/async_lower.rs`), not restated here, for the reason
+    /// [`ExprKind::Await`]'s doc gives.
     pub is_async: bool,
     pub body: Expr,
     pub span: Span,
@@ -1189,19 +1189,17 @@ pub enum ExprKind {
     /// `e.await` inside an `async fn`. `e` has type `Future<T>` and the
     /// `Await` expression has type `T`.
     ///
-    /// The half of the state-machine transform that lowers this into real
-    /// suspend/resume control flow has not landed yet. An `async fn` with no
-    /// `.await` in it *is* compiled (`nova-mir/src/async_lower.rs` rewrites it
-    /// into a poll function plus a future-building wrapper); one that contains
-    /// this node is rejected with a diagnostic, and rejected as a whole
-    /// function, before its body is lowered at all
-    /// (`nova-mir/src/mono.rs`'s `lower_module`, keyed on `Function::is_async`
-    /// together with `async_lower::contains_await`, which walks the whole
-    /// body). `.await` also only ever appears inside an `async fn`'s body
-    /// (enforced by `nova-typeck`'s `fcx.in_async`). So this node never
-    /// actually reaches MIR lowering from valid source, and
-    /// `nova-mir/src/lower.rs` handles it defensively (a diagnostic, not a
-    /// panic) in case that reasoning is ever bypassed.
+    /// Only ever appears inside an `async fn`'s body, which `nova-typeck`'s
+    /// `fcx.in_async` is what enforces — so nothing downstream needs a guard
+    /// against one outside a function that is [`Function::is_async`].
+    ///
+    /// What this node becomes is `nova-mir`'s: `lower.rs` emits a `Stmt::Await`
+    /// marker and `async_lower.rs`'s block split turns that into suspend/resume
+    /// control flow. **Deliberately not described further here.** A description
+    /// of another crate's behaviour, kept in this one, goes false the moment that
+    /// behaviour changes and has nothing to keep it honest — so this doc holds
+    /// only the two facts above, both of which are about this node and this
+    /// crate, and `nova-mir`'s own docs carry the contract.
     Await(Box<Expr>),
 }
 

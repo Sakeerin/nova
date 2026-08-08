@@ -469,3 +469,191 @@ fn an_await_free_async_fn_emits_a_poll_fn_and_a_wrapper() {
         "the poll fn must return an i64 status:{poll_body}"
     );
 }
+
+/// The body text of `<name>`'s `$poll` definition. Needed once a fixture has more
+/// than one `async fn`, where searching for "the `$poll`" is ambiguous.
+fn poll_body_of(ir: &str, name: &str) -> String {
+    let prefix = format!("define i64 @\"{name}.");
+    let header = ir
+        .lines()
+        .find(|l| l.starts_with(&prefix) && l.contains("$poll\""))
+        .unwrap_or_else(|| panic!("no `$poll` definition for `{name}`:\n{ir}"));
+    ir.split(header)
+        .nth(1)
+        .expect("text after the definition")
+        .split("\n}")
+        .next()
+        .expect("the poll fn's body")
+        .to_string()
+}
+
+/// A function body's instruction lines, keyed by block label.
+fn blocks_of(body: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut current = String::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(label) = t.strip_suffix(':') {
+            if !label.is_empty() && !label.contains(' ') {
+                current = label.to_string();
+                out.entry(current.clone()).or_default();
+                continue;
+            }
+        }
+        if !current.is_empty() && !t.is_empty() {
+            out.entry(current.clone()).or_default().push(t.to_string());
+        }
+    }
+    out
+}
+
+/// `(default_label, [(value, label)])` from a `switch i64 %r, label %d [ … ]`
+/// line.
+fn parse_switch(line: &str) -> (String, Vec<(i64, String)>) {
+    let (head, arms) = line.split_once('[').expect("a switch's arm list");
+    let default = head
+        .rsplit_once("label %")
+        .expect("a switch default label")
+        .1
+        .trim()
+        .to_string();
+    let arms = arms
+        .trim_end()
+        .trim_end_matches(']')
+        .split("i64 ")
+        .filter_map(|a| {
+            let (v, l) = a.split_once(", label %")?;
+            Some((v.trim().parse::<i64>().ok()?, l.trim().to_string()))
+        })
+        .collect();
+    (default, arms)
+}
+
+/// The **resumable** shape in the release backend's own output.
+///
+/// Everything else here covers only the await-free poll function, so without this
+/// an `async fn` containing `.await` reaches `nova build --release` unexercised —
+/// and `--release` is the LLVM path, which the Cranelift tests and the driver
+/// probes cannot speak for.
+///
+/// Asserts the three constructs the split introduces that no await-free body
+/// emits, inside `f`'s own poll function: the resume dispatch on the tag slot,
+/// the indirect poll of the awaited future at `PollFn`'s exact signature, and a
+/// suspend that writes the tag slot and returns the pending status. Both switches
+/// must share one trapping default, which is the shared bad-discriminant block.
+#[test]
+fn an_async_fn_containing_await_emits_a_resume_dispatch_and_an_indirect_poll() {
+    let ir = ir_for(
+        "async fn g() -> Float { 1.5 }\n\
+         async fn f() -> Float { g().await + 1.0 }\n\
+         fn main() { let x = f() }",
+    );
+    assert_well_formed(&ir);
+    let body = poll_body_of(&ir, "f");
+    let blocks = blocks_of(&body);
+    let switches: Vec<&String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("switch i64 "))
+        .map(|l| {
+            blocks
+                .values()
+                .flatten()
+                .find(|s| s.as_str() == l)
+                .expect("every switch line belongs to a block")
+        })
+        .collect();
+    assert_eq!(
+        switches.len(),
+        2,
+        "one resume dispatch plus one status switch per await:{body}"
+    );
+
+    // The resume dispatch: an arm for the entry state and one per await, on the
+    // value loaded from the tag slot, with distinct targets.
+    let (dispatch_default, dispatch_arms) = parse_switch(switches[0]);
+    let mut values: Vec<i64> = dispatch_arms.iter().map(|(v, _)| *v).collect();
+    values.sort_unstable();
+    assert_eq!(
+        values,
+        vec![0, 1],
+        "the entry state plus one resume tag: `{}`",
+        switches[0]
+    );
+    let distinct: std::collections::HashSet<&String> =
+        dispatch_arms.iter().map(|(_, l)| l).collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the resume states must be distinct blocks: `{}`",
+        switches[0]
+    );
+    let tag_offset = nova_mir::STATE_SLOT_TAG as i64 * 8;
+    let entry = blocks
+        .get("bb0")
+        .unwrap_or_else(|| panic!("no `bb0` (the dispatch):{body}"));
+    assert!(
+        entry
+            .windows(2)
+            .any(
+                |w| w[0].ends_with(&format!("i64 {tag_offset}")) && w[1].starts_with("load i64")
+                    || w[0].ends_with(&format!("i64 {tag_offset}")) && w[1].contains("= load i64")
+            ),
+        "the dispatch must switch on an i64 loaded from byte offset {tag_offset}, \
+         the tag slot: {entry:?}"
+    );
+
+    // Both defaults are the same block, and it traps rather than falling into a
+    // state or a continuation.
+    let (status_default, status_arms) = parse_switch(switches[1]);
+    assert_eq!(
+        dispatch_default, status_default,
+        "both switches send an unrecognized discriminant to one shared block: \
+         `{}` vs `{}`",
+        switches[0], switches[1]
+    );
+    let bad = blocks
+        .get(&status_default)
+        .unwrap_or_else(|| panic!("no block `{status_default}`:{body}"));
+    assert!(
+        bad.iter().any(|l| l.contains("@llvm.trap()")) && bad.iter().any(|l| l == "unreachable"),
+        "the shared default must trap: {bad:?}"
+    );
+
+    // The indirect poll, at `PollFn`'s signature: an i64 returned from a call
+    // through a *register* (not a symbol) taking exactly two pointers -- the inner
+    // state object and task_ctx.
+    assert!(
+        body.lines()
+            .map(str::trim)
+            .any(|l| l.contains("= call i64 %") && l.matches("ptr %").count() == 2),
+        "the await must be an indirect `(ptr, ptr) -> i64` call:{body}"
+    );
+
+    // The suspend: the status switch's PENDING arm writes the tag slot and returns
+    // the pending status.
+    let pending = status_arms
+        .iter()
+        .find_map(|(v, l)| (*v == nova_mir::POLL_PENDING).then_some(l))
+        .unwrap_or_else(|| panic!("no PENDING arm: `{}`", switches[1]));
+    let suspend = blocks
+        .get(pending)
+        .unwrap_or_else(|| panic!("no block `{pending}`:{body}"));
+    assert!(
+        suspend
+            .windows(2)
+            .any(|w| w[0].ends_with(&format!("i64 {tag_offset}")) && w[1].starts_with("store i64")),
+        "the suspend must store a tag at byte offset {tag_offset}: {suspend:?}"
+    );
+    assert!(
+        suspend.iter().any(
+            |l| l == &format!("store i64 {}, ptr %t6.slot", nova_mir::POLL_PENDING)
+                || l.starts_with(&format!("store i64 {}, ptr %t", nova_mir::POLL_PENDING))
+        ),
+        "the suspend must materialize the POLL_PENDING constant: {suspend:?}"
+    );
+    assert!(
+        suspend.last().is_some_and(|l| l.starts_with("ret i64 ")),
+        "the suspend must return a status: {suspend:?}"
+    );
+}

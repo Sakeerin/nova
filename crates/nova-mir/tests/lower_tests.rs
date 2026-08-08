@@ -1085,9 +1085,10 @@ fn an_async_fn_containing_await_produces_no_diagnostics() {
 
 /// A `.await` buried under each expression form real code puts one in.
 ///
-/// This replaces `nova-mir`'s `contains_await_looks_inside_nested_expressions`,
-/// which asserted the same shapes were *found* so the function could be
-/// rejected; now they must be split instead. Asserted as "the poll function
+/// This replaces `nova-mir`'s deleted `contains_await_looks_inside_nested_expressions`
+/// (the predicate it tested went with the rejection), which asserted the same
+/// shapes were *found* so the function could be rejected; now they must be split
+/// instead. Asserted as "the poll function
 /// dispatches on a resume tag", which is exactly what a body whose await was
 /// missed does not get -- and which no shallower check can fake, since
 /// `lower_expr` has to visit the subexpression to emit the marker at all.
@@ -1324,8 +1325,11 @@ fn a_reachable_generic_async_fn_instantiation_is_transformed() {
 /// backends call `main` for its effects and discard what it returns. So this
 /// must be a diagnostic until the driver learns to drive it (Task 7).
 ///
-/// A `main` with no `.await` in it is used deliberately: keyed on
-/// `contains_await` alone, this program would be accepted.
+/// A `main` with no `.await` in it is used deliberately: the rejection is keyed
+/// on being the entry point, and nothing else. A `main` that awaited something
+/// would pass this test against a guard that rejected suspend points instead,
+/// which is the wrong reason -- an `async fn` containing `.await` is compiled
+/// everywhere except here.
 #[test]
 fn an_async_main_reports_e0088() {
     let file_id = FileId::DUMMY;
