@@ -1123,6 +1123,33 @@ fn gate_async_tasks_build_standalone() {
     assert_eq!(out.replace("\r\n", "\n"), expected);
 }
 
+/// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
+/// allocation) — the established third member of every gate trio, and on this
+/// fixture the one that carries the most weight.
+///
+/// A suspended task's state object is reachable from no stack and no register:
+/// its only root is the executor's entry in the collector's `PINNED` registry.
+/// Collecting on every allocation is therefore what distinguishes "the registry
+/// is populated" from "the registry is honoured" end to end, on real generated
+/// code rather than a hand-built object — and the eight unit tests that assert
+/// on a real collection's outcome are `#[ignore]`d for reasons unrelated to the
+/// registry (ADR 0010), so this configuration is where a dropped root becomes
+/// visible in an ordinary `cargo test` run. The fixture yields inside both
+/// spawned tasks, so a state object genuinely outlives a suspension here.
+#[test]
+fn gate_async_tasks_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/async_tasks.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/async_tasks.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `block_on` called from inside an `async fn` ends the process with a
 /// diagnostic, rather than unwinding out of the runtime through a generated
 /// frame.

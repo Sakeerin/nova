@@ -752,6 +752,96 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   different mechanism aimed at a different layer, and its existence
   narrows neither gap.
 
+- `async fn`, `.await` and `Future<T>` (Phase 2.3a): an `async fn` returns a
+  `Future<T>` of its declared return type, and `.await` inside another
+  `async fn` suspends until that future produces its value. `Future<T>` is a
+  compiler-known type rather than a std record — the compiler knows no
+  library type by name, so there is no other place it could live — and it is
+  not nameable in source: it appears in diagnostics and in `std/task`'s
+  signatures, but a program cannot write it. Both backends compile the same
+  transform, because it runs on the monomorphized MIR module that Cranelift
+  and LLVM both consume. `.await` outside an `async fn` is `E0086`;
+  `.await` on a non-future is `E0087` and names the type. `async` on a
+  *trait* method (declaration, default body, or impl) and on an `extern`
+  function is still `E0900`; async **inherent** methods are supported. Async
+  closures are not in the grammar at all.
+- **The execution model is single-threaded cooperative state machines, which
+  reverses `docs/phase-2-plan.md` decision 1** (`docs/adr/0009-async-execution-model.md`
+  §1). That plan recommended thread-per-task over Tokio as the pragmatic
+  choice and deferred state-machine lowering; the recommendation was measured
+  false *for this codebase*. Nova's GC heap is a `thread_local!`, so an object
+  allocated on one task's thread is invisible to every other task's collector
+  and is freed by its own thread's next collection while another thread still
+  holds a pointer to it — a use-after-free reachable from ordinary source with
+  no diagnostic. Making thread-per-task sound needs a global locked heap,
+  stop-the-world coordination, all-thread stack scanning and safepoints:
+  larger and subtler than the lowering it was meant to avoid, and it moves the
+  risk out of the compiler and into the collector. Single-threaded state
+  machines leave the thread-local invariant untouched. `nova-spec/13-RUNTIME.md`
+  §4.2 (state machines) is honoured; §4.1 (Tokio, work-stealing thread pool)
+  and §4.4 (cancellation) are deviations recorded in the ADR. **What that
+  costs: real parallelism, and `spawn_blocking`** (`nova-spec/20-STDLIB.md`
+  §13), which is not provided rather than provided as a synonym for `spawn`
+  that would silently block the executor.
+- `std/task` (Phase 2.3a) — the fourth embedded std module, glob-imported like
+  the others: `spawn(fut) -> JoinHandle<T>`, `JoinHandle::join`, `yield_now()`
+  and `block_on(fut)`, plus `async fn main`, which is driven by `block_on`.
+  **`spawn` starts nothing on its own**: the task is queued, and the queue is
+  drained only while a `block_on` call is running, so a `spawn` with no
+  `block_on` above it never runs — silently. `join` **caches** rather than
+  consumes, deliberately: Nova has no move checking, so a `fn join(self)`
+  cannot prevent a second call, and the value is re-read from the future's own
+  output slot instead. **`block_on` is not callable from inside an `async fn`**
+  — a nested call would run a second executor loop inside the first one's
+  frame, and the runtime ends the process with a diagnostic rather than
+  corrupting the shared queue. It aborts rather than panicking for the reason
+  the whole transform rests on: a generated poll function's frame has no
+  landing pads and no unwind description, so no unwind may cross one.
+- Known gaps in async, each disclosed during implementation rather than found
+  afterwards, and each recorded in full in ADR 0009 §1: **no parking and no
+  waking** — a task that reports pending is re-queued round-robin and
+  re-polled, so waiting spins at one poll per turn rather than sleeping;
+  **`block_on` drains the whole queue**, so it implicitly joins everything
+  spawned on the thread (unlike tokio's, which returns as soon as its own
+  future resolves) **and does not terminate if any queued task never becomes
+  ready** — unreachable in 2.3a, where every suspension resumes on the next
+  turn, and reachable with the first primitive that can park on an external
+  event, which is what owes the park set and the deadlock diagnostic; **no
+  cancellation** of any kind, so dropping a `JoinHandle` does nothing;
+  **every temp is spilled into the state object**, not only those live across
+  a suspend, which is what buys the transform out of liveness analysis at the
+  cost of over-retaining (a later liveness pass narrows the state record and
+  changes no semantics); **awaiting the same future twice re-polls a completed
+  future**, re-running the body after its last suspend, because there is no
+  move checking to forbid it; **a spawned task whose output is never taken
+  leaks its state object**, the deliberate half of a trade whose alternative
+  frees a heap-valued output while the task still names it; **each
+  `yield_now()` costs four allocations**; and **the executor's
+  out-of-range-poll-status check is still a `panic!`**, the one place an unwind
+  can still cross a generated frame — kept because its precondition is a
+  broken compiler and its observability is what a test asserts on.
+- Gate: `tests/runtime/async_tasks.{nova,stdout}` — two tasks spawned, joined,
+  yielding inside each so the executor interleaves them, and a `Float` result —
+  driven through `nova run`, `nova build` and `NOVA_GC_STRESS=1`, joining
+  `std_core`, `collections`, `strings`, `assoc_types`, `iterator` and
+  `nova_test` among the fixtures registered in all three configurations. The
+  GC-stress configuration carries the most weight of the three here: a
+  suspended task's state object is reachable from no stack and no register, so
+  its only root is the executor's entry in the collector's root registry, and
+  collecting on every allocation is what distinguishes "the registry is
+  populated" from "the registry is honoured" on real generated code. The
+  interleaving rather than the totals is what the fixture exists to pin — a
+  run-to-completion scheduler would print the same total with all of one
+  task's lines before all of the other's — and the `Float` line is not
+  decoration, since `Int` and every pointer-like type share one machine class
+  and only `F64` crosses register banks.
+- Recorded, not implemented in this slice: channels and `Mutex` (2.3b),
+  `Instant`/`Duration`/`sleep`/`timeout` (2.3c), `std/log` (2.3d), real
+  parking and waking, `spawn_blocking`, cancellation, async trait methods,
+  async closures, liveness-based state minimization, and parallelism. A
+  recursive `async fn` is accepted and recurses without bound, the same
+  undiagnosed class as `fn f() { f() }`.
+
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 
 Filed here as well as under Added, because these change the meaning of code that

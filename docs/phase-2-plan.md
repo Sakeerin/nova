@@ -39,14 +39,27 @@ There is also known Phase-1 drift to reconcile: **chumsky 0.9 → 0.10**, add
 These are genuine forks that shape the whole phase — like the LLVM-backend
 decision in Phase 1. Recommendations in **bold**.
 
-1. **Async execution model.** The spec says "compile to a state machine like
-   Rust." That is a very large compiler feature (async lowering, self-referential
-   state, pinning). Options:
-   - (a) **Full state-machine lowering** (spec-faithful, portable, no OS threads per task).
-   - (b) **Stackful coroutines / thread-per-task over Tokio** (much simpler to
-     ship; `await` blocks a runtime worker). **Recommended for Phase 2.0**, revisit
-     (a) in Phase 2.x once collections/net are proven. This is a spec deviation →
-     needs an ADR.
+1. **Async execution model. SETTLED in Phase 2.3a — see `docs/adr/0009-async-execution-model.md`.**
+   The spec says "compile to a state machine like Rust." That is a very large
+   compiler feature (async lowering, self-referential state, pinning). Options:
+   - (a) **Full state-machine lowering** (spec-faithful, portable, no OS threads
+     per task). **This is what shipped**, in Phase 2.3a: an `async fn` lowers to a
+     resumable state machine driven by one cooperative single-threaded executor.
+     `nova-spec/13-RUNTIME.md` §4.2 is honoured; §4.1's Tokio thread pool is a
+     recorded deviation, and real parallelism and `spawn_blocking` are what that
+     costs.
+   - (b) **Stackful coroutines / thread-per-task over Tokio** (`await` blocks a
+     runtime worker). **Assessed and chosen against.** This option was recommended
+     here for Phase 2.0 on the grounds that it was "much simpler to ship"; that
+     was measured false *for this codebase*. Nova's GC heap is a `thread_local!`
+     (`crates/nova-runtime/src/gc.rs`), so an object allocated on one task's
+     thread is invisible to any other task's collector and is freed by its own
+     thread's next collection while another still holds it. Making
+     thread-per-task sound needs a global locked heap, stop-the-world
+     coordination, all-thread stack scanning and safepoints — a larger and
+     subtler body of work than the lowering it was meant to avoid, and it puts
+     the risk in the collector rather than the compiler. ADR 0009 §1 records the
+     full argument, what (a) gives up, and the known gaps.
 2. **Stdlib distribution / compile model.** How does `std/` reach a user program?
    Options: compile std sources alongside the user program every build; or a
    precompiled std artifact; or inject a prelude + link std objects. **Recommended:**

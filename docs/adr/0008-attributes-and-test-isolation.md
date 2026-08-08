@@ -18,6 +18,15 @@ down.
 All three are accepted, and each names a real loss rather than arguing it
 away.
 
+**Section 4 is not a decision.** It records an open, intermittent failure of
+freshly linked test binaries, first seen while this increment's gate was being
+built and still unresolved. It lives here because §2's exit-code discussion is
+the only place in this repository that had ever mentioned it, and because the
+substantive record was otherwise only in task reports that are not tracked
+(`.superpowers/sdd/.gitignore` is `*`) and in code comments in
+`crates/nova-cli/src/cmd/test.rs`. It was added in Phase 2.3a, when the
+instrumentation built to capture it finally fired.
+
 ---
 
 ## 1. Attributes are item-level, arguments are bare identifiers, and an unknown one is always an error
@@ -198,8 +207,9 @@ from a *different* investigation entirely — Task 4's report on a genuine
 (`0xC0000409`) and a separate, unexplained, non-reproducing crash
 (`0xC0000005`, `STATUS_ACCESS_VIOLATION`) — on different fixtures, neither
 of them `1 / 0`. They are real numbers from real investigations on this
-branch, just not evidence about *this* trap; see Task 4's and Task 5's own
-reports for what they actually measured.)*
+branch, just not evidence about *this* trap. The `0xC0000005` one is
+§4 below, which is where it is now recorded; `0xC0000409` is a genuine
+`abort()` and nothing more.)*
 
 The argument against using the exit code does not depend on the two
 `1 / 0` figures disagreeing, and is simpler than that framing suggested:
@@ -432,6 +442,160 @@ Four parts, each deliberate:
 
 ---
 
+## 4. Open: a freshly linked binary intermittently produces no output at all (`0xC0000005`)
+
+### Status
+
+**Open, not decided.** First seen during Phase 2.2e while this increment's gate
+was being built; still unresolved. Recorded here in Phase 2.3a (2026-08-08),
+when instrumentation added specifically to capture it fired twice.
+
+The standing decision about it, taken by the user during Phase 2.3a, is
+**instrument only** — do not chase it inside a task whose scope is something
+else, and capture the complete output verbatim whenever it recurs.
+
+### The signature
+
+A test binary that has just been compiled and linked, then executed, exits
+without producing any output. What the failing assertion looks like depends on
+which test caught it, but the diagnostic underneath is always the same: the
+binary produced nothing on either stream.
+
+The most legible form comes from `nova test`'s inventory step, which runs the
+freshly linked binary with no `NOVA_TEST_INDEX` and parses the test count it
+prints first:
+
+```
+Error: …\nova-test-bin\4c682723ee3c1e18\main.exe's inventory did not
+start with a test count (exit code: 0xc0000005): stdout "", stderr ""
+
+Caused by:
+    cannot parse integer from empty string
+```
+
+Retried in isolation immediately after that capture, the same test passed
+cleanly. Every occurrence has been transient on retry, and the failure has never
+been reproduced deliberately.
+
+### What is now evidenced rather than inferred
+
+Two occurrences on the `async-core` branch were captured with the child's raw
+exit code and both streams. **Both are `0xC0000005` (`STATUS_ACCESS_VIOLATION`),
+with stdout AND stderr completely empty.** That the two are identical is itself
+informative — a memory-corruption-style cause would be expected to vary, so the
+fault is not stochastic in its code.
+
+The consequence is the important part, and it is worth separating what the
+capture establishes from what it makes overwhelmingly likely.
+
+**Established.** The test count is the binary's very first output — the
+synthesized dispatcher reads `NOVA_TEST_INDEX`, falls through a chain of integer
+comparisons, and prints the count as the first `println` on the inventory path
+(`crates/nova-driver/src/lib.rs`'s `synthesize_test_main`). An empty stdout
+therefore means the process **died before reaching that print**, so nothing any
+`@test` body does — and nothing the collector does under the allocation pressure
+those bodies create — can be the cause. An empty *stderr* rules out every
+`nova: panic:` emitter and every other diagnostic the runtime writes. And
+`0xC0000005` is not the `0xC000001D` a Nova trap raises, so it is not a trap
+either.
+
+**Inferred, and this is what the capture upgraded.** What remains between process
+start and that first print is a handful of instructions: one runtime call to read
+the selector, some integer comparisons, and one `println`. A fault inside that
+would be deterministic, not one-in-many; a fault *before* the entry point is not.
+So the claim carried in `crates/nova-cli/src/cmd/test.rs`'s comments — "the
+process never reached its entry point" — has moved from an assumption with no
+supporting measurement to the reading the evidence actually favours, which puts
+the cause in image loading or process startup rather than in anything Nova
+emits. It is a strong inference from two captures, not a proof, and one captured
+occurrence with a subprocess fan-out would say considerably more.
+
+The instrumentation that made this visible is worth naming, because for the first
+three sightings the exit code was lost each time: `nova test`'s inventory and
+count-mismatch paths now report the child's exit status and both streams rather
+than stdout alone, `TRAPPED` lines render the code in unsigned hex beside decimal
+so an NTSTATUS is legible, and the three gate tests attach their raw,
+un-normalized output to the assertion so a placeholder-normalized diff cannot
+hide a real code.
+
+### Occurrence tally
+
+Counted by listing the capture files and the failing tests, not by carrying a
+prose total forward — two successive attempts to state this count from prose
+overstated it, in both directions.
+
+Phase 2.2e (before the instrumentation existed): **3 sightings, no exit code
+captured for any of them.** That figure is taken from
+`docs/superpowers/specs/2026-08-07-phase-2-3a-async-core-design.md` §11 risk 3,
+which also records that it was never reproduced in 60+ targeted runs; the
+underlying 2.2e artifacts are not tracked.
+
+Phase 2.3a, branch `async-core`: **7 sightings, 2 with captured exit codes, both
+identical.**
+
+| When | Test | Code captured? |
+|---|---|---|
+| Task 1 verification | `nova_test_filter_run` | No — the instrumentation had not landed |
+| Task 10 verification | `should_panic_is_matched_to_its_own_test_not_to_index_zero` (×2) | No |
+| Task 10 verification | `test_functions_calling_assert_eq_do_not_break_check_build_or_run` | No |
+| Task 10 verification | `nova_test_build_standalone` — all four fixture subprocesses reported TRAPPED | No |
+| Task 2 fix round | `nova_test_run` | **Yes — `0xC0000005`** |
+| Task 2 test round | `nova_test_filter_run` | **Yes — `0xC0000005`** |
+
+Frequency, measured on this branch: roughly seven sightings across one day of
+repeated full-suite runs. That rate is the operational risk rather than the
+technical one — at about one spurious failure per full-suite run, a genuine
+regression can be dismissed as "the known flake", which happened once on this
+branch (correctly, as it turned out).
+
+### A premise that is now falsified
+
+An earlier bounding argument for this anomaly — held in Phase 2.2e's task reports
+and repeated in working notes, never in this document — leaned on an asymmetry:
+`nova_driver::build_test_binary` executes its product within a syscall or two of
+the linker's exit, *unlike* `nova build`, whose linker subprocess is fully torn
+down first. If that asymmetry were what bounded the anomaly, `nova build`'s
+output would be immune.
+
+**It is not.** One occurrence's failing assertion is
+`crates/nova-cli/tests/run_tests.rs`'s `Command::new(&out_exe)` on a binary
+produced by **`nova build`** — not the JIT, and not `build_test_binary`. So the
+anomaly reaches the fully-torn-down path too.
+
+The broader "something about having just linked this image" family still covers
+every occurrence recorded above. The narrower story does not, and should not be
+repeated.
+
+### Reopen conditions, none of which has been met
+
+These are the observations that would change what this is, carried unchanged from
+the design doc's §11 risk 3:
+
+- **Some-but-not-all** subprocesses of one binary faulting. Not seen: the one
+  multi-subprocess occurrence was 4-of-4, and both captured occurrences are a
+  single inventory execution with no fan-out at all.
+- **Differing exit codes between subprocesses of one binary.** Not seen; both
+  captures are the same code.
+- **A trapping test still emitting its `nova: panic:` marker while its siblings
+  fault.** Not seen.
+- **Any reproduction under `NOVA_GC_STRESS` in isolation.** Not seen.
+
+### What is not known, stated plainly
+
+- **No cause.** "Image loading or process startup" is where the evidence puts it,
+  not a diagnosis. Nothing has been ruled in.
+- **No reproduction.** Every occurrence has been transient, and no deliberate
+  attempt has reproduced one.
+- **Whether it is Nova's at all is unestablished.** The evidence is consistent
+  with an environment-level fault on freshly written executables and equally
+  consistent with something in the images this project emits; nothing
+  distinguishes those yet.
+- **The next useful datum is a captured occurrence with a subprocess fan-out**,
+  which is the only shape that can discriminate between the reopen conditions
+  above. The instrumentation for it is in place.
+
+---
+
 ## References
 
 - Plan: `.superpowers/sdd/2026-08-05-nova-test/`
@@ -439,7 +603,12 @@ Four parts, each deliberate:
   `unknown_attribute`, `validate_attrs_reject_test`, `validate_test_function`
   (§1); `TestFn` (§1, §3)
 - `crates/nova-cli/src/cmd/test.rs`: `Outcome`, `PANIC_MARKER`, `classify`
-  (§2)
+  (§2); `format_exit_code` and the inventory/count-mismatch failure paths (§4 —
+  the instrumentation that captured the exit code, and the comments that carried
+  §4's claim before §4 existed)
+- `crates/nova-cli/tests/run_tests.rs`: `normalize_trap_codes` and the three
+  `nova_test_*` gate registrations, which attach their raw un-normalized output
+  to the assertion so a normalized diff cannot hide a real exit code (§4)
 - `crates/nova-runtime/src/lib.rs`: `nova_rt_panic_str`, `nova_rt_check_bounds`
   (§2); `crates/nova-runtime/src/gc.rs`: `alloc`'s oversized-object guard (§2)
 - `crates/nova-driver/src/lib.rs`: `SHADOWED_USER_MAIN_NAME`,
@@ -460,3 +629,9 @@ Four parts, each deliberate:
   `CHANGELOG` entry
 - Related: ADR 0007 §2 (a primitive `Self`'s `next` copying rather than
   advancing — the residual-gaps hang example in §2 above)
+- §4's 2.2e sighting count and its reopen conditions:
+  `docs/superpowers/specs/2026-08-07-phase-2-3a-async-core-design.md` §11 risk 3.
+  §4's branch sightings and the two verbatim captures were recorded in
+  `.superpowers/sdd/2026-08-07-phase-2-3a-async-core/progress.md`, which is not
+  tracked — which is why the captures and the tally are transcribed into §4
+  rather than cited from there.
