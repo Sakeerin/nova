@@ -913,4 +913,72 @@ mod tests {
     // End-to-end execution tests live in the nova-cli integration suite,
     // where stdout of compiled programs can be captured; compiling MIR here
     // and running it would print into the test harness output.
+
+    use nova_mir::RtFunc;
+
+    /// Every `RtFunc` must have a matching entry in `nova_runtime::symbols()`.
+    ///
+    /// This crate is the only place the containment can be checked: `nova-mir`
+    /// must not depend on `nova-runtime` (the poll ABI and state layout are
+    /// deliberately declared twice for that reason), and `nova-runtime` does
+    /// not depend on `nova-mir`. This crate depends on both.
+    ///
+    /// The gap this closes is real, not hypothetical: the `rt_funcs!` macro
+    /// guarantees a variant is declared to *both codegen backends*, because
+    /// `RtFunc::ALL` is generated from the same identifier list as the enum.
+    /// It guarantees nothing about `symbols()`, which is a separate,
+    /// hand-maintained table. `compile_jit` builds the JIT's resolver from
+    /// `symbols()` while `declare_runtime` imports all of `RtFunc::ALL`, and
+    /// `cranelift-jit` resolves imports inside `finalize_definitions`, where
+    /// an unresolvable symbol is a `panic!` rather than an `Err`. A variant
+    /// added to `rt_funcs!` and forgotten here therefore compiles clean,
+    /// passes every existing test, and fails the first time compiled code
+    /// actually calls it. The `nova_rt_task_*` entries shipped in exactly that
+    /// state, which is what this test was added for.
+    ///
+    /// Names, not addresses: `symbols()` returns `*const u8` function
+    /// pointers, and comparing those would only restate that the same `as`
+    /// cast appears twice. The symbol string is what the linker and the JIT
+    /// actually match on.
+    #[test]
+    fn every_rt_func_symbol_is_registered_with_the_jit() {
+        let registered: Vec<&str> = nova_runtime::symbols()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let missing: Vec<&str> = RtFunc::ALL
+            .iter()
+            .map(|f| f.symbol())
+            .filter(|s| !registered.contains(s))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "RtFunc variants with no nova_runtime::symbols() entry: {missing:?}. \
+             Compiled code calling one of these makes cranelift-jit panic in \
+             finalize_definitions; add it to symbols() in nova-runtime/src/lib.rs."
+        );
+    }
+
+    /// The reverse direction is deliberately *not* asserted as equality:
+    /// `symbols()` legitimately carries entries no `RtFunc` names, because
+    /// codegen reaches some runtime functions without going through the enum
+    /// (`nova_rt_str_new` is declared directly by `declare_runtime` for
+    /// `ConstStr`). What must hold is that every registered name is a real,
+    /// distinct symbol -- a duplicate entry would mean one registration
+    /// silently shadowing another.
+    #[test]
+    fn registered_runtime_symbols_are_distinct() {
+        let mut names: Vec<&str> = nova_runtime::symbols()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            before,
+            "nova_runtime::symbols() has a duplicate entry"
+        );
+    }
 }

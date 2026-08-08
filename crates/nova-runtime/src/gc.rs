@@ -238,6 +238,24 @@ pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
     })
 }
 
+/// Test-only: how many times `addr` is currently registered in the root
+/// registry (`0` if not registered at all).
+///
+/// [`add_root`] is a multiset, not a set -- two registrations require two
+/// [`remove_root`] calls -- so a caller pairing them has an exact count to
+/// assert, not merely a yes/no. This exists so a test can check that pairing
+/// **without** running a collection: `task.rs`'s executor must keep a
+/// completed task's state rooted until its output is taken, and asserting
+/// that through `collect()` would inherit the conservative scan's
+/// intermittent over-retention (`docs/adr/0010-conservative-scan-root-test-gating.md`)
+/// for an invariant that is really about this `Vec`'s contents. Reading the
+/// registry directly is both deterministic and platform-independent, where a
+/// `collect()`-based assertion is neither.
+#[cfg(test)]
+pub(crate) fn root_count(addr: usize) -> usize {
+    PINNED.with(|p| p.borrow().iter().filter(|&&a| a == addr).count())
+}
+
 /// Test-only: force a real, stack-scanning collection cycle immediately,
 /// bypassing [`maybe_collect`]'s allocation-threshold trigger, so a test can
 /// assert on a collection's outcome deterministically rather than allocating
@@ -255,11 +273,15 @@ pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
 /// (non-inlined) call to this wrapper inserts an extra frame between such a
 /// caller and `collect()`, shifting every address `collect()` itself touches
 /// one frame further from the caller's -- which changes whether that
-/// overwrite still happens to land on the right bytes. `task.rs`'s
-/// root-registration tests are the direct evidence: with this a plain `fn`,
-/// they falsely retain an already-nulled, never-registered object; inlined,
-/// they correctly sweep it. The task report for that module records the
-/// isolating experiment.
+/// overwrite still happens to land on the right bytes.
+///
+/// That is the mechanism, and it is the whole claim being made here. This
+/// attribute does **not** make the tests that call this function reliable:
+/// they are unconditionally `#[ignore]`d for intermittent over-retention that
+/// happens with the attribute in place
+/// (`docs/adr/0010-conservative-scan-root-test-gating.md`). Removing it
+/// changes their frame relationship to `collect()` for no reason; keeping it
+/// is not evidence that they pass.
 #[cfg(test)]
 #[inline(always)]
 pub(crate) fn collect_for_test() {
@@ -649,25 +671,28 @@ mod tests {
     /// `--release` as this comment used to say. `collect()`'s conservative
     /// stack scan is also intermittently flaky in debug, under the test
     /// parallelism CI actually runs at: a stale stack word in an
-    /// already-returned frame -- most likely `gc::alloc`'s own -- is read as
-    /// a conservative root, roughly 2-3 KB above `lo` (`&regs`, the
-    /// register-flush buffer the `setjmp` shim seeds at the start of its own
-    /// frame). Mechanism identified, not fixed; see
-    /// `.superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md`
-    /// for the isolating experiment, the measured rates, and two attempted
-    /// remedies (a deliberate stack clobber, a serializing mutex) that both
-    /// made the failure rate worse and were reverted rather than kept. Only
-    /// the three `is_none()` (sweep-asserting) tests below actually flake;
-    /// the other three, `is_some()`-asserting tests are gated alongside them
-    /// anyway, not because they fail on their own, but because gating only
-    /// the flaky half would strip the negative control from the paired
-    /// `is_some()` tests, leaving a green "the registered root survived"
-    /// assertion that would also pass against a collector that frees nothing
-    /// at all -- the same ungated-canary pattern Critical review finding C1
-    /// flagged, and the same pairing principle the Windows gate above exists
-    /// for. Reachable with `cargo test -- --ignored`. See `hide`'s doc
-    /// comment and each test's own attribute and comment for which is which,
-    /// rather than restating it in a second place here.
+    /// already-returned frame is read as a conservative root, well above the
+    /// scanned range's low end (so *not* `&regs`, the register-flush buffer
+    /// the `setjmp` shim seeds at the start of its own frame, which sits at
+    /// that low end). Mechanism identified, not fixed. The full account --
+    /// the isolating experiment, the measured rates, which frame the
+    /// retaining word sits in, and two attempted remedies (a deliberate
+    /// stack clobber, a serializing mutex) that were each measured to make
+    /// the failure rate worse and were reverted rather than kept -- is
+    /// `docs/adr/0010-conservative-scan-root-test-gating.md`. That document
+    /// is where the numbers live; this comment states only the invariant.
+    ///
+    /// Only the sweep-asserting (`is_none()`) tests below actually flake; the
+    /// survival-asserting (`is_some()`) ones are gated alongside them anyway,
+    /// not because they fail on their own, but because gating only the flaky
+    /// half would strip the negative control from the paired `is_some()`
+    /// tests, leaving a green "the registered root survived" assertion that
+    /// would also pass against a collector that frees nothing at all -- the
+    /// same ungated-canary pattern a Critical review finding flagged, and the
+    /// same pairing principle the Windows gate above exists for. Each test's
+    /// own `#[ignore]` reason says which of the two it is, so that is not
+    /// restated here. Reachable with `cargo test -- --ignored`, which CI runs
+    /// as an advisory, `continue-on-error` step.
     #[cfg(windows)]
     mod registry {
         use super::*;
@@ -736,16 +761,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "not flaky on its own -- never observed to fail by itself. \
+                    Gated only to stay paired with the sweep-asserting control \
+                    test that does flake: this one asserts an object SURVIVED, \
+                    which also passes against a collector that frees nothing at \
+                    all, so running it while its control is ignored would leave \
+                    a green assertion proving nothing. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn a_registered_root_survives_a_collection_with_no_stack_reference() {
             // The exact scenario: an object reachable ONLY through the registry.
             // `black_box` is not enough on its own here -- the point is that after
@@ -795,16 +818,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "flaky: asserts an unreachable object was SWEPT, and the \
+                    conservative stack scan intermittently retains it instead \
+                    -- a stale stack word in an already-returned frame is read \
+                    as a root, in debug as well as release, at default test \
+                    parallelism. Mechanism identified, not fixed; two remedies \
+                    were each measured to make it worse. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn an_unregistered_object_is_swept() {
             // The discriminating half. Without this, the test above passes even if
             // collect() never frees anything at all. It is also the test that
@@ -846,16 +867,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "flaky: asserts an unreachable object was SWEPT, and the \
+                    conservative stack scan intermittently retains it instead \
+                    -- a stale stack word in an already-returned frame is read \
+                    as a root, in debug as well as release, at default test \
+                    parallelism. Mechanism identified, not fixed; two remedies \
+                    were each measured to make it worse. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn remove_root_actually_unroots() {
             // Otherwise add/remove is a leak, and every completed task's state is
             // retained for the process lifetime. See
@@ -965,16 +984,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "not flaky on its own -- never observed to fail by itself. \
+                    Gated only to stay paired with the sweep-asserting control \
+                    test that does flake: this one asserts an object SURVIVED, \
+                    which also passes against a collector that frees nothing at \
+                    all, so running it while its control is ignored would leave \
+                    a green assertion proving nothing. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn a_registered_root_keeps_its_transitive_children_alive() {
             // The registry seeds the mark set; marking must then TRACE. A
             // registry that marked only the registered object itself would
@@ -1008,16 +1025,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "flaky: asserts an unreachable object was SWEPT, and the \
+                    conservative stack scan intermittently retains it instead \
+                    -- a stale stack word in an already-returned frame is read \
+                    as a root, in debug as well as release, at default test \
+                    parallelism. Mechanism identified, not fixed; two remedies \
+                    were each measured to make it worse. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn an_unregistered_parent_and_child_are_swept() {
             // The negative control for the test above -- see
             // `setup_parent_and_child`'s doc comment. Without this, the test
@@ -1050,16 +1065,14 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "flaky in debug too, not just release, at default test \
-                    parallelism: a stale stack word in an already-returned \
-                    frame -- most likely gc::alloc's own -- is read as a \
-                    conservative root, roughly 2-3 KB above `lo` (&regs, the \
-                    setjmp shim's flushed register buffer), not a retained \
-                    register. Mechanism identified, not fixed: a stack \
-                    clobber and a serializing mutex were each tried and \
-                    measured to make it worse, then reverted. See \
-                    .superpowers/sdd/2026-08-07-phase-2-3a-async-core/task-4-report.md; \
-                    reachable with `cargo test -- --ignored`."]
+        #[ignore = "not flaky on its own -- never observed to fail by itself. \
+                    Gated only to stay paired with the sweep-asserting control \
+                    test that does flake: this one asserts an object SURVIVED, \
+                    which also passes against a collector that frees nothing at \
+                    all, so running it while its control is ignored would leave \
+                    a green assertion proving nothing. See \
+                    docs/adr/0010-conservative-scan-root-test-gating.md. \
+                    Reachable with `cargo test -- --ignored`."]
         fn the_registry_survives_more_than_one_collection() {
             // ROOTS (gc.rs:95) is a SCRATCH buffer cleared at the start of
             // every cycle. If the registry were folded into it, the first

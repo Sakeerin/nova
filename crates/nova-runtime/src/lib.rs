@@ -308,6 +308,16 @@ pub extern "C" fn nova_rt_test_selector() -> i64 {
 }
 
 /// All runtime symbols, for registration with the JIT (or a linker map).
+///
+/// **Every `nova_mir::RtFunc` must appear here.** A `RtFunc` variant is
+/// declared to both codegen backends by the `rt_funcs!` macro, which guarantees
+/// the two backends cannot disagree about the enum — but it says nothing about
+/// this table, which is hand-maintained. A variant missing from here compiles
+/// clean and only fails when the JIT tries to resolve the symbol, inside
+/// `cranelift-jit`'s `finalize_definitions`, which `panic!`s rather than
+/// returning an error. `nova-codegen-cranelift`'s
+/// `every_rt_func_symbol_is_registered_with_the_jit` pins the containment,
+/// since that crate is the one that depends on both this one and `nova-mir`.
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("nova_rt_str_new", nova_rt_str_new as *const u8),
@@ -333,6 +343,19 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_check_bounds", nova_rt_check_bounds as *const u8),
         ("nova_rt_panic_str", nova_rt_panic_str as *const u8),
         ("nova_rt_test_selector", nova_rt_test_selector as *const u8),
+        ("nova_rt_task_spawn", task::nova_rt_task_spawn as *const u8),
+        (
+            "nova_rt_task_block_on",
+            task::nova_rt_task_block_on as *const u8,
+        ),
+        (
+            "nova_rt_task_is_done",
+            task::nova_rt_task_is_done as *const u8,
+        ),
+        (
+            "nova_rt_task_take_output",
+            task::nova_rt_task_take_output as *const u8,
+        ),
     ]
 }
 

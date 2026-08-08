@@ -25,6 +25,29 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
 
+      # The eight `#[ignore]`d GC root tests are the ONLY coverage of
+      # `gc::add_root` being wired into the executor's spawn path, and the step
+      # above runs none of them -- so without this step, deleting that call
+      # from `spawn` is killed by nothing CI executes at all. They assert on
+      # the outcome of a real, conservative stack scan and intermittently
+      # over-retain (never a false free); see
+      # docs/adr/0010-conservative-scan-root-test-gating.md for the mechanism
+      # and the two remedies that were measured to make it worse.
+      #
+      # `continue-on-error` deliberately: a flake here must be visible without
+      # red-lighting the pipeline, and a red-by-default job would just be
+      # ignored. Deliberately NOT `--test-threads=1` -- serialization is one of
+      # the two reverted remedies, and was measured to make this flakiness two
+      # orders of magnitude worse.
+      #
+      # All eight are `#[cfg(windows)]`, so this filters to zero tests on the
+      # ubuntu and macos legs. That is intentional rather than a matrix
+      # exclusion: the day `gc::stack_base` grows a non-Windows implementation,
+      # this step starts covering them everywhere with no CI change.
+      - name: cargo test (ignored GC scan tests; advisory, may flake)
+        continue-on-error: true
+        run: cargo test --workspace --all-features -- --ignored
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
