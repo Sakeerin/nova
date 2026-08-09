@@ -38,9 +38,10 @@
 // so `task_is_done`/`task_release` have no id space to guess at, only the one
 // state this handle's `fut` actually points to.
 //
-// An address is an identity only while the object at it lives, and the
-// executor holds to that: it stops recognising a state address when the
-// collector frees the state object, so a fresh future landing on the address
+// An address is an identity only while the object at it lives — stated in full
+// in `crates/nova-runtime/src/gc.rs`'s module doc comment, which owns that
+// property. The executor holds to it: it stops recognising a state address when
+// the collector frees the state object, so a fresh future landing on the address
 // of a collected one is still a future no task was spawned for, and is
 // rejected rather than answered for whatever task used to be there.
 //

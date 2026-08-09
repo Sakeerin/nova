@@ -28,11 +28,14 @@
 //! object.** An unmarked object's memory goes back to the system allocator
 //! (`dealloc`) rather than into an arena this module keeps, so a later [`alloc`]
 //! can hand the same address out for a wholly unrelated object. An address
-//! therefore names an object only while that object is live, and both
-//! transitions happen in exactly one place each: [`alloc`] starts an address
-//! meaning what it means, and the sweep in [`collect_with_roots`] ends it. This
-//! is the one place that property is stated, so that a reader who needs it has
-//! somewhere to be pointed at instead of a copy to compare.
+//! therefore names an object only while that object is live. [`alloc`] starts an
+//! address meaning what it means; the sweep in [`collect_with_roots`] ends it,
+//! and so does the `#[cfg(test)]` `reset`, which is the only other `dealloc` in
+//! this module. Every path that ends an address's meaning must tell the
+//! executor's state-address lookup, so that "a freed address is always
+//! forgotten" has no exception — a third such path would have to do the same.
+//! This is the one place that property is stated, so that a reader who needs it
+//! has somewhere to be pointed at instead of a copy to compare.
 //!
 //! Precise stack bounds are currently only implemented on Windows; on other
 //! platforms collection is skipped (allocations leak, as before — never
