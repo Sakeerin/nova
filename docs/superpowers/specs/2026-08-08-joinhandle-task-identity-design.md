@@ -65,6 +65,12 @@ for the state address, and look the task up in a new thread-local map from state
 populated at spawn and never removed. Removal is not needed and would be wrong: a released task's
 entry must stay so a second `join` still answers, which is what keeps `join` idempotent.
 
+Never removing has a consequence `spawn`'s own check has to account for: the collector genuinely
+frees a released, unreachable state through the real allocator (not an arena), so its address can be
+handed to a later, wholly unrelated allocation while the map still names the old task at that key.
+`spawn`'s duplicate check therefore tests **liveness** — has the task this address names already been
+released? — not mere presence in the map. See §3.3.
+
 **Builtin and `RtFunc` signatures.** `task_is_done` and `task_release` change from `(Int)` to
 `(Future<T>)`. `task_spawn`'s returned id becomes unused by `std/task`; keep the return rather than
 changing it to unit, so the executor's own Rust tests keep the handle they address tasks by.
@@ -82,17 +88,52 @@ that boundary** — generated code has no landing pads (ADR 0009 §1, constraint
 same resolution `block_on`'s re-entrancy guard already uses:
 
 - **The state is not a task** — "this future was never spawned". This replaces the hang.
-- **The state is already a task** — `spawn` rejects it.
+- **The state names a task that has not yet been released** — `spawn` rejects it. (Not "the state is
+  already a task, full stop" — see §3.3 for why that weaker, presence-only test is wrong.)
 
-### 3.3 Rejecting double-spawn is forced, and closes a second footgun
+### 3.3 Rejecting double-spawn is forced, and closes a second footgun — for a LIVE task
 
-Two tasks sharing one state object would make a state-keyed lookup **ambiguous**, so the design has
-to decide. Rejecting is the answer that also fixes the documented footgun in which spawning one
-future value twice runs its body twice and returns wrong answers (ADR 0009 §1).
+Two LIVE tasks sharing one state object would make a state-keyed lookup **ambiguous**, so the design
+has to decide. Rejecting is the answer that also fixes the documented footgun in which spawning one
+future value twice runs its body twice and returns wrong answers (ADR 0009 §1) — for the case that
+matters, a future still being driven by an earlier, unreleased task.
 
-**No false positives.** `spawn(f())` twice calls `f()` twice and produces two distinct futures with
-distinct states. Only re-spawning the *same future value* — `let fut = f(); spawn(fut); spawn(fut)`
-— is rejected, which is exactly the footgun.
+**No false positives on two temporally-close calls.** `spawn(f())` twice calls `f()` twice and
+produces two distinct futures with distinct states. Only re-spawning the *same, still-live* future
+value — `let fut = f(); spawn(fut); spawn(fut)` with no `release` in between — is rejected, which is
+exactly the footgun.
+
+**That reasoning does not extend across the program's lifetime, and an earlier version of this
+section did not say so.** A released task's `BY_STATE` entry is never removed (§3), and the collector
+genuinely frees its state once nothing else holds the future — real `dealloc`, not an arena — so the
+same address can legitimately belong to a wholly unrelated, later spawn while a stale entry still
+names the old, long-gone task. Rejecting on **presence** in the map, full stop, would abort that
+later, innocent spawn: a false positive on ordinary code that never re-spawned anything, and
+`gate_async_tasks_under_gc_stress` (which collects on every allocation, against same-sized state
+objects) makes the window real rather than hypothetical.
+
+The check instead asks whether the task an entry names has been **released** (`Task::taken`), not
+merely whether the address was ever used. This is airtight for the case that matters: a recycled
+address requires the old state to have actually been freed, which requires no live handle to hold it
+— so no handle a Nova program can still reach is ever misresolved by allowing the new spawn.
+
+**Consequence: this narrows what the check catches, and the narrowing is real, not free.**
+`Task::taken` distinguishes *released* from *live*, not *dead* from *alive* — a released state a
+caller still holds (Nova has no move checking) is alive but no longer blocks a new spawn at its
+address. So this becomes legal:
+
+```nova
+let h = spawn(f())
+h.join().await
+spawn(h.fut)        // re-polls a completed state machine
+```
+
+Contrived, and the same family as the already-documented double-await footgun, where re-polling a
+finished future re-runs statements after its last suspend (ADR 0009 §1). Closing that too needs to
+know whether the collector has *actually freed* the object, not just whether its task was released —
+a sweep-integration change materially larger than this one. What liveness-checking buys instead is
+removing a non-deterministic abort of code that did nothing wrong, in exchange for a rare, contrived,
+and already-precedented footgun. ADR 0009 §1's residual list gets a new entry for it (Task 3).
 
 ## 4. What this does not do
 
@@ -112,7 +153,11 @@ Not attempted, and each has its own reason:
   must be the literal program from §1, not a paraphrase.
 - **A handle on a never-spawned future aborts**, as a Nova `@test(should_panic)` — the existing
   per-test-process runner makes the abort observable.
-- **Double-spawn aborts**, same shape.
+- **Double-spawn of a LIVE task aborts**, same shape.
+- **Spawning the same future again after it is released succeeds**, and drives a genuinely new task —
+  not the presence-only rejection an earlier version of this design specified. This is the
+  discriminator between "reject on presence" and "reject on liveness": the former aborts here, the
+  latter does not.
 - **`join` twice still returns the same value twice** with no abort. This is the regression guard on
   idempotence, which the release-then-read ordering exists to provide.
 - **The gate fixture's output is byte-identical** under `nova run`, `nova build`, and
@@ -127,7 +172,8 @@ Mutation targets, named here rather than left to review:
 |---|---|
 | Look the task up by `id` again, ignoring the state | the forged-handle test — it would hang again |
 | Drop the not-a-task check | the never-spawned test |
-| Drop the already-a-task check | the double-spawn test |
+| Drop the already-a-live-task check | the double-spawn (live) test |
+| Reject on presence instead of liveness | the spawn-after-release test — it would abort a legitimate spawn |
 | Remove the map entry on release | `join` twice |
 
 ## 6. Risks
@@ -140,15 +186,17 @@ Mutation targets, named here rather than left to review:
    parameter of the calling generic function", which is why every `std/task` wrapper declares
    exactly one. A wrong arity fails as `E0010`, not as a miscompile.
 3. **The doc sweep.** `task.rs:1025` describes a scenario this makes unreachable, and ADR 0009 §1's
-   residual list changes for both the `JoinHandle` residual and the spawn-twice footgun. This
-   project's most repeated defect is a comment describing behaviour a change has just altered, and
-   ADR 0009 §2 records the rule; a commit that changes enforcement must sweep every document
+   residual list changes for the `JoinHandle` residual, the spawn-twice footgun, and (found during
+   implementation, §3.3) a third: `spawn` re-running a released-but-still-held future's state machine.
+   This project's most repeated defect is a comment describing behaviour a change has just altered,
+   and ADR 0009 §2 records the rule; a commit that changes enforcement must sweep every document
    asserting the old behaviour.
 
 ## 7. Definition of done
 
 - The §1 forged-handle program aborts with a diagnostic naming the cause; it does not hang.
-- Double-spawn is rejected; `spawn(f())` twice still works.
+- Double-spawn of a live task is rejected; `spawn(f())` twice still works; spawning the same future
+  again *after it is released* also still works (liveness, not presence — §3.3).
 - `join` remains idempotent.
 - The gate fixture is byte-identical under all three configurations, with no `.stdout` regeneration.
 - Suite green at 807 + the new tests, 0 failed; clippy `-D warnings` and `cargo fmt --check` clean.

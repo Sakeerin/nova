@@ -162,7 +162,18 @@ thread_local! {
     /// which only calling an `async fn` produces.
     ///
     /// Entries are never removed. A released task's entry must stay so a
-    /// second `join` still answers, which is what keeps `join` idempotent.
+    /// second `join` still answers, which is what keeps `join` idempotent --
+    /// but that is only half of what never-removing costs. The collector
+    /// genuinely frees a released, unreachable state (`gc.rs`'s sweep calls
+    /// the real deallocator), so its address can be handed to a later,
+    /// wholly unrelated allocation while this map still names the OLD task
+    /// at that key. Presence here is therefore not the same question as "is
+    /// this address still in use" -- `spawn_internal`'s duplicate check
+    /// consults `Task::taken` for that, not this map alone (see its own
+    /// comment). The two Nova-facing reads need no such check: a caller can
+    /// only ever hold a future for a task that is still reachable, and a
+    /// state whose future is reachable cannot have been freed and recycled
+    /// out from under it.
     static BY_STATE: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
     /// Set for the duration of one `nova_rt_task_block_on` call, so a nested
     /// call (a poll function calling `block_on` again) can be diagnosed
@@ -216,15 +227,44 @@ unsafe fn read_future(future: *mut u8) -> (PollFn, *mut u8) {
 unsafe fn spawn_internal(future: *mut u8) -> i64 {
     // SAFETY: forwarding this function's own contract.
     let (poll, state) = unsafe { read_future(future) };
-    // Two tasks sharing one state object would make this map ambiguous, so
-    // the lookup forces a decision here. Rejecting is also what closes the
-    // footgun in which one future value spawned twice runs its body twice:
-    // `spawn(f())` twice produces two distinct futures and is unaffected --
-    // only re-spawning the same future value reaches this.
-    if BY_STATE.with(|m| m.borrow().contains_key(&(state as usize))) {
-        abort_with(
-            "nova_rt_task_spawn: this future is already a task; a future may be spawned at most once",
-        );
+    // Two LIVE tasks sharing one state object would make this map ambiguous,
+    // so the lookup forces a decision here -- but presence in `BY_STATE` is
+    // not liveness. `gc.rs`'s sweep frees an unreachable object through the
+    // real allocator, so once a task is released and nothing else holds its
+    // future, its state can be collected and the address handed out again to
+    // a wholly unrelated, later spawn; rejecting on presence alone would abort
+    // code that did nothing wrong. Checking `Task::taken` instead (has the
+    // task this address last named been released?) is airtight for the case
+    // that matters: a recycled address requires the old state to have
+    // actually been freed, which requires no live handle to hold it, so no
+    // reachable handle can ever be misresolved by allowing the new spawn.
+    //
+    // This also reopens the footgun of one future value spawned twice --
+    // narrower than before, not eliminated: `spawn(f())` twice still produces
+    // two distinct futures and is unaffected, but `Task::taken` distinguishes
+    // *released* from *live*, not *dead* from *alive*, so a released future a
+    // caller still holds (Nova has no move checking) now passes this check
+    // too. `spawn(h.fut)` after `h.join()` is therefore legal and re-polls
+    // the completed state machine from its last suspend point -- the same
+    // family as the already-documented double-await footgun (ADR 0009). What
+    // this trades away is a non-deterministic abort of code that never
+    // re-spawned anything, for a rare, contrived, and already-precedented
+    // one. Distinguishing "released but still held" from "freed and
+    // recycled" needs to know whether the collector has actually freed the
+    // object, which is a sweep-integration change well beyond this check.
+    if let Some(prior) = BY_STATE.with(|m| m.borrow().get(&(state as usize)).copied()) {
+        let still_live = TASKS.with(|tasks| {
+            !tasks
+                .borrow()
+                .get(prior as usize)
+                .expect("BY_STATE named a task id that TASKS does not have")
+                .taken
+        });
+        if still_live {
+            abort_with(
+                "nova_rt_task_spawn: this future is already a live task; spawn it again only after its task has been released",
+            );
+        }
     }
     // The state object sits on no Nova stack and in no register while its
     // task is queued or parked -- the executor is its only reference, and
@@ -1218,6 +1258,36 @@ mod tests {
             nova_rt_task_release(fut);
         }
         assert_eq!(gc::root_count(state), 0);
+    }
+
+    #[test]
+    fn spawning_the_same_future_again_after_release_succeeds() {
+        // Presence in `BY_STATE` is not what must be rejected: the collector
+        // genuinely frees a released, unreachable state (`gc.rs`'s sweep calls
+        // the real deallocator), so an unrelated later spawn can legitimately
+        // land its own fresh state at an address the map still names from a
+        // task that is long gone. What has to stay rejected is two LIVE tasks
+        // sharing one state, which is what would make the map ambiguous -- a
+        // released task's entry must not block a new one at the same address.
+        // The same future value is reused here rather than waiting on a real
+        // collection to hand back the address: released-but-still-held and
+        // freed-and-recycled are the same case as far as this check can tell
+        // (see `spawn_internal`'s comment), so reusing `fut` after releasing
+        // it is the cheapest way to exercise the address-reuse shape directly.
+        let fut = make_future(poll_ready_now, 0);
+        let id1 = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_release(fut) };
+        let id2 = unsafe { nova_rt_task_spawn(fut) };
+        assert_ne!(
+            id1, id2,
+            "the second spawn must register a new task, not reuse the first's"
+        );
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(
+            unsafe { nova_rt_task_is_done(fut) },
+            1,
+            "the re-spawned task must actually run, not merely avoid aborting"
+        );
     }
 
     /// The exact layout `nova_rt_task_yield_future` builds, read back from the

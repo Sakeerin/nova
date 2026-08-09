@@ -4,7 +4,7 @@
 
 **Goal:** A `JoinHandle` can no longer name a task other than its own future's, and a forged handle aborts with a diagnostic instead of hanging the executor forever.
 
-**Architecture:** Task ids stay as the executor's *internal* identity — `poll_one`, `run_to_completion` and `take_output_internal` keep using them. Only the two *Nova-facing* entry points change: `nova_rt_task_is_done` and `nova_rt_task_release` take the future, read word 1 for the state address, and look the task up in a new thread-local map. Because two tasks sharing one state would make that lookup ambiguous, `spawn` rejects a future that is already a task — which also closes the documented double-spawn footgun.
+**Architecture:** Task ids stay as the executor's *internal* identity — `poll_one`, `run_to_completion` and `take_output_internal` keep using them. Only the two *Nova-facing* entry points change: `nova_rt_task_is_done` and `nova_rt_task_release` take the future, read word 1 for the state address, and look the task up in a new thread-local map. Because two LIVE tasks sharing one state would make that lookup ambiguous, `spawn` rejects a future that names a task which has not yet been released — which also closes the documented double-spawn footgun for a task still in flight. **Corrected during Task 1** (see that section): the map's entries are never removed, and the collector genuinely frees a released state, so rejecting on mere *presence* in the map is a false positive on a later, unrelated spawn that recycles the address — the check has to be liveness (`Task::taken`), not presence. A released task's entry stays for `join`'s idempotence but no longer blocks a new spawn at its address.
 
 **Tech Stack:** Rust (nova-runtime, nova-mir, nova-typeck), Nova (`std/task`), `nova test` for the abort cases.
 
@@ -167,20 +167,72 @@ Add a thread-local beside `TASKS`:
     /// which only calling an `async fn` produces.
     ///
     /// Entries are never removed. A released task's entry must stay so a
-    /// second `join` still answers, which is what keeps `join` idempotent.
+    /// second `join` still answers, which is what keeps `join` idempotent --
+    /// but that is only half of what never-removing costs. The collector
+    /// genuinely frees a released, unreachable state (`gc.rs`'s sweep calls
+    /// the real deallocator), so its address can be handed to a later,
+    /// wholly unrelated allocation while this map still names the OLD task
+    /// at that key. Presence here is therefore not the same question as "is
+    /// this address still in use" -- `spawn_internal`'s duplicate check
+    /// consults `Task::taken` for that, not this map alone (see its own
+    /// comment). The two Nova-facing reads need no such check: a caller can
+    /// only ever hold a future for a task that is still reachable, and a
+    /// state whose future is reachable cannot have been freed and recycled
+    /// out from under it.
     static BY_STATE: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
 ```
 
 `spawn_internal` inserts, and rejects a duplicate:
 
+**Corrected during implementation.** A presence-only check here (`BY_STATE` has this key at all) is a
+latent false positive on legitimate `spawn`: `BY_STATE` never removes an entry, and the collector
+genuinely frees a released, unreachable state through the real allocator, so a later, wholly unrelated
+spawn can land its own fresh state at a recycled address and hit a stale entry that names a task with
+nothing wrong with it. `gate_async_tasks_under_gc_stress` collects on every allocation against
+same-sized state objects, so the window is not hypothetical. The check below is what was actually
+built and committed: it tests **liveness** (`Task::taken` — has the named task been released?), not
+mere presence. The narrowing this trades in is real and is spelled out in the check's own comment: a
+released future a caller still holds can be spawned again, re-polling its completed state machine.
+
 ```rust
-    // Two tasks sharing one state object would make this map ambiguous, so
-    // the lookup forces a decision here. Rejecting is also what closes the
-    // footgun in which one future value spawned twice runs its body twice:
-    // `spawn(f())` twice produces two distinct futures and is unaffected --
-    // only re-spawning the same future value reaches this.
-    if BY_STATE.with(|m| m.borrow().contains_key(&(state as usize))) {
-        abort_with("nova_rt_task_spawn: this future is already a task; a future may be spawned at most once");
+    // Two LIVE tasks sharing one state object would make this map ambiguous,
+    // so the lookup forces a decision here -- but presence in `BY_STATE` is
+    // not liveness. `gc.rs`'s sweep frees an unreachable object through the
+    // real allocator, so once a task is released and nothing else holds its
+    // future, its state can be collected and the address handed out again to
+    // a wholly unrelated, later spawn; rejecting on presence alone would
+    // abort code that did nothing wrong. Checking `Task::taken` instead (has
+    // the task this address last named been released?) is airtight for the
+    // case that matters: a recycled address requires the old state to have
+    // actually been freed, which requires no live handle to hold it, so no
+    // reachable handle can ever be misresolved by allowing the new spawn.
+    //
+    // This also reopens the footgun of one future value spawned twice --
+    // narrower than before, not eliminated: `spawn(f())` twice still produces
+    // two distinct futures and is unaffected, but `Task::taken` distinguishes
+    // *released* from *live*, not *dead* from *alive*, so a released future a
+    // caller still holds (Nova has no move checking) now passes this check
+    // too. `spawn(h.fut)` after `h.join()` is therefore legal and re-polls
+    // the completed state machine from its last suspend point -- the same
+    // family as the already-documented double-await footgun (ADR 0009). What
+    // this trades away is a non-deterministic abort of code that never
+    // re-spawned anything, for a rare, contrived, and already-precedented
+    // one. Distinguishing "released but still held" from "freed and
+    // recycled" needs to know whether the collector has actually freed the
+    // object, which is a sweep-integration change well beyond this check.
+    if let Some(prior) = BY_STATE.with(|m| m.borrow().get(&(state as usize)).copied()) {
+        let still_live = TASKS.with(|tasks| {
+            !tasks
+                .borrow()
+                .get(prior as usize)
+                .expect("BY_STATE named a task id that TASKS does not have")
+                .taken
+        });
+        if still_live {
+            abort_with(
+                "nova_rt_task_spawn: this future is already a live task; spawn it again only after its task has been released",
+            );
+        }
     }
 ```
 
@@ -248,6 +300,32 @@ which runs inside a generated poll frame with no landing pads.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
+
+- [ ] **Step 7 (post-review correction): Liveness, not presence**
+
+Code review of the commit above found a defect in this section's own design, not in its
+implementation: the duplicate-spawn check above rejects on *presence* in `BY_STATE`, and `BY_STATE`
+never removes an entry (by design, for `join`'s idempotence). `gc.rs`'s sweep genuinely frees a
+released, unreachable state through the real allocator, so once a task is released and its future
+becomes unreachable, a later, wholly unrelated `spawn` can have its own fresh state land at that same
+recycled address — and hit the stale entry, aborting code that did nothing wrong.
+`gate_async_tasks_under_gc_stress` collects on every allocation against same-sized state objects, so
+the window is real, not hypothetical. See the spec's §3.3 for the full argument and the accepted
+consequence (a released-but-still-held future can now be spawned again, re-polling its completed
+state machine — the same family as the already-documented double-await footgun, ADR 0009 §1).
+
+The fix: check `Task::taken` (has the task this address names been released?) instead of mere
+presence. Applied directly to `spawn_internal` and to the `BY_STATE`/duplicate-check snippets above,
+which now show the corrected code rather than the original.
+
+**Required test**, added to Step 1's set: `spawn(fut)` → `release(fut)` → `spawn(fut)` must succeed —
+verified to abort under the original presence check and to succeed under the liveness check. Existing
+tests, including `releasing_the_same_future_twice_unroots_once` and the live-task duplicate-spawn
+abort (unwritten, as ever — an abort cannot be asserted via `catch_unwind`), all still pass/hold.
+
+Committed separately from Step 6's commit, on the same branch, same file plus the two document updates
+this correction required (this plan and the design spec). See
+`.superpowers/sdd/2026-08-08-joinhandle-task-identity/task-1-report.md` for the fix's full account.
 
 ---
 
