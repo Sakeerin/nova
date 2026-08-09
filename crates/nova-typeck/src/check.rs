@@ -15366,11 +15366,49 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_declarations_own_body_is_never_checked() {
+        // Pins skip-not-register: `reject_reserved_type_name` returns before
+        // `push_def`, so the rejected item never enters `defs` and is never
+        // visited by `collect_records`/`collect_type_arities` (which iterate
+        // `defs()` directly, independent of the name lookup that rejected
+        // it). A field naming an ordinary type (`v: Int`) can't discriminate
+        // this -- it would convert cleanly whether or not the record were
+        // processed. A field naming an unresolvable one can: if a future
+        // change made rejection register the def anyway, `collect_records`
+        // would convert this field and add a second diagnostic for `Nope`
+        // alongside `E0089`. `check_src` runs the type checker unconditionally
+        // (unlike the driver, which stops after a resolver error), so this
+        // is the layer where such a regression would actually surface.
+        let r = check_src("record Bool { v: Nope }\nfn main() { }");
+        assert_eq!(
+            r.diagnostics.len(),
+            1,
+            "expected only E0089, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| (&d.code, &d.message))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(r.diagnostics[0].code, "E0089");
+    }
+
+    #[test]
     fn declaring_a_type_named_for_a_builtin_is_rejected() {
-        // All six names, both declaration forms. A user type under one of these
-        // names can never be referred to -- `convert_ty` resolves the name to the
-        // built-in before it reaches `resolve_type` -- so the declaration is
-        // rejected where the user can act on it rather than at every use site.
+        // All six names, both declaration forms. `convert_ty` resolves the name
+        // to the built-in before it ever reaches `resolve_type`, so a type
+        // declared under one of these names could never be named in a type
+        // annotation -- a parameter, return type, `let` annotation, field type,
+        // or generic argument. Rejecting the declaration puts that fact where
+        // the user can act on it, rather than only once it is named in a
+        // signature.
+        //
+        // This also forecloses construction and pattern matching, which used to
+        // work (a record literal resolves through `resolve_type` directly; a
+        // sum type's variants live in the value namespace, both independent of
+        // `convert_ty`) -- a real, accepted breaking change for that narrower
+        // usage. See CHANGELOG.md for exactly what breaks, and
+        // `a_rejected_declarations_own_body_is_never_checked` for the
+        // no-cascade guarantee this rejection still provides.
         for name in nova_resolver::RESERVED_TYPE_NAMES {
             for src in [
                 format!("record {name} {{ v: Bool }}\nfn main() {{ }}"),

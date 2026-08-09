@@ -884,13 +884,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Future` — are now reserved: declaring a `record` or a sum `type` under one
   of them is rejected (`E0089`) instead of compiling. `convert_ty` resolves
   each of these names to its built-in type before a user declaration is ever
-  consulted, so such a declaration could never be referred to in any
-  annotation — every program that declared one already failed at its first
-  use, reporting the same type on both sides of the mismatch. **Nothing that
-  previously worked breaks**; this only moves the diagnostic to the
-  declaration, where it can be acted on. Generic parameters and trait names
-  are separate namespaces and are unaffected: `fn f<Int>(x: Int) -> Int { x }`
-  and `trait Int { fn m(self) -> Int }` both remain legal.
+  consulted, so such a declaration could never be named in a type annotation
+  — a parameter, return type, `let` annotation, field type, or generic
+  argument. **This is a breaking change, not a no-op**: construction and
+  pattern matching resolve through a different path (a record literal
+  through `resolve_type` directly; a sum type's variants through the value
+  namespace) and worked, before this change, for a type declared under one
+  of these names — only naming the type in a signature was already
+  impossible. See the Changed entry below for exactly what now breaks.
+  Generic parameters and trait names are separate namespaces and are
+  unaffected: `fn f<Int>(x: Int) -> Int { x }` and
+  `trait Int { fn m(self) -> Int }` both remain legal.
 
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 
@@ -906,6 +910,13 @@ already compiled. Full detail is in the associated-types entry above.
   self type (`E0900`), a trait declaring the same associated type twice, and a
   trait declaring the same method name twice (both `E0403`). All three were
   silently accepted, and the first was invisible to overlap checking.
+- **A `record` or sum `type` declared under a reserved built-in type name is
+  now rejected** (`E0089`; full detail in the Added entry above), rather than
+  compiling. This breaks a program that used such a declaration only through
+  construction, pattern matching, and inferred local bindings — never naming
+  the type in a signature — which worked before. Accepted rather than fixed
+  a different way, because a type that can be built and matched but never
+  named in any annotation is a trap not worth leaving open.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova

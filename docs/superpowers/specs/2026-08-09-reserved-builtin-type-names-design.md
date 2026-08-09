@@ -9,9 +9,10 @@
 ## 1. Why this, and why now
 
 A user can declare a type whose name is a built-in type's, and the declaration is then **permanently
-unusable** — `convert_ty` resolves those names to the built-in *before* it ever reaches
-`resolve_type`, so every annotation spelling the name means the built-in. The declaration compiles;
-only the use site fails, and it fails with a message naming the same type on both sides:
+unusable in type position** — `convert_ty` resolves those names to the built-in *before* it ever
+reaches `resolve_type`, so every annotation spelling the name means the built-in. The declaration
+compiles; a type annotation is where it fails, and it fails with a message naming the same type on
+both sides:
 
 ```nova
 record Bool { v: Int }
@@ -22,8 +23,13 @@ error[E0014]: cannot access field `v` on `Bool`
 error[E0010]: argument to `get` has type `Bool` but `Bool` was expected
 ```
 
+> **Scoped, 2026-08-09 (post-implementation review).** "Unusable" and "the use site fails" originally
+> read as unqualified — every use, not only an annotation. That is the same overclaim §3.2 makes at
+> length and is corrected there, with the mechanism; every other instance of it in this document
+> points back to that note rather than repeating it.
+
 `record Int { v: Bool }` compiles clean on its own, with no diagnostic at all until something tries
-to use it.
+to name it in a type annotation.
 
 The whole-branch review raised this for `Future` only, on the reasoning that `Future` is the first
 *generic* compiler-known name and therefore the first that can print identically to a user type "of
@@ -60,8 +66,13 @@ only place the user can act on it, and means a type alias would inherit it for f
 stop being `E0900`.
 
 The message must say two things, because the second is the part a user cannot otherwise discover:
-that the name belongs to a built-in type, and that a declaration under this name could never be
-referred to — every annotation spelling it resolves to the built-in.
+that the name belongs to a built-in type, and that a declaration under this name could not be named
+in any type annotation — every annotation spelling it resolves to the built-in.
+
+> **Corrected, 2026-08-09.** "Could never be referred to" was this document's own overclaim,
+> normative here because this paragraph specifies the message's required content. See §3.2's note
+> for the mechanism; the replacement clause is exactly the "every annotation…" justification this
+> paragraph already gave, which was correct all along.
 
 ### 3.1 Why reject rather than improve the diagnostic
 
@@ -70,12 +81,46 @@ message, and nothing else. The declared type would remain permanently unusable i
 the clearer error would explain a permanent uselessness at the use site instead of preventing it at
 the declaration. Rejecting is the smaller, more honest fix.
 
-### 3.2 Nothing that works breaks
+### 3.2 What breaks, and why it is accepted (originally titled "Nothing that works breaks")
 
-Every program that declares such a type is **already broken** — it simply fails later and worse. A
-declaration alone compiles today, so a program can only be affected if it also uses the type, and
-any such use already fails. This is a no-op for working code, which is why reserving all six costs
-no more than reserving `Future`.
+> **Superseded, 2026-08-09 (post-implementation review). This section's claim was false, and it was
+> the root of a false claim repeated at six other sites in this document** (§1 twice, §3, §4, §5,
+> §7) **and in the implementation's own doc comments, diagnostic message, and `CHANGELOG.md`
+> entry.** The pattern in every case is the same: §1 measured one shape — a type named in a type
+> annotation — and this section generalised from it to "any use", without checking the value
+> namespace.
+>
+> The missing mechanism: `check_record_literal` resolves a record literal's head through
+> `self.defs.resolve_type` **directly**, never through `convert_ty`. A sum type's variants are
+> inserted into the **value** namespace by `collect_item`, entirely independent of the sum type's own
+> name. Neither path is gated by the built-in-name short-circuit that makes *type-position* uses of
+> these six names permanently broken. So before this check existed, a record or sum type declared
+> under one of these names could already be **constructed and pattern-matched** — only *naming the
+> type in a type annotation* (a parameter, return type, `let` annotation, field type, or generic
+> argument) was already broken.
+>
+> Reproduced at the base commit (`1f30182`), in an isolated worktree: `record Bool { v: Int }`,
+> constructed via `Bool { v: 1 }` and read back via `.v`, compiles and runs, printing `1`.
+> `type Bool = | Yes | No`, constructed via the bare variant `Yes` and matched against `Yes`/`No`,
+> compiles and runs, printing `yes`. Both are rejected outright once this check exists, with no
+> alternative spelling — a real, accepted breaking change, not a no-op.
+>
+> **The corrected claim:** a program that declares one of these six names and only ever uses it
+> through construction, pattern matching, and inferred local bindings — never naming it in a type
+> annotation — was not broken, and this change breaks it. The rule stands regardless: a type that can
+> be built but never named in a signature is unusable for anything beyond a self-contained local
+> computation, which is a trap worth closing even at the cost of breaking the narrower usage that
+> happened to work by accident. Only the justification and the cost change, not the decision.
+> Reserving all six still costs no more than reserving *any single one* of them — the break is the
+> same shape regardless of which name it lands on — but "costs no more than one" no longer means
+> "costs nothing". See `CHANGELOG.md`'s `[Unreleased]` entry (filed under both `### Added` and
+> `### Changed`, the latter for exactly this reason) for the precise, user-facing statement of what
+> breaks.
+
+Every program that declares such a type and *names it in a type annotation* is already broken there
+— it simply fails later and worse, at the use site rather than the declaration. A declaration whose
+type is only ever constructed and matched, never annotated, compiles and runs correctly today; this
+change makes it `E0089` regardless.
 
 ## 4. Non-goals, and why each is deliberate
 
@@ -83,8 +128,20 @@ Each is pinned by a test, so a later tidy-up cannot quietly widen the rule:
 
 - **Generic parameters stay legal.** `fn f<Int>(x: Int) -> Int { x }` works correctly — measured.
   `convert_ty` resolves generics before the built-in table, so the parameter genuinely shadows the
-  primitive and the function behaves as written. Rejecting it would be a breaking change to
-  something that is not broken, unlike the declaration case which is a no-op for working code.
+  primitive and the function behaves as written.
+
+  > **Repaired, 2026-08-09.** This used to end "unlike the declaration case which is a no-op for
+  > working code" — a contrast that collapses once §3.2 is corrected, since the declaration case is
+  > *also* a breaking change now. The distinction was never breaking-vs-no-op; it is **works
+  > correctly vs. works only partially**. A generic parameter named `Int` behaves exactly as written
+  > at every type it is called with — proved behaviourally, not merely by compiling, at two different
+  > types (`Int` and `String`) in `tests/runtime/generics.nova`'s `shadow_builtin`. A type declared
+  > under a reserved name, by contrast, can be built and matched but can never be *named*: it cannot
+  > appear as a parameter, return type, field type, or generic argument anywhere, which makes it
+  > unusable in any signature no matter what else works. The generic case has no corresponding hole
+  > to begin with, so there is nothing for rejecting it to close — rejecting it would be a breaking
+  > change with no defect behind it, which is what makes it wrong where the declaration case is right
+  > despite both now breaking something that compiled.
 - **Trait names stay legal.** Traits are a separate namespace; `trait Int` does not shadow the type
   and remains usable as a bound — measured.
 - **Value names are untouched.** A different namespace again, and not the reported defect.
@@ -94,7 +151,8 @@ Each is pinned by a test, so a later tidy-up cannot quietly widen the rule:
 
 - One case per reserved name, for `record` and for sum `type` — twelve declarations, each rejected
   with `E0089`. A list-driven test is fine; asserting the code alone is not, because the message's
-  second half (that the declaration could never be referred to) is the part carrying the value.
+  second half — that the declaration could not be named in any type annotation (corrected,
+  2026-08-09; originally "could never be referred to", see §3.2) — is the part carrying the value.
 - **The three non-goals, each asserted positively:** a generic parameter named `Int` still compiles
   *and returns the right answer*; `trait Int` still compiles; a value named for a built-in is
   unaffected. Compiling is not enough for the generic case — it worked correctly before and must
@@ -134,9 +192,12 @@ Mutation targets, named here rather than left to review:
 ## 7. Definition of done
 
 - All six names rejected in both declaration forms, with a message naming the built-in and stating
-  the declaration could never be referred to.
+  the declaration could not be named in any type annotation (corrected, 2026-08-09; originally
+  "could never be referred to" — see §3.2, this was this document's own overclaim, normative here
+  since this is an acceptance criterion).
 - All three non-goals still work, each pinned by a test, with the generic case asserting behaviour
   rather than mere compilation.
 - The reserved list and `convert_ty`'s tables cannot drift apart unnoticed.
 - Suite green, clippy `-D warnings` and `cargo fmt --check` clean.
-- `CHANGELOG.md` records the new rejection as a language-surface change.
+- `CHANGELOG.md` records the new rejection as a breaking, language-surface change, stating precisely
+  what breaks (corrected, 2026-08-09; see §3.2).

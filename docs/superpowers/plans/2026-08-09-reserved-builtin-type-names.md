@@ -71,9 +71,13 @@ In `crates/nova-typeck/src/check.rs`'s `mod tests`. The helper is `check_src(src
 #[test]
 fn declaring_a_type_named_for_a_builtin_is_rejected() {
     // All six names, both declaration forms. A user type under one of these
-    // names can never be referred to -- `convert_ty` resolves the name to the
-    // built-in before it reaches `resolve_type` -- so the declaration is
-    // rejected where the user can act on it rather than at every use site.
+    // names can never be named in a type annotation -- `convert_ty` resolves
+    // the name to the built-in before it reaches `resolve_type` -- so the
+    // declaration is rejected where the user can act on it rather than at
+    // every annotation use site. [Corrected 2026-08-09 from "can never be
+    // referred to" -- see the spec's §3.2 note. Construction and pattern
+    // matching resolve outside `convert_ty` and this rejection breaks them
+    // too; that was this plan's own instance of the same overclaim.]
     for name in nova_resolver::RESERVED_TYPE_NAMES {
         for src in [
             format!("record {name} {{ v: Bool }}\nfn main() {{ }}"),
@@ -206,9 +210,19 @@ pub const RESERVED_TYPE_NAMES: [&str; 6] =
     ["Int", "Float", "Bool", "Char", "String", "Future"];
 ```
 
+**Corrected 2026-08-09 (post-implementation review) — this sample text was wrong, do not copy it
+verbatim.** "Every use of it would fail instead" overclaims: `check_record_literal` resolves a
+record literal's head through `resolve_type` directly, and a sum type's variants live in the value
+namespace, both independent of `convert_ty`. Construction and pattern matching worked before this
+change; only naming the type in a type annotation was already broken. See the spec's §3.2 for the
+full mechanism and what this means for the change's cost, and `crates/nova-resolver/src/lib.rs`'s
+actual `RESERVED_TYPE_NAMES` doc comment for the corrected wording that shipped.
+
 Then the check at both type-collection sites — the sum arm and the record arm identified in Step 1 — emitting `E0089` and **skipping the definition** rather than registering it, so a following use reports nothing extra. Model the diagnostic's construction and labelling on the neighbouring `E0002`.
 
-Message shape: name the built-in, and state that a declaration under this name could never be referred to. Do not narrate the mechanism in the diagnostic; the doc comment above owns that.
+Message shape: name the built-in, and state that a declaration under this name could not be named in any type annotation. Do not narrate the mechanism in the diagnostic; the doc comment above owns that.
+
+*(Corrected 2026-08-09: originally "could never be referred to" — this plan's own instance of the §3.2 overclaim. Construction and pattern matching are a different, unaffected-by-`convert_ty` path, so "referred to" was too broad; "named in any type annotation" is the claim that is actually true.)*
 
 Finally, add a one-line pointer at `convert_ty`'s built-in table naming `RESERVED_TYPE_NAMES` as the list a new built-in type name must also join. **That pointer is the only mitigation for the drift direction no test can catch**, so it must be at the table, not only in the const's own doc.
 
@@ -236,7 +250,9 @@ cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -3
 cargo fmt --all --check
 ```
 
-Add a `CHANGELOG.md` entry under `[Unreleased]` recording this as a **language-surface change**: the six names, both forms, and that nothing which previously worked breaks — a declaration under one of these names was already unusable in any annotation.
+Add a `CHANGELOG.md` entry under `[Unreleased]` recording this as a **language-surface change**: the six names, both forms, and that a declaration under one of these names was already unusable in any annotation.
+
+*(Corrected 2026-08-09: dropped "and that nothing which previously worked breaks" — false. Construction, pattern matching, and inferred local bindings for a type declared under one of these six names worked before this change and do not after; see the spec's §3.2. File the entry as a breaking change, cross-filed under both `### Added` and `### Changed` per this changelog's own precedent for a behaviour change, not only under `### Added`.)*
 
 ```bash
 git add crates/nova-resolver/src/lib.rs crates/nova-typeck/src/check.rs CHANGELOG.md
@@ -263,6 +279,14 @@ are a separate namespace.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
+
+**Note, 2026-08-09: this suggested message was committed essentially verbatim as `4ad1187`, false
+claim included** ("Nothing that worked breaks. Such a declaration was already unreferrable, so any
+program using one already failed…"). A commit message cannot be edited after the fact without
+rewriting history, so it is left as the historical record of what this plan asked for and what was
+believed true at the time; `CHANGELOG.md`'s corrected `[Unreleased]` entry is the correction of
+record for a reader of the repository, and this note is the correction of record for a reader of
+this plan. See the spec's §3.2 for the mechanism that was missed.
 
 ---
 
