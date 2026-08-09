@@ -274,9 +274,9 @@ impl RtFunc {
             RtFunc::Panic => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TestSelector => (vec![], MirTy::I64),
             RtFunc::TaskSpawn | RtFunc::TaskBlockOn => (vec![MirTy::Ptr], MirTy::I64),
-            RtFunc::TaskIsDone => (vec![MirTy::I64], MirTy::I8),
+            RtFunc::TaskIsDone => (vec![MirTy::Ptr], MirTy::I8),
             RtFunc::TaskTakeOutput => (vec![MirTy::I64], MirTy::I64),
-            RtFunc::TaskRelease => (vec![MirTy::I64], MirTy::Unit),
+            RtFunc::TaskRelease => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
         }
     }

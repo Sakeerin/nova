@@ -7092,8 +7092,8 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::TestSelector => (vec![], Ty::Int),
         Builtin::TaskSpawn => (vec![future_of_param0()], Ty::Int),
-        Builtin::TaskIsDone => (vec![Ty::Int], Ty::Bool),
-        Builtin::TaskRelease => (vec![Ty::Int], Ty::Unit),
+        Builtin::TaskIsDone => (vec![future_of_param0()], Ty::Bool),
+        Builtin::TaskRelease => (vec![future_of_param0()], Ty::Unit),
         Builtin::TaskDrive => (vec![future_of_param0()], Ty::Unit),
         Builtin::TaskOutput => (vec![future_of_param0()], Ty::Param(0)),
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
@@ -14866,12 +14866,12 @@ mod tests {
                     "`task_spawn(fut)` in `std/task`'s `spawn<T>`",
                 ),
                 Builtin::TaskIsDone => (
-                    (vec![Ty::Int], Ty::Bool),
-                    "`task_is_done(self.id)` in `JoinHandle<T>::join`",
+                    (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Bool),
+                    "`task_is_done(self.fut)` in `JoinHandle<T>::join`",
                 ),
                 Builtin::TaskRelease => (
-                    (vec![Ty::Int], Ty::Unit),
-                    "`task_release(self.id)` in `JoinHandle<T>::join`",
+                    (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Unit),
+                    "`task_release(self.fut)` in `JoinHandle<T>::join`",
                 ),
                 Builtin::TaskDrive => (
                     (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Unit),

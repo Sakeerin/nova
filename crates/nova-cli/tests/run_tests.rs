@@ -1226,6 +1226,47 @@ fn run_aborts_when_an_async_fn_calls_block_on() {
     );
 }
 
+/// The headline case of `2026-08-08-joinhandle-task-identity`: the review's
+/// exact forged-handle program, which used to pass `nova check` and then
+/// hang forever with empty stdout and stderr (see ADR 0009). `JoinHandle`'s
+/// field is public, so nothing stops building one directly
+/// with a future that was never handed to `spawn` -- see the fixture's own
+/// doc comment for why that used to name `block_on`'s own root task rather
+/// than aborting.
+///
+/// Keyed on the future's own state address instead of a forgeable `Int` id,
+/// there is no task left to misresolve to, so this must now abort with a
+/// diagnostic instead of hanging -- asserted on the message, not merely on
+/// failure, and the test completing at all is itself the proof it no longer
+/// hangs.
+#[test]
+fn forged_join_handle_aborts_instead_of_hanging() {
+    let file = repo_root().join("tests/runtime/forged_join_handle.nova");
+
+    // Accepted by every static stage: the hazard is a run-time property of
+    // the executor, and nothing in the language forbids constructing a
+    // `JoinHandle` directly -- record fields are public (ADR 0007).
+    nova().arg("check").arg(&file).assert().success();
+    let assert = nova().arg("run").arg(&file).assert().failure().stdout("");
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(
+            "nova_rt_task_is_done: this future was never spawned, so there is no task to ask about"
+        ),
+        "the abort must name the unspawned-future contract it violated: {stderr}"
+    );
+    assert!(
+        stderr.contains("nova: panic:"),
+        "the diagnostic must come from the runtime's abort path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "the diagnostic must not unwind -- an unwind here would have to pass \
+         through a generated poll frame, which has no unwind description at \
+         all: {stderr}"
+    );
+}
+
 /// Pins reachability semantics end-to-end (mirrors
 /// `nova-mir`'s `unreached_async_fn_compiles_cleanly`, one layer up): an
 /// `async fn` that is declared but never called from `main` must still run
@@ -4657,6 +4698,132 @@ fn should_panic_fails_distinctly_when_the_test_does_not_panic() {
          test does_not_actually_panic ... FAILED (expected a panic, but the test passed)\n\
          \n\
          test result: FAILED. 0 passed; 1 failed; 0 trapped; 1 total\n"
+    );
+}
+
+// === `2026-08-08-joinhandle-task-identity`: `JoinHandle` keyed on its future,
+// not a forgeable id ===
+//
+// The forged-handle hang itself is `forged_join_handle_aborts_instead_of_hanging`
+// above (a `nova run` gate, since the whole point is that it must *complete*).
+// The two cases below are its `@test(should_panic)` siblings -- observable
+// this way because each test runs in its own process (`cmd/test.rs`'s design),
+// so one `abort_with` cannot take any other test down with it -- plus the
+// false-positive guard neither would catch on its own: an over-broad
+// duplicate-spawn rejection (keying on mere `BY_STATE` presence rather than
+// `Task::taken` liveness) would make ordinary double-spawning abort too, and
+// nothing above would say so.
+
+/// `join` on a handle built directly from a future that was never `spawn`ed
+/// aborts, and spawning one future value twice aborts -- the two ways
+/// `nova_rt_task_is_done`/`nova_rt_task_release`/`nova_rt_task_spawn` reject a
+/// future they cannot (or must not) resolve. Both land on `abort_with`, which
+/// `eprintln!`s the `nova: panic:` marker `cmd/test.rs`'s `classify` looks
+/// for, so a `should_panic` test is satisfied by either -- the same
+/// classification `should_panic_passes_on_a_checked_panic` exercises via
+/// `nova_rt_check_bounds` instead.
+#[test]
+fn join_handle_rejects_a_never_spawned_future_and_a_live_duplicate() {
+    let dir = write_test_project(
+        "nova-test-join-handle-forgery-and-duplicate",
+        "async fn spin() -> Int { 1 }\n\
+         \n\
+         @test(should_panic)\n\
+         fn joining_a_never_spawned_handle_aborts() {\n\
+         \x20\x20let h = JoinHandle { fut: spin() }\n\
+         \x20\x20let _ = block_on(h.join())\n\
+         }\n\
+         \n\
+         @test(should_panic)\n\
+         fn spawning_the_same_future_twice_aborts() {\n\
+         \x20\x20let f = spin()\n\
+         \x20\x20spawn(f)\n\
+         \x20\x20let _ = spawn(f)\n\
+         }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test joining_a_never_spawned_handle_aborts ... ok\n\
+         test spawning_the_same_future_twice_aborts ... ok\n\
+         \n\
+         test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
+    );
+}
+
+/// The false-positive guard the design's own argument needs and the two
+/// `should_panic` tests above cannot provide: two distinct calls to `spin()`
+/// are two distinct futures (each allocates its own state object), so
+/// spawning both must succeed and run to completion, not merely "not abort".
+/// Without this, an over-broad duplicate-spawn rejection would have nothing
+/// in this suite to catch it: neither `should_panic` test above spawns two
+/// live, legitimately distinct futures, so neither would notice a rejection
+/// that fired on that shape too.
+#[test]
+fn spawning_two_distinct_futures_from_the_same_call_site_still_works() {
+    let dir = write_test_project(
+        "nova-test-join-handle-double-spawn-guard",
+        "async fn spin() -> Int { 1 }\n\
+         async fn run_two_spawns() -> Int {\n\
+         \x20\x20let a = spawn(spin())\n\
+         \x20\x20let b = spawn(spin())\n\
+         \x20\x20let ra = a.join().await\n\
+         \x20\x20let rb = b.join().await\n\
+         \x20\x20ra + rb\n\
+         }\n\
+         \n\
+         @test\n\
+         fn spawning_two_distinct_futures_still_works() {\n\
+         \x20\x20assert_eq(block_on(run_two_spawns()), 2)\n\
+         }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test spawning_two_distinct_futures_still_works ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n"
+    );
+}
+
+/// `join` is specified to be idempotent (`std/task/lib.nova`'s own doc
+/// comment on `JoinHandle::join`): `task_release` is a no-op on its second
+/// call, and the value is read back out of the state object's output slot
+/// rather than taken, so it survives being read twice. Keying identity on
+/// the future rather than an id does not disturb this -- both calls resolve
+/// through the same `self.fut`, so there is only ever one task to ask.
+#[test]
+fn joining_a_handle_twice_returns_the_same_value_twice_with_no_abort() {
+    let dir = write_test_project(
+        "nova-test-join-handle-join-twice",
+        "async fn spin() -> Int { 1 }\n\
+         async fn run_join_twice() -> Int {\n\
+         \x20\x20let h = spawn(spin())\n\
+         \x20\x20let a = h.join().await\n\
+         \x20\x20let b = h.join().await\n\
+         \x20\x20a + b\n\
+         }\n\
+         \n\
+         @test\n\
+         fn joining_a_handle_twice_returns_the_same_value_twice() {\n\
+         \x20\x20assert_eq(block_on(run_join_twice()), 2)\n\
+         }\n",
+    );
+
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 1 test\n\
+         test joining_a_handle_twice_returns_the_same_value_twice ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n"
     );
 }
 

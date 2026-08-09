@@ -1,0 +1,24 @@
+// The review's exact forged-handle program (task brief for
+// 2026-08-08-joinhandle-task-identity, headline case). `JoinHandle`'s field
+// is public, so nothing stops constructing one directly instead of going
+// through `spawn` -- naming a future that was never handed to the executor.
+//
+// Before this fix `JoinHandle` also carried an `Int` id, and
+// `task_is_done`/`task_release` looked a task up by that id rather than by
+// the future itself. Task ids are handed out `0, 1, 2, ...` in spawn order,
+// `block_on`'s own root task is always spawned first, and a default-valued
+// `Int` field reads as `0` -- so this exact program named the root task
+// itself and `join`'s `while !task_is_done(id) { yield_now().await }` loop
+// waited forever for the task that was doing the waiting. `nova check`
+// accepted it and `nova run` hung with empty stdout and stderr (see ADR
+// 0009, which discusses this same program).
+//
+// Keyed on the future's own state address instead of an id, there is no
+// task at all for an unspawned future to misresolve to, so this now aborts
+// with a diagnostic instead of hanging.
+async fn spin() -> Int { 1 }
+async fn run() -> Int {
+    let h = JoinHandle { fut: spin() }
+    h.join().await
+}
+fn main() { println("total ${block_on(run())}") }

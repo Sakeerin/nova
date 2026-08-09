@@ -18,16 +18,25 @@
 // advanced only while a `block_on` call is running. See that module's own doc
 // comment, and ADR 0009.
 
-// A handle on a spawned task: its executor id, and the future it is driving.
+// A handle on a spawned task, holding nothing but the future it is driving.
 //
-// The future is held as well as the id because that is where a finished task's
-// value lives — word 1 of the future is the state object, and the output slot
-// of that state object is what the task's poll function wrote when it
-// completed. Reading it there rather than through the executor is what makes
-// `join` both idempotent and correct for every output type: idempotent because
-// nothing is consumed, and correct because the value arrives in its own machine
-// class rather than as the `Int` the executor hands outputs back as (see
-// `Builtin::TaskOutput`).
+// The future alone is both this handle's key into the executor and where a
+// finished task's value lives. `task_is_done`/`task_release` resolve it to a
+// task by its state address (word 1 of the future) rather than by an index,
+// and the output slot of that same state object is what the task's poll
+// function wrote when it completed. Reading the value there rather than
+// through the executor is what makes `join` both idempotent and correct for
+// every output type: idempotent because nothing is consumed, and correct
+// because the value arrives in its own machine class rather than as the `Int`
+// the executor hands outputs back as (see `Builtin::TaskOutput`).
+//
+// This is also what keeps a handle from naming a task other than its own. An
+// `Int` id was constructible out of thin air — record fields are public (ADR
+// 0007) — and nothing stopped it from equaling some other task's id,
+// including one this handle never spawned. A future's state address cannot be
+// forged the same way: the only way to obtain one is to call an `async fn`,
+// so `task_is_done`/`task_release` have no id space to guess at, only the one
+// state this handle's `fut` actually points to.
 //
 // Holding the future also keeps the state object reachable for as long as the
 // handle itself is: the record is a scanned heap object, so the collector
@@ -37,7 +46,7 @@
 // No bound on `T` here: a bound on a record's type parameter is a resolution
 // scope and is not enforced at construction (ADR 0007), so any bound belongs on
 // the `impl` instead. There is none to state.
-pub record JoinHandle<T> { id: Int, fut: Future<T> }
+pub record JoinHandle<T> { fut: Future<T> }
 
 impl<T> JoinHandle<T> {
     // Wait for the task to finish and produce its value.
@@ -54,10 +63,10 @@ impl<T> JoinHandle<T> {
     // deliberately, because Nova has no move checking, so `self` by value
     // cannot stop a second call.
     pub async fn join(self) -> T {
-        while !task_is_done(self.id) {
+        while !task_is_done(self.fut) {
             yield_now().await
         }
-        task_release(self.id)
+        task_release(self.fut)
         task_output(self.fut)
     }
 }
@@ -68,8 +77,12 @@ impl<T> JoinHandle<T> {
 // (or by a `yield_now` inside a task the current `block_on` is already
 // draining) — so a `spawn` with no `block_on` anywhere above it never runs at
 // all.
+//
+// `task_spawn`'s returned id is discarded: the handle's identity is `fut`
+// itself now, so nothing downstream ever needs the id back.
 pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {
-    JoinHandle { id: task_spawn(fut), fut: fut }
+    task_spawn(fut)
+    JoinHandle { fut: fut }
 }
 
 // Suspend the current task, letting every other queued task take a turn.
