@@ -65,11 +65,23 @@ for the state address, and look the task up in a new thread-local map from state
 populated at spawn and never removed. Removal is not needed and would be wrong: a released task's
 entry must stay so a second `join` still answers, which is what keeps `join` idempotent.
 
-Never removing has a consequence `spawn`'s own check has to account for: the collector genuinely
-frees a released, unreachable state through the real allocator (not an arena), so its address can be
-handed to a later, wholly unrelated allocation while the map still names the old task at that key.
-`spawn`'s duplicate check therefore tests **liveness** — has the task this address names already been
-released? — not mere presence in the map. See §3.3.
+Never removing has a consequence `spawn`'s own check has to account for: a freed address is reissued
+rather than retired (`crates/nova-runtime/src/gc.rs`'s module doc comment states that property and is
+the one place it is stated), so a released, unreachable state's address can be handed to a later,
+wholly unrelated allocation while the map still names the old task at that key. `spawn`'s duplicate
+check therefore tests **liveness** — has the task this address names already been released? — not mere
+presence in the map. See §3.3.
+
+> **Superseded by the final whole-branch review of this branch (2026-08-09).** "Never removed" was
+> wrong, and it was wrong on the **read** path this paragraph waves through rather than on `spawn`. An
+> entry that outlived its state object made a *never-spawned* future whose fresh state landed on the
+> recycled address resolve to the old, released task, which reports done — so `join` skipped its wait
+> loop and produced its own never-polled output slot where an abort is required. The shipped design
+> prunes an entry when the collector frees the state object it keys on. That is what §3.3 below calls a
+> "sweep-integration change materially larger than this one"; it turned out to be the cheapest sound
+> option, and it costs `join`'s idempotence nothing, because a state object a handle can still reach is
+> marked through that handle's own future and so is never swept. See ADR 0009 §1 and
+> `.superpowers/sdd/2026-08-08-joinhandle-task-identity/final-fix-report.md`.
 
 **Builtin and `RtFunc` signatures.** `task_is_done` and `task_release` change from `(Int)` to
 `(Future<T>)`. `task_spawn`'s returned id becomes unused by `std/task`; keep the return rather than
@@ -104,11 +116,13 @@ value — `let fut = f(); spawn(fut); spawn(fut)` with no `release` in between �
 exactly the footgun.
 
 **That reasoning does not extend across the program's lifetime, and an earlier version of this
-section did not say so.** A released task's `BY_STATE` entry is never removed (§3), and the collector
-genuinely frees its state once nothing else holds the future — real `dealloc`, not an arena — so the
-same address can legitimately belong to a wholly unrelated, later spawn while a stale entry still
-names the old, long-gone task. Rejecting on **presence** in the map, full stop, would abort that
-later, innocent spawn: a false positive on ordinary code that never re-spawned anything, and
+section did not say so.** A released task's `BY_STATE` entry is never removed (§3 — and see the
+superseding note there, which is where that stopped being true), and a freed address
+is reissued rather than retired (`crates/nova-runtime/src/gc.rs`'s module doc comment, the one place
+that property is stated), so once nothing holds the future its state can be collected and the same
+address can legitimately belong to a wholly unrelated, later spawn while a stale entry still names the
+old, long-gone task. Rejecting on **presence** in the map, full stop, would abort that later, innocent
+spawn: a false positive on ordinary code that never re-spawned anything, and
 `gate_async_tasks_under_gc_stress` (which collects on every allocation, against same-sized state
 objects) makes the window real rather than hypothetical.
 
@@ -134,6 +148,13 @@ know whether the collector has *actually freed* the object, not just whether its
 a sweep-integration change materially larger than this one. What liveness-checking buys instead is
 removing a non-deterministic abort of code that did nothing wrong, in exchange for a rare, contrived,
 and already-precedented footgun. ADR 0009 §1's residual list gets a new entry for it (Task 3).
+
+> **Superseded on the "materially larger" judgement (2026-08-09).** That sweep integration was
+> required anyway, by the read path (§3's note above), and it is a call from the sweep to one
+> removal function. The executor can therefore now tell "released but still held" from "freed and
+> recycled". The re-spawn-after-release footgun is nevertheless **kept**, so it is a decision rather
+> than a limitation from here on: `join` cannot consume the handle that makes the shape expressible,
+> and `spawning_the_same_future_again_after_release_succeeds` pins the acceptance.
 
 ## 4. What this does not do
 

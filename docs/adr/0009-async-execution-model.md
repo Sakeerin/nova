@@ -151,12 +151,37 @@ afterwards.
   `Int`, read word 1 for its state address, and resolve the task through the
   executor's `BY_STATE` map keyed on that address
   (`crates/nova-runtime/src/task.rs`) — there is no id space left to forge,
-  since the only way to obtain a state address is to call an `async fn`. The
-  one case still reachable, a handle on a future that was never spawned at all,
-  now aborts (`nova_rt_task_is_done: this future was never spawned, so there is
-  no task to ask about`) rather than hanging, pinned end to end by
-  `forged_join_handle_aborts_instead_of_hanging`
-  (`crates/nova-cli/tests/run_tests.rs`, `tests/runtime/forged_join_handle.nova`).
+  since the only way to obtain a state address is to call an `async fn`. **A
+  state address is an identity only while the object at it lives, so the map is
+  pruned when the collector frees a state object** (`gc.rs`'s sweep calls
+  `task::forget_freed_state`; the property that makes this necessary is stated
+  once, in `gc.rs`'s module doc comment, and referred to from everywhere else).
+  Without pruning, keying on the address closed the forged-id hole and left a
+  narrower one of the same shape open: a never-spawned future whose fresh state
+  landed on the address of a collected one resolved to the old, released task,
+  which reports done — so `join` skipped its wait loop, `task_release` no-opped,
+  and the value handed back was the caller's own never-polled output slot, `0`
+  for `Int` and a **null pointer** for `String`/`Array`/`Record`/`Sum`/`Fn`,
+  typed to user code as that value. Not a use-after-free (a recycled address
+  implies the old task was already released), but a wrong answer where the
+  design requires a diagnostic. Found by this branch's final whole-branch
+  review, reproduced from Nova source under `NOVA_GC_STRESS=1` on 2026-08-09,
+  and fixed before the branch landed. Pruning is not a trade against `join`'s
+  idempotence: a state object a handle can still reach is marked through that
+  handle's own future — a scanned two-word value holding the state address — so
+  it is never swept and its entry is never pruned. The one case still
+  reachable, a handle on a future that was never spawned at all, now aborts
+  (`nova_rt_task_is_done: this future was never spawned, so there is no task to
+  ask about`) rather than hanging, however the state address was obtained:
+  pinned end to end by `forged_join_handle_aborts_instead_of_hanging` and, for
+  the recycled-address case, `a_recycled_state_address_does_not_resolve_a_never_spawned_future`
+  (`crates/nova-cli/tests/run_tests.rs`, with
+  `tests/runtime/forged_join_handle.nova` and
+  `tests/runtime/recycled_task_state.nova`), plus
+  `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve` and
+  `a_reachable_futures_key_survives_a_collection_so_a_second_read_resolves`
+  (`nova-runtime`), which assert the pruning and its limit deterministically
+  and on every platform.
   The park-set gap itself is unrelated and unchanged: it is still owed by
   whatever adds the first primitive that can park on an external event (an
   `await` on a channel nothing sends to) — a park set plus a deadlock diagnostic
@@ -169,23 +194,28 @@ afterwards.
   now checks `Task::taken` and aborts (`nova_rt_task_spawn: this future is
   already a live task; spawn it again only after its task has been released`)
   when the future's state already names a task that has not been released.
-  This is a *liveness* check rather than a presence check, deliberately: the
-  executor's `BY_STATE` map never removes an entry, and the collector genuinely
-  frees a released, unreachable state and can hand its address to a later,
-  unrelated allocation, so rejecting on bare presence would abort a spawn that
-  did nothing wrong. The liveness check closes the case above, but **reopens a
-  narrower one**: `Task::taken` distinguishes *released* from *live*, not
-  *dead* from *alive*, so a released future a caller still holds — Nova has no
-  move checking to stop that — now passes the check too. `let h = spawn(f());
-  h.join().await; spawn(h.fut)` is therefore legal, and the second `spawn`
-  re-polls the same completed state machine from its last suspend point. This
-  is accepted, in the same family as this list's own "awaiting the same future
-  twice" footgun below: both trade a rare, contrived re-poll of a finished
-  future for removing a non-deterministic abort of ordinary code, and closing
-  this narrower case would need the executor to distinguish "released but
-  still held" from "freed and recycled", which needs to know whether the
-  collector has actually freed the object — a sweep-integration change well
-  beyond this fix.
+  This is a *liveness* check rather than a presence check. **The reason it was
+  originally written that way no longer applies, and the reason it stays is a
+  different one.** When written, the argument was that `BY_STATE` never removed
+  an entry, so a stale key could name a recycled address and rejecting on bare
+  presence would abort a spawn that did nothing wrong. The map is pruned at the
+  sweep now (§1 above), so a key names only a state object that is still the
+  allocation it was spawned with, and that false positive cannot occur. What
+  presence now means is exactly "this same future, again" — and re-spawning a
+  future whose task has been *released* is deliberately allowed. `Task::taken`
+  distinguishes *released* from *live*, not *dead* from *alive*, so a released
+  future a caller still holds — Nova has no move checking to stop that — passes
+  the check. `let h = spawn(f()); h.join().await; spawn(h.fut)` is therefore
+  legal, and the second `spawn` re-polls the same completed state machine from
+  its last suspend point. This is accepted, in the same family as this list's
+  own "awaiting the same future twice" footgun below and for the same reason:
+  `join` cannot consume the handle that makes the shape expressible, and the
+  wrong answer stays inside the caller that asked for it rather than corrupting
+  a task that did nothing. The sweep integration that would let the executor
+  refuse it **now exists** — pruning is that integration — so this is a
+  standing decision rather than a limitation, and
+  `spawning_the_same_future_again_after_release_succeeds` (`nova-runtime`) is
+  what pins it as one.
 - **No cancellation.** `nova-spec/13-RUNTIME.md` §4.4 specifies structured
   cancellation — dropping a handle cancels the child, plus an explicit
   `task.cancel()`. None of it exists. A `JoinHandle` is a plain value-semantics

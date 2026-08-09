@@ -1,0 +1,68 @@
+// A never-spawned future whose fresh state object lands on the address of a
+// state object the collector has already freed must still be rejected.
+//
+// `task_is_done`/`task_release` resolve a future through the executor's map
+// from state address to task id, and an address is not a durable identity: the
+// sweep hands a collected object's memory back to the allocator, so a later
+// allocation can land at the same address (`crates/nova-runtime/src/gc.rs`'s
+// module doc comment). A map entry that outlived its state object therefore
+// made a *never-spawned* future resolve to the old, released task -- which
+// reports done, so `join`'s wait loop never runs, `task_release` no-ops, and
+// the value read back is the never-polled state's zero-initialised output slot
+// (`0` for `Int`, a null pointer for every heap class). ADR 0009 section 1
+// records the reproduction and its date.
+//
+// Shape, and why each part is needed:
+//
+//  - The `while` loop spawns and joins 200 short tasks and keeps none of them.
+//    Each iteration overwrites the previous iteration's handle in the same
+//    state-object slot, so the previous state becomes unreachable and can be
+//    collected while its map entry is still there. Accumulating many such
+//    addresses before the forged handle is what makes the collision the
+//    likely outcome rather than a possible one: a single freed address need
+//    not be the one the allocator hands back, and then the program aborts for
+//    the ordinary reason and discriminates nothing.
+//  - `churn` overwrites the native stack that the loop ran on, so a stale
+//    word in a dead frame is not read as a conservative root and does not keep
+//    the last state alive.
+//  - `JoinHandle { fut: one() }` is built *after* all of that, and joined
+//    once. `JoinHandle`'s field is public (ADR 0007), so nothing in the
+//    language forbids it.
+//
+// Correct behaviour is an abort with `nova_rt_task_is_done: this future was
+// never spawned`, so this fixture has no `.stdout` file and prints nothing at
+// all on the correct path: reaching the `println` at all is the defect.
+//
+// This needs `NOVA_GC_STRESS=1` to discriminate, and discriminates only where
+// the collector runs: `stack_base()` has an implementation on Windows and
+// returns `None` elsewhere, so on other platforms `collect()` returns before
+// marking, nothing is ever freed, no address is ever recycled, and this
+// program aborts whether or not the entry is pruned.
+// `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve`
+// (`nova-runtime`) covers the same property deterministically and everywhere.
+
+async fn one() -> Int { 1 }
+
+fn churn(n: Int) -> Int {
+    if n <= 0 { return 0 }
+    churn(n - 1) + n
+}
+
+async fn driver() -> Int {
+    let mut i = 0
+    let mut sum = 0
+    while i < 200 {
+        let h = spawn(one())
+        sum = sum + h.join().await
+        i = i + 1
+    }
+    let c = churn(400)
+    let g = JoinHandle { fut: one() }
+    let v = g.join().await
+    println("misresolved value ${v} sum ${sum} churn ${c}")
+    v
+}
+
+fn main() {
+    println("done ${block_on(driver())}")
+}

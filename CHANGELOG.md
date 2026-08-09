@@ -828,9 +828,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its future, and the two Nova-facing lookups resolve a task by the future's
   state address instead of a forgeable `Int`, so a hand-built handle can no
   longer name a task other than its own; the one remaining case, a handle on a
-  future that was never spawned, now aborts instead of hanging (ADR 0009 §1 has
-  the full mechanism, the narrower footgun it reopens, and the new
-  `spawn`-liveness check); the park set and the deadlock diagnostic are still
+  future that was never spawned, now aborts instead of hanging. **What makes
+  the first half of that true is that the executor's state-address index is
+  pruned when the collector frees a state object**, not merely populated at
+  spawn: an address is an identity only while the object at it lives (`gc.rs`'s
+  module doc comment), so an entry left behind let a never-spawned future whose
+  fresh state landed on a recycled address resolve to the old, released task —
+  reported done, so `join` skipped its wait loop, the release no-opped, and the
+  value read back was the caller's own never-polled output slot, `0` for `Int`
+  and a null pointer for every heap class. Pruning costs `join`'s idempotence
+  nothing rather than trading against it: a state object a handle can still
+  reach is marked through that handle's own future, so it is never swept.
+  Pinned by `tests/runtime/recycled_task_state.nova` under `NOVA_GC_STRESS=1`
+  and, deterministically and on every platform, by
+  `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve`
+  (ADR 0009 §1 has the full mechanism, the footgun the `spawn`-liveness check
+  accepts, and that check itself); the park set and the deadlock diagnostic are still
   owed by whatever adds the first primitive that can park on an external
   event; **no cancellation** of any kind, so dropping a `JoinHandle` does
   nothing;

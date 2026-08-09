@@ -24,6 +24,16 @@
 //! held transiently) keep their containing object alive. Objects flagged
 //! `scan = false` (string byte buffers) are leaves and are not traced.
 //!
+//! **A sweep really frees, so an address is not a durable identity for an
+//! object.** An unmarked object's memory goes back to the system allocator
+//! (`dealloc`) rather than into an arena this module keeps, so a later [`alloc`]
+//! can hand the same address out for a wholly unrelated object. An address
+//! therefore names an object only while that object is live, and both
+//! transitions happen in exactly one place each: [`alloc`] starts an address
+//! meaning what it means, and the sweep in [`collect_with_roots`] ends it. This
+//! is the one place that property is stated, so that a reader who needs it has
+//! somewhere to be pointed at instead of a copy to compare.
+//!
 //! Precise stack bounds are currently only implemented on Windows; on other
 //! platforms collection is skipped (allocations leak, as before — never
 //! unsafe).
@@ -298,6 +308,31 @@ pub(crate) fn collect_for_test() {
     collect();
 }
 
+/// Test-only: run one mark-and-sweep cycle against an **explicit** candidate
+/// root set, with no stack scan and no consultation of [`PINNED`] -- the same
+/// deterministic core [`collect_with_roots`] gives this module's own tests,
+/// reachable from a sibling module's tests.
+///
+/// The difference from [`collect_for_test`] is the whole reason this exists.
+/// That one runs the real cycle, so what survives depends on the conservative
+/// stack scan -- which has an implementation on Windows alone, and which
+/// intermittently reads a stale word in an already-returned frame as a root
+/// (`docs/adr/0010-conservative-scan-root-test-gating.md`, which owns that
+/// finding and the gating it forced). Handing the root set in makes "was this
+/// object swept" a decision about the argument instead, so a caller asserting
+/// a *consequence* of sweeping can do it deterministically and on every
+/// platform.
+///
+/// The caller chooses the whole root set, so an object the collector would
+/// otherwise have kept -- including one registered through [`add_root`] -- is
+/// freed if the caller does not name it. That is the point (a caller can stage
+/// the exact reachability it wants to assert about) and also the hazard: every
+/// address this thread allocated and did not name is dangling afterwards.
+#[cfg(test)]
+pub(crate) fn sweep_with_roots_for_test(roots: &[usize]) {
+    collect_with_roots(roots);
+}
+
 fn maybe_collect(incoming: usize) {
     let over = HEAP.with(|h| {
         let h = h.borrow();
@@ -396,6 +431,18 @@ fn collect_with_roots(roots: &[usize]) {
                     .expect("a live object's size was accepted by heap_layout at allocation");
                 // SAFETY: `addr`/`size` are from this object's own allocation.
                 unsafe { dealloc(o.addr as *mut u8, layout) };
+                // This address stops naming this object here (module doc
+                // comment), and the executor keys a lookup on state-object
+                // addresses. `task::forget_freed_state` states what that
+                // requires and why this is the only place it can be
+                // maintained; this call site deliberately does not restate it.
+                //
+                // Called with `HEAP` borrowed, which it must be able to
+                // tolerate: it touches nothing this module owns -- it borrows
+                // one unrelated thread-local and allocates nothing through
+                // `alloc` -- so it cannot re-enter this collector or this
+                // borrow.
+                crate::task::forget_freed_state(o.addr);
                 freed += o.size;
                 // `swap_remove` moved a new element into `i`; re-check it.
             }
@@ -493,6 +540,12 @@ mod tests {
             for o in h.objects.drain(..) {
                 let layout = heap_layout(o.size).expect("tracked size is describable");
                 unsafe { dealloc(o.addr as *mut u8, layout) };
+                // The other place an address stops naming its object, and so
+                // the other place the executor's state-address lookup has to
+                // be told -- see the sweep in `collect_with_roots`. Here so
+                // that "a freed address is always forgotten" has no exception,
+                // this test-only path included.
+                crate::task::forget_freed_state(o.addr);
             }
             h.alloc_since_gc = 0;
             h.live_bytes = 0;

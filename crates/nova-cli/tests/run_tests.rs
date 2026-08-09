@@ -1267,6 +1267,60 @@ fn forged_join_handle_aborts_instead_of_hanging() {
     );
 }
 
+/// The forged handle again, on the case the state-address lookup did not close
+/// on its own: a never-spawned future whose fresh state object lands on the
+/// address of one the collector has already freed.
+///
+/// `forged_join_handle_aborts_instead_of_hanging` above cannot reach this. Its
+/// program allocates almost nothing, so no collection happens, no address is
+/// recycled, and the lookup misses for the ordinary reason. This fixture spawns
+/// and joins a run of short tasks first, keeping none of them, so the map holds
+/// entries whose state objects have since been freed, and only then builds the
+/// forged handle -- see the fixture for why each part of that shape is
+/// load-bearing. It aborts iff a freed state's entry went with it.
+///
+/// `NOVA_GC_STRESS=1` is what makes this discriminate at all (collect on every
+/// allocation), and it discriminates only where the collector runs -- see the
+/// fixture's own comment, and `nova-runtime`'s
+/// `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve` for
+/// the same property asserted deterministically and on every platform.
+///
+/// `.stdout("")` is half the assertion, not tidiness: the fixture prints only
+/// on the path where the join returned a value instead of aborting, so a
+/// misresolution shows up as stdout content and not merely as a missing
+/// diagnostic.
+#[test]
+fn a_recycled_state_address_does_not_resolve_a_never_spawned_future() {
+    let file = repo_root().join("tests/runtime/recycled_task_state.nova");
+
+    nova().arg("check").arg(&file).assert().success();
+    let assert = nova()
+        .arg("run")
+        .arg(&file)
+        .env("NOVA_GC_STRESS", "1")
+        .assert()
+        .failure()
+        .stdout("");
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains(
+            "nova_rt_task_is_done: this future was never spawned, so there is no task to ask about"
+        ),
+        "a future the executor never saw must be rejected however its state \
+         address was obtained: {stderr}"
+    );
+    assert!(
+        stderr.contains("nova: panic:"),
+        "the diagnostic must come from the runtime's abort path: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked at"),
+        "the diagnostic must not unwind -- an unwind here would have to pass \
+         through a generated poll frame, which has no unwind description at \
+         all: {stderr}"
+    );
+}
+
 /// Pins reachability semantics end-to-end (mirrors
 /// `nova-mir`'s `unreached_async_fn_compiles_cleanly`, one layer up): an
 /// `async fn` that is declared but never called from `main` must still run

@@ -161,25 +161,52 @@ thread_local! {
     /// address cannot be fabricated -- obtaining one requires a real future,
     /// which only calling an `async fn` produces.
     ///
-    /// Entries are never removed. A released task's entry must stay so a
-    /// second `join` still answers, which is what keeps `join` idempotent --
-    /// but that is only half of what never-removing costs. The collector
-    /// genuinely frees a released, unreachable state (`gc.rs`'s sweep calls
-    /// the real deallocator), so its address can be handed to a later,
-    /// wholly unrelated allocation while this map still names the OLD task
-    /// at that key. Presence here is therefore not the same question as "is
-    /// this address still in use" -- `spawn_internal`'s duplicate check
-    /// consults `Task::taken` for that, not this map alone (see its own
-    /// comment). The two Nova-facing reads need no such check: a caller can
-    /// only ever hold a future for a task that is still reachable, and a
-    /// state whose future is reachable cannot have been freed and recycled
-    /// out from under it.
+    /// **An entry lasts exactly as long as the object its key names.** An
+    /// address is not a durable identity for a heap object (`gc.rs`'s module
+    /// doc comment states that property and owns it), so a key that outlived
+    /// its state object would go on naming the old task for whatever
+    /// unrelated object the collector next placed at that address, and the
+    /// two reads below would answer about that dead task instead of rejecting
+    /// a future the executor never saw. `spawn_internal` inserts;
+    /// [`forget_freed_state`] removes, at the moment the address stops
+    /// meaning anything.
+    ///
+    /// Two properties follow, and both are load-bearing elsewhere in this
+    /// module. A key is present only for a state object that is still the
+    /// allocation it was spawned with, so the reads need no staleness test of
+    /// their own (see [`task_id_of`]) and `spawn_internal`'s check is about
+    /// something else entirely (see its own comment). And a state a caller
+    /// can still reach is never swept, so it is never pruned -- which is what
+    /// makes a second `join` on a handle that still holds its future resolve
+    /// to the same task as the first.
     static BY_STATE: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
     /// Set for the duration of one `nova_rt_task_block_on` call, so a nested
     /// call (a poll function calling `block_on` again) can be diagnosed
     /// instead of running a second executor loop from inside the first
     /// one's frame and corrupting the shared queue.
     static IN_BLOCK_ON: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
+/// the collector has just returned to the allocator.
+///
+/// The removal half of that map's own invariant, and the reason `gc.rs` calls
+/// in here rather than this module watching for it: a freed address can be
+/// reissued for an unrelated object (`gc.rs`'s module doc comment), and the
+/// sweep is where that transition happens, so it is the only place a key can
+/// be dropped before it starts naming the wrong thing.
+///
+/// **Removal only.** Nothing here inserts a key, and nothing here touches
+/// `TASKS`, so this cannot introduce a key whose id `TASKS` does not have --
+/// `spawn_internal` is still the only thing that puts a key in this map or an
+/// entry in `TASKS`, and it takes the id from `TASKS` itself.
+///
+/// An address that never was a task's state simply misses: this map is keyed
+/// on state objects, and a sweep frees every kind of heap object.
+pub(crate) fn forget_freed_state(addr: usize) {
+    BY_STATE.with(|m| {
+        m.borrow_mut().remove(&addr);
+    });
 }
 
 /// Read the `{ poll_code, state }` fat pointer the compiler builds for a
@@ -228,30 +255,26 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
     // SAFETY: forwarding this function's own contract.
     let (poll, state) = unsafe { read_future(future) };
     // Two LIVE tasks sharing one state object would make this map ambiguous,
-    // so the lookup forces a decision here -- but presence in `BY_STATE` is
-    // not liveness. `gc.rs`'s sweep frees an unreachable object through the
-    // real allocator, so once a task is released and nothing else holds its
-    // future, its state can be collected and the address handed out again to
-    // a wholly unrelated, later spawn; rejecting on presence alone would abort
-    // code that did nothing wrong. Checking `Task::taken` instead (has the
-    // task this address last named been released?) is airtight for the case
-    // that matters: a recycled address requires the old state to have
-    // actually been freed, which requires no live handle to hold it, so no
-    // reachable handle can ever be misresolved by allowing the new spawn.
+    // so the lookup forces a decision here. A key exists only for a state
+    // object that is still the allocation it was spawned with (`BY_STATE`'s
+    // doc comment), so the question this hit asks is not "has this address
+    // been used before" but "is this the same future again".
     //
-    // This also reopens the footgun of one future value spawned twice --
-    // narrower than before, not eliminated: `spawn(f())` twice still produces
-    // two distinct futures and is unaffected, but `Task::taken` distinguishes
-    // *released* from *live*, not *dead* from *alive*, so a released future a
-    // caller still holds (Nova has no move checking) now passes this check
-    // too. `spawn(h.fut)` after `h.join()` is therefore legal and re-polls
-    // the completed state machine from its last suspend point -- the same
-    // family as the already-documented double-await footgun (ADR 0009). What
-    // this trades away is a non-deterministic abort of code that never
-    // re-spawned anything, for a rare, contrived, and already-precedented
-    // one. Distinguishing "released but still held" from "freed and
-    // recycled" needs to know whether the collector has actually freed the
-    // object, which is a sweep-integration change well beyond this check.
+    // Answered on liveness rather than on presence, because re-spawning a
+    // future whose task has been *released* is deliberately allowed. It could
+    // be refused: "released but still held" and "freed and recycled" are
+    // distinguishable here, since the second no longer reaches this branch at
+    // all. But a released future its caller still holds is the
+    // `spawn(h.fut)`-after-`join` shape, and Nova has no move checking, so
+    // `join` cannot consume the handle that makes it expressible. It is
+    // accepted for the same reason the double-await footgun is (ADR 0009):
+    // the second spawn re-polls a completed state machine from its last
+    // suspend point, re-running the body after its final await, which is a
+    // wrong answer confined to the caller that asked for it rather than
+    // corruption of a task that did nothing. What must stay rejected is two
+    // live tasks driving one state object, and `Task::taken` is exactly that
+    // distinction: it is set only where the executor gives up its GC root, so
+    // an unset flag means this state is still a task the executor is driving.
     if let Some(prior) = BY_STATE.with(|m| m.borrow().get(&(state as usize)).copied()) {
         let still_live = TASKS.with(|tasks| {
             !tasks
@@ -615,6 +638,15 @@ pub unsafe extern "C-unwind" fn nova_rt_task_block_on(future: *mut u8) -> i64 {
 }
 
 /// Read the task id for `future`'s state object, or abort.
+///
+/// **A miss means `future` was never spawned, and nothing else can miss.** The
+/// key is dropped only when the collector frees the state object
+/// ([`forget_freed_state`]), and that cannot have happened while a live future
+/// still points at the state: the fat pointer is a scanned heap object holding
+/// the state address in word [`FUTURE_SLOT_STATE`], so tracing the future marks
+/// the state. So a hit is this future's own task -- including a released one,
+/// which is what a second `join` needs -- and there is no staleness test to do
+/// here.
 ///
 /// Aborts rather than panics: both callers are reachable from `join`, which
 /// runs inside a generated poll frame, and a panic must not cross that
@@ -1262,18 +1294,14 @@ mod tests {
 
     #[test]
     fn spawning_the_same_future_again_after_release_succeeds() {
-        // Presence in `BY_STATE` is not what must be rejected: the collector
-        // genuinely frees a released, unreachable state (`gc.rs`'s sweep calls
-        // the real deallocator), so an unrelated later spawn can legitimately
-        // land its own fresh state at an address the map still names from a
-        // task that is long gone. What has to stay rejected is two LIVE tasks
-        // sharing one state, which is what would make the map ambiguous -- a
-        // released task's entry must not block a new one at the same address.
-        // The same future value is reused here rather than waiting on a real
-        // collection to hand back the address: released-but-still-held and
-        // freed-and-recycled are the same case as far as this check can tell
-        // (see `spawn_internal`'s comment), so reusing `fut` after releasing
-        // it is the cheapest way to exercise the address-reuse shape directly.
+        // Presence in `BY_STATE` is not what must be rejected. What has to
+        // stay rejected is two LIVE tasks sharing one state object, which is
+        // what would make the map ambiguous; a released task's entry must not
+        // block re-spawning the future it belongs to. Re-spawning after
+        // release is a deliberately accepted footgun rather than a case the
+        // check cannot see -- see `spawn_internal`'s own comment for why it is
+        // accepted -- and this test is what pins the acceptance, so a
+        // "tightening" of the check to bare presence fails here.
         let fut = make_future(poll_ready_now, 0);
         let id1 = unsafe { nova_rt_task_spawn(fut) };
         unsafe { nova_rt_task_release(fut) };
@@ -1287,6 +1315,96 @@ mod tests {
             unsafe { nova_rt_task_is_done(fut) },
             1,
             "the re-spawned task must actually run, not merely avoid aborting"
+        );
+    }
+
+    /// A freed state object's `BY_STATE` key goes with it, so the address
+    /// cannot resolve a later, unrelated object to the old task.
+    ///
+    /// The read path has no staleness test -- a hit is returned as the answer
+    /// -- so the whole of its correctness is that a key cannot outlive the
+    /// object it names. Asserted on the map directly, and on the deterministic
+    /// sweep (`gc::sweep_with_roots_for_test`, an explicit root set and no
+    /// stack scan) rather than on a real collection: what is being checked is
+    /// that *sweeping an object* drops its key, and handing the root set in is
+    /// what makes "this object was swept" a fact about the argument instead of
+    /// a fact about whatever the conservative scanner happened to retain
+    /// (`docs/adr/0010-conservative-scan-root-test-gating.md`, and the
+    /// `#[ignore]`d tests below that pay for it). It also keeps this test on
+    /// every platform, where a `collect()`-based version would assert nothing
+    /// wherever `gc.rs`'s `stack_base` has no implementation.
+    ///
+    /// The key's presence is asserted *before* the sweep as well, so a
+    /// `spawn_internal` that stopped inserting could not make this pass by
+    /// having nothing to remove.
+    #[test]
+    fn a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve() {
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        // Ends the executor's own claim, which is what lets the state be swept
+        // at all -- while a task holds its root, the collector keeps it.
+        unsafe { nova_rt_task_release(fut) };
+        assert!(
+            BY_STATE.with(|m| m.borrow().contains_key(&state)),
+            "spawn must have registered this state, or the removal below \
+             proves nothing"
+        );
+
+        // An empty root set: nothing is reachable, so this state really is
+        // freed. Every other object this thread allocated is freed with it, so
+        // nothing below dereferences any of them.
+        gc::sweep_with_roots_for_test(&[]);
+
+        assert!(
+            !BY_STATE.with(|m| m.borrow().contains_key(&state)),
+            "a freed state's key must not survive it: the address can be \
+             handed to an unrelated object, and this map is what the two \
+             Nova-facing reads resolve, so a surviving key answers about the \
+             old task instead of rejecting a future that was never spawned"
+        );
+    }
+
+    /// The other half, and what makes pruning compatible with `join`'s
+    /// idempotence rather than a trade against it: a state object a caller can
+    /// still reach keeps its key across a collection.
+    ///
+    /// `join` releases and then reads, and a second `join` on the same handle
+    /// has to resolve the same task again (`std/task`'s `JoinHandle::join`).
+    /// Released is not swept: the handle still holds the future, the future is
+    /// a scanned two-word object holding the state address, so tracing the
+    /// future marks the state. The root set here is the future alone --
+    /// deliberately *not* the state -- so the state survives only if it is
+    /// reached *through* the future, which is the actual mechanism.
+    ///
+    /// Without this, "prune at release" and "prune when freed" would be
+    /// indistinguishable, and the first breaks idempotence.
+    #[test]
+    fn a_reachable_futures_key_survives_a_collection_so_a_second_read_resolves() {
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        unsafe { nova_rt_task_release(fut) };
+
+        gc::sweep_with_roots_for_test(&[fut as usize]);
+
+        assert_eq!(
+            gc::object_info(state).map(|(_, scan)| scan),
+            Some(true),
+            "the state must have been reached through the future's own words, \
+             or this test is asserting nothing about tracing"
+        );
+        assert!(
+            BY_STATE.with(|m| m.borrow().contains_key(&state)),
+            "a state a handle can still reach must keep its key, or a second \
+             join aborts on a handle that did nothing wrong"
+        );
+        assert_eq!(
+            unsafe { nova_rt_task_is_done(fut) },
+            1,
+            "and the surviving key must still resolve to that task"
         );
     }
 

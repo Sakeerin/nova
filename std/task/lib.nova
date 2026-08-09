@@ -38,6 +38,12 @@
 // so `task_is_done`/`task_release` have no id space to guess at, only the one
 // state this handle's `fut` actually points to.
 //
+// An address is an identity only while the object at it lives, and the
+// executor holds to that: it stops recognising a state address when the
+// collector frees the state object, so a fresh future landing on the address
+// of a collected one is still a future no task was spawned for, and is
+// rejected rather than answered for whatever task used to be there.
+//
 // Holding the future also keeps the state object reachable for as long as the
 // handle itself is: the record is a scanned heap object, so the collector
 // traces through it. That is what makes the value still readable after
