@@ -252,6 +252,23 @@ impl Builtin {
     ];
 }
 
+/// Type names the compiler owns, which a user type declaration may not take.
+///
+/// `nova-typeck`'s `convert_ty` resolves each of these to its built-in type
+/// before consulting `resolve_type`, so a user type under one of these names
+/// could never be named in an annotation: the declaration would compile and
+/// every use of it would fail instead, reporting the same type on both sides
+/// of a mismatch. Rejecting the declaration says so where a user can act on
+/// it.
+///
+/// `Future` is here and is not a primitive: it is the one built-in type name
+/// taking a type argument, handled separately from the nullary table.
+/// `Unit` is deliberately absent — it is not a nameable type name; unit is
+/// spelled `()`.
+///
+/// This is the list, and `convert_ty`'s table is expected to agree with it.
+pub const RESERVED_TYPE_NAMES: [&str; 6] = ["Int", "Float", "Bool", "Char", "String", "Future"];
+
 /// What kind of definition a [`DefId`] refers to.
 #[derive(Debug, Clone)]
 pub enum DefKind {
@@ -860,6 +877,9 @@ fn collect_item(
                 TypeDef::Sum(variants) => {
                     let name = t.name.value.clone();
                     let span = t.name.span;
+                    if reject_reserved_type_name(diagnostics, &name, span) {
+                        return;
+                    }
                     let pubv = is_pub(t.vis);
                     let variant_defs: Vec<VariantDef> = variants
                         .iter()
@@ -931,6 +951,9 @@ fn collect_item(
             validate_attrs_reject_test(&r.attrs, "a record", diagnostics);
             let name = r.name.value.clone();
             let span = r.name.span;
+            if reject_reserved_type_name(diagnostics, &name, span) {
+                return;
+            }
             let id = push_def(
                 defs,
                 Def {
@@ -1078,6 +1101,30 @@ fn collect_item(
             // Carries no items of its own to collect.
         }
     }
+}
+
+/// `E0089`: `name` is one of [`RESERVED_TYPE_NAMES`]. Called from the sum-type
+/// and record arms of [`collect_item`] — the two forms that introduce a type
+/// name — before either pushes a `Def` or inserts into the type namespace, so
+/// a rejected declaration registers nothing: it does not occupy a `DefId`, is
+/// not collected by any later pass, and cannot collide with a genuine
+/// duplicate of the same name.
+fn reject_reserved_type_name(diagnostics: &mut Vec<Diagnostic>, name: &str, span: Span) -> bool {
+    if !RESERVED_TYPE_NAMES.contains(&name) {
+        return false;
+    }
+    diagnostics.push(
+        Diagnostic::error(
+            "E0089",
+            format!(
+                "`{name}` is already a built-in type; a declaration named `{name}` \
+                 could never be referred to, since `{name}` in a type position \
+                 always means the built-in"
+            ),
+        )
+        .with_primary_label(span, "redeclares a built-in type name"),
+    );
+    true
 }
 
 /// Attribute names the compiler recognizes. An attribute whose name is not in

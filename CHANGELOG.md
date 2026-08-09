@@ -880,6 +880,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   async closures, liveness-based state minimization, and parallelism. A
   recursive `async fn` is accepted and recurses without bound, the same
   undiagnosed class as `fn f() { f() }`.
+- The six built-in type names — `Int`, `Float`, `Bool`, `Char`, `String`, and
+  `Future` — are now reserved: declaring a `record` or a sum `type` under one
+  of them is rejected (`E0089`) instead of compiling. `convert_ty` resolves
+  each of these names to its built-in type before a user declaration is ever
+  consulted, so such a declaration could never be referred to in any
+  annotation — every program that declared one already failed at its first
+  use, reporting the same type on both sides of the mismatch. **Nothing that
+  previously worked breaks**; this only moves the diagnostic to the
+  declaration, where it can be acted on. Generic parameters and trait names
+  are separate namespaces and are unaffected: `fn f<Int>(x: Int) -> Int { x }`
+  and `trait Int { fn m(self) -> Int }` both remain legal.
 
 ### Changed (Phase 2 — behaviour changes, Phase 2.2c)
 

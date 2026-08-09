@@ -2,3 +2,5 @@ identity(41) + 1 = 42
 identity string: generic string
 first(7, _) = 7
 apply_twice(double, 5) = 20
+shadow_builtin(9) = 9
+shadow_builtin(shadowed) = shadowed

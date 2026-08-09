@@ -2433,6 +2433,12 @@ impl<'a> Checker<'a> {
                     let out = self.convert_ty(&args[0], generics, bounds);
                     return Ty::Future(Box::new(out));
                 }
+                // Every name matched here must also be in
+                // `nova_resolver::RESERVED_TYPE_NAMES`: that list is what
+                // turns a user type declared under one of these names into
+                // `E0089` instead of silently unreachable. A new nullary
+                // built-in added to this table without joining that list
+                // would recreate the defect the list exists to close.
                 let prim = match name {
                     "Int" => Some(Ty::Int),
                     "Float" => Some(Ty::Float),
@@ -12544,44 +12550,45 @@ mod tests {
         //
         // Does NOT kill a mutant that deletes the arm outright: with nothing
         // named `Future` declared, `resolve_type` also answers `None`, so
-        // deletion is a no-op here (confirmed by hand mutation). That mutant
-        // is killed by `future_qualifier_short_circuits_before_resolve_type`
-        // below instead, which gives `resolve_type` something to (wrongly)
-        // find.
+        // deletion is a no-op here. Since the built-in type names were
+        // reserved, that mutant is a no-op everywhere: declaring a type
+        // named `Future` is itself `E0089`
+        // (`declaring_a_type_named_for_a_builtin_is_rejected`), so no
+        // `Definitions` reachable through `resolve()` ever answers `Some`
+        // for `resolve_type(_, "Future")`.
+        // `future_qualifier_short_circuits_before_resolve_type` below records
+        // that the mutant it used to catch is no longer catchable at all.
         let r = check_src("fn f() { Future::x() }\nfn main() { }");
         assert_eq!(error_codes(&r), ["E0900"], "{:?}", r.diagnostics);
     }
 
     #[test]
     fn future_qualifier_short_circuits_before_resolve_type() {
-        // White-box, not a `check_src` integration test, because no Nova
-        // program can otherwise reach a divergence here: `qualifier_self_ty`'s
+        // White-box, not a `check_src` integration test: `qualifier_self_ty`'s
         // return only becomes *observable* through `check_call` when a
         // matching inherent/trait associated function is found for the
         // qualifier, which needs a real `impl` block on a type named
         // `Future` -- and such a block cannot be declared at all, since its
         // header fails `convert_ty`'s arity check first (see
-        // `bare_future_without_a_type_argument_is_rejected`). Verified by
-        // hand: `check_src` on `record Future { v: Int }\nimpl Future { fn
-        // x() -> Int { 1 } }\nfn f() -> Int { Future::x() }\nfn main() {}`
-        // produces byte-identical diagnostics whether this arm exists or not.
+        // `bare_future_without_a_type_argument_is_rejected`).
         //
-        // So this drives the method directly, past `check()` entirely:
-        // `resolve()` a program that legitimately declares `record Future {
-        // v: Int }` (a bare *declaration* succeeds; only a *type-position* or
-        // *impl-header* use of the name is intercepted) to get a real
-        // `Definitions` in which `resolve_type(module, "Future")` DOES find
-        // something, then build a minimal `Checker` around it and call the
-        // method under test.
-        //
-        // Kills the arm-deleted mutant, which the test above cannot: with the
-        // arm removed, this falls through to `resolve_type`, finds the record
-        // declared below, and returns `Some(Ty::Record { def_id, args: [] })`
-        // instead of `None` -- confirmed by hand mutation (deleting the arm
-        // changes this assertion's actual value from `None` to exactly that
-        // `Some(Record ..)`, caught below).
+        // This test used to drive the method past `check()` entirely by
+        // `resolve()`-ing a program that declared `record Future { v: Int }`,
+        // which compiled clean and gave `resolve_type(module, "Future")` a
+        // record to find -- exactly the defect that reserving the built-in
+        // type names closes. Declaring a type named `Future` is now `E0089`
+        // (`declaring_a_type_named_for_a_builtin_is_rejected`), and
+        // `Definitions` has no way to register one other than through that
+        // now-rejecting path, so `resolve_type(_, "Future")` is `None` for
+        // every `Definitions` reachable through `resolve()`. The arm-deleted
+        // mutant this test used to kill is therefore no longer
+        // distinguishable from correct behaviour by any input -- the same
+        // conclusion `future_used_as_a_call_qualifier_is_rejected` above
+        // already reaches for its own case. What remains below is a plain
+        // pin of the arm's return value against an otherwise-empty
+        // `Definitions`.
         let file_id = FileId::DUMMY;
-        let src = "record Future { v: Int }\nfn main() { }";
+        let src = "fn main() { }";
         let (tokens, lex_errors) = lex(src, file_id);
         assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
         let (ast, parse_errors) = parse(&tokens, file_id);
@@ -15337,5 +15344,150 @@ mod tests {
         let r = collect_tests_of("@test\n@test\nfn t() { }\nfn main() { }");
         assert_eq!(r.len(), 1, "{:?}", r);
         assert_eq!(r[0].name, "t");
+    }
+
+    // ---- reserved built-in type names ----
+
+    #[test]
+    fn reserved_type_names_is_exactly_the_six_expected_names() {
+        // Both tests below iterate `RESERVED_TYPE_NAMES` to build their own
+        // cases, so neither one can notice a name silently missing from it --
+        // they would just stop checking that name, not fail. This list is
+        // written out independently of the constant it checks against, so a
+        // name dropped (or swapped for a duplicate of another, keeping the
+        // length unchanged) shows up as a content mismatch here, and a name
+        // dropped without a length change fails to even compile, since two
+        // differently-sized arrays are different types.
+        let mut expected = ["Int", "Float", "Bool", "Char", "String", "Future"];
+        let mut actual = nova_resolver::RESERVED_TYPE_NAMES;
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn declaring_a_type_named_for_a_builtin_is_rejected() {
+        // All six names, both declaration forms. A user type under one of these
+        // names can never be referred to -- `convert_ty` resolves the name to the
+        // built-in before it reaches `resolve_type` -- so the declaration is
+        // rejected where the user can act on it rather than at every use site.
+        for name in nova_resolver::RESERVED_TYPE_NAMES {
+            for src in [
+                format!("record {name} {{ v: Bool }}\nfn main() {{ }}"),
+                format!("type {name} = | A | B\nfn main() {{ }}"),
+            ] {
+                let r = check_src(&src);
+                let d = r
+                    .diagnostics
+                    .iter()
+                    .find(|d| d.code == "E0089")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "expected E0089 for `{name}` in {src:?}, got {:?}",
+                            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+                        )
+                    });
+                // Both halves of the message matter. The name identifies which
+                // built-in was shadowed; the second half is the fact a user cannot
+                // discover from the declaration alone, and a code-only assertion
+                // would survive deleting it.
+                assert!(
+                    d.message.contains(name),
+                    "E0089 must name the built-in it collides with; got {:?}",
+                    d.message
+                );
+                assert!(
+                    d.message.contains("built-in") || d.message.contains("builtin"),
+                    "E0089 must say the name belongs to a built-in type; got {:?}",
+                    d.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_reserved_name_really_is_a_builtin_type() {
+        // The drift guard, in the direction that can be caught. If a name is
+        // removed from `convert_ty`'s table while staying in the reserved list,
+        // this fails -- annotating with it would become `E0001 cannot find type`.
+        //
+        // The other direction (a seventh built-in added without reserving it) is
+        // NOT caught here and cannot be from a fixed list; the mitigation is the
+        // pointer comment at the table itself (Step 4).
+        for name in nova_resolver::RESERVED_TYPE_NAMES {
+            let ann = if name == "Future" {
+                "Future<Int>"
+            } else {
+                name
+            };
+            let r = check_src(&format!("fn f(x: {ann}) -> Int {{ 1 }}\nfn main() {{ }}"));
+            assert!(
+                !r.diagnostics.iter().any(|d| d.code == "E0001"),
+                "`{name}` is in RESERVED_TYPE_NAMES but is not a built-in type name: {:?}",
+                r.diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn a_generic_parameter_named_for_a_builtin_still_works() {
+        // NON-GOAL, pinned. `convert_ty` resolves generics BEFORE the built-in
+        // table, so this shadowing is coherent rather than broken: the parameter
+        // genuinely means the parameter. Compiling is not enough to show that --
+        // an `Int` argument round-trips whether `x: Int` names the parameter or
+        // the primitive it shadows, since both are the same value either way.
+        // This crate has no evaluator, only the type checker, so the
+        // discriminating half of the claim -- that the annotation names a
+        // parameter free to become a *different* type, not just that it
+        // compiles for one -- is pinned at the runtime layer instead: see
+        // `shadow_builtin` in `tests/runtime/generics.nova`, called at both
+        // `Int` and `String`. If `Int` had instead fallen through to the
+        // primitive, the `String` call would be a compile-time type error,
+        // not a different runtime value.
+        let r = check_src("fn f<Int>(x: Int) -> Int { x }\nfn main() { }");
+        assert!(
+            r.diagnostics.is_empty(),
+            "a generic parameter may shadow a built-in type name, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_trait_named_for_a_builtin_still_works() {
+        // NON-GOAL, pinned. Traits are a separate namespace: `trait Int` does not
+        // shadow the type, and the return annotation below resolves to the
+        // primitive.
+        let r = check_src("trait Int { fn m(self) -> Int }\nfn main() { }");
+        assert!(
+            r.diagnostics.is_empty(),
+            "a trait may be named for a built-in type, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn an_unknown_type_name_is_still_e0001_not_e0089() {
+        // The new check must not swallow the not-found path.
+        let r = check_src("fn f(x: Nope) -> Int { 1 }\nfn main() { }");
+        assert!(r.diagnostics.iter().any(|d| d.code == "E0001"));
+        assert!(!r.diagnostics.iter().any(|d| d.code == "E0089"));
+    }
+
+    #[test]
+    fn an_ordinary_type_declaration_is_unaffected() {
+        // Kills a check that fires on every type name rather than the reserved
+        // ones. Weak on its own -- the whole suite would fail -- but it states the
+        // boundary at the point the reader is looking at.
+        let r = check_src("record Wrap { v: Int }\ntype Two = | A | B\nfn main() { }");
+        assert!(!r.diagnostics.iter().any(|d| d.code == "E0089"));
     }
 }

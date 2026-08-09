@@ -14,13 +14,27 @@ fn double(n: Int) -> Int {
     n * 2
 }
 
+// A generic parameter may shadow a built-in type name: `convert_ty` resolves
+// a function's own generics before it consults the built-in table, so `Int`
+// here names the parameter, not the primitive -- this is `identity` in all
+// but name. Called below at two different types: if `Int` had instead fallen
+// through to the primitive, `x` would be pinned to the real `Int` and the
+// second, `String` call would be a type error rather than a different value.
+fn shadow_builtin<Int>(x: Int) -> Int {
+    x
+}
+
 fn main() {
     let i = identity(41) + 1
     let s = identity("generic string")
     let f = first(7, "ignored")
     let d = apply_twice(double, 5)
+    let sh_int = shadow_builtin(9)
+    let sh_str = shadow_builtin("shadowed")
     println("identity(41) + 1 = ${i}")
     println("identity string: ${s}")
     println("first(7, _) = ${f}")
     println("apply_twice(double, 5) = ${d}")
+    println("shadow_builtin(9) = ${sh_int}")
+    println("shadow_builtin(shadowed) = ${sh_str}")
 }
