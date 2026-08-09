@@ -153,13 +153,14 @@ builtins! {
     /// (`E0010`) rather than anything quieter. Std-only, so `task_spawn` is not
     /// a reserved word in user code.
     TaskSpawn,
-    /// `task_is_done(id: Int) -> Bool` — whether a spawned task has completed.
-    /// Backs `JoinHandle::join`'s wait loop. Std-only.
+    /// `task_is_done(fut: Future<T>) -> Bool` — whether the task named by
+    /// `fut`'s state has completed. Backs `JoinHandle::join`'s wait loop.
+    /// Std-only.
     TaskIsDone,
-    /// `task_release(id: Int)` — end the executor's claim on a spawned task's
-    /// state object, so a joined task's state is not rooted for the rest of the
-    /// process. Idempotent, which is what lets `join` be called twice on one
-    /// handle. Std-only.
+    /// `task_release(fut: Future<T>)` — end the executor's claim on the task
+    /// named by `fut`'s state, so a joined task's state is not rooted for the
+    /// rest of the process. Idempotent, which is what lets `join` be called
+    /// twice on one handle. Std-only.
     TaskRelease,
     /// `task_drive(fut: Future<T>)` — run this thread's executor until every
     /// queued task has finished. Backs `std/task`'s `block_on`, paired with

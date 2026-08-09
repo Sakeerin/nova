@@ -817,15 +817,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spawned on the thread (unlike tokio's, which returns as soon as its own
   future resolves) **and does not terminate if any queued task never becomes
   ready** — no ordinary async program reaches this, since every suspension
-  resumes on the next turn, but it **is reachable today** by forging a
-  `JoinHandle`: the record's fields are public and task ids are `0, 1, 2, …` in
-  spawn order with `block_on`'s own root spawned first, so
-  `JoinHandle { id: 0, fut: … }` inside that root makes `join` wait for the task
-  that is doing the waiting. `nova check` reports `ok` and `nova run` hangs with
-  empty output. The forgeable id is a known gap assigned to the next increment;
-  the park set and the deadlock diagnostic are still owed by whatever adds the
-  first primitive that can park on an external event; **no
-  cancellation** of any kind, so dropping a `JoinHandle` does nothing;
+  resumes on the next turn, but it **was reachable** by forging a
+  `JoinHandle`: the record's fields were public and task ids were `0, 1, 2, …`
+  in spawn order with `block_on`'s own root spawned first, so
+  `JoinHandle { id: 0, fut: … }` — **`id` is no longer a field of
+  `JoinHandle<T>`; this no longer compiles, kept here as the record of the
+  hazard** — inside that root made `join` wait for the task that was doing the
+  waiting, so `nova check` reported `ok` while `nova run` hung with empty
+  output. **Closed on branch `task-identity`**: `JoinHandle<T>` now holds only
+  its future, and the two Nova-facing lookups resolve a task by the future's
+  state address instead of a forgeable `Int`, so a hand-built handle can no
+  longer name a task other than its own; the one remaining case, a handle on a
+  future that was never spawned, now aborts instead of hanging (ADR 0009 §1 has
+  the full mechanism, the narrower footgun it reopens, and the new
+  `spawn`-liveness check); the park set and the deadlock diagnostic are still
+  owed by whatever adds the first primitive that can park on an external
+  event; **no cancellation** of any kind, so dropping a `JoinHandle` does
+  nothing;
   **every temp is spilled into the state object**, not only those live across
   a suspend, which is what buys the transform out of liveness analysis at the
   cost of over-retaining (a later liveness pass narrows the state record and

@@ -225,7 +225,7 @@ exactly the outcomes that should count as a panic — which is what makes it
 the reliable signal, independent of exit-code agreement.
 
 **Correcting a claim that would otherwise have been enshrined here: the
-marker is not emitted only by `nova_rt_panic_str`.** Three call sites print
+marker is not emitted only by `nova_rt_panic_str`.** Four call sites print
 it independently, none delegating to another:
 
 - `nova_rt_panic_str` (`crates/nova-runtime/src/lib.rs`) — user `panic(...)`
@@ -234,6 +234,11 @@ it independently, none delegating to another:
 - `nova_rt_check_bounds` (same file) — an array index outside `0..len`.
 - `gc::alloc`'s oversized-allocation guard (`crates/nova-runtime/src/gc.rs`)
   — a size past `MAX_HEAP_OBJECT`.
+- `abort_with` (`crates/nova-runtime/src/task.rs`, added in Phase 2.3a) —
+  every contract violation the async executor detects at its Nova-facing
+  boundary, including a `spawn` on a future that already names a live task,
+  a `join`/`release` on a future that was never spawned, and a re-entrant
+  `block_on`.
 
 This is load-bearing rather than incidental. `tests/runtime/nova_test.nova`'s
 `array_out_of_bounds_panics` — the fixture's `should_panic` test that is
@@ -242,7 +247,7 @@ alone; it never calls `nova_rt_panic_str`. A classifier keyed to one specific
 emitter (checking, say, that the message looks like a `panic(...)` call)
 rather than a plain substring search over all of stderr would misclassify
 that test as a trap. `classify`'s `stderr.lines().find(|line|
-line.contains(PANIC_MARKER))` catches all three uniformly because it was
+line.contains(PANIC_MARKER))` catches all four uniformly because it was
 written to, not by accident.
 
 **`assert_throws` (`nova-spec/20-STDLIB.md` §11) is therefore not
@@ -271,12 +276,15 @@ way to assert that something panics.
   behaviour) but it means a typo'd CI filter silently reports green having
   run nothing.
 - **The stderr rule is sound only while every marker-emitting site aborts
-  immediately after printing it**, which is true of all three sites today
-  (each is `eprintln!` immediately followed by `std::process::abort()`, with
-  nothing observable in between) and is enforced by nothing for whatever the
-  fourth site turns out to be. A future runtime addition that prints a line
-  containing `nova: panic:` for some other reason, without aborting
-  immediately, would be misread by `classify`'s plain substring search.
+  immediately after printing it**, which is true of all four sites today —
+  `nova_rt_panic_str`, `nova_rt_check_bounds`, `gc::alloc`'s oversized-object
+  guard, and `task.rs`'s `abort_with` (each is `eprintln!` immediately
+  followed by `std::process::abort()`, with nothing observable in between,
+  verified directly against `abort_with`'s own body rather than assumed) —
+  and is enforced by nothing for whatever the fifth site turns out to be. A
+  future runtime addition that prints a line containing `nova: panic:` for
+  some other reason, without aborting immediately, would be misread by
+  `classify`'s plain substring search.
 
 ### Consequences
 
@@ -610,7 +618,9 @@ the design doc's §11 risk 3:
   `nova_test_*` gate registrations, which attach their raw un-normalized output
   to the assertion so a normalized diff cannot hide a real exit code (§4)
 - `crates/nova-runtime/src/lib.rs`: `nova_rt_panic_str`, `nova_rt_check_bounds`
-  (§2); `crates/nova-runtime/src/gc.rs`: `alloc`'s oversized-object guard (§2)
+  (§2); `crates/nova-runtime/src/gc.rs`: `alloc`'s oversized-object guard (§2);
+  `crates/nova-runtime/src/task.rs`: `abort_with`, the fourth marker emitter,
+  added in Phase 2.3a (§2)
 - `crates/nova-driver/src/lib.rs`: `SHADOWED_USER_MAIN_NAME`,
   `build_test_binary`, `synthesize_test_main` (§3)
 - `crates/nova-mir/src/mono.rs:19`: the entry-point lookup `main.shadowed_by_

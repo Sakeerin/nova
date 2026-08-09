@@ -205,7 +205,8 @@ rt_funcs! {
     /// `(ptr to { poll_code, state }) -> i64` — drive the executor until this
     /// future completes; returns its output slot.
     TaskBlockOn,
-    /// `(i64 task_id) -> i8` — whether a spawned task has completed.
+    /// `(ptr to { poll_code, state }) -> i8` — whether the task named by that
+    /// future's state has completed.
     TaskIsDone,
     /// `(i64 task_id) -> i64` — a completed task's output, taken exactly once.
     /// Declared for completeness of the executor's ABI; no MIR statement emits
@@ -213,8 +214,9 @@ rt_funcs! {
     /// object instead (`Builtin::TaskOutput`, whose class the runtime's `i64`
     /// return cannot carry for a `Float`).
     TaskTakeOutput,
-    /// `(i64 task_id) -> unit` — end the executor's claim on a task's state
-    /// object without handing its output back. Idempotent.
+    /// `(ptr to { poll_code, state }) -> unit` — end the executor's claim on
+    /// the task named by that future's state, without handing its output
+    /// back. Idempotent.
     TaskRelease,
     /// `() -> ptr to { poll_code, state }` — a fresh future that reports
     /// pending once and then completes. What `std/task`'s `yield_now` awaits.

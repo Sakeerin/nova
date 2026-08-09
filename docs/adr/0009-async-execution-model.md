@@ -122,7 +122,7 @@ afterwards.
   that returns `POLL_PENDING` is pushed back onto the ready queue and re-polled
   on the next turn, round-robin. A task waiting on something therefore *spins* at
   one poll per turn rather than sleeping — `JoinHandle::join` is literally a
-  `while !task_is_done(id) { yield_now().await }` loop.
+  `while !task_is_done(self.fut) { yield_now().await }` loop.
 - **`block_on` drains the whole queue, and does not terminate if any queued task
   never reports ready.** Two consequences follow from the same loop. It
   **implicitly joins everything** spawned on the thread, unlike tokio's
@@ -130,25 +130,62 @@ afterwards.
   else would ever advance a task left pending, so returning early would strand
   it. And a task that reports `POLL_PENDING` forever is re-queued forever, so the
   loop **hangs**. Every *suspension* in 2.3a is `yield_now`-shaped and resumes on
-  the next turn, so no ordinary async program reaches the hang — **but it is
-  reachable today**, via a forged `JoinHandle` rather than via a parking
-  primitive. `JoinHandle`'s fields are public and task ids are `0, 1, 2, …` in
-  spawn order, and `run_to_completion` spawns the `block_on` root *first*, so
-  `JoinHandle { id: 0, fut: … }` written inside that root names the root itself.
-  `join`'s `while !task_is_done(id) { yield_now().await }` then waits for the
-  task that is doing the waiting: a valid id, so nothing aborts, and it never
-  becomes done. Measured on this branch, 2026-08-09: `nova check` reports `ok`
-  and `nova run` hangs indefinitely with empty stdout and stderr (`timeout 8` →
-  exit 124). The earlier disclosure of this shape said only that a hand-built
-  handle with a *bogus* id aborts, which is true of an id no task ever had
-  (`nova_rt_task_is_done`'s unknown-id `abort_with`) and is the wrong half of
-  the hazard: a valid-but-wrong id does not abort, it deadlocks. **The
-  forgeable-id design is assigned to the next increment**, not fixed here. The
-  park-set gap is unchanged and still owed by whatever adds the first primitive
-  that can park on an external event (an `await` on a channel nothing sends to)
-  — a park set plus a deadlock diagnostic when the ready queue is empty and the
-  park set is not. A busy re-poll loop cannot tell "not ready yet" from "never
-  will be".
+  the next turn, so no ordinary async program reaches the hang that way — **but
+  a second route to it, through a forged `JoinHandle`, was reachable and is now
+  closed** (branch `task-identity`). `JoinHandle` had an `id` field next to
+  `fut`, and both were public — Nova has no field privacy — so a hand-built
+  value could set `id` to anything. Task ids are `0, 1, 2, …` in spawn order and
+  `run_to_completion` spawns the `block_on` root *first*, so
+  `JoinHandle { id: 0, fut: … }` — **`id` is no longer a field of
+  `JoinHandle<T>` (`3bbe2d7`); this shape does not compile and is kept here
+  only as the record of the hazard** — written inside that root named the root
+  itself. `join`'s `while !task_is_done(id) { yield_now().await }` then waited
+  for the task that was doing the waiting: a valid id, so nothing aborted, and
+  it never became done. Measured on the pre-fix branch, 2026-08-09: `nova check`
+  reported `ok` and `nova run` hung indefinitely with empty stdout and stderr
+  (`timeout 8` → exit 124). The earlier disclosure of this shape said only that
+  a hand-built handle with a *bogus* id aborts, which was true of an id no task
+  ever had, and was the wrong half of the hazard: a valid-but-wrong id did not
+  abort, it deadlocked. **What closed it:** `nova_rt_task_is_done` and
+  `nova_rt_task_release` (`7bbd78d`) now take the future itself rather than an
+  `Int`, read word 1 for its state address, and resolve the task through the
+  executor's `BY_STATE` map keyed on that address
+  (`crates/nova-runtime/src/task.rs`) — there is no id space left to forge,
+  since the only way to obtain a state address is to call an `async fn`. The
+  one case still reachable, a handle on a future that was never spawned at all,
+  now aborts (`nova_rt_task_is_done: this future was never spawned, so there is
+  no task to ask about`) rather than hanging, pinned end to end by
+  `forged_join_handle_aborts_instead_of_hanging`
+  (`crates/nova-cli/tests/run_tests.rs`, `tests/runtime/forged_join_handle.nova`).
+  The park-set gap itself is unrelated and unchanged: it is still owed by
+  whatever adds the first primitive that can park on an external event (an
+  `await` on a channel nothing sends to) — a park set plus a deadlock diagnostic
+  when the ready queue is empty and the park set is not. A busy re-poll loop
+  cannot tell "not ready yet" from "never will be".
+- **`spawn` used to accept the same future twice, with no check at all** —
+  registering it as two independent tasks that both drove one shared state
+  object, corrupting whichever one polled second. **Closed on branch
+  `task-identity` (`51b68b4`), narrower than the ideal fix.** `spawn_internal`
+  now checks `Task::taken` and aborts (`nova_rt_task_spawn: this future is
+  already a live task; spawn it again only after its task has been released`)
+  when the future's state already names a task that has not been released.
+  This is a *liveness* check rather than a presence check, deliberately: the
+  executor's `BY_STATE` map never removes an entry, and the collector genuinely
+  frees a released, unreachable state and can hand its address to a later,
+  unrelated allocation, so rejecting on bare presence would abort a spawn that
+  did nothing wrong. The liveness check closes the case above, but **reopens a
+  narrower one**: `Task::taken` distinguishes *released* from *live*, not
+  *dead* from *alive*, so a released future a caller still holds — Nova has no
+  move checking to stop that — now passes the check too. `let h = spawn(f());
+  h.join().await; spawn(h.fut)` is therefore legal, and the second `spawn`
+  re-polls the same completed state machine from its last suspend point. This
+  is accepted, in the same family as this list's own "awaiting the same future
+  twice" footgun below: both trade a rare, contrived re-poll of a finished
+  future for removing a non-deterministic abort of ordinary code, and closing
+  this narrower case would need the executor to distinguish "released but
+  still held" from "freed and recycled", which needs to know whether the
+  collector has actually freed the object — a sweep-integration change well
+  beyond this fix.
 - **No cancellation.** `nova-spec/13-RUNTIME.md` §4.4 specifies structured
   cancellation — dropping a handle cancels the child, plus an explicit
   `task.cancel()`. None of it exists. A `JoinHandle` is a plain value-semantics
