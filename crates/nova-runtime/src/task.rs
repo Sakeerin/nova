@@ -19,7 +19,7 @@
 
 use crate::gc;
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// The signature every compiled `async fn`'s poll function has -- both the
 /// hand-written ones this module's tests drive it with, and the ones
@@ -151,6 +151,19 @@ thread_local! {
     /// slot, so an `Option` here would add an arm no code path can reach.
     /// An out-of-range id is still rejected, by `Vec::get` returning `None`.
     static TASKS: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
+    /// State address to task id, for the two entry points Nova calls.
+    ///
+    /// The executor's own identity is still the `TASKS` index -- `poll_one`
+    /// and `run_to_completion` address tasks by it. This map exists because
+    /// the *Nova-facing* boundary must not be a forgeable integer: a
+    /// `JoinHandle` is constructible (Nova has no field privacy), so an
+    /// `Int` id in it can name a task the caller never spawned. A state
+    /// address cannot be fabricated -- obtaining one requires a real future,
+    /// which only calling an `async fn` produces.
+    ///
+    /// Entries are never removed. A released task's entry must stay so a
+    /// second `join` still answers, which is what keeps `join` idempotent.
+    static BY_STATE: RefCell<HashMap<usize, i64>> = RefCell::new(HashMap::new());
     /// Set for the duration of one `nova_rt_task_block_on` call, so a nested
     /// call (a poll function calling `block_on` again) can be diagnosed
     /// instead of running a second executor loop from inside the first
@@ -203,6 +216,16 @@ unsafe fn read_future(future: *mut u8) -> (PollFn, *mut u8) {
 unsafe fn spawn_internal(future: *mut u8) -> i64 {
     // SAFETY: forwarding this function's own contract.
     let (poll, state) = unsafe { read_future(future) };
+    // Two tasks sharing one state object would make this map ambiguous, so
+    // the lookup forces a decision here. Rejecting is also what closes the
+    // footgun in which one future value spawned twice runs its body twice:
+    // `spawn(f())` twice produces two distinct futures and is unaffected --
+    // only re-spawning the same future value reaches this.
+    if BY_STATE.with(|m| m.borrow().contains_key(&(state as usize))) {
+        abort_with(
+            "nova_rt_task_spawn: this future is already a task; a future may be spawned at most once",
+        );
+    }
     // The state object sits on no Nova stack and in no register while its
     // task is queued or parked -- the executor is its only reference, and
     // those are the collector's only other root sources (see `gc.rs`'s
@@ -222,6 +245,7 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
         });
         id
     });
+    BY_STATE.with(|m| m.borrow_mut().insert(state as usize, id));
     QUEUE.with(|queue| queue.borrow_mut().push_back(id));
     id
 }
@@ -309,8 +333,12 @@ unsafe fn poll_one(id: i64) {
 }
 
 /// Whether task `id` has completed. Aborts on an id no `spawn_internal` ever
-/// handed out, which a Nova program can reach by building a `JoinHandle` from
-/// an arbitrary `Int` rather than from `spawn`.
+/// handed out.
+///
+/// `id` is this executor's own internal identity, not something a Nova
+/// program can name directly: [`nova_rt_task_is_done`] resolves a future to
+/// one through `BY_STATE` before reaching here, so this abort now guards a
+/// bug in this module rather than a forged caller value.
 fn is_done_internal(id: i64) -> bool {
     TASKS.with(|tasks| match tasks.borrow().get(id as usize) {
         Some(task) => task.done,
@@ -546,18 +574,40 @@ pub unsafe extern "C-unwind" fn nova_rt_task_block_on(future: *mut u8) -> i64 {
     }
 }
 
-/// Whether task `id` (as returned by [`nova_rt_task_spawn`]) has completed.
+/// Read the task id for `future`'s state object, or abort.
+///
+/// Aborts rather than panics: both callers are reachable from `join`, which
+/// runs inside a generated poll frame, and a panic must not cross that
+/// boundary (ADR 0009 section 1).
+///
+/// # Safety
+/// `future` must be a valid future fat pointer (see [`read_future`]).
+unsafe fn task_id_of(future: *mut u8, who: &str) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let (_, state) = unsafe { read_future(future) };
+    match BY_STATE.with(|m| m.borrow().get(&(state as usize)).copied()) {
+        Some(id) => id,
+        None => abort_with(&format!(
+            "{who}: this future was never spawned, so there is no task to ask about"
+        )),
+    }
+}
+
+/// Whether the task named by `future`'s state object has completed.
 ///
 /// `"C-unwind"`: see [`PollFn`]'s doc comment. Sharing one ABI across every
 /// entry point in this module means a caller never has to know which of
-/// them can panic; both of `is_done`/`take_output`'s internal helpers do, on
-/// an unknown task id.
+/// them can panic; `is_done`/`take_output`'s internal helpers do, on an
+/// unknown task id, and so does resolving `future` itself (see
+/// [`task_id_of`]).
 ///
 /// # Safety
-/// `id` must be an id previously returned by `nova_rt_task_spawn` on this
-/// same thread.
+/// `future` must be a valid future fat pointer (see [`read_future`]). One
+/// this thread never spawned ends the process rather than answering.
 #[no_mangle]
-pub unsafe extern "C-unwind" fn nova_rt_task_is_done(id: i64) -> i8 {
+pub unsafe extern "C-unwind" fn nova_rt_task_is_done(future: *mut u8) -> i8 {
+    // SAFETY: forwarding this function's own contract.
+    let id = unsafe { task_id_of(future, "nova_rt_task_is_done") };
     is_done_internal(id) as i8
 }
 
@@ -585,18 +635,21 @@ pub unsafe extern "C-unwind" fn nova_rt_task_take_output(id: i64) -> i64 {
     take_output_internal(id)
 }
 
-/// End the executor's claim on task `id`'s state object. See
-/// [`release_internal`] for why this exists next to
+/// End the executor's claim on the task named by `future`'s state object.
+/// See [`release_internal`] for why this exists next to
 /// [`nova_rt_task_take_output`] rather than instead of it, and why calling it
 /// twice is a no-op rather than a diagnostic.
 ///
 /// `"C-unwind"`: see [`nova_rt_task_is_done`]'s doc comment.
 ///
 /// # Safety
-/// `id` must be an id previously returned by `nova_rt_task_spawn` on this
-/// same thread. An unknown id ends the process (see [`abort_with`]).
+/// `future` must be a valid future fat pointer (see [`read_future`]). One
+/// this thread never spawned ends the process rather than releasing the
+/// wrong task (see [`task_id_of`]).
 #[no_mangle]
-pub extern "C-unwind" fn nova_rt_task_release(id: i64) {
+pub unsafe extern "C-unwind" fn nova_rt_task_release(future: *mut u8) {
+    // SAFETY: forwarding this function's own contract.
+    let id = unsafe { task_id_of(future, "nova_rt_task_release") };
     release_internal(id);
 }
 
@@ -778,10 +831,10 @@ mod tests {
         let fut = make_future(poll_suspend_once, 0);
         let id = unsafe { nova_rt_task_spawn(fut) };
         // Not done before the executor has run it at all.
-        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 0);
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 0);
         let root = make_future(poll_ready_now, 0);
         unsafe { nova_rt_task_block_on(root) };
-        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 1);
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
         assert_eq!(unsafe { nova_rt_task_take_output(id) }, 42);
     }
 
@@ -829,7 +882,7 @@ mod tests {
 
         // Drive the queue to empty, which completes the spawned task.
         unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
-        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 1);
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
         assert_eq!(
             gc::root_count(state),
             1,
@@ -872,7 +925,7 @@ mod tests {
     fn taking_the_output_of_an_unfinished_task_panics() {
         let fut = make_future(poll_suspend_once, 0);
         let id = unsafe { nova_rt_task_spawn(fut) };
-        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 0);
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 0);
 
         let r = std::panic::catch_unwind(|| unsafe { nova_rt_task_take_output(id) });
         assert!(
@@ -1021,9 +1074,11 @@ mod tests {
     /// object and can be called any number of times.
     ///
     /// The exact root counts, not merely "eventually zero": releasing twice
-    /// must not cancel a *second* registration, which for a task whose future
-    /// was also handed to `nova_rt_task_spawn` a second time would unroot a
-    /// live task's state. Asserted on the registry rather than through a
+    /// must not cancel a registration it does not own. Simulated here with a
+    /// second, independent `gc::add_root` on the same state -- spawning the
+    /// same future twice no longer reaches this (`spawn_internal` now rejects
+    /// it), so this stands in for any other root on the object, which release
+    /// must leave alone. Asserted on the registry rather than through a
     /// collection, for the reason
     /// `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`
     /// documents.
@@ -1031,20 +1086,22 @@ mod tests {
     fn releasing_a_task_unroots_its_state_exactly_once_however_often_it_is_called() {
         let fut = make_future(poll_ready_now, 0);
         let state = state_of(fut);
-        let id = unsafe { nova_rt_task_spawn(fut) };
-        // A second registration of the same state, standing in for the same
-        // future having been spawned twice: it must survive the release below.
+        unsafe { nova_rt_task_spawn(fut) };
+        // A second, independent registration of the same state: it must
+        // survive the release below (see this test's doc comment).
         gc::add_root(state as *mut u8);
         assert_eq!(gc::root_count(state), 2);
 
-        nova_rt_task_release(id);
+        unsafe { nova_rt_task_release(fut) };
         assert_eq!(
             gc::root_count(state),
             1,
             "release must cancel the executor's own registration"
         );
-        nova_rt_task_release(id);
-        nova_rt_task_release(id);
+        unsafe {
+            nova_rt_task_release(fut);
+            nova_rt_task_release(fut);
+        }
         assert_eq!(
             gc::root_count(state),
             1,
@@ -1059,10 +1116,10 @@ mod tests {
     #[test]
     fn a_released_tasks_output_slot_still_holds_its_value() {
         let fut = make_future(poll_ready_now, 0);
-        let id = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_spawn(fut) };
         unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
-        assert_eq!(unsafe { nova_rt_task_is_done(id) }, 1);
-        nova_rt_task_release(id);
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+        unsafe { nova_rt_task_release(fut) };
         // SAFETY: `fut` is a live future fat pointer; `state_of` reads its
         // state word, and `STATE_SLOT_OUTPUT` is in bounds by `make_future`'s
         // minimum size.
@@ -1071,6 +1128,96 @@ mod tests {
             out, 7,
             "the value stays in the slot the poll fn wrote it to"
         );
+    }
+
+    #[test]
+    fn a_handle_on_a_never_spawned_future_is_not_reported_done() {
+        // The forged-handle case, at the runtime layer. Before this change the
+        // lookup was by an `Int` index, so a handle could name a DIFFERENT task
+        // and spin forever. Keyed on the state, a future that was never spawned
+        // has no entry at all, which is a diagnosable condition rather than a
+        // silent wrong answer.
+        //
+        // Asserted via `catch_unwind` is NOT possible -- the failure aborts, by
+        // design (a panic must not cross a generated poll frame). So this test
+        // asserts the *positive* half only: a spawned future IS found. The abort
+        // is covered from Nova in Task 2, where `nova test`'s per-process runner
+        // makes it observable.
+        let fut = make_future(poll_ready_now, 0);
+        unsafe { nova_rt_task_spawn(fut) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 0, "not polled yet");
+    }
+
+    #[test]
+    fn is_done_follows_the_future_it_is_given_not_a_positional_id() {
+        // The discriminating test, and the one that would have caught the
+        // original defect: two tasks, and each handle must answer about ITS OWN
+        // future. Under the old id-keyed lookup, passing task 1's index while
+        // holding task 0's future answered about task 1 -- which is exactly the
+        // forgery. Here the only thing passed IS the future, so a swap is
+        // impossible to express; this test pins that the two are distinguished
+        // at all, so a lookup that always returned the first task fails.
+        //
+        // One poll each via `poll_one`, not a full drain through `block_on`:
+        // `block_on` drains the whole shared queue, and by the time it empties,
+        // every task queued on this thread -- `a` AND `b` -- has reported
+        // `POLL_READY`, so both handles would read back `1` even from a lookup
+        // that resolved every future to the same task (any id in this test is
+        // done by then). One poll each keeps `a` (`poll_ready_now`) done and
+        // `b` (`poll_suspend_once`, which needs a second poll) not done, so the
+        // two answers must disagree for this test to mean anything.
+        let a = make_future(poll_ready_now, 0);
+        let b = make_future(poll_suspend_once, 0);
+        let (id_a, id_b) = unsafe { (nova_rt_task_spawn(a), nova_rt_task_spawn(b)) };
+        unsafe {
+            poll_one(id_a);
+            poll_one(id_b);
+        }
+        assert_eq!(unsafe { nova_rt_task_is_done(a) }, 1);
+        assert_eq!(
+            unsafe { nova_rt_task_is_done(b) },
+            0,
+            "b needs a second poll; reporting it done means the lookup did not \
+             distinguish the two futures"
+        );
+    }
+
+    #[test]
+    fn releasing_by_future_unroots_that_futures_state_and_no_other() {
+        // Two tasks, release one, and assert the OTHER's root survives. The old
+        // signature took an index, so an off-by-one released somebody else's
+        // state -- a premature free. Keyed on the future, the wrong-target case
+        // cannot be expressed, and this test pins that release still targets
+        // exactly one.
+        let a = make_future(poll_ready_now, 0);
+        let b = make_future(poll_ready_now, 0);
+        let (sa, sb) = (state_of(a), state_of(b));
+        unsafe {
+            nova_rt_task_spawn(a);
+            nova_rt_task_spawn(b);
+        }
+        assert_eq!(gc::root_count(sa), 1);
+        assert_eq!(gc::root_count(sb), 1);
+
+        unsafe { nova_rt_task_release(a) };
+
+        assert_eq!(gc::root_count(sa), 0, "release must unroot its own target");
+        assert_eq!(gc::root_count(sb), 1, "and must not touch another task's");
+    }
+
+    #[test]
+    fn releasing_the_same_future_twice_unroots_once() {
+        // Idempotence, preserved from the id-keyed version: `join` releases then
+        // reads, and Nova has no move checking, so a second `join` on the same
+        // handle must release again harmlessly.
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        unsafe {
+            nova_rt_task_spawn(fut);
+            nova_rt_task_release(fut);
+            nova_rt_task_release(fut);
+        }
+        assert_eq!(gc::root_count(state), 0);
     }
 
     /// The exact layout `nova_rt_task_yield_future` builds, read back from the

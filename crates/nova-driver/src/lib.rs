@@ -841,25 +841,28 @@ mod async_end_to_end {
         program.run();
 
         // A poll function returning a status that is neither POLL_PENDING nor
-        // POLL_READY does not reach this assertion at all, and does not present
-        // as a test failure either. `poll_one` panics naming the value, and that
+        // POLL_READY does not reach this call at all, and does not present as
+        // a test failure either. `poll_one` panics naming the value, and that
         // panic then has to unwind out through the JIT-compiled `main` frame --
         // Cranelift output with no landing pads -- so **the process dies** and
         // the harness reports only that the test exited abnormally. Run the one
         // test with `-- --nocapture` to see the executor's message, which does
         // name the offending status.
         //
+        // A task left queued rather than polled -- the other failure shape --
+        // is caught by `nova_rt_task_take_output` itself: it asserts the task
+        // is done before handing back its output, so that case panics here
+        // with its own message rather than silently returning the `output: 0`
+        // initializer. There is no `nova_rt_task_is_done` pre-check for it any
+        // more: that entry point now takes a future, not a task id, and this
+        // harness only ever kept `PROBE_TASK_ID`, the id `TaskSpawn` returned
+        // to the JIT-compiled `main` -- the future itself was never a value
+        // this Rust frame held, so there is nothing to pass it.
+        //
         // SAFETY: `PROBE_TASK_ID` was registered by the `TaskSpawn` above, on
         // this same thread -- `program.run()` ran the synthesized `main`
-        // in-process.
-        assert_eq!(
-            unsafe { nova_runtime::task::nova_rt_task_is_done(PROBE_TASK_ID) },
-            1,
-            "the future was registered but never completed, without the \
-             executor rejecting its status -- so it was left queued rather \
-             than polled"
-        );
-        // SAFETY: same task id, now known complete, and taken exactly once.
+        // in-process. Now known complete or this call panics, and taken
+        // exactly once.
         unsafe { nova_runtime::task::nova_rt_task_take_output(PROBE_TASK_ID) }
     }
 
