@@ -20,6 +20,7 @@
 use crate::gc;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::time::Instant;
 
 /// The signature every compiled `async fn`'s poll function has -- both the
 /// hand-written ones this module's tests drive it with, and the ones
@@ -137,6 +138,27 @@ struct Task {
     taken: bool,
 }
 
+/// Why a parked task is waiting, and therefore what wakes it.
+///
+/// `Copy`, and staged through a `Cell` rather than a `RefCell`, deliberately:
+/// it is written from inside a poll frame, and a `RefCell` borrow panic there
+/// would unwind through generated code that has no landing pads (see
+/// [`PollFn`]'s doc comment).
+///
+/// `#[allow(dead_code)]`: this task wires the park set itself but adds no
+/// caller that constructs a `Wait` outside this module's own tests --
+/// `sleep` (`Wait::Deadline`) and a parking `join` (`Wait::Task`) are Task 2
+/// and Task 3. The lint is real under a plain, non-test build in the
+/// meantime, since `#[cfg(test)]` code is compiled out of it.
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Wait {
+    /// Wake once the clock reaches this instant.
+    Deadline(Instant),
+    /// Wake once the task with this id completes.
+    Task(i64),
+}
+
 thread_local! {
     /// Ids ready for another turn, FIFO: pushed at the back, popped from the
     /// front, so a re-queued task's next poll always waits behind every
@@ -185,6 +207,20 @@ thread_local! {
     /// instead of running a second executor loop from inside the first
     /// one's frame and corrupting the shared queue.
     static IN_BLOCK_ON: Cell<bool> = const { Cell::new(false) };
+    /// Tasks that are waiting on something, and what for. **Disjoint from
+    /// `QUEUE` by construction:** an entry arrives only by `poll_one` declining
+    /// to re-queue, and leaves only by being pushed back onto `QUEUE`. Keyed on
+    /// the task id -- this executor's own private identity -- and deliberately
+    /// not on a state address: `BY_STATE` needs pruning at the GC sweep only
+    /// because its keys are heap addresses a Nova value names, and a second
+    /// address-keyed map would inherit that hazard for nothing.
+    static PARKED: RefCell<Vec<(i64, Wait)>> = const { RefCell::new(Vec::new()) };
+    /// The task `poll_one` is polling right now, so a park staged from inside
+    /// that poll knows whose it is without `task_ctx` having to carry it.
+    static CURRENT: Cell<Option<i64>> = const { Cell::new(None) };
+    /// A park staged by the poll in progress. Read by `poll_one` once the
+    /// status is known: committed on `POLL_PENDING`, discarded on `POLL_READY`.
+    static PENDING_PARK: Cell<Option<Wait>> = const { Cell::new(None) };
 }
 
 /// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
@@ -313,9 +349,34 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
     id
 }
 
-/// Poll task `id` once. On [`POLL_PENDING`], re-queue it for another turn. On
-/// [`POLL_READY`], copy its output out of the state object into the `Task`
-/// record and mark it done.
+/// Record that the task currently being polled wants to park on `wait`.
+///
+/// Called from inside a poll function, so it must not panic: both cells hold
+/// `Copy` values and neither borrow can fail. The two aborts below are
+/// compiler-or-runtime bugs rather than user error, which is why they end the
+/// process rather than returning a status.
+///
+/// `#[allow(dead_code)]`: only this module's own tests call this today: this
+/// task adds the mechanism but no builtin that calls it (see the `Wait` doc
+/// comment above). Task 2 and Task 3 are its real callers.
+#[allow(dead_code)]
+fn stage_park(wait: Wait) {
+    if CURRENT.with(Cell::get).is_none() {
+        abort_with("nova_rt: a park was staged outside a poll");
+    }
+    if let Some(previous) = PENDING_PARK.with(|p| p.replace(Some(wait))) {
+        abort_with(&format!(
+            "nova_rt: two parks staged in one poll ({previous:?} then {wait:?}); \
+             an inner future's POLL_PENDING did not propagate"
+        ));
+    }
+}
+
+/// Poll task `id` once. On [`POLL_PENDING`], re-queue it for another turn --
+/// or, if the poll staged a park via [`stage_park`], move it to [`PARKED`]
+/// instead. On [`POLL_READY`], copy its output out of the state object into
+/// the `Task` record, mark it done, and wake anything parked on it (see
+/// [`wake_tasks_waiting_on`]).
 ///
 /// **The state object's GC root is deliberately *not* released here.** The
 /// output value has been copied into `Task::output`, which lives in `TASKS` --
@@ -355,13 +416,21 @@ unsafe fn poll_one(id: i64) {
             .expect("poll_one: task id is not registered");
         (task.poll, task.state)
     });
-    // SAFETY: `poll`/`state` came from a `Task` this module built in
-    // `spawn_internal` from a caller-guaranteed-valid future fat pointer;
-    // `task_ctx` is always null (see `PollFn`'s doc comment -- unused in
-    // this phase).
+    CURRENT.with(|c| c.set(Some(id)));
+    // SAFETY: unchanged from before -- `poll`/`state` came from a `Task` this
+    // module built in `spawn_internal`; `task_ctx` is still always null.
     let status = unsafe { poll(state, std::ptr::null_mut()) };
+    CURRENT.with(|c| c.set(None));
+    // Taken unconditionally, which is what discards a park staged by a poll
+    // that then returned `POLL_READY`. Leaving it staged would park the next
+    // task polled; committing it would leave a finished task in `PARKED`,
+    // faking a deadlock for the rest of the process.
+    let staged = PENDING_PARK.with(|p| p.take());
     if status == POLL_PENDING {
-        QUEUE.with(|queue| queue.borrow_mut().push_back(id));
+        match staged {
+            Some(wait) => PARKED.with(|parked| parked.borrow_mut().push((id, wait))),
+            None => QUEUE.with(|queue| queue.borrow_mut().push_back(id)),
+        }
         return;
     }
     // Panics rather than aborting, unlike every other diagnostic here that a
@@ -392,6 +461,33 @@ unsafe fn poll_one(id: i64) {
             .expect("poll_one: task id is not registered");
         task.output = output;
         task.done = true;
+    });
+    wake_tasks_waiting_on(id);
+}
+
+/// Move every task parked on `done_id` back onto the ready queue.
+///
+/// Called from `poll_one` the moment a task is marked done, which is what
+/// makes `Wait::Task` a complete wake source: a task cannot finish by any
+/// other route.
+fn wake_tasks_waiting_on(done_id: i64) {
+    let woken = PARKED.with(|parked| {
+        let mut parked = parked.borrow_mut();
+        let mut woken = Vec::new();
+        parked.retain(|&(id, wait)| match wait {
+            Wait::Task(target) if target == done_id => {
+                woken.push(id);
+                false
+            }
+            _ => true,
+        });
+        woken
+    });
+    QUEUE.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        for id in woken {
+            queue.push_back(id);
+        }
     });
 }
 
@@ -535,12 +631,23 @@ fn take_output_internal(id: i64) -> i64 {
 unsafe fn run_to_completion(future: *mut u8) -> i64 {
     // SAFETY: forwarding this function's own contract.
     let root_id = unsafe { spawn_internal(future) };
-    while let Some(id) = QUEUE.with(|queue| queue.borrow_mut().pop_front()) {
-        // SAFETY: `id` was just popped from `QUEUE`, so it is a currently
-        // registered task id (every id is pushed by `spawn_internal` exactly
-        // once and re-pushed by `poll_one` itself only for a task that is
-        // not yet done).
-        unsafe { poll_one(id) };
+    loop {
+        while let Some(id) = QUEUE.with(|queue| queue.borrow_mut().pop_front()) {
+            // SAFETY: `id` was just popped from `QUEUE`, so it is a registered
+            // task id (pushed by `spawn_internal` once, re-pushed only by
+            // `poll_one` and `wake_tasks_waiting_on` for a live task).
+            unsafe { poll_one(id) };
+        }
+        if PARKED.with(|parked| parked.borrow().is_empty()) {
+            break;
+        }
+        // The ready queue is empty and something is still parked. A remaining
+        // deadline can refill the queue; a park set holding nothing but
+        // `Wait::Task` entries cannot, because nothing is running to finish.
+        match earliest_deadline() {
+            Some(at) => wake_due_deadlines(at),
+            None => report_deadlock(),
+        }
     }
     // The queue is empty, and the root task was in it, so it must have
     // finished -- the only way out of the queue is completion. Asserted
@@ -552,6 +659,88 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
         "run_to_completion: the queue drained but the root task is not done"
     );
     take_output_internal(root_id)
+}
+
+/// The soonest instant any parked task is waiting for, if any is waiting on
+/// the clock at all.
+fn earliest_deadline() -> Option<Instant> {
+    PARKED.with(|parked| {
+        parked
+            .borrow()
+            .iter()
+            .filter_map(|&(_, wait)| match wait {
+                Wait::Deadline(at) => Some(at),
+                Wait::Task(_) => None,
+            })
+            .min()
+    })
+}
+
+/// Sleep until `at`, then move every task whose deadline has arrived back onto
+/// the ready queue.
+fn wake_due_deadlines(at: Instant) {
+    let now = Instant::now();
+    if at > now {
+        std::thread::sleep(at - now);
+    }
+    let now = Instant::now();
+    let woken = PARKED.with(|parked| {
+        let mut parked = parked.borrow_mut();
+        let mut woken = Vec::new();
+        parked.retain(|&(id, wait)| match wait {
+            Wait::Deadline(deadline) if deadline <= now => {
+                woken.push(id);
+                false
+            }
+            _ => true,
+        });
+        woken
+    });
+    QUEUE.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        for id in woken {
+            queue.push_back(id);
+        }
+    });
+}
+
+/// The deadlock message: a headline plus one line per parked task.
+///
+/// Separate from [`report_deadlock`] so a test can assert the text without
+/// aborting. A `Wait::Deadline` cannot reach here through `run_to_completion`,
+/// which calls it only when `earliest_deadline()` is `None` -- but it is
+/// printed rather than treated as unreachable, because a panic on an abort
+/// path would replace a clear diagnostic with a confusing one.
+fn deadlock_report() -> String {
+    let entries = PARKED.with(|parked| parked.borrow().clone());
+    let plural = if entries.len() == 1 {
+        "task is"
+    } else {
+        "tasks are"
+    };
+    let mut report = format!(
+        "nova: deadlock: {} {plural} parked and none can wake\n",
+        entries.len()
+    );
+    for (id, wait) in entries {
+        match wait {
+            Wait::Task(target) => {
+                report.push_str(&format!(
+                    "  task {id} is waiting for task {target} to finish\n"
+                ));
+            }
+            Wait::Deadline(_) => {
+                report.push_str(&format!("  task {id} is waiting on a deadline\n"));
+            }
+        }
+    }
+    report
+}
+
+/// Print the deadlock report and end the process.
+fn report_deadlock() -> ! {
+    eprint!("{}", deadlock_report());
+    std::process::abort();
 }
 
 /// Queue a `{ poll_code, state }` future as a new task and return its id.
@@ -776,6 +965,39 @@ unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) 
     POLL_READY
 }
 
+/// Build a `{ poll_code, state }` future: a scanned [`FUTURE_SIZE`] fat pointer
+/// over a freshly allocated scanned state object of `state_size` bytes, with
+/// `init` handed the state's slots to populate before the future is returned.
+///
+/// **The one place this layout is written.** It is the layout
+/// `async_lower.rs` independently emits, so a second copy that drifts from it
+/// is a silent miscompile rather than a failure -- this project has already
+/// shipped one miscompile from two sites drifting apart.
+///
+/// `state` is registered as a GC root across the second allocation, which can
+/// collect while `state` is named only by this frame. That ordering is the
+/// subtle part every caller previously had to reproduce.
+///
+/// `gc::alloc` returns zeroed memory, so a caller whose only state is a resume
+/// tag starting at `0` passes an `init` that writes nothing.
+fn build_future(poll: PollFn, state_size: usize, init: impl FnOnce(*mut i64)) -> *mut u8 {
+    let state = gc::alloc(state_size, true);
+    gc::add_root(state);
+    init(state as *mut i64);
+    let fat = gc::alloc(FUTURE_SIZE, true);
+    // SAFETY: `fat` is a live, writable `FUTURE_SIZE` block, so both words
+    // below are in bounds. Written before the root is released, so the state
+    // object is reachable from the future by the time it is unrooted.
+    unsafe {
+        (fat as *mut i64)
+            .add(FUTURE_SLOT_POLL)
+            .write(poll as usize as i64);
+        (fat as *mut i64).add(FUTURE_SLOT_STATE).write(state as i64);
+    }
+    gc::remove_root(state);
+    fat
+}
+
 /// A fresh `Future<unit>` that pends once and then completes -- what
 /// `std/task`'s `yield_now` awaits.
 ///
@@ -786,47 +1008,26 @@ unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) 
 /// ever having yielded.
 ///
 /// Builds exactly the layout [`nova_rt_task_spawn`] documents and
-/// `async_lower.rs` independently emits: a scanned [`FUTURE_SIZE`]-byte fat
-/// pointer holding [`poll_yield_once`]'s address in word [`FUTURE_SLOT_POLL`]
-/// and the state object's address in word [`FUTURE_SLOT_STATE`], and a scanned
-/// state object of at least [`STATE_MIN_SIZE`] bytes. Reproducing a layout the
-/// compiler also emits is a silent miscompile when it is wrong, which is why
-/// `the_yield_futures_layout_is_the_one_the_abi_declares` asserts the tracked
-/// `(size, scan)` of both allocations rather than only the words written into
-/// them.
+/// `async_lower.rs` independently emits, via [`build_future`] -- see its doc
+/// comment for why that layout now has exactly one home. [`poll_yield_once`]
+/// is the poll function and [`YIELD_STATE_SIZE`] the state size. Reproducing a
+/// layout the compiler also emits is a silent miscompile when it is wrong,
+/// which is why `the_yield_futures_layout_is_the_one_the_abi_declares` asserts
+/// the tracked `(size, scan)` of both allocations rather than only the words
+/// written into them.
 #[no_mangle]
 pub extern "C-unwind" fn nova_rt_task_yield_future() -> *mut u8 {
-    // Bound as a `PollFn` before being written as a word, rather than cast from
-    // the function item directly: the coercion is what checks that this
-    // function's signature *is* the poll ABI, at the one place its address
-    // becomes an untyped word.
+    // Bound as a `PollFn` before being passed, rather than cast from the
+    // function item: the coercion is what checks that this function's
+    // signature *is* the poll ABI.
     let poll: PollFn = poll_yield_once;
-    let state = gc::alloc(YIELD_STATE_SIZE, true);
-    // The allocation below can collect, and at that moment `state` is named
-    // only by this Rust frame -- which the collector reaches only through its
-    // conservative stack scan, and that scan has a real implementation on one
-    // platform (`gc.rs`'s `stack_base`). Registered across the call so the
-    // object's survival is a property of the root registry instead.
-    gc::add_root(state);
-    let fat = gc::alloc(FUTURE_SIZE, true);
-    // SAFETY: `fat` is a live, writable `FUTURE_SIZE`-byte block, so both
-    // words below are in bounds. Written before the root is released, so
-    // `state` is reachable from `fat` by the time it stops being a root.
-    unsafe {
-        (fat as *mut usize)
-            .add(FUTURE_SLOT_POLL)
-            .write(poll as usize);
-        (fat as *mut usize)
-            .add(FUTURE_SLOT_STATE)
-            .write(state as usize);
-    }
-    gc::remove_root(state);
-    fat
+    build_future(poll, YIELD_STATE_SIZE, |_slots| {})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// A hand-written poll function shaped exactly like the ones
     /// `async_lower.rs` will generate: it reads and writes the resume tag in
@@ -882,6 +1083,15 @@ mod tests {
         // SAFETY: `future` is a `make_future` result, so word
         // `FUTURE_SLOT_STATE` is the state object's address.
         unsafe { (future as *mut usize).add(FUTURE_SLOT_STATE).read() }
+    }
+
+    /// Build a future with a `STATE_MIN_SIZE` state and nothing in it but the
+    /// tag and output slots, which `gc::alloc`'s zeroing already leaves at
+    /// `0`. A one-liner over [`build_future`] rather than a hand-rolled
+    /// layout, so the park-set tests below go through the same construction
+    /// path every other future in the system does.
+    fn test_future(poll: PollFn) -> *mut u8 {
+        build_future(poll, STATE_MIN_SIZE, |_| {})
     }
 
     #[test]
@@ -1445,6 +1655,30 @@ mod tests {
         );
     }
 
+    /// The layout a bare [`build_future`] call produces, read back from the
+    /// collector's own records -- the same check as
+    /// `the_yield_futures_layout_is_the_one_the_abi_declares`, but aimed at
+    /// the shared constructor directly rather than at one of its callers.
+    /// After `nova_rt_task_yield_future` was routed through it, `build_future`
+    /// is where every future's layout in this system actually comes from, so
+    /// this is the one test that would catch that function's own layout
+    /// drifting, independent of which caller happens to be tested elsewhere.
+    #[test]
+    fn a_build_future_result_has_the_layout_the_abi_declares() {
+        let fut = test_future(poll_ready_now);
+        assert_eq!(
+            gc::object_info(fut as usize),
+            Some((FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = state_of(fut);
+        assert_eq!(
+            gc::object_info(state),
+            Some((STATE_MIN_SIZE, true)),
+            "the state object must be at least the tag and output slots, scanned"
+        );
+    }
+
     /// The suspension shape everything else depends on: pending exactly once.
     #[test]
     fn the_yield_future_pends_once_then_completes() {
@@ -1529,6 +1763,122 @@ mod tests {
             unsafe { nova_rt_task_block_on(fut) },
             11,
             "the executor must re-poll a task that awaited a yield future"
+        );
+    }
+
+    /// A poll function that stages a deadline park on its first poll and
+    /// completes on its second, used to drive the park set without any Nova
+    /// surface. Mirrors `poll_yield_once`'s shape, including its obligation not
+    /// to unwind.
+    unsafe extern "C-unwind" fn poll_park_once(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `STATE_MIN_SIZE` state object built by the test
+        // helper below, so both slots are in bounds.
+        let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if tag == 0 {
+            unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+            stage_park(Wait::Deadline(Instant::now()));
+            return POLL_PENDING;
+        }
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    #[test]
+    fn a_staged_park_moves_the_task_out_of_the_ready_queue() {
+        let fut = test_future(poll_park_once);
+        // SAFETY: `fut` is a well-formed future from `test_future`.
+        let _id = unsafe { spawn_internal(fut) };
+        assert_eq!(QUEUE.with(|q| q.borrow().len()), 1, "spawn should queue it");
+
+        let id = QUEUE.with(|q| q.borrow_mut().pop_front()).expect("queued");
+        // SAFETY: `id` was just popped from `QUEUE`.
+        unsafe { poll_one(id) };
+
+        assert_eq!(
+            QUEUE.with(|q| q.borrow().len()),
+            0,
+            "a parked task must NOT be re-queued -- that is the whole change"
+        );
+        assert_eq!(
+            PARKED.with(|p| p.borrow().len()),
+            1,
+            "it must be in the park set instead"
+        );
+        let _ = id;
+    }
+
+    #[test]
+    fn a_deadline_park_is_woken_and_the_task_completes() {
+        let fut = test_future(poll_park_once);
+        // SAFETY: well-formed future from `test_future`.
+        let out = unsafe { run_to_completion(fut) };
+        assert_eq!(
+            out, 0,
+            "the parked task must be woken and run to completion"
+        );
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "the park set must be empty once the loop exits"
+        );
+    }
+
+    #[test]
+    fn the_earliest_deadline_is_the_one_slept_on() {
+        let far = Instant::now() + Duration::from_secs(30);
+        let near = Instant::now();
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((7, Wait::Deadline(far)));
+            p.push((8, Wait::Deadline(near)));
+        });
+        assert_eq!(
+            earliest_deadline(),
+            Some(near),
+            "sleeping on the later deadline would strand the earlier task"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+    }
+
+    #[test]
+    fn a_deadlock_names_every_parked_task_and_its_reason() {
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((1, Wait::Task(2)));
+            p.push((2, Wait::Task(1)));
+        });
+        let report = deadlock_report();
+        assert!(report.contains("2 tasks are parked"), "got: {report}");
+        assert!(
+            report.contains("task 1 is waiting for task 2 to finish"),
+            "every parked task must be named, not just the first -- got: {report}"
+        );
+        assert!(
+            report.contains("task 2 is waiting for task 1 to finish"),
+            "the second parked task is missing -- got: {report}"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+    }
+
+    /// A poll function that stages a park and then reports `POLL_READY` anyway --
+    /// the shape that would strand a finished task in the park set.
+    unsafe extern "C-unwind" fn poll_stage_then_ready(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+        let slots = state as *mut i64;
+        stage_park(Wait::Task(0));
+        // SAFETY: `state` is a `STATE_MIN_SIZE` object from `test_future`.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    #[test]
+    fn a_park_staged_by_a_poll_that_completes_is_discarded() {
+        let fut = test_future(poll_stage_then_ready);
+        // SAFETY: well-formed future from `test_future`.
+        let out = unsafe { run_to_completion(fut) };
+        assert_eq!(out, 0);
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "a completed task must not be left parked -- it would fake a deadlock forever"
         );
     }
 
