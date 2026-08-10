@@ -188,6 +188,18 @@ builtins! {
     /// Its future is built by `nova_rt_task_yield_future`, the one poll
     /// function `nova-mir`'s async transform did not generate. Std-only.
     TaskYieldFuture,
+    /// `task_sleep_future(ms: Int) -> Future<unit>` — a fresh future that
+    /// parks for `ms` milliseconds, then completes.
+    ///
+    /// The first builtin that actually parks: unlike
+    /// [`Builtin::TaskYieldFuture`], which always resumes on the next turn,
+    /// this future registers a deadline with the executor's park set (Task
+    /// 1's `Wait::Deadline`) and is not polled again until that deadline
+    /// passes. Backs `std/task`'s `sleep`. A builtin for the same reason
+    /// `task_yield_future` is: an `async fn` body suspends only at an
+    /// `.await`, and nothing expressible in Nova produces a future that
+    /// starts out pending. Std-only.
+    TaskSleepFuture,
 }
 
 impl Builtin {
@@ -212,6 +224,7 @@ impl Builtin {
             Builtin::TaskDrive => "task_drive",
             Builtin::TaskOutput => "task_output",
             Builtin::TaskYieldFuture => "task_yield_future",
+            Builtin::TaskSleepFuture => "task_sleep_future",
         }
     }
 
@@ -233,7 +246,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 15] = [
+    pub const STD_ONLY: [Builtin; 16] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -249,6 +262,7 @@ impl Builtin {
         Builtin::TaskDrive,
         Builtin::TaskOutput,
         Builtin::TaskYieldFuture,
+        Builtin::TaskSleepFuture,
     ];
 }
 

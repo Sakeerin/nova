@@ -1173,6 +1173,34 @@ fn gate_async_tasks_under_gc_stress() {
         .stdout(expected);
 }
 
+/// `sleep(ms)`, the first primitive that parks rather than spins, proved by
+/// wake *order* rather than by elapsed time.
+///
+/// `slow` is spawned before `quick`, so spawn order alone would print `slow`
+/// then `quick`. The fixture's expected output is the reverse: only a
+/// scheduler that actually honours each task's deadline (Task 1's park set,
+/// driven here through `sleep`'s `Wait::Deadline`) wakes `quick` first. A
+/// broken implementation that ignores the deadline and simply re-queues a
+/// parked task -- indistinguishable from `yield_now` -- produces `slow` then
+/// `quick`, which is exactly the mutation
+/// `crates/nova-runtime/src/task.rs`'s `run_to_completion` was hand-mutated to
+/// produce while verifying this fixture (see the task 2 report). No duration
+/// is asserted anywhere, only the two lines' order, per this suite's
+/// standing rule against timing-flaky assertions.
+#[test]
+fn gate_task_sleep_order_runs() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/task_sleep_order.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/task_sleep_order.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `block_on` called from inside an `async fn` ends the process with a
 /// diagnostic, rather than unwinding out of the runtime through a generated
 /// frame.

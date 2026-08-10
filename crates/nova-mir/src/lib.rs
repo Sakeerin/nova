@@ -221,6 +221,10 @@ rt_funcs! {
     /// `() -> ptr to { poll_code, state }` — a fresh future that reports
     /// pending once and then completes. What `std/task`'s `yield_now` awaits.
     TaskYieldFuture,
+    /// `(i64 ms) -> ptr to { poll_code, state }` — a fresh future that parks
+    /// for `ms` milliseconds via the executor's park set, then completes.
+    /// What `std/task`'s `sleep` awaits.
+    TaskSleepFuture,
 }
 
 impl RtFunc {
@@ -252,6 +256,7 @@ impl RtFunc {
             RtFunc::TaskTakeOutput => "nova_rt_task_take_output",
             RtFunc::TaskRelease => "nova_rt_task_release",
             RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
+            RtFunc::TaskSleepFuture => "nova_rt_task_sleep_future",
         }
     }
 
@@ -280,6 +285,7 @@ impl RtFunc {
             RtFunc::TaskTakeOutput => (vec![MirTy::I64], MirTy::I64),
             RtFunc::TaskRelease => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
+            RtFunc::TaskSleepFuture => (vec![MirTy::I64], MirTy::Ptr),
         }
     }
 }

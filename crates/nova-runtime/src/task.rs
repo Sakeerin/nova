@@ -24,7 +24,7 @@
 use crate::gc;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The signature every compiled `async fn`'s poll function has -- both the
 /// hand-written ones this module's tests drive it with, and the ones
@@ -355,15 +355,11 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
 
 /// Record that the task currently being polled wants to park on `wait`.
 ///
-/// Called from inside a poll function, so it must not panic: both cells hold
-/// `Copy` values and neither borrow can fail. The two aborts below are
-/// compiler-or-runtime bugs rather than user error, which is why they end the
-/// process rather than returning a status.
-///
-/// `#[allow(dead_code)]`: only this module's own tests call this today: this
-/// task adds the mechanism but no builtin that calls it (see the `Wait` doc
-/// comment above). Task 2 and Task 3 are its real callers.
-#[allow(dead_code)]
+/// Called from inside a poll function -- [`poll_sleep`] and this module's own
+/// tests today, with a parking `join` (Task 3) to follow -- so it must not
+/// panic: both cells hold `Copy` values and neither borrow can fail. The two
+/// aborts below are compiler-or-runtime bugs rather than user error, which is
+/// why they end the process rather than returning a status.
 fn stage_park(wait: Wait) {
     if CURRENT.with(Cell::get).is_none() {
         abort_with("nova_rt: a park was staged outside a poll");
@@ -1047,6 +1043,69 @@ pub extern "C-unwind" fn nova_rt_task_yield_future() -> *mut u8 {
     // signature *is* the poll ABI.
     let poll: PollFn = poll_yield_once;
     build_future(poll, YIELD_STATE_SIZE, |_slots| {})
+}
+
+/// Report [`POLL_PENDING`] on the first poll, having staged a deadline park,
+/// and [`POLL_READY`] on the second.
+///
+/// **It must not unwind**, for the reason [`poll_yield_once`] states: this is a
+/// hand-written [`PollFn`], so `async_lower.rs`'s argument that no unwind
+/// crosses a generated poll frame does not cover it. Unlike `poll_yield_once`
+/// it does touch runtime state, so that obligation is discharged by
+/// [`stage_park`] holding only `Copy` values in `Cell`s -- no borrow here can
+/// fail.
+unsafe extern "C-unwind" fn poll_sleep(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the state object `nova_rt_task_sleep_future` built,
+    // of at least `STATE_MIN_SIZE` bytes, so every slot below is in bounds.
+    let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+    if tag == 0 {
+        unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+        // SAFETY: same object; the deadline was stored here at construction.
+        let ms = unsafe { slots.add(SLEEP_SLOT_MS).read() };
+        stage_park(Wait::Deadline(deadline_from_ms(ms)));
+        return POLL_PENDING;
+    }
+    // SAFETY: same object, output slot.
+    unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+    POLL_READY
+}
+
+/// `ms` milliseconds from now, clamping a negative value to "now".
+///
+/// Nova's `Int` is signed and nothing stops `sleep(-1)`; treating it as an
+/// immediate wake keeps the executor's invariants intact without inventing a
+/// new failure mode for an argument that is merely useless.
+fn deadline_from_ms(ms: i64) -> Instant {
+    let ms = u64::try_from(ms).unwrap_or(0);
+    Instant::now() + Duration::from_millis(ms)
+}
+
+/// Where `nova_rt_task_sleep_future` stores its argument. One past the last
+/// slot the ABI reserves, so the state object is one word larger than
+/// `STATE_MIN_SIZE`.
+const SLEEP_SLOT_MS: usize = STATE_SLOT_TEMPS;
+
+/// State size for a sleep future: the ABI minimum plus the one temp slot
+/// holding `ms`.
+const SLEEP_STATE_SIZE: usize = STATE_MIN_SIZE + 8;
+
+const _: () = assert!(SLEEP_STATE_SIZE >= (SLEEP_SLOT_MS + 1) * 8);
+
+/// A fresh `Future<unit>` that parks for `ms` milliseconds, then completes.
+///
+/// Same layout obligation as [`nova_rt_task_yield_future`]: a scanned
+/// [`FUTURE_SIZE`] fat pointer over a scanned state object, built to the
+/// layout `async_lower.rs` independently emits. A fresh state object per call,
+/// because the resume tag *and* the deadline are per-suspension.
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_task_sleep_future(ms: i64) -> *mut u8 {
+    let poll: PollFn = poll_sleep;
+    build_future(poll, SLEEP_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `SLEEP_STATE_SIZE` block, and
+        // `SLEEP_SLOT_MS` is in bounds by the assertion above.
+        unsafe { slots.add(SLEEP_SLOT_MS).write(ms) };
+    })
 }
 
 #[cfg(test)]

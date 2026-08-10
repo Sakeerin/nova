@@ -103,6 +103,19 @@ pub async fn yield_now() {
     task_yield_future().await
 }
 
+// Suspend the current task for at least `ms` milliseconds.
+//
+// The first primitive in the language that parks rather than spins: it
+// registers a deadline with the executor and is not polled again until that
+// deadline passes, so a sleeping task costs no polls at all. Contrast
+// `yield_now`, which is re-queued immediately and deliberately.
+//
+// `ms` is whole milliseconds; Nova has no duration type. A negative value
+// wakes immediately rather than being rejected.
+pub async fn sleep(ms: Int) {
+    task_sleep_future(ms).await
+}
+
 // Run this thread's executor until every queued task has finished, and produce
 // `fut`'s value. The way async code is entered from sync code.
 //

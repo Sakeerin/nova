@@ -3917,7 +3917,8 @@ impl<'a> Checker<'a> {
             | Builtin::TaskRelease
             | Builtin::TaskDrive
             | Builtin::TaskOutput
-            | Builtin::TaskYieldFuture => "",
+            | Builtin::TaskYieldFuture
+            | Builtin::TaskSleepFuture => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7109,6 +7110,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::TaskDrive => (vec![future_of_param0()], Ty::Unit),
         Builtin::TaskOutput => (vec![future_of_param0()], Ty::Param(0)),
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
+        Builtin::TaskSleepFuture => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
     }
 }
 
@@ -14976,6 +14978,10 @@ mod tests {
                 Builtin::TaskYieldFuture => (
                     (vec![], Ty::Future(Box::new(Ty::Unit))),
                     "`task_yield_future().await` in `std/task`'s `yield_now`",
+                ),
+                Builtin::TaskSleepFuture => (
+                    (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
+                    "`task_sleep_future(ms).await` in `std/task`'s `sleep`",
                 ),
             }
         }

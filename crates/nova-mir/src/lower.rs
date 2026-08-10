@@ -687,6 +687,7 @@ impl<'a> Lowerer<'a> {
                     // machine class.
                     Builtin::TaskDrive => Lowering::Runtime(RtFunc::TaskBlockOn),
                     Builtin::TaskYieldFuture => Lowering::Runtime(RtFunc::TaskYieldFuture),
+                    Builtin::TaskSleepFuture => Lowering::Runtime(RtFunc::TaskSleepFuture),
                     Builtin::TaskOutput => Lowering::FutureOutput,
                 };
                 match how {
