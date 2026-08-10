@@ -118,7 +118,10 @@ over a scanned state object of at least `STATE_MIN_SIZE`, with the resume tag in
 
 ```
 loop {
-    while let Some(id) = QUEUE.pop_front() { poll_one(id) }
+    while let Some(id) = QUEUE.pop_front() {
+        poll_one(id)
+        if !PARKED.is_empty() { wake every entry due by now }   // no sleeping here
+    }
     if PARKED.is_empty() { break }
     match earliest Deadline in PARKED {
         Some(t) => { sleep until t; wake every entry now due }
@@ -126,6 +129,19 @@ loop {
     }
 }
 ```
+
+**Corrected 2026-08-10, during Task 2 — the first version of this loop woke deadlines only at the
+drained-queue branch, and that is a starvation bug.** A task that re-queues itself every turn (any
+`yield_now` loop, including the spin-based `join` this increment replaces) means `pop_front` always
+returns `Some`, so the inner loop never exits, `earliest_deadline` is never consulted, and a
+deadline-parked task is **never woken**. It survives this increment, because `yield_now` keeps
+re-queueing deliberately: `spawn(forever_yielding())` alongside `sleep(10).await` would hang for
+good. Waking what is already due is cheap and belongs on every turn; only *sleeping* requires an
+empty ready queue. The `PARKED.is_empty()` guard keeps the common case at one check with no clock
+read. Found by Task 2's own end-to-end fixture being the first thing to exercise the combination.
+
+**The deadlock condition is unchanged by that correction** — still queue-empty *and* park-set-non-empty
+*and* no `Wait::Deadline` remaining.
 
 **The deadlock condition is exact rather than heuristic.** An empty queue means nothing is running.
 If every remaining wait is a `Task(_)`, then each target is itself parked — a target that was done
