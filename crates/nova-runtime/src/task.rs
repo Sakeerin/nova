@@ -615,22 +615,33 @@ fn take_output_internal(id: i64) -> i64 {
 ///    no way to reach `nova_rt_task_take_output`'s promised state (`done`,
 ///    with an output) at all.
 /// 2. **A task that never reports [`POLL_READY`] no longer spins this loop
-///    forever.** Before the park set, a task returning [`POLL_PENDING`] was
+///    forever, and neither does a task that keeps re-queueing itself.**
+///    Before the park set, a task returning [`POLL_PENDING`] was
 ///    unconditionally re-queued, so one that never became ready re-queued
-///    forever and the loop hung with no diagnostic. Now a poll that stages a
+///    forever and the loop hung with no diagnostic. A poll that stages a
 ///    [`Wait`] (see [`stage_park`]) moves its task to [`PARKED`] instead of
-///    back onto the queue, and once the queue runs dry this loop only
-///    continues if a deadline remains to sleep on ([`earliest_deadline`]) --
-///    otherwise every task still parked is, by construction, waiting on
-///    something nothing left running can ever produce, and
-///    [`report_deadlock`] ends the process naming each one instead of hanging
-///    silently. Nothing compiled from Nova source can reach either path yet,
-///    though: `yield_now` is the only suspension an `async fn` body can await
-///    today, and it always resumes on the next turn, so a task's tag always
-///    advances. That changes once a later task adds a builtin that can park
-///    on an external event that may never arrive -- Task 2 (`sleep`) and
-///    Task 3 (a parking `join`) are exactly that, and they call the park set
-///    this task already built rather than the other way around.
+///    back onto the queue -- but a task that does not park (`yield_now`, and,
+///    until Task 3 rewrites it, a spinning `join`) still re-queues itself
+///    every turn by design, and that alone must not be able to starve a
+///    sibling's deadline. [`wake_due`] is therefore called after **every**
+///    poll below, not only once this loop's inner pass finds the queue
+///    empty: if a deadline were checked only there, a task that keeps
+///    re-queueing itself would keep that pass from ever finding the queue
+///    empty, and anything parked on a deadline would never be examined at
+///    all -- not delayed, starved permanently, for as long as anything kept
+///    re-queueing. Task 2's own end-to-end fixture is what surfaced this:
+///    `sleep`, awaited underneath a spinning `join`, hung indefinitely until
+///    this per-poll check was added. [`wake_due_deadlines`], which sleeps,
+///    is reached only from the drained-queue branch below, where sleeping is
+///    correct because there is genuinely nothing left to run; a park set
+///    holding nothing but `Wait::Task` entries there is a genuine deadlock,
+///    since nothing still running can ever finish and wake one, and
+///    [`report_deadlock`] ends the process naming each one instead of
+///    hanging silently. `sleep` (Task 2) and a parking `join` (Task 3) are
+///    what let Nova source reach any of this at all: before `sleep`,
+///    `yield_now` was the only suspension an `async fn` body could await,
+///    and it never stages a `Wait`, so nothing compiled from Nova source
+///    could ever populate [`PARKED`] in the first place.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).
@@ -643,6 +654,16 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
             // task id (pushed by `spawn_internal` once, re-pushed only by
             // `poll_one` and `wake_tasks_waiting_on` for a live task).
             unsafe { poll_one(id) };
+            // Checked after every poll, not only once this inner loop finds
+            // the queue empty -- see this function's own doc comment for why
+            // a self-requeuing task would otherwise starve every deadline in
+            // `PARKED` forever rather than merely delay it. Guarded on
+            // `PARKED` being non-empty so the overwhelmingly common case
+            // (nothing parked) costs one `Vec::is_empty` check and never
+            // reads the clock.
+            if !PARKED.with(|parked| parked.borrow().is_empty()) {
+                wake_due(Instant::now());
+            }
         }
         if PARKED.with(|parked| parked.borrow().is_empty()) {
             break;
@@ -682,14 +703,18 @@ fn earliest_deadline() -> Option<Instant> {
     })
 }
 
-/// Sleep until `at`, then move every task whose deadline has arrived back onto
-/// the ready queue.
-fn wake_due_deadlines(at: Instant) {
-    let now = Instant::now();
-    if at > now {
-        std::thread::sleep(at - now);
-    }
-    let now = Instant::now();
+/// Move every parked task whose deadline is `<= now` back onto the ready
+/// queue, leaving every other entry -- a [`Wait::Task`], or a
+/// [`Wait::Deadline`] still in the future -- exactly where it was.
+///
+/// The wake half of what used to be [`wake_due_deadlines`]' whole job,
+/// pulled apart from the sleep half so [`run_to_completion`] can call this
+/// half after every poll (cheap: one pass over [`PARKED`], no sleeping) while
+/// still calling [`wake_due_deadlines`] only when the ready queue is
+/// genuinely empty (the only time sleeping this thread is correct). See
+/// `run_to_completion`'s doc comment for why checking only at the
+/// drained-queue point is not enough on its own.
+fn wake_due(now: Instant) {
     let woken = PARKED.with(|parked| {
         let mut parked = parked.borrow_mut();
         let mut woken = Vec::new();
@@ -708,6 +733,21 @@ fn wake_due_deadlines(at: Instant) {
             queue.push_back(id);
         }
     });
+}
+
+/// Sleep until `at`, then wake whatever is due by then.
+///
+/// Called only from `run_to_completion`'s drained-queue branch, where
+/// sleeping is correct because there is nothing else left to run in the
+/// meantime. Contrast [`wake_due`], which `run_to_completion` also calls
+/// after every single poll specifically so this function's sleep is never
+/// the *only* place a deadline gets checked.
+fn wake_due_deadlines(at: Instant) {
+    let now = Instant::now();
+    if at > now {
+        std::thread::sleep(at - now);
+    }
+    wake_due(Instant::now());
 }
 
 /// The deadlock message: a headline plus one line per parked task.
@@ -1990,6 +2030,129 @@ mod tests {
         );
         PARKED.with(|p| p.borrow_mut().clear());
         QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
+    /// How many times `poll_spin_n_times` reports `POLL_PENDING`, without
+    /// ever staging a park, before it completes. Large enough that "the
+    /// spinner already finished" and "the spinner still has turns left" are
+    /// unmistakably different states for
+    /// `a_self_requeuing_task_does_not_starve_a_sibling_parked_on_a_deadline`
+    /// to tell apart.
+    const SPIN_TURNS: i64 = 5;
+
+    /// A poll function shaped like `yield_now`, or a spinning `join` before
+    /// Task 3: it re-queues itself by returning `POLL_PENDING` without ever
+    /// calling `stage_park`, `SPIN_TURNS` times, then completes.
+    /// `STATE_SLOT_TAG` doubles as the turn counter.
+    unsafe extern "C-unwind" fn poll_spin_n_times(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `STATE_MIN_SIZE` object from `test_future`.
+        let turns = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if turns < SPIN_TURNS {
+            unsafe { slots.add(STATE_SLOT_TAG).write(turns + 1) };
+            return POLL_PENDING;
+        }
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    /// Like `poll_park_once`, except the completing poll writes -- instead of
+    /// a fixed `0` -- the current `STATE_SLOT_TAG` of a *different* state
+    /// object, whose address is stashed in this one's first temp slot. Lets a
+    /// test read out how far a sibling task had progressed at the exact
+    /// moment this task was woken and completed, with no shared test-global
+    /// mutable state and no dependence on wall-clock timing.
+    unsafe extern "C-unwind" fn poll_park_then_read_sibling_progress(
+        state: *mut u8,
+        _task_ctx: *mut u8,
+    ) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `make_future(_, 1)` object: TAG, OUTPUT, then
+        // one temp slot holding the sibling's state address.
+        let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if tag == 0 {
+            unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+            stage_park(Wait::Deadline(Instant::now()));
+            return POLL_PENDING;
+        }
+        let sibling = unsafe { slots.add(STATE_SLOT_TEMPS).read() } as *mut i64;
+        // SAFETY: the sibling is a live state object of at least
+        // `STATE_MIN_SIZE`, spawned by the test and still registered (hence
+        // still rooted) for as long as this task is running.
+        let sibling_progress = unsafe { sibling.add(STATE_SLOT_TAG).read() };
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(sibling_progress) };
+        POLL_READY
+    }
+
+    /// The starvation bug a controller review caught in Task 2: a task that
+    /// keeps re-queueing itself (`yield_now`, or -- until Task 3 -- a
+    /// spinning `join`) must not be able to starve a sibling parked on a
+    /// deadline. Before this test existed, `run_to_completion` only ever
+    /// checked `PARKED` for due deadlines once its inner queue-draining pass
+    /// found the ready queue empty; a task that never let the queue go empty
+    /// (by re-queueing itself every turn) meant that check was never reached
+    /// at all, so a sibling's deadline -- however short -- was never
+    /// examined until the spinner happened to finish on its own. Task 2's
+    /// end-to-end `sleep` fixture hit exactly this, underneath a spinning
+    /// `join`, and hung indefinitely.
+    ///
+    /// Deterministic despite using a real clock: the sleeper's deadline is
+    /// `Instant::now()` at the moment it first parks, so it is already due
+    /// the instant anything next checks the clock, on any monotonic clock,
+    /// regardless of how fast or slow the machine is. Neither poll function
+    /// ever reaches `thread::sleep`, and nothing here asserts on elapsed
+    /// time -- only on which of two turn counts is smaller.
+    #[test]
+    fn a_self_requeuing_task_does_not_starve_a_sibling_parked_on_a_deadline() {
+        let spinner = test_future(poll_spin_n_times);
+        // SAFETY: `spinner` is a well-formed future from `test_future`.
+        let (_, spinner_state) = unsafe { read_future(spinner) };
+
+        let sleeper = make_future(poll_park_then_read_sibling_progress, 1);
+        // SAFETY: `sleeper` has one temp slot (`STATE_SLOT_TEMPS`), per
+        // `make_future(_, 1)`, to stash the spinner's state address into.
+        let (_, sleeper_state) = unsafe { read_future(sleeper) };
+        unsafe {
+            (sleeper_state as *mut i64)
+                .add(STATE_SLOT_TEMPS)
+                .write(spinner_state as i64);
+        }
+
+        // SAFETY: both are well-formed futures built above.
+        let spinner_id = unsafe { spawn_internal(spinner) };
+        let sleeper_id = unsafe { spawn_internal(sleeper) };
+
+        // A trivial always-ready root, spawned last so `run_to_completion`'s
+        // own `spawn_internal` call queues it behind the spinner and the
+        // sleeper -- matching the shape of Task 2's fixture, where `both()`
+        // (the root) spawns two tasks and then awaits them.
+        let root = test_future(poll_ready_now);
+        // SAFETY: well-formed future from `test_future`.
+        assert_eq!(
+            unsafe { run_to_completion(root) },
+            7,
+            "the root task must still complete normally"
+        );
+
+        assert!(
+            is_done_internal(sleeper_id),
+            "the deadline-parked task must have been woken and completed"
+        );
+        let sibling_progress_at_wake =
+            TASKS.with(|tasks| tasks.borrow()[sleeper_id as usize].output);
+        assert!(
+            sibling_progress_at_wake < SPIN_TURNS,
+            "the parked task must be woken while the spinner still has \
+             pending turns left ({sibling_progress_at_wake} of {SPIN_TURNS} \
+             turns spent) -- {sibling_progress_at_wake} >= {SPIN_TURNS} means \
+             it was only woken once the spinner had already finished on its \
+             own, which is the starvation bug this test exists to catch"
+        );
+        assert!(
+            is_done_internal(spinner_id),
+            "run_to_completion must not return until the spinner also \
+             finishes, regardless of when the sleeper was woken"
+        );
     }
 
     #[test]

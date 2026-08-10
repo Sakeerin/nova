@@ -12,18 +12,9 @@ fn main() {
     block_on(both())
 }
 
-// No `.join()` here: `join` still spins (`while !task_is_done { yield_now().await }`)
-// until Task 3 converts it to a park, and spin-joining a task that is genuinely
-// parked on a deadline -- with nothing else queued -- never lets the ready queue
-// go empty, so `wake_due_deadlines` is never reached and the deadline never gets
-// checked at all. That is the same "ready queue never empty" hang the park-set
-// plan names as Task 3's own motivating scenario (`forever()` deadlocking under
-// the old `join`), reproduced here one task early because both spawned tasks are
-// asleep, not merely slow. `block_on` already drains every task spawned on this
-// thread before returning (see its doc comment in `std/task/lib.nova`), so the
-// two spawns alone are sufficient to prove wake order without needing `join` at
-// all. See task-2-report.md for the trace and the reproduced hang.
 async fn both() {
     let a = spawn(slow())
     let b = spawn(quick())
+    a.join().await
+    b.join().await
 }
