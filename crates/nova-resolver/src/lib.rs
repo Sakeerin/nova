@@ -265,15 +265,11 @@ impl Builtin {
 /// (`check_record_literal`), and a sum type's variants live in the *value*
 /// namespace, independent of the type name — so construction and pattern
 /// matching for a type declared under one of these names worked before this
-/// list was enforced. An `impl` header's self type, though, is also a
-/// `convert_ty` site: an inherent `impl` on such a type never attached a
-/// method (`E0014` at every call site, for the missing method and for field
-/// access inside its body alike), and a trait impl silently attached to the
-/// *built-in* instead — `impl Zero for Bool` resolves `Bool` to the
-/// primitive exactly as a parameter annotation would, whether or not a
-/// record named `Bool` is declared anywhere. So what worked before this
-/// list was enforced was construction, pattern matching, and inferred local
-/// bindings; a signature or a method did not. See `CHANGELOG.md` for
+/// list was enforced. An `impl` header's self type is a `convert_ty` site
+/// too, so an `impl` written for one of these names attaches to the
+/// built-in, never to the declaration. So what worked before this list was
+/// enforced was construction, pattern matching, and inferred local
+/// bindings; a signature or an `impl` did not. See `CHANGELOG.md` for
 /// exactly what this change breaks.
 ///
 /// `Future` is here and is not a primitive: it is the one built-in type name

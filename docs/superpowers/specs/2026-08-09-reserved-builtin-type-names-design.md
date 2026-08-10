@@ -194,7 +194,7 @@ Mutation targets, named here rather than left to review:
    > fixing that finding. Current: nullary table `check.rs:2442`; `qualifier_self_ty`'s table
    > `:5224`. Re-derive again before trusting these, for the same reason as before.
 2. **`Future` is in the list but is not in the nullary `prim` table** — verified: it is handled at
-   `check.rs:2421`, ahead of the table at `:2437`, because it is the only built-in type name taking
+   `check.rs:2421`, ahead of the table at `:2442`, because it is the only built-in type name taking
    a type argument, and separately at `:5221` in `qualifier_self_ty`. **A check deriving its list
    from the `prim` table alone would silently omit `Future`** — the name this follow-up was
    originally about.
@@ -204,17 +204,22 @@ Mutation targets, named here rather than left to review:
 3. **Scope creep toward generic parameters.** The rule reads as "a built-in type name is never
    redeclarable", and the generic case looks like an omission rather than a decision. §4 and its
    test are what keep it a decision.
+4. **Recorded residual, 2026-08-09, not actioned here.** `E0089`'s message carries more mechanism
+   than a compiler message should: three correction rounds each rewrote its third clause — the one
+   that exists only to justify the second — and each rewrite was itself wrong until measured. §3's
+   two-clause requirement is why the clause exists at all. Whenever `E0089` is next touched: relax
+   §3 and shorten the message to roughly `` `Bool` is already a built-in type and cannot be
+   redeclared``, letting the label `redeclares a built-in type name` carry the rest, per the plan's
+   own Step 4 ("do not narrate the mechanism in the diagnostic").
 
 ## 7. Definition of done
 
 - All six names rejected in both declaration forms, with a message naming the built-in and stating
-  the declaration could not be named in any type annotation (corrected, 2026-08-09; originally
-  "could never be referred to" — see §3.2, this was this document's own overclaim, normative here
-  since this is an acceptance criterion).
+  the declaration could never be referred to in a type annotation.
 - All three non-goals still work, each pinned by a test (corrected, 2026-08-09: see §4 — the
   value-namespace one had none until this review round), with the generic case asserting behaviour
   rather than mere compilation.
-- The reserved list and `convert_ty`'s tables cannot drift apart unnoticed.
+- The reserved list and the built-in tables cannot drift apart unnoticed.
 - Suite green, clippy `-D warnings` and `cargo fmt --check` clean.
 - `CHANGELOG.md` records the new rejection as a breaking, language-surface change, stating precisely
   what breaks (corrected, 2026-08-09; see §3.2).

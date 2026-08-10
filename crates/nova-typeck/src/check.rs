@@ -12653,19 +12653,17 @@ mod tests {
 
     #[test]
     fn every_reserved_nullary_names_qualifier_resolves_to_its_own_primitive() {
-        // The list-driven guard `qualifier_self_ty`'s table never had:
-        // `every_reserved_name_really_is_a_builtin_type` only ever annotates a
-        // parameter (`fn f(x: {ann}) -> Int`), which exercises `convert_ty`'s
-        // table, never a qualifier (`Int::zero()`), which is this table --
-        // a name could leave this match and nothing in the suite would
-        // notice. White-box for the same reason
+        // Pins `qualifier_self_ty`'s table, which
+        // `every_reserved_name_really_is_a_builtin_type` does not reach: that
+        // test only ever annotates a parameter (`fn f(x: {ann}) -> Int`),
+        // never a qualifier (`Int::zero()`). White-box for the same reason
         // `future_qualifier_short_circuits_before_resolve_type` above is: the
         // qualifier only becomes observable through `check_call` when a
         // matching associated function is found afterward, which needs an
         // `impl` this test does not care about constructing.
         //
         // `Future` is excluded: it is not nullary, and its own arm returns
-        // `None` rather than a `Ty`, already pinned above.
+        // `None` rather than a `Ty`, unpinned.
         let file_id = FileId::DUMMY;
         let src = "fn main() { }";
         let (tokens, lex_errors) = lex(src, file_id);
@@ -15527,10 +15525,10 @@ mod tests {
         // work (a record literal resolves through `resolve_type` directly; a
         // sum type's variants live in the value namespace, both independent of
         // `convert_ty`) -- a real, accepted breaking change for that narrower
-        // usage. An `impl` header's self type is a `convert_ty` site too, so a
-        // method never worked either: see CHANGELOG.md for exactly what
-        // breaks, and `a_rejected_declarations_own_body_is_never_checked` for
-        // the no-cascade guarantee this rejection still provides.
+        // usage. An `impl` header's self type is a `convert_ty` site too. See
+        // CHANGELOG.md for exactly what breaks, and
+        // `a_rejected_declarations_own_body_is_never_checked` for the
+        // no-cascade guarantee this rejection still provides.
         for name in nova_resolver::RESERVED_TYPE_NAMES {
             for src in [
                 format!("record {name} {{ v: Bool }}\nfn main() {{ }}"),

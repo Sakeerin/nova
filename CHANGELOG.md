@@ -891,9 +891,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `resolve_type` directly; a sum type's variants through the value
   namespace) and worked, before this change, for a type declared under one
   of these names. An `impl` header's self type is a `convert_ty` site too,
-  though: an inherent `impl` on such a type never attached a method, and a
-  trait impl silently attached to the *built-in* instead — that part was
-  already broken before this change, not newly broken by it. See the
+  so an `impl` written for one of these names attaches to the built-in,
+  never to the declaration — already true before this change. See the
   Changed entry below for exactly what breaks. Generic parameters and trait
   names are separate namespaces and are unaffected:
   `fn f<Int>(x: Int) -> Int { x }` and `trait Int { fn m(self) -> Int }`
@@ -902,8 +901,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of
-code that already compiled. Full detail for each is in its own `### Added` entry
-above.
+code that already compiled. Full detail is in the `### Added` entries above.
 
 - **A `mut self` trait method now requires a mutable receiver** (`E0060`), closing
   ADR 0005 §1's gap. Calling one through an immutable binding was silently
