@@ -126,6 +126,11 @@ change makes it `E0089` regardless.
 
 Each is pinned by a test, so a later tidy-up cannot quietly widen the rule:
 
+> **Corrected, 2026-08-09 (final review).** False for the third non-goal below when this was
+> written: no test exercised a value named for a built-in. Closed by
+> `a_value_named_for_a_builtin_still_works` (`crates/nova-typeck/src/check.rs`), added in response.
+> True for all three now.
+
 - **Generic parameters stay legal.** `fn f<Int>(x: Int) -> Int { x }` works correctly — measured.
   `convert_ty` resolves generics before the built-in table, so the parameter genuinely shadows the
   primitive and the function behaves as written.
@@ -180,11 +185,22 @@ Mutation targets, named here rather than left to review:
    them together. **Re-derive these line numbers before relying on them**: the figures the
    whole-branch review carried (`:2394`, `:5080`) were already stale by the time this spec was
    written, because the async work grew that file.
+
+   > **Re-derived, 2026-08-09 — this section's own warning proved itself twice over.** The feature
+   > commit's six-line pointer comment at `convert_ty`'s table moved `:2437` to `:2442`, unnoticed
+   > until the final review measured it. This round's matching pointer comment at
+   > `qualifier_self_ty`'s table (added to close the finding that table had no guard at all — see
+   > `crates/nova-typeck/src/check.rs`) moved `:5212` to `:5224` the same way, in the very act of
+   > fixing that finding. Current: nullary table `check.rs:2442`; `qualifier_self_ty`'s table
+   > `:5224`. Re-derive again before trusting these, for the same reason as before.
 2. **`Future` is in the list but is not in the nullary `prim` table** — verified: it is handled at
    `check.rs:2421`, ahead of the table at `:2437`, because it is the only built-in type name taking
    a type argument, and separately at `:5221` in `qualifier_self_ty`. **A check deriving its list
    from the `prim` table alone would silently omit `Future`** — the name this follow-up was
    originally about.
+
+   > **Re-derived, 2026-08-09.** `:2421` is unchanged — nothing was inserted above it. `:5221` moved
+   > to `:5233`, for the same reason as item 1's `:5212`.
 3. **Scope creep toward generic parameters.** The rule reads as "a built-in type name is never
    redeclarable", and the generic case looks like an omission rather than a decision. §4 and its
    test are what keep it a decision.
@@ -195,7 +211,8 @@ Mutation targets, named here rather than left to review:
   the declaration could not be named in any type annotation (corrected, 2026-08-09; originally
   "could never be referred to" — see §3.2, this was this document's own overclaim, normative here
   since this is an acceptance criterion).
-- All three non-goals still work, each pinned by a test, with the generic case asserting behaviour
+- All three non-goals still work, each pinned by a test (corrected, 2026-08-09: see §4 — the
+  value-namespace one had none until this review round), with the generic case asserting behaviour
   rather than mere compilation.
 - The reserved list and `convert_ty`'s tables cannot drift apart unnoticed.
 - Suite green, clippy `-D warnings` and `cargo fmt --check` clean.

@@ -5214,6 +5214,12 @@ impl<'a> Checker<'a> {
     /// impl's generics; an unresolvable one is reported by the residual
     /// inference-variable check.
     fn qualifier_self_ty(&self, fcx: &mut FnCtx, name: &str) -> Option<Ty> {
+        // Every name matched here must also be in
+        // `nova_resolver::RESERVED_TYPE_NAMES`, the same requirement
+        // `convert_ty`'s own nullary table is already held to: a new
+        // nullary built-in added to this match without joining that list
+        // would leave a user type under its name declarable, which is
+        // exactly the defect the list exists to close.
         match name {
             "Int" => return Some(Ty::Int),
             "Float" => return Some(Ty::Float),
@@ -12646,6 +12652,87 @@ mod tests {
     }
 
     #[test]
+    fn every_reserved_nullary_names_qualifier_resolves_to_its_own_primitive() {
+        // The list-driven guard `qualifier_self_ty`'s table never had:
+        // `every_reserved_name_really_is_a_builtin_type` only ever annotates a
+        // parameter (`fn f(x: {ann}) -> Int`), which exercises `convert_ty`'s
+        // table, never a qualifier (`Int::zero()`), which is this table --
+        // a name could leave this match and nothing in the suite would
+        // notice. White-box for the same reason
+        // `future_qualifier_short_circuits_before_resolve_type` above is: the
+        // qualifier only becomes observable through `check_call` when a
+        // matching associated function is found afterward, which needs an
+        // `impl` this test does not care about constructing.
+        //
+        // `Future` is excluded: it is not nullary, and its own arm returns
+        // `None` rather than a `Ty`, already pinned above.
+        let file_id = FileId::DUMMY;
+        let src = "fn main() { }";
+        let (tokens, lex_errors) = lex(src, file_id);
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (ast, parse_errors) = parse(&tokens, file_id);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let ast = ast.expect("no AST");
+        let resolved = resolve(&ast);
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "resolve errors: {:?}",
+            resolved.diagnostics
+        );
+        let file = ast::File { items: Vec::new() };
+        let checker = Checker {
+            file: &file,
+            defs: &resolved.definitions,
+            cur_module: ModuleId(0),
+            sigs: FxHashMap::default(),
+            method_locs: FxHashMap::default(),
+            selfless: FxHashSet::default(),
+            mut_self: FxHashSet::default(),
+            sums: Vec::new(),
+            records: Vec::new(),
+            supertraits: FxHashMap::default(),
+            traits: Vec::new(),
+            impls: Vec::new(),
+            impl_self: None,
+            impl_selves: FxHashMap::default(),
+            extra_functions: Vec::new(),
+            next_closure_def: resolved.definitions.defs().len() as u32,
+            type_arity: FxHashMap::default(),
+            externs: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut fcx = FnCtx {
+            icx: InferCtx::default(),
+            locals: Vec::new(),
+            scopes: Vec::new(),
+            generics: FxHashMap::default(),
+            param_bounds: Vec::new(),
+            ret_ty: Ty::Unit,
+            loop_depth: 0,
+            in_async: false,
+            pending_closures: Vec::new(),
+        };
+        for name in nova_resolver::RESERVED_TYPE_NAMES {
+            if name == "Future" {
+                continue;
+            }
+            let expected = match name {
+                "Int" => Ty::Int,
+                "Float" => Ty::Float,
+                "Bool" => Ty::Bool,
+                "Char" => Ty::Char,
+                "String" => Ty::String,
+                _ => panic!("RESERVED_TYPE_NAMES grew a name this test does not know: {name}"),
+            };
+            assert_eq!(
+                checker.qualifier_self_ty(&mut fcx, name),
+                Some(expected),
+                "`{name}::_()`'s qualifier must resolve to the primitive"
+            );
+        }
+    }
+
+    #[test]
     fn a_user_written_self_type_parameter_is_rejected_in_an_impl() {
         // Was `a_user_written_self_type_parameter_makes_self_item_resolve_in_
         // an_impl`, which pinned that this program compiled clean. It did, and
@@ -15367,64 +15454,103 @@ mod tests {
 
     #[test]
     fn a_rejected_declarations_own_body_is_never_checked() {
-        // Pins skip-not-register: `reject_reserved_type_name` returns before
-        // `push_def`, so the rejected item never enters `defs` and is never
-        // visited by `collect_records`/`collect_type_arities` (which iterate
-        // `defs()` directly, independent of the name lookup that rejected
-        // it). A field naming an ordinary type (`v: Int`) can't discriminate
-        // this -- it would convert cleanly whether or not the record were
-        // processed. A field naming an unresolvable one can: if a future
-        // change made rejection register the def anyway, `collect_records`
-        // would convert this field and add a second diagnostic for `Nope`
-        // alongside `E0089`. `check_src` runs the type checker unconditionally
-        // (unlike the driver, which stops after a resolver error), so this
-        // is the layer where such a regression would actually surface.
-        let r = check_src("record Bool { v: Nope }\nfn main() { }");
+        // Pins skip-not-register for BOTH declaration forms:
+        // `reject_reserved_type_name` returns before `push_def`, so the
+        // rejected item never enters `defs` and is never visited by
+        // `collect_records`/`collect_sums`/`collect_type_arities` (which
+        // iterate `defs()` directly, independent of the name lookup that
+        // rejected it). An ordinary field or payload type (`v: Int`, or a
+        // variant with no payload) can't discriminate this -- it would
+        // convert cleanly whether or not the item were processed. One naming
+        // an unresolvable type can: if a future change made rejection
+        // register the def anyway, `collect_records`/`collect_sums` would
+        // convert it and add a second diagnostic for `Nope` alongside
+        // `E0089`. `check_src` runs the type checker unconditionally (unlike
+        // the driver, which stops after a resolver error), so this is the
+        // layer where such a regression would actually surface. The record
+        // and sum arms are two separate call sites in `collect_item`
+        // (`reject_reserved_type_name` is called independently from each),
+        // so one passing is no evidence about the other -- both are checked.
+        for src in [
+            "record Bool { v: Nope }\nfn main() { }",
+            "type Bool = | A(Nope) | B\nfn main() { }",
+        ] {
+            let r = check_src(src);
+            assert_eq!(
+                r.diagnostics.len(),
+                1,
+                "expected only E0089 for {src:?}, got {:?}",
+                r.diagnostics
+                    .iter()
+                    .map(|d| (&d.code, &d.message))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(r.diagnostics[0].code, "E0089");
+        }
+    }
+
+    #[test]
+    fn two_declarations_of_the_same_reserved_name_each_raise_e0089_not_e0002() {
+        // Pins a claim `reject_reserved_type_name`'s own doc makes but that
+        // nothing exercised: skip-not-register means a second declaration
+        // under an already-rejected reserved name is not a *duplicate* --
+        // `insert_type`, the `E0002` source two same-file type declarations
+        // under one name would otherwise reach, is never reached for either
+        // one here, since both return from `reject_reserved_type_name`
+        // before `push_def`. So this is two independent `E0089`s, not an
+        // `E0089` followed by an `E0002`. A refactor that reordered the check
+        // after `push_def`/`insert_type` would turn the second occurrence
+        // into `E0002` silently; this fails if it does.
+        let r = check_src("record Bool { v: Int }\nrecord Bool { w: Int }\nfn main() { }");
+        let codes: Vec<&str> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
         assert_eq!(
-            r.diagnostics.len(),
-            1,
-            "expected only E0089, got {:?}",
+            codes,
+            ["E0089", "E0089"],
+            "got {:?}",
             r.diagnostics
                 .iter()
-                .map(|d| (&d.code, &d.message))
+                .map(|d| d.message.clone())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(r.diagnostics[0].code, "E0089");
     }
 
     #[test]
     fn declaring_a_type_named_for_a_builtin_is_rejected() {
         // All six names, both declaration forms. `convert_ty` resolves the name
-        // to the built-in before it ever reaches `resolve_type`, so a type
-        // declared under one of these names could never be named in a type
-        // annotation -- a parameter, return type, `let` annotation, field type,
-        // or generic argument. Rejecting the declaration puts that fact where
-        // the user can act on it, rather than only once it is named in a
-        // signature.
+        // to the built-in, or to a shadowing generic parameter, wherever it
+        // runs -- never to a declaration under this name -- so a type declared
+        // under one of these names could never be referred to in a type
+        // annotation. Rejecting the declaration puts that fact where the user
+        // can act on it, rather than only once it is named in a signature.
         //
         // This also forecloses construction and pattern matching, which used to
         // work (a record literal resolves through `resolve_type` directly; a
         // sum type's variants live in the value namespace, both independent of
         // `convert_ty`) -- a real, accepted breaking change for that narrower
-        // usage. See CHANGELOG.md for exactly what breaks, and
-        // `a_rejected_declarations_own_body_is_never_checked` for the
-        // no-cascade guarantee this rejection still provides.
+        // usage. An `impl` header's self type is a `convert_ty` site too, so a
+        // method never worked either: see CHANGELOG.md for exactly what
+        // breaks, and `a_rejected_declarations_own_body_is_never_checked` for
+        // the no-cascade guarantee this rejection still provides.
         for name in nova_resolver::RESERVED_TYPE_NAMES {
             for src in [
                 format!("record {name} {{ v: Bool }}\nfn main() {{ }}"),
                 format!("type {name} = | A | B\nfn main() {{ }}"),
             ] {
                 let r = check_src(&src);
-                let d = r
-                    .diagnostics
-                    .iter()
-                    .find(|d| d.code == "E0089")
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "expected E0089 for `{name}` in {src:?}, got {:?}",
-                            r.diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
-                        )
-                    });
+                // Exactly one diagnostic, not merely "E0089 is present somewhere":
+                // skip-not-register means none of these twelve declarations should
+                // ever cascade, and `.find()` alone would not notice if one did.
+                assert_eq!(
+                    r.diagnostics.len(),
+                    1,
+                    "expected only E0089 for `{name}` in {src:?}, got {:?}",
+                    r.diagnostics
+                        .iter()
+                        .map(|d| (&d.code, &d.message))
+                        .collect::<Vec<_>>()
+                );
+                let d = &r.diagnostics[0];
+                assert_eq!(d.code, "E0089", "for `{name}` in {src:?}: {:?}", d.message);
                 // Both halves of the message matter. The name identifies which
                 // built-in was shadowed; the second half is the fact a user cannot
                 // discover from the declaration alone, and a code-only assertion
@@ -15505,6 +15631,29 @@ mod tests {
         assert!(
             r.diagnostics.is_empty(),
             "a trait may be named for a built-in type, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_value_named_for_a_builtin_still_works() {
+        // NON-GOAL, pinned. `reject_reserved_type_name` runs only from the
+        // sum-type and record arms of `collect_item`, never from `insert_value`
+        // -- a function, a const, and a local binding all live in the value
+        // namespace, which this check does not touch. Nothing before this
+        // stopped `nova-resolver` from being extended to reject these too, and
+        // this is the test that would fail if a later tidy-up quietly widened
+        // the rule that way.
+        let r = check_src(
+            "fn Int() -> Int { 1 }\nconst String: Int = 2\n\
+             fn main() { let Bool = 3\nprintln(\"${Int()} ${String} ${Bool}\") }",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "a function, const, or local binding may be named for a built-in type, got {:?}",
             r.diagnostics
                 .iter()
                 .map(|d| d.message.clone())

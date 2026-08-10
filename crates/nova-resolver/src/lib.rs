@@ -254,28 +254,36 @@ impl Builtin {
 
 /// Type names the compiler owns, which a user type declaration may not take.
 ///
-/// `nova-typeck`'s `convert_ty` resolves each of these to its built-in type
-/// before consulting `resolve_type`, so a user type under one of these names
-/// could never be named in a type annotation — a parameter, return type,
-/// `let` annotation, field type, or generic argument, every site
-/// `convert_ty` runs. That is narrower than "every use": a record literal
-/// resolves its head through `resolve_type` directly, never through
-/// `convert_ty` (`check_record_literal`), and a sum type's variants live in
-/// the *value* namespace, entirely independent of the type name. So
-/// construction and pattern matching for a type declared under one of these
-/// names worked before this list was enforced — only naming the type itself
-/// in a signature was already impossible. Rejecting the declaration is a
-/// breaking change for that narrower, construction-and-matching-only usage,
-/// accepted because a type that can be built and matched but never named in
-/// a signature is a trap not worth leaving open; see `CHANGELOG.md` for
-/// exactly what breaks.
+/// `nova-typeck`'s `convert_ty` resolves each of these to its built-in type,
+/// or to a shadowing generic parameter, wherever it runs — never to a
+/// declaration under this name, which is what `resolve_type` would have to
+/// find instead. So a type declared under one of these names could never be
+/// referred to in a type annotation.
+///
+/// That is narrower than "every use". A record literal resolves its head
+/// through `resolve_type` directly, never through `convert_ty`
+/// (`check_record_literal`), and a sum type's variants live in the *value*
+/// namespace, independent of the type name — so construction and pattern
+/// matching for a type declared under one of these names worked before this
+/// list was enforced. An `impl` header's self type, though, is also a
+/// `convert_ty` site: an inherent `impl` on such a type never attached a
+/// method (`E0014` at every call site, for the missing method and for field
+/// access inside its body alike), and a trait impl silently attached to the
+/// *built-in* instead — `impl Zero for Bool` resolves `Bool` to the
+/// primitive exactly as a parameter annotation would, whether or not a
+/// record named `Bool` is declared anywhere. So what worked before this
+/// list was enforced was construction, pattern matching, and inferred local
+/// bindings; a signature or a method did not. See `CHANGELOG.md` for
+/// exactly what this change breaks.
 ///
 /// `Future` is here and is not a primitive: it is the one built-in type name
 /// taking a type argument, handled separately from the nullary table.
 /// `Unit` is deliberately absent — it is not a nameable type name; unit is
 /// spelled `()`.
 ///
-/// This is the list, and `convert_ty`'s table is expected to agree with it.
+/// This is the list, and both `convert_ty`'s and `qualifier_self_ty`'s
+/// built-in-name tables (`crates/nova-typeck/src/check.rs`) are expected to
+/// agree with it.
 pub const RESERVED_TYPE_NAMES: [&str; 6] = ["Int", "Float", "Bool", "Char", "String", "Future"];
 
 /// What kind of definition a [`DefId`] refers to.
@@ -1127,8 +1135,9 @@ fn collect_item(
 /// skipping `push_def` here is sufficient — today. That is a cross-crate
 /// invariant this function's ordering relies on but cannot enforce; nothing
 /// stops a future pass from walking items directly instead. The same drift
-/// class this module already flags for `convert_ty`'s table (see
-/// [`RESERVED_TYPE_NAMES`]'s own doc): a comment, not a compiler backstop.
+/// class this module already flags for `convert_ty`'s and `qualifier_self_ty`'s
+/// tables (see [`RESERVED_TYPE_NAMES`]'s own doc): a comment, not a compiler
+/// backstop.
 fn reject_reserved_type_name(diagnostics: &mut Vec<Diagnostic>, name: &str, span: Span) -> bool {
     if !RESERVED_TYPE_NAMES.contains(&name) {
         return false;
@@ -1137,9 +1146,10 @@ fn reject_reserved_type_name(diagnostics: &mut Vec<Diagnostic>, name: &str, span
         Diagnostic::error(
             "E0089",
             format!(
-                "`{name}` is already a built-in type; a declaration named `{name}` \
-                 could not be named in any type annotation, since `{name}` in a \
-                 type position always means the built-in"
+                "`{name}` is already a built-in type; a type declared under \
+                 this name could never be referred to in a type annotation, \
+                 since `{name}` in a type position never resolves to a \
+                 declaration under this name"
             ),
         )
         .with_primary_label(span, "redeclares a built-in type name"),
