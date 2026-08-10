@@ -1871,32 +1871,62 @@ mod tests {
     /// real: a sleeping task and a joining task waiting side by side. Both
     /// functions must ignore `Wait::Task` entries entirely: they are not
     /// deadline candidates, and they must not be woken by a deadline arriving.
+    ///
+    /// **Two phases with disjoint `PARKED` contents, not one shared
+    /// scenario.** A first version of this test shared a single already-due
+    /// `Wait::Deadline` across both checks and could not catch
+    /// `Wait::Task(_) => Some(Instant::now())`: on a monotonic clock, a value
+    /// read *during* `earliest_deadline`'s call can only be later than one
+    /// read *before* it (test setup happens first), so `.min()` still picked
+    /// the real, earlier deadline under that mutant, every time it was
+    /// tried. Phase 1 fixes this by putting every real deadline in the
+    /// future, so a mutant's freshly-read "now" is detectably *smaller* than
+    /// the expected answer instead of larger or equal. Phase 2 keeps the
+    /// original already-due shape for `wake_due_deadlines`, which that
+    /// mutation-check already kills and does not need to change.
     #[test]
     fn earliest_deadline_and_wake_due_deadlines_ignore_task_waits() {
-        let far = Instant::now() + Duration::from_secs(30);
-        let near = Instant::now();
+        // Phase 1: earliest_deadline must return the real minimum, not a
+        // Wait::Task-contributed value. Both deadlines sit comfortably in the
+        // future (1s, 30s) so a mutant's `Instant::now()` -- evaluated no
+        // earlier than `base`, since it can only run after this test's own
+        // setup -- lands near `base`, strictly before `soon`.
+        let base = Instant::now();
+        let soon = base + Duration::from_secs(1);
+        let later = base + Duration::from_secs(30);
         PARKED.with(|p| {
             let mut p = p.borrow_mut();
             p.push((1, Wait::Task(999)));
-            p.push((2, Wait::Deadline(far)));
-            p.push((3, Wait::Deadline(near)));
+            p.push((2, Wait::Deadline(later)));
+            p.push((3, Wait::Deadline(soon)));
         });
         assert_eq!(
             earliest_deadline(),
-            Some(near),
+            Some(soon),
             "a Wait::Task entry must not contribute a candidate to the minimum"
         );
+        PARKED.with(|p| p.borrow_mut().clear());
 
-        wake_due_deadlines(near);
+        // Phase 2: wake_due_deadlines must wake only the due Deadline entry
+        // and must not treat a Wait::Task entry as one. `due` is already in
+        // the past by the time it is used below (test setup takes nonzero
+        // time), so `wake_due_deadlines` takes its `at <= now` branch and
+        // never calls `thread::sleep`.
+        let due = Instant::now();
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((4, Wait::Task(999)));
+            p.push((5, Wait::Deadline(due)));
+        });
+        wake_due_deadlines(due);
         assert_eq!(
             PARKED.with(|p| p.borrow().clone()),
-            vec![(1, Wait::Task(999)), (2, Wait::Deadline(far))],
-            "wake_due_deadlines must wake only the due deadline, leaving the \
-             Task entry and the not-yet-due deadline parked"
+            vec![(4, Wait::Task(999))],
+            "wake_due_deadlines must leave the Task entry parked"
         );
         assert_eq!(
             QUEUE.with(|q| q.borrow().clone()),
-            std::collections::VecDeque::from([3]),
+            std::collections::VecDeque::from([5]),
             "the task whose deadline arrived must be the one re-queued"
         );
         PARKED.with(|p| p.borrow_mut().clear());
