@@ -11,11 +11,15 @@
 //! construction rather than by convention: there is no API here for a task
 //! to migrate between threads. See ADR 0009.
 //!
-//! No wakers: a task that returns [`POLL_PENDING`] is simply re-queued for
-//! another turn, with no registered interest in any external event. That
-//! makes interleaving between tasks deterministic by construction, which is
-//! what lets [`nova_rt_task_block_on`]'s round-robin order be pinned by a
-//! test rather than merely observed.
+//! No wakers: a task that returns [`POLL_PENDING`] is re-queued for another
+//! turn unless it staged a park (see [`Wait`]), in which case it waits in the
+//! park set instead until a deadline or another task's completion -- the
+//! executor's only two wake sources -- moves it back. Both are scheduled by
+//! the executor itself, not registered as an arbitrary callback the awaited
+//! resource invokes, which is what "no wakers" still means once parking
+//! exists. That makes interleaving between ready tasks deterministic by
+//! construction, which is what lets [`nova_rt_task_block_on`]'s round-robin
+//! order be pinned by a test rather than merely observed.
 
 use crate::gc;
 use std::cell::{Cell, RefCell};
@@ -614,17 +618,23 @@ fn take_output_internal(id: i64) -> i64 {
 ///    thread, so a task spawned earlier and left pending would otherwise have
 ///    no way to reach `nova_rt_task_take_output`'s promised state (`done`,
 ///    with an output) at all.
-/// 2. **This loop does not terminate if any queued task never reports
-///    [`POLL_READY`].** A task that returns [`POLL_PENDING`] forever is
-///    re-queued forever, and the queue never empties. In 2.3a that is
-///    unreachable: every suspension is a `yield_now`-shaped one that resumes
-///    on the next turn, so a task's tag always advances. It becomes reachable
-///    the moment 2.3b adds a primitive that can park on an external event --
-///    an `await` on a channel nothing ever sends to. Whatever introduces such
-///    a primitive owns the fix (a park set holding tasks that are waiting on
-///    something rather than ready, and a deadlock diagnostic when the queue
-///    is empty of ready tasks but the park set is not); a busy re-poll loop
-///    has no way to tell "not ready yet" from "never will be".
+/// 2. **A task that never reports [`POLL_READY`] no longer spins this loop
+///    forever.** Before the park set, a task returning [`POLL_PENDING`] was
+///    unconditionally re-queued, so one that never became ready re-queued
+///    forever and the loop hung with no diagnostic. Now a poll that stages a
+///    [`Wait`] (see [`stage_park`]) moves its task to [`PARKED`] instead of
+///    back onto the queue, and once the queue runs dry this loop only
+///    continues if a deadline remains to sleep on ([`earliest_deadline`]) --
+///    otherwise every task still parked is, by construction, waiting on
+///    something nothing left running can ever produce, and
+///    [`report_deadlock`] ends the process naming each one instead of hanging
+///    silently. Nothing compiled from Nova source can reach either path yet,
+///    though: `yield_now` is the only suspension an `async fn` body can await
+///    today, and it always resumes on the next turn, so a task's tag always
+///    advances. That changes once a later task adds a builtin that can park
+///    on an external event that may never arrive -- Task 2 (`sleep`) and
+///    Task 3 (a parking `join`) are exactly that, and they call the park set
+///    this task already built rather than the other way around.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).
@@ -980,7 +990,22 @@ unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) 
 ///
 /// `gc::alloc` returns zeroed memory, so a caller whose only state is a resume
 /// tag starting at `0` passes an `init` that writes nothing.
+///
+/// `state_size` must be at least [`STATE_MIN_SIZE`]: [`STATE_SLOT_OUTPUT`] is
+/// read unconditionally on completion (`poll_one`'s doc comment), regardless
+/// of what the future's own poll function does with it, so a smaller state
+/// object is an out-of-bounds read rather than a caught error. Checked with a
+/// `debug_assert!` rather than an `abort_with`: every caller passes a
+/// compile-time constant today, so this can only fire on a caller's own
+/// mistake, not on Nova input, and release builds already pay for the bug via
+/// the out-of-bounds read itself if the assert is compiled out.
 fn build_future(poll: PollFn, state_size: usize, init: impl FnOnce(*mut i64)) -> *mut u8 {
+    debug_assert!(
+        state_size >= STATE_MIN_SIZE,
+        "build_future: state_size {state_size} is smaller than STATE_MIN_SIZE \
+         ({STATE_MIN_SIZE}); STATE_SLOT_OUTPUT is read unconditionally on \
+         completion and would be read out of bounds"
+    );
     let state = gc::alloc(state_size, true);
     gc::add_root(state);
     init(state as *mut i64);
@@ -1840,6 +1865,44 @@ mod tests {
         PARKED.with(|p| p.borrow_mut().clear());
     }
 
+    /// `earliest_deadline` and `wake_due_deadlines` with both `Wait` variants
+    /// live in `PARKED` at once -- every other test here populates one
+    /// variant only. Task 3 (a parking `join`) is what makes that coexistence
+    /// real: a sleeping task and a joining task waiting side by side. Both
+    /// functions must ignore `Wait::Task` entries entirely: they are not
+    /// deadline candidates, and they must not be woken by a deadline arriving.
+    #[test]
+    fn earliest_deadline_and_wake_due_deadlines_ignore_task_waits() {
+        let far = Instant::now() + Duration::from_secs(30);
+        let near = Instant::now();
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((1, Wait::Task(999)));
+            p.push((2, Wait::Deadline(far)));
+            p.push((3, Wait::Deadline(near)));
+        });
+        assert_eq!(
+            earliest_deadline(),
+            Some(near),
+            "a Wait::Task entry must not contribute a candidate to the minimum"
+        );
+
+        wake_due_deadlines(near);
+        assert_eq!(
+            PARKED.with(|p| p.borrow().clone()),
+            vec![(1, Wait::Task(999)), (2, Wait::Deadline(far))],
+            "wake_due_deadlines must wake only the due deadline, leaving the \
+             Task entry and the not-yet-due deadline parked"
+        );
+        assert_eq!(
+            QUEUE.with(|q| q.borrow().clone()),
+            std::collections::VecDeque::from([3]),
+            "the task whose deadline arrived must be the one re-queued"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
     #[test]
     fn a_deadlock_names_every_parked_task_and_its_reason() {
         PARKED.with(|p| {
@@ -1879,6 +1942,50 @@ mod tests {
         assert!(
             PARKED.with(|p| p.borrow().is_empty()),
             "a completed task must not be left parked -- it would fake a deadlock forever"
+        );
+    }
+
+    /// The discard in `poll_one` (`PENDING_PARK.with(|p| p.take())`) must
+    /// actually clear the cell, not just read it -- otherwise a park staged
+    /// by one task's completing poll would still be sitting in `PENDING_PARK`
+    /// when the *next* task is polled, and that unrelated task would be
+    /// swept into the park set on the first task's stale wait instead of
+    /// being re-queued. `a_park_staged_by_a_poll_that_completes_is_discarded`
+    /// cannot catch this: it only ever polls the one task that staged the
+    /// park, so it never observes what a `.take()` -> `.get()` regression
+    /// does to whichever task is polled afterward.
+    #[test]
+    fn a_discarded_park_does_not_leak_onto_the_next_task_polled() {
+        let a = test_future(poll_stage_then_ready);
+        let b = test_future(poll_suspend_once);
+        // SAFETY: both are well-formed futures from `test_future`.
+        let (id_a, id_b) = unsafe { (spawn_internal(a), spawn_internal(b)) };
+        // `spawn_internal` queues each id as it spawns it; drain that so the
+        // final QUEUE assertion below reflects only what `poll_one` itself
+        // does with each task, matching
+        // `a_staged_park_moves_the_task_out_of_the_ready_queue`'s pattern of
+        // popping before polling.
+        assert_eq!(
+            QUEUE.with(|q| q.borrow_mut().drain(..).collect::<Vec<_>>()),
+            vec![id_a, id_b],
+            "spawn should have queued both, in order"
+        );
+        // SAFETY: `id_a`/`id_b` were just returned by `spawn_internal`, so
+        // both are currently-registered task ids.
+        unsafe {
+            poll_one(id_a);
+            poll_one(id_b);
+        }
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "b never called stage_park and returned POLL_PENDING on its own; \
+             it must be re-queued, not parked on a's leftover wait -- got: {:?}",
+            PARKED.with(|p| p.borrow().clone())
+        );
+        assert_eq!(
+            QUEUE.with(|q| q.borrow().clone()),
+            std::collections::VecDeque::from([id_b]),
+            "b must be the one task left in the ready queue"
         );
     }
 
