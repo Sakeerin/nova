@@ -165,7 +165,7 @@ pub record IoError {
 // Map a runtime status code to its kind.
 //
 // **This function is one half of a wire contract.** The other half is
-// `status_of` in `crates/nova-runtime/src/fs.rs`, which produces these codes
+// `fail` in `crates/nova-runtime/src/fs.rs`, which produces these codes
 // from `std::io::ErrorKind`. The two are independent copies of one numbering,
 // which is the shape that has already produced a miscompile in this project, so
 // they are pinned together by a fixture per kind rather than by a comment
