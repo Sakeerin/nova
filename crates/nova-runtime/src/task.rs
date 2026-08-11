@@ -1779,6 +1779,48 @@ mod tests {
         );
     }
 
+    /// The exact layout `nova_rt_task_sleep_future` builds, read back from
+    /// the collector's own records -- the same discipline as
+    /// `the_yield_futures_layout_is_the_one_the_abi_declares`, and for the
+    /// identical reason, but this one is load-bearing in a way that test is
+    /// not: a review of this function caught a `build_future` call site
+    /// passing `STATE_MIN_SIZE` where `SLEEP_STATE_SIZE` belonged -- one word
+    /// short of what `nova_rt_task_sleep_future`'s own `init` closure writes
+    /// -- and neither existing guard caught it. The compile-time assertion
+    /// beside `SLEEP_STATE_SIZE` is a relation between two constants and is
+    /// blind to what a call site actually passes; `build_future`'s own
+    /// `debug_assert!(state_size >= STATE_MIN_SIZE)` is a floor, and
+    /// `STATE_MIN_SIZE` itself satisfies its own floor. Reading the words
+    /// back out of the state object cannot catch it either, for the same
+    /// reason the sibling test's doc comment gives: a too-small allocation
+    /// with slop after it still reads back whatever was written, silently,
+    /// until something else happens to occupy that word. Only the
+    /// collector's own recorded size distinguishes "16 bytes, and `ms` was
+    /// written one word past the end" from "24 bytes, exactly as declared."
+    #[test]
+    fn the_sleep_futures_layout_is_the_one_the_abi_declares() {
+        let fut = nova_rt_task_sleep_future(0);
+        assert_eq!(
+            gc::object_info(fut as usize),
+            Some((FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = state_of(fut);
+        assert_eq!(
+            gc::object_info(state),
+            Some((SLEEP_STATE_SIZE, true)),
+            "the state object must be the ABI minimum plus the one temp slot \
+             holding `ms`, scanned"
+        );
+        // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block.
+        let poll = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        let expected: PollFn = poll_sleep;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
     /// The layout a bare [`build_future`] call produces, read back from the
     /// collector's own records -- the same check as
     /// `the_yield_futures_layout_is_the_one_the_abi_declares`, but aimed at

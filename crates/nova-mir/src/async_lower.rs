@@ -85,17 +85,24 @@
 //! not FFI-safe, `require_ffi_safe` in `nova-typeck`), so no foreign function
 //! pointer can reach an await.
 //!
-//! Two sources of poll code therefore exist, and each carries the obligation
-//! itself:
+//! Poll code therefore comes from exactly two *kinds* of source, and each
+//! carries the obligation itself:
 //!
 //! - The `$poll` functions this pass generates, under this same paragraph's
 //!   discipline — the induction step.
-//! - `nova_rt_task_yield_future`'s `poll_yield_once`, hand-written Rust in
-//!   `nova-runtime`, which is what `std/task`'s `yield_now` awaits because an
-//!   `async fn` body suspends only at an `.await` and nothing in the language is
-//!   a future that is not already ready. Its body reads and writes two words and
-//!   does nothing else, so it has no panic to suppress; that is stated on the
-//!   function.
+//! - Every hand-written `PollFn` in `nova-runtime`, each stating its own
+//!   no-unwind justification at its own definition rather than here:
+//!   `nova_rt_task_yield_future`'s `poll_yield_once` (what `yield_now`
+//!   awaits, because an `async fn` body suspends only at an `.await` and
+//!   nothing in the language is a future that is not already ready) and
+//!   `nova_rt_task_sleep_future`'s `poll_sleep` (what `sleep` awaits) exist
+//!   today, and a parking `join` is still to come. Naming this as a *kind*
+//!   rather than a roster is deliberate: this comment went stale once
+//!   already when a second hand-written `PollFn` joined the first, and the
+//!   fix is not a bigger number but a claim that does not depend on one --
+//!   the two *kinds* are closed, by the callee-is-a-value argument above;
+//!   how many hand-written poll functions currently exist is not, and is
+//!   not this comment's business to track.
 //!
 //! The other way to break the argument is to make a runtime function that *can*
 //! unwind reachable from a poll body. `nova_rt_task_block_on` was that function:
