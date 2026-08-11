@@ -1050,6 +1050,25 @@ code that already compiled. Full detail is in the `### Added` entries above.
   including both limitations this does not close, is in the park set entry
   under Added above and in `docs/adr/0009-async-execution-model.md` §1's
   2026-08-10 amendment.
+- **A top-level `fn` or `const` named `eprint` or `eprintln` is now rejected**
+  (2026-08-11, the `std/fs`-on-Strings increment): joining `Builtin::GLOBAL`
+  seeds both names into every module's scope ahead of user item collection,
+  so a same-named top-level declaration is now `E0002` ("is a compiler
+  builtin"; full detail in the Added entry above) instead of compiling.
+  Before this increment neither name was resolved to anything, so
+  `fn eprint(s: String) { ... }` was ordinary, working, callable code — a
+  **stronger** break than the reserved-built-in-type-names entry above,
+  whose type was already unusable in a signature or an impl before that rule
+  existed. A local `let`-binding or parameter of either name is unaffected:
+  the conflict is checked only where `Builtin::GLOBAL` is seeded, at
+  top-level item collection, which a local binding never reaches. Accepted
+  as the same trade `panic`'s Phase 2.1 entry above already made:
+  `eprint`/`eprintln` are ordinary language-level output primitives, not
+  `std/core`-scoped implementation details like `str_cmp`, so they take
+  their names away from user code the same way panic's did, and this is a
+  different mechanism from — not an instance of — `std/core`'s silently
+  shadowable, glob-imported names (ADR 0004), which are seeded at the
+  *lowest* priority instead of the highest.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
