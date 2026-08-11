@@ -220,7 +220,9 @@ is there, and correct ADR 0008 from the grep. Do not copy a number from this spe
 **The hard part: "join parks" is otherwise unobservable.** A spinning join and a parking join
 produce identical output *and* identical completion order, so an ordering assertion passes under
 both. That is the exact trap this project keeps falling into, so it is called out here rather than
-left to review: the executor exposes a **poll counter for tests**, and the assertion is that joining
+left to review. **Superseded 2026-08-10 — the counter below was never built and is not needed;** the
+deadlock fixture discriminates on its own, since a spinning `join` can only hang and never report.
+The original reasoning, kept for the record: the executor exposes a **poll counter for tests**, and the assertion is that joining
 a task which sleeps burns a bounded number of polls rather than one per turn.
 
 - Runtime unit tests: park-then-wake on a deadline; wake-on-completion; deadlock with **two**
@@ -271,7 +273,11 @@ Mutation targets, named here rather than left to review:
 
 - A task that parks is removed from the ready queue, and one woken by deadline or by completion is
   returned to it — each pinned by a test.
-- `join` parks instead of spinning, demonstrated by the poll counter rather than by output.
+- `join` parks instead of spinning, demonstrated by the deadlock fixture rather than by output.
+  **Superseded 2026-08-10: the poll counter §6 proposed was dropped as unnecessary.** A mutual-join
+  cycle reports a deadlock only if `join` parks — with a spinning `join` the ready queue never empties
+  and the same fixture hangs instead, verified under an external timeout — so the fixture discriminates
+  on its own and the counter would have added executor surface for a property already pinned.
 - The queue draining with a non-empty park set and no deadline reports every parked task and its
   wait reason, then aborts; a fixture asserts the text and the exit status.
 - `yield_now`'s behaviour is unchanged, pinned by an existing test still passing.
