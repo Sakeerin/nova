@@ -1,0 +1,40 @@
+// Nova standard library — filesystem.
+//
+// Compiled as an implicit module and glob-imported into every user module. Error
+// types live in `std/io`.
+//
+// Every function here is an `async fn` per `nova-spec/20-STDLIB.md` §5, but
+// **none of them suspends**: the operation runs synchronously inside the poll,
+// because there is no I/O poller yet. The signature is what matters — it does
+// not change when a poller lands, so no call site breaks then. The cost is that
+// a call blocks the whole executor for its duration, so a sibling task makes no
+// progress during a large read. See docs/adr/0011-io-error-kinds.md.
+//
+// # The shape of these wrappers is load-bearing
+//
+// Each one calls its intrinsic, then reads a slot, with **no `.await` between
+// the two**. The runtime's payload and message slots are per-thread and are
+// overwritten by the next operation; only an `.await` can let another task run,
+// so a straight-line wrapper cannot have its slot clobbered by a sibling. A
+// future function here that awaited mid-sequence would break that. Keep them
+// straight-line.
+
+// Read the whole file at `path` as a UTF-8 string.
+//
+// Non-UTF-8 contents are `InvalidData`, not a panic and not lossy replacement.
+pub async fn read_to_string(path: String) -> Result<String, IoError> {
+    let status = fs_read_to_string(path)
+    if status == 0 {
+        return Ok(fs_take_string())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Write `content` to `path`, replacing any existing contents.
+pub async fn write_string(path: String, content: String) -> Result<(), IoError> {
+    let status = fs_write_string(path, content)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}

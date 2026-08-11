@@ -692,6 +692,10 @@ impl<'a> Lowerer<'a> {
                     Builtin::TaskSleepFuture => Lowering::Runtime(RtFunc::TaskSleepFuture),
                     Builtin::TaskJoinFuture => Lowering::Runtime(RtFunc::TaskJoinFuture),
                     Builtin::TaskOutput => Lowering::FutureOutput,
+                    Builtin::FsReadToString => Lowering::Runtime(RtFunc::FsReadToString),
+                    Builtin::FsWriteString => Lowering::Runtime(RtFunc::FsWriteString),
+                    Builtin::FsTakeString => Lowering::Runtime(RtFunc::FsTakeString),
+                    Builtin::FsLastErrorMessage => Lowering::Runtime(RtFunc::FsLastErrorMessage),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

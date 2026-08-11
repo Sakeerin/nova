@@ -1,0 +1,23 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    match read_to_string("nova_no_such_file_9f3a.txt").await {
+        Ok(_) => println("unexpectedly read it")
+        Err(e) => println(kind_name(e.kind))
+    }
+}
+
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}

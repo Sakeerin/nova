@@ -231,6 +231,28 @@ builtins! {
     /// expressible in Nova produces a future that starts out pending.
     /// Std-only.
     TaskJoinFuture,
+    /// `fs_read_to_string(path: String) -> Int` — read `path` as UTF-8.
+    ///
+    /// Returns a status code (`0` on success, an `IoErrorKind` code otherwise
+    /// — see `crates/nova-runtime/src/fs.rs`), not the string itself: an
+    /// intrinsic returns exactly one word, and this call must convey both a
+    /// `String` and enough information to build an `IoError`. On success the
+    /// contents are waiting in [`Builtin::FsTakeString`]. Backs `std/fs`'s
+    /// `read_to_string`. Std-only.
+    FsReadToString,
+    /// `fs_write_string(path: String, content: String) -> Int` — write
+    /// `content` to `path`, truncating any existing contents. A status code,
+    /// for the same reason as [`Builtin::FsReadToString`]. Backs `std/fs`'s
+    /// `write_string`. Std-only.
+    FsWriteString,
+    /// `fs_take_string() -> String` — take the payload staged by a successful
+    /// [`Builtin::FsReadToString`]. Backs `std/fs`'s `read_to_string`.
+    /// Std-only.
+    FsTakeString,
+    /// `fs_last_error_message() -> String` — take the OS-provided message
+    /// staged by a failed filesystem operation. Backs `std/fs`'s
+    /// `read_to_string` and `write_string`. Std-only.
+    FsLastErrorMessage,
 }
 
 impl Builtin {
@@ -259,6 +281,10 @@ impl Builtin {
             Builtin::TaskYieldFuture => "task_yield_future",
             Builtin::TaskSleepFuture => "task_sleep_future",
             Builtin::TaskJoinFuture => "task_join_future",
+            Builtin::FsReadToString => "fs_read_to_string",
+            Builtin::FsWriteString => "fs_write_string",
+            Builtin::FsTakeString => "fs_take_string",
+            Builtin::FsLastErrorMessage => "fs_last_error_message",
         }
     }
 
@@ -286,7 +312,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 17] = [
+    pub const STD_ONLY: [Builtin; 21] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -304,6 +330,10 @@ impl Builtin {
         Builtin::TaskYieldFuture,
         Builtin::TaskSleepFuture,
         Builtin::TaskJoinFuture,
+        Builtin::FsReadToString,
+        Builtin::FsWriteString,
+        Builtin::FsTakeString,
+        Builtin::FsLastErrorMessage,
     ];
 }
 
@@ -805,9 +835,10 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 5] = [
+pub const STD_MODULES: [(&str, &str); 6] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
     ("$std.io", include_str!("../../../std/io/lib.nova")),
+    ("$std.fs", include_str!("../../../std/fs/lib.nova")),
     (
         "$std.collections",
         include_str!("../../../std/collections/lib.nova"),

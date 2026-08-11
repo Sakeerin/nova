@@ -3921,7 +3921,11 @@ impl<'a> Checker<'a> {
             | Builtin::TaskOutput
             | Builtin::TaskYieldFuture
             | Builtin::TaskSleepFuture
-            | Builtin::TaskJoinFuture => "",
+            | Builtin::TaskJoinFuture
+            | Builtin::FsReadToString
+            | Builtin::FsWriteString
+            | Builtin::FsTakeString
+            | Builtin::FsLastErrorMessage => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7117,6 +7121,10 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskSleepFuture => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskJoinFuture => (vec![future_of_param0()], Ty::Future(Box::new(Ty::Unit))),
+        Builtin::FsReadToString => (vec![Ty::String], Ty::Int),
+        Builtin::FsWriteString => (vec![Ty::String, Ty::String], Ty::Int),
+        Builtin::FsTakeString => (vec![], Ty::String),
+        Builtin::FsLastErrorMessage => (vec![], Ty::String),
     }
 }
 
@@ -14997,6 +15005,23 @@ mod tests {
                         Ty::Future(Box::new(Ty::Unit)),
                     ),
                     "`task_join_future(self.fut).await` in `JoinHandle<T>::join`",
+                ),
+                Builtin::FsReadToString => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_read_to_string(path)` in `std/fs`'s `read_to_string`",
+                ),
+                Builtin::FsWriteString => (
+                    (vec![Ty::String, Ty::String], Ty::Int),
+                    "`fs_write_string(path, content)` in `std/fs`'s `write_string`",
+                ),
+                Builtin::FsTakeString => (
+                    (vec![], Ty::String),
+                    "`fs_take_string()` in `std/fs`'s `read_to_string`",
+                ),
+                Builtin::FsLastErrorMessage => (
+                    (vec![], Ty::String),
+                    "`fs_last_error_message()` in `std/fs`'s `read_to_string` and \
+                     `write_string`",
                 ),
             }
         }

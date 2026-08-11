@@ -5881,3 +5881,53 @@ fn eprint_family_run() {
         .stdout(expected)
         .stderr("ab\n");
 }
+
+// === Task 2 (std/fs on Strings increment): the boundary, `read_to_string`,
+// and `write_string` ===
+
+/// Reading a path that does not exist reports `NotFound`, round-tripped
+/// through the status-code boundary in `crates/nova-runtime/src/fs.rs` and
+/// back out through `io_error_kind_of` in `std/io`. Asserts on `kind` only,
+/// never `message`, per the spec's diagnostics rule -- the OS's own wording
+/// for "no such file" is platform-specific.
+#[test]
+fn fs_not_found_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_not_found.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_not_found.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Non-UTF-8 file contents report `InvalidData`, not a panic and not lossy
+/// replacement. `write_string` only accepts a `String`, so the invalid bytes
+/// can only be placed on disk from Rust, never from `std/fs` itself -- this
+/// writes them directly before invoking the fixture.
+///
+/// The directory folds in this process's id so two runs of this test binary
+/// (or two concurrent `cargo test` invocations) never share a path -- unlike
+/// `write_test_project`'s fixed-name directory, which does and is a known,
+/// accepted latent race in this file; new fixtures should not copy it.
+#[test]
+fn fs_invalid_data_run() {
+    let dir = std::env::temp_dir().join(format!("nova-fs-invalid-data-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir for the invalid-UTF-8 fixture");
+    std::fs::write(dir.join("invalid_utf8.bin"), [0xFFu8, 0xFE])
+        .expect("write invalid UTF-8 bytes");
+
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_invalid_data.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .current_dir(&dir)
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_invalid_data.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

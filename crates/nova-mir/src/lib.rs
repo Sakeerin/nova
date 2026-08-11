@@ -234,6 +234,17 @@ rt_funcs! {
     /// named by the given future's state completes, then completes itself.
     /// What `std/task`'s `join` awaits.
     TaskJoinFuture,
+    /// `(str) -> i64` — read the path as UTF-8. `0` on success, with the
+    /// contents waiting in `FsTakeString`; otherwise an `IoErrorKind` status
+    /// code (`crates/nova-runtime/src/fs.rs`).
+    FsReadToString,
+    /// `(str, str) -> i64` — write the second string to the path named by the
+    /// first, truncating. Status code, as `FsReadToString`.
+    FsWriteString,
+    /// `() -> str` — take the payload staged by a successful `FsReadToString`.
+    FsTakeString,
+    /// `() -> str` — take the message staged by a failed filesystem operation.
+    FsLastErrorMessage,
 }
 
 impl RtFunc {
@@ -269,6 +280,10 @@ impl RtFunc {
             RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
             RtFunc::TaskSleepFuture => "nova_rt_task_sleep_future",
             RtFunc::TaskJoinFuture => "nova_rt_task_join_future",
+            RtFunc::FsReadToString => "nova_rt_fs_read_to_string",
+            RtFunc::FsWriteString => "nova_rt_fs_write_string",
+            RtFunc::FsTakeString => "nova_rt_fs_take_string",
+            RtFunc::FsLastErrorMessage => "nova_rt_fs_last_error_message",
         }
     }
 
@@ -301,6 +316,9 @@ impl RtFunc {
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
             RtFunc::TaskSleepFuture => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
+            RtFunc::FsTakeString | RtFunc::FsLastErrorMessage => (vec![], MirTy::Ptr),
         }
     }
 }

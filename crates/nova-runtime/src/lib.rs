@@ -11,6 +11,11 @@
 //! [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`. All heap allocation
 //! routes through [`gc::alloc`], which reclaims unreachable objects.
 
+/// Filesystem intrinsics for `std/fs`. `pub`, not private: its own doc
+/// comment explains the boundary it implements; nothing about that requires
+/// hiding the module itself, and Task 3/4 build on it the same way this
+/// crate's other modules build on `task`.
+pub mod fs;
 mod gc;
 /// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,
 /// `POLL_READY`, `STATE_SLOT_TAG`, `STATE_SLOT_TEMPS`) are not all read by
@@ -30,7 +35,11 @@ pub struct NovaStr {
 
 /// Store a Rust string as a GC-managed `NovaStr` value (its bytes copied into a
 /// GC leaf buffer, the header a scanned object that keeps the buffer alive).
-fn gc_str(s: &str) -> *mut NovaStr {
+///
+/// `pub(crate)`, not private: `fs`'s `gc_message` reuses this rather than
+/// reproducing `NovaStr { len, ptr }`'s layout a second time, which is
+/// precisely the drift class this shared helper exists to avoid.
+pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
     let len = s.len();
     // A non-traced byte buffer holding the UTF-8 bytes.
     let buf = gc::alloc(len.max(1), false);
@@ -47,10 +56,13 @@ fn gc_str(s: &str) -> *mut NovaStr {
 
 /// Read a `NovaStr` back as a `&str`.
 ///
+/// `pub(crate)`, not private: `fs`'s intrinsics read their `NovaStr`
+/// arguments through this rather than a second copy of the same unsafe cast.
+///
 /// # Safety
 /// `s` must point to a valid `NovaStr` whose `ptr`/`len` reference valid
 /// UTF-8 (guaranteed for strings produced by the compiler and runtime).
-unsafe fn as_str<'a>(s: *const NovaStr) -> &'a str {
+pub(crate) unsafe fn as_str<'a>(s: *const NovaStr) -> &'a str {
     let s = &*s;
     std::str::from_utf8_unchecked(std::slice::from_raw_parts(s.ptr, s.len as usize))
 }
@@ -402,6 +414,22 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_task_join_future",
             task::nova_rt_task_join_future as *const u8,
+        ),
+        (
+            "nova_rt_fs_read_to_string",
+            fs::nova_rt_fs_read_to_string as *const u8,
+        ),
+        (
+            "nova_rt_fs_write_string",
+            fs::nova_rt_fs_write_string as *const u8,
+        ),
+        (
+            "nova_rt_fs_take_string",
+            fs::nova_rt_fs_take_string as *const u8,
+        ),
+        (
+            "nova_rt_fs_last_error_message",
+            fs::nova_rt_fs_last_error_message as *const u8,
         ),
     ]
 }
