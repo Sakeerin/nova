@@ -276,44 +276,9 @@ This task establishes the protocol every later operation reuses. Get it right he
 - Consumes: `io_error_kind_of(code: Int) -> IoErrorKind` and `IoError` (Task 1).
 - Produces: `fs::status_of(&std::io::Error) -> i64` and `fs::stash_string(*mut NovaStr)` / `fs::take_slot(&'static ...)` internals; builtins `fs_read_to_string(String) -> Int`, `fs_write_string(String, String) -> Int`, `fs_take_string() -> String`, `fs_last_error_message() -> String`; Nova `read_to_string`, `write_string`. Tasks 3–4 reuse `status_of`, the slots, and `fs_last_error_message`.
 
-- [ ] **Step 1: Write the failing round-trip fixture**
+**Decided before execution: the round-trip fixture belongs to Task 3, not here.** An earlier draft of this plan had Task 2 write `fs_roundtrip.nova` unregistered, to be gated only in Task 3 — but a fixture that cannot run is indistinguishable from a test that asserts nothing, and a reviewer would rightly flag it. `fs_roundtrip` is created, registered and passing entirely within Task 3, where `temp_dir` and `remove_file` exist. Task 2 gates its own deliverable with `fs_not_found` and `fs_invalid_data`, which is sufficient.
 
-`tests/runtime/fs_roundtrip.nova`:
-
-```nova
-fn main() {
-    block_on(go())
-}
-
-async fn go() {
-    let p = "${temp_dir()}/nova_fs_roundtrip.txt"
-    match write_string(p, "hello\nworld").await {
-        Ok(_) => println("wrote")
-        Err(e) => println("write failed: ${e.message}")
-    }
-    match read_to_string(p).await {
-        Ok(s) => println(s)
-        Err(e) => println("read failed: ${e.message}")
-    }
-    match remove_file(p).await {
-        Ok(_) => println("removed")
-        Err(e) => println("remove failed: ${e.message}")
-    }
-}
-```
-
-`tests/runtime/fs_roundtrip.stdout`:
-
-```
-wrote
-hello
-world
-removed
-```
-
-**`temp_dir()` and `remove_file` are Task 3's**, so this fixture cannot pass until Task 3. Write it now, keep it failing, and register it in `run_tests.rs` only in Task 3. **Instead, Task 2's own passing fixture is the next step** — this one exists here so the round-trip shape is fixed before the protocol is written.
-
-- [ ] **Step 2: Write Task 2's own failing fixtures**
+- [ ] **Step 1: Write Task 2's failing fixtures**
 
 `tests/runtime/fs_not_found.nova`:
 
@@ -351,7 +316,7 @@ NotFound
 
 This asserts on `kind` and never on `message`, per the spec's diagnostics rule.
 
-- [ ] **Step 3: Run it to confirm it fails**
+- [ ] **Step 2: Run it to confirm it fails**
 
 ```bash
 cargo build --workspace && cargo test -p nova-cli fs_not_found -- --nocapture
@@ -359,7 +324,7 @@ cargo build --workspace && cargo test -p nova-cli fs_not_found -- --nocapture
 
 Expected: FAIL — `E0001 cannot find function 'read_to_string'`. Confirm a non-zero test count.
 
-- [ ] **Step 4: Create `crates/nova-runtime/src/fs.rs` with the slots and the status map**
+- [ ] **Step 3: Create `crates/nova-runtime/src/fs.rs` with the slots and the status map**
 
 ```rust
 //! Filesystem intrinsics for `std/fs`.
@@ -442,7 +407,7 @@ You will need small helpers `stash(slot, ptr)` (register a root, then set) and `
 
 **Order `take` exactly as `task::take_output_internal` does:** release the root *after* reading the pointer out of the slot and *before* returning, so the root's add/remove stay balanced and the returned pointer is then rooted by the caller's frame like any other runtime return value.
 
-- [ ] **Step 5: Implement the two operations and the two takers**
+- [ ] **Step 4: Implement the two operations and the two takers**
 
 ```rust
 /// Read `path` as UTF-8. Returns a status; on `OK` the contents are waiting in
@@ -506,7 +471,7 @@ pub extern "C" fn nova_rt_fs_last_error_message() -> *mut NovaStr {
 
 Add `pub mod fs;` to `crates/nova-runtime/src/lib.rs` and register all four symbols with the JIT.
 
-- [ ] **Step 6: Wire the four builtins**
+- [ ] **Step 5: Wire the four builtins**
 
 Run the seam grep — `StrToUpper` is the closest analogue, a `STD_ONLY` builtin taking and returning a `String`:
 
@@ -516,7 +481,7 @@ grep -rn 'StrToUpper' --include=*.rs crates/
 
 Add a parallel arm at every hit for `FsReadToString`, `FsWriteString`, `FsTakeString`, `FsLastErrorMessage`, and bump `STD_ONLY` from `[Builtin; 17]` to `[Builtin; 21]`. Typeck signatures: `(vec![Ty::String], Ty::Int)`, `(vec![Ty::String, Ty::String], Ty::Int)`, `(vec![], Ty::String)`, `(vec![], Ty::String)`. MIR signatures: `(vec![MirTy::Ptr], MirTy::I64)`, `(vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64)`, `(vec![], MirTy::Ptr)`, `(vec![], MirTy::Ptr)`.
 
-- [ ] **Step 7: Create `std/fs/lib.nova` with the two wrappers**
+- [ ] **Step 6: Create `std/fs/lib.nova` with the two wrappers**
 
 ```nova
 // Nova standard library — filesystem.
@@ -563,7 +528,7 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
 
 Register `("$std.fs", include_str!("../../../std/fs/lib.nova"))` in `STD_MODULES`, bumping `5` to `6`. It must come **after** `$std.io`, since these wrappers use `IoError` and `io_error_kind_of`.
 
-- [ ] **Step 8: Run the fixture to confirm it passes**
+- [ ] **Step 7: Run the fixture to confirm it passes**
 
 ```bash
 cargo build --workspace && cargo test -p nova-cli fs_not_found -- --nocapture
@@ -571,13 +536,43 @@ cargo build --workspace && cargo test -p nova-cli fs_not_found -- --nocapture
 
 Expected: PASS, printing `NotFound`.
 
-- [ ] **Step 9: Add the `InvalidData` fixture and a Rust-level slot test**
+- [ ] **Step 8: Add the `InvalidData` fixture and a Rust-level slot test**
 
 `tests/runtime/fs_invalid_data.nova` writes bytes that are not UTF-8 and reads them back. Since `write_string` only takes a `String`, create the file from Rust in the test harness instead, then have the fixture read it — register it in `run_tests.rs` with the harness writing `&[0xFF, 0xFE]` to a unique temp path first.
 
 Then, in `crates/nova-runtime/src/fs.rs`'s own `mod tests`:
 
 ```rust
+/// Pins the spec's "these `async fn`s never suspend" property.
+///
+/// **Decided before execution.** The spec asks for a test that `PARKED` is
+/// empty after a `std/fs` call, but `PARKED` is private to `crate::task` and no
+/// accessor exists, so the property is pinned at its source instead: nothing in
+/// this module may register a park. That is strictly what matters — a `std/fs`
+/// intrinsic can only reach the park set by calling `stage_park`.
+///
+/// Self-referential, like `every_rt_func_is_declared_with_its_real_signature`
+/// elsewhere in this workspace, and carrying the same weakness: it checks the
+/// text of this file, not the behaviour of a running program. It would miss
+/// parking reached by some route other than a literal call. Accepted because the
+/// alternative is test-only surface in a module this branch does not otherwise
+/// touch.
+#[test]
+fn no_filesystem_intrinsic_registers_a_park() {
+    let source = include_str!("fs.rs");
+    // Skip this test's own body, which necessarily names the function.
+    let code = source
+        .split("fn no_filesystem_intrinsic_registers_a_park")
+        .next()
+        .unwrap_or(source);
+    assert!(
+        !code.contains("stage_park"),
+        "a std/fs intrinsic must not park: these async fns run synchronously \
+         inside the poll, and parking here without the poller work would \
+         suspend a task nothing can wake"
+    );
+}
+
 #[test]
 fn a_stashed_string_survives_a_collection_before_it_is_taken() {
     let p = gc_message("payload");
@@ -594,7 +589,7 @@ fn a_stashed_string_survives_a_collection_before_it_is_taken() {
 }
 ```
 
-- [ ] **Step 10: Prove both tests discriminate**
+- [ ] **Step 9: Prove both tests discriminate**
 
 Two mutations, one at a time, each applied then reverted with a rebuild:
 
@@ -603,7 +598,7 @@ Two mutations, one at a time, each applied then reverted with a rebuild:
 
 Paste both transcripts into your report.
 
-- [ ] **Step 11: Full verification and commit**
+- [ ] **Step 10: Full verification and commit**
 
 As Task 1 Step 10. Subject: `feat(std): read_to_string and write_string over a status boundary`
 
@@ -611,11 +606,48 @@ As Task 1 Step 10. Subject: `feat(std): read_to_string and write_string over a s
 
 ### Task 3: `exists`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir_all`
 
-Mechanical, reusing Task 2's protocol whole. This is also where `fs_roundtrip` from Task 2 Step 1 gets registered and starts passing.
+Mechanical, reusing Task 2's protocol whole. This task also **creates** the round-trip fixture, since only now do `temp_dir` and `remove_file` exist to make it pass.
 
 **Files:**
 - Modify: `crates/nova-runtime/src/fs.rs`, `crates/nova-runtime/src/lib.rs`, `crates/nova-resolver/src/lib.rs`, `crates/nova-typeck/src/check.rs`, `crates/nova-mir/src/lib.rs`, `crates/nova-mir/src/lower.rs`, `std/fs/lib.nova`
-- Test: `tests/runtime/fs_roundtrip.nova` + `.stdout` (from Task 2), `tests/runtime/fs_already_exists.nova` + `.stdout`, `tests/runtime/fs_dirs.nova` + `.stdout`
+- Create: `tests/runtime/fs_roundtrip.nova` + `.stdout`, `tests/runtime/fs_already_exists.nova` + `.stdout`, `tests/runtime/fs_dirs.nova` + `.stdout`
+
+**The round-trip fixture, created and registered here:**
+
+`tests/runtime/fs_roundtrip.nova`:
+
+```nova
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let p = "${temp_dir()}/nova_fs_roundtrip_5d2c.txt"
+    match write_string(p, "hello\nworld").await {
+        Ok(_) => println("wrote")
+        Err(e) => println("write failed: ${e.message}")
+    }
+    match read_to_string(p).await {
+        Ok(s) => println(s)
+        Err(e) => println("read failed: ${e.message}")
+    }
+    match remove_file(p).await {
+        Ok(_) => println("removed")
+        Err(e) => println("remove failed: ${e.message}")
+    }
+}
+```
+
+`tests/runtime/fs_roundtrip.stdout`:
+
+```
+wrote
+hello
+world
+removed
+```
+
+It exercises Task 2's two operations and this task's `remove_file` and `temp_dir` in one pass, which is why it lives here rather than in Task 2.
 
 **Interfaces:**
 - Consumes: `fs::fail`, `fs::OK`, the slots, `fs_last_error_message`, `io_error_kind_of` (Task 2).
@@ -800,7 +832,7 @@ pub fn temp_dir() -> String {
 
 Then `create_dir_all`, `remove_file` and `remove_dir_all` in `create_dir`'s exact shape.
 
-- [ ] **Step 7: Register `fs_roundtrip` and run all three fixtures**
+- [ ] **Step 7: Register all three fixtures and run them**
 
 ```bash
 cargo build --workspace && cargo test -p nova-cli fs_ -- --nocapture
@@ -1122,7 +1154,7 @@ Subject: `docs: ADR 0011 for std/fs's spec deviations`
 
 **Spec coverage.** §3.1 `std/io` → Task 1. §3.2's eight functions → Tasks 2 (2), 3 (5, plus `temp_dir`), 4 (1). §3.3 `eprint`/`eprintln` → Task 1. §3.4's boundary → Task 2 Steps 4–7, extended in 3 and 4. §4's non-goals → nothing implements them, by construction; the drive loop is untouched in every task. §5's never-suspends property → documented in `std/fs`'s header (Task 2 Step 7) and ADR'd in Task 5. §6 diagnostics → every error fixture asserts `kind`, never `message`. §7's deviations → Task 5 Step 1, which lists **four** where the spec listed two. §8's risks: risk 1 → Task 2 Step 10 mutation 2; risk 2 → Task 4 Step 6; risk 3 → Task 2's separate slots and its `fs_take_string` mutation; risk 4 → unique temp paths in every fixture; risk 5 → Task 3 Step 4's measure-and-record instruction. §9's mutation table → every row has a step, except `fs_take_string` reading the error slot, which Task 2 Step 10 covers by a different route.
 
-**One spec requirement has no task, deliberately, and it is called out here rather than silently dropped:** §9 asks for a test that a `std/fs` call leaves `PARKED` empty. No task implements it, because `PARKED` is private to `crates/nova-runtime/src/task.rs` and `std/fs` cannot see it, so the test belongs in `task.rs`'s own `mod tests` and needs a Nova-level `std/fs` call it cannot make from there. **Whoever executes this should raise it:** either expose a `#[cfg(test)]` accessor and drive it from an integration test, or drop the requirement and rely on the fact that no `stage_park` call exists anywhere in `fs.rs` — which a `grep` in Task 5 can assert cheaply. Do not skip it without recording which.
+**§9's `PARKED`-stays-empty requirement is met at its source instead, decided before execution.** `PARKED` is private to `crates/nova-runtime/src/task.rs` with no accessor, so a test asserting it directly would need test-only surface in a module this branch does not otherwise touch. Task 2 Step 8's `no_filesystem_intrinsic_registers_a_park` pins the property where it actually lives: a `std/fs` intrinsic can only reach the park set by calling `stage_park`, so asserting that no such call exists in `fs.rs` is exactly the guarantee. It is self-referential and that weakness is recorded in the test's own doc comment.
 
 **Type consistency.** `io_error_kind_of(code: Int) -> IoErrorKind` used identically in Tasks 1–4. `IoError { kind, message }` field order and names constant throughout. Status constants named once in Task 2 and reused. `fs_kind`'s 0/1/2 encoding stated identically in Task 3's absence of it, Task 4 Step 3, and Task 4 Step 5's `k == 1` / `k == 2`. The `STD_ONLY` length runs 17 → 21 → 27 → 30, and each task states the number it starts from.
 
