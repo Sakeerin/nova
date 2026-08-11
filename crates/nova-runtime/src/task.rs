@@ -607,8 +607,13 @@ fn take_output_internal(id: i64) -> i64 {
 ///    thread, so a task spawned earlier and left pending would otherwise have
 ///    no way to reach `nova_rt_task_take_output`'s promised state (`done`,
 ///    with an output) at all.
-/// 2. **A task that never reports [`POLL_READY`] no longer spins this loop
-///    forever, and neither does a task that keeps re-queueing itself.**
+/// 2. **A task that stages a park no longer spins this loop forever, and a
+///    task that instead keeps re-queueing itself can no longer starve
+///    anything else's deadline while it does.** (It still re-queues itself
+///    forever, by design; what changed is only that doing so no longer costs
+///    a sibling its wake-up. A task joining *that* kind of task is a
+///    livelock, not a deadlock, and this loop still cannot see it -- ADR
+///    0009 §1's 2026-08-10 amendment records it as accepted, not fixed.)
 ///    Before the park set, a task returning [`POLL_PENDING`] was
 ///    unconditionally re-queued, so one that never became ready re-queued
 ///    forever and the loop hung with no diagnostic. A poll that stages a

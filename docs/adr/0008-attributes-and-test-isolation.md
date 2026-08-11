@@ -240,6 +240,11 @@ it independently, none delegating to another:
   a `join`/`release` on a future that was never spawned, and a re-entrant
   `block_on`.
 
+**This inventory is of `nova: panic:` emitters specifically — the substring
+`classify` searches for — not of every way the runtime can end the process.**
+See the dated note under Residual gaps below for why that distinction now
+matters, rather than being academic.
+
 This is load-bearing rather than incidental. `tests/runtime/nova_test.nova`'s
 `array_out_of_bounds_panics` — the fixture's `should_panic` test that is
 *supposed* to pass — reaches the marker through `nova_rt_check_bounds`
@@ -285,6 +290,24 @@ way to assert that something panics.
   future runtime addition that prints a line containing `nova: panic:` for
   some other reason, without aborting immediately, would be misread by
   `classify`'s plain substring search.
+
+  **AMENDED 2026-08-10 (branch `park-set`): a fifth abort site has now
+  arrived, and it answers this bullet's speculation the easy way rather than
+  the hard one.** Re-derived from a fresh grep
+  (`grep -rn 'nova: panic:\|process::abort' --include=*.rs crates/`), not
+  carried forward as a number: the count above is still **four** for the
+  `nova: panic:` marker specifically. The grep's fifth hit is
+  `crates/nova-runtime/src/task.rs`'s `report_deadlock`, the park set's
+  deadlock diagnostic — it `eprint!`s `nova: deadlock: …`, a *different*
+  marker, then aborts. That is not the hazard this bullet anticipated: the
+  worry above was a future site printing *the same* marker for an unrelated
+  reason, which `classify`'s substring search would misread as a panic. A
+  different marker does not collide, so `nova test` reads a deadlocked
+  `@test` as `Trapped` — an unclean exit with no `nova: panic:` line, exactly
+  like any other trap — never `Panicked`. A deadlock not satisfying
+  `@test(should_panic)` is correct, not a gap: a deadlock is not a panic.
+  This bullet's own hazard — a *same*-marker fifth site — remains
+  hypothetical and still unenforced.
 
 ### Consequences
 
@@ -620,7 +643,9 @@ the design doc's §11 risk 3:
 - `crates/nova-runtime/src/lib.rs`: `nova_rt_panic_str`, `nova_rt_check_bounds`
   (§2); `crates/nova-runtime/src/gc.rs`: `alloc`'s oversized-object guard (§2);
   `crates/nova-runtime/src/task.rs`: `abort_with`, the fourth marker emitter,
-  added in Phase 2.3a (§2)
+  added in Phase 2.3a (§2); `deadlock_report`/`report_deadlock`, a fifth
+  abort site with a distinct, non-colliding marker (`nova: deadlock:`),
+  added by branch `park-set`, 2026-08-10 (§2's dated amendment)
 - `crates/nova-driver/src/lib.rs`: `SHADOWED_USER_MAIN_NAME`,
   `build_test_binary`, `synthesize_test_main` (§3)
 - `crates/nova-mir/src/mono.rs:19`: the entry-point lookup `main.shadowed_by_

@@ -212,9 +212,15 @@ builtins! {
     /// lookup [`Builtin::TaskIsDone`]/[`Builtin::TaskRelease`] use, so a
     /// future no task was spawned for aborts immediately rather than
     /// becoming a park nothing can wake. Backs `std/task`'s `join`, which
-    /// used to spin on [`Builtin::TaskIsDone`] instead: a join on a task that
-    /// never finishes now reports a deadlock rather than costing one poll
-    /// per turn forever. A builtin for the same reason `task_sleep_future`
+    /// used to spin on [`Builtin::TaskIsDone`] instead: joining a task that
+    /// is itself stuck -- parked, directly or through a cycle such as two
+    /// tasks joining each other -- now reports a deadlock rather than
+    /// costing one poll per turn forever. Joining a task that never finishes
+    /// because it keeps re-queueing itself (a `yield_now` loop) is a
+    /// livelock, not a deadlock, and is not reported: nothing there is
+    /// parked, so it still costs one poll per turn forever, undiagnosed
+    /// (`docs/adr/0009-async-execution-model.md` §1's 2026-08-10 amendment).
+    /// A builtin for the same reason `task_sleep_future`
     /// is: an `async fn` body suspends only at an `.await`, and nothing
     /// expressible in Nova produces a future that starts out pending.
     /// Std-only.

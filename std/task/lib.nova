@@ -63,8 +63,13 @@ impl<T> JoinHandle<T> {
     // await is enough: the only thing that wakes this task is the target's
     // completion, so there is no state in which it resumes early. The
     // `task_is_done` spin this replaced cost one poll per turn and could not
-    // be told apart from a deadlock — joining a task that never finishes now
-    // reports one instead of hanging.
+    // be told apart from a deadlock. Joining a task that is itself stuck —
+    // parked, directly or through a cycle such as two tasks joining each
+    // other — now reports a deadlock instead of hanging. Joining a task
+    // that never finishes because it keeps re-queueing itself (a
+    // `yield_now` loop, forever) is a livelock rather than a deadlock and
+    // still hangs: the ready queue is never empty, so the check that would
+    // report one is never reached (ADR 0009 §1's 2026-08-10 amendment).
     //
     // `task_release` before the read, not after: it ends the executor's claim
     // on the state object, and the read below then depends only on the claim
@@ -124,6 +129,12 @@ pub async fn sleep(ms: Int) {
 // thread, a task left pending when this returned could never be advanced again.
 // So `block_on` implicitly joins everything spawned on this thread, which is
 // where it parts company with tokio's.
+//
+// If every remaining task is parked and none of them can ever wake each
+// other — most simply, two tasks joining each other — this reports a
+// deadlock naming each one and what it is waiting for, then aborts, rather
+// than hanging. A task that never parks (a `yield_now` loop, forever) is not
+// this: it keeps the queue non-empty, so this neither returns nor aborts.
 //
 // **Not callable from inside an `async fn`.** A nested call would run a second
 // executor loop from inside the first one's frame; the runtime detects that and

@@ -123,6 +123,23 @@ afterwards.
   on the next turn, round-robin. A task waiting on something therefore *spins* at
   one poll per turn rather than sleeping — `JoinHandle::join` is literally a
   `while !task_is_done(self.fut) { yield_now().await }` loop.
+
+  **AMENDED 2026-08-10 (branch `park-set`): true only of `yield_now` now.** The
+  executor gained a park set (`crates/nova-runtime/src/task.rs`'s `PARKED`,
+  keyed on task id, plus `Wait::Deadline`/`Wait::Task`): a task that stages a
+  park during a poll is moved out of the ready queue instead of being
+  re-queued, and returns to it only when its deadline passes or the task it
+  named completes. `sleep` (`Wait::Deadline`) and `join` (`Wait::Task`) both
+  stage one; `yield_now` stages nothing and still re-queues every turn,
+  deliberately — it means "let others run", not a wait on anything.
+  `JoinHandle::join` is no longer the loop quoted above; it is
+  `task_join_future(self.fut).await`, a single park (`std/task/lib.nova`).
+  This does not close the gap the reversed plan decision above was named
+  for: parking on a genuine external event (I/O readiness) is still owed to
+  `std/io`, which is what this park set was built ahead of (see
+  `docs/superpowers/specs/2026-08-10-park-set-design.md` §1). Two new
+  accepted limitations follow this section's residual-gaps list below, both
+  about where the new deadlock check still cannot see a real hang.
 - **`block_on` drains the whole queue, and does not terminate if any queued task
   never reports ready.** Two consequences follow from the same loop. It
   **implicitly joins everything** spawned on the thread, unlike tokio's
@@ -187,6 +204,52 @@ afterwards.
   `await` on a channel nothing sends to) — a park set plus a deadlock diagnostic
   when the ready queue is empty and the park set is not. A busy re-poll loop
   cannot tell "not ready yet" from "never will be".
+
+  **AMENDED 2026-08-10 (branch `park-set`): the previous paragraph is now
+  stale — the park set and the deadlock diagnostic it names as owed both
+  exist.** `block_on`'s drive loop (`run_to_completion`) now wakes every due
+  deadline on every turn and, when the ready queue drains with the park set
+  non-empty and no `Wait::Deadline` left in it, reports a deadlock — naming
+  each parked task and what it is waiting for — and aborts (`nova: deadlock:
+  …`) instead of hanging: a mutual-join cycle (two tasks each joining the
+  other, or a task joining itself) is the shape this actually catches. This
+  narrows the "does not terminate" claim two paragraphs up; it does not
+  retract it. What the park set does *not* do is decide *whether* a task will
+  ever finish — only whether it is currently parked — so two shapes of the
+  original hang survive, each recorded as its own accepted limitation below
+  rather than folded into this one: a task that never parks at all keeps the
+  ready queue non-empty forever and, by itself, suppresses the check for
+  every other parked task too; and joining specifically *that* kind of task
+  is a livelock the check is not designed to see, because seeing it would
+  mean telling "will never finish" from "has not finished yet" — the halting
+  problem, not an oversight. And as the paragraph above already says, this
+  is still not a wake on a genuine external event (I/O readiness): that
+  primitive, and its interaction with the park set, is `std/io`'s to add.
+- **A permanently-runnable task masks a deadlock among the others, and that
+  is accepted (added 2026-08-10, branch `park-set`).** The deadlock check
+  only runs once the ready queue drains, so one task that never parks — any
+  `yield_now` loop, including a legitimate "let others run" pattern — keeps
+  the queue non-empty forever and suppresses the diagnostic even while two
+  *other* tasks sit in a genuine mutual-join cycle. Telling that apart from
+  ordinary slow progress needs a no-progress-in-*N*-turns heuristic, which is
+  rejected for the reason the design gives for not attempting one at all: it
+  cannot distinguish a slow program from a stuck one
+  (`docs/superpowers/specs/2026-08-10-park-set-design.md` §4). Recorded as
+  accepted, not fixed.
+- **Joining a task that loops forever is a livelock, not a deadlock, and is
+  deliberately not reported (added 2026-08-10, branch `park-set`).** If task
+  A joins task B and B never completes because it keeps re-queueing itself
+  (a `yield_now` loop) rather than parking, the ready queue is never empty —
+  B is always back in it — so the deadlock check is never reached and A
+  hangs with no diagnostic. This is the shape most likely to look like
+  exactly the bug this branch fixes, and it is deliberately out of scope:
+  separating "B has not completed yet" from "B will never complete" is the
+  halting problem, and no heuristic is used to approximate it. A genuine
+  deadlock — every remaining task is itself parked — is still reported; a
+  livelock — some task is always ready but never finishes — is not
+  (`docs/superpowers/specs/2026-08-10-park-set-design.md` §6, which is also
+  where the deadlock fixture's own shape is argued from this same
+  distinction).
 - **`spawn` used to accept the same future twice, with no check at all** —
   registering it as two independent tasks that both drove one shared state
   object, corrupting whichever one polled second. **Closed on branch
@@ -462,13 +525,23 @@ Two companion rules, from the same evidence:
 - `crates/nova-runtime/src/task.rs`: `PollFn`, `POLL_PENDING`, `POLL_READY`,
   `STATE_SLOT_*`, `STATE_MIN_SIZE`, `poll_one`, `run_to_completion`,
   `spawn_internal`, `take_output_internal`, `nova_rt_task_block_on`,
-  `nova_rt_task_yield_future`
+  `nova_rt_task_yield_future` — and, from the 2026-08-10 `park-set` amendment
+  above, `Wait`, `PARKED`, `stage_park`, `wake_due`/`wake_due_deadlines`,
+  `wake_tasks_waiting_on`, `nova_rt_task_sleep_future`,
+  `nova_rt_task_join_future`, `deadlock_report`/`report_deadlock`
 - `crates/nova-mir/src/async_lower.rs`: the state-machine transform, the
   `Spiller`, and the state-size guard
-- `std/task/lib.nova`: `spawn`, `JoinHandle`, `join`, `yield_now`, `block_on`
+- `std/task/lib.nova`: `spawn`, `JoinHandle`, `join`, `yield_now`, `block_on`,
+  and `sleep` (2026-08-10, `park-set`)
 - Gate: `tests/runtime/async_tasks.{nova,stdout}`, registered as
   `gate_async_tasks_run`, `gate_async_tasks_build_standalone` and
   `gate_async_tasks_under_gc_stress` (`crates/nova-cli/tests/run_tests.rs`)
+- Design (2026-08-10 amendment): `docs/superpowers/specs/2026-08-10-park-set-design.md`
+  — the residual gaps this amendment closes and narrows, and the two new
+  accepted limitations' own wording; gate: `tests/runtime/task_deadlock.nova`
+  and `tests/runtime/task_sleep_order.{nova,stdout}`, registered as
+  `task_deadlock_reports_and_aborts_instead_of_hanging_forever` and
+  `gate_task_sleep_order_runs` (`crates/nova-cli/tests/run_tests.rs`)
 - Spec: `nova-spec/13-RUNTIME.md` §4.2 (honoured), §4.1 and §4.4 (deviations
   recorded in §1); `nova-spec/20-STDLIB.md` §13 (`spawn_blocking`, not provided)
 - `docs/adr/0010-conservative-scan-root-test-gating.md` — the `#[ignore]`d

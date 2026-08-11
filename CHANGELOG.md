@@ -843,10 +843,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and, deterministically and on every platform, by
   `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve`
   (ADR 0009 §1 has the full mechanism, the footgun the `spawn`-liveness check
-  accepts, and that check itself); the park set and the deadlock diagnostic are still
-  owed by whatever adds the first primitive that can park on an external
-  event; **no cancellation** of any kind, so dropping a `JoinHandle` does
-  nothing;
+  accepts, and that check itself); the park set and the deadlock diagnostic
+  *(shipped 2026-08-10 — see the Added and Changed entries below, and ADR
+  0009 §1's dated amendment)* are no longer owed; what remains owed is a
+  primitive that parks on a genuine external event, `std/io`'s job, which
+  this park set was built ahead of; **no cancellation** of any kind, so
+  dropping a `JoinHandle` does nothing;
   **every temp is spilled into the state object**, not only those live across
   a suspend, which is what buys the transform out of liveness analysis at the
   cost of over-retaining (a later liveness pass narrows the state record and
@@ -875,11 +877,43 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decoration, since `Int` and every pointer-like type share one machine class
   and only `F64` crosses register banks.
 - Recorded, not implemented in this slice: channels and `Mutex` (2.3b),
-  `Instant`/`Duration`/`sleep`/`timeout` (2.3c), `std/log` (2.3d), real
-  parking and waking, `spawn_blocking`, cancellation, async trait methods,
+  `Instant`/`Duration`/`sleep`/`timeout` (2.3c) *(`sleep` and real parking
+  and waking shipped 2026-08-10, below — see the park set entry under this
+  same heading and the Changed entry for `join`/`block_on`; `Instant`,
+  `Duration` and `timeout` are still absent from Nova source, and parking on
+  an external I/O event is still `std/io`'s to add)*, `std/log` (2.3d),
+  `spawn_blocking`, cancellation, async trait methods,
   async closures, liveness-based state minimization, and parallelism. A
   recursive `async fn` is accepted and recurses without bound, the same
   undiagnosed class as `fn f() { f() }`.
+- **Park set (2026-08-10, a Phase 2.3a follow-up)** — the executor gained a
+  park set: a way for a task to register *why* it is suspended (a deadline,
+  or another task's id) and be pulled out of the ready queue until that
+  deadline passes or that task finishes, instead of being re-queued and
+  re-polled every turn regardless of what it is waiting for.
+  `sleep(ms: Int)`, in `std/task`, is the first primitive to use it — it
+  registers a deadline and is not polled again until that deadline passes,
+  so a sleeping task costs no polls at all (`ms` is whole milliseconds; Nova
+  has no duration type, and a negative value wakes immediately rather than
+  being rejected). `join` now parks the same way, described under Changed
+  below. `yield_now` stages no wait and keeps re-queueing itself every turn,
+  deliberately — it is the primitive that means "let others run", not a
+  wait on anything. When the ready queue drains with tasks still parked and
+  no deadline left for any of them to wake on, the executor reports a
+  deadlock — naming every parked task and what it is waiting for — and
+  aborts, e.g. two tasks each `join`ing the other, or a task joining itself.
+  This is not a general wake-on-I/O mechanism: parking on a genuine external
+  event (a socket or pipe with nothing ready) is still `std/io`'s to add, and
+  this park set exists ahead of it for exactly that reason
+  (`docs/superpowers/specs/2026-08-10-park-set-design.md` §1). Two shapes of
+  hang are deliberately still undiagnosed, both recorded as accepted
+  limitations rather than defects: a task that never parks (loops on
+  `yield_now`) keeps the ready queue non-empty forever and, by itself,
+  suppresses the deadlock check even for two *other* tasks in a genuine
+  cycle; and joining specifically that kind of task is a livelock, not a
+  deadlock, and separating "will never finish" from "has not finished yet"
+  is the halting problem, not an oversight
+  (`docs/adr/0009-async-execution-model.md` §1's 2026-08-10 amendment).
 - The six built-in type names — `Int`, `Float`, `Bool`, `Char`, `String`, and
   `Future` — are now reserved: declaring a `record` or a sum `type` under one
   of them is rejected (`E0089`) instead of compiling. `convert_ty` resolves
@@ -920,6 +954,22 @@ code that already compiled. Full detail is in the `### Added` entries above.
   method, already did not work. Accepted rather than fixed a different way,
   because a type that can be built and matched but never named in any
   annotation, or given a method, is a trap not worth leaving open.
+- **`JoinHandle::join` no longer spins, and `block_on` can now abort instead
+  of hanging forever (2026-08-10, a Phase 2.3a follow-up).** `join` used to
+  re-poll `task_is_done` once per turn until its target finished, spinning
+  at 100% CPU the whole time; it now parks on the park set below and wakes
+  only on the target's completion. Consequently `block_on`'s drive loop,
+  which used to hang forever if a queued task never became ready, now
+  detects the one case where every remaining task is parked and none can
+  wake — most simply, two tasks joining each other, or a task joining
+  itself — and aborts with a diagnostic naming each one and what it is
+  waiting for, instead of hanging. This does not make every hang
+  diagnosable: a task that never parks (loops on `yield_now`) keeps the
+  ready queue non-empty forever regardless, and joining it is a livelock the
+  executor still cannot tell apart from slow progress. Full detail,
+  including both limitations this does not close, is in the park set entry
+  under Added above and in `docs/adr/0009-async-execution-model.md` §1's
+  2026-08-10 amendment.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova
