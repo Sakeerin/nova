@@ -274,7 +274,9 @@ This task establishes the protocol every later operation reuses. Get it right he
 
 **Interfaces:**
 - Consumes: `io_error_kind_of(code: Int) -> IoErrorKind` and `IoError` (Task 1).
-- Produces: `fs::status_of(&std::io::Error) -> i64` and `fs::stash_string(*mut NovaStr)` / `fs::take_slot(&'static ...)` internals; builtins `fs_read_to_string(String) -> Int`, `fs_write_string(String, String) -> Int`, `fs_take_string() -> String`, `fs_last_error_message() -> String`; Nova `read_to_string`, `write_string`. Tasks 3–4 reuse `status_of`, the slots, and `fs_last_error_message`.
+- Produces: `fs::fail(&std::io::Error) -> i64` (the status mapping — **named `fail`, not `status_of`**; an earlier draft of this plan and `std/io/lib.nova`'s comment both used the latter, and nothing by that name exists) plus the `stash`/`take` slot helpers; builtins `fs_read_to_string(String) -> Int`, `fs_write_string(String, String) -> Int`, `fs_take_string() -> String`, `fs_last_error_message() -> String`, `fs_temp_dir() -> String`; Nova `read_to_string`, `write_string`, `temp_dir`. Tasks 3–4 reuse `fail`, the slots, `fs_last_error_message` and `temp_dir`.
+
+**Amended after Task 2's review: `fs_temp_dir` moved here from Task 3, and a round-trip fixture added.** The review proved by mutation that `write_string` had **no coverage of any kind** — replacing its body with a no-op returning success left all 44 targets passing — and that `read_to_string`'s success path was equally untested, since both original fixtures exercise only the error branch. This plan's claim that those two fixtures were "sufficient" for Task 2 was wrong. A round-trip needs a writable path, so `temp_dir` comes forward with it. `STD_ONLY` therefore goes 17 → **22** here, and Task 3 adds five rather than six to reach 27.
 
 **Decided before execution: the round-trip fixture belongs to Task 3, not here.** An earlier draft of this plan had Task 2 write `fs_roundtrip.nova` unregistered, to be gated only in Task 3 — but a fixture that cannot run is indistinguishable from a test that asserts nothing, and a reviewer would rightly flag it. `fs_roundtrip` is created, registered and passing entirely within Task 3, where `temp_dir` and `remove_file` exist. Task 2 gates its own deliverable with `fs_not_found` and `fs_invalid_data`, which is sufficient.
 
@@ -651,9 +653,11 @@ It exercises Task 2's two operations and this task's `remove_file` and `temp_dir
 
 **Interfaces:**
 - Consumes: `fs::fail`, `fs::OK`, the slots, `fs_last_error_message`, `io_error_kind_of` (Task 2).
-- Produces: builtins `fs_exists(String) -> Bool`, `fs_create_dir(String) -> Int`, `fs_create_dir_all(String) -> Int`, `fs_remove_file(String) -> Int`, `fs_remove_dir_all(String) -> Int`, `fs_temp_dir() -> String`; Nova `exists`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir_all`, `temp_dir`. Task 4 uses `temp_dir` and `create_dir` in its fixtures.
+- Produces: builtins `fs_exists(String) -> Bool`, `fs_create_dir(String) -> Int`, `fs_create_dir_all(String) -> Int`, `fs_remove_file(String) -> Int`, `fs_remove_dir_all(String) -> Int`; Nova `exists`, `create_dir`, `create_dir_all`, `remove_file`, `remove_dir_all`. Task 4 uses `temp_dir` (from Task 2) and `create_dir` in its fixtures.
 
-**Note the sixth builtin.** Fixtures need a writable directory and must not hardcode one, so this task adds `fs_temp_dir() -> String` wrapping `std::env::temp_dir()`, exposed as Nova `pub fn temp_dir() -> String` — a plain `fn`, not `async`, because it queries the environment and touches no filesystem. `nova-spec/20-STDLIB.md` §5 does not list it; that is a third deviation and belongs in the same ADR.
+**`fs_temp_dir` is NOT this task's — it moved to Task 2** when that task's review showed a round-trip fixture was needed there and a round-trip needs a writable path. Do not add it again; `temp_dir()` already exists. `STD_ONLY` therefore starts at **22** here and reaches 27 by adding **five** builtins, not six.
+
+`temp_dir` is a deviation from `nova-spec/20-STDLIB.md` §5, which does not list it, and belongs in Task 5's ADR regardless of which task shipped it.
 
 - [ ] **Step 1: Write the failing `AlreadyExists` fixture**
 
