@@ -1,0 +1,62 @@
+// A genuine deadlock: two tasks that each join the other, so once both have
+// parked nothing can ever wake either one -- the exact shape the executor's
+// deadlock check is sound for (`crates/nova-runtime/src/task.rs`'s
+// `run_to_completion`: an empty ready queue with a non-empty park set and no
+// `Wait::Deadline` means every remaining wait is a `Task(_)` whose target is
+// itself parked, so nothing can complete and nothing can wake).
+//
+// This is deliberately NOT "spawn a task that loops forever via `yield_now`
+// and join it" -- that shape was tried first and reverted. A `while true {
+// yield_now().await }` task re-queues itself every turn forever, which means
+// the ready queue is NEVER truly empty, which means `run_to_completion`'s
+// outer deadlock check (gated on the inner queue-drain loop actually
+// exiting) is never reached at all -- a livelock, not a deadlock, and
+// indistinguishable from one by any sound check (the two are the halting
+// problem apart: telling "never completes" from "hasn't completed yet"
+// requires waiting an unbounded time). Confirmed by hand: that version hangs
+// under a busy CPU spin whether `join` spins or parks, so it did not even
+// discriminate the thing it was meant to prove. See task-3-report.md for
+// the trace and for the design spec passage (3.3) that independently
+// predicts exactly this: "`spawn(forever_yielding())` alongside
+// `sleep(10).await` would hang for good" -- the same mechanism, one task
+// earlier.
+//
+// The cycle below has no such task: `a` and `b` each park on the other
+// exactly once, on their first and only poll, so the queue drains for real.
+// Building it needs a rendezvous, because `waiter(target)` must name its
+// *peer's* handle, and neither handle exists before both tasks are spawned.
+// `JoinHandle` is a plain public-field record (ADR 0007) with reference
+// semantics (ADR 0005), so a `mut`-bound handle works as that rendezvous
+// slot: each `waiter` is called with a placeholder handle, and the
+// placeholder's `fut` field is overwritten with the real peer handle after
+// both tasks are spawned -- entirely within `setup`'s own first poll, before
+// either spawned task has had a chance to run, so there is no ordering
+// hazard to reason about.
+//
+// If this regresses, it manifests as a HANG, not a failed assertion: this
+// is a `nova run` gate (not `nova test`), and `nova test` itself has no
+// per-test timeout either (known debt), so nothing here times out on its
+// own. Kill the process and reason about the runtime's queue/park-set state
+// rather than assuming the fixture is wrong -- the Rust-level unit tests in
+// `crates/nova-runtime/src/task.rs`
+// (`joining_a_pending_task_parks_and_is_woken_when_the_target_finishes` and
+// `a_deadlock_names_every_parked_task_and_its_reason`) exist precisely to
+// give a fast, non-hanging signal for the same mechanism.
+async fn waiter<T>(handle: JoinHandle<T>) -> T {
+    handle.join().await
+}
+
+fn main() {
+    block_on(setup())
+}
+
+async fn setup() {
+    let mut handle_for_a = JoinHandle { fut: yield_now() }
+    let mut handle_for_b = JoinHandle { fut: yield_now() }
+    let fut_a = waiter(handle_for_b)
+    let fut_b = waiter(handle_for_a)
+    let ha = spawn(fut_a)
+    let hb = spawn(fut_b)
+    handle_for_a.fut = ha.fut
+    handle_for_b.fut = hb.fut
+}

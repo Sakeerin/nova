@@ -1267,6 +1267,13 @@ fn run_aborts_when_an_async_fn_calls_block_on() {
 /// diagnostic instead of hanging -- asserted on the message, not merely on
 /// failure, and the test completing at all is itself the proof it no longer
 /// hangs.
+///
+/// The message names `nova_rt_task_join_future`, not `nova_rt_task_is_done`:
+/// Task 3 rewrote `join` to call `task_join_future(self.fut).await` as its
+/// first statement, so that is the first thing to resolve `self.fut` through
+/// `task_id_of` and the first thing this program's forged handle can reach.
+/// The contract violated is identical either way (`task_id_of`'s own "this
+/// future was never spawned" message), only the caller's name changes.
 #[test]
 fn forged_join_handle_aborts_instead_of_hanging() {
     let file = repo_root().join("tests/runtime/forged_join_handle.nova");
@@ -1279,7 +1286,7 @@ fn forged_join_handle_aborts_instead_of_hanging() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(
         stderr.contains(
-            "nova_rt_task_is_done: this future was never spawned, so there is no task to ask about"
+            "nova_rt_task_join_future: this future was never spawned, so there is no task to ask about"
         ),
         "the abort must name the unspawned-future contract it violated: {stderr}"
     );
@@ -1317,6 +1324,10 @@ fn forged_join_handle_aborts_instead_of_hanging() {
 /// on the path where the join returned a value instead of aborting, so a
 /// misresolution shows up as stdout content and not merely as a missing
 /// diagnostic.
+///
+/// The message names `nova_rt_task_join_future`, not `nova_rt_task_is_done`,
+/// for the same reason `forged_join_handle_aborts_instead_of_hanging`'s does:
+/// Task 3's `join` resolves `self.fut` through `task_join_future` first.
 #[test]
 fn a_recycled_state_address_does_not_resolve_a_never_spawned_future() {
     let file = repo_root().join("tests/runtime/recycled_task_state.nova");
@@ -1332,7 +1343,7 @@ fn a_recycled_state_address_does_not_resolve_a_never_spawned_future() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(
         stderr.contains(
-            "nova_rt_task_is_done: this future was never spawned, so there is no task to ask about"
+            "nova_rt_task_join_future: this future was never spawned, so there is no task to ask about"
         ),
         "a future the executor never saw must be rejected however its state \
          address was obtained: {stderr}"
@@ -1346,6 +1357,44 @@ fn a_recycled_state_address_does_not_resolve_a_never_spawned_future() {
         "the diagnostic must not unwind -- an unwind here would have to pass \
          through a generated poll frame, which has no unwind description at \
          all: {stderr}"
+    );
+}
+
+/// The centrepiece of `2026-08-10-park-set` Task 3: two tasks that join each
+/// other is what makes the deadlock diagnostic reachable from Nova source at
+/// all. With the old spinning `join`, both tasks would re-check
+/// `task_is_done` and `yield_now().await` forever, so the ready queue would
+/// never empty and `run_to_completion` could never reach its deadlock arm --
+/// a hang, not a diagnostic. Only a parking `join` lets both sides actually
+/// leave the ready queue once each has staged its `Wait::Task`, which is
+/// what lets the queue drain for real and the executor's exact (non-
+/// heuristic) deadlock check fire. So this test passing -- completing at
+/// all, with the right diagnostic -- is itself the proof that `join` parks.
+///
+/// The fixture's own header explains why this is a two-task mutual-join
+/// cycle rather than "join a task that spins forever via `yield_now`": the
+/// latter is a livelock indistinguishable from legitimate slow progress by
+/// any sound check, and was confirmed by hand to hang regardless of whether
+/// `join` spins or parks -- see task-3-report.md. See the fixture's own
+/// header for why a regression here shows up as a hang rather than a failed
+/// assertion.
+#[test]
+fn task_deadlock_reports_and_aborts_instead_of_hanging_forever() {
+    let file = repo_root().join("tests/runtime/task_deadlock.nova");
+
+    // Accepted by every static stage: the deadlock is a run-time property of
+    // the executor's park set, and nothing in the language forbids joining a
+    // task that never finishes.
+    nova().arg("check").arg(&file).assert().success();
+    let assert = nova().arg("run").arg(&file).assert().failure().stdout("");
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: deadlock:"),
+        "the diagnostic must be the deadlock report, not a different abort: {stderr}"
+    );
+    assert!(
+        stderr.contains("is waiting for task"),
+        "the report must name what the parked task is waiting for: {stderr}"
     );
 }
 

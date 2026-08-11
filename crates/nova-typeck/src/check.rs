@@ -3918,7 +3918,8 @@ impl<'a> Checker<'a> {
             | Builtin::TaskDrive
             | Builtin::TaskOutput
             | Builtin::TaskYieldFuture
-            | Builtin::TaskSleepFuture => "",
+            | Builtin::TaskSleepFuture
+            | Builtin::TaskJoinFuture => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7111,6 +7112,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::TaskOutput => (vec![future_of_param0()], Ty::Param(0)),
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskSleepFuture => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
+        Builtin::TaskJoinFuture => (vec![future_of_param0()], Ty::Future(Box::new(Ty::Unit))),
     }
 }
 
@@ -14961,7 +14963,8 @@ mod tests {
                 ),
                 Builtin::TaskIsDone => (
                     (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Bool),
-                    "`task_is_done(self.fut)` in `JoinHandle<T>::join`",
+                    "no call site in `std/task` since Task 3's `join` -- kept \
+                     as part of the executor's Nova-facing surface",
                 ),
                 Builtin::TaskRelease => (
                     (vec![Ty::Future(Box::new(Ty::Param(0)))], Ty::Unit),
@@ -14982,6 +14985,13 @@ mod tests {
                 Builtin::TaskSleepFuture => (
                     (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
                     "`task_sleep_future(ms).await` in `std/task`'s `sleep`",
+                ),
+                Builtin::TaskJoinFuture => (
+                    (
+                        vec![Ty::Future(Box::new(Ty::Param(0)))],
+                        Ty::Future(Box::new(Ty::Unit)),
+                    ),
+                    "`task_join_future(self.fut).await` in `JoinHandle<T>::join`",
                 ),
             }
         }

@@ -225,6 +225,11 @@ rt_funcs! {
     /// for `ms` milliseconds via the executor's park set, then completes.
     /// What `std/task`'s `sleep` awaits.
     TaskSleepFuture,
+    /// `(ptr to { poll_code, state }) -> ptr to { poll_code, state }` — a
+    /// fresh future that parks via the executor's park set until the task
+    /// named by the given future's state completes, then completes itself.
+    /// What `std/task`'s `join` awaits.
+    TaskJoinFuture,
 }
 
 impl RtFunc {
@@ -257,6 +262,7 @@ impl RtFunc {
             RtFunc::TaskRelease => "nova_rt_task_release",
             RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
             RtFunc::TaskSleepFuture => "nova_rt_task_sleep_future",
+            RtFunc::TaskJoinFuture => "nova_rt_task_join_future",
         }
     }
 
@@ -286,6 +292,7 @@ impl RtFunc {
             RtFunc::TaskRelease => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
             RtFunc::TaskSleepFuture => (vec![MirTy::I64], MirTy::Ptr),
+            RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
         }
     }
 }

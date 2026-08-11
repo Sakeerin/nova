@@ -1,16 +1,16 @@
 // A never-spawned future whose fresh state object lands on the address of a
 // state object the collector has already freed must still be rejected.
 //
-// `task_is_done`/`task_release` resolve a future through the executor's map
-// from state address to task id, and an address is not a durable identity: the
-// sweep hands a collected object's memory back to the allocator, so a later
-// allocation can land at the same address (`crates/nova-runtime/src/gc.rs`'s
-// module doc comment). A map entry that outlived its state object therefore
-// made a *never-spawned* future resolve to the old, released task -- which
-// reports done, so `join`'s wait loop never runs, `task_release` no-ops, and
-// the value read back is the never-polled state's zero-initialised output slot
-// (`0` for `Int`, a null pointer for every heap class). ADR 0009 section 1
-// records the reproduction and its date.
+// `task_is_done`/`task_release`/`task_join_future` resolve a future through
+// the executor's map from state address to task id, and an address is not a
+// durable identity: the sweep hands a collected object's memory back to the
+// allocator, so a later allocation can land at the same address
+// (`crates/nova-runtime/src/gc.rs`'s module doc comment). A map entry that
+// outlived its state object therefore made a *never-spawned* future resolve
+// to the old, released task -- which reports done, so `join` never parks,
+// `task_release` no-ops, and the value read back is the never-polled state's
+// zero-initialised output slot (`0` for `Int`, a null pointer for every heap
+// class). ADR 0009 section 1 records the reproduction and its date.
 //
 // Shape, and why each part is needed:
 //
@@ -29,9 +29,10 @@
 //    once. `JoinHandle`'s field is public (ADR 0007), so nothing in the
 //    language forbids it.
 //
-// Correct behaviour is an abort with `nova_rt_task_is_done: this future was
-// never spawned`, so this fixture has no `.stdout` file and prints nothing at
-// all on the correct path: reaching the `println` at all is the defect.
+// Correct behaviour is an abort with `nova_rt_task_join_future: this future
+// was never spawned`, so this fixture has no `.stdout` file and prints
+// nothing at all on the correct path: reaching the `println` at all is the
+// defect.
 //
 // This needs `NOVA_GC_STRESS=1` to discriminate, and discriminates only where
 // the collector runs: `stack_base()` has an implementation on Windows and

@@ -148,13 +148,6 @@ struct Task {
 /// it is written from inside a poll frame, and a `RefCell` borrow panic there
 /// would unwind through generated code that has no landing pads (see
 /// [`PollFn`]'s doc comment).
-///
-/// `#[allow(dead_code)]`: this task wires the park set itself but adds no
-/// caller that constructs a `Wait` outside this module's own tests --
-/// `sleep` (`Wait::Deadline`) and a parking `join` (`Wait::Task`) are Task 2
-/// and Task 3. The lint is real under a plain, non-test build in the
-/// meantime, since `#[cfg(test)]` code is compiled out of it.
-#[allow(dead_code)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Wait {
     /// Wake once the clock reaches this instant.
@@ -355,11 +348,11 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
 
 /// Record that the task currently being polled wants to park on `wait`.
 ///
-/// Called from inside a poll function -- [`poll_sleep`] and this module's own
-/// tests today, with a parking `join` (Task 3) to follow -- so it must not
-/// panic: both cells hold `Copy` values and neither borrow can fail. The two
-/// aborts below are compiler-or-runtime bugs rather than user error, which is
-/// why they end the process rather than returning a status.
+/// Called from inside a poll function -- [`poll_sleep`], [`poll_join`], and
+/// this module's own tests -- so it must not panic: both cells hold `Copy`
+/// values and neither borrow can fail. The two aborts below are
+/// compiler-or-runtime bugs rather than user error, which is why they end the
+/// process rather than returning a status.
 fn stage_park(wait: Wait) {
     if CURRENT.with(Cell::get).is_none() {
         abort_with("nova_rt: a park was staged outside a poll");
@@ -620,28 +613,28 @@ fn take_output_internal(id: i64) -> i64 {
 ///    unconditionally re-queued, so one that never became ready re-queued
 ///    forever and the loop hung with no diagnostic. A poll that stages a
 ///    [`Wait`] (see [`stage_park`]) moves its task to [`PARKED`] instead of
-///    back onto the queue -- but a task that does not park (`yield_now`, and,
-///    until Task 3 rewrites it, a spinning `join`) still re-queues itself
-///    every turn by design, and that alone must not be able to starve a
-///    sibling's deadline. [`wake_due`] is therefore called after **every**
-///    poll below, not only once this loop's inner pass finds the queue
-///    empty: if a deadline were checked only there, a task that keeps
-///    re-queueing itself would keep that pass from ever finding the queue
-///    empty, and anything parked on a deadline would never be examined at
-///    all -- not delayed, starved permanently, for as long as anything kept
-///    re-queueing. Task 2's own end-to-end fixture is what surfaced this:
-///    `sleep`, awaited underneath a spinning `join`, hung indefinitely until
-///    this per-poll check was added. [`wake_due_deadlines`], which sleeps,
-///    is reached only from the drained-queue branch below, where sleeping is
-///    correct because there is genuinely nothing left to run; a park set
-///    holding nothing but `Wait::Task` entries there is a genuine deadlock,
-///    since nothing still running can ever finish and wake one, and
-///    [`report_deadlock`] ends the process naming each one instead of
-///    hanging silently. `sleep` (Task 2) and a parking `join` (Task 3) are
-///    what let Nova source reach any of this at all: before `sleep`,
-///    `yield_now` was the only suspension an `async fn` body could await,
-///    and it never stages a `Wait`, so nothing compiled from Nova source
-///    could ever populate [`PARKED`] in the first place.
+///    back onto the queue -- but a task that does not park (`yield_now`)
+///    still re-queues itself every turn by design, and that alone must not
+///    be able to starve a sibling's deadline. [`wake_due`] is therefore
+///    called after **every** poll below, not only once this loop's inner
+///    pass finds the queue empty: if a deadline were checked only there, a
+///    task that keeps re-queueing itself would keep that pass from ever
+///    finding the queue empty, and anything parked on a deadline would never
+///    be examined at all -- not delayed, starved permanently, for as long as
+///    anything kept re-queueing. Task 2's own end-to-end fixture is what
+///    surfaced this: `sleep`, awaited underneath what was then a spinning
+///    `join`, hung indefinitely until this per-poll check was added.
+///    [`wake_due_deadlines`], which sleeps, is reached only from the
+///    drained-queue branch below, where sleeping is correct because there is
+///    genuinely nothing left to run; a park set holding nothing but
+///    `Wait::Task` entries there is a genuine deadlock, since nothing still
+///    running can ever finish and wake one, and [`report_deadlock`] ends the
+///    process naming each one instead of hanging silently. `sleep` (Task 2)
+///    and a parking `join` (Task 3) are what let Nova source reach any of
+///    this at all: before `sleep`, `yield_now` was the only suspension an
+///    `async fn` body could await, and it never stages a `Wait`, so nothing
+///    compiled from Nova source could ever populate [`PARKED`] in the first
+///    place.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).
@@ -1145,6 +1138,61 @@ pub extern "C-unwind" fn nova_rt_task_sleep_future(ms: i64) -> *mut u8 {
         // SAFETY: `slots` addresses a live `SLEEP_STATE_SIZE` block, and
         // `SLEEP_SLOT_MS` is in bounds by the assertion above.
         unsafe { slots.add(SLEEP_SLOT_MS).write(ms) };
+    })
+}
+
+/// Park until the task driving `target` completes, then complete.
+///
+/// Polls to `POLL_READY` immediately if the target is already done, so a join
+/// on a finished task costs no suspension. Otherwise stages a
+/// [`Wait::Task`] park; the only thing that clears it is
+/// [`wake_tasks_waiting_on`] at the target's completion, so one suspension is
+/// always enough and no loop is needed.
+///
+/// **Must not unwind**, as [`poll_sleep`] and [`poll_yield_once`] must not.
+/// `is_done_internal` borrows `TASKS`, and `poll_one` holds no `TASKS` borrow
+/// across the `poll` call, so that borrow cannot fail.
+unsafe extern "C-unwind" fn poll_join(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_task_join_future` built, at least
+    // `JOIN_STATE_SIZE` bytes, so every slot below is in bounds.
+    let target = unsafe { slots.add(JOIN_SLOT_TARGET).read() };
+    if is_done_internal(target) {
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        return POLL_READY;
+    }
+    stage_park(Wait::Task(target));
+    POLL_PENDING
+}
+
+/// Where the target task id lives in a join future's state object.
+const JOIN_SLOT_TARGET: usize = STATE_SLOT_TEMPS;
+
+/// State size for a join future: the ABI minimum plus the target-id slot.
+const JOIN_STATE_SIZE: usize = STATE_MIN_SIZE + 8;
+
+const _: () = assert!(JOIN_STATE_SIZE >= (JOIN_SLOT_TARGET + 1) * 8);
+
+/// A fresh `Future<unit>` that completes when `future`'s task does.
+///
+/// Resolves `future` to a task id through the same `BY_STATE` path
+/// `nova_rt_task_is_done` uses, so a future no task was spawned for aborts
+/// there rather than becoming a park nothing can wake. The id is resolved
+/// *once*, here, rather than on every poll: the target cannot change, and a
+/// stale-address abort belongs at the call the Nova program made.
+///
+/// # Safety
+/// `future` must point to a live `FUTURE_SIZE` `{ poll_code, state }` block.
+#[no_mangle]
+pub unsafe extern "C-unwind" fn nova_rt_task_join_future(future: *mut u8) -> *mut u8 {
+    // SAFETY: forwarding this function's own contract.
+    let target = unsafe { task_id_of(future, "nova_rt_task_join_future") };
+    let poll: PollFn = poll_join;
+    build_future(poll, JOIN_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `JOIN_STATE_SIZE` block, and
+        // `JOIN_SLOT_TARGET` is in bounds by the assertion above.
+        unsafe { slots.add(JOIN_SLOT_TARGET).write(target) };
     })
 }
 
@@ -1821,6 +1869,45 @@ mod tests {
         );
     }
 
+    /// The exact layout `nova_rt_task_join_future` builds, read back from the
+    /// collector's own records -- the same discipline as
+    /// `the_sleep_futures_layout_is_the_one_the_abi_declares`, and for the
+    /// identical reason: that test's own doc comment records a review that
+    /// caught a `build_future` call site one word short of what its `init`
+    /// closure writes, undetected by the const assert beside `JOIN_STATE_SIZE`
+    /// (a relation between two constants, blind to what a call site actually
+    /// passes) and by `build_future`'s own `debug_assert!` (a floor, and
+    /// `STATE_MIN_SIZE` already satisfies its own floor). Only the collector's
+    /// own recorded size distinguishes "16 bytes, and the target id was
+    /// written one word past the end" from "24 bytes, exactly as declared."
+    #[test]
+    fn the_join_futures_layout_is_the_one_the_abi_declares() {
+        let target = make_future(poll_ready_now, 0);
+        // SAFETY: `target` is a well-formed future from `make_future`.
+        unsafe { nova_rt_task_spawn(target) };
+        // SAFETY: `target` was just spawned, so `task_id_of` resolves it.
+        let fut = unsafe { nova_rt_task_join_future(target) };
+        assert_eq!(
+            gc::object_info(fut as usize),
+            Some((FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = state_of(fut);
+        assert_eq!(
+            gc::object_info(state),
+            Some((JOIN_STATE_SIZE, true)),
+            "the state object must be the ABI minimum plus the one temp slot \
+             holding the target task id, scanned"
+        );
+        // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block.
+        let poll = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        let expected: PollFn = poll_join;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
     /// The layout a bare [`build_future`] call produces, read back from the
     /// collector's own records -- the same check as
     /// `the_yield_futures_layout_is_the_one_the_abi_declares`, but aimed at
@@ -2197,6 +2284,132 @@ mod tests {
         );
     }
 
+    /// The fast path `poll_join`'s own doc comment promises: joining a task
+    /// that has already finished completes on its first poll, with no park
+    /// staged at all -- "a join on a finished task costs no suspension".
+    /// Without this branch, every join would park at least once even when
+    /// nothing is left to wait for.
+    #[test]
+    fn joining_an_already_done_task_completes_without_parking() {
+        let target = make_future(poll_ready_now, 0);
+        // SAFETY: well-formed future from `make_future`.
+        let target_id = unsafe { spawn_internal(target) };
+        // `poll_one` does not pop from `QUEUE` itself -- `spawn_internal`
+        // queued `target_id`, and that entry must be drained by hand, or the
+        // later pop below sees this stale entry instead of the joiner's.
+        let popped_target = QUEUE.with(|q| q.borrow_mut().pop_front());
+        assert_eq!(
+            popped_target,
+            Some(target_id),
+            "spawn should have queued the target"
+        );
+        // SAFETY: `target_id` is currently registered.
+        unsafe { poll_one(target_id) };
+        assert!(
+            is_done_internal(target_id),
+            "target must be done before the join below means anything"
+        );
+
+        // SAFETY: `target` was spawned above, so `task_id_of` resolves it.
+        let join_fut = unsafe { nova_rt_task_join_future(target) };
+        // SAFETY: `join_fut` is a well-formed future `nova_rt_task_join_future`
+        // built, so spawning it directly as a task is the same as spawning
+        // any other future -- `poll_one` needs only a `{ poll_code, state }`
+        // pair, and that is exactly what it is.
+        let joiner_id = unsafe { spawn_internal(join_fut) };
+        let popped = QUEUE.with(|q| q.borrow_mut().pop_front());
+        assert_eq!(
+            popped,
+            Some(joiner_id),
+            "spawn should have queued the joiner"
+        );
+        // SAFETY: `joiner_id` is currently registered.
+        unsafe { poll_one(joiner_id) };
+
+        assert!(
+            is_done_internal(joiner_id),
+            "joining an already-finished task must complete on the first \
+             poll, not park"
+        );
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "no park may be staged on the immediate-ready path"
+        );
+    }
+
+    /// The suspend path: joining a task that has not yet finished parks on
+    /// `Wait::Task`, and is woken -- moved back onto the ready queue -- the
+    /// moment the target completes, with no re-poll of the joiner in between
+    /// and no involvement of `wake_due`/`wake_due_deadlines`, which handle
+    /// only `Wait::Deadline`.
+    ///
+    /// The join future is spawned directly as the joiner task, the same way
+    /// `joining_an_already_done_task_completes_without_parking` does: a
+    /// `{ poll_code, state }` pair is all `poll_one` needs, and
+    /// `nova_rt_task_join_future` hands back exactly that, so no synthetic
+    /// wrapper poll function is needed to drive `poll_join` through the real
+    /// stage/commit park protocol (`CURRENT`/`PENDING_PARK`).
+    #[test]
+    fn joining_a_pending_task_parks_and_is_woken_when_the_target_finishes() {
+        let target = make_future(poll_ready_now, 0);
+        // SAFETY: well-formed future from `make_future`.
+        let target_id = unsafe { spawn_internal(target) };
+        // SAFETY: `target` was just spawned, so `task_id_of` resolves it.
+        let join_fut = unsafe { nova_rt_task_join_future(target) };
+        // SAFETY: `join_fut` is a well-formed future `nova_rt_task_join_future`
+        // built.
+        let joiner_id = unsafe { spawn_internal(join_fut) };
+
+        // Drain the queue `spawn_internal` filled for both, so the rest of
+        // this test can poll in a deliberately chosen order instead of FIFO
+        // order -- the joiner first, before its target has ever run.
+        assert_eq!(
+            QUEUE.with(|q| q.borrow_mut().drain(..).collect::<Vec<_>>()),
+            vec![target_id, joiner_id],
+            "spawn should have queued both, in order"
+        );
+
+        // SAFETY: `joiner_id` was just spawned, so it is currently registered.
+        unsafe { poll_one(joiner_id) };
+        assert!(
+            !is_done_internal(joiner_id),
+            "the joiner must not complete while its target is still pending"
+        );
+        assert_eq!(
+            PARKED.with(|p| p.borrow().clone()),
+            vec![(joiner_id, Wait::Task(target_id))],
+            "the joiner must be parked on the target's id, not re-queued"
+        );
+        assert!(
+            QUEUE.with(|q| q.borrow().is_empty()),
+            "a parked task must not also sit in the ready queue"
+        );
+
+        // SAFETY: `target_id` is currently registered.
+        unsafe { poll_one(target_id) };
+        assert!(
+            is_done_internal(target_id),
+            "poll_ready_now completes on its first poll"
+        );
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "the target's completion must wake the joiner out of the park set"
+        );
+        let woken = QUEUE.with(|q| q.borrow_mut().pop_front());
+        assert_eq!(
+            woken,
+            Some(joiner_id),
+            "the woken joiner must be the one re-queued"
+        );
+
+        // SAFETY: `joiner_id` is currently registered.
+        unsafe { poll_one(joiner_id) };
+        assert!(
+            is_done_internal(joiner_id),
+            "once woken, the joiner must complete -- its target is now done"
+        );
+    }
+
     #[test]
     fn a_deadlock_names_every_parked_task_and_its_reason() {
         PARKED.with(|p| {
@@ -2213,6 +2426,28 @@ mod tests {
         assert!(
             report.contains("task 2 is waiting for task 1 to finish"),
             "the second parked task is missing -- got: {report}"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+    }
+
+    /// `deadlock_report`'s singular-vs-plural headline, exercised with
+    /// exactly one parked task -- the only other test that calls
+    /// `deadlock_report` (`a_deadlock_names_every_parked_task_and_its_reason`,
+    /// directly above) pushes two, so a hardcoded `"tasks are"` would pass
+    /// unnoticed there. A task parked on its own id is also the smallest
+    /// possible deadlock: nothing else needs to exist for it to be
+    /// unwakeable.
+    #[test]
+    fn a_task_parked_on_itself_is_reported_as_a_deadlock() {
+        PARKED.with(|p| p.borrow_mut().push((3, Wait::Task(3))));
+        let report = deadlock_report();
+        assert!(
+            report.contains("task 3 is waiting for task 3 to finish"),
+            "got: {report}"
+        );
+        assert!(
+            report.contains("1 task is"),
+            "singular headline -- got: {report}"
         );
         PARKED.with(|p| p.borrow_mut().clear());
     }

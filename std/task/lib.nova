@@ -13,10 +13,13 @@
 // (see `builtin_signature` in `nova-typeck`). That is why every generic
 // function below declares exactly one type parameter, and why it is `T`.
 //
-// The executor is single-threaded and has no wakers: a suspended task is simply
-// re-queued, so `spawn` starts nothing on its own and every task on a thread is
-// advanced only while a `block_on` call is running. See that module's own doc
-// comment, and ADR 0009.
+// The executor is single-threaded and has no wakers of its own: a suspended
+// task is re-queued for its next turn unless it parks — waiting on a
+// deadline (`sleep`) or another task's completion (`join`) — in which case
+// it resumes only once that deadline passes or that task finishes, the
+// executor's only two wake sources. `spawn` starts nothing on its own, and
+// every task on a thread is advanced only while a `block_on` call is
+// running. See that module's own doc comment, and ADR 0009.
 
 // A handle on a spawned task, holding nothing but the future it is driving.
 //
@@ -56,12 +59,12 @@
 pub record JoinHandle<T> { fut: Future<T> }
 
 impl<T> JoinHandle<T> {
-    // Wait for the task to finish and produce its value.
-    //
-    // The wait is a `yield_now` loop rather than a park: the executor has no
-    // wakers, so there is nothing to register interest with, and re-queueing is
-    // how a task waits for anything. Each turn re-checks `task_is_done`, so a
-    // task that joins another one costs one poll per turn until it finishes.
+    // Parks until the task finishes, rather than re-checking each turn. One
+    // await is enough: the only thing that wakes this task is the target's
+    // completion, so there is no state in which it resumes early. The
+    // `task_is_done` spin this replaced cost one poll per turn and could not
+    // be told apart from a deadlock — joining a task that never finishes now
+    // reports one instead of hanging.
     //
     // `task_release` before the read, not after: it ends the executor's claim
     // on the state object, and the read below then depends only on the claim
@@ -70,9 +73,7 @@ impl<T> JoinHandle<T> {
     // deliberately, because Nova has no move checking, so `self` by value
     // cannot stop a second call.
     pub async fn join(self) -> T {
-        while !task_is_done(self.fut) {
-            yield_now().await
-        }
+        task_join_future(self.fut).await
         task_release(self.fut)
         task_output(self.fut)
     }

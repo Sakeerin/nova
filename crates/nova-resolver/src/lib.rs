@@ -154,8 +154,12 @@ builtins! {
     /// a reserved word in user code.
     TaskSpawn,
     /// `task_is_done(fut: Future<T>) -> Bool` — whether the task named by
-    /// `fut`'s state has completed. Backs `JoinHandle::join`'s wait loop.
-    /// Std-only.
+    /// `fut`'s state has completed.
+    ///
+    /// Backed `JoinHandle::join`'s spin loop before Task 3 replaced it with a
+    /// real park on completion ([`Builtin::TaskJoinFuture`]); no call site in
+    /// `std/task` remains, but the query is still part of the executor's
+    /// Nova-facing surface. Std-only.
     TaskIsDone,
     /// `task_release(fut: Future<T>)` — end the executor's claim on the task
     /// named by `fut`'s state, so a joined task's state is not rooted for the
@@ -200,6 +204,21 @@ builtins! {
     /// `.await`, and nothing expressible in Nova produces a future that
     /// starts out pending. Std-only.
     TaskSleepFuture,
+    /// `task_join_future(fut: Future<T>) -> Future<unit>` — a fresh future
+    /// that parks until the task named by `fut`'s state completes, then
+    /// completes itself.
+    ///
+    /// Resolves `fut` to a task id up front, through the same state-address
+    /// lookup [`Builtin::TaskIsDone`]/[`Builtin::TaskRelease`] use, so a
+    /// future no task was spawned for aborts immediately rather than
+    /// becoming a park nothing can wake. Backs `std/task`'s `join`, which
+    /// used to spin on [`Builtin::TaskIsDone`] instead: a join on a task that
+    /// never finishes now reports a deadlock rather than costing one poll
+    /// per turn forever. A builtin for the same reason `task_sleep_future`
+    /// is: an `async fn` body suspends only at an `.await`, and nothing
+    /// expressible in Nova produces a future that starts out pending.
+    /// Std-only.
+    TaskJoinFuture,
 }
 
 impl Builtin {
@@ -225,6 +244,7 @@ impl Builtin {
             Builtin::TaskOutput => "task_output",
             Builtin::TaskYieldFuture => "task_yield_future",
             Builtin::TaskSleepFuture => "task_sleep_future",
+            Builtin::TaskJoinFuture => "task_join_future",
         }
     }
 
@@ -246,7 +266,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 16] = [
+    pub const STD_ONLY: [Builtin; 17] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -263,6 +283,7 @@ impl Builtin {
         Builtin::TaskOutput,
         Builtin::TaskYieldFuture,
         Builtin::TaskSleepFuture,
+        Builtin::TaskJoinFuture,
     ];
 }
 

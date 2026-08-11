@@ -688,6 +688,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::TaskDrive => Lowering::Runtime(RtFunc::TaskBlockOn),
                     Builtin::TaskYieldFuture => Lowering::Runtime(RtFunc::TaskYieldFuture),
                     Builtin::TaskSleepFuture => Lowering::Runtime(RtFunc::TaskSleepFuture),
+                    Builtin::TaskJoinFuture => Lowering::Runtime(RtFunc::TaskJoinFuture),
                     Builtin::TaskOutput => Lowering::FutureOutput,
                 };
                 match how {
