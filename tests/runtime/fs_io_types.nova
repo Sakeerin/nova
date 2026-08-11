@@ -11,9 +11,20 @@ fn describe(e: IoError) -> String {
     }
 }
 
+// Every code `io_error_kind_of` maps, in order, plus the two codes that must
+// both land on `Other`: `0` (the success status, not a kind) and `99` (an
+// unmapped code, otherwise unreachable from Rust). Pins all eight
+// `IoErrorKind` variants individually so a swap between any two arms in
+// `io_error_kind_of` (e.g. codes 2 and 3, or 5 and 7) is caught here rather
+// than passing silently.
 fn main() {
-    let e = IoError { kind: io_error_kind_of(1), message: "m" }
-    println(describe(e))
+    println(describe(IoError { kind: io_error_kind_of(0), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(1), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(2), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(3), message: "m" }))
     println(describe(IoError { kind: io_error_kind_of(4), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(5), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(6), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(7), message: "m" }))
     println(describe(IoError { kind: io_error_kind_of(99), message: "m" }))
 }
