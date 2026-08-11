@@ -369,6 +369,20 @@ afterwards.
   yields the thread. There is no preemption, so a long computation inside one
   task starves every other task on that thread, and the fix is always an
   `.await`.
+
+  **AMENDED 2026-08-11 (branch `std-fs-strings`): "the fix is always an
+  `.await`" no longer holds without qualification.** `std/fs`'s eight
+  functions (`docs/adr/0011-io-error-kinds.md`) are `async fn`s whose bodies
+  contain no `.await` at all — the filesystem operation runs synchronously
+  inside the first poll, because there is no I/O poller yet. Writing `.await`
+  at the call site does not help: the callee's poll function runs to
+  completion and reports `POLL_READY` before the calling task's own suspend
+  machinery is ever reached, so a long `read_to_string` still starves every
+  other task on the thread for its duration — the exact symptom this bullet
+  describes, with an `.await` already present and not fixing it. The
+  qualification this bullet was missing: the fix is an `.await` on something
+  that can actually report pending, which requires a poller for I/O and does
+  not exist yet.
 - **`spawn` starts nothing.** A task is queued, and the queue is drained only
   while a `block_on` call is running — so a `spawn` with no `block_on` anywhere
   above it never runs at all, silently. `async fn main` is driven by `block_on`,

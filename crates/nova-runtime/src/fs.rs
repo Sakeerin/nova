@@ -362,6 +362,19 @@ pub extern "C" fn nova_rt_fs_take_string_array() -> *mut u8 {
 /// One call rather than separate `is_file`/`is_dir` intrinsics, so a `DirEntry`
 /// costs one syscall instead of two and the two answers cannot disagree.
 ///
+/// **The convention for an entry that is neither, stated here because the code
+/// below does not spell it out: it is classified `1` (file).** The check is
+/// `is_dir()`, with everything else that exists falling to the `else` arm, so
+/// a FIFO, Unix domain socket, or device node -- a filesystem entry that is
+/// genuinely neither a plain file nor a directory -- is `1`, not some third
+/// code. This is a stated convention, not a measurement: nothing in this
+/// codebase constructs such an entry to observe it against, and on Windows
+/// the class is structurally unreachable through this function's `metadata`
+/// call. `tests/runtime/fs_read_dir.nova`'s fixture, the one test that drives
+/// this function, contains only a plain file and a subdirectory -- it pins
+/// the two-way split, and says nothing about the third case, which is why
+/// this paragraph exists instead of a test.
+///
 /// # Safety
 /// `path` must point to a live `NovaStr`.
 #[no_mangle]

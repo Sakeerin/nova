@@ -169,12 +169,20 @@ pub record IoError {
     pub message: String
 }
 
+// AMENDED 2026-08-11 (branch `std-fs-strings`): `AlreadyExists` and
+// `InvalidData` added to the list below, which originally had six variants
+// and was network-flavoured; on a filesystem, a `create_dir` on an existing
+// path and a non-UTF-8 `read_to_string` would both otherwise collapse into
+// `Other`, forcing user code to string-match the platform-specific `message`
+// to tell them apart. See docs/adr/0011-io-error-kinds.md.
 pub type IoErrorKind =
     | NotFound
     | PermissionDenied
-    | ConnectionRefused
-    | TimedOut
+    | AlreadyExists
+    | InvalidData
     | Interrupted
+    | TimedOut
+    | ConnectionRefused
     | Other
 
 pub fn stdin() -> impl Read

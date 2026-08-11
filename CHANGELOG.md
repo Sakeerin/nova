@@ -947,6 +947,71 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fn f<Int>(x: Int) -> Int { x }` and `trait Int { fn m(self) -> Int }`
   both remain legal.
 
+- `std/io`'s error surface, eight `std/fs` functions plus `DirEntry`, and
+  `eprint`/`eprintln` (increment 1 of the `std/fs`-on-Strings decomposition,
+  `docs/superpowers/specs/2026-08-11-std-fs-strings-design.md`): Nova's first
+  file I/O.
+  - **`std/io`** gains `IoError { kind: IoErrorKind, message: String }` and
+    `IoErrorKind`'s eight variants — `NotFound`, `PermissionDenied`,
+    `AlreadyExists`, `InvalidData`, `Interrupted`, `TimedOut`,
+    `ConnectionRefused`, `Other` — plus `io_error_kind_of(code: Int) ->
+    IoErrorKind`, the Nova-side half of the status-code boundary described
+    below. `AlreadyExists` and `InvalidData` are additions to
+    `nova-spec/20-STDLIB.md` §4's original six, amended in place; see
+    `docs/adr/0011-io-error-kinds.md`.
+  - **`std/fs`** gains eight `async fn`s matching `nova-spec/20-STDLIB.md` §5's
+    signatures exactly — `read_to_string`, `write_string`, `exists`,
+    `create_dir`, `create_dir_all`, `remove_file`, `remove_dir_all`,
+    `read_dir` — plus `record DirEntry { name, path, is_file, is_dir }` and
+    `temp_dir() -> String`. `temp_dir` is a plain `fn`, not `async`: it only
+    queries the environment and touches no filesystem, and it is not in the
+    spec at all (`docs/adr/0011-io-error-kinds.md`). This is the
+    `String`-and-`Bool` subset of §5 — `read`, `write`, `open` and `File` need
+    a byte type Nova does not have yet, deferred to a later increment.
+  - **`eprint`/`eprintln`** join `println`/`print`/`panic` in
+    `Builtin::GLOBAL` (`[Builtin; 3]` to `[Builtin; 5]`), mirroring
+    `println`/`print` at every seam. Like `panic` before them (Phase 2.1
+    above), this makes both names reserved words: a user `fn eprint(...)` or
+    `fn eprintln(...)` now reports `E0002: duplicate definition of 'eprint'`
+    (or `'eprintln'`) with the note "is a compiler builtin", the same
+    treatment `println`/`print`/`panic` already had — not the silent,
+    lowest-priority shadowing `std/core`'s glob-imported items get under ADR
+    0004, which is a different mechanism for a different `Builtin` category
+    (`STD_ONLY`, not `GLOBAL`).
+  - **The boundary: an intrinsic returns one word, and the status code is the
+    error kind.** Nova has no out-parameters and building a Nova aggregate
+    from Rust would duplicate its layout there — precisely the drift this
+    project has already shipped a miscompile from once — so every `std/fs`
+    intrinsic that can fail returns a status `Int` (`0` success, otherwise an
+    `IoErrorKind` code) and, on success, leaves its payload (a string, a
+    `[String]`, or an error message) in a thread-local, GC-rooted
+    `Cell<usize>` slot for a follow-up intrinsic to take. `std/fs`'s Nova
+    wrappers alone build every `Result`, `IoError` and `DirEntry`; no Nova
+    aggregate layout enters Rust. The status numbering is one wire contract
+    with independent copies in `crates/nova-runtime/src/fs.rs` and
+    `std/io/lib.nova`'s `io_error_kind_of`, pinned together by a fixture per
+    kind rather than a "keep in sync" comment. Thirteen new
+    `Builtin::STD_ONLY` intrinsics land this way (`[Builtin; 17]` to
+    `[Builtin; 30]`), and `STD_MODULES` grows from 4 to 6 (`$std.io`,
+    `$std.fs`).
+  - **These eight `async fn`s never suspend**: each runs its filesystem
+    operation synchronously inside the first poll, because there is no I/O
+    poller yet (pinned by `no_filesystem_intrinsic_registers_a_park`, which
+    asserts `fs.rs`'s own source contains no `stage_park` call). The
+    signature is what matters for forward compatibility — it does not change
+    when a poller lands — but the cost is real: a call blocks the whole
+    executor for its duration, so a sibling task makes no progress during a
+    large read. This is a new instance of the starvation
+    `docs/adr/0009-async-execution-model.md` §1 already named, and that
+    ADR's "the fix is always an `.await`" consequence is amended in place to
+    say so (`docs/adr/0011-io-error-kinds.md`).
+  - **`exists` returns `Bool`, not `Result`, per the spec** — so a path that
+    exists but cannot be examined is indistinguishable from one that is
+    absent. This is the spec's own choice and is left alone.
+  - All three deviations from `nova-spec/20-STDLIB.md` and both limitations
+    above are recorded in full, with the reasons behind each, in
+    `docs/adr/0011-io-error-kinds.md`.
+
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of

@@ -114,8 +114,24 @@ pub record DirEntry { pub name: String   pub path: String   pub is_file: Bool   
 ### 3.3 `eprint` / `eprintln`
 
 Two new `Builtin::GLOBAL` members, taking that array from 3 to 5, mirroring `Println`/`Print` at
-every seam. They are global rather than `STD_ONLY` because their siblings are: a user function of
-either name shadows the builtin, per ADR 0004's shadowing rules.
+every seam. They are global rather than `STD_ONLY` because their siblings are.
+
+**CORRECTED 2026-08-11 (Task 5): the line above previously ended "a user function of either name
+shadows the builtin, per ADR 0004's shadowing rules" — measured false.** `Builtin::GLOBAL` members
+are seeded directly into every module's scope *before* user items are collected
+(`crates/nova-resolver/src/lib.rs`'s per-module scope setup), and a user definition of an
+already-scoped name is `insert_value`'s ordinary duplicate-definition path, which reports `E0002`
+with the note "is a compiler builtin" — not a silent shadow. Measured directly: `nova check` on
+`fn eprint(s: String) { }` reports `E0002` ("duplicate definition of `eprint`") with the note
+"`eprint` is a compiler builtin", and the same shape for `eprintln`. This is the *same* treatment
+`panic` already has (`user_fn_named_panic_is_a_reserved_word`, `nova-resolver`) — `eprint`/
+`eprintln` become reserved words the instant they join `GLOBAL`, exactly as `panic` did in Phase
+2.1. ADR 0004's shadowing rule is a different mechanism for a different `Builtin` category: it
+governs `std/core`'s (and the other std modules') own `pub` items, which are glob-imported into
+every module at the *lowest* priority (`or_insert`, so a user definition collected first wins with
+no diagnostic) — the opposite priority order from `GLOBAL`/`STD_ONLY`, which are seeded *first* and
+block a same-named user definition instead. See `docs/adr/0011-io-error-kinds.md` and the
+`CHANGELOG.md` entry for this increment.
 
 ### 3.4 The boundary: status first, payload second
 
@@ -137,8 +153,20 @@ kind fetch exists:
 | `fs_exists(path)` | `Bool` |
 | `fs_kind(path)` | `Int` — 0 absent, 1 file, 2 dir |
 | `fs_last_error_message()` | `String` |
+| `fs_temp_dir()` | `String` — the OS temp-directory path (`std::env::temp_dir()`) |
 
 Twelve new `STD_ONLY` builtins, 17 → 29.
+
+**CORRECTED 2026-08-11 (Task 5): thirteen new `STD_ONLY` builtins, 17 → 30 — not twelve and
+17 → 29.** Two things were wrong, not one: the sentence undercounted by exactly the one builtin
+the table above was *also* missing, `fs_temp_dir()` (now added as the table's last row). Neither
+gap is a rewrite — `fs_temp_dir` is a direct `String` return with no status/payload split, the same
+shape `fs_last_error_message()` already has, so it slots into the existing table pattern rather than
+needing a new column. Both were stale for the same reason: this section was written before
+`fs_temp_dir` moved forward from Task 3 into Task 2 (see
+`docs/superpowers/plans/2026-08-11-std-fs-strings.md`'s own Task 2 amendment note), and neither the
+table nor this sentence was updated to match once it did. `Builtin::STD_ONLY` is `[Builtin; 30]` as
+shipped (`crates/nova-resolver/src/lib.rs`), matching `docs/adr/0011-io-error-kinds.md`.
 
 **No Nova aggregate layout enters Rust.** The runtime never learns that a sum is tag-plus-fields at
 `8 + 8i`, nor where `IoError.message` sits. `std/fs`'s Nova wrappers map a status to an
