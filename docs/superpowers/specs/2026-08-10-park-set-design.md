@@ -192,6 +192,12 @@ probe rather than assume.
   them needs no sweep hook and inherits no address-recycling hazard.
 - **`yield_now` keeps spinning.** It is the primitive that means "let others run", and re-queueing is
   the correct implementation of that.
+- **A permanently-runnable task masks a deadlock among the others, and that is accepted.** The check
+  is gated on the ready queue draining, so one task looping on `yield_now` suppresses the diagnostic
+  even when two *other* tasks are in a mutual-join cycle. Detecting that needs a
+  no-task-made-progress-in-N-turns heuristic, which is exactly what §3.3 rejects: it cannot
+  distinguish a slow program from a stuck one. Recorded rather than fixed, and it belongs in ADR 0009
+  alongside the existing footguns.
 
 ## 5. Diagnostics
 
@@ -224,6 +230,14 @@ a task which sleeps burns a bounded number of polls rather than one per turn.
   order** — spawn order is what a broken implementation produces, so this discriminates. Plus a
   deadlock fixture asserting the diagnostic text and a non-zero exit, mirroring
   `tests/runtime/forged_join_handle.nova`.
+- **The deadlock fixture must be a mutual-join cycle** — two tasks each joining the other — which is
+  the shape §5's own example shows. **Corrected 2026-08-10 during Task 3: the plan had specified
+  "join a task that loops forever with `yield_now`", which contradicted §5 and cannot work.** That
+  shape is a **livelock, not a deadlock**: the spinner re-queues itself every turn, so the ready
+  queue is never empty, so the check is never reached — and it should not be, because telling "never
+  completes" from "has not completed yet" is the halting problem. Reporting it would require a
+  heuristic, which this design rejects. The mutual-join cycle still discriminates spinning from
+  parking: with a spinning `join` the same fixture hangs instead of reporting.
 - **Assert ordering and completion, never elapsed duration.** A timing assertion is the one thing
   certain to flake in CI, and eight tests are already `#[ignore]`d for flakiness (ADR 0010).
 - The suite stays green at 830 + the new tests, with those 8 still ignored and untouched.
