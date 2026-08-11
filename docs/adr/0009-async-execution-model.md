@@ -188,10 +188,17 @@ afterwards.
   handle's own future — a scanned two-word value holding the state address — so
   it is never swept and its entry is never pruned. The one case still
   reachable, a handle on a future that was never spawned at all, now aborts
-  (`nova_rt_task_is_done: this future was never spawned, so there is no task to
-  ask about`) rather than hanging, however the state address was obtained:
-  pinned end to end by `forged_join_handle_aborts_instead_of_hanging` and, for
-  the recycled-address case, `a_recycled_state_address_does_not_resolve_a_never_spawned_future`
+  (`nova_rt_task_join_future: this future was never spawned, so there is no
+  task to ask about`) rather than hanging, however the state address was
+  obtained: pinned end to end by `forged_join_handle_aborts_instead_of_hanging`
+  and, for the recycled-address case,
+  `a_recycled_state_address_does_not_resolve_a_never_spawned_future`
+  **(quoted message corrected 2026-08-10, branch `park-set` — it read
+  `nova_rt_task_is_done: this future was never spawned, so there is no task
+  to ask about` here, because that was the builtin `join`'s old spin
+  resolved `self.fut` through first; Task 3's rewrite of `join` made
+  `task_join_future` the first resolver instead, both tests were updated to
+  match at the time, and only this paragraph's quote was missed until now)**
   (`crates/nova-cli/tests/run_tests.rs`, with
   `tests/runtime/forged_join_handle.nova` and
   `tests/runtime/recycled_task_state.nova`), plus

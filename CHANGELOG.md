@@ -812,11 +812,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Known gaps in async, each disclosed during implementation rather than found
   afterwards, and each recorded in full in ADR 0009 §1: **no parking and no
   waking** — a task that reports pending is re-queued round-robin and
-  re-polled, so waiting spins at one poll per turn rather than sleeping;
+  re-polled, so waiting spins at one poll per turn rather than sleeping
+  *(true of `yield_now` only as of 2026-08-10 — `sleep` and `join` now park
+  instead of spinning; see the park set entry below and ADR 0009 §1's dated
+  amendment)*;
   **`block_on` drains the whole queue**, so it implicitly joins everything
   spawned on the thread (unlike tokio's, which returns as soon as its own
   future resolves) **and does not terminate if any queued task never becomes
-  ready** — no ordinary async program reaches this, since every suspension
+  ready** *(narrowed, not retracted, as of 2026-08-10: a genuine deadlock —
+  every remaining task itself parked, e.g. two tasks joining each other —
+  now aborts with a diagnostic instead of hanging; a task that never parks
+  at all still leaves this un-terminating, since it alone keeps the queue
+  non-empty forever; see below and ADR 0009 §1's dated amendment)* — no
+  ordinary async program reaches this, since every suspension
   resumes on the next turn, but it **was reachable** by forging a
   `JoinHandle`: the record's fields were public and task ids were `0, 1, 2, …`
   in spawn order with `block_on`'s own root spawned first, so

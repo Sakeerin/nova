@@ -95,14 +95,16 @@
 //!   `nova_rt_task_yield_future`'s `poll_yield_once` (what `yield_now`
 //!   awaits, because an `async fn` body suspends only at an `.await` and
 //!   nothing in the language is a future that is not already ready) and
-//!   `nova_rt_task_sleep_future`'s `poll_sleep` (what `sleep` awaits) exist
-//!   today, and a parking `join` is still to come. Naming this as a *kind*
-//!   rather than a roster is deliberate: this comment went stale once
-//!   already when a second hand-written `PollFn` joined the first, and the
-//!   fix is not a bigger number but a claim that does not depend on one --
-//!   the two *kinds* are closed, by the callee-is-a-value argument above;
-//!   how many hand-written poll functions currently exist is not, and is
-//!   not this comment's business to track.
+//!   `nova_rt_task_sleep_future`'s `poll_sleep` (what `sleep` awaits) are two
+//!   of them, not an exhaustive count — `nova_rt_task_join_future`'s
+//!   `poll_join` (what `join` awaits) is a third, added after this paragraph
+//!   was first written, and there may be more by the time this is read.
+//!   Naming this as a *kind* rather than a roster is deliberate: this
+//!   comment went stale once already when a second hand-written `PollFn`
+//!   joined the first, and the fix is not a bigger number but a claim that
+//!   does not depend on one -- the two *kinds* are closed, by the
+//!   callee-is-a-value argument above; how many hand-written poll functions
+//!   currently exist is not, and is not this comment's business to track.
 //!
 //! The other way to break the argument is to make a runtime function that *can*
 //! unwind reachable from a poll body. `nova_rt_task_block_on` was that function:
