@@ -79,10 +79,16 @@ Both new variants are pinned by a fixture that provokes the real OS condition
 and asserts on `kind` — `fs_already_exists.nova` (calling `create_dir` twice)
 and `fs_invalid_data.nova` (reading bytes written directly from Rust that are
 not valid UTF-8) — the same treatment `fs_not_found.nova` already gives
-`NotFound`. Three of the eight variants are reachable that way from this
-increment's own operations; the other five (`PermissionDenied`, `Interrupted`,
-`TimedOut`, `ConnectionRefused`, `Other`) are not things `std/fs`'s eight
-functions can provoke portably in a test, so `fs_io_types.nova` instead pins
+`NotFound`. **Corrected 2026-08-12:** this paragraph said "three of the eight
+variants", which the final review's fix wave falsified by adding a
+Windows-gated `PermissionDenied` fixture. **Four** are now pinned by a
+real-condition fixture — `NotFound`, `AlreadyExists`, `InvalidData` portably,
+and `PermissionDenied` on Windows only, provoked by `read_to_string` on a
+directory. (Note the shape matters: reading the temp directory *itself* gives
+`NotFound`, because Windows resolves a trailing-backslash-only path before
+checking access; the fixture reads a plain created subdirectory.) The remaining
+four — `Interrupted`, `TimedOut`, `ConnectionRefused`, `Other` — are not things
+`std/fs`'s eight functions can provoke portably in a test, so `fs_io_types.nova` instead pins
 the *numbering* directly — calling `io_error_kind_of(1)` through
 `io_error_kind_of(7)`, the seven codes that map to a specific variant, plus
 `io_error_kind_of(0)` (the success status, not itself a kind) and

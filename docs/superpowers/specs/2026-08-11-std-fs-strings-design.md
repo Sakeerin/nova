@@ -151,7 +151,7 @@ kind fetch exists:
 | `fs_remove_file(path)` | `Int` status |
 | `fs_remove_dir_all(path)` | `Int` status |
 | `fs_exists(path)` | `Bool` |
-| `fs_kind(path)` | `Int` — 0 absent, 1 file, 2 dir |
+| `fs_kind(path)` | `Int` — 0 absent, 1 file, 2 dir. **Corrected 2026-08-12:** `0` also covers an entry that exists but is neither — a FIFO, socket or device node, or a dangling symlink, since `metadata` resolves symlinks and fails on a broken one. A **stated convention, not a measurement**: nothing in this codebase constructs such an entry, and on Windows the class is unreachable through this call. The final review named three copies of the uncorrected claim and missed this fourth one. |
 | `fs_last_error_message()` | `String` |
 | `fs_temp_dir()` | `String` — the OS temp-directory path (`std::env::temp_dir()`) |
 
