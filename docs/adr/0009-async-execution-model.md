@@ -252,8 +252,9 @@ afterwards.
   exactly the bug this branch fixes, and it is deliberately out of scope:
   separating "B has not completed yet" from "B will never complete" is the
   halting problem, and no heuristic is used to approximate it. A genuine
-  deadlock — every remaining task is itself parked — is still reported; a
-  livelock — some task is always ready but never finishes — is not
+  deadlock — every remaining task is itself parked and no deadline remains
+  for any of them to wake on — is still reported; a livelock — some task
+  is always ready but never finishes — is not
   (`docs/superpowers/specs/2026-08-10-park-set-design.md` §6, which is also
   where the deadlock fixture's own shape is argued from this same
   distinction).

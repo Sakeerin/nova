@@ -113,9 +113,19 @@
 //! That diagnostic aborts instead, for this reason; see
 //! `nova-runtime`'s `abort_with`.
 //!
-//! The state object's allocation is a call too, and stays outside this argument
-//! by being in the wrapper, which is an ordinary Nova function and not a poll
-//! function.
+//! The state object's allocation is a call too. The outer async fn's own
+//! state object is allocated in its wrapper, which is an ordinary Nova
+//! function and not a poll function, and so sits outside this argument.
+//!
+//! **Corrected 2026-08-11: the inner future a body awaits is a different
+//! allocation, and is not outside this argument.** `task_yield_future`,
+//! `task_sleep_future` and `task_join_future` are called from the awaiting
+//! body itself, so that call -- and the `build_future`/`gc::alloc` inside
+//! it -- runs in the generated `$poll` frame that awaits the result, on
+//! whichever poll first reaches it. Its own no-panic argument is not
+//! restated here: it lives with `build_future`
+//! (`nova-runtime/src/task.rs`), which only ever receives a
+//! compile-time-constant size.
 //!
 //! # The layout this pass builds
 //!

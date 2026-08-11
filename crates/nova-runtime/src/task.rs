@@ -2081,6 +2081,146 @@ mod tests {
         );
     }
 
+    /// Like `poll_park_once`, but the deadline is `STATE_SLOT_TEMPS`
+    /// milliseconds in the future rather than already due, and the
+    /// completing poll records -- in its own output slot -- whether the
+    /// task named by the *second* temp slot was already done at that
+    /// moment.
+    ///
+    /// Final whole-branch review of `park-set`, finding I3: every existing
+    /// deadline test (`poll_park_once`,
+    /// `poll_park_then_read_sibling_progress`) stages
+    /// `Wait::Deadline(Instant::now())` -- already due the instant it is
+    /// staged -- so `run_to_completion`'s per-poll `wake_due` check (run
+    /// after every `poll_one`, before the ready queue can ever be observed
+    /// as drained) always wakes it first. `run_to_completion`'s *other*
+    /// wake path -- the drained-queue branch's
+    /// `match earliest_deadline() { Some(at) => wake_due_deadlines(at), ... }`,
+    /// the one place a real `thread::sleep` runs -- was reachable from no
+    /// Rust-level test at all. MEASURED: replacing that arm with
+    /// `Some(_at) => report_deadlock()` left all 59 pre-existing
+    /// `nova-runtime` tests green; only the end-to-end `nova run` gate
+    /// (`gate_task_sleep_order_runs`) caught it.
+    unsafe extern "C-unwind" fn poll_park_after_delay(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `make_future(_, 2)` object: TAG, OUTPUT, a
+        // delay-in-milliseconds temp, and a sibling-task-id temp.
+        let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if tag == 0 {
+            unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+            // SAFETY: same object, the delay temp.
+            let delay_ms = unsafe { slots.add(STATE_SLOT_TEMPS).read() };
+            stage_park(Wait::Deadline(
+                Instant::now() + Duration::from_millis(delay_ms as u64),
+            ));
+            return POLL_PENDING;
+        }
+        // SAFETY: same object, the sibling-id temp, written by the test
+        // before either task in the pair is ever polled.
+        let sibling_id = unsafe { slots.add(STATE_SLOT_TEMPS + 1).read() };
+        let sibling_was_already_done = is_done_internal(sibling_id) as i64;
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(sibling_was_already_done) };
+        POLL_READY
+    }
+
+    /// I3 (final whole-branch review of `park-set`): the one Rust-level gap
+    /// the review found. Two tasks park on deadlines `SHORT_DELAY_MS` and
+    /// `LONG_DELAY_MS` in the future -- neither due when staged -- so the
+    /// ready queue genuinely drains with both still parked, forcing
+    /// `run_to_completion`'s drained-queue branch to consult
+    /// `earliest_deadline()` and actually sleep, unlike every other
+    /// deadline test in this module (see `poll_park_after_delay`'s doc
+    /// comment). Spawned in *reverse* of deadline order -- the long one
+    /// first -- so an implementation that woke parked tasks in spawn order
+    /// rather than deadline order would also be caught here.
+    ///
+    /// Asserts completion and ordering only, never elapsed duration, per
+    /// this project's rule against timing assertions
+    /// (`docs/adr/0010-conservative-scan-root-test-gating.md` exists
+    /// because eight tests already flake on real timing). Ordering is read
+    /// off executor state -- which task's `is_done_internal` the other
+    /// observes as true at the moment it completes -- never off the clock:
+    /// nothing here reads elapsed time or makes an assertion about it. The
+    /// 285ms gap between the two delays is not a timing assertion either;
+    /// it is margin against ordinary host scheduling delay between staging
+    /// the two deadlines and the wake that follows. Unlike this module's
+    /// already-due-deadline tests, where monotonicity alone guarantees the
+    /// order with no margin needed, this test's ordering claim depends on
+    /// that margin holding -- an arbitrarily slow host could in principle
+    /// exceed it. If that ever happens the two assertions on `.output`
+    /// below fail loudly, which is the safe direction for this kind of
+    /// dependency to fail in.
+    #[test]
+    fn two_not_yet_due_deadlines_drain_the_queue_then_wake_in_deadline_order() {
+        const SHORT_DELAY_MS: i64 = 15;
+        const LONG_DELAY_MS: i64 = 300;
+
+        let long = make_future(poll_park_after_delay, 2);
+        let short = make_future(poll_park_after_delay, 2);
+        // SAFETY: both are `make_future(_, 2)` objects, so slot
+        // `STATE_SLOT_TEMPS` (the delay) is in bounds.
+        unsafe {
+            (state_of(long) as *mut i64)
+                .add(STATE_SLOT_TEMPS)
+                .write(LONG_DELAY_MS);
+            (state_of(short) as *mut i64)
+                .add(STATE_SLOT_TEMPS)
+                .write(SHORT_DELAY_MS);
+        }
+
+        // SAFETY: both are well-formed futures from `make_future`.
+        let long_id = unsafe { spawn_internal(long) };
+        let short_id = unsafe { spawn_internal(short) };
+
+        // Neither id exists until both are spawned, and neither future is
+        // polled before `run_to_completion` starts below -- `spawn_internal`
+        // only enqueues -- so stashing each one's sibling id now is still
+        // strictly before either poll ever reads it.
+        // SAFETY: both are `make_future(_, 2)` objects, so slot
+        // `STATE_SLOT_TEMPS + 1` (the sibling id) is in bounds.
+        unsafe {
+            (state_of(long) as *mut i64)
+                .add(STATE_SLOT_TEMPS + 1)
+                .write(short_id);
+            (state_of(short) as *mut i64)
+                .add(STATE_SLOT_TEMPS + 1)
+                .write(long_id);
+        }
+
+        let root = test_future(poll_ready_now);
+        // SAFETY: well-formed future from `test_future`.
+        assert_eq!(
+            unsafe { run_to_completion(root) },
+            7,
+            "the root task must still complete normally"
+        );
+
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "both deadline-parked tasks must be woken, not left parked -- an \
+             empty park set here is exactly what distinguishes this from the \
+             deadlock this same code path would otherwise report"
+        );
+        assert!(
+            is_done_internal(long_id) && is_done_internal(short_id),
+            "both tasks must run to completion"
+        );
+        assert_eq!(
+            TASKS.with(|t| t.borrow()[short_id as usize].output),
+            0,
+            "the short deadline must wake and complete before the long one, \
+             so it must not see the long task already done"
+        );
+        assert_eq!(
+            TASKS.with(|t| t.borrow()[long_id as usize].output),
+            1,
+            "the long deadline must wake after the short one -- deadline \
+             order, not spawn order, since long was spawned first -- so it \
+             must see the short task already done"
+        );
+    }
+
     #[test]
     fn the_earliest_deadline_is_the_one_slept_on() {
         let far = Instant::now() + Duration::from_secs(30);

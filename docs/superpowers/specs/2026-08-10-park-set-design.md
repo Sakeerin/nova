@@ -249,10 +249,26 @@ Mutation targets, named here rather than left to review:
 | Mutation | Must be killed by |
 |---|---|
 | Delete the discard-on-`READY` branch | a future that stages a park then completes |
-| Let the deadlock arm fire while a `Deadline` remains | the deadline-plus-running-task test |
+| Let the deadlock arm fire while a `Deadline` remains | `two_not_yet_due_deadlines_drain_the_queue_then_wake_in_deadline_order` |
 | Wake on the wrong `Wait` reason | wake-on-completion test |
 | Report only the first parked task | the **two**-task deadlock test |
-| Re-queue instead of parking when a park is staged | the poll-counter assertion |
+| Re-queue instead of parking when a park is staged | `a_staged_park_moves_the_task_out_of_the_ready_queue` |
+
+**Corrected 2026-08-11, during the final whole-branch review's fix pass
+(finding I3).** The deadline-arm row named "the deadline-plus-running-task
+test" —
+`a_self_requeuing_task_does_not_starve_a_sibling_parked_on_a_deadline`. That
+test parks its sleeper on `Wait::Deadline(Instant::now())`, already due the
+instant it stages, so `run_to_completion`'s per-poll wake check always
+wakes it before the drained-queue branch this mutation targets is ever
+reached. MEASURED: replacing that arm's `wake_due_deadlines(at)` with
+`report_deadlock()` left every pre-existing `nova-runtime` test green. The
+row now names the Rust-level test written to close that gap, which parks
+on a deadline still in the future so the drained-queue branch's real sleep
+is what has to run. The last row named a test-only poll counter that this
+section's own opening paragraph records as superseded and never built; it
+now names the existing test that already covers the same mutation without
+one.
 
 ## 7. Risks
 

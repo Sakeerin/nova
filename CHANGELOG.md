@@ -820,12 +820,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spawned on the thread (unlike tokio's, which returns as soon as its own
   future resolves) **and does not terminate if any queued task never becomes
   ready** *(narrowed, not retracted, as of 2026-08-10: a genuine deadlock —
-  every remaining task itself parked, e.g. two tasks joining each other —
-  now aborts with a diagnostic instead of hanging; a task that never parks
+  every remaining task itself parked and no deadline left for any of them
+  to wake on, e.g. two tasks joining each other — now aborts with a
+  diagnostic instead of hanging; a task that never parks
   at all still leaves this un-terminating, since it alone keeps the queue
   non-empty forever; see below and ADR 0009 §1's dated amendment)* — no
   ordinary async program reaches this, since every suspension
-  resumes on the next turn, but it **was reachable** by forging a
+  resumes on the next turn *(true only of Phase 2.3a, before this same
+  2026-08-10 park set — `sleep` and `join` now suspend without resuming on
+  the next turn, each waking on its own deadline or completion instead; a
+  second, unforged route to an undiagnosed hang also exists today, since
+  joining a task that loops on `yield_now` forever is a livelock rather
+  than a deadlock and is deliberately not reported — see below)*, but it
+  **was reachable** by forging a
   `JoinHandle`: the record's fields were public and task ids were `0, 1, 2, …`
   in spawn order with `block_on`'s own root spawned first, so
   `JoinHandle { id: 0, fut: … }` — **`id` is no longer a field of

@@ -213,12 +213,16 @@ builtins! {
     /// future no task was spawned for aborts immediately rather than
     /// becoming a park nothing can wake. Backs `std/task`'s `join`, which
     /// used to spin on [`Builtin::TaskIsDone`] instead: joining a task that
-    /// is itself stuck -- parked, directly or through a cycle such as two
-    /// tasks joining each other -- now reports a deadlock rather than
-    /// costing one poll per turn forever. Joining a task that never finishes
-    /// because it keeps re-queueing itself (a `yield_now` loop) is a
-    /// livelock, not a deadlock, and is not reported: nothing there is
-    /// parked, so it still costs one poll per turn forever, undiagnosed
+    /// is parked with nothing left in the program that could ever wake it —
+    /// for example, two tasks joining each other in a cycle — now reports a
+    /// deadlock rather than costing one poll per turn forever. Joining a
+    /// task parked on a deadline (one that is sleeping) is not this: a
+    /// deadline always eventually passes, so the target completes on its
+    /// own and this join completes normally right after. Joining a task
+    /// that never finishes because it keeps re-queueing itself (a
+    /// `yield_now` loop) is a livelock, not a deadlock, and is not
+    /// reported: nothing there is parked, so it still costs one poll per
+    /// turn forever, undiagnosed
     /// (`docs/adr/0009-async-execution-model.md` §1's 2026-08-10 amendment).
     /// A builtin for the same reason `task_sleep_future`
     /// is: an `async fn` body suspends only at an `.await`, and nothing

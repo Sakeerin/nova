@@ -63,13 +63,17 @@ impl<T> JoinHandle<T> {
     // await is enough: the only thing that wakes this task is the target's
     // completion, so there is no state in which it resumes early. The
     // `task_is_done` spin this replaced cost one poll per turn and could not
-    // be told apart from a deadlock. Joining a task that is itself stuck —
-    // parked, directly or through a cycle such as two tasks joining each
-    // other — now reports a deadlock instead of hanging. Joining a task
-    // that never finishes because it keeps re-queueing itself (a
-    // `yield_now` loop, forever) is a livelock rather than a deadlock and
-    // still hangs: the ready queue is never empty, so the check that would
-    // report one is never reached (ADR 0009 §1's 2026-08-10 amendment).
+    // be told apart from a deadlock. Joining a task that is parked with
+    // nothing left in the program that could ever wake it — for example,
+    // two tasks joining each other in a cycle — now reports a deadlock
+    // instead of hanging. Joining a task parked on a deadline (one that is
+    // sleeping) is not this: a deadline always eventually passes, so the
+    // target completes on its own and this join completes normally right
+    // after. Joining a task that never finishes because it keeps
+    // re-queueing itself (a `yield_now` loop, forever) is a livelock rather
+    // than a deadlock and still hangs: the ready queue is never empty, so
+    // the check that would report one is never reached (ADR 0009 §1's
+    // 2026-08-10 amendment).
     //
     // `task_release` before the read, not after: it ends the executor's claim
     // on the state object, and the read below then depends only on the claim
