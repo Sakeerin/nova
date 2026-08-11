@@ -12,8 +12,10 @@ async fn go() {
         Ok(s) => println(s)
         Err(e) => println("read failed: ${e.message}")
     }
+    println("${exists(p).await}")
     match remove_file(p).await {
         Ok(_) => println("removed")
         Err(e) => println("remove failed: ${e.message}")
     }
+    println("${exists(p).await}")
 }

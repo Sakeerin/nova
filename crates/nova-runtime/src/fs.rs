@@ -267,19 +267,33 @@ pub unsafe extern "C" fn nova_rt_fs_remove_dir_all(path: *const NovaStr) -> i64 
 mod tests {
     use super::*;
 
-    /// **Measured, not assumed.** The design spec's note on `remove_dir_all`
-    /// flags Windows-versus-POSIX divergence for a read-only entry as an
-    /// expectation, not something anyone had actually run. Measured here
-    /// instead, against `nova_rt_fs_remove_dir_all` itself rather than bare
-    /// `std::fs`: on this platform's std, a read-only file nested inside the
+    /// **Measured, not assumed -- on Windows only.** The design spec's note
+    /// on `remove_dir_all` flags Windows-versus-POSIX divergence for a
+    /// read-only entry as an expectation, not something anyone had actually
+    /// run. Measured here, against `nova_rt_fs_remove_dir_all` itself rather
+    /// than bare `std::fs`: on Windows, a read-only file nested inside the
     /// tree does not stop the removal -- the status is `OK` and the
     /// directory is gone afterward, the same as for an ordinary file.
     /// (Windows' own `DeleteFile` denies access to a read-only attribute;
     /// whatever compensates -- clearing the attribute first, or a different
     /// removal path entirely -- lives in the standard library this function
     /// calls straight into, not in this crate, so it is not this crate's to
-    /// document further than "observed".) See the task report this landed
-    /// with for the transcript this was first observed in.
+    /// document further than "observed".)
+    ///
+    /// **`#[cfg(windows)]` because Windows is the only platform this was
+    /// actually run on.** `.github/workflows/ci.yml` runs ubuntu, windows and
+    /// macos, so leaving this ungated would assert a POSIX result nobody
+    /// measured. There is a plausible reason POSIX would behave the same --
+    /// unlinking a directory entry is governed by the *directory's* write
+    /// permission, not the target file's own mode bits, so a read-only file
+    /// should not by itself block removal -- but that is exactly a plausible
+    /// reason, not a measurement, and this project keeps getting burned by
+    /// treating the two as equivalent. Recorded here as the *expectation*
+    /// for POSIX, explicitly labelled as unmeasured -- the same "observed,
+    /// not explained" treatment the Windows mechanism gets above. See the
+    /// task report this landed with for the transcript this was first
+    /// observed in.
+    #[cfg(windows)]
     #[test]
     fn remove_dir_all_is_not_stopped_by_a_read_only_entry() {
         let dir =

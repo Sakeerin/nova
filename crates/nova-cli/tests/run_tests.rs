@@ -6024,21 +6024,32 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
-/// `write_string`, `read_to_string`, and `remove_file` in one pass -- the
-/// three operations Task 2 and this task between them add a status-boundary
+/// `write_string`, `read_to_string`, `exists`, and `remove_file` in one pass
+/// -- the operations Task 2 and this task between them add a status-boundary
 /// wrapper for, chained through one real file.
 ///
 /// **The stdout check alone does not exercise `remove_file`'s success arm**:
-/// `fs_roundtrip.nova` (this task's brief, verbatim) never re-checks the
-/// path after removing it, so it prints "removed" whether or not anything
-/// was actually deleted. Proven, not assumed: replacing
-/// `nova_rt_fs_remove_file`'s body with a no-op returning `OK` left this
-/// test passing against the stdout check alone (see the task report for the
-/// transcript) -- the same shape of gap Task 2's review found in
-/// `write_string`. The explicit `exists` assertion below is what actually
-/// exercises the success arm; it is a harness-level check rather than an
-/// addition to the fixture because the fixture's own text is this task's
-/// brief, transcribed verbatim.
+/// the fixture prints "removed" whether or not anything was actually
+/// deleted. Proven, not assumed: replacing `nova_rt_fs_remove_file`'s body
+/// with a no-op returning `OK` left this test passing against the stdout
+/// check alone (see the task report for the transcript) -- the same shape
+/// of gap Task 2's review found in `write_string`. The explicit `exists`
+/// assertion below, checking the raw filesystem directly rather than
+/// through the builtin, is what actually exercises the success arm.
+///
+/// **The `exists(p)` calls inside the fixture itself, bracketing
+/// `remove_file`, are a review addition, not brief text.** Task 3's review
+/// (finding I1) found that every `exists()` call anywhere in this suite ran
+/// on a directory (`fs_dirs.nova`'s `d`, always freshly made by
+/// `create_dir_all`), so changing `nova_rt_fs_exists` to call `.is_dir()`
+/// instead of `.exists()` still passed every fixture and every
+/// `nova-runtime` test. `p` here is a plain file, so `.is_dir()` and
+/// `.exists()` disagree on it before removal (`false` vs. the expected
+/// `true`) -- proven by mutation, transcript in the task report. This is the
+/// one deliberate departure from "the fixture's text is the brief,
+/// transcribed verbatim" in this task, made after review rather than
+/// pre-emptively, and `fs_roundtrip.stdout` was updated to match (`true`
+/// after the write, `false` after the remove).
 #[test]
 fn fs_roundtrip_run() {
     let tmp = unique_temp_dir("nova-fs-roundtrip");
