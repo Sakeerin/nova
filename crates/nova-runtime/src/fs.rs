@@ -51,12 +51,10 @@ thread_local! {
     static STRING_SLOT: Cell<usize> = const { Cell::new(0) };
     /// A GC-rooted array block awaiting `nova_rt_fs_take_string_array`, or 0.
     ///
-    /// Unused until Task 3/4 adds the operation that fills it. Declared here
-    /// alongside its two siblings because all three slots are one boundary
-    /// design introduced together, not three unrelated additions; `#[allow]`
-    /// rather than leaving it out because adding it back under time pressure
-    /// later is exactly how the drift this module exists to avoid happens.
-    #[allow(dead_code)]
+    /// Filled by `stash_array`, Task 4's array-building counterpart to
+    /// `stash` below. Declared here alongside its two siblings from the start
+    /// because all three slots are one boundary design introduced together,
+    /// not three unrelated additions.
     static ARRAY_SLOT: Cell<usize> = const { Cell::new(0) };
     /// A GC-rooted `*mut NovaStr` awaiting `nova_rt_fs_last_error_message`, or 0.
     static MESSAGE_SLOT: Cell<usize> = const { Cell::new(0) };
@@ -116,6 +114,51 @@ fn fail(e: &std::io::Error) -> i64 {
         ErrorKind::ConnectionRefused => CONNECTION_REFUSED,
         _ => OTHER,
     }
+}
+
+/// Build a Nova `[String]` from `names` and stash it, GC-rooted.
+///
+/// **Reproduces the layout codegen emits for an array**: word 0 is the element
+/// count, elements follow at `8 + 8*i`, allocated scanned so the collector
+/// traces the `NovaStr` pointers inside. Getting this wrong is a silent
+/// miscompile rather than a failure, which is why `mod tests` asserts the
+/// tracked `(size, scan)` through `gc::object_info` and not merely the values
+/// read back — the same discipline `nova_rt_str_chars` carries.
+///
+/// Each element is rooted while it is being built, because the allocation of a
+/// later element can collect and an earlier one is then named only by a block
+/// that is itself not yet reachable from anywhere the collector scans.
+///
+/// **This is rooting the block, not each element — verified against `gc.rs`'s
+/// actual contract rather than assumed.** `block` is allocated with
+/// `scan = true` (the same flag `nova_rt_str_chars`'s array block uses), and
+/// `collect_with_roots`'s mark phase does not stop at a rooted object: every
+/// object it marks — reached directly as a root or transitively — is then
+/// traced if `scan` is true, meaning its words are read back and each one is
+/// itself passed through the identical range-based `mark_word` check a root
+/// gets. So once `block` is a root, every `NovaStr` pointer already written
+/// into its element words is found by that trace and kept alive too, the same
+/// way a rooted record keeps its fields alive without each field needing its
+/// own root. If `add_root`ing a block did NOT cause its contents to be
+/// traced, this function would need to root every element individually
+/// instead; it does not, because the property above holds.
+fn stash_array(names: &[String]) {
+    let n = names.len();
+    let block = gc::alloc(8 + 8 * n, true);
+    gc::add_root(block);
+    let words = block as *mut i64;
+    // SAFETY: `block` has `8 + 8*n` writable bytes, so word 0 and words
+    // `1..=n` are all in bounds.
+    unsafe { *words = n as i64 };
+    for (i, name) in names.iter().enumerate() {
+        let s = gc_message(name);
+        // SAFETY: same block; `i < n`.
+        unsafe { *words.add(1 + i) = s as i64 };
+    }
+    // The block is already rooted by `stash` below, so drop the build-time root
+    // to keep `add_root`/`remove_root` balanced.
+    gc::remove_root(block);
+    stash(&ARRAY_SLOT, block as *mut NovaStr);
 }
 
 /// Read `path` as UTF-8. Returns a status; on `OK` the contents are waiting in
@@ -260,6 +303,79 @@ pub unsafe extern "C" fn nova_rt_fs_remove_dir_all(path: *const NovaStr) -> i64 
     match std::fs::remove_dir_all(p) {
         Ok(()) => OK,
         Err(e) => fail(&e),
+    }
+}
+
+/// List `path`'s entry names, sorted. On `OK` the names are waiting in
+/// `nova_rt_fs_take_string_array`.
+///
+/// **Sorted in the runtime deliberately.** Directory order is unspecified by
+/// every OS, so unsorted output would make each fixture platform-dependent.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_read_dir(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    let iter = match std::fs::read_dir(p) {
+        Ok(it) => it,
+        Err(e) => return fail(&e),
+    };
+    let mut names: Vec<String> = Vec::new();
+    for entry in iter {
+        match entry {
+            Ok(e) => names.push(e.file_name().to_string_lossy().into_owned()),
+            Err(e) => return fail(&e),
+        }
+    }
+    names.sort();
+    stash_array(&names);
+    OK
+}
+
+/// Take the array payload staged by a successful `nova_rt_fs_read_dir`.
+///
+/// Mirrors [`nova_rt_fs_take_string`], with the one difference forced by there
+/// being no such thing as a null Nova array: an empty slot (`0`) yields a
+/// fresh, well-formed zero-length array here -- the same `{ len: 0 }` shape
+/// `nova_rt_str_chars` produces for an empty string -- rather than a null
+/// pointer, which a correct wrapper would then have to null-check for no
+/// reason (a correct wrapper never asks for this when nothing is pending,
+/// exactly as `nova_rt_fs_take_string`'s own doc comment notes).
+#[no_mangle]
+pub extern "C" fn nova_rt_fs_take_string_array() -> *mut u8 {
+    match take(&ARRAY_SLOT) {
+        0 => {
+            let block = gc::alloc(8, true);
+            let words = block as *mut i64;
+            // SAFETY: `block` is 8 bytes, so word 0 is in bounds.
+            unsafe { *words = 0 };
+            block
+        }
+        p => p as *mut u8,
+    }
+}
+
+/// What `path` is: 0 absent, 1 file, 2 directory.
+///
+/// One call rather than separate `is_file`/`is_dir` intrinsics, so a `DirEntry`
+/// costs one syscall instead of two and the two answers cannot disagree.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_kind(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    let meta = match std::fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if meta.is_dir() {
+        2
+    } else {
+        1
     }
 }
 
@@ -416,5 +532,36 @@ mod tests {
         // above, and nothing has allocated since -- so despite no longer
         // being explicitly rooted, it has not yet been swept.
         assert_eq!(unsafe { crate::as_str(taken) }, "payload");
+    }
+
+    /// **Reproduces the exact array layout codegen emits**, the same
+    /// discipline `nova_rt_str_chars`'s own layout test (`nova-runtime`'s
+    /// `lib.rs`) uses: reading back the words `stash_array` wrote cannot by
+    /// itself distinguish a correctly sized block from one that merely has
+    /// enough allocator slop past a *wrong* declared size for these three
+    /// words to still land in live memory, and it cannot observe the `scan`
+    /// flag at all -- that only changes GC behaviour, not what is readable.
+    /// Asserting `gc::object_info` alongside the values closes both holes.
+    #[test]
+    fn a_stashed_array_has_the_layout_the_abi_declares() {
+        let names = vec!["a".to_string(), "bb".to_string()];
+        stash_array(&names);
+        let block = take(&ARRAY_SLOT);
+        assert_eq!(
+            gc::object_info(block),
+            Some((8 + 8 * 2, true)),
+            "an array block is a length word plus one word per element, scanned"
+        );
+        let words = block as *mut i64;
+        // SAFETY: the block is `8 + 8*2` bytes, so these three words are in
+        // bounds, and reading it here is safe for the same reason
+        // `a_stashed_string_is_rooted_until_it_is_taken` reads its own `taken`
+        // after release: nothing has allocated since `take` ran one statement
+        // above, so nothing has swept it yet.
+        unsafe {
+            assert_eq!(*words, 2);
+            assert_eq!(crate::as_str(*words.add(1) as *const NovaStr), "a");
+            assert_eq!(crate::as_str(*words.add(2) as *const NovaStr), "bb");
+        }
     }
 }

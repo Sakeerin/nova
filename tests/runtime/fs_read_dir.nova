@@ -1,0 +1,45 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let d = "${temp_dir()}/nova_fs_read_dir_4b8e"
+    let _ = remove_dir_all(d).await
+    let _ = create_dir_all(d).await
+    // `Zebra.txt` is capitalized deliberately -- measured, not merely
+    // plausible. An earlier version of this fixture used all-lowercase names
+    // created out of order (zebra, then apple, then the subdirectory); on
+    // this host `std::fs::read_dir`'s raw enumeration order turned out to
+    // already be case-insensitively alphabetical regardless of creation
+    // order, so deleting the runtime's `names.sort()` produced byte-identical
+    // output and the mutation it was meant to catch survived (see the task
+    // report). Byte-lexicographic sort (what `Vec<String>::sort()` actually
+    // does) orders ALL capital letters before ALL lowercase ones -- 'Z' is
+    // 0x5A, 'a' is 0x61 -- so the correctly-sorted order is
+    // `Zebra.txt, apple.txt, mid`, while every plausible *unsorted*
+    // enumeration this project has observed (creation order below, and this
+    // host's case-insensitive collation) gives `apple.txt, mid, Zebra.txt`.
+    // Those two orders are provably different regardless of which unsorted
+    // hypothesis is correct, so a missing `names.sort()` cannot coincidentally
+    // pass here the way it did before.
+    let _ = write_string("${d}/apple.txt", "a").await
+    let _ = create_dir("${d}/mid").await
+    let _ = write_string("${d}/Zebra.txt", "z").await
+    match read_dir(d).await {
+        Ok(entries) => {
+            // Arrays have no `.iter()`/`for x in arr` (only `.len()` and
+            // indexing are built in -- see the task report), so this walks by
+            // index rather than the `for e in entries.iter()` shape a `Vec`
+            // would use.
+            let n = entries.len()
+            let mut i = 0
+            while i < n {
+                let e = entries[i]
+                println("${e.name} file=${e.is_file} dir=${e.is_dir}")
+                i = i + 1
+            }
+        }
+        Err(e) => println("failed: ${e.message}")
+    }
+    let _ = remove_dir_all(d).await
+}

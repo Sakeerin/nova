@@ -3931,7 +3931,10 @@ impl<'a> Checker<'a> {
             | Builtin::FsCreateDir
             | Builtin::FsCreateDirAll
             | Builtin::FsRemoveFile
-            | Builtin::FsRemoveDirAll => "",
+            | Builtin::FsRemoveDirAll
+            | Builtin::FsReadDir
+            | Builtin::FsTakeStringArray
+            | Builtin::FsKind => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7137,6 +7140,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsCreateDirAll => (vec![Ty::String], Ty::Int),
         Builtin::FsRemoveFile => (vec![Ty::String], Ty::Int),
         Builtin::FsRemoveDirAll => (vec![Ty::String], Ty::Int),
+        Builtin::FsReadDir => (vec![Ty::String], Ty::Int),
+        Builtin::FsTakeStringArray => (vec![], Ty::Array(Box::new(Ty::String))),
+        Builtin::FsKind => (vec![Ty::String], Ty::Int),
     }
 }
 
@@ -15058,6 +15064,18 @@ mod tests {
                 Builtin::FsRemoveDirAll => (
                     (vec![Ty::String], Ty::Int),
                     "`fs_remove_dir_all(path)` in `std/fs`'s `remove_dir_all`",
+                ),
+                Builtin::FsReadDir => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_read_dir(path)` in `std/fs`'s `read_dir`",
+                ),
+                Builtin::FsTakeStringArray => (
+                    (vec![], Ty::Array(Box::new(Ty::String))),
+                    "`fs_take_string_array()` in `std/fs`'s `read_dir`",
+                ),
+                Builtin::FsKind => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_kind(path)` in `std/fs`'s `read_dir`",
                 ),
             }
         }

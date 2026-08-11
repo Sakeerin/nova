@@ -702,6 +702,9 @@ impl<'a> Lowerer<'a> {
                     Builtin::FsCreateDirAll => Lowering::Runtime(RtFunc::FsCreateDirAll),
                     Builtin::FsRemoveFile => Lowering::Runtime(RtFunc::FsRemoveFile),
                     Builtin::FsRemoveDirAll => Lowering::Runtime(RtFunc::FsRemoveDirAll),
+                    Builtin::FsReadDir => Lowering::Runtime(RtFunc::FsReadDir),
+                    Builtin::FsTakeStringArray => Lowering::Runtime(RtFunc::FsTakeStringArray),
+                    Builtin::FsKind => Lowering::Runtime(RtFunc::FsKind),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

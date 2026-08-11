@@ -285,6 +285,22 @@ builtins! {
     /// as [`Builtin::FsReadToString`]. Backs `std/fs`'s `remove_dir_all`.
     /// Std-only.
     FsRemoveDirAll,
+    /// `fs_read_dir(path: String) -> Int` — list `path`'s entry names,
+    /// sorted. A status code, for the same reason as
+    /// [`Builtin::FsReadToString`]; on success the names are waiting in
+    /// [`Builtin::FsTakeStringArray`]. Sorted in the runtime because
+    /// directory order is unspecified by every OS. Backs `std/fs`'s
+    /// `read_dir`. Std-only.
+    FsReadDir,
+    /// `fs_take_string_array() -> [String]` — take the array staged by a
+    /// successful [`Builtin::FsReadDir`]. Backs `std/fs`'s `read_dir`.
+    /// Std-only.
+    FsTakeStringArray,
+    /// `fs_kind(path: String) -> Int` — what `path` is: `0` absent, `1`
+    /// file, `2` directory. One call rather than separate `is_file`/`is_dir`
+    /// intrinsics, so a `DirEntry` costs one syscall instead of two and the
+    /// two answers cannot disagree. Backs `std/fs`'s `read_dir`. Std-only.
+    FsKind,
 }
 
 impl Builtin {
@@ -323,6 +339,9 @@ impl Builtin {
             Builtin::FsCreateDirAll => "fs_create_dir_all",
             Builtin::FsRemoveFile => "fs_remove_file",
             Builtin::FsRemoveDirAll => "fs_remove_dir_all",
+            Builtin::FsReadDir => "fs_read_dir",
+            Builtin::FsTakeStringArray => "fs_take_string_array",
+            Builtin::FsKind => "fs_kind",
         }
     }
 
@@ -350,7 +369,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 27] = [
+    pub const STD_ONLY: [Builtin; 30] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -378,6 +397,9 @@ impl Builtin {
         Builtin::FsCreateDirAll,
         Builtin::FsRemoveFile,
         Builtin::FsRemoveDirAll,
+        Builtin::FsReadDir,
+        Builtin::FsTakeStringArray,
+        Builtin::FsKind,
     ];
 }
 

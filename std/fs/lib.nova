@@ -95,3 +95,45 @@ pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
     }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
+
+// One entry in a directory listing.
+//
+// `is_file` and `is_dir` come from a single `fs_kind` call, so they cannot
+// disagree: exactly one is true for an entry that exists.
+pub record DirEntry {
+    pub name: String
+    pub path: String
+    pub is_file: Bool
+    pub is_dir: Bool
+}
+
+// List the entries in `path`, sorted by name.
+//
+// Sorted because directory order is unspecified by the operating system; the
+// sort happens in the runtime.
+//
+// Builds each `DirEntry` here rather than in the runtime: a record built in Rust
+// would put Nova's field layout in two places, which is the drift this module's
+// boundary exists to avoid. The cost is one extra `fs_kind` call per entry.
+pub async fn read_dir(path: String) -> Result<[DirEntry], IoError> {
+    let status = fs_read_dir(path)
+    if status != 0 {
+        return Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+    let names = fs_take_string_array()
+    let n = names.len()
+    // A repeat array, then every slot overwritten. `[init; n]` evaluates `init`
+    // exactly ONCE, so all `n` slots start as the same heap object -- harmless
+    // only because the loop below replaces each one. Do not read a slot before
+    // assigning it.
+    let mut out = [DirEntry { name: "", path: "", is_file: false, is_dir: false }; n]
+    let mut i = 0
+    while i < n {
+        let name = names[i]
+        let full = "${path}/${name}"
+        let k = fs_kind(full)
+        out[i] = DirEntry { name: name, path: full, is_file: k == 1, is_dir: k == 2 }
+        i = i + 1
+    }
+    Ok(out)
+}

@@ -6121,3 +6121,38 @@ fn fs_dirs_run() {
         .stdout(expected);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// === Task 4 (std/fs on Strings increment): read_dir, DirEntry ===
+
+/// `read_dir` returns entries sorted by name, with `DirEntry.is_file`/`is_dir`
+/// coming from one `fs_kind` call per entry. One entry (`Zebra.txt`) is
+/// capitalized deliberately, so that byte-lexicographic sort (what the
+/// runtime's `names.sort()` actually does: capitals order before lowercase)
+/// disagrees with every case-insensitive or creation-order enumeration this
+/// project has observed -- a missing `names.sort()` was measured to survive
+/// an earlier, all-lowercase version of this fixture on this host, because
+/// this host's raw directory order already happened to be alphabetical for
+/// same-case names. See `tests/runtime/fs_read_dir.nova`'s own header and the
+/// task report for the measurement.
+///
+/// This one fixture is written to discriminate three separate mutations:
+/// dropping the sort (order changes), swapping `fs_kind`'s file/dir status
+/// codes (the `mid` line inverts), and a wrong array length (a line goes
+/// missing). See the task report for all three transcripts.
+#[test]
+fn fs_read_dir_run() {
+    let tmp = unique_temp_dir("nova-fs-read-dir");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_read_dir.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_read_dir.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

@@ -449,6 +449,12 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_fs_remove_dir_all",
             fs::nova_rt_fs_remove_dir_all as *const u8,
         ),
+        ("nova_rt_fs_read_dir", fs::nova_rt_fs_read_dir as *const u8),
+        (
+            "nova_rt_fs_take_string_array",
+            fs::nova_rt_fs_take_string_array as *const u8,
+        ),
+        ("nova_rt_fs_kind", fs::nova_rt_fs_kind as *const u8),
     ]
 }
 

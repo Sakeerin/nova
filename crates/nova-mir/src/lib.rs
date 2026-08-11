@@ -260,6 +260,14 @@ rt_funcs! {
     /// `(str) -> i64` — remove the directory and everything under it.
     /// Status code, as `FsReadToString`.
     FsRemoveDirAll,
+    /// `(str) -> i64` — list the directory's entry names, sorted. Status
+    /// code, as `FsReadToString`; on success the names are waiting in
+    /// `FsTakeStringArray`.
+    FsReadDir,
+    /// `() -> ptr` — take the `[String]` staged by a successful `FsReadDir`.
+    FsTakeStringArray,
+    /// `(str) -> i64` — what the path is: 0 absent, 1 file, 2 directory.
+    FsKind,
 }
 
 impl RtFunc {
@@ -305,6 +313,9 @@ impl RtFunc {
             RtFunc::FsCreateDirAll => "nova_rt_fs_create_dir_all",
             RtFunc::FsRemoveFile => "nova_rt_fs_remove_file",
             RtFunc::FsRemoveDirAll => "nova_rt_fs_remove_dir_all",
+            RtFunc::FsReadDir => "nova_rt_fs_read_dir",
+            RtFunc::FsTakeStringArray => "nova_rt_fs_take_string_array",
+            RtFunc::FsKind => "nova_rt_fs_kind",
         }
     }
 
@@ -339,14 +350,17 @@ impl RtFunc {
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
-            RtFunc::FsTakeString | RtFunc::FsLastErrorMessage | RtFunc::FsTempDir => {
-                (vec![], MirTy::Ptr)
-            }
+            RtFunc::FsTakeString
+            | RtFunc::FsLastErrorMessage
+            | RtFunc::FsTempDir
+            | RtFunc::FsTakeStringArray => (vec![], MirTy::Ptr),
             RtFunc::FsExists => (vec![MirTy::Ptr], MirTy::I8),
             RtFunc::FsCreateDir
             | RtFunc::FsCreateDirAll
             | RtFunc::FsRemoveFile
-            | RtFunc::FsRemoveDirAll => (vec![MirTy::Ptr], MirTy::I64),
+            | RtFunc::FsRemoveDirAll
+            | RtFunc::FsReadDir
+            | RtFunc::FsKind => (vec![MirTy::Ptr], MirTy::I64),
         }
     }
 }
