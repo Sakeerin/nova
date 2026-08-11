@@ -190,9 +190,134 @@ pub extern "C" fn nova_rt_fs_temp_dir() -> *mut NovaStr {
     gc_message(&std::env::temp_dir().to_string_lossy())
 }
 
+/// Whether `path` exists. Cannot distinguish absent from unreadable, because
+/// `nova-spec/20-STDLIB.md` §5 gives `exists` a `Bool` return rather than a
+/// `Result`; that is the spec's choice and is left alone.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_exists(path: *const NovaStr) -> i8 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    i8::from(std::path::Path::new(p).exists())
+}
+
+/// Create the directory `path`. Its parent must exist; an existing `path` is
+/// `ALREADY_EXISTS`.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_create_dir(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    match std::fs::create_dir(p) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
+/// Create the directory `path`, and any missing parent directories along the
+/// way. Unlike `create_dir`, an existing directory at `path` is success, not
+/// `ALREADY_EXISTS` -- `std::fs::create_dir_all`'s own behaviour, carried
+/// through unchanged rather than papered over.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_create_dir_all(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    match std::fs::create_dir_all(p) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
+/// Remove the file `path`.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_remove_file(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    match std::fs::remove_file(p) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
+/// Remove the directory `path` and everything under it.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_remove_dir_all(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    match std::fs::remove_dir_all(p) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Measured, not assumed.** The design spec's note on `remove_dir_all`
+    /// flags Windows-versus-POSIX divergence for a read-only entry as an
+    /// expectation, not something anyone had actually run. Measured here
+    /// instead, against `nova_rt_fs_remove_dir_all` itself rather than bare
+    /// `std::fs`: on this platform's std, a read-only file nested inside the
+    /// tree does not stop the removal -- the status is `OK` and the
+    /// directory is gone afterward, the same as for an ordinary file.
+    /// (Windows' own `DeleteFile` denies access to a read-only attribute;
+    /// whatever compensates -- clearing the attribute first, or a different
+    /// removal path entirely -- lives in the standard library this function
+    /// calls straight into, not in this crate, so it is not this crate's to
+    /// document further than "observed".) See the task report this landed
+    /// with for the transcript this was first observed in.
+    #[test]
+    fn remove_dir_all_is_not_stopped_by_a_read_only_entry() {
+        let dir =
+            std::env::temp_dir().join(format!("nova-rt-fs-readonly-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        let file = dir.join("locked.txt");
+        std::fs::write(&file, "x").expect("probe file");
+        let mut perms = std::fs::metadata(&file)
+            .expect("probe metadata")
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).expect("set readonly");
+
+        let path_str = gc_message(&dir.to_string_lossy());
+        // SAFETY: `path_str` was just allocated above and is still live.
+        let status = unsafe { nova_rt_fs_remove_dir_all(path_str) };
+        let dir_gone_after_removal = !dir.exists();
+
+        // Best-effort cleanup in case the removal above did *not* clear the
+        // read-only file (i.e. the assertions below are about to fail): rely
+        // on the exact same call this test measures, not a hand-rolled
+        // `set_readonly(false)` -- which clippy's
+        // `permissions_set_readonly_false` rightly flags as unsafe to do
+        // generically, since on Unix it makes the file world-writable rather
+        // than merely owner-writable. If plain `remove_dir_all` cannot clear
+        // it either, there is nothing more this cleanup should attempt.
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            status, OK,
+            "measured on this platform: a read-only entry did not stop removal"
+        );
+        assert!(
+            dir_gone_after_removal,
+            "measured on this platform: the directory was fully removed"
+        );
+    }
 
     /// Pins the spec's "these `async fn`s never suspend" property.
     ///

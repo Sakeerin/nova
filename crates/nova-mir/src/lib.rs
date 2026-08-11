@@ -247,6 +247,19 @@ rt_funcs! {
     FsLastErrorMessage,
     /// `() -> str` — the OS temporary-directory path (`std::env::temp_dir()`).
     FsTempDir,
+    /// `(str) -> i8` — whether the path exists.
+    FsExists,
+    /// `(str) -> i64` — create the directory. Status code, as
+    /// `FsReadToString`.
+    FsCreateDir,
+    /// `(str) -> i64` — create the directory and any missing parents.
+    /// Status code, as `FsReadToString`.
+    FsCreateDirAll,
+    /// `(str) -> i64` — remove the file. Status code, as `FsReadToString`.
+    FsRemoveFile,
+    /// `(str) -> i64` — remove the directory and everything under it.
+    /// Status code, as `FsReadToString`.
+    FsRemoveDirAll,
 }
 
 impl RtFunc {
@@ -287,6 +300,11 @@ impl RtFunc {
             RtFunc::FsTakeString => "nova_rt_fs_take_string",
             RtFunc::FsLastErrorMessage => "nova_rt_fs_last_error_message",
             RtFunc::FsTempDir => "nova_rt_fs_temp_dir",
+            RtFunc::FsExists => "nova_rt_fs_exists",
+            RtFunc::FsCreateDir => "nova_rt_fs_create_dir",
+            RtFunc::FsCreateDirAll => "nova_rt_fs_create_dir_all",
+            RtFunc::FsRemoveFile => "nova_rt_fs_remove_file",
+            RtFunc::FsRemoveDirAll => "nova_rt_fs_remove_dir_all",
         }
     }
 
@@ -324,6 +342,11 @@ impl RtFunc {
             RtFunc::FsTakeString | RtFunc::FsLastErrorMessage | RtFunc::FsTempDir => {
                 (vec![], MirTy::Ptr)
             }
+            RtFunc::FsExists => (vec![MirTy::Ptr], MirTy::I8),
+            RtFunc::FsCreateDir
+            | RtFunc::FsCreateDirAll
+            | RtFunc::FsRemoveFile
+            | RtFunc::FsRemoveDirAll => (vec![MirTy::Ptr], MirTy::I64),
         }
     }
 }

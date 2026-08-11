@@ -49,3 +49,49 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
 pub fn temp_dir() -> String {
     fs_temp_dir()
 }
+
+// Whether `path` exists.
+//
+// Returns `Bool`, not `Result`, per `nova-spec/20-STDLIB.md` §5 — so a path that
+// exists but cannot be examined is indistinguishable from one that is absent.
+pub async fn exists(path: String) -> Bool {
+    fs_exists(path)
+}
+
+// Create the directory `path`. The parent must already exist; use
+// `create_dir_all` otherwise. An existing `path` is `AlreadyExists`.
+pub async fn create_dir(path: String) -> Result<(), IoError> {
+    let status = fs_create_dir(path)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Create the directory `path`, and any missing parent directories along the
+// way. Unlike `create_dir`, an existing `path` is not an error.
+pub async fn create_dir_all(path: String) -> Result<(), IoError> {
+    let status = fs_create_dir_all(path)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Remove the file `path`.
+pub async fn remove_file(path: String) -> Result<(), IoError> {
+    let status = fs_remove_file(path)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Remove the directory `path` and everything under it.
+pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
+    let status = fs_remove_dir_all(path)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}

@@ -259,6 +259,32 @@ builtins! {
     /// Not a runtime-call-only concern: this is what lets a fixture build a
     /// writable path without hardcoding one. Std-only.
     FsTempDir,
+    /// `fs_exists(path: String) -> Bool` — whether `path` exists on disk.
+    /// Not a status code like its siblings: `nova-spec/20-STDLIB.md` §5
+    /// gives `exists` a plain `Bool`, so a path that exists but cannot be
+    /// examined is indistinguishable from one that is absent. Backs
+    /// `std/fs`'s `exists`. Std-only.
+    FsExists,
+    /// `fs_create_dir(path: String) -> Int` — create the directory `path`.
+    /// Its parent must exist; an existing `path` is `AlreadyExists`. A
+    /// status code, for the same reason as [`Builtin::FsReadToString`].
+    /// Backs `std/fs`'s `create_dir`. Std-only.
+    FsCreateDir,
+    /// `fs_create_dir_all(path: String) -> Int` — create the directory
+    /// `path`, and any missing parent directories along the way. Unlike
+    /// [`Builtin::FsCreateDir`], an already-existing directory at `path` is
+    /// success, not `AlreadyExists`. Backs `std/fs`'s `create_dir_all`.
+    /// Std-only.
+    FsCreateDirAll,
+    /// `fs_remove_file(path: String) -> Int` — remove the file `path`. A
+    /// status code, for the same reason as [`Builtin::FsReadToString`].
+    /// Backs `std/fs`'s `remove_file`. Std-only.
+    FsRemoveFile,
+    /// `fs_remove_dir_all(path: String) -> Int` — remove the directory
+    /// `path` and everything beneath it. A status code, for the same reason
+    /// as [`Builtin::FsReadToString`]. Backs `std/fs`'s `remove_dir_all`.
+    /// Std-only.
+    FsRemoveDirAll,
 }
 
 impl Builtin {
@@ -292,6 +318,11 @@ impl Builtin {
             Builtin::FsTakeString => "fs_take_string",
             Builtin::FsLastErrorMessage => "fs_last_error_message",
             Builtin::FsTempDir => "fs_temp_dir",
+            Builtin::FsExists => "fs_exists",
+            Builtin::FsCreateDir => "fs_create_dir",
+            Builtin::FsCreateDirAll => "fs_create_dir_all",
+            Builtin::FsRemoveFile => "fs_remove_file",
+            Builtin::FsRemoveDirAll => "fs_remove_dir_all",
         }
     }
 
@@ -319,7 +350,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 22] = [
+    pub const STD_ONLY: [Builtin; 27] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -342,6 +373,11 @@ impl Builtin {
         Builtin::FsTakeString,
         Builtin::FsLastErrorMessage,
         Builtin::FsTempDir,
+        Builtin::FsExists,
+        Builtin::FsCreateDir,
+        Builtin::FsCreateDirAll,
+        Builtin::FsRemoveFile,
+        Builtin::FsRemoveDirAll,
     ];
 }
 

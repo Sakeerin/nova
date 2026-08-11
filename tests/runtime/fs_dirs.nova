@@ -1,0 +1,16 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let d = "${temp_dir()}/nova_fs_dirs_2e9f/a/b"
+    let _ = remove_dir_all("${temp_dir()}/nova_fs_dirs_2e9f").await
+    println("${exists(d).await}")
+    match create_dir_all(d).await {
+        Ok(_) => println("made")
+        Err(e) => println("failed: ${e.message}")
+    }
+    println("${exists(d).await}")
+    let _ = remove_dir_all("${temp_dir()}/nova_fs_dirs_2e9f").await
+    println("${exists(d).await}")
+}

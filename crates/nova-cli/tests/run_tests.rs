@@ -5946,14 +5946,29 @@ fn fs_invalid_data_run() {
 /// A real write-then-read round trip needs a writable path, which is what
 /// `temp_dir` (pulled forward from Task 3 for exactly this reason) supplies.
 /// This is deliberately not named or shaped like Task 3's own
-/// `fs_roundtrip.nova` (which additionally exercises `remove_file` and does
-/// not exist yet): `write_string`/`read_to_string` accept only a `String`,
-/// `std/fs` has no delete operation until Task 3, so *this* harness deletes
+/// `fs_roundtrip.nova` (which additionally exercises `remove_file`):
+/// `write_string`/`read_to_string` accept only a `String` and `std/fs` had no
+/// delete operation when this fixture was written, so *this* harness deletes
 /// the file directly, both before (a stale file from an interrupted prior
 /// run must not produce a false pass) and after (leave nothing behind).
+///
+/// **The literal filename below used to be joined onto the OS-shared temp
+/// directory directly** (Task 3 review): two concurrent `cargo test`
+/// invocations of this same binary would then race on one path. The
+/// before/after `remove_file` calls only ever protected against a *stale*
+/// file left by a non-overlapping prior run; they cannot protect against a
+/// second process deleting or overwriting the file out from under this one
+/// mid-test. `unique_temp_dir` fixes the actual collision by redirecting
+/// *this process's* view of `temp_dir()` (via `TMP`/`TEMP`/`TMPDIR`, scoped
+/// to the child `nova` process only) to a directory namespaced by this test
+/// binary's own process id, so the path this fixture computes at runtime can
+/// no longer collide with another process's. See `unique_temp_dir`'s doc
+/// comment for why this is an environment override rather than a Nova-level
+/// change, and the task report for how this was verified.
 #[test]
 fn fs_write_then_read_run() {
-    let path = std::env::temp_dir().join("nova_fs_write_then_read_8a41.txt");
+    let tmp = unique_temp_dir("nova-fs-write-then-read");
+    let path = tmp.join("nova_fs_write_then_read_8a41.txt");
     let _ = std::fs::remove_file(&path);
 
     let expected =
@@ -5963,9 +5978,135 @@ fn fs_write_then_read_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/fs_write_then_read.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
         .assert()
         .success()
         .stdout(expected);
 
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// === Task 3 (std/fs on Strings increment): exists, create_dir,
+// create_dir_all, remove_file, remove_dir_all ===
+
+/// A fresh directory under the OS temp root, namespaced by `label` and this
+/// test binary's own process id, for a fixture that calls Nova's `temp_dir()`.
+///
+/// Every fixture below (and `fs_write_then_read_run` above) builds its path
+/// as `"${temp_dir()}/<literal>"` *inside the compiled Nova program*, per
+/// this task's brief -- so, unlike `fs_invalid_data_run`'s bare relative
+/// filename plus `.current_dir`, pointing the spawned `nova` process's
+/// working directory elsewhere would not change the path the fixture
+/// actually touches: `temp_dir()` resolves the OS-wide shared temp
+/// directory regardless of the current directory. What Nova's `temp_dir()`
+/// *does* respond to is the same thing Rust's `std::env::temp_dir()` (which
+/// `nova_rt_fs_temp_dir` calls directly) responds to: the `TMP`/`TEMP`
+/// (Windows) and `TMPDIR` (POSIX) environment variables, read fresh every
+/// call rather than cached at process start. Setting them only on the
+/// spawned `nova` `Command` -- never via `std::env::set_var` on this test
+/// binary's own process -- keeps the override scoped to that one child, so
+/// it cannot bleed into a sibling test running on another thread of this
+/// same binary (`cargo test`'s default parallelism runs many `#[test]`s
+/// concurrently within one process, all sharing one real environment).
+///
+/// The process id, folded in after `label`, is what keeps two *separate*
+/// invocations of this test binary (a developer re-running the suite while
+/// a previous run is still finishing; two overlapping CI jobs on one
+/// machine) from resolving `temp_dir()` to the same directory. `label`
+/// alone already keeps sibling fixtures inside a single run from colliding
+/// with each other. See `fs_write_then_read_run`'s doc comment for the
+/// fixed, run-invariant path this replaces.
+fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("{label}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("unique temp dir for a std/fs fixture");
+    dir
+}
+
+/// `write_string`, `read_to_string`, and `remove_file` in one pass -- the
+/// three operations Task 2 and this task between them add a status-boundary
+/// wrapper for, chained through one real file.
+///
+/// **The stdout check alone does not exercise `remove_file`'s success arm**:
+/// `fs_roundtrip.nova` (this task's brief, verbatim) never re-checks the
+/// path after removing it, so it prints "removed" whether or not anything
+/// was actually deleted. Proven, not assumed: replacing
+/// `nova_rt_fs_remove_file`'s body with a no-op returning `OK` left this
+/// test passing against the stdout check alone (see the task report for the
+/// transcript) -- the same shape of gap Task 2's review found in
+/// `write_string`. The explicit `exists` assertion below is what actually
+/// exercises the success arm; it is a harness-level check rather than an
+/// addition to the fixture because the fixture's own text is this task's
+/// brief, transcribed verbatim.
+#[test]
+fn fs_roundtrip_run() {
+    let tmp = unique_temp_dir("nova-fs-roundtrip");
+    let written_path = tmp.join("nova_fs_roundtrip_5d2c.txt");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_roundtrip.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_roundtrip.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let removed = !written_path.exists();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(
+        removed,
+        "remove_file should have actually deleted {}, not merely reported success",
+        written_path.display()
+    );
+}
+
+/// A second `create_dir` on an existing directory reports `AlreadyExists`.
+/// The fixture's own leading `remove_dir_all` (discarding the result: absent
+/// is fine, present is cleaned up) makes this independent of a previous
+/// run's leftovers; `unique_temp_dir` makes it independent of a *concurrent*
+/// one. Together they cover both halves of the race this task's brief
+/// called out -- see `fs_write_then_read_run`'s doc comment.
+#[test]
+fn fs_already_exists_run() {
+    let tmp = unique_temp_dir("nova-fs-already-exists");
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_already_exists.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_already_exists.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `exists` bracketing a nested `create_dir_all`: absent, then present, then
+/// absent again. Three calls rather than one so that a `nova_rt_fs_exists`
+/// hard-coded to either `true` or `false` fails this fixture -- proven by
+/// mutation in the task report, not just argued here.
+#[test]
+fn fs_dirs_run() {
+    let tmp = unique_temp_dir("nova-fs-dirs");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_dirs.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_dirs.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
 }

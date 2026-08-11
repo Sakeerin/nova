@@ -1,0 +1,19 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let p = "${temp_dir()}/nova_fs_roundtrip_5d2c.txt"
+    match write_string(p, "hello\nworld").await {
+        Ok(_) => println("wrote")
+        Err(e) => println("write failed: ${e.message}")
+    }
+    match read_to_string(p).await {
+        Ok(s) => println(s)
+        Err(e) => println("read failed: ${e.message}")
+    }
+    match remove_file(p).await {
+        Ok(_) => println("removed")
+        Err(e) => println("remove failed: ${e.message}")
+    }
+}

@@ -3926,7 +3926,12 @@ impl<'a> Checker<'a> {
             | Builtin::FsWriteString
             | Builtin::FsTakeString
             | Builtin::FsLastErrorMessage
-            | Builtin::FsTempDir => "",
+            | Builtin::FsTempDir
+            | Builtin::FsExists
+            | Builtin::FsCreateDir
+            | Builtin::FsCreateDirAll
+            | Builtin::FsRemoveFile
+            | Builtin::FsRemoveDirAll => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7127,6 +7132,11 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsTakeString => (vec![], Ty::String),
         Builtin::FsLastErrorMessage => (vec![], Ty::String),
         Builtin::FsTempDir => (vec![], Ty::String),
+        Builtin::FsExists => (vec![Ty::String], Ty::Bool),
+        Builtin::FsCreateDir => (vec![Ty::String], Ty::Int),
+        Builtin::FsCreateDirAll => (vec![Ty::String], Ty::Int),
+        Builtin::FsRemoveFile => (vec![Ty::String], Ty::Int),
+        Builtin::FsRemoveDirAll => (vec![Ty::String], Ty::Int),
     }
 }
 
@@ -15028,6 +15038,26 @@ mod tests {
                 Builtin::FsTempDir => (
                     (vec![], Ty::String),
                     "`fs_temp_dir()` in `std/fs`'s `temp_dir`",
+                ),
+                Builtin::FsExists => (
+                    (vec![Ty::String], Ty::Bool),
+                    "`fs_exists(path)` in `std/fs`'s `exists`",
+                ),
+                Builtin::FsCreateDir => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_create_dir(path)` in `std/fs`'s `create_dir`",
+                ),
+                Builtin::FsCreateDirAll => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_create_dir_all(path)` in `std/fs`'s `create_dir_all`",
+                ),
+                Builtin::FsRemoveFile => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_remove_file(path)` in `std/fs`'s `remove_file`",
+                ),
+                Builtin::FsRemoveDirAll => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_remove_dir_all(path)` in `std/fs`'s `remove_dir_all`",
                 ),
             }
         }

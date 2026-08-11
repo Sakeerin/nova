@@ -432,6 +432,23 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             fs::nova_rt_fs_last_error_message as *const u8,
         ),
         ("nova_rt_fs_temp_dir", fs::nova_rt_fs_temp_dir as *const u8),
+        ("nova_rt_fs_exists", fs::nova_rt_fs_exists as *const u8),
+        (
+            "nova_rt_fs_create_dir",
+            fs::nova_rt_fs_create_dir as *const u8,
+        ),
+        (
+            "nova_rt_fs_create_dir_all",
+            fs::nova_rt_fs_create_dir_all as *const u8,
+        ),
+        (
+            "nova_rt_fs_remove_file",
+            fs::nova_rt_fs_remove_file as *const u8,
+        ),
+        (
+            "nova_rt_fs_remove_dir_all",
+            fs::nova_rt_fs_remove_dir_all as *const u8,
+        ),
     ]
 }
 

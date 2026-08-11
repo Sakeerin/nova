@@ -1,0 +1,31 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let d = "${temp_dir()}/nova_fs_exists_7c1b"
+    let _ = remove_dir_all(d).await
+    match create_dir(d).await {
+        Ok(_) => println("created")
+        Err(e) => println("first create failed: ${e.message}")
+    }
+    match create_dir(d).await {
+        Ok(_) => println("created twice, which is wrong")
+        Err(e) => println(kind_name(e.kind))
+    }
+    let _ = remove_dir_all(d).await
+    println("cleaned")
+}
+
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
