@@ -92,6 +92,35 @@ pub unsafe extern "C" fn nova_rt_print(s: *const NovaStr) {
     let _ = lock.flush();
 }
 
+/// Write `s` to stderr with no trailing newline.
+///
+/// Mirrors [`nova_rt_print`]'s explicit lock-and-flush rather than
+/// [`nova_rt_println`]'s `println!`: without a newline there is nothing to
+/// trigger a line-buffer flush, so the write must be flushed here or output can
+/// arrive out of order relative to stdout.
+///
+/// # Safety
+/// `s` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_eprint(s: *const NovaStr) {
+    use std::io::Write;
+    let err = std::io::stderr();
+    let mut lock = err.lock();
+    // SAFETY: forwarding this function's own contract.
+    let _ = lock.write_all(unsafe { as_str(s) }.as_bytes());
+    let _ = lock.flush();
+}
+
+/// Write `s` to stderr followed by a newline.
+///
+/// # Safety
+/// `s` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_eprintln(s: *const NovaStr) {
+    // SAFETY: forwarding this function's own contract.
+    eprintln!("{}", unsafe { as_str(s) });
+}
+
 /// Concatenate two strings into a new string value.
 ///
 /// # Safety
@@ -323,6 +352,8 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_new", nova_rt_str_new as *const u8),
         ("nova_rt_println", nova_rt_println as *const u8),
         ("nova_rt_print", nova_rt_print as *const u8),
+        ("nova_rt_eprint", nova_rt_eprint as *const u8),
+        ("nova_rt_eprintln", nova_rt_eprintln as *const u8),
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),

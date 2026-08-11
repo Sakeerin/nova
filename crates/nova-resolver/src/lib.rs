@@ -64,6 +64,10 @@ builtins! {
     Println,
     /// `print(s: String)` — write to stdout without a trailing newline.
     Print,
+    /// `eprint(s: String)` — write to stderr without a trailing newline.
+    EPrint,
+    /// `eprintln(s: String)` — write a line to stderr.
+    EPrintln,
     /// `panic(msg: String)` — abort the program with a message.
     Panic,
     /// `str_cmp(a: String, b: String) -> Int` — byte-lexicographic compare,
@@ -235,6 +239,8 @@ impl Builtin {
         match self {
             Builtin::Println => "println",
             Builtin::Print => "print",
+            Builtin::EPrint => "eprint",
+            Builtin::EPrintln => "eprintln",
             Builtin::Panic => "panic",
             Builtin::StrCmp => "str_cmp",
             Builtin::StrHash => "str_hash",
@@ -258,7 +264,13 @@ impl Builtin {
 
     /// Builtins injected into *every* module's scope — part of the
     /// user-visible language surface, and reserved words everywhere.
-    pub const GLOBAL: [Builtin; 3] = [Builtin::Println, Builtin::Print, Builtin::Panic];
+    pub const GLOBAL: [Builtin; 5] = [
+        Builtin::Println,
+        Builtin::Print,
+        Builtin::EPrint,
+        Builtin::EPrintln,
+        Builtin::Panic,
+    ];
 
     /// Builtins injected only into an std module's own scope (any module in
     /// [`STD_MODULES`], not only `std/core`). These are implementation
@@ -793,8 +805,9 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 4] = [
+pub const STD_MODULES: [(&str, &str); 5] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
+    ("$std.io", include_str!("../../../std/io/lib.nova")),
     (
         "$std.collections",
         include_str!("../../../std/collections/lib.nova"),

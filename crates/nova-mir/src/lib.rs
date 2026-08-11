@@ -166,6 +166,10 @@ rt_funcs! {
     Println,
     /// `(str) -> unit`
     Print,
+    /// `(str) -> unit` — write to stderr with no trailing newline.
+    EPrint,
+    /// `(str) -> unit` — write to stderr followed by a newline.
+    EPrintln,
     /// `(str, str) -> str`
     StrConcat,
     /// `(i64) -> str`
@@ -238,6 +242,8 @@ impl RtFunc {
         match self {
             RtFunc::Println => "nova_rt_println",
             RtFunc::Print => "nova_rt_print",
+            RtFunc::EPrint => "nova_rt_eprint",
+            RtFunc::EPrintln => "nova_rt_eprintln",
             RtFunc::StrConcat => "nova_rt_str_concat",
             RtFunc::IntToStr => "nova_rt_int_to_str",
             RtFunc::FloatToStr => "nova_rt_float_to_str",
@@ -269,7 +275,9 @@ impl RtFunc {
     /// Parameter and return classes: `(params, ret)`.
     pub fn signature(self) -> (Vec<MirTy>, MirTy) {
         match self {
-            RtFunc::Println | RtFunc::Print => (vec![MirTy::Ptr], MirTy::Unit),
+            RtFunc::Println | RtFunc::Print | RtFunc::EPrint | RtFunc::EPrintln => {
+                (vec![MirTy::Ptr], MirTy::Unit)
+            }
             RtFunc::StrConcat => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
             RtFunc::IntToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::FloatToStr => (vec![MirTy::F64], MirTy::Ptr),

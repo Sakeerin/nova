@@ -3900,9 +3900,11 @@ impl<'a> Checker<'a> {
         // std/strings, with no single wrong-argument pattern common to all of
         // them.
         let hint = match builtin {
-            Builtin::Println | Builtin::Print | Builtin::Panic => {
-                " (use string interpolation: \"${value}\")"
-            }
+            Builtin::Println
+            | Builtin::Print
+            | Builtin::EPrint
+            | Builtin::EPrintln
+            | Builtin::Panic => " (use string interpolation: \"${value}\")",
             Builtin::StrCmp
             | Builtin::StrHash
             | Builtin::CharToInt
@@ -7095,7 +7097,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
     // `Future<T>` where `T` is the caller's first type parameter — see above.
     let future_of_param0 = || Ty::Future(Box::new(Ty::Param(0)));
     match builtin {
-        Builtin::Println | Builtin::Print => (vec![Ty::String], Ty::Unit),
+        Builtin::Println | Builtin::Print | Builtin::EPrint | Builtin::EPrintln => {
+            (vec![Ty::String], Ty::Unit)
+        }
         Builtin::Panic => (vec![Ty::String], Ty::Never),
         Builtin::StrCmp => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::StrHash => (vec![Ty::String], Ty::Int),
@@ -14917,9 +14921,10 @@ mod tests {
         // caller it would break rather than only the types.
         fn expected(b: Builtin) -> ((Vec<Ty>, Ty), &'static str) {
             match b {
-                Builtin::Println | Builtin::Print => {
-                    ((vec![Ty::String], Ty::Unit), "`println(s)` / `print(s)`")
-                }
+                Builtin::Println | Builtin::Print | Builtin::EPrint | Builtin::EPrintln => (
+                    (vec![Ty::String], Ty::Unit),
+                    "`println(s)` / `print(s)` / `eprint(s)` / `eprintln(s)`",
+                ),
                 Builtin::Panic => ((vec![Ty::String], Ty::Never), "`panic(msg)` diverges"),
                 Builtin::StrCmp => (
                     (vec![Ty::String, Ty::String], Ty::Int),

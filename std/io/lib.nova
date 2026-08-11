@@ -1,0 +1,58 @@
+// Nova standard library — I/O error types.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import`. A user definition of the same name shadows the
+// one here (see docs/adr/0004-stdlib-compile-model.md).
+//
+// This module holds only the error surface. `nova-spec/20-STDLIB.md` §4 also
+// specifies `Read`/`Write` traits and `stdin`/`stdout`/`stderr`; those need a
+// byte type and a settled buffer signature, and arrive in a later increment.
+
+// Why an operation failed. `ConnectionRefused` is unused by `std/fs` and is
+// carried so §4's network I/O needs no further addition later.
+//
+// `AlreadyExists` and `InvalidData` are additions to the list in
+// `nova-spec/20-STDLIB.md` §4; see docs/adr/0011-io-error-kinds.md.
+pub type IoErrorKind =
+    | NotFound
+    | PermissionDenied
+    | AlreadyExists
+    | InvalidData
+    | Interrupted
+    | TimedOut
+    | ConnectionRefused
+    | Other
+
+// A failed I/O operation: a kind to branch on, and the operating system's own
+// message for diagnosis.
+//
+// `message` is platform-specific text, so a test asserting output should match
+// on `kind` and normalise `message` -- the same treatment
+// `tests/runtime/nova_test.stdout` already applies to a Windows NTSTATUS.
+pub record IoError {
+    pub kind: IoErrorKind
+    pub message: String
+}
+
+// Map a runtime status code to its kind.
+//
+// **This function is one half of a wire contract.** The other half is
+// `status_of` in `crates/nova-runtime/src/fs.rs`, which produces these codes
+// from `std::io::ErrorKind`. The two are independent copies of one numbering,
+// which is the shape that has already produced a miscompile in this project, so
+// they are pinned together by a fixture per kind rather than by a comment
+// asking a reader to keep them in step.
+//
+// An unrecognised code is `Other` rather than a panic: a status this function
+// does not know is a runtime bug, and mapping it to `Other` keeps a diagnosable
+// error flowing instead of ending the process.
+pub fn io_error_kind_of(code: Int) -> IoErrorKind {
+    if code == 1 { return NotFound }
+    if code == 2 { return PermissionDenied }
+    if code == 3 { return AlreadyExists }
+    if code == 4 { return InvalidData }
+    if code == 5 { return Interrupted }
+    if code == 6 { return TimedOut }
+    if code == 7 { return ConnectionRefused }
+    Other
+}

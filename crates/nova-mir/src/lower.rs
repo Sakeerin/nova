@@ -666,6 +666,8 @@ impl<'a> Lowerer<'a> {
                 let how = match b {
                     Builtin::Println => Lowering::Runtime(RtFunc::Println),
                     Builtin::Print => Lowering::Runtime(RtFunc::Print),
+                    Builtin::EPrint => Lowering::Runtime(RtFunc::EPrint),
+                    Builtin::EPrintln => Lowering::Runtime(RtFunc::EPrintln),
                     Builtin::Panic => Lowering::Runtime(RtFunc::Panic),
                     Builtin::StrCmp => Lowering::Runtime(RtFunc::StrCmp),
                     Builtin::StrHash => Lowering::Runtime(RtFunc::StrHash),

@@ -1,0 +1,19 @@
+fn describe(e: IoError) -> String {
+    match e.kind {
+        NotFound => "not-found"
+        PermissionDenied => "denied"
+        AlreadyExists => "exists"
+        InvalidData => "invalid"
+        Interrupted => "interrupted"
+        TimedOut => "timeout"
+        ConnectionRefused => "refused"
+        Other => "other"
+    }
+}
+
+fn main() {
+    let e = IoError { kind: io_error_kind_of(1), message: "m" }
+    println(describe(e))
+    println(describe(IoError { kind: io_error_kind_of(4), message: "m" }))
+    println(describe(IoError { kind: io_error_kind_of(99), message: "m" }))
+}

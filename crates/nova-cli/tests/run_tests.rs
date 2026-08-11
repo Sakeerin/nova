@@ -5844,3 +5844,40 @@ fn an_unfiltered_run_with_no_tests_still_succeeds() {
          test result: ok. 0 passed; 0 failed; 0 trapped; 0 total\n"
     );
 }
+
+// === Task 1 (std/fs on Strings increment): `std/io` error types, and the
+// `eprint`/`eprintln` builtins ===
+
+/// `IoError`/`IoErrorKind` resolve with no `import`, and `io_error_kind_of`
+/// maps a runtime status code to the right variant — including an unmapped
+/// code (`99`), which must fall to `Other` rather than doing something
+/// undefined; that arm is otherwise unreachable from Rust.
+#[test]
+fn fs_io_types_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_io_types.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_io_types.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `eprint`/`eprintln` write to stderr, not stdout — the split is the whole
+/// point, so this pins both streams exactly rather than only checking stdout.
+/// A version that wrote either to stdout instead must fail this.
+#[test]
+fn eprint_family_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/eprint_family.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/eprint_family.nova"))
+        .assert()
+        .success()
+        .stdout(expected)
+        .stderr("ab\n");
+}
