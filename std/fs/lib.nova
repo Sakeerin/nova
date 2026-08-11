@@ -3,12 +3,17 @@
 // Compiled as an implicit module and glob-imported into every user module. Error
 // types live in `std/io`.
 //
-// Every function here is an `async fn` per `nova-spec/20-STDLIB.md` §5, but
-// **none of them suspends**: the operation runs synchronously inside the poll,
-// because there is no I/O poller yet. The signature is what matters — it does
-// not change when a poller lands, so no call site breaks then. The cost is that
-// a call blocks the whole executor for its duration, so a sibling task makes no
-// progress during a large read. See docs/adr/0011-io-error-kinds.md.
+// Every function that touches the filesystem is an `async fn` per
+// `nova-spec/20-STDLIB.md` §5, but **none of them suspends**: the operation
+// runs synchronously inside the poll, because there is no I/O poller yet. The
+// signature is what matters — it does not change when a poller lands, so no
+// call site breaks then. The cost is that a call blocks the whole executor for
+// its duration, so a sibling task makes no progress during a large read. See
+// docs/adr/0011-io-error-kinds.md.
+//
+// `temp_dir` is the one exception and is a plain `fn`: it only queries the
+// environment and touches no filesystem, so there is nothing in it that could
+// ever suspend, and no future reason to change its signature either.
 //
 // # The shape of these wrappers is load-bearing
 //
@@ -37,4 +42,10 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
         return Ok(())
     }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// The OS's temporary-directory path, with no trailing separator guaranteed
+// either way -- join a name onto it the same way `fs_roundtrip` does.
+pub fn temp_dir() -> String {
+    fs_temp_dir()
 }

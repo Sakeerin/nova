@@ -3925,7 +3925,8 @@ impl<'a> Checker<'a> {
             | Builtin::FsReadToString
             | Builtin::FsWriteString
             | Builtin::FsTakeString
-            | Builtin::FsLastErrorMessage => "",
+            | Builtin::FsLastErrorMessage
+            | Builtin::FsTempDir => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7125,6 +7126,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsWriteString => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::FsTakeString => (vec![], Ty::String),
         Builtin::FsLastErrorMessage => (vec![], Ty::String),
+        Builtin::FsTempDir => (vec![], Ty::String),
     }
 }
 
@@ -15022,6 +15024,10 @@ mod tests {
                     (vec![], Ty::String),
                     "`fs_last_error_message()` in `std/fs`'s `read_to_string` and \
                      `write_string`",
+                ),
+                Builtin::FsTempDir => (
+                    (vec![], Ty::String),
+                    "`fs_temp_dir()` in `std/fs`'s `temp_dir`",
                 ),
             }
         }

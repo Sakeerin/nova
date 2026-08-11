@@ -245,6 +245,8 @@ rt_funcs! {
     FsTakeString,
     /// `() -> str` — take the message staged by a failed filesystem operation.
     FsLastErrorMessage,
+    /// `() -> str` — the OS temporary-directory path (`std::env::temp_dir()`).
+    FsTempDir,
 }
 
 impl RtFunc {
@@ -284,6 +286,7 @@ impl RtFunc {
             RtFunc::FsWriteString => "nova_rt_fs_write_string",
             RtFunc::FsTakeString => "nova_rt_fs_take_string",
             RtFunc::FsLastErrorMessage => "nova_rt_fs_last_error_message",
+            RtFunc::FsTempDir => "nova_rt_fs_temp_dir",
         }
     }
 
@@ -318,7 +321,9 @@ impl RtFunc {
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
-            RtFunc::FsTakeString | RtFunc::FsLastErrorMessage => (vec![], MirTy::Ptr),
+            RtFunc::FsTakeString | RtFunc::FsLastErrorMessage | RtFunc::FsTempDir => {
+                (vec![], MirTy::Ptr)
+            }
         }
     }
 }

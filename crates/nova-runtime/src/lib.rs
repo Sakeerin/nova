@@ -431,6 +431,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_fs_last_error_message",
             fs::nova_rt_fs_last_error_message as *const u8,
         ),
+        ("nova_rt_fs_temp_dir", fs::nova_rt_fs_temp_dir as *const u8),
     ]
 }
 

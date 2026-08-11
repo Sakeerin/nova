@@ -253,6 +253,12 @@ builtins! {
     /// staged by a failed filesystem operation. Backs `std/fs`'s
     /// `read_to_string` and `write_string`. Std-only.
     FsLastErrorMessage,
+    /// `fs_temp_dir() -> String` — the OS temporary-directory path
+    /// (`std::env::temp_dir()`, lossily reencoded from UTF-16 on Windows —
+    /// see `crates/nova-runtime/src/fs.rs`). Backs `std/fs`'s `temp_dir`.
+    /// Not a runtime-call-only concern: this is what lets a fixture build a
+    /// writable path without hardcoding one. Std-only.
+    FsTempDir,
 }
 
 impl Builtin {
@@ -285,6 +291,7 @@ impl Builtin {
             Builtin::FsWriteString => "fs_write_string",
             Builtin::FsTakeString => "fs_take_string",
             Builtin::FsLastErrorMessage => "fs_last_error_message",
+            Builtin::FsTempDir => "fs_temp_dir",
         }
     }
 
@@ -312,7 +319,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 21] = [
+    pub const STD_ONLY: [Builtin; 22] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -334,6 +341,7 @@ impl Builtin {
         Builtin::FsWriteString,
         Builtin::FsTakeString,
         Builtin::FsLastErrorMessage,
+        Builtin::FsTempDir,
     ];
 }
 

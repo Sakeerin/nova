@@ -176,6 +176,20 @@ pub extern "C" fn nova_rt_fs_last_error_message() -> *mut NovaStr {
     }
 }
 
+/// The OS temporary-directory path, per `std::env::temp_dir()`.
+///
+/// `to_string_lossy`, not a fallible conversion: a Nova `String` is UTF-8
+/// while a Windows path is UTF-16, so a path containing an unpaired
+/// surrogate cannot round-trip exactly. There is no `IoError` to report that
+/// through here -- nothing failed at the OS level, the path is simply
+/// unrepresentable exactly -- and this path is exotic enough in practice
+/// that a usable (if occasionally imprecise) string beats an operation with
+/// no way to signal the problem.
+#[no_mangle]
+pub extern "C" fn nova_rt_fs_temp_dir() -> *mut NovaStr {
+    gc_message(&std::env::temp_dir().to_string_lossy())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

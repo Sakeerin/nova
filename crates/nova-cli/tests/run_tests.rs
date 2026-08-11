@@ -5931,3 +5931,41 @@ fn fs_invalid_data_run() {
         .success()
         .stdout(expected);
 }
+
+/// Closes review findings I1/I2 on this task: `fs_not_found` and
+/// `fs_invalid_data` above exercise only the error branch of
+/// `read_to_string`/`write_string`, so neither `write_string` actually
+/// touching disk nor `read_to_string`'s success arm delivering the right
+/// payload was ever exercised by anything. Proven by mutation, not argued:
+/// replacing `nova_rt_fs_write_string`'s body with a no-op returning success
+/// left every target in the workspace passing, and discarding the payload in
+/// `nova_rt_fs_read_to_string`'s `Ok` arm (returning `NOT_FOUND` instead)
+/// left every test in this binary and in `fs.rs`'s own suite passing too.
+/// See the task report for both transcripts.
+///
+/// A real write-then-read round trip needs a writable path, which is what
+/// `temp_dir` (pulled forward from Task 3 for exactly this reason) supplies.
+/// This is deliberately not named or shaped like Task 3's own
+/// `fs_roundtrip.nova` (which additionally exercises `remove_file` and does
+/// not exist yet): `write_string`/`read_to_string` accept only a `String`,
+/// `std/fs` has no delete operation until Task 3, so *this* harness deletes
+/// the file directly, both before (a stale file from an interrupted prior
+/// run must not produce a false pass) and after (leave nothing behind).
+#[test]
+fn fs_write_then_read_run() {
+    let path = std::env::temp_dir().join("nova_fs_write_then_read_8a41.txt");
+    let _ = std::fs::remove_file(&path);
+
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_write_then_read.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_write_then_read.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+
+    let _ = std::fs::remove_file(&path);
+}

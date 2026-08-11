@@ -696,6 +696,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::FsWriteString => Lowering::Runtime(RtFunc::FsWriteString),
                     Builtin::FsTakeString => Lowering::Runtime(RtFunc::FsTakeString),
                     Builtin::FsLastErrorMessage => Lowering::Runtime(RtFunc::FsLastErrorMessage),
+                    Builtin::FsTempDir => Lowering::Runtime(RtFunc::FsTempDir),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {
