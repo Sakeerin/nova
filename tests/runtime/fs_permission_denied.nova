@@ -1,0 +1,46 @@
+fn main() {
+    block_on(go())
+}
+
+// **Measured, not assumed -- on Windows only (final review, I1).** Reading a
+// directory through `read_to_string` reports `PermissionDenied` on this
+// platform, but only for a path with no trailing separator: `temp_dir()`
+// itself carries a trailing backslash on Windows (its own doc comment in
+// `std/fs/lib.nova` says the separator is "not guaranteed either way"), and
+// reading that exact string instead reports `NotFound` -- Windows'
+// `CreateFileW` fails a trailing-backslash-only path with
+// `ERROR_PATH_NOT_FOUND` before access is even checked. Measured directly
+// with a small standalone probe against both forms on this host before
+// writing this fixture. So this creates and reads a plain subdirectory, the
+// same shape every other directory-touching fs fixture already uses, rather
+// than reading `temp_dir()` verbatim.
+//
+// On POSIX, the same call instead reports `IsADirectory`, which
+// `crates/nova-runtime/src/fs.rs`'s `fail` has no arm for, so it falls to
+// `Other` -- a different, also-true result, which is why this fixture's
+// harness test (`fs_permission_denied_run`,
+// `crates/nova-cli/tests/run_tests.rs`) is `#[cfg(windows)]`-gated rather
+// than asserted for every platform.
+async fn go() {
+    let d = "${temp_dir()}/nova_fs_permission_denied_probe"
+    let _ = remove_dir_all(d).await
+    let _ = create_dir_all(d).await
+    match read_to_string(d).await {
+        Ok(_) => println("unexpectedly read it")
+        Err(e) => println(kind_name(e.kind))
+    }
+    let _ = remove_dir_all(d).await
+}
+
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}

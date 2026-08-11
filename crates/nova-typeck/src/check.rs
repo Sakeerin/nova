@@ -15038,8 +15038,9 @@ mod tests {
                 ),
                 Builtin::FsLastErrorMessage => (
                     (vec![], Ty::String),
-                    "`fs_last_error_message()` in `std/fs`'s `read_to_string` and \
-                     `write_string`",
+                    "`fs_last_error_message()` in every fallible `std/fs` wrapper: \
+                     `read_to_string`, `write_string`, `create_dir`, \
+                     `create_dir_all`, `remove_file`, `remove_dir_all`, `read_dir`",
                 ),
                 Builtin::FsTempDir => (
                     (vec![], Ty::String),

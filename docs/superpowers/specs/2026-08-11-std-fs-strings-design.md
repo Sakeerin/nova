@@ -282,6 +282,17 @@ Mutation targets, named here rather than left to review:
 - All eight functions and `DirEntry` work end to end under both backends, `nova run` and
   `nova build`, and under `NOVA_GC_STRESS=1`.
 - `eprint`/`eprintln` write to stderr and are shadowable by a user function of the same name.
+  **CORRECTED 2026-08-12 (final-fix wave, review finding I4(a)): "shadowable" is false, and this
+  bullet was the surviving copy.** §3.3 above already corrected the identical claim on
+  2026-08-11 (Task 5) but this bullet, in the same document, was never updated to match — exactly
+  the "sentence this change falsified but did not touch" the quantifier sweep below asks a reader
+  to catch, found inside the sweeping document itself. Re-measured (`nova check`): a top-level
+  `fn eprint(s: String) { }` or `const eprintln: Int = 1` is `E0002: duplicate definition of
+  '<name>'` with the note "is a compiler builtin"; a local `let` or a function parameter, of
+  either name, compiles clean in both positions (all four combinations measured) — the clash is
+  only checked where `Builtin::GLOBAL` is seeded, at top-level item collection, which neither
+  reaches. See §3.3 and
+  `docs/adr/0011-io-error-kinds.md`.
 - Every `IoErrorKind` this increment can produce is reachable and pinned by a fixture that provokes
   it for real.
 - No Nova aggregate layout appears in Rust; the runtime returns only `Int`, `Bool`, `String` and one

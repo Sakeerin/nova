@@ -35,7 +35,15 @@ async fn go() {
             let mut i = 0
             while i < n {
                 let e = entries[i]
-                println("${e.name} file=${e.is_file} dir=${e.is_dir}")
+                // `path_ok`: whether `e.path` ends with `/${e.name}` -- the
+                // one property of `path` that is stable across runs. `path`
+                // itself is not printed because it embeds this run's temp
+                // directory, which differs every time (final review, I3:
+                // before this line, nothing in the whole suite ever read
+                // `DirEntry.path`, so a wrong value -- e.g. `path` copy-pasted
+                // from `name` -- shipped green).
+                let suffix = "/${e.name}"
+                println("${e.name} file=${e.is_file} dir=${e.is_dir} path_ok=${e.path.ends_with(suffix)}")
                 i = i + 1
             }
         }

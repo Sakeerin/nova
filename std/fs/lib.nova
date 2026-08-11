@@ -99,7 +99,15 @@ pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
 // One entry in a directory listing.
 //
 // `is_file` and `is_dir` come from a single `fs_kind` call, so they cannot
-// disagree: exactly one is true for an entry that exists.
+// disagree with each other. They CAN both be false, though: `fs_kind` returns
+// `0` whenever it cannot read the entry's metadata at all, not only when the
+// entry is absent (see `fs_kind`'s own doc comment), and this record does not
+// special-case that. So "exactly one is true" holds only for an entry whose
+// metadata `fs_kind` could actually read -- not for every entry that exists.
+// INFERRED, not measured: the clean trigger is a dangling symlink (`read_dir`
+// lists it, its metadata call fails), which this codebase has not measured
+// against on any platform -- constructing one needs admin rights on Windows,
+// where this was checked.
 pub record DirEntry {
     pub name: String
     pub path: String

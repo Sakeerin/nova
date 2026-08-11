@@ -989,8 +989,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     wrappers alone build every `Result`, `IoError` and `DirEntry`; no Nova
     aggregate layout enters Rust. The status numbering is one wire contract
     with independent copies in `crates/nova-runtime/src/fs.rs` and
-    `std/io/lib.nova`'s `io_error_kind_of`, pinned together by a fixture per
-    kind rather than a "keep in sync" comment. Thirteen new
+    `std/io/lib.nova`'s `io_error_kind_of`, rather than a "keep in sync"
+    comment — but a fixture pins only four of the eight kinds for real
+    (`NotFound`, `AlreadyExists`, `InvalidData`, and `PermissionDenied` on
+    Windows); the other four are either unreachable from `std/fs` or reachable
+    but not yet exercised. See `docs/adr/0011-io-error-kinds.md`. Thirteen new
     `Builtin::STD_ONLY` intrinsics land this way (`[Builtin; 17]` to
     `[Builtin; 30]`), and `STD_MODULES` grows from 4 to 6 (`$std.io`,
     `$std.fs`).

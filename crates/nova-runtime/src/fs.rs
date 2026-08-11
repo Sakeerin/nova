@@ -34,8 +34,23 @@ use std::thread::LocalKey;
 /// Status codes. `0` is success; every other value is an `IoErrorKind`.
 ///
 /// **This numbering is one half of a wire contract.** The other half is
-/// `io_error_kind_of` in `std/io/lib.nova`. The two are independent copies, so
-/// they are pinned together by a fixture per kind, not by this comment.
+/// `io_error_kind_of` in `std/io/lib.nova`. The two are independent copies.
+///
+/// **MEASURED, not "pinned together by a fixture per kind" for all eight —
+/// that claim was false and this replaces it (final review, I1).** The Nova
+/// half (`io_error_kind_of`'s own arms) is pinned per-code by
+/// `fs_io_types.nova`. This Rust half, the one that produces a code from a
+/// real `std::io::ErrorKind` below, is pinned by a fixture that provokes the
+/// real OS condition for only four of the eight: `NotFound`
+/// (`fs_not_found.nova`), `AlreadyExists` (`fs_already_exists.nova`),
+/// `InvalidData` (`fs_invalid_data.nova`), and `PermissionDenied` on Windows
+/// only (`fs_permission_denied.nova`, reading a directory as a file — see
+/// that test's `#[cfg(windows)]` gate). `Interrupted`, `TimedOut` and
+/// `ConnectionRefused` are not reachable from `std/fs`'s eight functions at
+/// all, portably or otherwise, so no fixture can pin them. The `_ => OTHER`
+/// fallback *is* reachable (e.g. `read_dir` on a plain file returns it), but
+/// nothing exercises it today. See `docs/adr/0011-io-error-kinds.md`, which
+/// states this split correctly and predates this correction.
 pub const OK: i64 = 0;
 pub const NOT_FOUND: i64 = 1;
 pub const PERMISSION_DENIED: i64 = 2;
@@ -73,8 +88,30 @@ fn gc_message(s: &str) -> *mut NovaStr {
 ///
 /// Rooting before publishing means a scan running between these two
 /// statements still finds the object through the root table — there is no
-/// instant where it is reachable by neither the slot nor a root.
+/// instant where it is reachable by neither the slot nor a root. This now
+/// holds for the overwrite case too: releasing whatever `slot` already held
+/// happens first, via the same `take` a normal read uses, so a displaced
+/// pointer's root is never left dangling.
+///
+/// **Releases the slot's current occupant first (final review, I2).**
+/// Without this, stashing into an already-occupied slot would `add_root` the
+/// new pointer while leaving the displaced one's root registered forever —
+/// `take` is the only place that releases a *slot's* root (`stash_array`'s own
+/// `remove_root` call is a separate, self-contained build-time balance,
+/// finished before its block ever reaches a slot), and `take` can only see
+/// whichever pointer is *currently* published, so the one just overwritten
+/// would never be found and released. Not reachable through today's
+/// `std/fs` surface (every wrapper drains a slot before the next `stash`
+/// targeting it — see `a_stashed_string_is_rooted_until_it_is_taken`'s doc
+/// comment for why that is not itself enough to catch this), so this was
+/// latent rather than observed in any fixture; measured with a probe
+/// identical in shape to
+/// `stash_overwriting_an_occupied_slot_does_not_leak_the_displaced_root`
+/// below, minus this fix. `take`'s own contract (return `0` for an empty
+/// slot, otherwise the released pointer) makes discarding its result safe
+/// here: there is nothing to free by hand either way.
 fn stash(slot: &'static LocalKey<Cell<usize>>, ptr: *mut NovaStr) {
+    take(slot);
     gc::add_root(ptr as *mut u8);
     slot.set(ptr as usize);
 }
@@ -357,7 +394,8 @@ pub extern "C" fn nova_rt_fs_take_string_array() -> *mut u8 {
     }
 }
 
-/// What `path` is: 0 absent, 1 file, 2 directory.
+/// What `path` is: 0 = metadata unavailable (absent, or unreadable), 1 file,
+/// 2 directory.
 ///
 /// One call rather than separate `is_file`/`is_dir` intrinsics, so a `DirEntry`
 /// costs one syscall instead of two and the two answers cannot disagree.
@@ -545,6 +583,58 @@ mod tests {
         // above, and nothing has allocated since -- so despite no longer
         // being explicitly rooted, it has not yet been swept.
         assert_eq!(unsafe { crate::as_str(taken) }, "payload");
+    }
+
+    /// `stash` must not leak the root of whatever a slot already held when a
+    /// second pointer overwrites it (final review, I2). Fails without the
+    /// `take(slot)` line at the top of `stash`: measured by temporarily
+    /// deleting it, which reproduces the review's own probe exactly --
+    /// `a_root` stayed at `1` after `b` was stashed over it, instead of
+    /// dropping to `0`.
+    ///
+    /// Not reachable through today's `std/fs` wrappers -- every one drains a
+    /// slot before the next `stash` targeting it -- so this is a property of
+    /// `stash` in isolation, exercised directly rather than through a Nova
+    /// fixture, the same way `a_stashed_string_is_rooted_until_it_is_taken`
+    /// is.
+    #[test]
+    fn stash_overwriting_an_occupied_slot_does_not_leak_the_displaced_root() {
+        let a = gc_message("first");
+        let b = gc_message("second");
+        let (a_addr, b_addr) = (a as usize, b as usize);
+
+        stash(&STRING_SLOT, a);
+        assert_eq!(
+            gc::root_count(a_addr),
+            1,
+            "the first stash roots its pointer"
+        );
+
+        stash(&STRING_SLOT, b);
+        assert_eq!(
+            gc::root_count(a_addr),
+            0,
+            "stashing a second pointer into an occupied slot must release the \
+             first one's root -- otherwise it is pinned for the thread's \
+             lifetime, since `take` is the only place that releases a slot's \
+             root and can only ever see the slot's *current* occupant"
+        );
+        assert_eq!(
+            gc::root_count(b_addr),
+            1,
+            "the second stash roots its pointer"
+        );
+
+        let taken = take(&STRING_SLOT);
+        assert_eq!(
+            taken, b_addr,
+            "take returns the most recently stashed pointer"
+        );
+        assert_eq!(
+            gc::root_count(b_addr),
+            0,
+            "take releases the surviving root"
+        );
     }
 
     /// **Reproduces the exact array layout codegen emits**, the same

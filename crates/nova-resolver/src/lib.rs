@@ -296,10 +296,11 @@ builtins! {
     /// successful [`Builtin::FsReadDir`]. Backs `std/fs`'s `read_dir`.
     /// Std-only.
     FsTakeStringArray,
-    /// `fs_kind(path: String) -> Int` — what `path` is: `0` absent, `1`
-    /// file, `2` directory. One call rather than separate `is_file`/`is_dir`
-    /// intrinsics, so a `DirEntry` costs one syscall instead of two and the
-    /// two answers cannot disagree. Backs `std/fs`'s `read_dir`. Std-only.
+    /// `fs_kind(path: String) -> Int` — what `path` is: `0` metadata
+    /// unavailable (absent, or unreadable), `1` file, `2` directory. One call
+    /// rather than separate `is_file`/`is_dir` intrinsics, so a `DirEntry`
+    /// costs one syscall instead of two and the two answers cannot disagree.
+    /// Backs `std/fs`'s `read_dir`. Std-only.
     FsKind,
 }
 

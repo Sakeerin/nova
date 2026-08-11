@@ -39,9 +39,18 @@ pub record IoError {
 // **This function is one half of a wire contract.** The other half is
 // `fail` in `crates/nova-runtime/src/fs.rs`, which produces these codes
 // from `std::io::ErrorKind`. The two are independent copies of one numbering,
-// which is the shape that has already produced a miscompile in this project, so
-// they are pinned together by a fixture per kind rather than by a comment
-// asking a reader to keep them in step.
+// which is the shape that has already produced a miscompile in this project.
+//
+// **This function's own mapping (every arm below, including the unmapped-code
+// fallback to `Other`) is pinned per-code by `fs_io_types.nova`.** The Rust
+// side that produces these codes from a real OS condition is pinned for only
+// four of the eight kinds -- `NotFound`, `AlreadyExists`, `InvalidData`, and
+// (Windows only) `PermissionDenied`; the rest are either unreachable from
+// `std/fs` or reachable but not yet exercised by a fixture. See `fs.rs`'s
+// status-constant doc comment and `docs/adr/0011-io-error-kinds.md` for the
+// full split -- this comment previously claimed all eight were "pinned
+// together by a fixture per kind," which was false for five of them
+// (final review, I1).
 //
 // An unrecognised code is `Other` rather than a panic: a status this function
 // does not know is a runtime bug, and mapping it to `Other` keeps a diagnosable

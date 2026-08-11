@@ -266,7 +266,8 @@ rt_funcs! {
     FsReadDir,
     /// `() -> ptr` — take the `[String]` staged by a successful `FsReadDir`.
     FsTakeStringArray,
-    /// `(str) -> i64` — what the path is: 0 absent, 1 file, 2 directory.
+    /// `(str) -> i64` — what the path is: 0 = metadata unavailable (absent,
+    /// or unreadable), 1 file, 2 directory.
     FsKind,
 }
 

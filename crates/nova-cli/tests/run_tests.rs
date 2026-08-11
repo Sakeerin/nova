@@ -5903,6 +5903,55 @@ fn fs_not_found_run() {
         .stdout(expected);
 }
 
+/// The same fixture again through `nova build` -- a standalone linked
+/// executable rather than the JIT (see `gate_async_tasks_build_standalone`'s
+/// doc comment for why this does not itself cross the Cranelift/LLVM
+/// boundary). Closes half of I4(b) from the final review: before this, no
+/// `std/fs` fixture ran under anything but `nova run`, even though the
+/// reviewer checked by hand that `nova build` works. This particular
+/// fixture needs no temp directory or environment override -- it only reads
+/// a path that must not exist -- so it is the cheapest fs fixture to route
+/// through `build_and_run` as it stands.
+#[test]
+fn fs_not_found_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_not_found.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/fs_not_found.nova", "fs_not_found");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// **MEASURED, not assumed -- on Windows only (final review, I1).** Pins the
+/// one arm of the Rust-side status↔kind mapping (`crates/nova-runtime/src/fs.rs`'s
+/// `fail`) that is both reachable from `std/fs` and was previously unpinned:
+/// `read_to_string` on a directory reports `PermissionDenied` here. Swapping
+/// `PERMISSION_DENIED` with another status in `fail` (the review's own
+/// mutation) now fails this fixture; before this test existed, that swap
+/// survived the entire suite. `#[cfg(windows)]` because Windows is the only
+/// platform this was measured on -- the same call reports a different kind
+/// (`Other`, via `Uncategorized`) on POSIX, per `docs/adr/0011-io-error-kinds.md`,
+/// so asserting `PermissionDenied` unconditionally would be wrong there, not
+/// merely untested.
+#[cfg(windows)]
+#[test]
+fn fs_permission_denied_run() {
+    let tmp = unique_temp_dir("nova-fs-permission-denied");
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_permission_denied.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_permission_denied.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// Non-UTF-8 file contents report `InvalidData`, not a panic and not lossy
 /// replacement. `write_string` only accepts a `String`, so the invalid bytes
 /// can only be placed on disk from Rust, never from `std/fs` itself -- this
@@ -5930,6 +5979,10 @@ fn fs_invalid_data_run() {
         .assert()
         .success()
         .stdout(expected);
+    // M3 (final review): every other fs fixture cleans up its temp
+    // directory; this one did not, accumulating one directory per
+    // test-binary run.
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Closes review findings I1/I2 on this task: `fs_not_found` and
@@ -5984,6 +6037,25 @@ fn fs_write_then_read_run() {
         .assert()
         .success()
         .stdout(expected);
+
+    // M4 (final review). MEASURED: temporarily hardcoding
+    // `nova_rt_fs_temp_dir` to always create and return
+    // `C:/nova-mutant-tempdir-probe`, ignoring `TMPDIR`/`TMP`/`TEMP` entirely,
+    // still produced byte-identical stdout here -- `write_string` and
+    // `read_to_string` both resolve `temp_dir()` themselves, so the mutant
+    // stayed internally self-consistent. The assertion below is what caught
+    // it: `fs_write_then_read.nova` never deletes what it writes, so
+    // asserting the file exists at exactly the path this harness computed
+    // from its own override -- before this harness's own cleanup removes it
+    // -- pins that `temp_dir()` returned what those env vars said, not merely
+    // *a* writable directory. Reverted after measuring; not one of this
+    // fix wave's three required mutation transcripts, but cheap to check.
+    assert!(
+        path.exists(),
+        "the write should have landed at {} (the path this harness computed \
+         from its own TMPDIR/TMP/TEMP override), not merely somewhere writable",
+        path.display()
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -6146,6 +6218,48 @@ fn fs_read_dir_run() {
         .expect("expected-output fixture exists")
         .replace("\r\n", "\n");
     nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_read_dir.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
+/// allocation) -- closing the other half of I4(b) from the final review.
+///
+/// **Why this fixture is the one that matters most, among the fs fixtures.**
+/// This branch's own GC-rooting unit tests
+/// (`a_stashed_string_is_rooted_until_it_is_taken`,
+/// `stash_overwriting_an_occupied_slot_does_not_leak_the_displaced_root`) use
+/// `gc::root_count`, which reads the root registry directly and never runs a
+/// collection at all -- deliberately, per their own doc comments, because a
+/// real collection inherits the conservative scanner's documented
+/// intermittent over-retention (`docs/adr/0010-conservative-scan-root-test-gating.md`).
+/// That leaves the actual end-to-end property -- a stashed payload survives a
+/// collection that happens between the intrinsic call and the take --
+/// guarded by nothing in this suite before this test. `read_dir` is the
+/// richest fs fixture for exercising it: `stash_array` allocates one
+/// `NovaStr` per entry inside a freshly rooted block, so with a collection
+/// forced on every allocation, each element's string must survive both its
+/// own allocation and every later one before `read_dir`'s Nova wrapper reads
+/// the array back out.
+///
+/// Uses its own `unique_temp_dir` label so this directory never collides with
+/// `fs_read_dir_run`'s, even though `cargo test`'s default parallelism can
+/// run both concurrently in the same process (same pid, different label).
+#[test]
+fn fs_read_dir_under_gc_stress() {
+    let tmp = unique_temp_dir("nova-fs-read-dir-stress");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_read_dir.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
         .arg("run")
         .arg(repo_root().join("tests/runtime/fs_read_dir.nova"))
         .env("TMPDIR", &tmp)
