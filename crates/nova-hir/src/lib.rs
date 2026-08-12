@@ -28,6 +28,14 @@ pub enum Ty {
     Bool,
     Char,
     String,
+    /// An immutable byte buffer.
+    ///
+    /// Structurally identical to [`Ty::String`] -- both are a scanned
+    /// `{len, ptr}` header over a GC leaf buffer -- and semantically distinct:
+    /// only `String` carries a UTF-8 guarantee. Nothing converts between them
+    /// implicitly. Every operation is an intrinsic, so this reaches codegen as
+    /// an opaque pointer and neither backend needs an arm for it.
+    Bytes,
     /// The unit type `()`.
     Unit,
     /// A function type `fn(A, B) -> R`.
@@ -225,6 +233,7 @@ impl Ty {
             Ty::Bool => Some(TyHead::Bool),
             Ty::Char => Some(TyHead::Char),
             Ty::String => Some(TyHead::String),
+            Ty::Bytes => Some(TyHead::Bytes),
             Ty::Sum { def_id, .. } => Some(TyHead::Sum(*def_id)),
             Ty::Record { def_id, .. } => Some(TyHead::Record(*def_id)),
             _ => None,
@@ -310,6 +319,7 @@ pub enum TyHead {
     Bool,
     Char,
     String,
+    Bytes,
     Sum(DefId),
     Record(DefId),
 }
@@ -629,6 +639,7 @@ fn normalize_within(
         | Ty::Bool
         | Ty::Char
         | Ty::String
+        | Ty::Bytes
         | Ty::Unit
         | Ty::Param(_)
         | Ty::Var(_)

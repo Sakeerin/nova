@@ -44,7 +44,7 @@ pub enum MirTy {
     F64,
     /// Boolean (byte-sized).
     I8,
-    /// Opaque pointer (String, sum values, function values).
+    /// Opaque pointer (String, Bytes, sum values, function values).
     Ptr,
     /// No runtime value (unit / diverging results).
     Unit,
@@ -611,6 +611,7 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         hir::Ty::Float => MirTy::F64,
         hir::Ty::Bool => MirTy::I8,
         hir::Ty::String
+        | hir::Ty::Bytes
         | hir::Ty::Fn { .. }
         | hir::Ty::Sum { .. }
         | hir::Ty::Record { .. }
@@ -661,6 +662,12 @@ fn mangle_ty(ty: &hir::Ty) -> String {
         hir::Ty::Bool => "b".to_string(),
         hir::Ty::Char => "c".to_string(),
         hir::Ty::String => "s".to_string(),
+        // Distinct from `String`'s `"s"`: two types mangling to the same
+        // string is the exact miscompile class `d49f896` shipped (see the
+        // defensive `"X"` arm's comment below) -- two monomorphized instances
+        // would collide on one symbol and both dispatch to the first one's
+        // code.
+        hir::Ty::Bytes => "y".to_string(),
         hir::Ty::Unit => "u".to_string(),
         hir::Ty::Never => "n".to_string(),
         hir::Ty::Fn { params, ret } => {

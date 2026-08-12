@@ -39,6 +39,7 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
         Ty::Bool => "Bool".to_string(),
         Ty::Char => "Char".to_string(),
         Ty::String => "String".to_string(),
+        Ty::Bytes => "Bytes".to_string(),
         Ty::Unit => "()".to_string(),
         Ty::Fn { params, ret } => {
             let params = params

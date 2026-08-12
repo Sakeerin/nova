@@ -429,10 +429,15 @@ impl Builtin {
 /// `Unit` is deliberately absent — it is not a nameable type name; unit is
 /// spelled `()`.
 ///
+/// `Bytes` joined later, for the same reason as the five original
+/// primitives: an ordinary nullary entry in `convert_ty`'s table, with no
+/// carve-out of its own like `Future`'s or `Unit`'s above.
+///
 /// This is the list, and both `convert_ty`'s and `qualifier_self_ty`'s
 /// built-in-name tables (`crates/nova-typeck/src/check.rs`) are expected to
 /// agree with it.
-pub const RESERVED_TYPE_NAMES: [&str; 6] = ["Int", "Float", "Bool", "Char", "String", "Future"];
+pub const RESERVED_TYPE_NAMES: [&str; 7] =
+    ["Int", "Float", "Bool", "Char", "String", "Future", "Bytes"];
 
 /// What kind of definition a [`DefId`] refers to.
 #[derive(Debug, Clone)]

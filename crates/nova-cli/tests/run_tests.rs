@@ -6363,3 +6363,28 @@ fn fs_read_dir_under_gc_stress() {
         .stdout(expected);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// === byte-type increment, Task 1: `Bytes` joins `RESERVED_TYPE_NAMES` ===
+
+/// `Bytes` must join `nova_resolver::RESERVED_TYPE_NAMES`, so a user's own
+/// `record Bytes { .. }` is rejected with `E0089` rather than becoming a
+/// silently-unusable declaration -- shadowed by the built-in in every
+/// signature or `impl`, yet still constructible and matchable, which is
+/// exactly the confusing split `RESERVED_TYPE_NAMES`'s own doc explains
+/// reservation exists to prevent.
+///
+/// A checked-in fixture rather than this file's usual temp-dir string for an
+/// `E00xx` test: every earlier pin of the reserved-name mechanism lives in
+/// `nova-typeck`'s own `mod tests` (`check_src` against an inline string), so
+/// this is the first end-to-end, CLI-level confirmation that the declaration
+/// is rejected the same way through the real binary.
+///
+/// `check`, not `run`: the rejection happens at name resolution, long before
+/// anything would execute, and `main` here is empty besides.
+#[test]
+fn bytes_reserved_declaration_is_rejected() {
+    let file = repo_root().join("tests/runtime/bytes_reserved.nova");
+    let assert = nova().arg("check").arg(&file).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("E0089"), "stderr: {stderr}");
+}
