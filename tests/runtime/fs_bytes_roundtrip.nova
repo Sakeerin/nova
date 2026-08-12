@@ -4,8 +4,14 @@ fn main() {
 
 async fn go() {
     let p = "${temp_dir()}/nova_fs_bytes_c47a.bin"
-    // Deliberately NOT valid UTF-8, so this cannot silently be routing through
-    // `String`.
+    // Deliberately NOT valid UTF-8, so a LOSSY `String` conversion anywhere in
+    // the write/read path (e.g. `from_utf8_lossy`, which replaces invalid
+    // sequences with U+FFFD) would corrupt the round-trip. This does not
+    // catch every possible "routes through String" mistake: an unchecked,
+    // purely representational reinterpretation (`Bytes` and `String` share
+    // one `{len, ptr}` layout, and `from_utf8_unchecked` performs no
+    // validation) is byte-identical either way and passes this fixture
+    // regardless -- measured, see the Task 4 report's Mutation 1.
     let payload = bytes_from_ints([0, 255, 10, 254, 65])
     match write(p, payload).await {
         Ok(_) => println("wrote")

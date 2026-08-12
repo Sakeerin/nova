@@ -3,6 +3,11 @@
 // Compiled as an implicit module and glob-imported into every user module. Error
 // types live in `std/io`.
 //
+// Paths are `String` throughout. Contents are not, uniformly: `read`/`write`
+// take and return `Bytes` (`std/bytes`), so arbitrary file contents need no
+// UTF-8 round-trip, while `read_to_string`/`write_string` stay on `String`
+// for the common text case.
+//
 // Every function that touches the filesystem is an `async fn` per
 // `nova-spec/20-STDLIB.md` §5, but **none of them suspends**: the operation
 // runs synchronously inside the poll, because there is no I/O poller yet. The

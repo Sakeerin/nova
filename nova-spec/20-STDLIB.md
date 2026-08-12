@@ -154,6 +154,18 @@ pub type FormatPart = | Lit(String) | Val(String)
 ```nova
 module std.io
 
+// AMENDED 2026-08-12 (branch `byte-type`): the `&mut [u8]`/`&[u8]` buffer
+// parameters below are buffer-FILLING, which needs references -- `&Int` is
+// `E0900`, measured, and Nova does not have them. This is not merely
+// unimplemented: the byte-type design spec settles Nova's byte I/O as
+// buffer-RETURNING instead, so references are off this roadmap permanently
+// (docs/superpowers/specs/2026-08-12-byte-type-design.md §1, §6 -- nothing
+// in the remaining increments needs them). `Bytes` (a scanned `{len, ptr}`
+// header over a GC leaf buffer, `std/bytes`) is the concrete buffer type:
+// `std/fs`'s `read`/`write` below in §5 already ship against it --
+// `Result<Bytes, IoError>` and `content: Bytes`, not the `[u8]` shown there
+// -- and `open`/`File`/these two traits will too, once built. See
+// docs/adr/0011-io-error-kinds.md for the narrowed §5 deviation this leaves.
 pub trait Read {
     async fn read(self, buf: &mut [u8]) -> Result<Int, IoError>
     async fn read_to_end(self, buf: &mut [u8]) -> Result<Int, IoError> { /* default */ }
