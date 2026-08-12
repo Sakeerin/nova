@@ -127,8 +127,17 @@ pub unsafe extern "C" fn nova_rt_bytes_at(b: *const NovaStr, i: i64) -> i64 {
 
 /// The bytes in `start..end`, clamped to the buffer and to `start <= end`.
 ///
-/// Clamps rather than aborting because `std/strings`'s `slice` clamps too, and
-/// a byte type that panicked where the string type saturates would be a trap.
+/// **Deliberately diverges from `String::slice`, which panics on an
+/// out-of-range bound (`std/strings/lib.nova`) rather than clamping.** A
+/// `Bytes` length often comes from disk (`fs::read`'s result, say), not from
+/// a caller who is expected to already know it the way a codepoint index
+/// is; aborting the whole process on a bound derived from external input is
+/// a worse failure mode than the same defect in a string index a caller
+/// chose by hand. The clamp below is two saturating `.max`/`.min` integer
+/// comparisons, which is what keeps this from ever aborting, unlike a bounds
+/// check that panics. This is a recorded, accepted divergence, not an
+/// oversight — see the design spec's dated note — and it does not imply
+/// `String::slice` will ever clamp too.
 ///
 /// # Safety
 /// `b` must point to a live `NovaStr`.
@@ -358,6 +367,42 @@ mod tests {
             assert_eq!(*words, 2);
             assert_eq!(*words.add(1), 7);
             assert_eq!(*words.add(2), 8);
+        }
+    }
+
+    /// Pins this module's own panic-freedom contract (module doc comment
+    /// above: "nothing here may panic") mechanically, the way
+    /// `fs::tests::no_filesystem_intrinsic_registers_a_park` pins `std/fs`'s
+    /// "never parks" contract -- final review's recommendation (D11), added
+    /// after this exact module shipped a real native, non-unwinding panic
+    /// caught only by mutation testing, in code reachable from a generated
+    /// poll boundary with no landing pad to unwind through.
+    ///
+    /// **Follows `fs.rs`'s structure exactly, including why the split point
+    /// is the test module marker and not this function's own body.** This
+    /// test's assertion message below names `unwrap()`, `.expect(`, `panic!`,
+    /// `format!` and `RefCell` in prose, so splitting on this function alone
+    /// would leave those words in the scanned half and the test could never
+    /// pass. Splitting at `#[cfg(test)]` instead excludes every test (and its
+    /// comments) while still scanning all of this file's actual production
+    /// code -- which is why this test, like its sibling, must live inside
+    /// this module and not be hoisted out of it.
+    ///
+    /// All five needles are currently absent from the production half, so
+    /// this passes today; it auto-covers every future intrinsic added above
+    /// without needing a recount, the same durability `fs.rs`'s version has
+    /// for `stage_park`.
+    #[test]
+    fn no_bytes_intrinsic_can_panic() {
+        let source = include_str!("bytes.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        for needle in ["unwrap()", ".expect(", "panic!", "format!", "RefCell"] {
+            assert!(
+                !code.contains(needle),
+                "a std/bytes intrinsic must not panic: `{needle}` found in this \
+                 file's production code, which is reachable from a generated poll \
+                 boundary with no landing pad to unwind through"
+            );
         }
     }
 }

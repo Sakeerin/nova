@@ -112,6 +112,14 @@ type.
 methods on 5 intrinsics. `bytes_at` is an intrinsic rather than `to_ints()[i]` because the latter is
 O(n) per access.
 
+**Corrected 2026-08-12 (final review): "every bounds check" overclaimed.** `index_of`/`contains` are
+indeed Nova-level, over `to_ints()`, as stated above. But `slice`'s clamp, `bytes_at`'s intrinsic-level
+range guard, and `from_ints`'s `0..=255` guard are all Rust-level (`crates/nova-runtime/src/bytes.rs`).
+Only `byte_at`'s own Nova-level check (`std/bytes/lib.nova`) tests a bound directly in Nova, and it
+tests `self.len()`, not `to_ints()` — paying for the O(n) conversion just to bounds-check would defeat
+the reason `bytes_at` is an intrinsic in the first place. `CHANGELOG.md` and `crates/nova-hir/src/
+lib.rs` both inherited this overclaim from here; all three are corrected together.
+
 **`bytes_is_utf8` and `bytes_to_string_unchecked` are a deliberate pair**: together they let
 `to_string` be a Nova-level `if`, avoiding a status-code protocol for what is one boolean.
 
@@ -150,6 +158,25 @@ debt for no benefit.
 - **`fs_invalid_data` stops needing its Rust-side workaround.** That fixture currently has the harness
   write raw non-UTF-8 bytes because Nova could not; with `fs::write` and
   `bytes_from_ints([0xFF, 0xFE])` it becomes self-contained Nova. Convert it.
+
+**Recorded debt (final review, 2026-08-12):**
+
+- **`Bytes::slice` clamps out-of-range bounds; `String::slice` panics on them
+  (`std/strings/lib.nova:135-143`).** A byte type and a string type disagreeing on
+  out-of-range index behavior is an inconsistency in the language's own indexing
+  conventions. The divergence is deliberate and stays — the clamp is two saturating
+  `.max`/`.min` integer comparisons, so it cannot abort the way a bounds check that
+  panics can, which matters more for a `Bytes` length that often comes from disk
+  than for a codepoint index a caller is expected to know — but the inconsistency
+  itself is unresolved debt, not a settled design. Revisit in increment 3 alongside
+  `Read`/`Write`.
+- **`Bytes` is not `Hash`/`Display`/`Clone`/`Ord`.** `Map<Bytes, V>` fails with the
+  bound error pointing into `<std/collections>` rather than the user's file. Out of
+  this spec's scope; queued here rather than implemented.
+- **No `nova build` (linked-binary) path exercises `fs_read`/`fs_write`/`fs_take_bytes`
+  directly.** `bytes_api_build_standalone` covers all ten byte intrinsics and
+  `fs_not_found_build_standalone` sets the fs-boundary precedent under `nova build`,
+  so the risk is assessed as low; queued here rather than fixed this wave.
 
 ## 7. Testing
 

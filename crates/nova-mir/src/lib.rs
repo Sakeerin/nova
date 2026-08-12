@@ -754,7 +754,7 @@ fn mangle_ty(ty: &hir::Ty) -> String {
         }
         hir::Ty::Array(elem) => format!("A{}E", mangle_ty(elem)),
         // `U` is not otherwise used as a leading letter here (nullary:
-        // i/f/b/c/s/u/n; compound: F/S/R/A above), and the mangling must be
+        // i/f/b/c/s/y/u/n; compound: F/S/R/A above), and the mangling must be
         // output-dependent like `Array`'s `A{elem}E` rather than a shared
         // placeholder — see `mangle_ty_distinguishes_futures_by_output_type`.
         hir::Ty::Future(out) => format!("U{}E", mangle_ty(out)),

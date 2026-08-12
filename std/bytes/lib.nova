@@ -38,8 +38,12 @@ impl Bytes {
         Some(bytes_at(self, i))
     }
 
-    // The bytes in `start..end`, clamped to this buffer, as `String::slice`
-    // clamps.
+    // The bytes in `start..end`, clamped to this buffer. Deliberately NOT
+    // what `String::slice` does -- that one panics on an out-of-range bound.
+    // A `Bytes` length often comes from disk rather than from a caller who
+    // already knows it, so clamping (rather than aborting the process) is
+    // the better failure mode here. Recorded, accepted divergence -- see the
+    // design spec's dated note -- not a claim that `String::slice` agrees.
     pub fn slice(self, start: Int, end: Int) -> Bytes { bytes_slice(self, start, end) }
 
     // These bytes followed by `other`'s.

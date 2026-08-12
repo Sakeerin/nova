@@ -12,6 +12,7 @@ std/core         primitives, Option, Result, traits
 std/fmt          formatting (Display, Debug, write)
 std/io           I/O abstractions
 std/fs           filesystem
+std/bytes        immutable byte buffers
 std/net          TCP/UDP/Unix sockets
 std/http         HTTP client + server
 std/json         JSON parse/serialize (codec-based)
@@ -26,6 +27,11 @@ std/process      spawn, env, args
 std/sync         Mutex, RwLock, channel, atomic
 std/task         async runtime primitives
 ```
+
+**AMENDED 2026-08-12 (branch `byte-type`):** `std/bytes` shipped as a `STD_MODULES` entry this branch
+(`docs/superpowers/specs/2026-08-12-byte-type-design.md`) but this index still listed only the six
+prior entries — added above. Like `std/strings`, `std/regex`, `std/process` and `std/net`, it has no
+dedicated numbered section below yet.
 
 ---
 

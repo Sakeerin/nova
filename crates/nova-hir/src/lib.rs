@@ -33,8 +33,12 @@ pub enum Ty {
     /// Structurally identical to [`Ty::String`] -- both are a scanned
     /// `{len, ptr}` header over a GC leaf buffer -- and semantically distinct:
     /// only `String` carries a UTF-8 guarantee. Nothing converts between them
-    /// implicitly. Every operation is an intrinsic, so this reaches codegen as
-    /// an opaque pointer and neither backend needs an arm for it.
+    /// implicitly. This reaches codegen as the same opaque `MirTy::Ptr` every
+    /// other heap pointer already lowers to, so neither backend needs an arm
+    /// for it -- not because every operation on it is an intrinsic
+    /// (`index_of`/`contains` in `std/bytes/lib.nova` are pure Nova control
+    /// flow), but because codegen dispatches on MIR types, and `Ptr` is not
+    /// new.
     Bytes,
     /// The unit type `()`.
     Unit,

@@ -885,6 +885,22 @@ impl<'a> Lowerer<'a> {
         let r = self.lower_expr(rhs);
 
         // String equality is a runtime call, not a machine instruction.
+        //
+        // **`Ty::Bytes` deliberately has no arm here.** `binary_result_ty`
+        // (`nova-typeck/src/check.rs`) has no `Ty::Bytes` case in its
+        // `Eq | Ne` arm either, so `b1 == b2` is `E0013` today, pinned by
+        // `bytes_eq_bytes_is_e0013_not_a_silent_pointer_compare`
+        // (`nova-typeck/src/check.rs`) — `Bytes` equality is reached only
+        // through `impl Eq for Bytes`'s `eq` method
+        // (`Builtin::BytesEq`'s doc comment, `nova-resolver`). If a
+        // `Ty::Bytes` arm is ever added to that typeck match — the obvious
+        // symmetry with `Ty::String` — this `matches!` must gain a matching
+        // `Ty::Bytes` arm too, or `==` silently falls through to the generic
+        // path below: `operand_class` maps `Ty::Bytes` to
+        // `OperandClass::Int`, so `Stmt::Bin { op: Eq, class: Int, .. }` runs
+        // on the two `MirTy::Ptr` temps directly — a pointer-identity
+        // comparison, not a byte-for-byte one, and silently wrong rather
+        // than a compile error.
         if matches!(lhs.ty, Ty::String) && matches!(op, hir::BinOp::Eq | hir::BinOp::Ne) {
             let eq = self.new_temp(MirTy::I8);
             self.push(Stmt::CallRuntime {

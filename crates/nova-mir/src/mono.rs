@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn mangle_ty_gives_bytes_a_distinct_string_from_every_other_nullary_type() {
+    fn mangle_ty_gives_bytes_a_distinct_string_from_every_nullary_type_with_its_own_arm() {
         // `mangle_ty` mapping two types to the same string has already shipped
         // as a miscompile on this project (see
         // `mangle_ty_distinguishes_futures_by_output_type` above): two

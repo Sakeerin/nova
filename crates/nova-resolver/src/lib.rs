@@ -364,8 +364,13 @@ builtins! {
     BytesAt,
     /// `bytes_slice(b: Bytes, start: Int, end: Int) -> Bytes` — the bytes in
     /// `start..end`, clamped to the buffer and to `start <= end`. Backs
-    /// `std/bytes`'s `Bytes::slice`. Clamps rather than aborting, matching
-    /// `std/strings`'s `String::slice`. Std-only.
+    /// `std/bytes`'s `Bytes::slice`. Clamps rather than aborting — a
+    /// deliberate divergence from `std/strings`'s `String::slice`, which
+    /// panics on an out-of-range bound; a `Bytes` length often comes from
+    /// disk rather than from a caller who already knows it, so clamping is
+    /// the better failure mode here. Recorded, accepted divergence — see the
+    /// design spec's dated note — not agreement with `String::slice`.
+    /// Std-only.
     BytesSlice,
     /// `bytes_concat(a: Bytes, b: Bytes) -> Bytes` — `a`'s bytes followed by
     /// `b`'s. Backs `std/bytes`'s `Bytes::concat`. Std-only.
