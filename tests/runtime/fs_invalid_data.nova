@@ -3,10 +3,15 @@ fn main() {
 }
 
 async fn go() {
-    match read_to_string("invalid_utf8.bin").await {
+    let p = "${temp_dir()}/nova_fs_invalid_data_e2b6.bin"
+    // Written from Nova itself now that `write` accepts `Bytes`: 0xFF is never
+    // a valid UTF-8 lead byte on its own, so this is non-UTF-8 by construction.
+    let _ = write(p, bytes_from_ints([0xFF, 0xFE])).await
+    match read_to_string(p).await {
         Ok(_) => println("unexpectedly read it")
         Err(e) => println(kind_name(e.kind))
     }
+    let _ = remove_file(p).await
 }
 
 fn kind_name(k: IoErrorKind) -> String {

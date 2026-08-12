@@ -302,6 +302,19 @@ builtins! {
     /// costs one syscall instead of two and the two answers cannot disagree.
     /// Backs `std/fs`'s `read_dir`. Std-only.
     FsKind,
+    /// `fs_read(path: String) -> Int` — read the path's raw bytes. `0` on
+    /// success, with the contents waiting in [`Builtin::FsTakeBytes`];
+    /// otherwise an `IoErrorKind` status code (`crates/nova-runtime/src/fs.rs`).
+    /// Unlike [`Builtin::FsReadToString`] this cannot report `InvalidData`:
+    /// there is no encoding to violate. Backs `std/fs`'s `read`. Std-only.
+    FsRead,
+    /// `fs_take_bytes() -> Bytes` — take the payload staged by a successful
+    /// [`Builtin::FsRead`]. Backs `std/fs`'s `read`. Std-only.
+    FsTakeBytes,
+    /// `fs_write(path: String, content: Bytes) -> Int` — write the bytes to
+    /// the path, truncating an existing file. Status code, as
+    /// [`Builtin::FsReadToString`]. Backs `std/fs`'s `write`. Std-only.
+    FsWrite,
     /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
     /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
     /// Nova cannot read a `Bytes` value's own header (no length, indexing or
@@ -422,6 +435,9 @@ impl Builtin {
             Builtin::FsReadDir => "fs_read_dir",
             Builtin::FsTakeStringArray => "fs_take_string_array",
             Builtin::FsKind => "fs_kind",
+            Builtin::FsRead => "fs_read",
+            Builtin::FsTakeBytes => "fs_take_bytes",
+            Builtin::FsWrite => "fs_write",
             Builtin::BytesLen => "bytes_len",
             // Deliberately not "bytes_from_string" — see this variant's doc
             // comment for why that would collide with `std/bytes`'s own
@@ -465,7 +481,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 40] = [
+    pub const STD_ONLY: [Builtin; 43] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -496,6 +512,9 @@ impl Builtin {
         Builtin::FsReadDir,
         Builtin::FsTakeStringArray,
         Builtin::FsKind,
+        Builtin::FsRead,
+        Builtin::FsTakeBytes,
+        Builtin::FsWrite,
         Builtin::BytesLen,
         Builtin::BytesFromString,
         Builtin::BytesIsUtf8,

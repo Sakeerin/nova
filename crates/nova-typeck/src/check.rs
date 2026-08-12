@@ -3936,6 +3936,9 @@ impl<'a> Checker<'a> {
             | Builtin::FsReadDir
             | Builtin::FsTakeStringArray
             | Builtin::FsKind
+            | Builtin::FsRead
+            | Builtin::FsTakeBytes
+            | Builtin::FsWrite
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7156,6 +7159,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsReadDir => (vec![Ty::String], Ty::Int),
         Builtin::FsTakeStringArray => (vec![], Ty::Array(Box::new(Ty::String))),
         Builtin::FsKind => (vec![Ty::String], Ty::Int),
+        Builtin::FsRead => (vec![Ty::String], Ty::Int),
+        Builtin::FsTakeBytes => (vec![], Ty::Bytes),
+        Builtin::FsWrite => (vec![Ty::String, Ty::Bytes], Ty::Int),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15101,6 +15107,18 @@ mod tests {
                 Builtin::FsKind => (
                     (vec![Ty::String], Ty::Int),
                     "`fs_kind(path)` in `std/fs`'s `read_dir`",
+                ),
+                Builtin::FsRead => (
+                    (vec![Ty::String], Ty::Int),
+                    "`fs_read(path)` in `std/fs`'s `read`",
+                ),
+                Builtin::FsTakeBytes => (
+                    (vec![], Ty::Bytes),
+                    "`fs_take_bytes()` in `std/fs`'s `read`",
+                ),
+                Builtin::FsWrite => (
+                    (vec![Ty::String, Ty::Bytes], Ty::Int),
+                    "`fs_write(path, content)` in `std/fs`'s `write`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),

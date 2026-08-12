@@ -6046,36 +6046,35 @@ fn fs_permission_denied_run() {
 }
 
 /// Non-UTF-8 file contents report `InvalidData`, not a panic and not lossy
-/// replacement. `write_string` only accepts a `String`, so the invalid bytes
-/// can only be placed on disk from Rust, never from `std/fs` itself -- this
-/// writes them directly before invoking the fixture.
+/// replacement.
 ///
-/// The directory folds in this process's id so two runs of this test binary
-/// (or two concurrent `cargo test` invocations) never share a path -- unlike
-/// `write_test_project`'s fixed-name directory, which does and is a known,
-/// accepted latent race in this file; new fixtures should not copy it.
+/// **Before the byte-type increment's Task 4, `write_string` only accepted a
+/// `String`, so the invalid bytes could only be placed on disk from Rust** --
+/// this harness wrote them directly before invoking the fixture, with its own
+/// process-id-namespaced directory and `.current_dir` (since the fixture then
+/// read a bare relative filename). Task 4's `write` accepts `Bytes`, so the
+/// fixture now writes its own non-UTF-8 payload via
+/// `write(p, bytes_from_ints([0xFF, 0xFE])).await`, and this harness shrinks
+/// to the same `unique_temp_dir` + `TMPDIR`/`TMP`/`TEMP` shape every other
+/// `fs_` fixture already uses -- nothing filesystem-specific to this one test
+/// remains here. See the task report for the exact before/after.
 #[test]
 fn fs_invalid_data_run() {
-    let dir = std::env::temp_dir().join(format!("nova-fs-invalid-data-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir for the invalid-UTF-8 fixture");
-    std::fs::write(dir.join("invalid_utf8.bin"), [0xFFu8, 0xFE])
-        .expect("write invalid UTF-8 bytes");
-
+    let tmp = unique_temp_dir("nova-fs-invalid-data");
     let expected =
         std::fs::read_to_string(repo_root().join("tests/runtime/fs_invalid_data.stdout"))
             .expect("expected-output fixture exists")
             .replace("\r\n", "\n");
     nova()
-        .current_dir(&dir)
         .arg("run")
         .arg(repo_root().join("tests/runtime/fs_invalid_data.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
         .assert()
         .success()
         .stdout(expected);
-    // M3 (final review): every other fs fixture cleans up its temp
-    // directory; this one did not, accumulating one directory per
-    // test-binary run.
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 /// Closes review findings I1/I2 on this task: `fs_not_found` and
@@ -6546,4 +6545,89 @@ fn bytes_from_ints_rejects_a_value_below_the_range() {
         "stderr was {stderr:?}"
     );
     assert!(!stdout.contains('1'), "stdout was {stdout:?}");
+}
+
+// === byte-type increment, Task 4: byte-based fs::read and fs::write ===
+
+/// `write`/`read` round-trip a non-UTF-8 payload (bytes `0`, `255`, `10`,
+/// `254`, `65`) through a real file: `len`, `eq` against the original
+/// payload, and `to_string().is_none()` (this buffer is not valid UTF-8), so
+/// a version that routed through `String` anywhere in the path -- write or
+/// read -- cannot pass. See the task report's mutation transcripts for the
+/// specific implementations this fixture was checked against.
+#[test]
+fn fs_bytes_roundtrip_run() {
+    let tmp = unique_temp_dir("nova-fs-bytes-roundtrip");
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_bytes_roundtrip.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_bytes_roundtrip.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
+/// allocation). `nova_rt_fs_read` stashes a freshly allocated `Bytes` header
+/// and leaf buffer into the shared `BUFFER_SLOT`, GC-rooting it for exactly
+/// the span between the intrinsic call and the wrapper's own read of that slot
+/// (`crates/nova-runtime/src/fs.rs`) -- the same rooting contract
+/// `fs_read_dir_under_gc_stress` exists to exercise for `stash_array`, applied
+/// here to the payload slot's newest producer. Its own label keeps this
+/// directory from colliding with `fs_bytes_roundtrip_run`'s, even though
+/// `cargo test`'s default parallelism can run both concurrently in the same
+/// process.
+#[test]
+fn fs_bytes_roundtrip_under_gc_stress() {
+    let tmp = unique_temp_dir("nova-fs-bytes-roundtrip-stress");
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_bytes_roundtrip.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_bytes_roundtrip.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `read`'s and `write`'s `Err` arms, neither exercised by
+/// `fs_bytes_roundtrip_run` (which only ever takes the success path for
+/// both). **Proven by mutation, not argued**: deleting the `if status == 0`
+/// check from either wrapper in `std/fs/lib.nova` -- so it unconditionally
+/// returns `Ok`, discarding a real failure status -- left every target in
+/// this workspace passing, `fs_bytes_roundtrip_run` included, the identical
+/// shape of gap `fs_write_then_read_run`'s own doc comment records for
+/// `write_string`. See the task report for both transcripts.
+///
+/// Needs no `unique_temp_dir`: like `fs_not_found_run`, neither branch ever
+/// creates anything on disk (the whole point is that both fail before
+/// touching the filesystem), so there is nothing to namespace or clean up and
+/// a bare relative path cannot collide with a concurrent run the way a
+/// created file or directory could.
+#[test]
+fn fs_bytes_errors_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fs_bytes_errors.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_bytes_errors.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
 }
