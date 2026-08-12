@@ -231,9 +231,11 @@ thread_local! {
 
 /// The task currently being polled, or `None` outside a poll.
 ///
-/// `poll_one` sets this for exactly the duration of the `poll` call
-/// (`task.rs:413-425`), so a runtime intrinsic reached from generated code can
-/// key per-task storage on it. `fs.rs` is the first consumer.
+/// `poll_one` sets this to `Some(id)` immediately before calling that task's
+/// poll function, and back to `None` immediately after it returns -- scoped
+/// to exactly the duration of that one `poll` call -- so a runtime intrinsic
+/// reached from generated code can key per-task storage on it. `fs.rs` is the
+/// first consumer.
 pub(crate) fn current_task() -> Option<i64> {
     CURRENT.with(|c| c.get())
 }
