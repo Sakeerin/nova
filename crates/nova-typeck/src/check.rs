@@ -15778,10 +15778,12 @@ mod tests {
     }
 
     #[test]
-    fn bytes_is_a_nameable_type_in_every_position() {
+    fn bytes_is_nameable_in_representative_positions() {
         // `Bytes` has no operations yet, so this only asserts it converts in a
         // signature, a `let` annotation, a field type and a generic argument --
-        // every position `convert_ty` runs. A value cannot be constructed
+        // one representative per broad category, not an exhaustive
+        // enumeration of `convert_ty`'s call sites (there are far more than
+        // these four). A value cannot be constructed
         // until Task 2, which is why `main`'s `let` initializes with
         // `panic(...)` rather than a real `Bytes` value: `panic` diverges
         // (`Ty::Never`), and `Never` unifies with anything, so the annotation

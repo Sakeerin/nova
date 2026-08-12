@@ -88,7 +88,7 @@ directory. (Note the shape matters: reading the temp directory *itself* gives
 `NotFound`, because Windows resolves a trailing-backslash-only path before
 checking access; the fixture reads a plain created subdirectory.) The remaining
 four — `Interrupted`, `TimedOut`, `ConnectionRefused`, `Other` — are not things
-`std/fs`'s eight functions can provoke portably in a test, so `fs_io_types.nova` instead pins
+`std/fs`'s functions can provoke portably in a test, so `fs_io_types.nova` instead pins
 the *numbering* directly — calling `io_error_kind_of(1)` through
 `io_error_kind_of(7)`, the seven codes that map to a specific variant, plus
 `io_error_kind_of(0)` (the success status, not itself a kind) and
@@ -154,7 +154,7 @@ directory and must not hardcode one (a hardcoded path is exactly the
 increment's fixtures, though not `fs_not_found.nova`, `fs_io_types.nova` or
 `eprint_family.nova`, none of which touch a real path at all. `temp_dir` wraps
 `std::env::temp_dir()` and is a **plain `fn`, not
-`async`** — unlike its seven siblings, it only queries the environment and
+`async`** — unlike its siblings, it only queries the environment and
 touches no filesystem, so there is nothing in it that could ever suspend, and
 no future reason to change its signature when a poller lands either. §5 does
 not list it. `nova-spec/20-STDLIB.md` is not amended for this one: unlike
@@ -164,15 +164,19 @@ sentence for `temp_dir` to contradict — only an omission, recorded here.
 
 ## Two accepted limitations
 
-### These eight `async fn`s never suspend
+### These `async fn`s never suspend
 
-Every function above is `async fn` per §5's signatures, but each runs its
-filesystem operation synchronously inside the first poll: there is no I/O
-poller yet, so there is nothing to suspend on.
+Every `async fn` `std/fs` exposes runs its filesystem operation
+synchronously inside the first poll: there is no I/O poller yet, so there is
+nothing to suspend on.
 `no_filesystem_intrinsic_registers_a_park` (`crates/nova-runtime/src/fs.rs`)
 pins this at its source by asserting that `fs.rs`'s own production code
 contains no `stage_park` call — the only way a `std/fs` intrinsic could reach
-the executor's park set at all.
+the executor's park set at all, a check that scans everything in the file
+before its own `#[cfg(test)] mod tests` block (excluding that block because
+the test's own doc comment names `stage_park` in prose) and so covers
+whichever `async fn`s `std/fs` exposes without needing a recount as more are
+added.
 
 The signature is what matters for forward compatibility: it does not change
 when a real poller lands, so no call site written against these functions
@@ -287,8 +291,8 @@ other direction.
 - `crates/nova-runtime/src/fs.rs`: the status constants, `fail`, and
   `no_filesystem_intrinsic_registers_a_park`
 - `std/io/lib.nova`: `IoError`, `IoErrorKind`, `io_error_kind_of`
-- `std/fs/lib.nova`: the ten wrappers (the eight from this increment, plus
-  `read`/`write` from the 2026-08-12 amendment above), `DirEntry`, `temp_dir`
+- `std/fs/lib.nova`: the wrappers (including `read`/`write` from the
+  2026-08-12 amendment above), `DirEntry`, `temp_dir`
 - Related: `docs/adr/0009-async-execution-model.md` §1 (the cooperative-
   scheduling hazard this increment's never-suspends property is a new instance
   of; amended in place by this ADR), `docs/adr/0004-stdlib-compile-model.md`
