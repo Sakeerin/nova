@@ -6,21 +6,26 @@
 //! them directly; for `nova run` they are registered as JIT symbols via
 //! [`symbols`].
 //!
-//! **Memory:** heap values (records, sums, arrays, closures, and strings) are
-//! managed by a conservative mark-and-sweep garbage collector — see
-//! [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`. All heap allocation
-//! routes through [`gc::alloc`], which reclaims unreachable objects.
+//! **Memory:** heap values (records, sums, arrays, closures, strings, and
+//! byte buffers) are managed by a conservative mark-and-sweep garbage
+//! collector — see [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`.
+//! All heap allocation routes through [`gc::alloc`], which reclaims
+//! unreachable objects.
 
 /// Byte-buffer intrinsics for `std/bytes`. `pub`, not private, for the same
 /// reason as [`fs`]: its own doc comment explains the boundary it implements
 /// (one representation, shared with `NovaStr`, distinguished only by
-/// `hir::Ty`), and Task 3/4 add intrinsics beside these the same way this
-/// crate's other modules build on `task`.
+/// `hir::Ty`). Branch `byte-type`'s own Task 3
+/// (`docs/superpowers/plans/2026-08-12-byte-type.md`) added the rest of the
+/// byte surface beside this module's first four intrinsics, the same way
+/// this crate's other modules build on `task`.
 pub mod bytes;
 /// Filesystem intrinsics for `std/fs`. `pub`, not private: its own doc
 /// comment explains the boundary it implements; nothing about that requires
-/// hiding the module itself, and Task 3/4 build on it the same way this
-/// crate's other modules build on `task`.
+/// hiding the module itself. Branch `std-fs-strings`'s Task 3 and Task 4
+/// (`docs/superpowers/plans/2026-08-11-std-fs-strings.md`) built most of this
+/// module, and branch `byte-type`'s own Task 4 later added `read`/`write`
+/// beside them, the same way this crate's other modules build on `task`.
 pub mod fs;
 mod gc;
 /// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,

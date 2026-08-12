@@ -46,11 +46,19 @@ use std::thread::LocalKey;
 /// `InvalidData` (`fs_invalid_data.nova`), and `PermissionDenied` on Windows
 /// only (`fs_permission_denied.nova`, reading a directory as a file — see
 /// that test's `#[cfg(windows)]` gate). `Interrupted`, `TimedOut` and
-/// `ConnectionRefused` are not reachable from `std/fs`'s eight functions at
-/// all, portably or otherwise, so no fixture can pin them. The `_ => OTHER`
-/// fallback *is* reachable (e.g. `read_dir` on a plain file returns it), but
-/// nothing exercises it today. See `docs/adr/0011-io-error-kinds.md`, which
-/// states this split correctly and predates this correction.
+/// `ConnectionRefused` are not reachable from `std/fs`'s `async fn`s at all,
+/// portably or otherwise, so no fixture can pin them. **Reasoned, not
+/// measured, for `read`/`write` (`byte-type` branch):** both route through
+/// this same `fail` function exactly as `read_to_string`/`write_string` do,
+/// over `std::fs::read`/`std::fs::write` rather than
+/// `std::fs::read_to_string`/`std::fs::write` — reading or writing raw bytes
+/// instead of UTF-8 text opens no path to a network- or signal-flavoured
+/// `ErrorKind` that plain-text local I/O did not already have, so the same
+/// unreachability is expected to hold, not separately provoked. The
+/// `_ => OTHER` fallback *is* reachable (e.g. `read_dir` on a plain file
+/// returns it), but nothing exercises it today. See
+/// `docs/adr/0011-io-error-kinds.md`, which states this split correctly and
+/// predates this correction.
 pub const OK: i64 = 0;
 pub const NOT_FOUND: i64 = 1;
 pub const PERMISSION_DENIED: i64 = 2;
@@ -67,14 +75,16 @@ thread_local! {
     ///
     /// **Shared by `String` and `Bytes` payloads, not one slot each.** The
     /// two types have the identical `{len, ptr}` representation (see
-    /// `crate::bytes`'s module doc comment), so a second slot would be a
-    /// second copy of storage for a distinction that is already fully carried
-    /// by which *builtin* stashed into it and which one reads it back
-    /// (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string` treat the
-    /// payload as UTF-8; `nova_rt_fs_read`/`nova_rt_fs_take_bytes` do not
-    /// interpret it at all) — deepening the per-thread slot protocol with a
-    /// third slot for no representational reason is exactly the kind of
-    /// avoidable debt this module's own boundary design exists to prevent.
+    /// `crate::bytes`'s module doc comment), so a dedicated `Bytes` slot
+    /// would be a fourth copy of storage in this module — alongside this
+    /// one, `ARRAY_SLOT` and `MESSAGE_SLOT` below — for a distinction that is
+    /// already fully carried by which *builtin* stashed into it and which
+    /// one reads it back (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string`
+    /// treat the payload as UTF-8; `nova_rt_fs_read`/`nova_rt_fs_take_bytes`
+    /// do not interpret it at all) — deepening the per-thread slot protocol
+    /// with a fourth slot for no representational reason is exactly the kind
+    /// of avoidable debt this module's own boundary design exists to
+    /// prevent.
     static BUFFER_SLOT: Cell<usize> = const { Cell::new(0) };
     /// A GC-rooted array block awaiting `nova_rt_fs_take_string_array`, or 0.
     ///

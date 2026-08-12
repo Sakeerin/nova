@@ -2,6 +2,7 @@
 not utf8
 255
 true
+true
 hi
 hi!
 true
@@ -10,4 +11,6 @@ true
 false
 1
 0
+0
+true
 false

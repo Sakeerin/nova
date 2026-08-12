@@ -15697,7 +15697,9 @@ mod tests {
 
     #[test]
     fn declaring_a_type_named_for_a_builtin_is_rejected() {
-        // All six names, both declaration forms. `convert_ty` resolves the name
+        // Every name in `RESERVED_TYPE_NAMES`, in both declaration forms --
+        // the loop below iterates the array itself, so this cannot go stale
+        // as the table grows. `convert_ty` resolves the name
         // to the built-in, or to a shadowing generic parameter, wherever it
         // runs -- never to a declaration under this name -- so a type declared
         // under one of these names could never be referred to in a type
@@ -15719,8 +15721,9 @@ mod tests {
             ] {
                 let r = check_src(&src);
                 // Exactly one diagnostic, not merely "E0089 is present somewhere":
-                // skip-not-register means none of these twelve declarations should
-                // ever cascade, and `.find()` alone would not notice if one did.
+                // skip-not-register means none of these declarations -- every
+                // reserved name, in both declaration forms -- should ever cascade,
+                // and `.find()` alone would not notice if one did.
                 assert_eq!(
                     r.diagnostics.len(),
                     1,
@@ -15780,7 +15783,7 @@ mod tests {
     #[test]
     fn bytes_is_nameable_in_representative_positions() {
         // This test asserts only that `Bytes` converts in a signature, a
-        // `let` annotation, a field type and a generic argument -- one
+        // `let` annotation, a field type and an array element type -- one
         // representative per broad category, not an exhaustive enumeration
         // of `convert_ty`'s call sites (there are far more than these
         // four). `main`'s `let` initializes with `panic(...)` rather than a
@@ -15800,6 +15803,39 @@ mod tests {
         assert!(
             r.diagnostics.is_empty(),
             "`Bytes` must convert in each representative type position, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| (&d.code, &d.message))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn bytes_eq_bytes_is_e0013_not_a_silent_pointer_compare() {
+        // Pins the decision recorded in `Builtin::BytesEq`'s doc comment
+        // (`nova-resolver`): `Ty::Bytes` is deliberately absent from
+        // `binary_result_ty`'s `Eq | Ne` arm, so `b1 == b2` does not type
+        // check today -- `Bytes` equality is reached only through `impl Eq
+        // for Bytes`'s `eq` method. This is not a hypothetical seam: if
+        // `Ty::Bytes` is ever added to that arm (the obvious symmetry with
+        // `Ty::String`), `nova_mir::lower::lower_binary`'s `matches!(lhs.ty,
+        // Ty::String)` guard (`lower.rs`) would not also match `Ty::Bytes`,
+        // so `==` would silently fall through to a pointer-identity
+        // comparison on the two `MirTy::Ptr` temps instead of a
+        // byte-for-byte one -- `bytes_from_string("x") ==
+        // bytes_from_string("x")` would silently become `false`. `Ty::Array`/
+        // `Record`/`Sum` share this same latent exposure and are unchanged;
+        // `Bytes` is the member under active pressure to grow a `==` arm,
+        // being the only non-primitive `STD_MODULES` type shipping its own
+        // `impl Eq`. This test is what would catch the typeck half of that
+        // regressing; `lower.rs`'s own comment beside the `matches!` names
+        // the MIR half that would also need to change.
+        let r = check_src(
+            "fn main() { let a = bytes_from_string(\"x\")\n let b = bytes_from_string(\"x\")\n let _ = a == b }",
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "E0013"),
+            "`Bytes == Bytes` must be E0013 until `binary_result_ty` gains a `Ty::Bytes` arm; got {:?}",
             r.diagnostics
                 .iter()
                 .map(|d| (&d.code, &d.message))

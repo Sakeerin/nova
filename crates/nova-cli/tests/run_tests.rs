@@ -6440,6 +6440,17 @@ fn bytes_basics_run() {
 /// returning the last match instead of the first -- the original fixture's
 /// only search (`"i"` in `"hi\xff"`) matches exactly once and cannot tell the
 /// two apart.
+///
+/// **Final-review findings D6 and D7, folded in here too.** `b.byte_at(0 - 1)`
+/// is the byte-domain mirror of `tests/runtime/strings.nova`'s
+/// `"héllo".char_at(0 - 1)`: `byte_at`'s negative-index guard had no fixture
+/// coverage, so a deleted `if i < 0 { return None }` reached the
+/// `bytes_at` intrinsic with a negative index and aborted the process
+/// instead of returning `None`. `b.index_of(b)`/`b.contains(b)` cover the
+/// equal-length needle/haystack case `tests/runtime/strings.nova` already
+/// covers for `String`: changing `index_of`'s `n.len() > h.len()` guard to
+/// `>=` survived the whole suite before this, since no prior call had a
+/// needle exactly as long as its haystack.
 #[test]
 fn bytes_api_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_api.stdout"))

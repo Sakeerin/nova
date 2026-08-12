@@ -1026,17 +1026,25 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     struct with the identical layout. `Bytes` and `String` are therefore
     structurally identical and semantically distinct — same representation,
     but `String` carries a UTF-8 guarantee and `Bytes` does not, and nothing
-    converts between them implicitly. Every `Bytes` operation is an
-    intrinsic, so **neither codegen backend changes**.
+    converts between them implicitly. `Bytes` reaches codegen as the same
+    `MirTy::Ptr` every other heap pointer already lowers to, so **neither
+    codegen backend changes** — not because every `Bytes` operation is an
+    intrinsic (`index_of`/`contains` are pure Nova control flow over
+    `to_ints`, no intrinsic of their own), but because codegen dispatches on
+    MIR types, and `Ptr` needed no new arm.
   - **`std/bytes`**, a seventh `STD_MODULES` entry, gives `Bytes` eight
     methods — `len`, `byte_at` (`Option<Int>`, matching `String::char_at`),
     `slice`, `concat`, `to_ints`, `to_string` (`Option<String>`, `None` on
     invalid UTF-8), `index_of` (`Option<Int>`), `contains` — plus two
     constructors, `bytes_from_string(s: String) -> Bytes` and
     `bytes_from_ints(ints: [Int]) -> Bytes` (aborts on an element outside
-    `0..=255`), and `impl Eq for Bytes`. `index_of`/`contains` and every
-    bounds check are Nova-level over `to_ints`, the same shape `std/strings`
-    already builds over `str_chars`.
+    `0..=255`), and `impl Eq for Bytes`. `index_of`/`contains` are Nova-level
+    over `to_ints`, the same shape `std/strings` already builds over
+    `str_chars` — but not every bounds check is: `slice`'s clamp, `bytes_at`'s
+    intrinsic-level range guard and `from_ints`'s `0..=255` guard are
+    Rust-level, and `byte_at`'s own Nova-level check tests `self.len()`
+    directly rather than paying for a `to_ints()` conversion just to
+    bounds-check.
   - **`fs::read(path: String) -> Result<Bytes, IoError>` and
     `fs::write(path: String, content: Bytes) -> Result<(), IoError>`** join
     `std/fs`, over three more intrinsics on increment 1's existing
