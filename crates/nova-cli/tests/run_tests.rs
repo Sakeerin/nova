@@ -6588,14 +6588,14 @@ fn fs_bytes_roundtrip_run() {
 
 /// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
 /// allocation). `nova_rt_fs_read` stashes a freshly allocated `Bytes` header
-/// and leaf buffer into the shared `BUFFER_SLOT`, GC-rooting it for exactly
-/// the span between the intrinsic call and the wrapper's own read of that slot
-/// (`crates/nova-runtime/src/fs.rs`) -- the same rooting contract
-/// `fs_read_dir_under_gc_stress` exists to exercise for `stash_array`, applied
-/// here to the payload slot's newest producer. Its own label keeps this
-/// directory from colliding with `fs_bytes_roundtrip_run`'s, even though
-/// `cargo test`'s default parallelism can run both concurrently in the same
-/// process.
+/// and leaf buffer into the current task's `Slot::Buffer` entry, GC-rooting it
+/// for exactly the span between the intrinsic call and the wrapper's own read
+/// of that slot (`crates/nova-runtime/src/fs.rs`) -- the same rooting
+/// contract `fs_read_dir_under_gc_stress` exists to exercise for
+/// `stash_array`, applied here to the payload slot's newest producer. Its own
+/// label keeps this directory from colliding with `fs_bytes_roundtrip_run`'s,
+/// even though `cargo test`'s default parallelism can run both concurrently
+/// in the same process.
 #[test]
 fn fs_bytes_roundtrip_under_gc_stress() {
     let tmp = unique_temp_dir("nova-fs-bytes-roundtrip-stress");
