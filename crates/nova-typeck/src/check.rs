@@ -2445,6 +2445,7 @@ impl<'a> Checker<'a> {
                     "Bool" => Some(Ty::Bool),
                     "Char" => Some(Ty::Char),
                     "String" => Some(Ty::String),
+                    "Bytes" => Some(Ty::Bytes),
                     _ => None,
                 };
                 if let Some(p) = prim {
@@ -5243,6 +5244,7 @@ impl<'a> Checker<'a> {
             "Bool" => return Some(Ty::Bool),
             "Char" => return Some(Ty::Char),
             "String" => return Some(Ty::String),
+            "Bytes" => return Some(Ty::Bytes),
             // `Future` is compiler-constructed and carries no associated
             // functions; `Future::f()` is not a qualifier. Returning None here
             // (rather than falling through to resolve_type) keeps the
@@ -6769,6 +6771,7 @@ fn collect_self_projections(ty: &Ty, self_ty: &Ty, out: &mut Vec<DefId>) {
         | Ty::Bool
         | Ty::Char
         | Ty::String
+        | Ty::Bytes
         | Ty::Unit
         | Ty::Param(_)
         | Ty::Var(_)
@@ -12754,6 +12757,7 @@ mod tests {
                 "Bool" => Ty::Bool,
                 "Char" => Ty::Char,
                 "String" => Ty::String,
+                "Bytes" => Ty::Bytes,
                 _ => panic!("RESERVED_TYPE_NAMES grew a name this test does not know: {name}"),
             };
             assert_eq!(
@@ -15535,7 +15539,7 @@ mod tests {
     // ---- reserved built-in type names ----
 
     #[test]
-    fn reserved_type_names_is_exactly_the_six_expected_names() {
+    fn reserved_type_names_is_exactly_the_seven_expected_names() {
         // Both tests below iterate `RESERVED_TYPE_NAMES` to build their own
         // cases, so neither one can notice a name silently missing from it --
         // they would just stop checking that name, not fail. This list is
@@ -15544,7 +15548,7 @@ mod tests {
         // length unchanged) shows up as a content mismatch here, and a name
         // dropped without a length change fails to even compile, since two
         // differently-sized arrays are different types.
-        let mut expected = ["Int", "Float", "Bool", "Char", "String", "Future"];
+        let mut expected = ["Int", "Float", "Bool", "Char", "String", "Future", "Bytes"];
         let mut actual = nova_resolver::RESERVED_TYPE_NAMES;
         expected.sort_unstable();
         actual.sort_unstable();
@@ -15693,6 +15697,28 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn bytes_is_a_nameable_type_in_every_position() {
+        // `Bytes` has no operations yet, so this only asserts it converts in a
+        // signature, a `let` annotation, a field type and a generic argument --
+        // every position `convert_ty` runs. A value cannot be constructed until
+        // Task 2, which is why this is typeck-only.
+        let r = check_src(
+            "record Holder { b: Bytes }\n\
+             fn ident(x: Bytes) -> Bytes { x }\n\
+             fn takes_array(xs: [Bytes]) -> Int { xs.len() }\n\
+             fn main() { }",
+        );
+        assert!(
+            r.diagnostics.is_empty(),
+            "`Bytes` must convert in every type position, got {:?}",
+            r.diagnostics
+                .iter()
+                .map(|d| (&d.code, &d.message))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

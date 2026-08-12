@@ -109,6 +109,7 @@ impl InferCtx {
             | (Ty::Bool, Ty::Bool)
             | (Ty::Char, Ty::Char)
             | (Ty::String, Ty::String)
+            | (Ty::Bytes, Ty::Bytes)
             | (Ty::Unit, Ty::Unit) => true,
             (Ty::Param(i), Ty::Param(j)) => i == j,
             (

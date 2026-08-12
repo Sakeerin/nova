@@ -1,0 +1,2 @@
+record Bytes { v: Int }
+fn main() { }

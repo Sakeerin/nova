@@ -364,6 +364,7 @@ fn type_name(ty: &Ty, module: &hir::Module) -> String {
         Ty::Bool => "Bool".to_string(),
         Ty::Char => "Char".to_string(),
         Ty::String => "String".to_string(),
+        Ty::Bytes => "Bytes".to_string(),
         Ty::Unit => "()".to_string(),
         Ty::Sum { def_id, .. } => module
             .sum(*def_id)
