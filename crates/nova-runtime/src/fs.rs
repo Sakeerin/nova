@@ -211,6 +211,40 @@ fn take(slot: Slot) -> usize {
     ptr
 }
 
+/// Release every payload root task `id` still holds, and clear its slots.
+///
+/// Called from `crate::task::release_internal` and `crate::task::take_output_internal` —
+/// the two places that release a task's *state* root. Keyed on `id` rather
+/// than [`slot_index`] precisely because those call sites do not run with
+/// `CURRENT` set to the task being released.
+///
+/// Idempotent, and silent for a task that never stashed anything: a task id
+/// past the end of the table simply has no slots.
+///
+/// Roots are released after the borrow is dropped, for the same reason
+/// [`take`] does it that way.
+pub(crate) fn release_task_slots(id: i64) {
+    let held = SLOTS.with(|cell| {
+        let Ok(mut slots) = cell.try_borrow_mut() else {
+            crate::task::abort_with("nova_rt_fs: payload slot table is already borrowed")
+        };
+        let index = id as usize + 1;
+        match slots.get_mut(index) {
+            Some(entry) => {
+                let held = [entry.buffer, entry.array, entry.message];
+                *entry = Slots::default();
+                held
+            }
+            None => [0, 0, 0],
+        }
+    });
+    for ptr in held {
+        if ptr != 0 {
+            gc::remove_root(ptr as *mut u8);
+        }
+    }
+}
+
 /// Map an `std::io::Error` to its status code, and stash its message.
 ///
 /// Called on every failure path, so the message is always available to the
@@ -857,6 +891,61 @@ mod tests {
 
         crate::task::set_current_for_test(Some(0));
         assert_eq!(take(Slot::Buffer), zero_payload as usize);
+        crate::task::set_current_for_test(None);
+    }
+
+    /// A task's unread payload is released when its state root is.
+    ///
+    /// `task.rs` releases a task's state root in `release_internal` and
+    /// `take_output_internal` — deliberately not at completion, because a spawned
+    /// task's output has to outlive it so a later `join` can take it (see
+    /// `poll_one`'s and `take_output_internal`'s own doc comments in
+    /// `task.rs`). Payload release hangs off the same two points so payload
+    /// lifetime follows the policy `task.rs` already owns rather than a
+    /// second one.
+    ///
+    /// Uses `gc::root_count` rather than asserting the object is collected: per
+    /// ADR 0010, a churn-loop test asserting survival cannot discriminate on this
+    /// platform. This proves bookkeeping, not survival, and claims only that.
+    #[test]
+    fn releasing_a_tasks_slots_drops_the_roots_it_held() {
+        let payload = crate::gc_str("never-read");
+        let addr = payload as usize;
+
+        crate::task::set_current_for_test(Some(7));
+        stash(Slot::Buffer, payload);
+        assert_eq!(gc::root_count(addr), 1, "the stash roots its pointer");
+
+        crate::task::set_current_for_test(None);
+        release_task_slots(7);
+        assert_eq!(
+            gc::root_count(addr),
+            0,
+            "releasing task 7's slots must release the root it held"
+        );
+
+        // Idempotent: a second release must not double-remove or abort.
+        release_task_slots(7);
+        assert_eq!(gc::root_count(addr), 0);
+    }
+
+    /// Releasing one task's slots leaves another task's alone.
+    #[test]
+    fn releasing_one_tasks_slots_leaves_another_tasks_intact() {
+        let keep = crate::gc_str("keep-me");
+        let keep_addr = keep as usize;
+
+        crate::task::set_current_for_test(Some(3));
+        stash(Slot::Message, keep);
+        release_task_slots(4);
+        assert_eq!(
+            gc::root_count(keep_addr),
+            1,
+            "task 4's release must not touch task 3's slots"
+        );
+
+        crate::task::set_current_for_test(Some(3));
+        assert_eq!(take(Slot::Message), keep as usize);
         crate::task::set_current_for_test(None);
     }
 }
