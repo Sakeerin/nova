@@ -379,9 +379,9 @@ mod tests {
     /// poll boundary with no landing pad to unwind through.
     ///
     /// **Follows `fs.rs`'s structure exactly, including why the split point
-    /// is the test module marker and not this function's own body.** This
-    /// test's assertion message below names `unwrap()`, `.expect(`, `panic!`,
-    /// `format!` and `RefCell` in prose, so splitting on this function alone
+    /// is the test module marker and not this function's own body.** The
+    /// needle array below names `unwrap()`, `.expect(`, `panic!`,
+    /// `format!` and `RefCell`, so splitting on this function alone
     /// would leave those words in the scanned half and the test could never
     /// pass. Splitting at `#[cfg(test)]` instead excludes every test (and its
     /// comments) while still scanning all of this file's actual production

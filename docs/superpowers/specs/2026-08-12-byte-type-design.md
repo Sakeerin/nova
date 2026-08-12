@@ -66,7 +66,7 @@ the first of which is the decisive one:
 **scanned header** `{len, ptr}` pointing at a **GC leaf buffer**. That shape is not a guess — it is
 what every Nova `String` already is.
 
-Because `Bytes` is an opaque pointer whose every operation is an intrinsic, **neither codegen backend
+Because `Bytes` lowers to `MirTy::Ptr`, which every other heap type already lowered to, **neither codegen backend
 changes.** Cranelift and the textual LLVM emitter see a pointer, exactly as they do for `String`.
 
 `Bytes` and `String` are therefore **structurally identical and semantically distinct**: same layout,
