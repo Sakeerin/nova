@@ -66,8 +66,15 @@ the first of which is the decisive one:
 **scanned header** `{len, ptr}` pointing at a **GC leaf buffer**. That shape is not a guess — it is
 what every Nova `String` already is.
 
-Because `Bytes` lowers to `MirTy::Ptr`, which every other heap type already lowered to, **neither codegen backend
+Because `Bytes` is an opaque pointer whose every operation is an intrinsic, **neither codegen backend
 changes.** Cranelift and the textual LLVM emitter see a pointer, exactly as they do for `String`.
+
+**Corrected 2026-08-12 (final review): "every operation is an intrinsic" overclaimed.** `index_of`
+(`std/bytes/lib.nova`) is a pure Nova loop with no intrinsic of its own, and `contains` calls it. The
+conclusion still holds, for a different reason: `Bytes` lowers to `MirTy::Ptr`, which every other heap
+type already lowered to, so neither backend needed a new arm. `CHANGELOG.md` and
+`crates/nova-hir/src/lib.rs` inherited this premise from here and are corrected with it — the same
+inheritance path as §5.2's overclaim below.
 
 `Bytes` and `String` are therefore **structurally identical and semantically distinct**: same layout,
 but `String` carries a UTF-8 guarantee and `Bytes` does not. Nothing in the type system converts
