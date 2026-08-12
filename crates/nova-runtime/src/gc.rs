@@ -305,7 +305,16 @@ pub(crate) fn root_count(addr: usize) -> usize {
 /// (`docs/adr/0010-conservative-scan-root-test-gating.md`). Removing it
 /// changes their frame relationship to `collect()` for no reason; keeping it
 /// is not evidence that they pass.
+///
+/// `#[cfg(windows)]` matches its only callers: `task.rs`'s
+/// `root_registration` tests, themselves gated to Windows because
+/// `stack_base` below only has a real implementation there (off Windows,
+/// `collect()` returns before marking anything, so those assertions would
+/// pass or fail for the wrong reason rather than exercising this at all).
+/// Without this gate the function has no caller at all off Windows and
+/// reads as dead code there under `-D warnings`.
 #[cfg(test)]
+#[cfg(windows)]
 #[inline(always)]
 pub(crate) fn collect_for_test() {
     collect();

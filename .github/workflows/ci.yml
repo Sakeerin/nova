@@ -22,6 +22,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --workspace
       - name: cargo test
         run: cargo test --workspace --all-features
 
