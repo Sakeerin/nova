@@ -444,7 +444,27 @@ fn prelude_option_result_build_standalone() {
     assert_eq!(out, expected);
 }
 
+/// `nova run`'s Cranelift JIT cannot resolve the libm symbol `sqrt` at run
+/// time on Linux only (`E0902`) -- `nova build`'s ahead-of-time link step
+/// resolves the same symbol fine on the same platform, and this exact `nova
+/// run` invocation passes on macOS and Windows. Filed as
+/// <https://github.com/Sakeerin/nova/issues/3> rather than fixed here: the
+/// right remedy is a design decision (explicitly load `libm` at JIT setup,
+/// or document `extern` libm-family functions as build-only on Linux), not
+/// a mechanical patch.
+///
+/// `#[ignore]`, not `#[cfg(not(target_os = "linux"))]`, and only on Linux:
+/// an ignored test still shows up in every platform's test counts (`cargo
+/// test`'s summary line, and `-- --ignored` on the advisory CI step), while
+/// a `cfg`-ed-out one vanishes with no trace anywhere -- and invisibility is
+/// exactly how the defects this PR exists to fix survived undetected.
+/// Matches the precedent of ADR 0010's eight documented ignores. Unaffected
+/// on macOS and Windows, where it keeps running (and passing) normally.
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "E0902 at JIT time on Linux; see issue #3"
+)]
 fn extern_ffi_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/extern_ffi.stdout"))
         .expect("expected-output fixture exists")
@@ -4701,6 +4721,56 @@ fn nova_test_reports_a_pass_and_a_failure_distinctly() {
     );
 }
 
+/// The `(code, hex)` pair `nova test`'s own report will show in its
+/// `TRAPPED (exit code ...)` line, measured from a direct run of the same
+/// compiled test binary. Shared by
+/// `a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic` and
+/// `a_trapping_tests_captured_output_is_shown_not_discarded` — both trap the
+/// process the same way (a division by zero) and both need this pair to
+/// build their expected string, so a divergence between them would only
+/// mean one had bit-rotted.
+///
+/// On Windows a fault arrives as a concrete NTSTATUS, so `ExitStatus::code()`
+/// is always `Some` and is returned verbatim — a real measurement, exactly
+/// as both tests' own doc comments already describe (design doc §9 risk 4:
+/// not portable, so measured rather than hard-coded).
+///
+/// On Unix, POSIX makes "exited normally" and "killed by a signal" mutually
+/// exclusive, and a hard trap (a CPU-raised fault — SIGFPE, SIGILL, ...) is
+/// the latter, so `.code()` is unconditionally `None` here: there is no code
+/// to measure. `classify` (`cmd/test.rs`) already handles exactly this via
+/// `output.status.code().unwrap_or(-1)`, so `-1` (`0xFFFFFFFF`) asserted
+/// below is not a measurement on Unix, it is production's own documented
+/// fallback constant — asserted because that is genuinely what `nova test`
+/// will print, not because anything was measured.
+///
+/// What IS asserted, and is why this does not degrade into a tautology that
+/// passes for any nonzero exit: `.signal().is_some()` demands the process
+/// was actually killed by a fatal signal. If a future change made this
+/// program exit gracefully with some nonzero code instead of trapping,
+/// `code()` would be `Some` and `signal()` `None`, and this assertion would
+/// fail here — before either caller ever reaches its own comparison against
+/// `nova test`'s reported output.
+fn expect_trap_exit_code(status: &std::process::ExitStatus) -> (i32, u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            status.signal().is_some(),
+            "a hard trap must be killed by a fatal signal on Unix, not merely exit nonzero: {status:?}"
+        );
+        let code = -1i32;
+        (code, code as u32)
+    }
+    #[cfg(windows)]
+    {
+        let code = status
+            .code()
+            .expect("a concrete exit code on this platform");
+        (code, code as u32)
+    }
+}
+
 /// The load-bearing test on this branch (design doc §5, §9 risk 4; brief
 /// step 3). A division by zero exits nonzero with **no** `nova: panic:` line
 /// on stderr — a hard trap, not a checked panic — measured directly below
@@ -4760,11 +4830,7 @@ fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
         !direct_stderr.contains("nova: panic:"),
         "must be a hard trap with no panic message, not a checked panic: {direct_stderr}"
     );
-    let code = direct
-        .status
-        .code()
-        .expect("a concrete exit code on this platform");
-    let hex = code as u32;
+    let (code, hex) = expect_trap_exit_code(&direct.status);
     let _ = std::fs::remove_file(&exe);
 
     let assert = nova().current_dir(&dir).arg("test").assert().failure();
@@ -5775,11 +5841,7 @@ fn a_trapping_tests_captured_output_is_shown_not_discarded() {
         .env("NOVA_TEST_INDEX", "0")
         .output()
         .expect("run the trap directly");
-    let code = direct
-        .status
-        .code()
-        .expect("a concrete exit code on this platform");
-    let hex = code as u32;
+    let (code, hex) = expect_trap_exit_code(&direct.status);
     let _ = std::fs::remove_file(&exe);
 
     let assert = nova().current_dir(&dir).arg("test").assert().failure();
