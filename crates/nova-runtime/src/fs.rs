@@ -9,13 +9,17 @@
 //! payloads travel in the slots below. `std/fs`'s Nova wrappers map a status to
 //! an `IoErrorKind` and construct every `Result` and `IoError` themselves.
 //!
-//! # Why these slots are `Cell<usize>` and not `RefCell<Option<String>>`
+//! # Why `SLOTS` is a `RefCell` guarded with `try_borrow_mut`, not `borrow_mut`
 //!
 //! **Every function here is called from inside an `async fn`'s generated
 //! `$poll`, which has no landing pads** (see `nova_mir::async_lower`'s module
-//! doc comment), so nothing here may panic. A `RefCell` borrow can panic; a
-//! `Cell` of a `Copy` value cannot. The slots therefore hold a raw
-//! already-allocated pointer as a `usize`, with `0` meaning empty.
+//! doc comment), so nothing here may panic. `RefCell::borrow_mut` panics on an
+//! already-outstanding borrow; `try_borrow_mut` cannot, so `with_slot` uses
+//! that instead and falls back to `abort_with` -- which terminates without
+//! unwinding -- on the contended case. Each slot still holds nothing more
+//! than a raw already-allocated pointer as a `usize`, with `0` meaning empty;
+//! the per-task table just adds one layer of indirection to reach it, keyed
+//! by `slot_index`.
 //!
 //! # Why the pointer is GC-rooted while it sits in a slot
 //!
@@ -28,8 +32,7 @@
 //! allocation happens in between".
 
 use crate::{gc, NovaStr};
-use std::cell::Cell;
-use std::thread::LocalKey;
+use std::cell::RefCell;
 
 /// Status codes. `0` is success; every other value is an `IoErrorKind`.
 ///
@@ -69,32 +72,37 @@ pub const TIMED_OUT: i64 = 6;
 pub const CONNECTION_REFUSED: i64 = 7;
 pub const OTHER: i64 = 8;
 
+/// Which payload a `stash`/`take` pair is addressing.
+///
+/// Replaces the three separate `thread_local!` slots this module used before
+/// per-task storage. `Buffer` serves `String` *and* `Bytes` payloads, not one
+/// variant each: the two have the identical `{len, ptr}` representation (see
+/// `crate::bytes`'s module doc comment), and which one a payload is gets
+/// carried entirely by which builtin stashed it and which one reads it back
+/// (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string` treat it as UTF-8;
+/// `nova_rt_fs_read`/`nova_rt_fs_take_bytes` do not interpret it at all).
+#[derive(Copy, Clone)]
+enum Slot {
+    Buffer,
+    Array,
+    Message,
+}
+
+/// One task's three payload slots. Each field is a GC-rooted pointer, or 0.
+#[derive(Clone, Copy, Default)]
+struct Slots {
+    buffer: usize,
+    array: usize,
+    message: usize,
+}
+
 thread_local! {
-    /// A GC-rooted `*mut NovaStr` awaiting `nova_rt_fs_take_string` or
-    /// `nova_rt_fs_take_bytes`, or 0.
+    /// Payload slots, per task, indexed by `slot_index`.
     ///
-    /// **Shared by `String` and `Bytes` payloads, not one slot each.** The
-    /// two types have the identical `{len, ptr}` representation (see
-    /// `crate::bytes`'s module doc comment), so a dedicated `Bytes` slot
-    /// would be a fourth copy of storage in this module — alongside this
-    /// one, `ARRAY_SLOT` and `MESSAGE_SLOT` below — for a distinction that is
-    /// already fully carried by which *builtin* stashed into it and which
-    /// one reads it back (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string`
-    /// treat the payload as UTF-8; `nova_rt_fs_read`/`nova_rt_fs_take_bytes`
-    /// do not interpret it at all) — deepening the per-thread slot protocol
-    /// with a fourth slot for no representational reason is exactly the kind
-    /// of avoidable debt this module's own boundary design exists to
-    /// prevent.
-    static BUFFER_SLOT: Cell<usize> = const { Cell::new(0) };
-    /// A GC-rooted array block awaiting `nova_rt_fs_take_string_array`, or 0.
-    ///
-    /// Filled by `stash_array`, Task 4's array-building counterpart to
-    /// `stash` below. Declared here alongside its two siblings from the start
-    /// because all three slots are one boundary design introduced together,
-    /// not three unrelated additions.
-    static ARRAY_SLOT: Cell<usize> = const { Cell::new(0) };
-    /// A GC-rooted `*mut NovaStr` awaiting `nova_rt_fs_last_error_message`, or 0.
-    static MESSAGE_SLOT: Cell<usize> = const { Cell::new(0) };
+    /// `thread_local!` for the reason `task.rs`'s module doc gives for `TASKS`
+    /// and `QUEUE`: the GC's root table is per-thread, so a second thread
+    /// running Nova code would free objects the first still holds.
+    static SLOTS: RefCell<Vec<Slots>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Allocate a GC-managed string for a slot payload.
@@ -104,6 +112,45 @@ thread_local! {
 /// class this module's boundary design exists to avoid.
 fn gc_message(s: &str) -> *mut NovaStr {
     crate::gc_str(s)
+}
+
+/// The `SLOTS` index for the current task.
+///
+/// `id + 1`, so index **0 is the reserved no-task key**. Task ids are dense
+/// from zero (`poll_one` reads `tasks.get(id as usize)`), so a `Vec` gives O(1)
+/// access with no hashing and no per-call allocation.
+fn slot_index() -> usize {
+    crate::task::current_task().map_or(0, |id| id as usize + 1)
+}
+
+/// Run `f` against one field of the current task's slots, growing the table if
+/// this task has not been seen before.
+///
+/// **Panic-free by construction, because this runs inside a generated poll
+/// boundary with no landing pads.** `try_borrow_mut` rather than `borrow_mut`,
+/// and `get_mut` rather than `[i]`; both fall back to `abort_with`, which
+/// terminates without unwinding. The `get_mut` arm is unreachable — the resize
+/// immediately above guarantees `i < len` — and exists so the impossible case
+/// still cannot unwind.
+fn with_slot<R>(slot: Slot, f: impl FnOnce(&mut usize) -> R) -> R {
+    SLOTS.with(|cell| {
+        let Ok(mut slots) = cell.try_borrow_mut() else {
+            crate::task::abort_with("nova_rt_fs: payload slot table is already borrowed")
+        };
+        let i = slot_index();
+        if slots.len() <= i {
+            slots.resize(i + 1, Slots::default());
+        }
+        let Some(entry) = slots.get_mut(i) else {
+            crate::task::abort_with("nova_rt_fs: payload slot index out of range after resize")
+        };
+        let field = match slot {
+            Slot::Buffer => &mut entry.buffer,
+            Slot::Array => &mut entry.array,
+            Slot::Message => &mut entry.message,
+        };
+        f(field)
+    })
 }
 
 /// Register `ptr` as a GC root, then publish it in `slot`.
@@ -132,10 +179,10 @@ fn gc_message(s: &str) -> *mut NovaStr {
 /// below, minus this fix. `take`'s own contract (return `0` for an empty
 /// slot, otherwise the released pointer) makes discarding its result safe
 /// here: there is nothing to free by hand either way.
-fn stash(slot: &'static LocalKey<Cell<usize>>, ptr: *mut NovaStr) {
+fn stash(slot: Slot, ptr: *mut NovaStr) {
     take(slot);
     gc::add_root(ptr as *mut u8);
-    slot.set(ptr as usize);
+    with_slot(slot, |field| *field = ptr as usize);
 }
 
 /// Read and clear `slot`, releasing its root, and return what was there (`0`
@@ -147,9 +194,17 @@ fn stash(slot: &'static LocalKey<Cell<usize>>, ptr: *mut NovaStr) {
 /// the returned pointer is live throughout — rooted by the slot until the
 /// instant before this returns, then rooted by the caller's own frame like
 /// any other runtime return value.
-fn take(slot: &'static LocalKey<Cell<usize>>) -> usize {
-    let ptr = slot.get();
-    slot.set(0);
+///
+/// **The `gc::remove_root` deliberately happens after the borrow is dropped**,
+/// not inside `with_slot`'s closure. Holding a `RefCell` borrow across a call
+/// into the collector would be a re-entrancy hazard for no benefit; the
+/// pointer is already out of the table and owned by this frame by then.
+fn take(slot: Slot) -> usize {
+    let ptr = with_slot(slot, |field| {
+        let ptr = *field;
+        *field = 0;
+        ptr
+    });
     if ptr != 0 {
         gc::remove_root(ptr as *mut u8);
     }
@@ -162,7 +217,7 @@ fn take(slot: &'static LocalKey<Cell<usize>>) -> usize {
 /// wrapper that is about to build an `IoError`.
 fn fail(e: &std::io::Error) -> i64 {
     use std::io::ErrorKind;
-    stash(&MESSAGE_SLOT, gc_message(&e.to_string()));
+    stash(Slot::Message, gc_message(&e.to_string()));
     match e.kind() {
         ErrorKind::NotFound => NOT_FOUND,
         ErrorKind::PermissionDenied => PERMISSION_DENIED,
@@ -217,7 +272,7 @@ fn stash_array(names: &[String]) {
     // The block is already rooted by `stash` below, so drop the build-time root
     // to keep `add_root`/`remove_root` balanced.
     gc::remove_root(block);
-    stash(&ARRAY_SLOT, block as *mut NovaStr);
+    stash(Slot::Array, block as *mut NovaStr);
 }
 
 /// Read `path` as UTF-8. Returns a status; on `OK` the contents are waiting in
@@ -235,7 +290,7 @@ pub unsafe extern "C" fn nova_rt_fs_read_to_string(path: *const NovaStr) -> i64 
     let p = unsafe { crate::as_str(path) };
     match std::fs::read_to_string(p) {
         Ok(s) => {
-            stash(&BUFFER_SLOT, gc_message(&s));
+            stash(Slot::Buffer, gc_message(&s));
             OK
         }
         Err(e) => fail(&e),
@@ -263,7 +318,7 @@ pub unsafe extern "C" fn nova_rt_fs_write_string(
 /// pending, which a correct wrapper never asks for.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_string() -> *mut NovaStr {
-    match take(&BUFFER_SLOT) {
+    match take(Slot::Buffer) {
         0 => gc_message(""),
         p => p as *mut NovaStr,
     }
@@ -283,7 +338,7 @@ pub unsafe extern "C" fn nova_rt_fs_read(path: *const NovaStr) -> i64 {
     let p = unsafe { crate::as_str(path) };
     match std::fs::read(p) {
         Ok(bytes) => {
-            stash(&BUFFER_SLOT, crate::bytes::gc_bytes(&bytes));
+            stash(Slot::Buffer, crate::bytes::gc_bytes(&bytes));
             OK
         }
         Err(e) => fail(&e),
@@ -308,11 +363,11 @@ pub unsafe extern "C" fn nova_rt_fs_write(path: *const NovaStr, content: *const 
 /// pending, which a correct wrapper never asks for.
 ///
 /// Mirrors [`nova_rt_fs_take_string`], reading the same shared
-/// [`BUFFER_SLOT`] -- the payload left there by a successful
+/// [`Slot::Buffer`] -- the payload left there by a successful
 /// [`nova_rt_fs_read`], never interpreted as UTF-8.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
-    match take(&BUFFER_SLOT) {
+    match take(Slot::Buffer) {
         0 => crate::bytes::gc_bytes(&[]),
         p => p as *mut NovaStr,
     }
@@ -321,7 +376,7 @@ pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
 /// Take the pending error message.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_last_error_message() -> *mut NovaStr {
-    match take(&MESSAGE_SLOT) {
+    match take(Slot::Message) {
         0 => gc_message(""),
         p => p as *mut NovaStr,
     }
@@ -453,7 +508,7 @@ pub unsafe extern "C" fn nova_rt_fs_read_dir(path: *const NovaStr) -> i64 {
 /// exactly as `nova_rt_fs_take_string`'s own doc comment notes).
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_string_array() -> *mut u8 {
-    match take(&ARRAY_SLOT) {
+    match take(Slot::Array) {
         0 => {
             let block = gc::alloc(8, true);
             let words = block as *mut i64;
@@ -634,7 +689,7 @@ mod tests {
     fn a_stashed_string_is_rooted_until_it_is_taken() {
         let p = gc_message("payload");
         let addr = p as usize;
-        stash(&BUFFER_SLOT, p);
+        stash(Slot::Buffer, p);
         assert_eq!(
             gc::root_count(addr),
             1,
@@ -674,14 +729,14 @@ mod tests {
         let b = gc_message("second");
         let (a_addr, b_addr) = (a as usize, b as usize);
 
-        stash(&BUFFER_SLOT, a);
+        stash(Slot::Buffer, a);
         assert_eq!(
             gc::root_count(a_addr),
             1,
             "the first stash roots its pointer"
         );
 
-        stash(&BUFFER_SLOT, b);
+        stash(Slot::Buffer, b);
         assert_eq!(
             gc::root_count(a_addr),
             0,
@@ -696,7 +751,7 @@ mod tests {
             "the second stash roots its pointer"
         );
 
-        let taken = take(&BUFFER_SLOT);
+        let taken = take(Slot::Buffer);
         assert_eq!(
             taken, b_addr,
             "take returns the most recently stashed pointer"
@@ -720,7 +775,7 @@ mod tests {
     fn a_stashed_array_has_the_layout_the_abi_declares() {
         let names = vec!["a".to_string(), "bb".to_string()];
         stash_array(&names);
-        let block = take(&ARRAY_SLOT);
+        let block = take(Slot::Array);
         assert_eq!(
             gc::object_info(block),
             Some((8 + 8 * 2, true)),
@@ -737,5 +792,71 @@ mod tests {
             assert_eq!(crate::as_str(*words.add(1) as *const NovaStr), "a");
             assert_eq!(crate::as_str(*words.add(2) as *const NovaStr), "bb");
         }
+    }
+
+    /// Two tasks stashing between one task's stash and its take must not collide.
+    ///
+    /// This is the defect the per-task table exists to prevent, and it cannot be
+    /// reached from Nova today: `std/fs`'s wrappers are straight-line, so nothing
+    /// runs between a stash and its take. Increment 4's poller inserts exactly
+    /// that gap, which is why the interleaving is built here by hand instead.
+    ///
+    /// **Fails against the pre-change thread-local slots**, where task B's stash
+    /// releases task A's root and overwrites the one shared slot, so A's take
+    /// returns B's pointer. That is what earns this test.
+    #[test]
+    fn a_stash_is_private_to_the_task_that_made_it() {
+        let a = crate::gc_str("task-a-payload");
+        let b = crate::gc_str("task-b-payload");
+
+        crate::task::set_current_for_test(Some(0));
+        stash(Slot::Buffer, a);
+
+        crate::task::set_current_for_test(Some(1));
+        stash(Slot::Buffer, b);
+
+        crate::task::set_current_for_test(Some(0));
+        let got = take(Slot::Buffer);
+        assert_eq!(
+            got, a as usize,
+            "task 0 must read back its own payload, not task 1's"
+        );
+
+        crate::task::set_current_for_test(Some(1));
+        assert_eq!(
+            take(Slot::Buffer),
+            b as usize,
+            "task 1's payload must still be there, undisturbed"
+        );
+        crate::task::set_current_for_test(None);
+    }
+
+    /// "No task" is a key, not a special case, and it does not collide with task 0.
+    ///
+    /// Kills the plausible mistake of indexing by `id as usize` instead of
+    /// `id as usize + 1`, which would map task 0 onto the no-task slot. `fs.rs`'s
+    /// other unit tests all run with `CURRENT == None`, so this is the path they
+    /// take.
+    #[test]
+    fn the_no_task_key_does_not_collide_with_task_zero() {
+        let none_payload = crate::gc_str("no-task");
+        let zero_payload = crate::gc_str("task-zero");
+
+        crate::task::set_current_for_test(None);
+        stash(Slot::Buffer, none_payload);
+
+        crate::task::set_current_for_test(Some(0));
+        stash(Slot::Buffer, zero_payload);
+
+        crate::task::set_current_for_test(None);
+        assert_eq!(
+            take(Slot::Buffer),
+            none_payload as usize,
+            "the no-task slot must not be task 0's slot"
+        );
+
+        crate::task::set_current_for_test(Some(0));
+        assert_eq!(take(Slot::Buffer), zero_payload as usize);
+        crate::task::set_current_for_test(None);
     }
 }

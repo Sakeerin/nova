@@ -229,6 +229,27 @@ thread_local! {
     static PENDING_PARK: Cell<Option<Wait>> = const { Cell::new(None) };
 }
 
+/// The task currently being polled, or `None` outside a poll.
+///
+/// `poll_one` sets this for exactly the duration of the `poll` call
+/// (`task.rs:413-425`), so a runtime intrinsic reached from generated code can
+/// key per-task storage on it. `fs.rs` is the first consumer.
+pub(crate) fn current_task() -> Option<i64> {
+    CURRENT.with(|c| c.get())
+}
+
+/// Set [`CURRENT`] directly, for tests that need a task context without an
+/// executor.
+///
+/// Test-only because nothing in production may set `CURRENT` outside
+/// `poll_one`. Gated `#[cfg(test)]` rather than `#[cfg(windows)]`: its callers
+/// are `fs.rs`'s tests, which run on every platform, so unlike
+/// `gc::collect_for_test` this cannot read as dead code off Windows.
+#[cfg(test)]
+pub(crate) fn set_current_for_test(id: Option<i64>) {
+    CURRENT.with(|c| c.set(id));
+}
+
 /// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
 /// the collector has just returned to the allocator.
 ///
