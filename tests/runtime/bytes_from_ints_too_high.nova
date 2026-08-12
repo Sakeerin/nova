@@ -1,0 +1,4 @@
+fn main() {
+    let b = bytes_from_ints([256])
+    println("${b.len()}")
+}

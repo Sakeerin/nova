@@ -6426,6 +6426,20 @@ fn bytes_basics_run() {
 /// length-only comparison gets wrong (`true`) where a real one answers
 /// `false`. Measured, not assumed: see the task report's mutation transcripts
 /// for the run where the first call alone let that mutation survive.
+///
+/// **Review findings P1 and P3, folded in here rather than as separate
+/// fixtures.** `b.slice(1, 100)` and `b.slice(100, 200)` both push a bound
+/// past the buffer's 3-byte length -- the first past `end`, the second past
+/// `start` as well -- which the original fixture never did (its only
+/// `slice(0, 2)` call is in range on both bounds), so a missing
+/// `.min(bytes.len())` on `nova_rt_bytes_slice`'s `hi` survived undetected;
+/// see the task report for the mutation transcript. `bytes_from_ints([97,
+/// 97, 97]).index_of(bytes_from_ints([97, 97]))` is the byte-domain mirror of
+/// `tests/runtime/strings.nova`'s `"aaa".index_of("aa")`: the needle matches
+/// at both index 0 and index 1, so this is what would catch `index_of`
+/// returning the last match instead of the first -- the original fixture's
+/// only search (`"i"` in `"hi\xff"`) matches exactly once and cannot tell the
+/// two apart.
 #[test]
 fn bytes_api_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_api.stdout"))
@@ -6477,4 +6491,59 @@ fn bytes_api_under_gc_stress() {
         .assert()
         .success()
         .stdout(expected);
+}
+
+/// Review finding P2 (Important): `bytes_from_ints`'s `0..=255` contract is
+/// documented in three places (the plan, `bytes.rs`'s doc comment, and
+/// `std/bytes/lib.nova`'s), and nothing exercised it -- replacing the
+/// `u8::try_from`/`abort_with` pair with a wrapping `v as u8` passed the
+/// whole suite, since nothing anywhere called it with a value outside the
+/// range. An abort cannot be observed as a stdout diff (the process ends
+/// before producing any more output), so this follows the same shape as
+/// `panic_aborts_with_message`/`run_aborts_when_an_async_fn_calls_block_on`:
+/// `nova run` on a fixture that aborts, asserting failure and the exact
+/// `nova: panic:` message on stderr, exactly as `nova_rt_bytes_from_ints`'s
+/// own `abort_with` call emits it.
+///
+/// This is the "too high" direction (`256`, one past the range). See
+/// `bytes_from_ints_rejects_a_value_below_the_range` for "too low" (`-1`) --
+/// covered separately because `u8::try_from` rejects each for a different
+/// reason (`-1` fails on sign, `256` fails on magnitude), and a mutation
+/// could plausibly get one direction right and the other wrong (e.g. `if v >
+/// 255 { abort } else { v as u8 }` accepts `256`'s rejection but wraps `-1`
+/// silently).
+#[test]
+fn bytes_from_ints_rejects_a_value_above_the_range() {
+    let assert = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/bytes_from_ints_too_high.nova"))
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nova: panic: nova_rt_bytes_from_ints: element out of range 0..=255"),
+        "stderr was {stderr:?}"
+    );
+    // Nothing after the aborting call ever runs.
+    assert!(!stdout.contains('1'), "stdout was {stdout:?}");
+}
+
+/// The "too low" direction (`-1`) of P2 -- see the sibling test above.
+#[test]
+fn bytes_from_ints_rejects_a_value_below_the_range() {
+    let assert = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/bytes_from_ints_too_low.nova"))
+        .assert()
+        .failure();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("nova: panic: nova_rt_bytes_from_ints: element out of range 0..=255"),
+        "stderr was {stderr:?}"
+    );
+    assert!(!stdout.contains('1'), "stdout was {stdout:?}");
 }
