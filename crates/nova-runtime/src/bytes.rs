@@ -89,16 +89,17 @@ pub unsafe extern "C" fn nova_rt_bytes_is_utf8(b: *const NovaStr) -> i8 {
 ///
 /// The caller must have established validity with
 /// [`nova_rt_bytes_is_utf8`] first; `std/bytes`'s `to_string` is the only
-/// caller and does exactly that. Because the two share a representation this
-/// hands back the same buffer rather than copying — an invalid `String` would
-/// be unsound, which is why the check is not optional.
+/// caller and does exactly that. This copies `b`'s bytes into a fresh buffer
+/// via `gc_bytes` — an invalid `String` would be unsound, which is why the
+/// check is not optional.
 ///
 /// # Safety
 /// `b` must point to a live `NovaStr` whose bytes are valid UTF-8.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_bytes_to_string_unchecked(b: *const NovaStr) -> *mut NovaStr {
-    // SAFETY: forwarding this function's own contract. Re-wrapping rather than
-    // copying is sound only because the layouts are identical.
+    // SAFETY: forwarding this function's own contract. `gc_bytes` allocates a
+    // fresh header and buffer and copies `b`'s bytes into it, rather than
+    // reusing `b`'s own storage.
     gc_bytes(unsafe { as_bytes(b) })
 }
 
@@ -148,6 +149,56 @@ mod tests {
                 0,
                 "0xFF is not a valid UTF-8 sequence on its own"
             );
+        }
+    }
+
+    /// **Review finding I1.** Every payload above (and the `bytes_basics`
+    /// Nova fixture's) is 1-3 bytes, entirely under `gc::alloc`'s 8-byte
+    /// floor (`let size = size.max(8);`, `gc.rs`), so the buffer's tracked
+    /// size reads 8 whether the request was correct or wrong by up to seven
+    /// bytes — no assertion using only those payloads can tell the two
+    /// apart. Proven, not assumed: hardcoding `gc_bytes`'s buffer allocation
+    /// to `crate::gc::alloc(1, false)`, ignoring `len` entirely, left the
+    /// whole suite (including `a_bytes_value_has_a_scanned_header_over_a_
+    /// leaf_buffer` above) green — and for any payload actually over 8 bytes
+    /// that mutation is a real heap-buffer overflow, since the
+    /// `copy_nonoverlapping` right after it still copies the full `len`
+    /// bytes into an 8-byte allocation. A payload above the floor is
+    /// required so the buffer's tracked size has a value other than 8 to be
+    /// wrong about.
+    #[test]
+    fn a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size() {
+        let payload = [7u8; 32];
+        let b = gc_bytes(&payload);
+        // SAFETY: `b` is the live header `gc_bytes` just built.
+        let buf = unsafe { (*b).ptr };
+        assert_eq!(
+            crate::gc::object_info(buf as usize),
+            Some((32, false)),
+            "a payload above the allocator's 8-byte floor must be tracked at \
+             its own exact size, not merely at the floor"
+        );
+    }
+
+    /// **Review finding M2.** Before this, the only exercise of
+    /// `nova_rt_bytes_len` was the `bytes_basics` fixture's single 2-byte
+    /// string — one data point, which cannot distinguish "returns the real
+    /// length" from a hardcoded constant. Proven, not assumed: hardcoding
+    /// the return to `2` passed the whole suite, fixture included (review
+    /// also checked the brief's other suggested probe, returning
+    /// `size_of::<NovaStr>()`, and that one *does* already die against the
+    /// existing fixture, since 16 != 2 — so the hardcoded-constant gap was
+    /// the only one left open). Two different real lengths rule out a
+    /// constant; the second clears `gc::alloc`'s 8-byte floor so this
+    /// doubles as a second, independent probe of the same floor
+    /// `a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size`
+    /// exercises, this time through the header's `len` field rather than
+    /// `object_info`.
+    #[test]
+    fn bytes_len_reports_the_real_length_for_more_than_one_size() {
+        unsafe {
+            assert_eq!(nova_rt_bytes_len(gc_bytes(&[1, 2, 3])), 3);
+            assert_eq!(nova_rt_bytes_len(gc_bytes(&[7u8; 32])), 32);
         }
     }
 }
