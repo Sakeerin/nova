@@ -78,7 +78,16 @@ pub type PollFn = unsafe extern "C-unwind" fn(state: *mut u8, task_ctx: *mut u8)
 /// unwind table describing it, so an unwind that started under one and passed
 /// through it would have to be resolved by an unwinder that has no description
 /// of that frame (see [`PollFn`]'s doc comment).
-fn abort_with(msg: &str) -> ! {
+///
+/// `pub(crate)`, not private: `bytes`'s `nova_rt_bytes_at` and
+/// `nova_rt_bytes_from_ints` (Task 3) call this too, for the same reason this
+/// module does -- both are reachable from inside a generated poll frame, so a
+/// rejected caller error must abort rather than unwind. This is still the
+/// *only* place that prints the `nova: panic:` marker and aborts on this path
+/// (ADR 0008's emitter inventory); a second helper doing the same thing would
+/// be a fifth emitter to track there, whereas a second module merely calling
+/// this one is not.
+pub(crate) fn abort_with(msg: &str) -> ! {
     eprintln!("nova: panic: {msg}");
     std::process::abort();
 }

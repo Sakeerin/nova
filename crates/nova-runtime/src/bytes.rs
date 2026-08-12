@@ -103,6 +103,138 @@ pub unsafe extern "C" fn nova_rt_bytes_to_string_unchecked(b: *const NovaStr) ->
     gc_bytes(unsafe { as_bytes(b) })
 }
 
+/// The byte at `i`, as an `Int` in `0..=255`.
+///
+/// Aborts on an out-of-range index. Nova's `Bytes::byte_at` bounds-checks first
+/// and returns `Option`, so this abort guards a bug in `std/bytes` rather than
+/// user error — and it aborts rather than panicking because a panic here could
+/// unwind through a generated poll frame.
+///
+/// # Safety
+/// `b` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_at(b: *const NovaStr, i: i64) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let bytes = unsafe { as_bytes(b) };
+    let Ok(idx) = usize::try_from(i) else {
+        crate::task::abort_with("nova_rt_bytes_at: negative index");
+    };
+    match bytes.get(idx) {
+        Some(byte) => i64::from(*byte),
+        None => crate::task::abort_with("nova_rt_bytes_at: index out of range"),
+    }
+}
+
+/// The bytes in `start..end`, clamped to the buffer and to `start <= end`.
+///
+/// Clamps rather than aborting because `std/strings`'s `slice` clamps too, and
+/// a byte type that panicked where the string type saturates would be a trap.
+///
+/// # Safety
+/// `b` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_slice(
+    b: *const NovaStr,
+    start: i64,
+    end: i64,
+) -> *mut NovaStr {
+    // SAFETY: forwarding this function's own contract.
+    let bytes = unsafe { as_bytes(b) };
+    let lo = start.max(0).min(bytes.len() as i64) as usize;
+    let hi = end.max(0).min(bytes.len() as i64) as usize;
+    if hi <= lo {
+        return gc_bytes(&[]);
+    }
+    gc_bytes(&bytes[lo..hi])
+}
+
+/// `a`'s bytes followed by `b`'s, in a freshly allocated buffer.
+///
+/// # Safety
+/// `a` and `b` must point to live `NovaStr`s.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_concat(
+    a: *const NovaStr,
+    b: *const NovaStr,
+) -> *mut NovaStr {
+    // SAFETY: forwarding this function's own contract.
+    let (a, b) = unsafe { (as_bytes(a), as_bytes(b)) };
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    out.extend_from_slice(a);
+    out.extend_from_slice(b);
+    gc_bytes(&out)
+}
+
+/// Decompose `b` into a Nova `[Int]`, one element per byte in `0..=255`.
+///
+/// The result must match **exactly** what codegen emits for an array: one
+/// block holding `{ len: i64, elem0, elem1, … }`, element `i` at byte offset
+/// `8 + 8*i`, allocated *scanned* — the same layout `nova_rt_str_chars`
+/// (`nova-runtime`'s crate root) builds for `[Char]`, and pinned here the same
+/// way that one is pinned, in this module's own `mod tests`
+/// (`to_ints_writes_the_array_layout_codegen_expects`, below).
+///
+/// # Safety
+/// `b` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_to_ints(b: *const NovaStr) -> *mut u8 {
+    // SAFETY: forwarding this function's own contract.
+    let bytes = unsafe { as_bytes(b) };
+    let n = bytes.len();
+    // `8` for the length header plus `8` per element, exactly as
+    // `nova_rt_str_chars` sizes its own `[Char]` block.
+    let block = crate::gc::alloc(8 + 8 * n, true);
+    let words = block as *mut i64;
+    // SAFETY: `block` is a fresh allocation of `8 + 8*n` bytes, so words
+    // `0..=n` are in bounds.
+    unsafe {
+        *words = n as i64;
+        for (i, byte) in bytes.iter().enumerate() {
+            *words.add(1 + i) = i64::from(*byte);
+        }
+    }
+    block
+}
+
+/// A `Bytes` holding each element of `ints` as one byte.
+///
+/// Aborts if any element is outside `0..=255`: that is a caller error (`std/
+/// bytes`'s `bytes_from_ints` is the only path to this intrinsic, and it
+/// documents the same contract), and a `Result` here would infect every
+/// construction path with a status protocol for what is a programmer mistake.
+///
+/// # Safety
+/// `ints` must point to a Nova array of `Int`: `{ len: i64, elems… }` with
+/// element `i` at byte offset `8 + 8*i` — the layout `nova_rt_str_from_chars`
+/// (`nova-runtime`'s crate root) reads for `[Char]`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_from_ints(ints: *const u8) -> *mut NovaStr {
+    let words = ints as *const i64;
+    // SAFETY: forwarding this function's own contract.
+    let n = unsafe { *words }.max(0) as usize;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        // SAFETY: `i < n`, and `n` is the array's own length, so this word is
+        // in bounds for the block `ints` describes.
+        let v = unsafe { *words.add(1 + i) };
+        let Ok(byte) = u8::try_from(v) else {
+            crate::task::abort_with("nova_rt_bytes_from_ints: element out of range 0..=255");
+        };
+        out.push(byte);
+    }
+    gc_bytes(&out)
+}
+
+/// Byte-for-byte equality of `a` and `b`.
+///
+/// # Safety
+/// `a` and `b` must point to live `NovaStr`s.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_bytes_eq(a: *const NovaStr, b: *const NovaStr) -> i8 {
+    // SAFETY: forwarding this function's own contract.
+    i8::from(unsafe { as_bytes(a) == as_bytes(b) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +331,33 @@ mod tests {
         unsafe {
             assert_eq!(nova_rt_bytes_len(gc_bytes(&[1, 2, 3])), 3);
             assert_eq!(nova_rt_bytes_len(gc_bytes(&[7u8; 32])), 32);
+        }
+    }
+
+    /// Pins `nova_rt_bytes_to_ints`'s array layout directly, the same way
+    /// `nova-runtime`'s own `str_chars_writes_the_array_layout_codegen_expects`
+    /// pins `nova_rt_str_chars`'s. Two elements: `8 + 8*2 = 24` bytes, well
+    /// above `gc::alloc`'s 8-byte floor (`gc.rs`, `size.max(8)`), so the
+    /// tracked size can actually discriminate a correct allocation from a
+    /// wrong one -- a payload at or under the floor could not (see this
+    /// module's own `a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size`
+    /// for the same reasoning applied to `gc_bytes`'s buffer).
+    #[test]
+    fn to_ints_writes_the_array_layout_codegen_expects() {
+        let b = gc_bytes(&[7, 8]);
+        // SAFETY: `b` is live; this is the same call Nova makes.
+        let block = unsafe { nova_rt_bytes_to_ints(b) };
+        assert_eq!(
+            crate::gc::object_info(block as usize),
+            Some((8 + 8 * 2, true)),
+            "an array block is a length word plus one word per element, SCANNED"
+        );
+        let words = block as *mut i64;
+        // SAFETY: the block is `8 + 8*2` bytes, so these three words are in bounds.
+        unsafe {
+            assert_eq!(*words, 2);
+            assert_eq!(*words.add(1), 7);
+            assert_eq!(*words.add(2), 8);
         }
     }
 }

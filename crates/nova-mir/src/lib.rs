@@ -279,6 +279,22 @@ rt_funcs! {
     /// `(bytes) -> str` — the bytes as a `String`, without checking UTF-8
     /// validity. The caller must have checked `BytesIsUtf8` first.
     BytesToStringUnchecked,
+    /// `(bytes, i64) -> i64` — the byte at the given index, as a value in
+    /// `0..=255`. Aborts if the index is out of range.
+    BytesAt,
+    /// `(bytes, i64, i64) -> bytes` — the bytes in `start..end`, clamped to
+    /// the buffer and to `start <= end`.
+    BytesSlice,
+    /// `(bytes, bytes) -> bytes` — the first buffer's bytes followed by the
+    /// second's.
+    BytesConcat,
+    /// `(bytes) -> ptr` — a Nova `[Int]`, one element per byte.
+    BytesToInts,
+    /// `(ptr to [Int]) -> bytes` — a `Bytes` holding each array element as one
+    /// byte. Aborts if any element is outside `0..=255`.
+    BytesFromInts,
+    /// `(bytes, bytes) -> i8` — byte-for-byte equality.
+    BytesEq,
 }
 
 impl RtFunc {
@@ -331,6 +347,12 @@ impl RtFunc {
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
             RtFunc::BytesToStringUnchecked => "nova_rt_bytes_to_string_unchecked",
+            RtFunc::BytesAt => "nova_rt_bytes_at",
+            RtFunc::BytesSlice => "nova_rt_bytes_slice",
+            RtFunc::BytesConcat => "nova_rt_bytes_concat",
+            RtFunc::BytesToInts => "nova_rt_bytes_to_ints",
+            RtFunc::BytesFromInts => "nova_rt_bytes_from_ints",
+            RtFunc::BytesEq => "nova_rt_bytes_eq",
         }
     }
 
@@ -380,6 +402,12 @@ impl RtFunc {
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
             RtFunc::BytesToStringUnchecked => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::BytesAt => (vec![MirTy::Ptr, MirTy::I64], MirTy::I64),
+            RtFunc::BytesSlice => (vec![MirTy::Ptr, MirTy::I64, MirTy::I64], MirTy::Ptr),
+            RtFunc::BytesConcat => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
+            RtFunc::BytesToInts => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::BytesFromInts => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
         }
     }
 }

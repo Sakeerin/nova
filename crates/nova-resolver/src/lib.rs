@@ -341,6 +341,46 @@ builtins! {
     /// which is why that check is not optional at the call site even though
     /// this builtin cannot enforce it itself. Std-only.
     BytesToStringUnchecked,
+    /// `bytes_at(b: Bytes, i: Int) -> Int` — the byte at `i`, in `0..=255`.
+    /// Backs `std/bytes`'s `Bytes::byte_at`, which bounds-checks `i` first and
+    /// returns `Option`; this intrinsic aborts on an out-of-range index rather
+    /// than returning a sentinel, since that path guards a `std/bytes` bug
+    /// rather than a user mistake. Nova cannot index a `Bytes` value's own
+    /// buffer (no indexing operator reaches the runtime), so this reaches the
+    /// runtime the same way `bytes_len` does. Std-only.
+    BytesAt,
+    /// `bytes_slice(b: Bytes, start: Int, end: Int) -> Bytes` — the bytes in
+    /// `start..end`, clamped to the buffer and to `start <= end`. Backs
+    /// `std/bytes`'s `Bytes::slice`. Clamps rather than aborting, matching
+    /// `std/strings`'s `String::slice`. Std-only.
+    BytesSlice,
+    /// `bytes_concat(a: Bytes, b: Bytes) -> Bytes` — `a`'s bytes followed by
+    /// `b`'s. Backs `std/bytes`'s `Bytes::concat`. Std-only.
+    BytesConcat,
+    /// `bytes_to_ints(b: Bytes) -> [Int]` — each byte as an `Int` in
+    /// `0..=255`, in order. Backs `std/bytes`'s `Bytes::to_ints`, and in turn
+    /// `index_of`/`contains`, which search over the resulting array in Nova
+    /// rather than through a per-search intrinsic. Std-only.
+    BytesToInts,
+    /// `bytes_from_ints_intrinsic(ints: [Int]) -> Bytes` — a `Bytes` holding
+    /// each element of `ints` as one byte. Aborts if any element is outside
+    /// `0..=255`. Backs the free function `bytes_from_ints` in
+    /// `std/bytes/lib.nova`.
+    ///
+    /// **Named `..._intrinsic`, not `bytes_from_ints`, for the same reason as
+    /// [`Builtin::BytesFromString`]** — see that variant's doc comment.
+    /// `std/bytes` is itself an entry of [`STD_MODULES`], so a `pub fn
+    /// bytes_from_ints` there sharing this builtin's name would collide with
+    /// its own pre-seeded builtin entry (`insert_value`'s `E0002`) rather than
+    /// calling it. Std-only.
+    BytesFromInts,
+    /// `bytes_eq(a: Bytes, b: Bytes) -> Bool` — byte-for-byte equality. Backs
+    /// `std/bytes`'s `impl Eq for Bytes`. A dedicated intrinsic rather than an
+    /// operator lowering: unlike `String`'s `==` (a pure operator lowering
+    /// straight to `nova_rt_str_eq`, see [`Builtin::StrCmp`]'s doc comment),
+    /// `Bytes` equality is reached only through the `Eq` trait's `eq` method,
+    /// so `binary_result_ty` needs no `Ty::Bytes` arm for `==`/`!=`. Std-only.
+    BytesEq,
 }
 
 impl Builtin {
@@ -389,6 +429,15 @@ impl Builtin {
             Builtin::BytesFromString => "bytes_from_string_intrinsic",
             Builtin::BytesIsUtf8 => "bytes_is_utf8",
             Builtin::BytesToStringUnchecked => "bytes_to_string_unchecked",
+            Builtin::BytesAt => "bytes_at",
+            Builtin::BytesSlice => "bytes_slice",
+            Builtin::BytesConcat => "bytes_concat",
+            Builtin::BytesToInts => "bytes_to_ints",
+            // Deliberately not "bytes_from_ints" — see this variant's doc
+            // comment for why that would collide with `std/bytes`'s own
+            // `pub fn bytes_from_ints` wrapper.
+            Builtin::BytesFromInts => "bytes_from_ints_intrinsic",
+            Builtin::BytesEq => "bytes_eq",
         }
     }
 
@@ -416,7 +465,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 34] = [
+    pub const STD_ONLY: [Builtin; 40] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -451,6 +500,12 @@ impl Builtin {
         Builtin::BytesFromString,
         Builtin::BytesIsUtf8,
         Builtin::BytesToStringUnchecked,
+        Builtin::BytesAt,
+        Builtin::BytesSlice,
+        Builtin::BytesConcat,
+        Builtin::BytesToInts,
+        Builtin::BytesFromInts,
+        Builtin::BytesEq,
     ];
 }
 

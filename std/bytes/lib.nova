@@ -27,6 +27,54 @@ impl Bytes {
             None
         }
     }
+
+    // The byte at `i`, or `None` if `i` is out of range.
+    //
+    // `Option` rather than an abort, matching `String::char_at`; a negative
+    // index is `None` for the same reason.
+    pub fn byte_at(self, i: Int) -> Option<Int> {
+        if i < 0 { return None }
+        if i >= self.len() { return None }
+        Some(bytes_at(self, i))
+    }
+
+    // The bytes in `start..end`, clamped to this buffer, as `String::slice`
+    // clamps.
+    pub fn slice(self, start: Int, end: Int) -> Bytes { bytes_slice(self, start, end) }
+
+    // These bytes followed by `other`'s.
+    pub fn concat(self, other: Bytes) -> Bytes { bytes_concat(self, other) }
+
+    // Each byte as an `Int` in `0..=255`.
+    pub fn to_ints(self) -> [Int] { bytes_to_ints(self) }
+
+    // The index of `needle`'s first occurrence, or `None`.
+    //
+    // Searched here in Nova over an `[Int]` rather than by an intrinsic, the
+    // same shape `String::index_of` uses over `str_chars` -- one runtime call
+    // per operand instead of one per byte compared.
+    pub fn index_of(self, needle: Bytes) -> Option<Int> {
+        let h = self.to_ints()
+        let n = needle.to_ints()
+        if n.len() == 0 { return Some(0) }
+        if n.len() > h.len() { return None }
+        let last = h.len() - n.len()
+        let mut at = 0
+        while at <= last {
+            let mut k = 0
+            let mut same = true
+            while k < n.len() {
+                if h[at + k] != n[k] { same = false }
+                k = k + 1
+            }
+            if same { return Some(at) }
+            at = at + 1
+        }
+        None
+    }
+
+    // Whether `needle` occurs in these bytes.
+    pub fn contains(self, needle: Bytes) -> Bool { self.index_of(needle).is_some() }
 }
 
 // A `Bytes` holding `s`'s UTF-8 bytes.
@@ -47,3 +95,19 @@ impl Bytes {
 // `Builtin::BytesFromString`'s doc comment (`nova-resolver`) and the Task 2
 // report for the verification.
 pub fn bytes_from_string(s: String) -> Bytes { bytes_from_string_intrinsic(s) }
+
+// A `Bytes` holding each `Int` in `ints` as one byte.
+//
+// Aborts if any element is outside `0..=255`: that is a caller error, and a
+// `Result` here would infect every construction path.
+//
+// Calls `bytes_from_ints_intrinsic`, not a builtin of this same name, for the
+// same reason `bytes_from_string` above calls `bytes_from_string_intrinsic`:
+// this module is a `STD_MODULES` entry, so a builtin named `bytes_from_ints`
+// would collide with this very definition (`E0002`) rather than being called
+// by it. See `Builtin::BytesFromInts`'s doc comment (`nova-resolver`).
+pub fn bytes_from_ints(ints: [Int]) -> Bytes { bytes_from_ints_intrinsic(ints) }
+
+impl Eq for Bytes {
+    fn eq(self, other: Bytes) -> Bool { bytes_eq(self, other) }
+}
