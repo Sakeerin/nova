@@ -705,6 +705,12 @@ impl<'a> Lowerer<'a> {
                     Builtin::FsReadDir => Lowering::Runtime(RtFunc::FsReadDir),
                     Builtin::FsTakeStringArray => Lowering::Runtime(RtFunc::FsTakeStringArray),
                     Builtin::FsKind => Lowering::Runtime(RtFunc::FsKind),
+                    Builtin::BytesLen => Lowering::Runtime(RtFunc::BytesLen),
+                    Builtin::BytesFromString => Lowering::Runtime(RtFunc::BytesFromString),
+                    Builtin::BytesIsUtf8 => Lowering::Runtime(RtFunc::BytesIsUtf8),
+                    Builtin::BytesToStringUnchecked => {
+                        Lowering::Runtime(RtFunc::BytesToStringUnchecked)
+                    }
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

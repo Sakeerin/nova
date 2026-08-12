@@ -302,6 +302,45 @@ builtins! {
     /// costs one syscall instead of two and the two answers cannot disagree.
     /// Backs `std/fs`'s `read_dir`. Std-only.
     FsKind,
+    /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
+    /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
+    /// Nova cannot read a `Bytes` value's own header (no length, indexing or
+    /// iteration on it, same as `String`), so this reaches the runtime the
+    /// same way `str_len_chars` does. Std-only.
+    BytesLen,
+    /// `bytes_from_string_intrinsic(s: String) -> Bytes` — a `Bytes` holding
+    /// `s`'s UTF-8 bytes. Backs the free function `bytes_from_string` in
+    /// `std/bytes/lib.nova`.
+    ///
+    /// **Named `..._intrinsic`, not `bytes_from_string`, deliberately.**
+    /// `std/bytes` is itself an entry of [`STD_MODULES`], so `Builtin::STD_ONLY`
+    /// is seeded into its *own* scope before that module's items are
+    /// collected (see `resolve_program`'s pass order). A `pub fn
+    /// bytes_from_string` in that same file would then hit `insert_value`'s
+    /// `scope.values.contains_key` check against this builtin's own
+    /// pre-seeded entry and fail name resolution with `E0002 duplicate
+    /// definition` — **not** silently compile into a recursive call, and not
+    /// silently shadow the builtin either; `insert_value` has no soft/shadow
+    /// path for a module's own item colliding with something already in its
+    /// own scope, unlike the separate, later, `entry`-style glob import
+    /// `import_std_module` uses to let one *std module's* export lose to
+    /// another module's own definition. Verified empirically (see the Task 2
+    /// report): naming this builtin `bytes_from_string` reproduces the
+    /// `E0002` against `std/bytes/lib.nova` itself, on every compile. Std-only.
+    BytesFromString,
+    /// `bytes_is_utf8(b: Bytes) -> Bool` — whether `b`'s bytes are valid
+    /// UTF-8. Backs `std/bytes`'s `Bytes::to_string`, paired with
+    /// [`Builtin::BytesToStringUnchecked`] so that method can be a Nova-level
+    /// `if` rather than needing a status-code protocol for one boolean.
+    /// Std-only.
+    BytesIsUtf8,
+    /// `bytes_to_string_unchecked(b: Bytes) -> String` — `b`'s bytes as a
+    /// `String`, without checking UTF-8 validity. Backs `std/bytes`'s
+    /// `Bytes::to_string`, whose only call site checks
+    /// [`Builtin::BytesIsUtf8`] first — an invalid `String` would be unsound,
+    /// which is why that check is not optional at the call site even though
+    /// this builtin cannot enforce it itself. Std-only.
+    BytesToStringUnchecked,
 }
 
 impl Builtin {
@@ -343,6 +382,13 @@ impl Builtin {
             Builtin::FsReadDir => "fs_read_dir",
             Builtin::FsTakeStringArray => "fs_take_string_array",
             Builtin::FsKind => "fs_kind",
+            Builtin::BytesLen => "bytes_len",
+            // Deliberately not "bytes_from_string" — see this variant's doc
+            // comment for why that would collide with `std/bytes`'s own
+            // `pub fn bytes_from_string` wrapper.
+            Builtin::BytesFromString => "bytes_from_string_intrinsic",
+            Builtin::BytesIsUtf8 => "bytes_is_utf8",
+            Builtin::BytesToStringUnchecked => "bytes_to_string_unchecked",
         }
     }
 
@@ -370,7 +416,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 30] = [
+    pub const STD_ONLY: [Builtin; 34] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -401,6 +447,10 @@ impl Builtin {
         Builtin::FsReadDir,
         Builtin::FsTakeStringArray,
         Builtin::FsKind,
+        Builtin::BytesLen,
+        Builtin::BytesFromString,
+        Builtin::BytesIsUtf8,
+        Builtin::BytesToStringUnchecked,
     ];
 }
 
@@ -907,8 +957,9 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 6] = [
+pub const STD_MODULES: [(&str, &str); 7] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
+    ("$std.bytes", include_str!("../../../std/bytes/lib.nova")),
     ("$std.io", include_str!("../../../std/io/lib.nova")),
     ("$std.fs", include_str!("../../../std/fs/lib.nova")),
     (

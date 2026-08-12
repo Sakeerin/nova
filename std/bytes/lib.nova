@@ -1,0 +1,49 @@
+// Nova standard library — byte buffers.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
+//
+// `Bytes` is an immutable byte buffer. It shares `String`'s representation -- a
+// scanned header over a leaf buffer -- and differs in carrying no encoding
+// guarantee. Nothing converts between them implicitly.
+//
+// This module follows `std/strings`' structure: a small intrinsic core with the
+// searching and bounds checking done here in Nova, rather than one intrinsic per
+// method.
+
+impl Bytes {
+    // The number of bytes. Not a character count: `Bytes` has no encoding.
+    pub fn len(self) -> Int { bytes_len(self) }
+
+    // These bytes as a `String`, or `None` if they are not valid UTF-8.
+    //
+    // `Option` rather than `Result<String, IoError>`: there is exactly one way
+    // this fails, so an error kind would carry no information, and a byte type
+    // should not depend on an I/O error type.
+    pub fn to_string(self) -> Option<String> {
+        if bytes_is_utf8(self) {
+            Some(bytes_to_string_unchecked(self))
+        } else {
+            None
+        }
+    }
+}
+
+// A `Bytes` holding `s`'s UTF-8 bytes.
+//
+// A free function rather than a method on `String`, so `std/strings` needs no
+// knowledge of `Bytes`.
+//
+// Calls `bytes_from_string_intrinsic`, not a builtin of this same name: this
+// module is itself a `STD_MODULES` entry, so `Builtin::STD_ONLY` -- including
+// the builtin backing this very function -- is seeded into this module's own
+// scope before this function is collected (`nova_resolver::resolve_program`'s
+// pass order). A builtin named `bytes_from_string` here would make this
+// definition collide with itself: `insert_value` reports `E0002 duplicate
+// definition` ("is a compiler builtin") rather than silently compiling the
+// call below into a recursive call, and rather than silently letting this
+// definition shadow the builtin -- there is no such shadowing path for a
+// module's own item colliding with something already in its own scope. See
+// `Builtin::BytesFromString`'s doc comment (`nova-resolver`) and the Task 2
+// report for the verification.
+pub fn bytes_from_string(s: String) -> Bytes { bytes_from_string_intrinsic(s) }
