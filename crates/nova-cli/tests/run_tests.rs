@@ -6056,10 +6056,9 @@ fn fs_permission_denied_run() {
 /// fixture now writes its own non-UTF-8 payload via
 /// `write(p, bytes_from_ints([0xFF, 0xFE])).await`, and this harness shrinks
 /// to the same `unique_temp_dir` + `TMPDIR`/`TMP`/`TEMP` shape every other
-/// `fs_` fixture that touches a real path already uses (`fs_not_found_run`,
-/// `fs_io_types_run` and `fs_not_found_build_standalone` do not, since none
-/// of them touch a real path at all) -- nothing filesystem-specific to this
-/// one test remains here. See the task report for the exact before/after.
+/// `fs_` fixture that touches a real path already uses -- nothing
+/// filesystem-specific to this one test remains here. See the task report
+/// for the exact before/after.
 #[test]
 fn fs_invalid_data_run() {
     let tmp = unique_temp_dir("nova-fs-invalid-data");

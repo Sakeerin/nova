@@ -371,11 +371,11 @@ afterwards.
   `.await`.
 
   **AMENDED 2026-08-11 (branch `std-fs-strings`): "the fix is always an
-  `.await`" no longer holds without qualification.** `std/fs`'s eight
-  functions (`docs/adr/0011-io-error-kinds.md`) are `async fn`s whose bodies
-  contain no `.await` at all — the filesystem operation runs synchronously
-  inside the first poll, because there is no I/O poller yet. Writing `.await`
-  at the call site does not help: the callee's poll function runs to
+  `.await`" no longer holds without qualification.** `std/fs`'s `async fn`s
+  (`docs/adr/0011-io-error-kinds.md`) have bodies that contain no `.await` at
+  all — the filesystem operation runs synchronously inside the first poll,
+  because there is no I/O poller yet. Writing `.await` at the call site does
+  not help: the callee's poll function runs to
   completion and reports `POLL_READY` before the calling task's own suspend
   machinery is ever reached, so a long `read_to_string` still starves every
   other task on the thread for its duration — the exact symptom this bullet
