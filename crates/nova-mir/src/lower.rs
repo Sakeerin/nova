@@ -711,6 +711,12 @@ impl<'a> Lowerer<'a> {
                     Builtin::BytesToStringUnchecked => {
                         Lowering::Runtime(RtFunc::BytesToStringUnchecked)
                     }
+                    Builtin::BytesAt => Lowering::Runtime(RtFunc::BytesAt),
+                    Builtin::BytesSlice => Lowering::Runtime(RtFunc::BytesSlice),
+                    Builtin::BytesConcat => Lowering::Runtime(RtFunc::BytesConcat),
+                    Builtin::BytesToInts => Lowering::Runtime(RtFunc::BytesToInts),
+                    Builtin::BytesFromInts => Lowering::Runtime(RtFunc::BytesFromInts),
+                    Builtin::BytesEq => Lowering::Runtime(RtFunc::BytesEq),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

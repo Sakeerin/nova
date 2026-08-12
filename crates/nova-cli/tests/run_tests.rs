@@ -6406,3 +6406,75 @@ fn bytes_basics_run() {
         .success()
         .stdout(expected);
 }
+
+// === byte-type increment, Task 3: the rest of the byte surface ===
+
+/// End-to-end: `bytes_from_ints` builds a non-UTF-8 buffer (byte `255`), and
+/// every new method round-trips against it -- `byte_at` (both the in-range
+/// and out-of-range arms), `slice`, `concat`, `to_ints` fed back through
+/// `bytes_from_ints` and compared with `eq`, `index_of`, and `contains`. Byte
+/// `255` is deliberate: it makes the buffer invalid UTF-8 (closing Task 2's
+/// surviving `bytes_is_utf8` mutation, since Task 2's own fixtures never
+/// exercised the "not UTF-8" arm end-to-end) and it proves `byte_at` returns
+/// an unsigned value rather than a sign-extended `-1`.
+///
+/// **Two `eq` calls, deliberately not one.** `bytes_from_ints(b.to_ints()).eq(b)`
+/// reconstructs a buffer that is byte-for-byte identical to `b`, so a
+/// length-only `eq` mutation (comparing `len` alone, never the bytes) cannot
+/// be told apart from a real one there -- both answer `true`. The second call
+/// compares two three-byte buffers differing only in their last byte, which a
+/// length-only comparison gets wrong (`true`) where a real one answers
+/// `false`. Measured, not assumed: see the task report's mutation transcripts
+/// for the run where the first call alone let that mutation survive.
+#[test]
+fn bytes_api_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_api.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/bytes_api.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture through `nova build` -- a standalone linked executable
+/// rather than the JIT. Closes the `nova build` half of the byte-type plan's
+/// definition of done (§9): unlike `std/fs`'s fixtures, which inherit `nova
+/// build`/`NOVA_GC_STRESS=1` coverage from that increment's existing gate
+/// wiring, no `bytes_*` fixture ran under either configuration before this --
+/// a gap the plan's own self-review caught before implementation, rather than
+/// after. This fixture needs no temp directory or environment override, so it
+/// is as cheap to route through `build_and_run` as `fs_not_found` was for the
+/// `std/fs` increment.
+#[test]
+fn bytes_api_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_api.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let out = build_and_run("tests/runtime/bytes_api.nova", "bytes_api");
+    assert_eq!(out.replace("\r\n", "\n"), expected);
+}
+
+/// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
+/// allocation) -- the other half of the byte-type plan's `nova build` /
+/// `NOVA_GC_STRESS=1` definition-of-done gap. `to_ints`/`from_ints` allocate a
+/// fresh scanned array block, `slice`/`concat`/`bytes_from_ints` each allocate
+/// a fresh header and leaf buffer, and `index_of`/`contains` hold both
+/// operands' arrays live across a Nova-level loop -- so a collection forced on
+/// every allocation exercises every new intrinsic's rooting, not only the
+/// four already covered by `bytes_basics`/`bytes_len`.
+#[test]
+fn bytes_api_under_gc_stress() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_api.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/bytes_api.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

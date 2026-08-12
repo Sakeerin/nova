@@ -1,0 +1,29 @@
+fn main() {
+    let b = bytes_from_ints([104, 105, 255])
+    println("${b.len()}")
+    match b.to_string() {
+        Some(s) => println("unexpectedly utf8: ${s}")
+        None => println("not utf8")
+    }
+    println("${b.byte_at(2).unwrap_or(0)}")
+    println("${b.byte_at(3).is_none()}")
+    let hi = b.slice(0, 2)
+    match hi.to_string() {
+        Some(s) => println(s)
+        None => println("slice not utf8")
+    }
+    let joined = hi.concat(bytes_from_string("!"))
+    match joined.to_string() {
+        Some(s) => println(s)
+        None => println("joined not utf8")
+    }
+    println("${bytes_from_ints(b.to_ints()).eq(b)}")
+    // Two equal-length buffers differing in exactly one byte: a length-only
+    // `eq` (comparing `len` alone, never the bytes) would wrongly call these
+    // equal, unlike the line above, where the reconstructed buffer is also
+    // byte-for-byte identical and so cannot tell a real comparison from one
+    // that only checks length.
+    println("${bytes_from_ints([1, 2, 3]).eq(bytes_from_ints([1, 2, 4]))}")
+    println("${b.index_of(bytes_from_string("i")).unwrap_or(-1)}")
+    println("${b.contains(bytes_from_string("z"))}")
+}

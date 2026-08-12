@@ -3939,7 +3939,13 @@ impl<'a> Checker<'a> {
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
-            | Builtin::BytesToStringUnchecked => "",
+            | Builtin::BytesToStringUnchecked
+            | Builtin::BytesAt
+            | Builtin::BytesSlice
+            | Builtin::BytesConcat
+            | Builtin::BytesToInts
+            | Builtin::BytesFromInts
+            | Builtin::BytesEq => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7154,6 +7160,12 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
         Builtin::BytesToStringUnchecked => (vec![Ty::Bytes], Ty::String),
+        Builtin::BytesAt => (vec![Ty::Bytes, Ty::Int], Ty::Int),
+        Builtin::BytesSlice => (vec![Ty::Bytes, Ty::Int, Ty::Int], Ty::Bytes),
+        Builtin::BytesConcat => (vec![Ty::Bytes, Ty::Bytes], Ty::Bytes),
+        Builtin::BytesToInts => (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
+        Builtin::BytesFromInts => (vec![Ty::Array(Box::new(Ty::Int))], Ty::Bytes),
+        Builtin::BytesEq => (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
     }
 }
 
@@ -15105,6 +15117,30 @@ mod tests {
                 Builtin::BytesToStringUnchecked => (
                     (vec![Ty::Bytes], Ty::String),
                     "`bytes_to_string_unchecked(self)` in `Bytes::to_string`",
+                ),
+                Builtin::BytesAt => (
+                    (vec![Ty::Bytes, Ty::Int], Ty::Int),
+                    "`bytes_at(self, i)` in `Bytes::byte_at`",
+                ),
+                Builtin::BytesSlice => (
+                    (vec![Ty::Bytes, Ty::Int, Ty::Int], Ty::Bytes),
+                    "`bytes_slice(self, start, end)` in `Bytes::slice`",
+                ),
+                Builtin::BytesConcat => (
+                    (vec![Ty::Bytes, Ty::Bytes], Ty::Bytes),
+                    "`bytes_concat(self, other)` in `Bytes::concat`",
+                ),
+                Builtin::BytesToInts => (
+                    (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
+                    "`bytes_to_ints(self)` in `Bytes::to_ints`",
+                ),
+                Builtin::BytesFromInts => (
+                    (vec![Ty::Array(Box::new(Ty::Int))], Ty::Bytes),
+                    "`bytes_from_ints_intrinsic(ints)` in the free function `bytes_from_ints`",
+                ),
+                Builtin::BytesEq => (
+                    (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
+                    "`bytes_eq(self, other)` in `impl Eq for Bytes`",
                 ),
             }
         }

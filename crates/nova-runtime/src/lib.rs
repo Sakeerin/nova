@@ -474,6 +474,24 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_bytes_to_string_unchecked",
             bytes::nova_rt_bytes_to_string_unchecked as *const u8,
         ),
+        ("nova_rt_bytes_at", bytes::nova_rt_bytes_at as *const u8),
+        (
+            "nova_rt_bytes_slice",
+            bytes::nova_rt_bytes_slice as *const u8,
+        ),
+        (
+            "nova_rt_bytes_concat",
+            bytes::nova_rt_bytes_concat as *const u8,
+        ),
+        (
+            "nova_rt_bytes_to_ints",
+            bytes::nova_rt_bytes_to_ints as *const u8,
+        ),
+        (
+            "nova_rt_bytes_from_ints",
+            bytes::nova_rt_bytes_from_ints as *const u8,
+        ),
+        ("nova_rt_bytes_eq", bytes::nova_rt_bytes_eq as *const u8),
     ]
 }
 
