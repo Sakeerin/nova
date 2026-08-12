@@ -5,7 +5,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
+// `anyhow!` is only invoked from `link_msvc`'s `#[cfg(windows)]` body below;
+// off Windows that function is the `unreachable!`-only stub, so an
+// unqualified import here reads as unused there (`-D warnings` on the
+// Clippy job, which runs on ubuntu-latest, is what turns that into a build
+// failure).
+#[cfg(windows)]
+use anyhow::anyhow;
 
 /// Compile textual LLVM IR (`ir`, a `.ll` file) to a native object file using
 /// a discovered LLVM toolchain, optimizing at `-O2`.
