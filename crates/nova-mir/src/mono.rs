@@ -876,6 +876,39 @@ mod tests {
     }
 
     #[test]
+    fn mangle_ty_gives_bytes_a_distinct_string_from_every_other_nullary_type() {
+        // `mangle_ty` mapping two types to the same string has already shipped
+        // as a miscompile on this project (see
+        // `mangle_ty_distinguishes_futures_by_output_type` above): two
+        // monomorphized instances collide on one symbol and both dispatch to
+        // the first one's code. `Bytes` reaching this function is not
+        // hypothetical or Task-2-only: a value-less generic instantiation --
+        // a zero-field generic record's constructor called at `Box<Bytes>`,
+        // the same pattern `tests/runtime/assoc_types.nova` already uses for
+        // `Vec::new()` -- calls `mangle_ty(&Ty::Bytes)` for the symbol name
+        // with no `Bytes` value ever constructed. Checked against every other
+        // nullary type, not just `String` (the structural twin it is most
+        // likely to be confused with): a collision with `Int` or `Char` would
+        // be exactly as wrong, and this one loop covers all of them.
+        let bytes = crate::mangle_ty(&hir::Ty::Bytes);
+        for (name, other) in [
+            ("Int", hir::Ty::Int),
+            ("Float", hir::Ty::Float),
+            ("Bool", hir::Ty::Bool),
+            ("Char", hir::Ty::Char),
+            ("String", hir::Ty::String),
+            ("Unit", hir::Ty::Unit),
+            ("Never", hir::Ty::Never),
+        ] {
+            assert_ne!(
+                bytes,
+                crate::mangle_ty(&other),
+                "Bytes's mangled string must not collide with {name}'s"
+            );
+        }
+    }
+
+    #[test]
     fn mir_ty_maps_future_to_ptr() {
         // A future value is the fat pointer { poll_code, state_ptr }.
         // MirTy::Unit would be catastrophic and silent: unit parameters are

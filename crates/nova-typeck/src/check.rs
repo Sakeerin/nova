@@ -15703,13 +15703,16 @@ mod tests {
     fn bytes_is_a_nameable_type_in_every_position() {
         // `Bytes` has no operations yet, so this only asserts it converts in a
         // signature, a `let` annotation, a field type and a generic argument --
-        // every position `convert_ty` runs. A value cannot be constructed until
-        // Task 2, which is why this is typeck-only.
+        // every position `convert_ty` runs. A value cannot be constructed
+        // until Task 2, which is why `main`'s `let` initializes with
+        // `panic(...)` rather than a real `Bytes` value: `panic` diverges
+        // (`Ty::Never`), and `Never` unifies with anything, so the annotation
+        // still converts and unifies without needing a way to construct one.
         let r = check_src(
             "record Holder { b: Bytes }\n\
              fn ident(x: Bytes) -> Bytes { x }\n\
              fn takes_array(xs: [Bytes]) -> Int { xs.len() }\n\
-             fn main() { }",
+             fn main() { let x: Bytes = panic(\"unreachable\") }",
         );
         assert!(
             r.diagnostics.is_empty(),
