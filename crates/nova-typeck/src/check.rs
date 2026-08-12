@@ -15779,15 +15779,18 @@ mod tests {
 
     #[test]
     fn bytes_is_nameable_in_representative_positions() {
-        // `Bytes` has no operations yet, so this only asserts it converts in a
-        // signature, a `let` annotation, a field type and a generic argument --
-        // one representative per broad category, not an exhaustive
-        // enumeration of `convert_ty`'s call sites (there are far more than
-        // these four). A value cannot be constructed
-        // until Task 2, which is why `main`'s `let` initializes with
-        // `panic(...)` rather than a real `Bytes` value: `panic` diverges
-        // (`Ty::Never`), and `Never` unifies with anything, so the annotation
-        // still converts and unifies without needing a way to construct one.
+        // This test asserts only that `Bytes` converts in a signature, a
+        // `let` annotation, a field type and a generic argument -- one
+        // representative per broad category, not an exhaustive enumeration
+        // of `convert_ty`'s call sites (there are far more than these
+        // four). `main`'s `let` initializes with `panic(...)` rather than a
+        // real `Bytes` value -- not because one cannot be built
+        // (`bytes_from_string("x")` works today, with `$std.bytes`
+        // glob-imported into every other module since Task 2, no `import`
+        // needed) but because this test does not need one: `panic`
+        // diverges (`Ty::Never`), and `Never` unifies with anything, so the
+        // annotation still converts and unifies without needing a way to
+        // construct one.
         let r = check_src(
             "record Holder { b: Bytes }\n\
              fn ident(x: Bytes) -> Bytes { x }\n\
@@ -15796,7 +15799,7 @@ mod tests {
         );
         assert!(
             r.diagnostics.is_empty(),
-            "`Bytes` must convert in every type position, got {:?}",
+            "`Bytes` must convert in each representative type position, got {:?}",
             r.diagnostics
                 .iter()
                 .map(|d| (&d.code, &d.message))
