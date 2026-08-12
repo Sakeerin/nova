@@ -1,0 +1,24 @@
+fn main() {
+    block_on(go())
+}
+
+async fn go() {
+    let p = "${temp_dir()}/nova_fs_bytes_c47a.bin"
+    // Deliberately NOT valid UTF-8, so this cannot silently be routing through
+    // `String`.
+    let payload = bytes_from_ints([0, 255, 10, 254, 65])
+    match write(p, payload).await {
+        Ok(_) => println("wrote")
+        Err(e) => println("write failed: ${e.message}")
+    }
+    match read(p).await {
+        Ok(b) => {
+            println("${b.len()}")
+            println("${b.eq(payload)}")
+            println("${b.to_string().is_none()}")
+        }
+        Err(e) => println("read failed: ${e.message}")
+    }
+    let _ = remove_file(p).await
+    println("removed")
+}

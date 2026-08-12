@@ -461,6 +461,12 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             fs::nova_rt_fs_take_string_array as *const u8,
         ),
         ("nova_rt_fs_kind", fs::nova_rt_fs_kind as *const u8),
+        ("nova_rt_fs_read", fs::nova_rt_fs_read as *const u8),
+        (
+            "nova_rt_fs_take_bytes",
+            fs::nova_rt_fs_take_bytes as *const u8,
+        ),
+        ("nova_rt_fs_write", fs::nova_rt_fs_write as *const u8),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",

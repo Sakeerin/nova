@@ -1,0 +1,33 @@
+fn main() {
+    block_on(go())
+}
+
+// `fs_bytes_roundtrip.nova` only exercises `read`/`write`'s success paths, so
+// this fixture is what actually exercises their `Err` arms -- the shape of
+// gap this codebase has already found once for `write_string` (see
+// `fs_write_then_read_run`'s doc comment): a status check silently deleted
+// from either wrapper here left the entire workspace suite green until this
+// fixture existed. See the task report's mutation transcripts.
+async fn go() {
+    match read("nova_no_such_bytes_file_9d3a.bin").await {
+        Ok(_) => println("unexpectedly read it")
+        Err(e) => println(kind_name(e.kind))
+    }
+    match write("nova_no_such_bytes_dir_9d3a/deep.bin", bytes_from_ints([1, 2, 3])).await {
+        Ok(_) => println("unexpectedly wrote it")
+        Err(e) => println(kind_name(e.kind))
+    }
+}
+
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}

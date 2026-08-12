@@ -62,8 +62,20 @@ pub const CONNECTION_REFUSED: i64 = 7;
 pub const OTHER: i64 = 8;
 
 thread_local! {
-    /// A GC-rooted `*mut NovaStr` awaiting `nova_rt_fs_take_string`, or 0.
-    static STRING_SLOT: Cell<usize> = const { Cell::new(0) };
+    /// A GC-rooted `*mut NovaStr` awaiting `nova_rt_fs_take_string` or
+    /// `nova_rt_fs_take_bytes`, or 0.
+    ///
+    /// **Shared by `String` and `Bytes` payloads, not one slot each.** The
+    /// two types have the identical `{len, ptr}` representation (see
+    /// `crate::bytes`'s module doc comment), so a second slot would be a
+    /// second copy of storage for a distinction that is already fully carried
+    /// by which *builtin* stashed into it and which one reads it back
+    /// (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string` treat the
+    /// payload as UTF-8; `nova_rt_fs_read`/`nova_rt_fs_take_bytes` do not
+    /// interpret it at all) — deepening the per-thread slot protocol with a
+    /// third slot for no representational reason is exactly the kind of
+    /// avoidable debt this module's own boundary design exists to prevent.
+    static BUFFER_SLOT: Cell<usize> = const { Cell::new(0) };
     /// A GC-rooted array block awaiting `nova_rt_fs_take_string_array`, or 0.
     ///
     /// Filled by `stash_array`, Task 4's array-building counterpart to
@@ -213,7 +225,7 @@ pub unsafe extern "C" fn nova_rt_fs_read_to_string(path: *const NovaStr) -> i64 
     let p = unsafe { crate::as_str(path) };
     match std::fs::read_to_string(p) {
         Ok(s) => {
-            stash(&STRING_SLOT, gc_message(&s));
+            stash(&BUFFER_SLOT, gc_message(&s));
             OK
         }
         Err(e) => fail(&e),
@@ -241,8 +253,57 @@ pub unsafe extern "C" fn nova_rt_fs_write_string(
 /// pending, which a correct wrapper never asks for.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_string() -> *mut NovaStr {
-    match take(&STRING_SLOT) {
+    match take(&BUFFER_SLOT) {
         0 => gc_message(""),
+        p => p as *mut NovaStr,
+    }
+}
+
+/// Read `path`'s bytes. Returns a status; on `OK` the contents are waiting in
+/// `nova_rt_fs_take_bytes`.
+///
+/// Unlike `nova_rt_fs_read_to_string` this cannot produce `INVALID_DATA`: there
+/// is no encoding to violate. Any status other than `OK` is a real I/O failure.
+///
+/// # Safety
+/// `path` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_read(path: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { crate::as_str(path) };
+    match std::fs::read(p) {
+        Ok(bytes) => {
+            stash(&BUFFER_SLOT, crate::bytes::gc_bytes(&bytes));
+            OK
+        }
+        Err(e) => fail(&e),
+    }
+}
+
+/// Write `content`'s bytes to `path`, truncating an existing file.
+///
+/// # Safety
+/// Both arguments must point to live `NovaStr`s.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_write(path: *const NovaStr, content: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let (p, c) = unsafe { (crate::as_str(path), crate::bytes::as_bytes(content)) };
+    match std::fs::write(p, c) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
+/// Take the pending payload as `Bytes`. Returns an empty `Bytes` if nothing is
+/// pending, which a correct wrapper never asks for.
+///
+/// Mirrors [`nova_rt_fs_take_string`], reading the same shared
+/// [`BUFFER_SLOT`] -- the payload left there by a successful
+/// [`nova_rt_fs_read`], never interpreted as UTF-8.
+#[no_mangle]
+pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
+    match take(&BUFFER_SLOT) {
+        0 => crate::bytes::gc_bytes(&[]),
         p => p as *mut NovaStr,
     }
 }
@@ -563,7 +624,7 @@ mod tests {
     fn a_stashed_string_is_rooted_until_it_is_taken() {
         let p = gc_message("payload");
         let addr = p as usize;
-        stash(&STRING_SLOT, p);
+        stash(&BUFFER_SLOT, p);
         assert_eq!(
             gc::root_count(addr),
             1,
@@ -603,14 +664,14 @@ mod tests {
         let b = gc_message("second");
         let (a_addr, b_addr) = (a as usize, b as usize);
 
-        stash(&STRING_SLOT, a);
+        stash(&BUFFER_SLOT, a);
         assert_eq!(
             gc::root_count(a_addr),
             1,
             "the first stash roots its pointer"
         );
 
-        stash(&STRING_SLOT, b);
+        stash(&BUFFER_SLOT, b);
         assert_eq!(
             gc::root_count(a_addr),
             0,
@@ -625,7 +686,7 @@ mod tests {
             "the second stash roots its pointer"
         );
 
-        let taken = take(&STRING_SLOT);
+        let taken = take(&BUFFER_SLOT);
         assert_eq!(
             taken, b_addr,
             "take returns the most recently stashed pointer"

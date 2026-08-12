@@ -44,6 +44,27 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
+// Read the whole file at `path` as bytes.
+//
+// Unlike `read_to_string` this cannot fail with `InvalidData`: there is no
+// encoding to violate.
+pub async fn read(path: String) -> Result<Bytes, IoError> {
+    let status = fs_read(path)
+    if status == 0 {
+        return Ok(fs_take_bytes())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Write `content` to `path`, replacing any existing contents.
+pub async fn write(path: String, content: Bytes) -> Result<(), IoError> {
+    let status = fs_write(path, content)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
 // The OS's temporary-directory path, with no trailing separator guaranteed
 // either way -- join a name onto it the same way `fs_roundtrip` does.
 pub fn temp_dir() -> String {

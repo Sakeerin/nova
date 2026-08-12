@@ -269,6 +269,16 @@ rt_funcs! {
     /// `(str) -> i64` — what the path is: 0 = metadata unavailable (absent,
     /// or unreadable), 1 file, 2 directory.
     FsKind,
+    /// `(str) -> i64` — read the path's raw bytes. `0` on success, with the
+    /// contents waiting in `FsTakeBytes`; otherwise an `IoErrorKind` status
+    /// code, as `FsReadToString`. Unlike `FsReadToString` this cannot produce
+    /// `INVALID_DATA`: there is no encoding to violate.
+    FsRead,
+    /// `() -> bytes` — take the payload staged by a successful `FsRead`.
+    FsTakeBytes,
+    /// `(str, bytes) -> i64` — write the bytes to the path named by the
+    /// first argument, truncating. Status code, as `FsReadToString`.
+    FsWrite,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -343,6 +353,9 @@ impl RtFunc {
             RtFunc::FsReadDir => "nova_rt_fs_read_dir",
             RtFunc::FsTakeStringArray => "nova_rt_fs_take_string_array",
             RtFunc::FsKind => "nova_rt_fs_kind",
+            RtFunc::FsRead => "nova_rt_fs_read",
+            RtFunc::FsTakeBytes => "nova_rt_fs_take_bytes",
+            RtFunc::FsWrite => "nova_rt_fs_write",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -397,7 +410,10 @@ impl RtFunc {
             | RtFunc::FsRemoveFile
             | RtFunc::FsRemoveDirAll
             | RtFunc::FsReadDir
-            | RtFunc::FsKind => (vec![MirTy::Ptr], MirTy::I64),
+            | RtFunc::FsKind
+            | RtFunc::FsRead => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::FsTakeBytes => (vec![], MirTy::Ptr),
+            RtFunc::FsWrite => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
