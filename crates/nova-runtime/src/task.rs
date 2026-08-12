@@ -1404,6 +1404,87 @@ mod tests {
         );
     }
 
+    /// `release_internal` must release a task's stashed `fs` payload, not
+    /// only its own state root.
+    ///
+    /// Calls `release_internal` directly -- it is private to this module,
+    /// and this test lives in it -- rather than through the public
+    /// `nova_rt_task_release`, and seeds the payload with
+    /// `crate::fs::stash_for_test` rather than by driving a real poll:
+    /// `release_internal` has no precondition on `Task::done` (only on
+    /// `Task::taken`, which a freshly spawned task has not set), so a task
+    /// that was spawned -- and therefore queued, by `spawn_internal` -- but
+    /// never actually dequeued and polled already exercises it fully. This
+    /// is what actually pins `release_internal`'s call into `fs.rs`, unlike
+    /// `fs::tests::releasing_a_tasks_slots_drops_the_roots_it_held`, which
+    /// calls `crate::fs::release_task_slots` directly and so cannot see
+    /// whether `release_internal` still makes that call at all.
+    #[test]
+    fn releasing_a_task_also_releases_its_stashed_fs_payload() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+
+        let payload = crate::gc_str("release-internal-payload");
+        let addr = payload as usize;
+        crate::fs::stash_for_test(id, payload);
+        assert_eq!(
+            gc::root_count(addr),
+            1,
+            "stash_for_test must root its pointer"
+        );
+
+        release_internal(id);
+        assert_eq!(
+            gc::root_count(addr),
+            0,
+            "release_internal must release the task's stashed fs payload, \
+             not only its own state root"
+        );
+    }
+
+    /// `take_output_internal` must release a task's stashed `fs` payload,
+    /// not only its own state root.
+    ///
+    /// Unlike `release_internal`'s sibling test above, `take_output_internal`
+    /// asserts `Task::done`, so this drives one real `nova_rt_task_block_on`
+    /// pass first to let `poll_one` mark the task done, and only stashes the
+    /// payload afterward -- the ordering does not matter to `fs.rs`'s slot
+    /// table, which knows nothing about task completion, but the task must
+    /// be done before `take_output_internal` will accept it at all. Calls
+    /// `take_output_internal` directly for the same reason the sibling test
+    /// calls `release_internal` directly: only that pins the call into
+    /// `fs.rs`, rather than `crate::fs::release_task_slots` itself, which
+    /// `fs::tests::releasing_one_tasks_slots_leaves_another_tasks_intact`
+    /// already covers.
+    #[test]
+    fn taking_a_tasks_output_also_releases_its_stashed_fs_payload() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+
+        let payload = crate::gc_str("take-output-internal-payload");
+        let addr = payload as usize;
+        crate::fs::stash_for_test(id, payload);
+        assert_eq!(
+            gc::root_count(addr),
+            1,
+            "stash_for_test must root its pointer"
+        );
+
+        assert_eq!(
+            take_output_internal(id),
+            7,
+            "poll_ready_now's own output, unaffected by the stashed fs payload"
+        );
+        assert_eq!(
+            gc::root_count(addr),
+            0,
+            "take_output_internal must release the task's stashed fs \
+             payload, not only its own state root"
+        );
+    }
+
     /// `take_output` is a take, not a peek: the second call must be diagnosed,
     /// because the first one released the root that was keeping a heap-valued
     /// output alive, so the bits it would hand back a second time may name a

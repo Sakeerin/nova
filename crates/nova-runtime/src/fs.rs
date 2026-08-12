@@ -245,6 +245,33 @@ pub(crate) fn release_task_slots(id: i64) {
     }
 }
 
+/// Test-only: stash `ptr` into task `id`'s [`Slot::Buffer`], without
+/// requiring `CURRENT` to already equal `id`.
+///
+/// `task.rs`'s own test module cannot call [`stash`] or reach `SLOTS`
+/// directly -- both are private to this module -- and it needs a way to
+/// seed a payload for a task it registers through its own internals
+/// (`spawn_internal`/`nova_rt_task_spawn`) without driving a real poll,
+/// so it can call `release_internal`/`take_output_internal` directly and
+/// check whether either one actually drops the payload's root. Delegates
+/// to [`stash`] under a temporary [`crate::task::set_current_for_test`]
+/// override, restoring whatever `CURRENT` held beforehand rather than
+/// assuming it was `None`.
+///
+/// `#[cfg(test)]` only, not also `#[cfg(windows)]`: every caller of this
+/// function is an ordinary, cross-platform `task.rs` test, the same
+/// reasoning `set_current_for_test`'s own doc comment gives for itself --
+/// contrast `gc::collect_for_test`, whose *only* callers genuinely are
+/// `#[cfg(windows)]`, which is why that one carries the platform gate and
+/// this one must not.
+#[cfg(test)]
+pub(crate) fn stash_for_test(id: i64, ptr: *mut NovaStr) {
+    let previous = crate::task::current_task();
+    crate::task::set_current_for_test(Some(id));
+    stash(Slot::Buffer, ptr);
+    crate::task::set_current_for_test(previous);
+}
+
 /// Map an `std::io::Error` to its status code, and stash its message.
 ///
 /// Called on every failure path, so the message is always available to the
