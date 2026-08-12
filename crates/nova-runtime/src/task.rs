@@ -563,6 +563,12 @@ fn release_internal(id: i64) {
     if let Some(state) = state {
         gc::remove_root(state);
     }
+    // A task's payload slots die with the task. `fs.rs` owns the storage and the
+    // root discipline; this is the whole of `task.rs`'s knowledge of it. The
+    // matching call is in `take_output_internal` / `release_internal` -- both
+    // release points need it, because either can be the last thing to touch a
+    // task.
+    crate::fs::release_task_slots(id);
 }
 
 /// Hand out task `id`'s output and release the GC root `spawn_internal`
@@ -619,6 +625,12 @@ fn take_output_internal(id: i64) -> i64 {
     // collection, but ordering the read first keeps that independent of
     // `remove_root`'s implementation.
     gc::remove_root(state);
+    // A task's payload slots die with the task. `fs.rs` owns the storage and the
+    // root discipline; this is the whole of `task.rs`'s knowledge of it. The
+    // matching call is in `take_output_internal` / `release_internal` -- both
+    // release points need it, because either can be the last thing to touch a
+    // task.
+    crate::fs::release_task_slots(id);
     output
 }
 
