@@ -4738,11 +4738,17 @@ fn nova_test_reports_a_pass_and_a_failure_distinctly() {
 /// On Unix, POSIX makes "exited normally" and "killed by a signal" mutually
 /// exclusive, and a hard trap (a CPU-raised fault — SIGFPE, SIGILL, ...) is
 /// the latter, so `.code()` is unconditionally `None` here: there is no code
-/// to measure. `classify` (`cmd/test.rs`) already handles exactly this via
-/// `output.status.code().unwrap_or(-1)`, so `-1` (`0xFFFFFFFF`) asserted
-/// below is not a measurement on Unix, it is production's own documented
-/// fallback constant — asserted because that is genuinely what `nova test`
-/// will print, not because anything was measured.
+/// to measure. `classify` (`crates/nova-cli/src/cmd/test.rs:112`) already
+/// handles exactly this via `output.status.code().unwrap_or(-1)`, so `-1`
+/// (`0xFFFFFFFF`) asserted below deliberately duplicates that production
+/// constant rather than measuring anything — asserted because that is
+/// genuinely what `nova test` will print, not because anything was
+/// measured. That duplication still catches real regressions: `classify`
+/// changing its fallback value, or the hex form being misrendered. What it
+/// can no longer do is cross-check against a real reported status, because
+/// a signal-terminated process on Unix never hands one back — this half is
+/// strictly weaker than the Windows measurement above, not an equivalent
+/// to it.
 ///
 /// What IS asserted, and is why this does not degrade into a tautology that
 /// passes for any nonzero exit: `.signal().is_some()` demands the process
@@ -4785,7 +4791,7 @@ fn expect_trap_exit_code(status: &std::process::ExitStatus) -> (i32, u32) {
 /// real guard whose removal turned a clean type-check into exactly this
 /// exit-132-on-legal-source shape.
 ///
-/// The expected exit code is **measured directly** in this test, not
+/// The expected exit code is **measured directly on Windows**, not
 /// hard-coded: the code an aborted process reports is platform- and
 /// shell-dependent (design doc §9 risk 4 measured 127 and 132 for two
 /// different aborts through Git Bash on this same project), so pinning a
@@ -4800,8 +4806,21 @@ fn expect_trap_exit_code(status: &std::process::ExitStatus) -> (i32, u32) {
 /// this project's own 127/132 Git Bash figures and this task's 0xC0000409 /
 /// 0xC0000005 figures, because none of the three measured the same thing:
 /// different program, different platform-vs-shell layer. That mismatch is
-/// exactly why the assertion below measures its own expectation instead of
-/// hard-coding any of those.
+/// why Windows measures its own expectation rather than hard-coding one of
+/// those unrelated figures.
+///
+/// Unix has no figure to measure in the first place: a signal-terminated
+/// process reports no exit code at all. Below asserts a fatal signal was
+/// delivered instead (confirming this really is a hard trap, not a graceful
+/// nonzero exit) and pins the same `-1` (`0xFFFFFFFF`) `classify`
+/// (`crates/nova-cli/src/cmd/test.rs:112`) itself falls back to via
+/// `code().unwrap_or(-1)` — a deliberate duplication of that production
+/// constant, not a second measurement, and correspondingly weaker: it
+/// catches `classify`'s fallback changing or the hex form being
+/// misrendered, but it cannot cross-check against a real reported status
+/// the way the Windows half can, because a signal-terminated process on
+/// Unix never hands one back. See `expect_trap_exit_code`'s own doc
+/// comment for the full mechanism.
 #[test]
 fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
     let dir = write_test_project(
@@ -4809,8 +4828,12 @@ fn a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic() {
         "@test(should_panic)\nfn divides_by_zero() { let _ = 1 / 0 }\n",
     );
 
-    // Measure the real exit code directly, the same way `nova test` itself
-    // will see it, rather than assuming a portable number.
+    // On Windows, measure the real exit code directly, the same way `nova
+    // test` itself will see it, rather than assuming a portable number. On
+    // Unix there is no code to measure, so `expect_trap_exit_code` asserts a
+    // fatal signal instead and pins `classify`'s own fallback constant --
+    // see its doc comment (and this test's, above) for why that is weaker
+    // than a measurement but still a real check, not a tautology.
     let (exe, tests) = nova_driver::build_test_binary(&dir.join("src/main.nova"))
         .expect("test binary compiles and links");
     assert_eq!(
@@ -5244,14 +5267,19 @@ fn read_gate_expected() -> String {
 /// the word `TRAPPED`, and the presence of both the decimal and the
 /// parenthesized hex — is preserved, so a change in the report's *shape*
 /// still fails the comparison. This is the same rule this file already
-/// follows for its two live-measuring trap tests,
+/// follows for its two trap tests,
 /// `a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic` and
 /// `a_trapping_tests_captured_output_is_shown_not_discarded`: never write a
 /// literal exit code into an expectation, because the code an aborted
-/// process reports is platform-dependent. Those two tests measure the real
-/// code directly from the platform they run on and are deliberately left
-/// untouched here, which is exactly why normalizing this fixture loses no
-/// coverage — the real value is still pinned, just not in this file.
+/// process reports is platform-dependent. Those two tests get their
+/// `(code, hex)` pair from `expect_trap_exit_code` — a real measurement on
+/// Windows, but on Unix (where a signal-terminated process reports no code
+/// at all) a deliberate pin of `classify`'s own documented `-1`
+/// (`0xFFFFFFFF`) fallback rather than a second measurement (see that
+/// helper's doc comment). Either way the value is platform-appropriate and
+/// asserted rather than written as a literal here, which is exactly why
+/// normalizing this fixture loses no coverage — the real, or on Unix the
+/// correctly-predicted, value is still pinned, just not in this file.
 ///
 /// Splits on plain `'\n'` rather than [`str::lines`]: `lines()` also
 /// swallows a trailing line terminator (`"a\n".lines().collect::<Vec<_>>()`
@@ -5817,10 +5845,13 @@ fn a_failing_tests_own_stdout_is_no_longer_discarded() {
 /// A trap must show captured output too, not just the bare exit code — the
 /// entire point of this finding: reporting a trap with *less* information
 /// than an ordinary failure is backwards given this branch's central claim
-/// that traps deserve their own outcome. The exit code is measured
-/// directly, the same way `a_hard_trap_is_reported_as_a_trap_and_does_not_
-/// satisfy_should_panic` does, rather than assumed (design doc §9 risk 4:
-/// not portable).
+/// that traps deserve their own outcome. The `(code, hex)` pair below comes
+/// from `expect_trap_exit_code`, exactly as
+/// `a_hard_trap_is_reported_as_a_trap_and_does_not_satisfy_should_panic`
+/// uses it: measured directly on Windows, pinned to `classify`'s own
+/// documented fallback on Unix rather than assumed either way (design doc
+/// §9 risk 4: not portable) — see that test's doc comment, or the helper's,
+/// for why the Unix half is weaker than a measurement but not a tautology.
 #[test]
 fn a_trapping_tests_captured_output_is_shown_not_discarded() {
     let dir = write_test_project(
