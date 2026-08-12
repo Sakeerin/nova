@@ -5,8 +5,10 @@
 // one here (see docs/adr/0004-stdlib-compile-model.md).
 //
 // This module holds only the error surface. `nova-spec/20-STDLIB.md` §4 also
-// specifies `Read`/`Write` traits and `stdin`/`stdout`/`stderr`; those need a
-// byte type and a settled buffer signature, and arrive in a later increment.
+// specifies `Read`/`Write` traits and `stdin`/`stdout`/`stderr`. The byte
+// type they were waiting on now exists (`Bytes`, `std/bytes`) -- `std/fs`'s
+// `read`/`write` already use it -- but `File` and a settled buffer signature
+// for these traits do not, so they still arrive in a later increment.
 
 // Why an operation failed. `ConnectionRefused` is unused by `std/fs` and is
 // carried so §4's network I/O needs no further addition later.

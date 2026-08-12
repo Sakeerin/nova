@@ -1015,6 +1015,48 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     above are recorded in full, with the reasons behind each, in
     `docs/adr/0011-io-error-kinds.md`.
 
+- `Bytes`, `std/bytes`, and byte-based `fs::read`/`fs::write` (increment 2 of
+  the `std/fs`-on-Strings decomposition,
+  `docs/superpowers/specs/2026-08-12-byte-type-design.md`): Nova's first byte
+  type, closing the byte-type gap increment 1 (above) deferred `read`/`write`
+  on.
+  - **`Bytes` is a new nullary `hir::Ty` variant mapping to `MirTy::Ptr`**,
+    represented exactly as `String` is: a scanned `{len, ptr}` header over a
+    GC **leaf** buffer, reusing `crate::NovaStr` rather than a second Rust
+    struct with the identical layout. `Bytes` and `String` are therefore
+    structurally identical and semantically distinct — same representation,
+    but `String` carries a UTF-8 guarantee and `Bytes` does not, and nothing
+    converts between them implicitly. Every `Bytes` operation is an
+    intrinsic, so **neither codegen backend changes**.
+  - **`std/bytes`**, a seventh `STD_MODULES` entry, gives `Bytes` eight
+    methods — `len`, `byte_at` (`Option<Int>`, matching `String::char_at`),
+    `slice`, `concat`, `to_ints`, `to_string` (`Option<String>`, `None` on
+    invalid UTF-8), `index_of` (`Option<Int>`), `contains` — plus two
+    constructors, `bytes_from_string(s: String) -> Bytes` and
+    `bytes_from_ints(ints: [Int]) -> Bytes` (aborts on an element outside
+    `0..=255`), and `impl Eq for Bytes`. `index_of`/`contains` and every
+    bounds check are Nova-level over `to_ints`, the same shape `std/strings`
+    already builds over `str_chars`.
+  - **`fs::read(path: String) -> Result<Bytes, IoError>` and
+    `fs::write(path: String, content: Bytes) -> Result<(), IoError>`** join
+    `std/fs`, over three more intrinsics on increment 1's existing
+    status-boundary. **No new thread-local slot**: `String` and `Bytes` share
+    one payload slot (renamed `BUFFER_SLOT`), since both have the identical
+    `{len, ptr}` representation and the distinction is carried entirely by
+    which builtin stashed into it and which one reads it back.
+  - **Thirteen new `Builtin::STD_ONLY` intrinsics land this way** (ten byte
+    intrinsics plus the three above), taking `STD_ONLY` from `[Builtin; 30]`
+    to `[Builtin; 43]`; `STD_MODULES` grows from 6 to 7.
+  - **`Bytes` joins the six reserved built-in type names above via the
+    identical `E0089` mechanism** (`RESERVED_TYPE_NAMES`: six names to
+    seven). See the Changed entry below for exactly what breaks.
+  - Deferred, per `docs/adr/0011-io-error-kinds.md`'s narrowed deviation:
+    `open`, `File`, the `Read`/`Write` traits, and `stdin`/`stdout`/`stderr`.
+    **References are removed from the roadmap entirely, not merely
+    unimplemented** — Nova's byte I/O is buffer-returning, so
+    `nova-spec/20-STDLIB.md` §4's `&mut [u8]`/`&[u8]` parameters are amended
+    in place (dated note) rather than eventually built against.
+
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of
@@ -1072,6 +1114,16 @@ code that already compiled. Full detail is in the `### Added` entries above.
   different mechanism from — not an instance of — `std/core`'s silently
   shadowable, glob-imported names (ADR 0004), which are seeded at the
   *lowest* priority instead of the highest.
+- **`Bytes` is now a reserved built-in type name: a `record` or sum `type`
+  declared under it is rejected** (`E0089`; full detail in the Added entry
+  above), joining the six built-in type names already reserved above
+  (`RESERVED_TYPE_NAMES`: six names to seven). This breaks a program that
+  declared a type named `Bytes` and either used it only through construction,
+  pattern matching, and inferred local bindings, or did not use it at all —
+  naming it in a signature, or giving it a method, already did not work, for
+  the identical `convert_ty`-resolves-to-the-builtin reason the six-name
+  entry above gives. Accepted rather than fixed a different way, for the
+  identical trap-not-worth-leaving-open reason.
 
 ### Fixed (Phase 2)
 - An allocation whose size is too large to *describe* now aborts with a Nova

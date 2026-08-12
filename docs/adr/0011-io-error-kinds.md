@@ -134,6 +134,17 @@ beyond `String`, `Bool`, `[DirEntry]` and `IoError`: `read_to_string`,
 `write_string`, `exists`, `create_dir`, `create_dir_all`, `remove_file`,
 `remove_dir_all`, `read_dir`.
 
+**Narrowed 2026-08-12 (branch `byte-type`):** the byte type arrived
+(`Bytes`, `docs/superpowers/specs/2026-08-12-byte-type-design.md`), and with
+it `read` and `write` — both now exist, over `Result<Bytes, IoError>` and
+`content: Bytes`, on three more intrinsics over this same status boundary.
+Only `open` and `File` (and, from increment 3's original list above,
+`Read`/`Write`/`Stdin`/`Stdout`/`Stderr`) remain deferred. `nova-spec/
+20-STDLIB.md` §4 is amended separately (dated note there) to record that
+Nova's byte I/O is buffer-**returning**, not the buffer-filling shape §4
+originally specified — so references are off the roadmap permanently, not
+merely still missing.
+
 ### 3. `temp_dir() -> String` is added, and is not in §5 at all
 
 A fixture that writes, creates, or removes anything on disk needs a writable
@@ -210,6 +221,11 @@ other direction.
   `stderr` remain entirely unimplemented** — calling any of them is `E0001`,
   identical to before this increment. Nothing here narrows that gap; increment
   2 of the decomposition is where a byte type would have to land first.
+
+  **Narrowed 2026-08-12 (branch `byte-type`):** increment 2 landed the byte
+  type and, on top of it, `read` and `write` — both now compile and run.
+  `open`, `File`, `Read`, `Write`, `stdin`, `stdout` and `stderr` remain
+  `E0001`, exactly as this bullet originally described.
 - **The drive loop is untouched.** `crates/nova-runtime/src/task.rs`'s
   `report_deadlock` default arm still assumes every `Wait` variant carries a
   deadline, which is correct as long as nothing can park on an external event —
@@ -256,17 +272,23 @@ other direction.
 
 ## References
 
-- Spec: `nova-spec/20-STDLIB.md` §4 (`IoErrorKind`, amended by this ADR), §5
-  (`std/fs`, subset shipped)
+- Spec: `nova-spec/20-STDLIB.md` §4 (`IoErrorKind` amended by this ADR;
+  `Read`/`Write`'s buffer parameters amended 2026-08-12 for buffer-returning
+  I/O, byte-type design spec below), §5 (`std/fs`, subset shipped; `read`/
+  `write` added 2026-08-12, narrowing note above)
 - Design: `docs/superpowers/specs/2026-08-11-std-fs-strings-design.md` (§2
   measured facts, §3 the change, §4 non-goals, §5 never-suspends, §7 the
   original two-deviation list this ADR supersedes with three)
+- Design (2026-08-12 amendment): `docs/superpowers/specs/2026-08-12-byte-type-design.md`
+  — `Bytes`, and the buffer-returning decision that narrows this ADR's §5
+  deviation (above) and amends `nova-spec/20-STDLIB.md` §4 (above)
 - Plan and ledger: `docs/superpowers/plans/2026-08-11-std-fs-strings.md`,
   `.superpowers/sdd/2026-08-11-std-fs-strings/`
 - `crates/nova-runtime/src/fs.rs`: the status constants, `fail`, and
   `no_filesystem_intrinsic_registers_a_park`
 - `std/io/lib.nova`: `IoError`, `IoErrorKind`, `io_error_kind_of`
-- `std/fs/lib.nova`: the eight wrappers, `DirEntry`, `temp_dir`
+- `std/fs/lib.nova`: the ten wrappers (the eight from this increment, plus
+  `read`/`write` from the 2026-08-12 amendment above), `DirEntry`, `temp_dir`
 - Related: `docs/adr/0009-async-execution-model.md` §1 (the cooperative-
   scheduling hazard this increment's never-suspends property is a new instance
   of; amended in place by this ADR), `docs/adr/0004-stdlib-compile-model.md`

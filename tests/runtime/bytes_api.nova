@@ -24,9 +24,13 @@ fn main() {
     // and the intrinsic is reachable from async code, so that panic would
     // cross a generated poll boundary.
     println("${b.slice(1, 100).eq(bytes_from_ints([105, 255]))}")
-    // A `start` past the length must clamp too, independently of `end` --
-    // here `end` is past the length as well, exercising the same
-    // missing-clamp hazard from a different `start`.
+    // Both `start` and `end` past the length: exercises the clamp path where
+    // both bounds saturate to the buffer's own length, collapsing to an
+    // empty result. This is NOT a distinct hazard from the line above --
+    // dropping the clamp on `start` alone is an equivalent mutant here:
+    // whenever `start > len`, the correctly-clamped `end` is already
+    // `<= len < start`, so the `hi <= lo` guard intercepts before any
+    // indexing regardless of whether `start` itself was clamped.
     println("${b.slice(100, 200).len()}")
     println("${bytes_from_ints(b.to_ints()).eq(b)}")
     // Two equal-length buffers differing in exactly one byte: a length-only

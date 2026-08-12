@@ -887,9 +887,14 @@ mod tests {
         // the same pattern `tests/runtime/assoc_types.nova` already uses for
         // `Vec::new()` -- calls `mangle_ty(&Ty::Bytes)` for the symbol name
         // with no `Bytes` value ever constructed. Checked against every other
-        // nullary type, not just `String` (the structural twin it is most
-        // likely to be confused with): a collision with `Int` or `Char` would
-        // be exactly as wrong, and this one loop covers all of them.
+        // nullary type with its own `mangle_ty` arm, not just `String` (the
+        // structural twin it is most likely to be confused with): a
+        // collision with `Int` or `Char` would be exactly as wrong, and this
+        // loop covers all seven of them. `Ty::Error` (also nullary) is
+        // deliberately not among them -- it shares the pre-existing `"X"`
+        // catch-all with `Param`/`Var`/`Assoc`, a latent, already-documented
+        // collision (see `mangle_ty`'s own comment on that arm) this test
+        // does not touch.
         let bytes = crate::mangle_ty(&hir::Ty::Bytes);
         for (name, other) in [
             ("Int", hir::Ty::Int),
