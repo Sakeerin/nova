@@ -269,6 +269,16 @@ rt_funcs! {
     /// `(str) -> i64` — what the path is: 0 = metadata unavailable (absent,
     /// or unreadable), 1 file, 2 directory.
     FsKind,
+    /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
+    /// no encoding.
+    BytesLen,
+    /// `(str) -> bytes` — a `Bytes` holding `s`'s UTF-8 bytes.
+    BytesFromString,
+    /// `(bytes) -> i8` — whether the bytes are valid UTF-8.
+    BytesIsUtf8,
+    /// `(bytes) -> str` — the bytes as a `String`, without checking UTF-8
+    /// validity. The caller must have checked `BytesIsUtf8` first.
+    BytesToStringUnchecked,
 }
 
 impl RtFunc {
@@ -317,6 +327,10 @@ impl RtFunc {
             RtFunc::FsReadDir => "nova_rt_fs_read_dir",
             RtFunc::FsTakeStringArray => "nova_rt_fs_take_string_array",
             RtFunc::FsKind => "nova_rt_fs_kind",
+            RtFunc::BytesLen => "nova_rt_bytes_len",
+            RtFunc::BytesFromString => "nova_rt_bytes_from_string",
+            RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
+            RtFunc::BytesToStringUnchecked => "nova_rt_bytes_to_string_unchecked",
         }
     }
 
@@ -362,6 +376,10 @@ impl RtFunc {
             | RtFunc::FsRemoveDirAll
             | RtFunc::FsReadDir
             | RtFunc::FsKind => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
+            RtFunc::BytesToStringUnchecked => (vec![MirTy::Ptr], MirTy::Ptr),
         }
     }
 }

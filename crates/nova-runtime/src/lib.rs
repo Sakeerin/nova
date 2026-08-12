@@ -11,6 +11,12 @@
 //! [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`. All heap allocation
 //! routes through [`gc::alloc`], which reclaims unreachable objects.
 
+/// Byte-buffer intrinsics for `std/bytes`. `pub`, not private, for the same
+/// reason as [`fs`]: its own doc comment explains the boundary it implements
+/// (one representation, shared with `NovaStr`, distinguished only by
+/// `hir::Ty`), and Task 3/4 add intrinsics beside these the same way this
+/// crate's other modules build on `task`.
+pub mod bytes;
 /// Filesystem intrinsics for `std/fs`. `pub`, not private: its own doc
 /// comment explains the boundary it implements; nothing about that requires
 /// hiding the module itself, and Task 3/4 build on it the same way this
@@ -455,6 +461,19 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             fs::nova_rt_fs_take_string_array as *const u8,
         ),
         ("nova_rt_fs_kind", fs::nova_rt_fs_kind as *const u8),
+        ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
+        (
+            "nova_rt_bytes_from_string",
+            bytes::nova_rt_bytes_from_string as *const u8,
+        ),
+        (
+            "nova_rt_bytes_is_utf8",
+            bytes::nova_rt_bytes_is_utf8 as *const u8,
+        ),
+        (
+            "nova_rt_bytes_to_string_unchecked",
+            bytes::nova_rt_bytes_to_string_unchecked as *const u8,
+        ),
     ]
 }
 

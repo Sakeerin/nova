@@ -1,0 +1,8 @@
+fn main() {
+    let b = bytes_from_string("hi")
+    println("${b.len()}")
+    match b.to_string() {
+        Some(s) => println(s)
+        None => println("not utf8")
+    }
+}

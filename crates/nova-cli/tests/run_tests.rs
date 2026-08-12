@@ -6388,3 +6388,21 @@ fn bytes_reserved_declaration_is_rejected() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(stderr.contains("E0089"), "stderr: {stderr}");
 }
+
+// === byte-type increment, Task 2: Bytes representation, len and to_string ===
+
+/// End-to-end: `bytes_from_string` builds a `Bytes` value, `Bytes::len` reads
+/// its byte length, and `Bytes::to_string` round-trips valid UTF-8 back to a
+/// `String` through the `Some` arm of the `Option<String>` it returns.
+#[test]
+fn bytes_basics_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/bytes_basics.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/bytes_basics.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
