@@ -295,12 +295,15 @@ pub(crate) fn release_task_slots(id: i64) {
 /// Test-only: stash `ptr` into task `id`'s `slot`, without requiring
 /// `CURRENT` to already equal `id`.
 ///
-/// `task.rs`'s own test module cannot call [`stash`] or reach `SLOTS`
-/// directly -- both are private to this module -- and it needs a way to
-/// seed a payload for a task it registers through its own internals
-/// (`spawn_internal`/`nova_rt_task_spawn`) without driving a real poll,
-/// so it can call `release_internal`/`take_output_internal` directly and
-/// check whether either one actually drops the payload's root. Delegates
+/// `task.rs`'s own test module cannot reach `SLOTS` directly -- it is
+/// private to this module -- and even now that [`stash`] itself is
+/// `pub(crate)`, calling it directly still only ever targets *the current
+/// task's* slot (through `slot_index`), never an arbitrary one. This
+/// function needs a way to seed a payload for a task it registers through
+/// its own internals (`spawn_internal`/`nova_rt_task_spawn`) without
+/// driving a real poll, so it can call
+/// `release_internal`/`take_output_internal` directly and check whether
+/// either one actually drops the payload's root. Delegates
 /// to [`stash`] under a temporary [`crate::task::set_current_for_test`]
 /// override, restoring whatever `CURRENT` held beforehand rather than
 /// assuming it was `None`.

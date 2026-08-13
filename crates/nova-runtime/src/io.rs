@@ -346,17 +346,22 @@ mod tests {
     /// both document in full: what keeps a split like this sound is that the
     /// *first* occurrence of the split literal `mod tests {` is the real
     /// boundary, not that the literal is unique in the file. It is not
-    /// unique here either -- it recurs once more, in this test's own
-    /// `source.split("mod tests {")` call below -- and that second
-    /// occurrence is harmless only because it comes after the real one. An
-    /// *earlier* occurrence, such as a doc comment quoting that exact text
-    /// before the real declaration, would silently truncate the scan right
-    /// there instead, and this class of guard fails open: it would pass
-    /// while covering nothing, with no test failing to say so. Indexing
-    /// (`[i]`) is also outside what a substring scan can tell safe from
-    /// dangerous. See `fs::tests::no_filesystem_intrinsic_registers_a_park`'s
-    /// doc comment (`fs.rs`) for the full statement of all three, including a
-    /// real case where an earlier occurrence did exactly this.
+    /// unique here either -- the same text recurs elsewhere in this file,
+    /// including in this doc comment's own quoting of it above and in this
+    /// test's own `source.split("mod tests {")` call below -- and every such
+    /// occurrence is harmless only because it comes after the real
+    /// declaration, however many there turn out to be. **Do not replace this
+    /// sentence with a count**: a fixed number here goes stale the moment
+    /// anyone edits this comment again, which is why it states the property
+    /// instead. An *earlier* occurrence, such as a doc comment quoting that
+    /// exact text before the real declaration, would silently truncate the
+    /// scan right there instead, and this class of guard fails open: it
+    /// would pass while covering nothing, with no test failing to say so.
+    /// Indexing (`[i]`) is also outside what a substring scan can tell safe
+    /// from dangerous. See
+    /// `fs::tests::no_filesystem_intrinsic_registers_a_park`'s doc comment
+    /// (`fs.rs`) for the full statement of all three, including a real case
+    /// where an earlier occurrence did exactly this.
     #[test]
     fn no_stream_intrinsic_can_panic() {
         let source = include_str!("io.rs");
