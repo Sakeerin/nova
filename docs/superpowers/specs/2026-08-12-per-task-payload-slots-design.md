@@ -29,7 +29,12 @@ replaced by the per-task table §3 describes (`Slot`/`Slots`/`SLOTS` in
 `crates/nova-runtime/src/fs.rs`), and none of the lines cited above — the intro sentence's `:88`,
 `:95`, `:97`, or the table's stash/take sites — still hold the text they cite. Left as originally
 written rather than renumbered: this section is the historical record of the problem this design
-solves, not a live index into the post-change file.
+solves, not a live index into the post-change file. **This note's scope is the whole document, not
+only this section** (final review, M2): most other `fs.rs`/`task.rs` line citations below, in §3 and
+§4 alike, were written against a file the branch's later commits went on to move code around in and
+were never updated to match — this document flags the rare exception where one still is — so
+re-derive any citation in this design before relying on it rather than assuming it survived, the
+same as this section's own.
 
 That invariant holds today because `std/fs`'s `async fn`s never suspend — the filesystem call runs
 synchronously inside the first poll. Increment 4's I/O poller removes exactly that property. Once a
