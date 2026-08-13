@@ -1271,6 +1271,32 @@ code that already compiled. Full detail is in the `### Added` entries above.
   where a string built to contain `${` still printed it unescaped. With that
   arm in place, both `Debug for Char` and `Debug for String` round-trip back
   through the lexer to the original value.
+- `std/fs`'s payload-passing slots move from three thread-global slots to one
+  per-task table (2026-08-13, branch `per-task-slots`,
+  `docs/superpowers/specs/2026-08-12-per-task-payload-slots-design.md`): the
+  `thread_local! { Cell<usize> }` slots (`BUFFER_SLOT`, `ARRAY_SLOT`,
+  `MESSAGE_SLOT`) that carry a payload from a status-returning intrinsic to
+  the wrapper that reads it back are now one `RefCell<Vec<Slots>>`, indexed
+  by the current task (index `0` reserved for no task). This closes a latent
+  cross-task clobber that today's straight-line, never-suspending `async
+  fn`s cannot reach (`docs/adr/0011-io-error-kinds.md`) but a future I/O
+  poller would: once a `std/fs` call can suspend between its stash and its
+  take, a second task polled in the gap would previously have stashed into
+  the same thread-global slot, overwriting the first task's payload and its
+  GC root. `release_task_slots(id)` is called immediately after each of the
+  two points `task.rs` already releases a task's state root
+  (`release_internal`, `take_output_internal`), so a task's payload is
+  released in the same call that releases its state, not deferred to some
+  later, separate event. Every `SLOTS` access is a fallible borrow (`try_borrow_mut`/
+  `get_mut`), never `borrow_mut`/`[i]`, aborting instead of panicking on the
+  believed-unreachable contended case — a `RefCell` panic here would cross a
+  generated poll boundary with no landing pad — and
+  `no_slot_access_can_panic_on_a_borrow` (`fs.rs`) now pins that mechanically.
+  **Does not fix** the pre-existing leak of a task whose output is neither
+  taken nor released (`docs/adr/0009-async-execution-model.md` §1): such a
+  task's last unread payload still leaks until the process exits, one per
+  leaked task now instead of one per thread. No Nova-visible signature
+  changed; `std/fs/lib.nova` was not touched.
 
 ## [0.1.0] - 2026-07-23
 

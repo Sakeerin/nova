@@ -423,7 +423,7 @@ pub unsafe extern "C" fn nova_rt_fs_write(path: *const NovaStr, content: *const 
 /// Take the pending payload as `Bytes`. Returns an empty `Bytes` if nothing is
 /// pending, which a correct wrapper never asks for.
 ///
-/// Mirrors [`nova_rt_fs_take_string`], reading the same shared
+/// Mirrors [`nova_rt_fs_take_string`], reading the same
 /// [`Slot::Buffer`] -- the payload left there by a successful
 /// [`nova_rt_fs_read`], never interpreted as UTF-8.
 #[no_mangle]
@@ -705,19 +705,55 @@ mod tests {
     #[test]
     fn no_filesystem_intrinsic_registers_a_park() {
         let source = include_str!("fs.rs");
-        // Skip the whole `#[cfg(test)] mod tests` block, not just this
-        // function's body: this test's *own* doc comment above names
-        // `stage_park` in prose, and splitting on the function name alone
-        // would leave that doc comment in the scanned half, failing even
-        // when no real intrinsic parks. Splitting at the test module's own
-        // marker instead excludes every test (and its comments) while still
-        // scanning all of this file's actual production code.
-        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        // Skip the whole `mod tests` block, not just this function's body:
+        // this test's *own* doc comment above names `stage_park` in prose,
+        // and splitting on the function name alone would leave that doc
+        // comment in the scanned half, failing even when no real intrinsic
+        // parks. Splits on the module declaration's own text, `mod tests {`,
+        // rather than the bare `#[cfg(test)]` attribute one line above it --
+        // `stash_for_test`'s doc comment above quotes that exact attribute
+        // text in prose ("`#[cfg(test)]` only, not also..."), an *earlier*
+        // occurrence of the same substring than the real attribute, which
+        // silently cut this scan short right there instead of at the real
+        // module boundary, for as long as that comment has existed (found
+        // while writing `no_slot_access_can_panic_on_a_borrow` below, which
+        // would have inherited the identical defect from the same pattern).
+        // `mod tests {` is unique to the real declaration (confirmed by
+        // grep), so this now genuinely covers everything ahead of it.
+        let code = source.split("mod tests {").next().unwrap_or(source);
         assert!(
             !code.contains("stage_park"),
             "a std/fs intrinsic must not park: these async fns run synchronously \
              inside the poll, and parking here without the poller work would \
              suspend a task nothing can wake"
+        );
+    }
+
+    /// Every `SLOTS` access in production code is fallible-borrow, never
+    /// `borrow_mut`.
+    ///
+    /// A `RefCell` borrow panic in this module would cross a generated poll
+    /// boundary, where there are no landing pads — the one hazard the
+    /// per-task table introduced that the three `Cell`s it replaced could
+    /// not have. Pinned at its source rather than by a fixture, so it
+    /// covers every future access without a recount.
+    ///
+    /// Scans only the part of this file before its own `mod tests` block,
+    /// for the same reason `no_filesystem_intrinsic_registers_a_park` does
+    /// and, since Task 3, in the same corrected way -- see that test's own
+    /// comment for why the split is on the literal `mod tests {` rather than
+    /// the bare `#[cfg(test)]` attribute above it.
+    #[test]
+    fn no_slot_access_can_panic_on_a_borrow() {
+        let source = include_str!("fs.rs");
+        let production = source.split("mod tests {").next().unwrap_or(source);
+        assert!(
+            !production.contains(".borrow_mut()"),
+            "production code in fs.rs must use try_borrow_mut, not borrow_mut"
+        );
+        assert!(
+            !production.contains(".borrow()"),
+            "production code in fs.rs must not take an infallible RefCell borrow"
         );
     }
 

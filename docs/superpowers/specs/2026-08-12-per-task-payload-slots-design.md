@@ -23,6 +23,14 @@ All three are `thread_local! { static … : Cell<usize> }`. **Their correctness 
 `std/fs/lib.nova` that read a slot are deliberately straight-line. (`exists` reads none, and
 `temp_dir` is a plain `fn` that touches no slot at all, so they have nothing to keep straight.)
 
+**Note (2026-08-13, Task 3 of this plan): the line numbers throughout this section describe the
+pre-change file.** By the time this increment landed, the three `thread_local!` slots above were
+replaced by the per-task table §3 describes (`Slot`/`Slots`/`SLOTS` in
+`crates/nova-runtime/src/fs.rs`), and none of the lines cited above — the intro sentence's `:88`,
+`:95`, `:97`, or the table's stash/take sites — still hold the text they cite. Left as originally
+written rather than renumbered: this section is the historical record of the problem this design
+solves, not a live index into the post-change file.
+
 That invariant holds today because `std/fs`'s `async fn`s never suspend — the filesystem call runs
 synchronously inside the first poll. Increment 4's I/O poller removes exactly that property. Once a
 read can return `POLL_PENDING` between the stash and the take, a second task polled in the interval
@@ -126,6 +134,32 @@ before the call — and the migration must hold no `SLOTS` borrow across one eit
 intrinsic calls back into the executor while holding the borrow. That has not been checked across all
 thirteen, so the implementation must confirm it rather than inherit it from this spec, and say which
 intrinsics it read to do so.
+
+**Confirmed (2026-08-13, Task 3): the premise holds.** All sixteen `nova_rt_fs_*` functions in
+`crates/nova-runtime/src/fs.rs` were read: `nova_rt_fs_read_to_string`, `nova_rt_fs_write_string`,
+`nova_rt_fs_take_string`, `nova_rt_fs_read`, `nova_rt_fs_write`, `nova_rt_fs_take_bytes`,
+`nova_rt_fs_last_error_message`, `nova_rt_fs_temp_dir`, `nova_rt_fs_exists`, `nova_rt_fs_create_dir`,
+`nova_rt_fs_create_dir_all`, `nova_rt_fs_remove_file`, `nova_rt_fs_remove_dir_all`,
+`nova_rt_fs_read_dir`, `nova_rt_fs_take_string_array`, and `nova_rt_fs_kind`. Of these, thirteen touch
+`SLOTS` at all (directly, or through `fail`/`stash_array`) — `temp_dir`, `exists` and `kind` never
+touch a slot — which is exactly the count this paragraph's "thirteen" already named, read as
+"intrinsics that touch the slot table" rather than "every `nova_rt_fs_*` function." None of the
+sixteen calls into `task.rs` directly beyond `current_task`/`abort_with`.
+
+One *indirect* path exists and was traced rather than assumed absent: `gc::alloc` (reached via
+`gc_str`/`gc_message`/`crate::bytes::gc_bytes`/`stash_array`'s own block allocation) can trigger a
+collection (`maybe_collect` → `collect` → `collect_with_roots`), which calls
+`crate::task::forget_freed_state` — a call into `task.rs` beyond `current_task`/`abort_with`. It does
+not violate the premise: every `gc::alloc` call reachable from this module's production code happens
+either as an argument evaluated *before* `stash` is invoked, or (in `nova_rt_fs_take_string_array`'s
+and `nova_rt_fs_take_bytes`'s empty-slot arms) strictly *after* `take` has already returned and
+dropped its `with_slot` borrow. `with_slot`'s own closures — in `stash`, `take`, and
+`release_task_slots`'s inline equivalent — never call `gc::alloc` themselves; they only read and write
+a `Vec<Slots>` field, backed by the ordinary Rust allocator rather than the GC heap. So nothing that
+can reach `collect_with_roots` ever runs while a `SLOTS` borrow is held, and the backstop stays a
+backstop. `fs.rs`'s own `no_slot_access_can_panic_on_a_borrow` now pins the narrower, mechanical half
+of this — every `SLOTS` access uses a fallible borrow — at its source, so this claim does not rely on
+this reading staying accurate by itself as the file changes.
 
 ## 5. Testing
 
