@@ -3939,6 +3939,11 @@ impl<'a> Checker<'a> {
             | Builtin::FsRead
             | Builtin::FsTakeBytes
             | Builtin::FsWrite
+            | Builtin::IoStdinRead
+            | Builtin::IoStdoutWrite
+            | Builtin::IoStderrWrite
+            | Builtin::IoStdoutFlush
+            | Builtin::IoStderrFlush
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7162,6 +7167,11 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsRead => (vec![Ty::String], Ty::Int),
         Builtin::FsTakeBytes => (vec![], Ty::Bytes),
         Builtin::FsWrite => (vec![Ty::String, Ty::Bytes], Ty::Int),
+        Builtin::IoStdinRead => (vec![Ty::Int], Ty::Int),
+        Builtin::IoStdoutWrite => (vec![Ty::Bytes], Ty::Int),
+        Builtin::IoStderrWrite => (vec![Ty::Bytes], Ty::Int),
+        Builtin::IoStdoutFlush => (vec![], Ty::Int),
+        Builtin::IoStderrFlush => (vec![], Ty::Int),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15120,6 +15130,31 @@ mod tests {
                     (vec![Ty::String, Ty::Bytes], Ty::Int),
                     "`fs_write(path, content)` in `std/fs`'s `write`",
                 ),
+                Builtin::IoStdinRead => (
+                    (vec![Ty::Int], Ty::Int),
+                    "no call site yet -- `std/io`'s `Read::read` for `Stdin` \
+                     will be the first",
+                ),
+                Builtin::IoStdoutWrite => (
+                    (vec![Ty::Bytes], Ty::Int),
+                    "no call site yet -- `std/io`'s `Write::write` for \
+                     `Stdout` will be the first",
+                ),
+                Builtin::IoStderrWrite => (
+                    (vec![Ty::Bytes], Ty::Int),
+                    "no call site yet -- `std/io`'s `Write::write` for \
+                     `Stderr` will be the first",
+                ),
+                Builtin::IoStdoutFlush => (
+                    (vec![], Ty::Int),
+                    "no call site yet -- `std/io`'s `Write::flush` for \
+                     `Stdout` will be the first",
+                ),
+                Builtin::IoStderrFlush => (
+                    (vec![], Ty::Int),
+                    "no call site yet -- `std/io`'s `Write::flush` for \
+                     `Stderr` will be the first",
+                ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),
                     "`bytes_len(self)` in `Bytes::len`",
@@ -15165,6 +15200,32 @@ mod tests {
         for b in Builtin::ALL {
             let (sig, site) = expected(b);
             assert_eq!(builtin_signature(b), sig, "{}: {site}", b.name());
+        }
+    }
+
+    /// The five stream builtins are visible in an std module and typed as
+    /// status words.
+    ///
+    /// `STD_ONLY` is seeded into every std module's scope, not per-module
+    /// (see `Builtin::STD_ONLY`'s own doc), so `std/io` reaches these without
+    /// new plumbing -- and so does any other std module, which is why their
+    /// names carry the `io_` prefix rather than relying on scope to
+    /// disambiguate.
+    #[test]
+    fn the_stream_builtins_are_std_only_and_return_status_words() {
+        for name in [
+            "io_stdin_read",
+            "io_stdout_write",
+            "io_stderr_write",
+            "io_stdout_flush",
+            "io_stderr_flush",
+        ] {
+            assert!(
+                nova_resolver::Builtin::STD_ONLY
+                    .iter()
+                    .any(|b| b.name() == name),
+                "{name} must be an STD_ONLY builtin"
+            );
         }
     }
 
