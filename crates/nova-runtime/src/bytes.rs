@@ -383,10 +383,27 @@ mod tests {
     /// needle array below names `unwrap()`, `.expect(`, `panic!`,
     /// `format!` and `RefCell`, so splitting on this function alone
     /// would leave those words in the scanned half and the test could never
-    /// pass. Splitting at `#[cfg(test)]` instead excludes every test (and its
-    /// comments) while still scanning all of this file's actual production
-    /// code -- which is why this test, like its sibling, must live inside
-    /// this module and not be hoisted out of it.
+    /// pass. This test, like its sibling, must live inside this module and
+    /// not be hoisted out of it.
+    ///
+    /// **Splits on `mod tests {`, not the bare `#[cfg(test)]` attribute one
+    /// line above it (final review, routed item 1 -- the same reasoning
+    /// error as `fs.rs`'s I1, caught in a second place).** `#[cfg(test)]`
+    /// occurs three times in this file: the real attribute, plus this
+    /// paragraph and the needle scan below, both later in the file than it.
+    /// That was harmless only because both later occurrences happen to
+    /// follow the real one, not because the attribute text is unique --
+    /// splitting there was one stray production comment away from quoting
+    /// that exact attribute and silently scanning less than all of the real
+    /// production code, with no test failing to say so. `mod tests {` occurs
+    /// exactly once in this file today, which narrows that exposure without
+    /// claiming immunity from the same failure mode. See
+    /// `fs::tests::no_filesystem_intrinsic_registers_a_park`'s doc comment in
+    /// `fs.rs` for what actually keeps a split like this sound (the *first*
+    /// occurrence being the real boundary, not uniqueness), for the
+    /// guarantee this class of guard cannot make (**it fails open**: it
+    /// passes when it covers nothing), and for the ceiling on what a
+    /// substring scan can ever see.
     ///
     /// All five needles are currently absent from the production half, so
     /// this passes today; it auto-covers every future intrinsic added above
@@ -395,7 +412,7 @@ mod tests {
     #[test]
     fn no_bytes_intrinsic_can_panic() {
         let source = include_str!("bytes.rs");
-        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let code = source.split("mod tests {").next().unwrap_or(source);
         for needle in ["unwrap()", ".expect(", "panic!", "format!", "RefCell"] {
             assert!(
                 !code.contains(needle),

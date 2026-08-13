@@ -1426,7 +1426,7 @@ mod tests {
 
         let payload = crate::gc_str("release-internal-payload");
         let addr = payload as usize;
-        crate::fs::stash_for_test(id, payload);
+        crate::fs::stash_for_test(id, crate::fs::Slot::Buffer, payload);
         assert_eq!(
             gc::root_count(addr),
             1,
@@ -1465,7 +1465,7 @@ mod tests {
 
         let payload = crate::gc_str("take-output-internal-payload");
         let addr = payload as usize;
-        crate::fs::stash_for_test(id, payload);
+        crate::fs::stash_for_test(id, crate::fs::Slot::Buffer, payload);
         assert_eq!(
             gc::root_count(addr),
             1,
@@ -1483,6 +1483,59 @@ mod tests {
             "take_output_internal must release the task's stashed fs \
              payload, not only its own state root"
         );
+    }
+
+    /// `release_internal` must release all three of a task's stashed `fs`
+    /// payload kinds, not only the one kind (`Buffer`) the two tests above
+    /// happen to seed (final review, I2).
+    ///
+    /// **Mutation, confirmed to survive before this test existed** (measured
+    /// directly against `b19156a`, in an isolated worktree, apart from just
+    /// re-running the review's own report): `release_task_slots` collecting
+    /// `[entry.buffer, 0, 0]` instead of
+    /// `[entry.buffer, entry.array, entry.message]` passed all 78
+    /// `nova-runtime` lib tests. Every test that stashed a payload for the
+    /// *same task* it then released seeded only `Slot::Buffer` -- both tests
+    /// above do, and `stash_for_test` hardcoded `Buffer` until this test
+    /// needed otherwise.
+    /// `fs::tests::releasing_one_tasks_slots_leaves_another_tasks_intact`
+    /// does stash into `Slot::Message`, but for a *different* task than the
+    /// one it releases, so it asserts that unrelated root is left alone, not
+    /// that a same-task `Message`/`Array` root is actually dropped. This is
+    /// what an undrained OS error message (`fail` stashes one on every
+    /// failure path) or an undrained `read_dir` array would ride on to keep
+    /// its root registered for the process lifetime.
+    #[test]
+    fn releasing_a_task_releases_all_three_stashed_fs_slot_kinds() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+
+        let buffer = crate::gc_str("all-three-buffer-payload");
+        let array = crate::gc_str("all-three-array-payload");
+        let message = crate::gc_str("all-three-message-payload");
+        let addrs = [buffer as usize, array as usize, message as usize];
+
+        crate::fs::stash_for_test(id, crate::fs::Slot::Buffer, buffer);
+        crate::fs::stash_for_test(id, crate::fs::Slot::Array, array);
+        crate::fs::stash_for_test(id, crate::fs::Slot::Message, message);
+        for addr in addrs {
+            assert_eq!(
+                gc::root_count(addr),
+                1,
+                "stash_for_test must root each of the three payloads"
+            );
+        }
+
+        release_internal(id);
+        for addr in addrs {
+            assert_eq!(
+                gc::root_count(addr),
+                0,
+                "release_internal must release all three of the task's \
+                 stashed fs payload roots -- buffer, array and message alike \
+                 -- not only whichever kind a caller happened to seed"
+            );
+        }
     }
 
     /// `take_output` is a take, not a peek: the second call must be diagnosed,

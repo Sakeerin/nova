@@ -80,9 +80,20 @@ pub const OTHER: i64 = 8;
 /// `crate::bytes`'s module doc comment), and which one a payload is gets
 /// carried entirely by which builtin stashed it and which one reads it back
 /// (`nova_rt_fs_read_to_string`/`nova_rt_fs_take_string` treat it as UTF-8;
-/// `nova_rt_fs_read`/`nova_rt_fs_take_bytes` do not interpret it at all).
+/// `nova_rt_fs_read`/`nova_rt_fs_take_bytes` do not interpret it at all). A
+/// dedicated `Bytes` slot would be a fourth copy of storage for a distinction
+/// already carried by which builtin stashed it — exactly the kind of
+/// avoidable debt this module's boundary design exists to prevent.
+///
+/// `pub(crate)`, not private: the [`release_task_slots`] test that seeds all
+/// three kinds for one task id lives in `task.rs`, alongside the two
+/// Buffer-only ones it completes, and needs to name a variant to call
+/// [`stash_for_test`] with (final review, I2). A placement choice, not a
+/// forced one -- the same coverage could instead have been written directly
+/// in this module's own tests, which already call [`stash`] without needing
+/// `Slot` visible outside it at all.
 #[derive(Copy, Clone)]
-enum Slot {
+pub(crate) enum Slot {
     Buffer,
     Array,
     Message,
@@ -114,13 +125,34 @@ fn gc_message(s: &str) -> *mut NovaStr {
     crate::gc_str(s)
 }
 
+/// Convert a task id into its `SLOTS` index. Shared by [`slot_index`] and
+/// [`release_task_slots`] so the `+ 1` offset is written in exactly one place
+/// (final review, M3 — it was previously duplicated between them).
+///
+/// `id + 1`, so index **0 stays the reserved no-task key** and is never a
+/// real task's own index. Both of today's callers already validate `id`
+/// against `TASKS` before reaching here (`task.rs`'s `release_internal`
+/// aborts and `take_output_internal` panics on an id that was never
+/// registered), so a negative `id` cannot reach this function today. Guarded
+/// anyway, for a future caller that might: `abort_with`, not a check that
+/// could panic, since this can run inside a generated poll boundary with no
+/// landing pads. Without the guard, `id as usize + 1` on a negative `id`
+/// is an overflow -- a debug-only panic, and a silent wrap onto the
+/// no-task index in release -- rather than a clean rejection.
+fn slot_index_for(id: i64) -> usize {
+    let Ok(id) = usize::try_from(id) else {
+        crate::task::abort_with("nova_rt_fs: task id must not be negative")
+    };
+    id + 1
+}
+
 /// The `SLOTS` index for the current task.
 ///
 /// `id + 1`, so index **0 is the reserved no-task key**. Task ids are dense
 /// from zero (`poll_one` reads `tasks.get(id as usize)`), so a `Vec` gives O(1)
 /// access with no hashing and no per-call allocation.
 fn slot_index() -> usize {
-    crate::task::current_task().map_or(0, |id| id as usize + 1)
+    crate::task::current_task().map_or(0, slot_index_for)
 }
 
 /// Run `f` against one field of the current task's slots, growing the table if
@@ -228,7 +260,7 @@ pub(crate) fn release_task_slots(id: i64) {
         let Ok(mut slots) = cell.try_borrow_mut() else {
             crate::task::abort_with("nova_rt_fs: payload slot table is already borrowed")
         };
-        let index = id as usize + 1;
+        let index = slot_index_for(id);
         match slots.get_mut(index) {
             Some(entry) => {
                 let held = [entry.buffer, entry.array, entry.message];
@@ -245,8 +277,8 @@ pub(crate) fn release_task_slots(id: i64) {
     }
 }
 
-/// Test-only: stash `ptr` into task `id`'s [`Slot::Buffer`], without
-/// requiring `CURRENT` to already equal `id`.
+/// Test-only: stash `ptr` into task `id`'s `slot`, without requiring
+/// `CURRENT` to already equal `id`.
 ///
 /// `task.rs`'s own test module cannot call [`stash`] or reach `SLOTS`
 /// directly -- both are private to this module -- and it needs a way to
@@ -258,6 +290,12 @@ pub(crate) fn release_task_slots(id: i64) {
 /// override, restoring whatever `CURRENT` held beforehand rather than
 /// assuming it was `None`.
 ///
+/// **Takes `slot` rather than hardcoding [`Slot::Buffer`] (final review,
+/// I2).** `release_task_slots` has three fields to release, and until this
+/// change every caller of this function seeded only `Buffer` -- widened
+/// only as far as pinning all three needed, not into a general-purpose
+/// helper.
+///
 /// `#[cfg(test)]` only, not also `#[cfg(windows)]`: every caller of this
 /// function is an ordinary, cross-platform `task.rs` test, the same
 /// reasoning `set_current_for_test`'s own doc comment gives for itself --
@@ -265,10 +303,10 @@ pub(crate) fn release_task_slots(id: i64) {
 /// `#[cfg(windows)]`, which is why that one carries the platform gate and
 /// this one must not.
 #[cfg(test)]
-pub(crate) fn stash_for_test(id: i64, ptr: *mut NovaStr) {
+pub(crate) fn stash_for_test(id: i64, slot: Slot, ptr: *mut NovaStr) {
     let previous = crate::task::current_task();
     crate::task::set_current_for_test(Some(id));
-    stash(Slot::Buffer, ptr);
+    stash(slot, ptr);
     crate::task::set_current_for_test(previous);
 }
 
@@ -702,6 +740,25 @@ mod tests {
     /// miss parking reached by some route other than a literal call. Accepted
     /// because the alternative is test-only surface in a module this branch
     /// does not otherwise touch.
+    ///
+    /// **What actually keeps a split-on-a-literal guard sound, stated once
+    /// here for this guard, its sibling below, and `bytes.rs`'s equivalent
+    /// (final review, I1, correcting an overclaim this comment used to make):
+    /// the property is that the *first* occurrence of the split literal is
+    /// the real boundary -- not that the literal is unique in the file.** It
+    /// is not unique: this explanation and the sibling guard below both
+    /// contain the same text, and that is harmless only because both
+    /// occurrences come *after* the real one. What would not be harmless is
+    /// an *earlier* one -- a production doc comment quoting the exact split
+    /// text before the real module declaration would silently truncate the
+    /// scan right there, and **this class of guard fails open**: it passes
+    /// when it covers nothing, with no test failing to say so. The ceiling
+    /// this stays honest about, for the same reason: a substring scan cannot
+    /// see past a rewrite that reaches equivalent code a different way --
+    /// fully-qualified syntax (`RefCell::borrow_mut(&*cell)` instead of
+    /// `cell.borrow_mut()`), an aliased import, or indexing spelled other
+    /// than literal `[i]`. Not a plausible thing for anyone here to write,
+    /// but it is the honest limit of what this class of guard can promise.
     #[test]
     fn no_filesystem_intrinsic_registers_a_park() {
         let source = include_str!("fs.rs");
@@ -718,8 +775,8 @@ mod tests {
         // module boundary, for as long as that comment has existed (found
         // while writing `no_slot_access_can_panic_on_a_borrow` below, which
         // would have inherited the identical defect from the same pattern).
-        // `mod tests {` is unique to the real declaration (confirmed by
-        // grep), so this now genuinely covers everything ahead of it.
+        // See this function's own doc comment above for the property that
+        // actually keeps this sound, now that "unique" has been corrected.
         let code = source.split("mod tests {").next().unwrap_or(source);
         assert!(
             !code.contains("stage_park"),
@@ -730,7 +787,8 @@ mod tests {
     }
 
     /// Every `SLOTS` access in production code is fallible-borrow, never
-    /// `borrow_mut`.
+    /// `borrow_mut`, and this file's production half is also free of the
+    /// other panic sources this workspace watches for.
     ///
     /// A `RefCell` borrow panic in this module would cross a generated poll
     /// boundary, where there are no landing pads — the one hazard the
@@ -738,23 +796,49 @@ mod tests {
     /// not have. Pinned at its source rather than by a fixture, so it
     /// covers every future access without a recount.
     ///
+    /// **Needle list widened toward `bytes.rs`'s, with one deliberate
+    /// omission (final review, M1).** `bytes.rs`'s sibling guard
+    /// (`no_bytes_intrinsic_can_panic`) also needles the bare word
+    /// `RefCell`, sound there because that module never declares one. This
+    /// module's design *is* a `RefCell` -- `SLOTS`, declared a few dozen
+    /// lines above, correctly and unavoidably -- so that needle was checked
+    /// and would fail immediately here, not merely pass with less room to
+    /// regress; it is deliberately left out rather than forgotten.
+    /// `unwrap()`, `.expect(`, `panic!` and `format!` were checked the same
+    /// way and are genuinely absent from this file's production half today,
+    /// so adding them costs nothing now and covers more later. **Indexing
+    /// (`[i]`) stays outside what this guard can see** -- a substring scan
+    /// cannot distinguish a safe, already-bounds-checked `[i]` from a
+    /// dangerous one -- so that half of panic-freedom is held by review, not
+    /// mechanically; `CHANGELOG.md`'s entry for this module says so now
+    /// instead of overclaiming it.
+    ///
     /// Scans only the part of this file before its own `mod tests` block,
     /// for the same reason `no_filesystem_intrinsic_registers_a_park` does
     /// and, since Task 3, in the same corrected way -- see that test's own
-    /// comment for why the split is on the literal `mod tests {` rather than
-    /// the bare `#[cfg(test)]` attribute above it.
+    /// doc comment for why the split is on the literal `mod tests {` rather
+    /// than the bare `#[cfg(test)]` attribute above it, for the property
+    /// that actually keeps the split sound, and for the ceiling on what a
+    /// guard shaped like this one can ever promise.
     #[test]
     fn no_slot_access_can_panic_on_a_borrow() {
         let source = include_str!("fs.rs");
         let production = source.split("mod tests {").next().unwrap_or(source);
-        assert!(
-            !production.contains(".borrow_mut()"),
-            "production code in fs.rs must use try_borrow_mut, not borrow_mut"
-        );
-        assert!(
-            !production.contains(".borrow()"),
-            "production code in fs.rs must not take an infallible RefCell borrow"
-        );
+        for needle in [
+            ".borrow_mut()",
+            ".borrow()",
+            "unwrap()",
+            ".expect(",
+            "panic!",
+            "format!",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "a std/fs intrinsic must not panic: `{needle}` found in this file's \
+                 production code, which is reachable from a generated poll boundary \
+                 with no landing pad to unwind through"
+            );
+        }
     }
 
     /// `stash` registers exactly one root for its pointer, and `take` releases
@@ -782,6 +866,14 @@ mod tests {
     /// `a_completed_tasks_state_stays_rooted_until_its_output_is_taken` pins
     /// the identical kind of add_root/remove_root pairing the same way, for
     /// the same reason.
+    ///
+    /// **Also pins that `take` clears the field, not only that it releases
+    /// the root (final review, I3).** Nothing previously read a slot twice or
+    /// asserted a drained one reads back empty. Left undone, a second
+    /// `stash` into the same slot -- or a `release_task_slots` for the same
+    /// task -- would issue a second `gc::remove_root` for an address whose
+    /// first registration is already gone, which can cancel a different,
+    /// live registration once the collector reuses that address.
     #[test]
     fn a_stashed_string_is_rooted_until_it_is_taken() {
         let p = gc_message("payload");
@@ -806,6 +898,7 @@ mod tests {
         // above, and nothing has allocated since -- so despite no longer
         // being explicitly rooted, it has not yet been swept.
         assert_eq!(unsafe { crate::as_str(taken) }, "payload");
+        assert_eq!(take(Slot::Buffer), 0, "take must clear the slot");
     }
 
     /// `stash` must not leak the root of whatever a slot already held when a
