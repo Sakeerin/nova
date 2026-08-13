@@ -746,9 +746,10 @@ mod tests {
     /// (final review, I1, correcting an overclaim this comment used to make):
     /// the property is that the *first* occurrence of the split literal is
     /// the real boundary -- not that the literal is unique in the file.** It
-    /// is not unique: this explanation and the sibling guard below both
-    /// contain the same text, and that is harmless only because both
-    /// occurrences come *after* the real one. What would not be harmless is
+    /// is not unique: this explanation, the sibling guard below, and each
+    /// guard's own split call all contain the same text, and that is
+    /// harmless only because every occurrence of it comes *after* the real
+    /// one, however many there turn out to be. What would not be harmless is
     /// an *earlier* one -- a production doc comment quoting the exact split
     /// text before the real module declaration would silently truncate the
     /// scan right there, and **this class of guard fails open**: it passes

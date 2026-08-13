@@ -395,9 +395,13 @@ mod tests {
     /// follow the real one, not because the attribute text is unique --
     /// splitting there was one stray production comment away from quoting
     /// that exact attribute and silently scanning less than all of the real
-    /// production code, with no test failing to say so. `mod tests {` occurs
-    /// exactly once in this file today, which narrows that exposure without
-    /// claiming immunity from the same failure mode. See
+    /// production code, with no test failing to say so. `mod tests {` -- the
+    /// literal actually split on below -- is not unique either: it recurs in
+    /// this paragraph's own quotes of it and in the split call's own
+    /// argument. None of that matters to soundness, for the same reason it
+    /// does not matter for `#[cfg(test)]` above: only an occurrence
+    /// *before* the real declaration would silently truncate the scan, and
+    /// every one of these comes after it. See
     /// `fs::tests::no_filesystem_intrinsic_registers_a_park`'s doc comment in
     /// `fs.rs` for what actually keeps a split like this sound (the *first*
     /// occurrence being the real boundary, not uniqueness), for the
