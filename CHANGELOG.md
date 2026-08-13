@@ -1288,10 +1288,12 @@ code that already compiled. Full detail is in the `### Added` entries above.
   (`release_internal`, `take_output_internal`), so a task's payload is
   released in the same call that releases its state, not deferred to some
   later, separate event. Every `SLOTS` access is a fallible borrow (`try_borrow_mut`/
-  `get_mut`), never `borrow_mut`/`[i]`, aborting instead of panicking on the
+  `get_mut`), never `borrow_mut`, aborting instead of panicking on the
   believed-unreachable contended case — a `RefCell` panic here would cross a
-  generated poll boundary with no landing pad — and
-  `no_slot_access_can_panic_on_a_borrow` (`fs.rs`) now pins that mechanically.
+  generated poll boundary with no landing pad. `no_slot_access_can_panic_on_a_borrow`
+  (`fs.rs`) mechanically pins that borrow half, plus `unwrap()`/`.expect(`/`panic!`/
+  `format!` (final review, M1); that no access is written as indexing (`[i]`)
+  instead is held by review, not by the guard, since a substring scan cannot see it.
   **Does not fix** the pre-existing leak of a task whose output is neither
   taken nor released (`docs/adr/0009-async-execution-model.md` §1): such a
   task's last unread payload still leaks until the process exits, one per
