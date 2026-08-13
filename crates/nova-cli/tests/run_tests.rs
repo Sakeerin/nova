@@ -6643,3 +6643,144 @@ fn fs_bytes_errors_run() {
         .success()
         .stdout(expected);
 }
+
+// === Task 3 (read-write-and-stdio increment): `std/io`'s `Read`/`Write`
+// surface over the three standard streams, and `read_to_end`'s default ===
+
+/// The stdout marker `tests/runtime/io_streams.nova` writes: `"Q".repeat(300)`
+/// plus a trailing newline. Built the same way here as there, rather than
+/// copied out as a 301-character literal, so a future change to the repeat
+/// count is a one-word diff to compare instead of a wall of `Q`s to eyeball.
+/// Deliberately 256 bytes or longer: a write's byte count crosses the
+/// runtime boundary as 8 little-endian bytes
+/// (`crates/nova-runtime/src/io.rs`'s `stash_count`), and a Nova-level decode
+/// that read back only the first of them would under-report any count at or
+/// above 256 without a marker this long catching it.
+fn io_streams_stdout_marker() -> String {
+    format!("{}\n", "Q".repeat(300))
+}
+
+/// The exact stderr content `tests/runtime/io_streams.nova` writes -- nothing
+/// else in that fixture ever writes to stderr.
+const IO_STREAMS_STDERR_MARKER: &str = "NOVA_STDERR_ONLY_MARKER\n";
+
+/// `Read`/`Write` against the three real standard streams: `nova run` as a
+/// child process with stdout and stderr captured as two independent
+/// `std::process::Output` buffers, stdin fed a fixed string from this
+/// harness rather than a terminal (so this test cannot hang waiting on one).
+///
+/// **The cross-stream check is the point of this test, not a bonus.** A
+/// `Write for Stdout` wired to the wrong OS stream (or the reverse) still
+/// produces a program that runs, exits `0`, and prints the right status
+/// lines -- only capturing both streams separately and checking that each
+/// contains *only* its own marker catches that. This is not hypothetical:
+/// Task 1's own report records that exactly this mutation
+/// (`nova_rt_io_stdout_write` writing to stderr) survived that task's entire
+/// test suite, because nothing at that layer observes which real OS stream
+/// received the bytes -- closing that gap is what this test exists for.
+#[test]
+fn io_streams_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/io_streams.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let assert = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/io_streams.nova"))
+        .write_stdin("hello-stdin")
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+
+    assert_eq!(stdout, expected, "stdout did not match the golden fixture");
+    assert_eq!(
+        stderr, IO_STREAMS_STDERR_MARKER,
+        "stderr must hold exactly the stderr marker and nothing else"
+    );
+
+    let stdout_marker = io_streams_stdout_marker();
+    assert!(
+        stdout.contains(&stdout_marker),
+        "stdout must contain its own marker: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("NOVA_STDERR_ONLY_MARKER"),
+        "stderr must contain its own marker: {stderr:?}"
+    );
+    // The negative half. Without this pair, a same-stream mutation (or a
+    // crossed-stream one) still passes every assertion above, each of which
+    // only checks "did my own marker appear somewhere" -- this is what
+    // actually catches bytes landing on the wrong stream.
+    assert!(
+        !stdout.contains("NOVA_STDERR_ONLY_MARKER"),
+        "stdout must not contain stderr's marker: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains(&stdout_marker),
+        "stderr must not contain stdout's marker: {stderr:?}"
+    );
+}
+
+/// `io_streams_run` again through `nova build` -- a standalone linked
+/// executable rather than the JIT -- exercising the same cross-stream
+/// separation on the other backend. Written inline rather than through the
+/// shared `build_and_run` helper: that helper keeps only stdout, and the
+/// entire point here is comparing both streams independently.
+#[test]
+fn io_streams_build_standalone() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/io_streams.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    let dir = std::env::temp_dir().join("nova-io-streams-build");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let exe = dir.join(format!("io_streams{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(repo_root().join("tests/runtime/io_streams.nova"))
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+
+    let assert = Command::new(&exe)
+        .write_stdin("hello-stdin")
+        .assert()
+        .success();
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    let _ = std::fs::remove_file(&exe);
+
+    assert_eq!(stdout, expected, "stdout did not match the golden fixture");
+    assert_eq!(
+        stderr, IO_STREAMS_STDERR_MARKER,
+        "stderr must hold exactly the stderr marker and nothing else"
+    );
+    assert!(
+        !stdout.contains("NOVA_STDERR_ONLY_MARKER"),
+        "stdout must not contain stderr's marker: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains(&io_streams_stdout_marker()),
+        "stderr must not contain stdout's marker: {stderr:?}"
+    );
+}
+
+/// `Read::read_to_end`'s default body (`read_all` in `std/io`), pinned
+/// against fake readers with fully deterministic results. See `tests/runtime/
+/// io_read_to_end.nova`'s own doc comment for how its `Chunks` reader
+/// advances state between calls despite Nova records being values with no
+/// `&mut`, and for why a separate `Failing` reader is there too.
+#[test]
+fn io_read_to_end_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/io_read_to_end.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/io_read_to_end.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

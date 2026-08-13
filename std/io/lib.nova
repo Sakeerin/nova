@@ -1,14 +1,37 @@
-// Nova standard library — I/O error types.
+// Nova standard library — I/O error types, and the `Read`/`Write` traits over
+// the three standard streams.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
-// these names need no `import`. A user definition of the same name shadows the
-// one here (see docs/adr/0004-stdlib-compile-model.md).
+// these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
+// A user definition of the same name shadows the one here.
 //
-// This module holds only the error surface. `nova-spec/20-STDLIB.md` §4 also
-// specifies `Read`/`Write` traits and `stdin`/`stdout`/`stderr`. The byte
-// type they were waiting on now exists (`Bytes`, `std/bytes`) -- `std/fs`'s
-// `read`/`write` already use it -- but `File` and a settled buffer signature
-// for these traits do not, so they still arrive in a later increment.
+// `File`, `open` and `OpenOptions` are a later increment. `Stdin`, `Stdout`
+// and `Stderr` below are process-global, always open and never closed, so
+// they exercise both traits with none of `File`'s handle-lifetime design
+// needed yet.
+//
+// **The `Future<T>` spelling.** `async fn` in a trait *declaration* is
+// `E0900`, so `Read`/`Write` below are declared `fn ... -> Future<T>`
+// instead of `async fn ... -> T`. Calling an `async fn` without `.await`
+// produces its `Future` without running it, so a plain, non-`async` `fn` can
+// still return one, unawaited -- every method on both traits follows this
+// same shape, including `read_to_end`'s default body, which returns the
+// `Future` of the private, generic `read_all` rather than `await`ing it
+// itself (an `async fn` default body could not: it would need to `await` to
+// produce a plain `T`, and a non-`async` `fn` has no `await` available to it).
+//
+// **Every wrapper below is straight-line**: it calls its builtin and reads
+// the per-task payload/message slot with no `.await` between the two. Those
+// slots are per-task, keyed on the polling task
+// (`crates/nova-runtime/src/fs.rs`'s `SLOTS`/`slot_index`), so a sibling task
+// cannot clobber them -- but *within* one task, a second operation still
+// overwrites that same task's own slot, so a wrapper that awaited
+// mid-sequence could read back a payload its own later call had already
+// replaced. `fs_take_bytes`/`fs_last_error_message` keep their `fs_` prefix
+// for history, not scope: the slot table has been a general per-task
+// boundary facility since increment 3a, not a filesystem-only one, and
+// `std/io` reaches both directly because `Builtin::STD_ONLY` is seeded into
+// every std module's scope, not only `std/fs`'s.
 
 // Why an operation failed. `ConnectionRefused` is unused by `std/fs` and is
 // carried so §4's network I/O needs no further addition later.
@@ -66,4 +89,162 @@ pub fn io_error_kind_of(code: Int) -> IoErrorKind {
     if code == 6 { return TimedOut }
     if code == 7 { return ConnectionRefused }
     Other
+}
+
+pub trait Read {
+    // Up to `max` bytes. An **empty** result means end of stream. **A short
+    // read is not EOF** -- a pipe or a terminal may hand back far fewer bytes
+    // than `max` and still have more to give later, so a caller (including
+    // `read_to_end`'s default below) must keep reading on anything
+    // non-empty and stop only on a genuinely empty result.
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>>
+
+    // Reads until end of stream and returns everything concatenated in
+    // order. Defaults to the private `read_all`, over this trait's own
+    // `read` -- see that function for the loop, and `CHUNK` for the size it
+    // reads at a time.
+    fn read_to_end(self) -> Future<Result<Bytes, IoError>> { read_all(self) }
+}
+
+pub trait Write {
+    // Writes as much of `buf` as one underlying write accepts, and reports
+    // exactly how many bytes that was -- **not necessarily all of `buf`**.
+    // Mirrors Rust's own possibly-partial `Write::write`, deliberately
+    // unlike `std/fs`'s count-less, write-all `write`. A caller that needs a
+    // guaranteed full write must loop on the returned count itself; this
+    // method does not do it for you.
+    fn write(self, buf: Bytes) -> Future<Result<Int, IoError>>
+
+    fn flush(self) -> Future<Result<(), IoError>>
+}
+
+// The process's standard input. Process-global, always open, never closed --
+// reading it more than once keeps reading from wherever the last read left
+// off, the same as calling `std::io::stdin()` more than once in Rust.
+//
+// There is no I/O poller yet (`docs/adr/0009-async-execution-model.md`'s
+// residual-gaps list): a `read` blocks the whole executor for as long as the
+// OS read takes, so a terminal with nothing typed yet stalls every other
+// task, not only this one.
+pub record Stdin { }
+
+pub fn stdin() -> Stdin { Stdin { } }
+
+async fn read_stdin(s: Stdin, max: Int) -> Result<Bytes, IoError> {
+    let status = io_stdin_read(max)
+    if status == 0 {
+        return Ok(fs_take_bytes())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Read for Stdin {
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>> { read_stdin(self, max) }
+}
+
+// The process's standard output. Process-global, always open, never closed.
+pub record Stdout { }
+
+pub fn stdout() -> Stdout { Stdout { } }
+
+// The write's byte count crosses the boundary as 8 little-endian bytes in the
+// payload slot (`crates/nova-runtime/src/io.rs`'s `stash_count`), not in the
+// status word -- decoded here by `decode_count`, which reads all eight,
+// rather than by reading a single byte, which would silently truncate any
+// count at or above 256.
+async fn write_stdout(s: Stdout, buf: Bytes) -> Result<Int, IoError> {
+    let status = io_stdout_write(buf)
+    if status == 0 {
+        return Ok(decode_count(fs_take_bytes()))
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+async fn flush_stdout(s: Stdout) -> Result<(), IoError> {
+    let status = io_stdout_flush()
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Write for Stdout {
+    fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_stdout(self, buf) }
+    fn flush(self) -> Future<Result<(), IoError>> { flush_stdout(self) }
+}
+
+// The process's standard error. Process-global, always open, never closed.
+pub record Stderr { }
+
+pub fn stderr() -> Stderr { Stderr { } }
+
+// Mirrors `write_stdout` exactly, against the other stream.
+async fn write_stderr(s: Stderr, buf: Bytes) -> Result<Int, IoError> {
+    let status = io_stderr_write(buf)
+    if status == 0 {
+        return Ok(decode_count(fs_take_bytes()))
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Mirrors `flush_stdout` exactly, against the other stream.
+async fn flush_stderr(s: Stderr) -> Result<(), IoError> {
+    let status = io_stderr_flush()
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Write for Stderr {
+    fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_stderr(self, buf) }
+    fn flush(self) -> Future<Result<(), IoError>> { flush_stderr(self) }
+}
+
+// How many bytes `read_all` asks for per `read` call while draining a `Read`
+// to end of stream. Stated once, here, and nowhere else -- a size duplicated
+// between a doc comment and the code is a drift this project has repeatedly
+// had to correct.
+const CHUNK: Int = 4096
+
+// `read_to_end`'s default body, over any `Read`. Loops `read(CHUNK)` and
+// concatenates every non-empty result in order, stopping on the first
+// genuinely empty one (`read`'s own EOF contract) -- never on a short one,
+// which is not EOF (see `Read::read`'s own doc comment). Getting that
+// backwards -- stopping as soon as a result is shorter than `CHUNK` rather
+// than only when it is empty -- silently truncates the result, and does so
+// against the *common* case, not an edge case: a real pipe or terminal
+// rarely hands back a chunk exactly `CHUNK` bytes long, so nearly every read
+// from one looks "short" by that broken test.
+async fn read_all<T: Read>(reader: T) -> Result<Bytes, IoError> {
+    let mut acc = bytes_from_ints([])
+    while true {
+        let chunk = reader.read(CHUNK).await
+        match chunk {
+            Ok(bytes) => {
+                if bytes.len() == 0 { return Ok(acc) }
+                acc = acc.concat(bytes)
+            }
+            Err(e) => return Err(e)
+        }
+    }
+    Ok(acc)
+}
+
+// Decodes the 8 little-endian bytes a successful stream write's byte count
+// crosses the boundary as (`crates/nova-runtime/src/io.rs`'s `stash_count`)
+// back into the `Int` it encodes, folding from the most significant byte
+// down so no intermediate value needs more range than the final count does.
+// Reading only the first byte -- `fs_take_bytes().byte_at(0)` -- would
+// silently truncate any count at or above 256; a single write can exceed
+// that.
+fn decode_count(b: Bytes) -> Int {
+    let ints = b.to_ints()
+    let mut n = 0
+    let mut i = ints.len() - 1
+    while i >= 0 {
+        n = n * 256 + ints[i]
+        i = i - 1
+    }
+    n
 }

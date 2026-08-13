@@ -1,0 +1,91 @@
+// Pins `Read::read_to_end`'s default body (`read_all` in `std/io`) against
+// fake readers with fully deterministic, Nova-controlled results -- the real
+// streams cannot exercise the loop-and-concatenate behaviour deterministically
+// (`stdin`'s content depends on whatever the harness feeds it, and
+// `stdout`/`stderr` do not implement `Read` at all).
+//
+// `Chunks` needs state that advances across repeated `read()` calls that all
+// look, from the caller's side, like calls on the same value -- and Nova
+// records are values, with no `&mut`. The way out: records are heap objects
+// with no copy semantics anywhere in this compiler (see `std/collections`'s
+// `Iterator` trait doc comment, and
+// `an_iterators_own_storage_still_advances_when_a_consumer_takes_plain_self`
+// in `crates/nova-cli/tests/run_tests.rs`, which pins exactly this aliasing
+// for a hand-rolled `Iterator` impl). So a `mut` parameter on the *async*
+// function a `Read` impl forwards into can still mutate the shared record in
+// place, and `read_all`'s next call against what is, syntactically, the same
+// unchanged reader value observes the mutation. `step` is that mutable
+// field, advanced by `chunk_read` alone -- neither `read_all` nor this
+// fixture's own `main` ever touches it directly.
+record Chunks { first: Bytes, second: Bytes, step: Int }
+
+async fn chunk_read(mut c: Chunks, max: Int) -> Result<Bytes, IoError> {
+    if c.step == 0 {
+        c.step = 1
+        return Ok(c.first)
+    }
+    if c.step == 1 {
+        c.step = 2
+        return Ok(c.second)
+    }
+    Ok(bytes_from_ints([]))
+}
+
+impl Read for Chunks {
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>> { chunk_read(self, max) }
+}
+
+// A reader whose every call fails, to pin that `read_all` propagates an
+// `Err` immediately instead of looping past it or discarding it.
+record Failing { }
+
+async fn failing_read(f: Failing, max: Int) -> Result<Bytes, IoError> {
+    Err(IoError { kind: Other, message: "simulated read failure" })
+}
+
+impl Read for Failing {
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>> { failing_read(self, max) }
+}
+
+async fn main() {
+    // Two non-empty chunks, concatenated in the order they were read: proves
+    // both the loop (more than one `read` call happens at all) and the
+    // concatenation order (a reversed or first-result-only accumulator would
+    // print something other than "AB" followed by "CD").
+    //
+    // Bound to a local (`two_chunks`) before `.read_to_end()`, never matched
+    // directly off a record literal: `match Chunks { ... }.read_to_end() { }`
+    // is `P0001`.
+    let two_chunks = Chunks { first: bytes_from_string("AB"), second: bytes_from_string("CD"), step: 0 }
+    let joined = two_chunks.read_to_end().await
+    match joined {
+        Ok(b) => {
+            match b.to_string() {
+                Some(s) => println("joined: ${s}")
+                None => println("joined: <non-utf8>")
+            }
+        }
+        Err(e) => println("joined err: ${e.message}")
+    }
+
+    // `empty`'s chunks are genuinely zero-length, not merely short, so its
+    // very first `read` already reports end of stream: `read_to_end` must
+    // yield empty after that one call rather than loop looking for more.
+    // `two_chunks` above already covers "short but non-empty is not EOF" on
+    // its own (its chunks are short but never empty) -- this second,
+    // independent reader pins the separate, immediately-empty case instead
+    // of repeating that one.
+    let empty = Chunks { first: bytes_from_ints([]), second: bytes_from_ints([]), step: 0 }
+    let empty_result = empty.read_to_end().await
+    match empty_result {
+        Ok(b) => println("empty: ${b.len()}")
+        Err(e) => println("empty err: ${e.message}")
+    }
+
+    let failing = Failing { }
+    let failed = failing.read_to_end().await
+    match failed {
+        Ok(b) => println("failing: unexpectedly ok, len ${b.len()}")
+        Err(e) => println("failing err: ${e.message}")
+    }
+}
