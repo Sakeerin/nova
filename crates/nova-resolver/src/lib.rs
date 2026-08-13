@@ -315,6 +315,37 @@ builtins! {
     /// the path, truncating an existing file. Status code, as
     /// [`Builtin::FsReadToString`]. Backs `std/fs`'s `write`. Std-only.
     FsWrite,
+    /// `io_stdin_read(max: Int) -> Int` — read up to `max` bytes from stdin,
+    /// the same status/payload shape as [`Builtin::FsRead`]. `0` on success,
+    /// with the bytes read waiting in [`Builtin::FsTakeBytes`]; otherwise an
+    /// `IoErrorKind` status code, as [`Builtin::FsReadToString`]. An
+    /// **empty** payload means end of stream; a short read does not. Runtime
+    /// symbol `nova_rt_io_stdin_read` (`crates/nova-runtime/src/io.rs`).
+    /// Std-only.
+    IoStdinRead,
+    /// `io_stdout_write(buf: Bytes) -> Int` — write `buf` to stdout with one
+    /// `Write::write` call, not a `write_all` loop, so a short write is
+    /// reported rather than retried underneath the caller. `0` on success,
+    /// with the number of bytes actually written waiting in
+    /// [`Builtin::FsTakeBytes`], encoded as an 8-byte little-endian count;
+    /// otherwise an `IoErrorKind` status code, as [`Builtin::FsReadToString`].
+    /// Runtime symbol `nova_rt_io_stdout_write`
+    /// (`crates/nova-runtime/src/io.rs`). Std-only.
+    IoStdoutWrite,
+    /// `io_stderr_write(buf: Bytes) -> Int` — write `buf` to stderr. Mirrors
+    /// [`Builtin::IoStdoutWrite`] exactly, against the other stream.
+    /// Std-only.
+    IoStderrWrite,
+    /// `io_stdout_flush() -> Int` — flush stdout. A status code, as
+    /// [`Builtin::FsReadToString`]; unlike [`Builtin::IoStdoutWrite`], a
+    /// successful flush stashes no payload of its own for
+    /// [`Builtin::FsTakeBytes`] to collect -- it does not clear whatever a
+    /// prior operation left there either. Std-only.
+    IoStdoutFlush,
+    /// `io_stderr_flush() -> Int` — flush stderr. Mirrors
+    /// [`Builtin::IoStdoutFlush`] exactly, against the other stream.
+    /// Std-only.
+    IoStderrFlush,
     /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
     /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
     /// Nova cannot read a `Bytes` value's own header (no length, indexing or
@@ -443,6 +474,11 @@ impl Builtin {
             Builtin::FsRead => "fs_read",
             Builtin::FsTakeBytes => "fs_take_bytes",
             Builtin::FsWrite => "fs_write",
+            Builtin::IoStdinRead => "io_stdin_read",
+            Builtin::IoStdoutWrite => "io_stdout_write",
+            Builtin::IoStderrWrite => "io_stderr_write",
+            Builtin::IoStdoutFlush => "io_stdout_flush",
+            Builtin::IoStderrFlush => "io_stderr_flush",
             Builtin::BytesLen => "bytes_len",
             // Deliberately not "bytes_from_string" — see this variant's doc
             // comment for why that would collide with `std/bytes`'s own
@@ -486,7 +522,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 43] = [
+    pub const STD_ONLY: [Builtin; 48] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -520,6 +556,11 @@ impl Builtin {
         Builtin::FsRead,
         Builtin::FsTakeBytes,
         Builtin::FsWrite,
+        Builtin::IoStdinRead,
+        Builtin::IoStdoutWrite,
+        Builtin::IoStderrWrite,
+        Builtin::IoStdoutFlush,
+        Builtin::IoStderrFlush,
         Builtin::BytesLen,
         Builtin::BytesFromString,
         Builtin::BytesIsUtf8,

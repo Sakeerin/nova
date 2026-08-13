@@ -279,6 +279,25 @@ rt_funcs! {
     /// `(str, bytes) -> i64` — write the bytes to the path named by the
     /// first argument, truncating. Status code, as `FsReadToString`.
     FsWrite,
+    /// `(i64) -> i64` — read up to `max` bytes from stdin. `0` on success,
+    /// with the bytes waiting in `FsTakeBytes`; otherwise an `IoErrorKind`
+    /// status code, as `FsReadToString`. An empty payload means end of
+    /// stream; a short read does not.
+    IoStdinRead,
+    /// `(bytes) -> i64` — write the bytes to stdout with one `Write::write`
+    /// call, not a `write_all` loop. Status code, as `FsReadToString`; on
+    /// success the number of bytes actually written is waiting in
+    /// `FsTakeBytes`, encoded as an 8-byte little-endian count.
+    IoStdoutWrite,
+    /// `(bytes) -> i64` — write the bytes to stderr. Mirrors `IoStdoutWrite`
+    /// against the other stream.
+    IoStderrWrite,
+    /// `() -> i64` — flush stdout. Status code, as `FsReadToString`; no
+    /// payload.
+    IoStdoutFlush,
+    /// `() -> i64` — flush stderr. Mirrors `IoStdoutFlush` against the other
+    /// stream.
+    IoStderrFlush,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -356,6 +375,11 @@ impl RtFunc {
             RtFunc::FsRead => "nova_rt_fs_read",
             RtFunc::FsTakeBytes => "nova_rt_fs_take_bytes",
             RtFunc::FsWrite => "nova_rt_fs_write",
+            RtFunc::IoStdinRead => "nova_rt_io_stdin_read",
+            RtFunc::IoStdoutWrite => "nova_rt_io_stdout_write",
+            RtFunc::IoStderrWrite => "nova_rt_io_stderr_write",
+            RtFunc::IoStdoutFlush => "nova_rt_io_stdout_flush",
+            RtFunc::IoStderrFlush => "nova_rt_io_stderr_flush",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -414,6 +438,9 @@ impl RtFunc {
             | RtFunc::FsRead => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsTakeBytes => (vec![], MirTy::Ptr),
             RtFunc::FsWrite => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
+            RtFunc::IoStdinRead => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::IoStdoutWrite | RtFunc::IoStderrWrite => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::IoStdoutFlush | RtFunc::IoStderrFlush => (vec![], MirTy::I64),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
