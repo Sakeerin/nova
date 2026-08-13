@@ -244,6 +244,20 @@ other direction.
   because nothing yields mid-sequence, and that is also why they never
   suspend.
 
+  **Corrected 2026-08-13 (branch `per-task-slots`): both halves of this bullet
+  are now stale.** The payload storage is no longer thread-local `Cell`
+  slots — `crates/nova-runtime/src/fs.rs`'s `Slot`/`Slots`/`SLOTS` replaced
+  them with one per-task table, indexed by the current task
+  (`docs/superpowers/specs/2026-08-12-per-task-payload-slots-design.md`).
+  And the warning itself now points the wrong way: per-task keying is
+  specifically what makes a future `std/fs` function awaiting mid-sequence
+  *safe*, not hazardous — two tasks stashing between one task's stash and its
+  take can no longer collide, because each task's payloads live in its own
+  row rather than one slot shared thread-wide
+  (`a_stash_is_private_to_the_task_that_made_it`, `fs.rs`). Left standing
+  above as the record of the hazard this increment was written to close
+  before a poller could make it live.
+
 ## Alternatives considered
 
 - **Route `AlreadyExists`/`InvalidData` through `Other` and let callers
@@ -286,6 +300,10 @@ other direction.
 - Design (2026-08-12 amendment): `docs/superpowers/specs/2026-08-12-byte-type-design.md`
   — `Bytes`, and the buffer-returning decision that narrows this ADR's §5
   deviation (above) and amends `nova-spec/20-STDLIB.md` §4 (above)
+- Design (2026-08-13 amendment):
+  `docs/superpowers/specs/2026-08-12-per-task-payload-slots-design.md` — the
+  per-task table that replaces the thread-local `Cell` slots this ADR's
+  Consequences section originally described (corrected above)
 - Plan and ledger: `docs/superpowers/plans/2026-08-11-std-fs-strings.md`,
   `.superpowers/sdd/2026-08-11-std-fs-strings/`
 - `crates/nova-runtime/src/fs.rs`: the status constants, `fail`, and
