@@ -1,0 +1,44 @@
+// Proves `Read`/`Write` work against the three real standard streams: a
+// known chunk fed through stdin by the test harness (never a terminal --
+// this file must not block waiting on one), a write to stdout, a write to
+// stderr, and a flush. The two writes use markers that share no substring,
+// so the harness running this can assert not only that each stream's own
+// marker landed, but that neither stream's capture contains the other's --
+// the check that catches a `Write for Stdout` wired to the wrong OS stream.
+//
+// The stdout marker is also deliberately 256 bytes or longer: a write's byte
+// count crosses the runtime boundary as 8 little-endian bytes, and a Nova
+// wrapper that read back only the first of them would under-report any count
+// at or above 256 without this fixture noticing.
+async fn main() {
+    let heard = stdin().read(64).await
+    match heard {
+        Ok(bytes) => {
+            match bytes.to_string() {
+                Some(s) => println("stdin: ${s}")
+                None => println("stdin: <non-utf8>")
+            }
+        }
+        Err(e) => println("stdin err: ${e.message}")
+    }
+
+    let repeated = "Q".repeat(300)
+    let stdout_marker = "${repeated}\n"
+    let wrote = stdout().write(bytes_from_string(stdout_marker)).await
+    match wrote {
+        Ok(count) => println("wrote ${count}")
+        Err(e) => println("stdout err: ${e.message}")
+    }
+
+    let stderr_marker = "NOVA_STDERR_ONLY_MARKER\n"
+    let wrote_err = stderr().write(bytes_from_string(stderr_marker)).await
+    match wrote_err {
+        Ok(count) => println("stderr wrote ${count}")
+        Err(e) => println("stderr err: ${e.message}")
+    }
+
+    match stdout().flush().await {
+        Ok(_) => println("flushed")
+        Err(e) => println("flush err: ${e.message}")
+    }
+}

@@ -15132,28 +15132,28 @@ mod tests {
                 ),
                 Builtin::IoStdinRead => (
                     (vec![Ty::Int], Ty::Int),
-                    "no call site yet -- `std/io`'s `Read::read` for `Stdin` \
-                     will be the first",
+                    "`io_stdin_read(max)` in `std/io`'s `read_stdin`, which \
+                     backs `Stdin`'s `Read::read`",
                 ),
                 Builtin::IoStdoutWrite => (
                     (vec![Ty::Bytes], Ty::Int),
-                    "no call site yet -- `std/io`'s `Write::write` for \
-                     `Stdout` will be the first",
+                    "`io_stdout_write(buf)` in `std/io`'s `write_stdout`, \
+                     which backs `Stdout`'s `Write::write`",
                 ),
                 Builtin::IoStderrWrite => (
                     (vec![Ty::Bytes], Ty::Int),
-                    "no call site yet -- `std/io`'s `Write::write` for \
-                     `Stderr` will be the first",
+                    "`io_stderr_write(buf)` in `std/io`'s `write_stderr`, \
+                     which backs `Stderr`'s `Write::write`",
                 ),
                 Builtin::IoStdoutFlush => (
                     (vec![], Ty::Int),
-                    "no call site yet -- `std/io`'s `Write::flush` for \
-                     `Stdout` will be the first",
+                    "`io_stdout_flush()` in `std/io`'s `flush_stdout`, which \
+                     backs `Stdout`'s `Write::flush`",
                 ),
                 Builtin::IoStderrFlush => (
                     (vec![], Ty::Int),
-                    "no call site yet -- `std/io`'s `Write::flush` for \
-                     `Stderr` will be the first",
+                    "`io_stderr_flush()` in `std/io`'s `flush_stderr`, which \
+                     backs `Stderr`'s `Write::flush`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),
