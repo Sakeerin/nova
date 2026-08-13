@@ -28,6 +28,12 @@ pub mod bytes;
 /// beside them, the same way this crate's other modules build on `task`.
 pub mod fs;
 mod gc;
+/// The three standard streams' intrinsics for `std/io`. `pub`, not private,
+/// for the same reason as [`fs`] and [`bytes`]: its own doc comment explains
+/// the boundary it implements. Branch `read-write-stdio`'s Task 1 added this
+/// module beside `fs` and `bytes`, reusing `fs`'s per-task slot table rather
+/// than owning a second one.
+pub mod io;
 /// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,
 /// `POLL_READY`, `STATE_SLOT_TAG`, `STATE_SLOT_TEMPS`) are not all read by
 /// this crate's own runtime logic -- some exist purely as the documented
@@ -63,6 +69,22 @@ pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
         (*node).ptr = buf;
     }
     node
+}
+
+/// Test-only: allocate a `Bytes` payload, for a test that hands a runtime
+/// intrinsic a `Bytes` argument directly rather than going through `std/
+/// bytes`'s own Nova-level constructors.
+///
+/// Delegates to [`bytes::gc_bytes`], which already does exactly this and is
+/// `pub(crate)` -- named at the crate root only so `io`'s own tests can reach
+/// it as `crate::gc_bytes_for_test` without spelling out the `bytes` module
+/// path at each call site.
+///
+/// `#[cfg(test)]` only, no platform gate: every caller is an ordinary,
+/// cross-platform unit test.
+#[cfg(test)]
+pub(crate) fn gc_bytes_for_test(data: &[u8]) -> *mut NovaStr {
+    bytes::gc_bytes(data)
 }
 
 /// Read a `NovaStr` back as a `&str`.
@@ -472,6 +494,26 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             fs::nova_rt_fs_take_bytes as *const u8,
         ),
         ("nova_rt_fs_write", fs::nova_rt_fs_write as *const u8),
+        (
+            "nova_rt_io_stdin_read",
+            io::nova_rt_io_stdin_read as *const u8,
+        ),
+        (
+            "nova_rt_io_stdout_write",
+            io::nova_rt_io_stdout_write as *const u8,
+        ),
+        (
+            "nova_rt_io_stderr_write",
+            io::nova_rt_io_stderr_write as *const u8,
+        ),
+        (
+            "nova_rt_io_stdout_flush",
+            io::nova_rt_io_stdout_flush as *const u8,
+        ),
+        (
+            "nova_rt_io_stderr_flush",
+            io::nova_rt_io_stderr_flush as *const u8,
+        ),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",

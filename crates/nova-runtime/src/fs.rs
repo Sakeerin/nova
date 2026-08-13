@@ -21,6 +21,11 @@
 //! the per-task table just adds one layer of indirection to reach it, keyed
 //! by `slot_index`.
 //!
+//! `stash`/`take` themselves are `pub(crate)`: `crates/nova-runtime/src/io.rs`
+//! is a second consumer, stashing the three standard streams' payloads and
+//! write byte counts through this identical slot table rather than a second
+//! one.
+//!
 //! # Why the pointer is GC-rooted while it sits in a slot
 //!
 //! A slot is written by one intrinsic and read by the next, with Nova code in
@@ -211,7 +216,11 @@ fn with_slot<R>(slot: Slot, f: impl FnOnce(&mut usize) -> R) -> R {
 /// below, minus this fix. `take`'s own contract (return `0` for an empty
 /// slot, otherwise the released pointer) makes discarding its result safe
 /// here: there is nothing to free by hand either way.
-fn stash(slot: Slot, ptr: *mut NovaStr) {
+///
+/// `pub(crate)`, not private: `crate::io` is a second consumer, stashing the
+/// standard streams' read payloads and write byte counts through this same
+/// function rather than reproducing its root-balancing logic a second time.
+pub(crate) fn stash(slot: Slot, ptr: *mut NovaStr) {
     take(slot);
     gc::add_root(ptr as *mut u8);
     with_slot(slot, |field| *field = ptr as usize);
@@ -231,7 +240,13 @@ fn stash(slot: Slot, ptr: *mut NovaStr) {
 /// not inside `with_slot`'s closure. Holding a `RefCell` borrow across a call
 /// into the collector would be a re-entrancy hazard for no benefit; the
 /// pointer is already out of the table and owned by this frame by then.
-fn take(slot: Slot) -> usize {
+///
+/// `pub(crate)`, not private: `crate::io`'s own tests are a second consumer
+/// -- production code there only ever stashes (its payloads are meant for a
+/// future Nova caller to take via `nova_rt_fs_take_bytes`, not for `io.rs`
+/// itself to take back out), but its tests call this directly to verify what
+/// a stash left behind, the same way this function's own tests here do.
+pub(crate) fn take(slot: Slot) -> usize {
     let ptr = with_slot(slot, |field| {
         let ptr = *field;
         *field = 0;
@@ -314,7 +329,11 @@ pub(crate) fn stash_for_test(id: i64, slot: Slot, ptr: *mut NovaStr) {
 ///
 /// Called on every failure path, so the message is always available to the
 /// wrapper that is about to build an `IoError`.
-fn fail(e: &std::io::Error) -> i64 {
+///
+/// `pub(crate)`, not private: `crate::io` is a second consumer, mapping the
+/// standard streams' I/O errors through this same function rather than a
+/// second copy of the kind-to-status table.
+pub(crate) fn fail(e: &std::io::Error) -> i64 {
     use std::io::ErrorKind;
     stash(Slot::Message, gc_message(&e.to_string()));
     match e.kind() {
@@ -464,6 +483,13 @@ pub unsafe extern "C" fn nova_rt_fs_write(path: *const NovaStr, content: *const 
 /// Mirrors [`nova_rt_fs_take_string`], reading the same
 /// [`Slot::Buffer`] -- the payload left there by a successful
 /// [`nova_rt_fs_read`], never interpreted as UTF-8.
+///
+/// **The `fs_` prefix is now historical.** Since increment 3a this reads a
+/// general per-task slot, not an fs-specific one, and `crate::io`'s stream
+/// intrinsics already stash exactly this shape of payload -- both a read
+/// buffer and, for a write, its byte count encoded as bytes -- so that a
+/// future Nova caller outside `std/fs` can collect it through this same
+/// taker rather than a second one.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
     match take(Slot::Buffer) {
@@ -473,6 +499,12 @@ pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
 }
 
 /// Take the pending error message.
+///
+/// **The `fs_` prefix is now historical**, for the same reason
+/// [`nova_rt_fs_take_bytes`]'s doc comment gives: [`fail`] stashes into the
+/// same per-task [`Slot::Message`] regardless of which module's intrinsic
+/// called it, so a future caller outside `std/fs` will be able to read its
+/// own error message back through this same taker too.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_last_error_message() -> *mut NovaStr {
     match take(Slot::Message) {

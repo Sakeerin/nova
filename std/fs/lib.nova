@@ -23,11 +23,13 @@
 // # The shape of these wrappers is load-bearing
 //
 // Each one calls its intrinsic, then reads a slot, with **no `.await` between
-// the two**. The runtime's payload and message slots are per-thread and are
-// overwritten by the next operation; only an `.await` can let another task run,
-// so a straight-line wrapper cannot have its slot clobbered by a sibling. A
-// future function here that awaited mid-sequence would break that. Keep them
-// straight-line.
+// the two**. The runtime's payload and message slots are per-task, keyed on the
+// polling task (`crates/nova-runtime/src/fs.rs`'s `SLOTS`/`slot_index`), so a
+// sibling task cannot clobber them. The risk that remains is narrower but still
+// real: **within one task**, a second operation overwrites that same task's own
+// slot, so a wrapper that awaited mid-sequence could still read a payload its
+// own later call replaced. A future function here that awaited mid-sequence
+// would break that. Keep them straight-line.
 
 // Read the whole file at `path` as a UTF-8 string.
 //
