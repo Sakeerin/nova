@@ -279,6 +279,31 @@ rt_funcs! {
     /// `(str, bytes) -> i64` — write the bytes to the path named by the
     /// first argument, truncating. Status code, as `FsReadToString`.
     FsWrite,
+    /// `(ptr, i8, i8, i8, i8, i8, i8) -> i64` — open the path through
+    /// `std::fs::OpenOptions`, forwarding the six flags (read, write, append,
+    /// truncate, create, create_new) one for one. `0` on success, with the
+    /// new fd waiting in `FsTakeBytes`, encoded as an 8-byte little-endian
+    /// value; otherwise an `IoErrorKind` status code, as `FsReadToString`.
+    FileOpen,
+    /// `(i64 fd) -> i64` — close `fd`, dropping the underlying file and
+    /// releasing its OS handle. Idempotent: closing an already-closed,
+    /// stale, or forged fd still reports success.
+    FileClose,
+    /// `(i64 fd, i64 max) -> i64` — read up to `max` bytes from `fd`. `0` on
+    /// success, with the bytes waiting in `FsTakeBytes`; otherwise an
+    /// `IoErrorKind` status code, as `FsReadToString` — including a closed,
+    /// stale, or forged fd. An empty payload means end of stream; a short
+    /// read does not.
+    FileRead,
+    /// `(i64 fd, bytes) -> i64` — write the bytes to `fd` with one
+    /// `Write::write` call, not a `write_all` loop. Status code, as
+    /// `FsReadToString` — including a closed, stale, or forged fd — with the
+    /// byte count waiting in `FsTakeBytes` on success, encoded as an 8-byte
+    /// little-endian count.
+    FileWrite,
+    /// `(i64 fd) -> i64` — flush `fd`. Status code, as `FsReadToString`,
+    /// including a closed, stale, or forged fd; no payload.
+    FileFlush,
     /// `(i64) -> i64` — read up to `max` bytes from stdin. `0` on success,
     /// with the bytes waiting in `FsTakeBytes`; otherwise an `IoErrorKind`
     /// status code, as `FsReadToString`. An empty payload means end of
@@ -375,6 +400,11 @@ impl RtFunc {
             RtFunc::FsRead => "nova_rt_fs_read",
             RtFunc::FsTakeBytes => "nova_rt_fs_take_bytes",
             RtFunc::FsWrite => "nova_rt_fs_write",
+            RtFunc::FileOpen => "nova_rt_file_open",
+            RtFunc::FileClose => "nova_rt_file_close",
+            RtFunc::FileRead => "nova_rt_file_read",
+            RtFunc::FileWrite => "nova_rt_file_write",
+            RtFunc::FileFlush => "nova_rt_file_flush",
             RtFunc::IoStdinRead => "nova_rt_io_stdin_read",
             RtFunc::IoStdoutWrite => "nova_rt_io_stdout_write",
             RtFunc::IoStderrWrite => "nova_rt_io_stderr_write",
@@ -438,6 +468,21 @@ impl RtFunc {
             | RtFunc::FsRead => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsTakeBytes => (vec![], MirTy::Ptr),
             RtFunc::FsWrite => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
+            RtFunc::FileOpen => (
+                vec![
+                    MirTy::Ptr,
+                    MirTy::I8,
+                    MirTy::I8,
+                    MirTy::I8,
+                    MirTy::I8,
+                    MirTy::I8,
+                    MirTy::I8,
+                ],
+                MirTy::I64,
+            ),
+            RtFunc::FileClose | RtFunc::FileFlush => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::FileRead => (vec![MirTy::I64, MirTy::I64], MirTy::I64),
+            RtFunc::FileWrite => (vec![MirTy::I64, MirTy::Ptr], MirTy::I64),
             RtFunc::IoStdinRead => (vec![MirTy::I64], MirTy::I64),
             RtFunc::IoStdoutWrite | RtFunc::IoStderrWrite => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::IoStdoutFlush | RtFunc::IoStderrFlush => (vec![], MirTy::I64),

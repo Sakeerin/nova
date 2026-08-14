@@ -3939,6 +3939,11 @@ impl<'a> Checker<'a> {
             | Builtin::FsRead
             | Builtin::FsTakeBytes
             | Builtin::FsWrite
+            | Builtin::FileOpen
+            | Builtin::FileClose
+            | Builtin::FileRead
+            | Builtin::FileWrite
+            | Builtin::FileFlush
             | Builtin::IoStdinRead
             | Builtin::IoStdoutWrite
             | Builtin::IoStderrWrite
@@ -7167,6 +7172,22 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsRead => (vec![Ty::String], Ty::Int),
         Builtin::FsTakeBytes => (vec![], Ty::Bytes),
         Builtin::FsWrite => (vec![Ty::String, Ty::Bytes], Ty::Int),
+        Builtin::FileOpen => (
+            vec![
+                Ty::String,
+                Ty::Bool,
+                Ty::Bool,
+                Ty::Bool,
+                Ty::Bool,
+                Ty::Bool,
+                Ty::Bool,
+            ],
+            Ty::Int,
+        ),
+        Builtin::FileClose => (vec![Ty::Int], Ty::Int),
+        Builtin::FileRead => (vec![Ty::Int, Ty::Int], Ty::Int),
+        Builtin::FileWrite => (vec![Ty::Int, Ty::Bytes], Ty::Int),
+        Builtin::FileFlush => (vec![Ty::Int], Ty::Int),
         Builtin::IoStdinRead => (vec![Ty::Int], Ty::Int),
         Builtin::IoStdoutWrite => (vec![Ty::Bytes], Ty::Int),
         Builtin::IoStderrWrite => (vec![Ty::Bytes], Ty::Int),
@@ -15130,6 +15151,37 @@ mod tests {
                     (vec![Ty::String, Ty::Bytes], Ty::Int),
                     "`fs_write(path, content)` in `std/fs`'s `write`",
                 ),
+                Builtin::FileOpen => (
+                    (
+                        vec![
+                            Ty::String,
+                            Ty::Bool,
+                            Ty::Bool,
+                            Ty::Bool,
+                            Ty::Bool,
+                            Ty::Bool,
+                            Ty::Bool,
+                        ],
+                        Ty::Int,
+                    ),
+                    "no call site yet -- `std/fs`'s `File` and `open` are a later task",
+                ),
+                Builtin::FileClose => (
+                    (vec![Ty::Int], Ty::Int),
+                    "no call site yet -- `std/fs`'s `File::close` is a later task",
+                ),
+                Builtin::FileRead => (
+                    (vec![Ty::Int, Ty::Int], Ty::Int),
+                    "no call site yet -- `impl Read for File` is a later task",
+                ),
+                Builtin::FileWrite => (
+                    (vec![Ty::Int, Ty::Bytes], Ty::Int),
+                    "no call site yet -- `impl Write for File` is a later task",
+                ),
+                Builtin::FileFlush => (
+                    (vec![Ty::Int], Ty::Int),
+                    "no call site yet -- `impl Write for File` is a later task",
+                ),
                 Builtin::IoStdinRead => (
                     (vec![Ty::Int], Ty::Int),
                     "`io_stdin_read(max)` in `std/io`'s `read_stdin`, which \
@@ -15219,6 +15271,29 @@ mod tests {
             "io_stderr_write",
             "io_stdout_flush",
             "io_stderr_flush",
+        ] {
+            assert!(
+                nova_resolver::Builtin::STD_ONLY
+                    .iter()
+                    .any(|b| b.name() == name),
+                "{name} must be an STD_ONLY builtin"
+            );
+        }
+    }
+
+    /// The five file builtins are `STD_ONLY` and return status words.
+    ///
+    /// `STD_ONLY` is seeded into every std module's scope rather than per-module
+    /// (see `Builtin::STD_ONLY`'s own doc), which is why these carry a `file_`
+    /// prefix rather than relying on scope to disambiguate them.
+    #[test]
+    fn the_file_builtins_are_std_only_and_return_status_words() {
+        for name in [
+            "file_open",
+            "file_close",
+            "file_read",
+            "file_write",
+            "file_flush",
         ] {
             assert!(
                 nova_resolver::Builtin::STD_ONLY
