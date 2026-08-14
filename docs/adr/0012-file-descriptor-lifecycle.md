@@ -22,10 +22,11 @@ needed a table of live handles. `File` does: `crates/nova-runtime/src/file.rs`
 holds a thread-local `HashMap<i64, std::fs::File>`, and `File { fd: Int }`'s
 `fd` is a key into it, not an OS file descriptor number.
 
-**Nova has no destructors and no finalizers.** The collector can free the
-`File` record naming an open handle while that handle stays open at the OS
-level — nothing runs when a GC object dies, by design. So the question this
-decision answers is: what closes the handle when a Nova program forgets to?
+**Nova has no destructors and no finalizers — no per-type cleanup logic runs
+when a value dies, by design.** The collector can free the `File` record
+naming an open handle while that handle stays open at the OS level, with
+nothing type-specific stepping in to close it. So the question this decision
+answers is: what closes the handle when a Nova program forgets to?
 
 The answer looks, at first read, like it might already exist. **The
 collector has a per-object notification hook.** `gc.rs`'s sweep calls
@@ -64,15 +65,20 @@ unbuilt:**
 
 1. **`fd: Int` makes it impossible, not merely unused.** The collector's
    sweep walks GC-tracked *objects* — records, arrays, strings, closures,
-   sums — and notifies on their addresses dying. It never sees an `Int`
-   *inside* a record: a `File`'s `fd` field is an ordinary scanned word, not
-   itself a heap object with an address the sweep can report on. When a
-   `File` record is freed, `forget_freed_state` is called with *that
-   record's own address*, which names nothing in `file.rs`'s handle table —
-   the table is keyed by `fd`, an arbitrary small integer bearing no
-   relation to any GC address. Keeping the option open would require `File`
-   to hold a GC-managed cookie whose *address* keys the table instead of an
-   `Int` doing so — `JoinHandle<T>`'s pointer-identity pattern
+   sums — and notifies `forget_freed_state` with *the freed object's own
+   address* when it dies. That notification has no comparable hook for a
+   *value inside* a still-scanned word: the mark phase reads a `File`
+   record's `fd` field the same conservative way it reads every other word
+   in a scanned object (`mark_word`, checking whether the value happens to
+   fall inside a live allocation's range), but the sweep's notification, one
+   level up, only ever names the object that just died — never a field
+   value read out of it. So when a `File` record is freed,
+   `forget_freed_state` is called with *that record's own address*, which
+   names nothing in `file.rs`'s handle table — the table is keyed by `fd`,
+   an arbitrary small integer bearing no relation to any GC address.
+   Keeping the option open would require `File` to hold a GC-managed cookie
+   whose *address* keys the table instead of an `Int` doing so —
+   `JoinHandle<T>`'s pointer-identity pattern
    (`docs/adr/0009-async-execution-model.md` §1, branch `task-identity`),
    which a prior increment deliberately migrated *toward* for exactly this
    kind of lookup. That was considered for `File` too and declined; see
@@ -131,10 +137,10 @@ its own.
   leaks turn out to bite in practice.
 - **A first-class opaque `Ty` variant for `File`**, the route `Bytes` took
   when it needed one. The most honest representation, and the collector
-  could see it directly. Declined on cost — roughly ten compiler seams,
-  measured against `Bytes`'s own integration — and because it would
-  **reserve the name `File`**, a breaking change this increment otherwise
-  does not have (`RESERVED_TYPE_NAMES` stays at 7 throughout).
+  could see it directly. Declined on cost — roughly ten compiler seams, per
+  the design spec's own estimate — and because it would **reserve the name
+  `File`**, a breaking change this increment otherwise does not have
+  (`RESERVED_TYPE_NAMES` stays at 7 throughout).
 - **A scope-based `with_file(path, options, body)`** that closes on the way
   out, making the common case leak-proof by construction with no destructor.
   Genuinely safer, and worth building later. Declined here because it is
