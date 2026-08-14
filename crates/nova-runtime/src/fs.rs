@@ -489,10 +489,11 @@ pub unsafe extern "C" fn nova_rt_fs_write(path: *const NovaStr, content: *const 
 ///
 /// **The `fs_` prefix is now historical.** Since increment 3a this reads a
 /// general per-task slot, not an fs-specific one, and `crate::io`'s stream
-/// intrinsics already stash exactly this shape of payload -- both a read
-/// buffer and, for a write, its byte count encoded as bytes -- so that a
-/// future Nova caller outside `std/fs` can collect it through this same
-/// taker rather than a second one.
+/// intrinsics stash exactly this shape of payload here too -- both a read
+/// buffer and, for a write, its byte count encoded as bytes.
+/// `std/io/lib.nova`'s `read_stdin`, `write_stdout` and `write_stderr` are
+/// that outside-`std/fs` caller now, collecting through this same taker
+/// rather than a second one.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
     match take(Slot::Buffer) {
@@ -506,8 +507,10 @@ pub extern "C" fn nova_rt_fs_take_bytes() -> *mut NovaStr {
 /// **The `fs_` prefix is now historical**, for the same reason
 /// [`nova_rt_fs_take_bytes`]'s doc comment gives: [`fail`] stashes into the
 /// same per-task [`Slot::Message`] regardless of which module's intrinsic
-/// called it, so a future caller outside `std/fs` will be able to read its
-/// own error message back through this same taker too.
+/// called it. Every fallible wrapper in `std/io/lib.nova` --
+/// `read_stdin`, `write_stdout`, `write_stderr`, `flush_stdout` and
+/// `flush_stderr` -- reads its own error message back through this same
+/// taker now, alongside `std/fs`'s own wrappers.
 #[no_mangle]
 pub extern "C" fn nova_rt_fs_last_error_message() -> *mut NovaStr {
     match take(Slot::Message) {

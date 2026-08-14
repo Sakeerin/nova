@@ -1,10 +1,12 @@
 // Proves `Read`/`Write` work against the three real standard streams: a
 // known chunk fed through stdin by the test harness (never a terminal --
 // this file must not block waiting on one), a write to stdout, a write to
-// stderr, and a flush. The two writes use markers that share no substring,
-// so the harness running this can assert not only that each stream's own
-// marker landed, but that neither stream's capture contains the other's --
-// the check that catches a `Write for Stdout` wired to the wrong OS stream.
+// stderr, and a flush. The two writes use markers whose identifying text
+// does not appear in the other (both happen to end in a trailing newline,
+// which is not the distinguishing part), so the harness running this can
+// assert not only that each stream's own marker landed, but that neither
+// stream's capture contains the other's -- the check that catches a `Write
+// for Stdout` wired to the wrong OS stream.
 //
 // The stdout marker is also deliberately 256 bytes or longer: a write's byte
 // count crosses the runtime boundary as 8 little-endian bytes, and a Nova
