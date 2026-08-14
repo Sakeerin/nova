@@ -2,6 +2,18 @@
 // print the text. Exercises `impl Write for File` (`write`), `impl Read for
 // File` (through `read_to_end`'s default body in `std/io`, over `File`'s own
 // `read`), and `File::close`, the inherent `async fn`.
+//
+// The payload is `"hello, file".repeat(30)`, past the 256-byte threshold
+// where a write's byte count -- 8 little-endian bytes, decoded by
+// `std/io`'s shared `decode_count` -- would silently under-report under a
+// decoder truncated to one byte, on the same reasoning
+// `io_streams_stdout_marker`'s own doc comment gives for its 300-`Q`
+// marker. The original 11-byte payload could not: a one-byte decode of any
+// count below 256 is correct by coincidence, and review (fix round 1,
+// Important 2) found that all three of this task's fixtures moved fewer
+// bytes than that, so none of them could independently catch that mutation
+// -- only the pre-existing `io_streams_run` could. Confirmed by re-applying
+// that exact mutation after this change: see the task report.
 async fn main() {
     let path = "${temp_dir()}/nova_file_roundtrip_5a91.txt"
     let _ = remove_file(path).await
@@ -10,7 +22,7 @@ async fn main() {
         Ok(f) => f
         Err(e) => panic("open for writing: ${e.message}")
     }
-    let n = match w.write(bytes_from_string("hello, file")).await {
+    let n = match w.write(bytes_from_string("hello, file".repeat(30))).await {
         Ok(count) => count
         Err(e) => panic("write: ${e.message}")
     }

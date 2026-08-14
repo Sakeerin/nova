@@ -7104,26 +7104,20 @@ fn file_lifetime_run() {
 /// with `std/io/lib.nova`'s own doc comment, which already lists
 /// `AlreadyExists` and `NotFound` among the kinds a real OS condition pins,
 /// with no platform qualifier attached to either the way it attaches one to
-/// `PermissionDenied` (see the next paragraph).
+/// `PermissionDenied` (see `file_open_dir_run` below).
 ///
-/// **`#[cfg(windows)]`, for the third check bundled into the same fixture
-/// and the same golden-output comparison.** `tests/runtime/file_errors.nova`
-/// also opens a directory with `OpenOptions::reading()`, which this host
-/// measures as `PermissionDenied` -- consistent with that same doc comment's
-/// "(Windows only) `PermissionDenied`" note. **Reasoned, not measured, since
-/// no POSIX host is available in this environment:** POSIX `open(2)` permits
-/// read-only access to a directory (needed for e.g. reading it back by fd),
-/// so this exact call would plausibly *succeed* on Linux/macOS rather than
-/// fail at all, with a failure only reachable from an actual `read()`
-/// afterward -- reporting `IsADirectory`, a kind
-/// `crates/nova-runtime/src/fs.rs`'s `fail` has no arm for and therefore
-/// maps to `Other`, not `PermissionDenied`. Since one golden `.stdout` file
-/// covers all three checks in this one fixture, a real kind difference on
-/// just the directory check would fail the whole comparison on a platform
-/// that disagrees -- the same trade-off `fs_permission_denied_run` already
-/// made for a directory-flavoured check of its own, and the reason that test
-/// is `#[cfg(windows)]` too.
-#[cfg(windows)]
+/// **Not platform-gated, unlike `file_open_dir_run`.** This fixture used to
+/// bundle a third, genuinely platform-divergent check (opening a directory
+/// for reading) into the same golden `.stdout`, which meant the whole
+/// fixture -- these two portable checks included -- ran on Windows only.
+/// Review (fix round 1, Important 1) found that was also the *only* thing
+/// backing up two of the five mandated mutations (`open`'s status check
+/// deleted; `create_new` hardcoded false), since `open`/`OpenOptions` are
+/// new this task and no pre-existing test can catch a regression in them
+/// the way `io_streams_run` backs up the shared decoder. Moving the
+/// directory check to its own fixture (`file_open_dir.nova`,
+/// `file_open_dir_run` below) is what lets these two run, and those two
+/// mutations be caught, on every platform this project targets.
 #[test]
 fn file_errors_run() {
     let tmp = unique_temp_dir("nova-file-errors");
@@ -7133,6 +7127,41 @@ fn file_errors_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/file_errors.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Opening a directory for reading, split out of `file_errors_run` above
+/// (fix round 1, Important 1) because it is the one genuinely
+/// platform-divergent check among that fixture's original three --
+/// measured `PermissionDenied` on this host, consistent with
+/// `std/io/lib.nova`'s own doc comment's "(Windows only) `PermissionDenied`"
+/// note. **Reasoned, not measured, since no POSIX host is available in this
+/// environment:** POSIX `open(2)` permits read-only access to a directory
+/// (needed for e.g. reading it back by fd), so this exact call would
+/// plausibly *succeed* on Linux/macOS rather than fail, with a failure only
+/// reachable from an actual `read()` afterward -- reporting `IsADirectory`,
+/// a kind `crates/nova-runtime/src/fs.rs`'s `fail` has no arm for and
+/// therefore maps to `Other`, not `PermissionDenied`. This fixture now
+/// holds only this one check, so gating it -- rather than a fixture with
+/// portable checks bundled in -- costs nothing on non-Windows platforms:
+/// the same shape `fs_permission_denied_run` already uses for its own
+/// directory-flavoured, Windows-only check.
+#[cfg(windows)]
+#[test]
+fn file_open_dir_run() {
+    let tmp = unique_temp_dir("nova-file-open-dir");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/file_open_dir.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/file_open_dir.nova"))
         .env("TMPDIR", &tmp)
         .env("TMP", &tmp)
         .env("TEMP", &tmp)
