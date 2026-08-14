@@ -48,6 +48,25 @@ still-missing piece of a later increment's scope; the two this paragraph origina
 only place it appears *inside a signature*; and it is not defined as a type anywhere in `nova-spec/` or
 `docs/`, under either kind of mention.
 
+**Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 3): both halves of that closing clause
+are now false, and the second half already was.** The `nova-spec/` half broke at commit `7d1af14`, once
+`nova-spec/20-STDLIB.md` §5 gained an actual `pub record OpenOptions { ... }` declaration. The `docs/`
+half broke earlier, and independently of anything this branch did: `docs/superpowers/specs/
+2026-08-14-file-open-and-openoptions-design.md` — itself a document under `docs/` — has defined
+`OpenOptions` in full, in its own §2, since commit `1509a82`, which landed three commits after this very
+correction was written (`867b122` → `fc7b252` → `7207a41` → `1509a82`, confirmed by walking the log rather
+than assumed). This paragraph's central property was therefore already false by the time its
+own successor increment shipped, and neither falsification took a misreading to produce — both are the
+ordinary, expected consequence of a chartered increment doing exactly the job it was chartered for.
+
+That is the lesson worth keeping, since this paragraph replaced a retracted *count* on the theory that a
+property "does not go stale the same way." The lesson is not that a property is more durable than a count
+in general. It is narrower and sharper: **a negative existential claimed over an entire directory tree is
+falsified by every future commit that adds the thing being denied**, and when the very increment already
+scheduled to add that thing is what the document is *about*, the claim was never a stable property to
+begin with. It was a date — "as of right now, this is still missing" — wearing a property's grammar, and
+it expired the moment the schedule it described was kept.
+
 `Stdin`, `Stdout` and `Stderr` are process-global, always open, and never closed. They exercise both
 traits with **no resource-lifetime risk at all**, so `File` arrives in 3c against traits already proven
 in use rather than co-designed with them.

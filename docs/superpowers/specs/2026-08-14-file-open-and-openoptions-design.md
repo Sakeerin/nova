@@ -17,6 +17,15 @@ occurrences: the 3b spec asserted "exactly twice" for this same identifier, and 
 was written, because the sentence making such a claim is itself an occurrence and the grep behind it had
 filtered out part of the tree it claimed to cover.
 
+**Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 3): both of the preceding paragraph's
+claims about `OpenOptions` are now false, not merely narrowed.** `nova-spec/20-STDLIB.md` §5 now declares
+`pub record OpenOptions { ... }` directly (added at commit `7d1af14`, after a review round found that an
+earlier amendment there had narrated a definition without actually supplying one) — so neither "no
+document defines it as a type" nor "name it only as `open`'s parameter type" still holds for the normative
+spec. **The bolded chronology claim, "This spec is the first document to define it," is unaffected**: it
+compares which commit came first, not a current-state count, and that ordering cannot change no matter
+what `nova-spec` does afterward.
+
 ADR 0011's remaining deviation is exactly `open` and `File`, restricted by the property that separates them
 from everything already shipped: **they need real handle lifetime management.**
 
