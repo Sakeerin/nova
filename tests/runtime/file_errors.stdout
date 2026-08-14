@@ -1,3 +1,2 @@
 create_new: AlreadyExists
-dir_read: PermissionDenied
 missing_parent: NotFound

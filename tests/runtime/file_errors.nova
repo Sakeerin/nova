@@ -1,9 +1,15 @@
 // The portable failure modes `open` reaches: `create_new` against a path
 // that already exists is `AlreadyExists`, and a path under a missing parent
-// directory is `NotFound`. Also checks opening a directory for reading,
-// which fails here -- **measured on Windows only** (`crates/nova-cli/tests/
-// run_tests.rs`'s `file_errors_run` gates this fixture to Windows for
-// exactly that reason; see its own doc comment for what differs on POSIX).
+// directory is `NotFound`. Both asserted unconditionally, on every CI
+// platform this project targets.
+//
+// The directory-open-for-reading check used to live here too, but it is
+// genuinely platform-divergent (Windows-measured `PermissionDenied`; very
+// plausibly a POSIX success at the `open` step itself, per
+// `file_open_dir.nova`'s own doc comment) -- bundling it with these two
+// portable checks in one golden `.stdout` meant the whole fixture, portable
+// checks included, ran on Windows only (review, fix round 1, Important 1).
+// Moved out to `file_open_dir.nova` so these two run everywhere.
 //
 // `message` is platform text, so only `kind` is asserted -- the same
 // treatment `fs_io_types.nova` already applies.
@@ -36,11 +42,6 @@ async fn main() {
     match open(existing, create_new_opts).await {
         Ok(_) => println("create_new: unexpectedly ok")
         Err(e) => println("create_new: ${kind_name(e.kind)}")
-    }
-
-    match open(base, OpenOptions::reading()).await {
-        Ok(_) => println("dir_read: unexpectedly ok")
-        Err(e) => println("dir_read: ${kind_name(e.kind)}")
     }
 
     let missing_parent = "${base}/nonexistent_subdir/inner.txt"

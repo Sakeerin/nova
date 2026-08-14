@@ -1,0 +1,46 @@
+// Opening a directory for reading fails -- **measured on Windows only**
+// (`crates/nova-cli/tests/run_tests.rs`'s `file_open_dir_run` gates this
+// fixture to Windows for exactly that reason). **Reasoned, not measured,
+// for POSIX:** `open(2)` there permits read-only access to a directory
+// (needed for e.g. reading one back by fd), so this exact call would
+// plausibly *succeed* on Linux/macOS rather than fail, with any failure
+// reachable only from an actual `read()` afterward and reporting a
+// different, unmapped kind (`IsADirectory` -> `Other`, not
+// `PermissionDenied`) -- see `fs_permission_denied.nova`'s own doc comment
+// for the same split measured a different way (`read_to_string`, not
+// `open`).
+//
+// Split out of `file_errors.nova` (review, fix round 1, Important 1):
+// this is the one genuinely platform-divergent check among that fixture's
+// three, and keeping it separate is what lets the other two run on every
+// platform rather than only the one this check needs. One fixture, one
+// platform-divergent check, nothing portable bundled in with it --
+// `fs_permission_denied.nova`'s own shape, not only its `#[cfg(windows)]`
+// tactic.
+//
+// `message` is platform text, so only `kind` is asserted.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
+async fn main() {
+    let base = "${temp_dir()}/nova_file_open_dir_probe"
+    let _ = remove_dir_all(base).await
+    let _ = create_dir_all(base).await
+
+    match open(base, OpenOptions::reading()).await {
+        Ok(_) => println("dir_read: unexpectedly ok")
+        Err(e) => println("dir_read: ${kind_name(e.kind)}")
+    }
+
+    let _ = remove_dir_all(base).await
+}
