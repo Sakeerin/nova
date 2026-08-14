@@ -265,25 +265,29 @@ pub record DirEntry {
 }
 
 // AMENDED 2026-08-14 (branch `file-open-openoptions`): `OpenOptions` is
-// `open`'s parameter type above and has been since this section first named
-// it, but this document never defined it as a type until now -- the design
-// spec this increment implements
-// (docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md,
-// §2's record definition, and §1's own words: "This spec is the first
-// document to define it") already had; this note is this document's own
-// catch-up to that, not a claim that no document anywhere ever defined it.
-// It ships as a record of six `Bool` flags, in the order `open` forwards
-// them to the runtime: read, write, append, truncate, create, create_new.
+// `open`'s parameter type below and has been since this section first named
+// it, but this document never declared it as a type until now. Declared
+// here, matching `std/fs/lib.nova`'s shipped record exactly -- no `pub` on
+// any field, since the shipped record has none.
+pub record OpenOptions {
+    read: Bool
+    write: Bool
+    append: Bool
+    truncate: Bool
+    create: Bool
+    create_new: Bool
+}
+
 // `impl Default` sets every flag false; that value alone is not a legal
-// `open` argument
-// (`std::fs::OpenOptions` requires at least one of read/write/append), so it
-// exists as a base for field assignment, not for direct use. Three named
-// constructors cover the common cases instead: `reading()`, `writing()`
-// (write + create + truncate) and `appending()` (append + create). There is
-// no chainable builder: a receiver-mutating method cannot be called on a
-// temporary (`E0060`, measured), so `OpenOptions::reading().with_write()`
-// does not compile in this language -- an exotic combination starts from
-// `OpenOptions::default()` and assigns fields on a `let mut` binding instead.
+// `open` argument (`std::fs::OpenOptions` requires at least one of
+// read/write/append), so it exists as a base for field assignment, not for
+// direct use. Three named constructors cover the common cases instead:
+// `reading()`, `writing()` (write + create + truncate) and `appending()`
+// (append + create). There is no chainable builder: a receiver-mutating
+// method cannot be called on a temporary (`E0060`, measured), so
+// `OpenOptions::reading().with_write()` does not compile in this language --
+// an exotic combination starts from `OpenOptions::default()` and assigns
+// fields on a `let mut` binding instead.
 //
 // `File` below is written `{ /* opaque */ }` because nothing outside
 // `std/fs` should rely on its shape, but it is not opaque to the language

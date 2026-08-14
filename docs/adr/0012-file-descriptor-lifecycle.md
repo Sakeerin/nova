@@ -64,15 +64,16 @@ to close them.
 unbuilt:**
 
 1. **`fd: Int` makes it impossible, not merely unused.** The collector's
-   sweep walks GC-tracked *objects* — records, arrays, strings, closures,
-   sums — and notifies `forget_freed_state` with *the freed object's own
-   address* when it dies. That notification has no comparable hook for a
-   *value inside* a still-scanned word: the mark phase reads a `File`
-   record's `fd` field the same conservative way it reads every other word
-   in a scanned object (`mark_word`, checking whether the value happens to
-   fall inside a live allocation's range), but the sweep's notification, one
-   level up, only ever names the object that just died — never a field
-   value read out of it. So when a `File` record is freed,
+   sweep walks GC-tracked *objects* of every kind it allocates — e.g.
+   records, arrays, strings, closures, sums, `Bytes` buffers, and task
+   state objects — and notifies `forget_freed_state` with *the freed
+   object's own address* when it dies. That notification has no comparable
+   hook for a *value inside* a still-scanned object: the mark phase reads a
+   `File` record's `fd` field the same conservative way it reads every
+   other word in a scanned object (`mark_word`, checking whether the value
+   happens to fall inside a live allocation's range), but the sweep's
+   notification, one level up, only ever names the object that just died —
+   never a field value read out of it. So when a `File` record is freed,
    `forget_freed_state` is called with *that record's own address*, which
    names nothing in `file.rs`'s handle table — the table is keyed by `fd`,
    an arbitrary small integer bearing no relation to any GC address.
@@ -147,10 +148,11 @@ its own.
   surface `nova-spec/20-STDLIB.md` never asked for, error threading through a
   closure needs its own design, and it would widen an increment whose job was
   settling the resource model, not extending the API beyond it.
-- **A Windows-only close-on-collect backstop.** Rejected for the platform-
-  asymmetry reason the Decision section states: closing automatically on one
-  of three supported platforms and leaking unboundedly on the other two is a
-  worse thing to ship, silently, than a uniform documented leak.
+- **A Windows-only close-on-collect backstop.** Rejected for the
+  platform-asymmetry reason the Decision section states: closing
+  automatically on one of three supported platforms and leaking
+  unboundedly on the other two is a worse thing to ship, silently, than a
+  uniform documented leak.
 
 ## References
 
