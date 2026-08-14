@@ -6708,10 +6708,12 @@ fn io_streams_run() {
         stderr.contains("NOVA_STDERR_ONLY_MARKER"),
         "stderr must contain its own marker: {stderr:?}"
     );
-    // The negative half. Without this pair, a same-stream mutation (or a
-    // crossed-stream one) still passes every assertion above, each of which
-    // only checks "did my own marker appear somewhere" -- this is what
-    // actually catches bytes landing on the wrong stream.
+    // The negative half. Without this pair, a mutation that leaks one
+    // stream's bytes into the other (rather than swapping them outright)
+    // could still pass the two `.contains()` checks just above -- each of
+    // those only checks "did my own marker appear somewhere," which stays
+    // true even when the wrong stream *also* picked it up. This is what
+    // actually catches bytes landing on the wrong stream in that case.
     assert!(
         !stdout.contains("NOVA_STDERR_ONLY_MARKER"),
         "stdout must not contain stderr's marker: {stdout:?}"
@@ -6783,4 +6785,159 @@ fn io_read_to_end_run() {
         .assert()
         .success()
         .stdout(expected);
+}
+
+/// Runs `path` (`tests/runtime/io_broken_stdout.nova` or
+/// `io_broken_stderr.nova`) as a child process, deterministically breaking
+/// the pipe behind whichever of its stdout/stderr the fixture writes to,
+/// then returns the exit status and the full text of the *other* (healthy)
+/// stream.
+///
+/// **MEASURED on Windows only (fix round 1: deleting `write_stdout`'s,
+/// `write_stderr`'s, `flush_stdout`'s or `flush_stderr`'s status check was
+/// reachable-but-untested).** The mechanism: `std::process::Command` with
+/// all three standard streams piped, `spawn`, then this immediately drops
+/// the parent's read end of `break_stdout`'s stream (`child.stdout`/
+/// `child.stderr`) -- *before* touching `child.stdin` at all. Both fixtures
+/// block on `stdin().read(1).await` as their very first action, so at the
+/// moment this function drops that handle the child provably has not
+/// written anything to either stream yet; only after the drop does this
+/// function close `child.stdin`, releasing the child to run past its stdin
+/// read. This ordering is what makes the break race-free rather than
+/// merely likely: the child cannot reach its own writes until this
+/// function's close-then-release sequence has already happened.
+///
+/// Once the target stream's only reader is gone, an OS write to it fails
+/// (`BrokenPipe`, mapped by `fs.rs`'s `fail` to `IoErrorKind::Other`) --
+/// confirmed by reading the healthy stream's own reported results, not
+/// assumed from the exit status alone. Rust's `Stdout` is line-buffered, so
+/// a payload ending in `"\n"` fails at the `write()` call itself, while one
+/// without a trailing newline only fails later, at the next `flush()` --
+/// `io_broken_stdout_run` exploits that split to reach `write_stdout` and
+/// `flush_stdout` independently. `Stderr` turned out not to line-buffer at
+/// all (measured in `io_broken_stderr_run`, not assumed), so the same split
+/// reaches only `write_stderr`; see that test's own doc comment for what
+/// this means for `flush_stderr`. See `io_broken_stdout.nova`/
+/// `io_broken_stderr.nova` for why the healthy stream's reporting must go
+/// through `print`/`eprint` and never `println`/`eprintln`.
+///
+/// Not attempted on non-Windows CI: the mechanism (drop a pipe's read end,
+/// observe the writer's next operation fail) is standard POSIX behaviour
+/// too, and grepping this workspace found no `SIGPIPE`/`signal`/`sigaction`
+/// handling anywhere in `nova-runtime` that would turn a broken pipe into a
+/// killed process instead of an `Err` -- Rust's own default of ignoring
+/// `SIGPIPE` should apply unmodified. That is a reason to expect it works,
+/// not a measurement that it does; this environment has no Linux or macOS
+/// host to run it on, so the gate below is what was actually verified
+/// against, not a guess about what would also pass.
+#[cfg(windows)]
+fn run_with_a_broken_pipe(
+    path: &std::path::Path,
+    break_stdout: bool,
+) -> (std::process::ExitStatus, String) {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
+        .arg("run")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn nova run");
+
+    // Drop the parent's read end of the stream under test first, while the
+    // child is still provably blocked on its own stdin read -- see this
+    // function's own doc comment for why that ordering is what removes the
+    // race rather than merely narrowing it.
+    let mut healthy: Box<dyn Read> = if break_stdout {
+        drop(child.stdout.take().expect("stdout was piped"));
+        Box::new(child.stderr.take().expect("stderr was piped"))
+    } else {
+        drop(child.stderr.take().expect("stderr was piped"));
+        Box::new(child.stdout.take().expect("stdout was piped"))
+    };
+
+    // Release the child from `stdin().read(1)` by closing its stdin.
+    drop(child.stdin.take().expect("stdin was piped"));
+
+    let mut out = String::new();
+    healthy
+        .read_to_string(&mut out)
+        .expect("read the healthy stream to completion");
+    let status = child.wait().expect("wait for the child");
+    (status, out)
+}
+
+/// `write_stdout`'s and `flush_stdout`'s `Err` branches, reached through a
+/// genuinely broken stdout pipe rather than argued to be unreachable. See
+/// `run_with_a_broken_pipe`'s own doc comment for the mechanism and its
+/// Windows-only scope, and `io_broken_stdout.nova`'s for why it reports on
+/// stderr through `eprint` alone.
+#[cfg(windows)]
+#[test]
+fn io_broken_stdout_run() {
+    let (status, stderr) = run_with_a_broken_pipe(
+        &repo_root().join("tests/runtime/io_broken_stdout.nova"),
+        true,
+    );
+    assert!(status.success(), "the child process itself must exit 0");
+    assert!(
+        stderr.contains("write_stdout: err"),
+        "write_stdout must report Err against a broken pipe: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("write_stdout_buffered: ok"),
+        "a write with no trailing newline must still buffer successfully: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("flush_stdout: err"),
+        "flush_stdout must report Err when the deferred write it flushes fails: {stderr:?}"
+    );
+}
+
+/// `write_stderr`'s `Err` branch, reached the same way as
+/// `io_broken_stdout_run`, against stderr instead.
+///
+/// **`flush_stderr`'s `Err` branch is NOT reached here, measured rather
+/// than assumed.** `io_broken_stdout_run`'s deferred-write trick relies on
+/// `Stdout` being line-buffered; `Stderr` is not buffered at all --
+/// confirmed directly below, not inferred, because the *second* write (the
+/// one with no trailing newline, which buffers and reports `Ok` for
+/// stdout) already fails immediately here too. With nothing ever buffered,
+/// the following `flush()` has nothing to flush and reports `Ok`
+/// unconditionally, even though the pipe is still broken. So of the four
+/// wrappers a mutated status check could hide behind, this fixture closes
+/// three (`write_stdout`, `flush_stdout` above, `write_stderr` here);
+/// `flush_stderr`'s status check has no fixture-reachable failure found by
+/// this technique. No second technique was tried -- a Nova program has no
+/// way to invalidate its own file descriptors any more severely than
+/// closing their readers, which this technique already does -- so this is
+/// reported as an open gap rather than a search that was exhausted; see
+/// the report.
+#[cfg(windows)]
+#[test]
+fn io_broken_stderr_run() {
+    let (status, stdout) = run_with_a_broken_pipe(
+        &repo_root().join("tests/runtime/io_broken_stderr.nova"),
+        false,
+    );
+    assert!(status.success(), "the child process itself must exit 0");
+    assert!(
+        stdout.contains("write_stderr: err"),
+        "write_stderr must report Err against a broken pipe: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("write_stderr_buffered: err"),
+        "unlike stdout's, a write to stderr with no trailing newline must \
+         still fail immediately against a broken pipe -- stderr does not \
+         line-buffer: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("flush_stderr: ok"),
+        "with nothing buffered (stderr never buffered either of the writes \
+         above), flushing stderr must report Ok even though the pipe is \
+         broken -- there is nothing pending for it to fail on: {stdout:?}"
+    );
 }

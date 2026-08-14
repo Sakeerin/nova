@@ -1,0 +1,45 @@
+// Proves `write_stdout`'s and `flush_stdout`'s `Err` branches are reachable,
+// not only their `Ok` branches: the harness running this spawns it as a
+// child process, closes its own (the parent's) read end of the child's
+// stdout pipe while this process is still blocked on the stdin read below
+// -- so the close cannot race the writes further down -- and only then
+// releases it by closing stdin. Stdout is already broken for every
+// operation below, though that does not mean each one fails immediately:
+// Rust's line-buffering defers a no-newline write's actual OS write until
+// the next flush, so which call actually observes the failure differs --
+// see each match arm's own comment.
+//
+// Reports results on stderr, and only through `eprint`, never `eprintln` or
+// `println`: both of the latter two call Rust's panicking `println!`-family
+// macros internally (`crates/nova-runtime/src/lib.rs`), which abort the
+// process on a write failure instead of letting it report one. `eprint`
+// and `print` explicitly discard their `Write`/`flush` results and cannot
+// panic this way -- see `nova_rt_eprint`'s own doc comment.
+async fn main() {
+    let _ = stdin().read(1).await
+
+    // Rust's `Stdout` is line-buffered: a payload ending in "\n" triggers
+    // an immediate underlying OS write, which fails right here once the
+    // pipe's read end is already gone.
+    let w1 = stdout().write(bytes_from_string("line\n")).await
+    match w1 {
+        Ok(_) => eprint("write_stdout: unexpectedly ok\n")
+        Err(_) => eprint("write_stdout: err\n")
+    }
+
+    // No trailing newline: the line buffer only stages these bytes, so
+    // this call reports success even though the pipe is already broken --
+    // the actual OS write is deferred to the next flush.
+    let w2 = stdout().write(bytes_from_string("no-newline")).await
+    match w2 {
+        Ok(_) => eprint("write_stdout_buffered: ok\n")
+        Err(_) => eprint("write_stdout_buffered: unexpectedly err\n")
+    }
+
+    // The deferred write from `w2` happens here, and fails.
+    let f = stdout().flush().await
+    match f {
+        Ok(_) => eprint("flush_stdout: unexpectedly ok\n")
+        Err(_) => eprint("flush_stdout: err\n")
+    }
+}

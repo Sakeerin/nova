@@ -1,0 +1,39 @@
+// Mirrors `io_broken_stdout.nova` against the other stream: proves
+// `write_stderr`'s `Err` branch is reachable. The harness closes its read
+// end of this process's stderr pipe while it is still blocked on the
+// stdin read below, then releases it by closing stdin, so every stderr
+// operation after that point is against a genuinely broken pipe.
+//
+// Reports results on stdout, and only through `print`, never `println`,
+// for the same panic-avoidance reason `io_broken_stdout.nova` documents
+// (`println!`/`eprintln!` both panic on a write failure; `print`/`eprint`
+// discard theirs).
+//
+// Unlike `Stdout`, `Stderr` does not line-buffer -- measured here, not
+// merely expected: the second write below (no trailing newline, which
+// buffers and reports `Ok` for `Stdout`) fails immediately too, so nothing
+// is ever buffered for the flush after it to fail on. `flush_stderr`'s own
+// `Err` branch is consequently not exercised by this fixture; see
+// `crates/nova-cli/tests/run_tests.rs`'s `io_broken_stderr_run` for the
+// full account of what that means.
+async fn main() {
+    let _ = stdin().read(1).await
+
+    let w1 = stderr().write(bytes_from_string("line\n")).await
+    match w1 {
+        Ok(_) => print("write_stderr: unexpectedly ok\n")
+        Err(_) => print("write_stderr: err\n")
+    }
+
+    let w2 = stderr().write(bytes_from_string("no-newline")).await
+    match w2 {
+        Ok(_) => print("write_stderr_buffered: ok\n")
+        Err(_) => print("write_stderr_buffered: err\n")
+    }
+
+    let f = stderr().flush().await
+    match f {
+        Ok(_) => print("flush_stderr: ok\n")
+        Err(_) => print("flush_stderr: err\n")
+    }
+}
