@@ -171,8 +171,9 @@ module std.io
 // `std/fs`'s `read`/`write` below in §5 already ship against it --
 // `Result<Bytes, IoError>` and `content: Bytes`, not the `[u8]` shown there
 // -- and `open`/`File`/these two traits do too, now that all three are
-// built (2026-08-14, both amendments below). See docs/adr/0011-io-error-
-// kinds.md for the §5 deviation this left, since closed.
+// built (2026-08-14, both amendments below). See
+// docs/adr/0011-io-error-kinds.md for the §5 deviation this left, since
+// closed.
 //
 // AMENDED 2026-08-14 (branch `read-write-stdio`): neither trait below
 // compiles exactly as declared, and neither do `stdin`/`stdout`/`stderr`'s
@@ -267,8 +268,10 @@ pub record DirEntry {
 // AMENDED 2026-08-14 (branch `file-open-openoptions`): `OpenOptions` is
 // `open`'s parameter type below and has been since this section first named
 // it, but this document never declared it as a type until now. Declared
-// here, matching `std/fs/lib.nova`'s shipped record exactly -- no `pub` on
-// any field, since the shipped record has none.
+// here with no `pub` on any field -- Nova has no field privacy at all
+// (`File` below is the identical case), so marking a field `pub` or not
+// changes nothing about who can read or construct one; the declaration
+// below simply doesn't.
 pub record OpenOptions {
     read: Bool
     write: Bool
@@ -276,6 +279,14 @@ pub record OpenOptions {
     truncate: Bool
     create: Bool
     create_new: Bool
+}
+
+impl Default for OpenOptions { ... }
+
+impl OpenOptions {
+    pub fn reading() -> OpenOptions { ... }
+    pub fn writing() -> OpenOptions { ... }
+    pub fn appending() -> OpenOptions { ... }
 }
 
 // `impl Default` sets every flag false; that value alone is not a legal

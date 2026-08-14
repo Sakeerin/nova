@@ -733,8 +733,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   separator already avoided (`std/strings`, Phase 2.2b). Outside
   `nova test` those names are simply unresolved (`E0001`).
 - Deferred, each for a stated reason rather than left unmentioned
-  (`nova-spec/20-STDLIB.md` §11, `docs/adr/0008-attributes-and-test-
-  isolation.md` §2): `assert_throws` (this runtime has no unwinding, so a
+  (`nova-spec/20-STDLIB.md` §11,
+  `docs/adr/0008-attributes-and-test-isolation.md` §2): `assert_throws`
+  (this runtime has no unwinding, so a
   panic cannot be caught, inspected, and recovered from —
   `@test(should_panic)` is the only supported way to assert that something
   panics, and there is no supported way to assert *what* it panics with);
@@ -1196,8 +1197,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `Pub` item enters a module's exports, so `pub` was the only mechanism
     available at all. Widens `std/io`'s public surface as a side effect.
   - `nova-spec/20-STDLIB.md` §5 is amended in place (dated note) to add
-    `OpenOptions`'s `pub record` declaration — matching `std/fs/lib.nova`'s
-    shipped record exactly, no `pub` on any field — since the spec had
+    `OpenOptions`'s `pub record` declaration, with no `pub` on any field —
+    Nova has no field privacy to enforce either way, the same reason
+    `std/fs/lib.nova`'s own shipped record has none — since the spec had
     named it as `open`'s parameter since before this increment existed but
     never declared it as a type, and to record that `File` carries an
     `Int` descriptor with explicit `close`, not the opaque shape the code
