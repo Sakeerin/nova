@@ -315,6 +315,53 @@ builtins! {
     /// the path, truncating an existing file. Status code, as
     /// [`Builtin::FsReadToString`]. Backs `std/fs`'s `write`. Std-only.
     FsWrite,
+    /// `file_open(path: String, read: Bool, write: Bool, append: Bool,
+    /// truncate: Bool, create: Bool, create_new: Bool) -> Int` — open `path`
+    /// through `std::fs::OpenOptions`, forwarding all six flags one for one.
+    /// `0` on success, with the new fd waiting in [`Builtin::FsTakeBytes`] as
+    /// an 8-byte little-endian payload — the fd cannot travel in the status
+    /// word because the status word already carries the `IoErrorKind`, the
+    /// same reason [`Builtin::IoStdoutWrite`]'s byte count does not either;
+    /// otherwise an `IoErrorKind` status code, as [`Builtin::FsReadToString`].
+    /// The widest builtin in this table, one parameter per `OpenOptions`
+    /// method rather than a packed bitmask, so the Nova surface matches
+    /// `std::fs::OpenOptions` field for field. Runtime symbol
+    /// `nova_rt_file_open` (`crates/nova-runtime/src/file.rs`). Std-only.
+    FileOpen,
+    /// `file_close(fd: Int) -> Int` — close `fd`, dropping the underlying
+    /// file and releasing its OS handle. Idempotent: closing an
+    /// already-closed, stale, or forged fd finds nothing in the runtime's
+    /// handle table and still reports success, so a caller may close the
+    /// same value more than once. No payload, mirroring
+    /// [`Builtin::IoStdoutFlush`]. Runtime symbol `nova_rt_file_close`
+    /// (`crates/nova-runtime/src/file.rs`). Std-only.
+    FileClose,
+    /// `file_read(fd: Int, max: Int) -> Int` — read up to `max` bytes from
+    /// `fd`, the same status/payload shape as [`Builtin::IoStdinRead`]. `0`
+    /// on success, with the bytes read waiting in [`Builtin::FsTakeBytes`];
+    /// otherwise an `IoErrorKind` status code, as [`Builtin::FsReadToString`]
+    /// — including a closed, stale, or forged fd, which the runtime's handle
+    /// table reports as an ordinary `IoError` rather than a panic. An
+    /// **empty** payload means end of stream; a short read does not. Runtime
+    /// symbol `nova_rt_file_read` (`crates/nova-runtime/src/file.rs`).
+    /// Std-only.
+    FileRead,
+    /// `file_write(fd: Int, buf: Bytes) -> Int` — write `buf` to `fd` with
+    /// one `Write::write` call, not a `write_all` loop, the same shape as
+    /// [`Builtin::IoStdoutWrite`]. `0` on success, with the number of bytes
+    /// actually written waiting in [`Builtin::FsTakeBytes`], encoded as an
+    /// 8-byte little-endian count; otherwise an `IoErrorKind` status code, as
+    /// [`Builtin::FsReadToString`] — including a closed, stale, or forged
+    /// fd, as [`Builtin::FileRead`]. Runtime symbol `nova_rt_file_write`
+    /// (`crates/nova-runtime/src/file.rs`). Std-only.
+    FileWrite,
+    /// `file_flush(fd: Int) -> Int` — flush `fd`. A status code, as
+    /// [`Builtin::FsReadToString`], including a closed, stale, or forged fd,
+    /// as [`Builtin::FileRead`]; unlike [`Builtin::FileWrite`], a successful
+    /// flush stashes no payload of its own for [`Builtin::FsTakeBytes`] to
+    /// collect, mirroring [`Builtin::IoStdoutFlush`]. Runtime symbol
+    /// `nova_rt_file_flush` (`crates/nova-runtime/src/file.rs`). Std-only.
+    FileFlush,
     /// `io_stdin_read(max: Int) -> Int` — read up to `max` bytes from stdin,
     /// the same status/payload shape as [`Builtin::FsRead`]. `0` on success,
     /// with the bytes read waiting in [`Builtin::FsTakeBytes`]; otherwise an
@@ -474,6 +521,11 @@ impl Builtin {
             Builtin::FsRead => "fs_read",
             Builtin::FsTakeBytes => "fs_take_bytes",
             Builtin::FsWrite => "fs_write",
+            Builtin::FileOpen => "file_open",
+            Builtin::FileClose => "file_close",
+            Builtin::FileRead => "file_read",
+            Builtin::FileWrite => "file_write",
+            Builtin::FileFlush => "file_flush",
             Builtin::IoStdinRead => "io_stdin_read",
             Builtin::IoStdoutWrite => "io_stdout_write",
             Builtin::IoStderrWrite => "io_stderr_write",
@@ -522,7 +574,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 48] = [
+    pub const STD_ONLY: [Builtin; 53] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -556,6 +608,11 @@ impl Builtin {
         Builtin::FsRead,
         Builtin::FsTakeBytes,
         Builtin::FsWrite,
+        Builtin::FileOpen,
+        Builtin::FileClose,
+        Builtin::FileRead,
+        Builtin::FileWrite,
+        Builtin::FileFlush,
         Builtin::IoStdinRead,
         Builtin::IoStdoutWrite,
         Builtin::IoStderrWrite,
