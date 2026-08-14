@@ -37,6 +37,17 @@ needs designing from nothing — **measured: `OpenOptions` appears exactly twice
 `docs/`, at `nova-spec/20-STDLIB.md:236` and `docs/adr/0011-io-error-kinds.md:113`, both of which are
 `open`'s signature. It is referenced and never defined.**
 
+**Corrected 2026-08-14 (branch `read-write-stdio`, fix round 1): the count above cannot be right, by the
+same construction `crates/nova-runtime/src/io.rs`'s `no_stream_intrinsic_can_panic` doc comment already
+names for a literal-occurrence claim** — the sentence stating the count is itself an occurrence of the
+string it counts, and this document alone names `OpenOptions` in more than one other place (its own
+front-matter status line, above `## 1`, and the Non-Goals bullet below), so "exactly twice" was wrong
+the day it was written, not only after later edits added more. Restated as a property instead, which
+does not go stale the same way: every one of those other mentions only *names* `OpenOptions` as a
+still-missing piece of a later increment's scope; the two this paragraph originally cited remain the
+only place it appears *inside a signature*; and it is not defined as a type anywhere in `nova-spec/` or
+`docs/`, under either kind of mention.
+
 `Stdin`, `Stdout` and `Stderr` are process-global, always open, and never closed. They exercise both
 traits with **no resource-lifetime risk at all**, so `File` arrives in 3c against traits already proven
 in use rather than co-designed with them.
@@ -44,6 +55,12 @@ in use rather than co-designed with them.
 ## 3. Non-goals
 
 - **`File`, `open`, `OpenOptions`** — 3c. ADR 0011's remaining §5 deviation stays exactly those.
+
+  **Corrected 2026-08-14 (branch `read-write-stdio`, fix round 1): "ADR 0011's remaining §5 deviation
+  stays exactly those" is not what that ADR tracks.** `docs/adr/0011-io-error-kinds.md` narrows its
+  deviation to `open` and `File` only — `OpenOptions` is not a separate tracked item there, only a type
+  referenced inside `open`'s own signature. This increment's own non-goals above are otherwise
+  unchanged: nothing here builds `File`, `open`, or the parameter type its signature needs.
 - **No I/O poller.** `Wait::Io`, timed waits and the drive loop's default arm remain increment 4's.
 - **`print`/`println`/`eprint`/`eprintln` are not touched.** They stay synchronous `Builtin::GLOBAL`
   entries with their existing fixtures. Routing them through an async `Write` would make every
@@ -141,6 +158,14 @@ zero-bytes-read convention.
 `max`, and that is normal. So the test for EOF is `len() == 0` and never `len() < max` — getting that
 backwards is an infinite loop, not a wrong answer. This must be stated in `Read::read`'s own doc
 comment, not only here.
+
+**Corrected 2026-08-14 (branch `read-write-stdio`): "an infinite loop" is wrong, measured directly
+rather than reasoned about.** Getting the EOF test backwards does not hang — it produces a wrong
+*terminating* answer: early truncation, empty or partial output, exit `0`, instantly. A real pipe or
+terminal rarely hands back a chunk exactly `max` bytes long, so `len() < max` reads as "stop" on
+nearly the first call, the opposite failure from a loop that never exits. `std/io/lib.nova`'s own doc
+comment on `Read::read` and `read_all` already states this correctly; it is what this section's
+original claim above should have said.
 
 ## 7. The boundary
 
