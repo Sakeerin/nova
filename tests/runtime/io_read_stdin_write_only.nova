@@ -1,0 +1,36 @@
+// Proves `read_stdin`'s `Err` branch (`std/io/lib.nova`) is reachable, not
+// only argued to be hard: the harness spawns this as a child process whose
+// **stdin is a write-only file handle**, never a pipe -- so the very first
+// `stdin().read(..)` fails at the OS level on contact instead of blocking or
+// returning ordinary EOF. See `run_with_a_write_only_stdin`'s own doc
+// comment (`crates/nova-cli/tests/run_tests.rs`) for the mechanism, and for
+// why it needs none of `run_with_a_broken_pipe`'s drop-ordering dance.
+//
+// Reports on stdout with plain `println`: unlike the broken-pipe fixtures,
+// nothing here breaks stdout or stderr, so neither `nova_rt_println`'s
+// panic-on-write-failure risk nor `eprint`'s workaround applies.
+//
+// Asserts on `kind`, never the raw OS `message` -- `IoError`'s own doc
+// comment in `std/io/lib.nova` says message text is platform-specific and a
+// test should match on `kind` instead, the same discipline
+// `fs_permission_denied.nova` already follows for the analogous `std/fs`
+// case.
+async fn main() {
+    match stdin().read(1).await {
+        Ok(b) => println("read_stdin: unexpectedly ok, len ${b.len()}")
+        Err(e) => println("read_stdin: err ${kind_name(e.kind)}")
+    }
+}
+
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
