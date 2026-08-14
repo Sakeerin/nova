@@ -20,6 +20,15 @@
 /// byte surface beside this module's first four intrinsics, the same way
 /// this crate's other modules build on `task`.
 pub mod bytes;
+/// The open-file table and its five intrinsics for `std/fs`'s `File`.
+/// Private, not `pub` like [`fs`]/[`bytes`]/[`io`]: nothing outside this
+/// crate names `file::` directly — the five `nova_rt_file_*` symbols reach
+/// the JIT and linked binaries through their `#[no_mangle]` C names and
+/// through [`symbols`], both of which need only this module's *items*
+/// public, not the module path itself. Branch `file-open-openoptions`'s
+/// Task 1 added this module beside `fs`, `io` and `bytes`, reusing `fs`'s
+/// per-task slot table rather than owning a second one.
+mod file;
 /// Filesystem intrinsics for `std/fs`. `pub`, not private: its own doc
 /// comment explains the boundary it implements; nothing about that requires
 /// hiding the module itself. Branch `std-fs-strings`'s Task 3 and Task 4
@@ -519,6 +528,11 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_io_stderr_flush",
             io::nova_rt_io_stderr_flush as *const u8,
         ),
+        ("nova_rt_file_open", file::nova_rt_file_open as *const u8),
+        ("nova_rt_file_close", file::nova_rt_file_close as *const u8),
+        ("nova_rt_file_read", file::nova_rt_file_read as *const u8),
+        ("nova_rt_file_write", file::nova_rt_file_write as *const u8),
+        ("nova_rt_file_flush", file::nova_rt_file_flush as *const u8),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",
