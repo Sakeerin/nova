@@ -139,10 +139,15 @@ pub unsafe extern "C" fn nova_rt_print(s: *const NovaStr) {
 
 /// Write `s` to stderr with no trailing newline.
 ///
-/// Mirrors [`nova_rt_print`]'s explicit lock-and-flush rather than
-/// [`nova_rt_println`]'s `println!`: without a newline there is nothing to
-/// trigger a line-buffer flush, so the write must be flushed here or output can
-/// arrive out of order relative to stdout.
+/// Mirrors [`nova_rt_print`]'s explicit lock-and-flush shape rather than
+/// [`nova_rt_println`]'s `println!`, but not its reason. Rust 1.95's
+/// `Stdout` is a `LineWriter` unconditionally, so a partial line with no
+/// trailing newline can sit in that buffer until something flushes it --
+/// there, the explicit flush is load-bearing. `Stderr` carries no such
+/// buffer at all (Rust's own source marks its raw handle "not buffered"),
+/// so a write reaches the OS on contact regardless of a trailing newline;
+/// the flush call below is a harmless no-op kept for symmetry with
+/// [`nova_rt_print`], not a mechanism this stream needs.
 ///
 /// # Safety
 /// `s` must point to a live `NovaStr`.

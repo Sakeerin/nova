@@ -383,6 +383,22 @@ afterwards.
   qualification this bullet was missing: the fix is an `.await` on something
   that can actually report pending, which requires a poller for I/O and does
   not exist yet.
+
+  **AMENDED 2026-08-14 (branch `read-write-stdio`): a second instance,
+  worse in degree.** `std/io`'s `Stdin::read` (`std/io/lib.nova`, over
+  `nova_rt_io_stdin_read`) has the identical shape to `std/fs`'s functions
+  above: no I/O poller exists yet, so a read from stdin runs synchronously
+  inside the first poll and blocks the whole executor for as long as the OS
+  read takes — **`stdin` blocks the whole executor until a real poller
+  lands.** The degree is worse than the filesystem case, not merely another
+  instance of it: a filesystem read finishes on its own, however long it
+  takes, while a terminal read waits on a human, who may act at an
+  arbitrary time or not at all. Concretely, `read_to_end` on an interactive
+  terminal with nothing typed yet blocks until the user sends EOF, so **a
+  program that spawns tasks and then reads stdin stalls every other task on
+  the thread indefinitely**, not merely for a bounded duration. Recorded
+  here, in §1, because this is where a reader debugging a stalled program
+  looks first — a doc comment on the intrinsic alone is not enough.
 - **`spawn` starts nothing.** A task is queued, and the queue is drained only
   while a `block_on` call is running — so a `spawn` with no `block_on` anywhere
   above it never runs at all, silently. `async fn main` is driven by `block_on`,
