@@ -22,8 +22,8 @@ for it by shipping the traits against the streams instead.
 What was measured, stated as the scan it was: grepping `crates/` for `RawFd`, `RawHandle`, `OwnedFd`,
 `OwnedHandle`, `as_raw`, `std::fs::File`, `File::open`, `File::create`, `TcpStream`, `TcpListener`,
 `libc::open` and `std::io::std{in,out,err}()` hits exactly two files. One is `nova-driver`, where the
-*compiler* reads source files — irrelevant to the runtime. The other is `nova-runtime/src/lib.rs:112`
-and `:130`, where `print`/`eprint` call `std::io::stdout()`/`stderr()`, **acquire the process-global
+*compiler* reads source files — irrelevant to the runtime. The other is `nova-runtime/src/lib.rs`, where
+`nova_rt_print`/`nova_rt_eprint` call `std::io::stdout()`/`stderr()`, **acquire the process-global
 stream, write, and drop it inside the one call.** So nothing in the runtime *holds* an OS handle between
 intrinsic calls, and increment 3a's per-task slot holds GC memory between two intrinsics, not a handle.
 
@@ -34,7 +34,7 @@ this runtime has shipped since phase 1, and they hold nothing between calls.
 `File` is a different and harder problem: Nova has no destructors, and the GC can collect a record while
 the OS handle it names stays open. It needs its own decision about handle lifetime, and `OpenOptions`
 needs designing from nothing — **measured: `OpenOptions` appears exactly twice across `nova-spec/` and
-`docs/`, at `nova-spec/20-STDLIB.md:236` and `docs/adr/0011-io-error-kinds.md:113`, both of which are
+`docs/`, in `nova-spec/20-STDLIB.md` §5 and at `docs/adr/0011-io-error-kinds.md:113`, both of which are
 `open`'s signature. It is referenced and never defined.**
 
 **Corrected 2026-08-14 (branch `read-write-stdio`, fix round 1): the count above cannot be right, by the
@@ -187,11 +187,11 @@ with the existing `nova_rt_fs_take_bytes` and `nova_rt_fs_last_error_message`.
 
 **The `fs_` prefix on those two is historical and the spec says so.** Since 3a the slot table has been a
 general per-task boundary facility, not a filesystem one; only its name records where it was born.
-**Verified that this works without new plumbing:** `nova-resolver/src/lib.rs:958-959` seeds every
-`Builtin::STD_ONLY` entry into *every* std module's scope (`if is_std_module(mid)`), not per-module, so
-`std/io` reaches both takers directly. A note belongs at both definitions and both call sites. **3c
-inherits this arrangement**; if a third consumer makes the name intolerable, renaming is a follow-up
-with its own review, not a silent widening here.
+**Verified that this works without new plumbing:** `nova-resolver/src/lib.rs`'s `resolve_program` seeds
+every `Builtin::STD_ONLY` entry into *every* std module's scope via its `if is_std_module(mid)` seeding
+loop, not per-module, so `std/io` reaches both takers directly. A note belongs at both definitions and
+both call sites. **3c inherits this arrangement**; if a third consumer makes the name intolerable,
+renaming is a follow-up with its own review, not a silent widening here.
 
 Each Nova wrapper stays **straight-line with no `.await` between an intrinsic call and its slot read**,
 the discipline `std/fs`'s wrappers already follow. 3a made a suspension there survivable across tasks;
@@ -201,7 +201,7 @@ it did not make it correct within one.
 
 There is no I/O poller until increment 4, so **`stdin` blocks the entire executor.** `read_to_end` on an
 interactive terminal blocks until the user sends EOF, which means **a program that spawns tasks and then
-reads stdin stalls every other task indefinitely** — not slowly, but until input arrives.
+reads stdin stalls every other task on the thread indefinitely** — not slowly, but until input arrives.
 
 This is the same class as `std/fs`'s never-suspending `async fn`s, and worse in degree: a filesystem read
 finishes on its own, while a terminal read waits on a human. It goes in ADR 0009 §1's footgun list, not

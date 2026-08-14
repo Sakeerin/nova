@@ -79,9 +79,12 @@ pub unsafe extern "C" fn nova_rt_io_stdin_read(max: i64) -> i64 {
 /// already serves more than one logical payload -- `fs.rs`'s own `Slot` doc
 /// comment makes the identical point for `String` versus `Bytes` -- so reusing
 /// it needs no new `Slot` variant and no new taker intrinsic. `fs.rs` itself
-/// only gains `pub(crate)` visibility on `stash`/`take`/`fail` and
-/// doc-comment notes (including on the two existing takers) recording the
-/// reuse -- no behavioural change anywhere in it.
+/// only gains `pub(crate)` visibility on `stash`/`fail` (`take` stays
+/// private -- its one cross-module consumer is `crate::io`'s own tests,
+/// reached through the test-only `take_for_test` instead of widening `take`
+/// itself, final review M4) and doc-comment notes (including on the two
+/// existing takers) recording the reuse -- no behavioural change anywhere
+/// in it.
 ///
 /// **Fixed-width 8 bytes, little-endian -- not the single byte a first sketch
 /// of the Nova wrapper might reach for.** A write can exceed 255 bytes, so one
@@ -190,7 +193,7 @@ mod tests {
     ///
     /// Not `pub(crate)`: every caller is one of this module's own tests.
     fn take_count() -> i64 {
-        let ptr = crate::fs::take(Slot::Buffer) as *const NovaStr;
+        let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
         // SAFETY: test-only. The slot was just populated, in the same test,
         // by either `stash_count` or a real write intrinsic's call into it;
         // nothing has allocated since, so the payload has not been swept.
@@ -287,7 +290,7 @@ mod tests {
         let mut buf = vec![0u8; 10]; // far more than the source below has
         let status = read_and_stash(std::io::Cursor::new(b"hi".to_vec()), &mut buf);
         assert_eq!(status, OK);
-        let ptr = crate::fs::take(Slot::Buffer) as *const NovaStr;
+        let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
         // SAFETY: just stashed by the call above; nothing has allocated since.
         let bytes = unsafe { crate::bytes::as_bytes(ptr) };
         assert_eq!(
@@ -304,7 +307,7 @@ mod tests {
         let mut buf = vec![0u8; 10];
         let status = read_and_stash(std::io::Cursor::new(Vec::new()), &mut buf);
         assert_eq!(status, OK);
-        let ptr = crate::fs::take(Slot::Buffer) as *const NovaStr;
+        let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
         // SAFETY: just stashed by the call above; nothing has allocated since.
         let bytes = unsafe { crate::bytes::as_bytes(ptr) };
         assert_eq!(
@@ -343,7 +346,7 @@ mod tests {
     ///
     /// Scans only the part of this file before its own `mod tests` block, for
     /// the same reason those two guards do, and with the same ceiling they
-    /// both document in full: what keeps a split like this sound is that the
+    /// both point to: what keeps a split like this sound is that the
     /// *first* occurrence of the split literal `mod tests {` is the real
     /// boundary, not that the literal is unique in the file. It is not
     /// unique here either -- the same text recurs elsewhere in this file,

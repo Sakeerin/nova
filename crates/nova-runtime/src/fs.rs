@@ -21,10 +21,12 @@
 //! the per-task table just adds one layer of indirection to reach it, keyed
 //! by `slot_index`.
 //!
-//! `stash`/`take` themselves are `pub(crate)`: `crates/nova-runtime/src/io.rs`
-//! is a second consumer, stashing the three standard streams' payloads and
-//! write byte counts through this identical slot table rather than a second
-//! one.
+//! `stash` itself is `pub(crate)`: `crates/nova-runtime/src/io.rs` is a
+//! second consumer, stashing the three standard streams' payloads and write
+//! byte counts through this identical slot table rather than a second one.
+//! `take` stays private (final review, M4) -- `io.rs`'s own production code
+//! only ever stashes, and its tests reach `take` through the test-only
+//! `take_for_test` instead of `take` itself being widened for their sake.
 //!
 //! # Why the pointer is GC-rooted while it sits in a slot
 //!
@@ -241,12 +243,17 @@ pub(crate) fn stash(slot: Slot, ptr: *mut NovaStr) {
 /// into the collector would be a re-entrancy hazard for no benefit; the
 /// pointer is already out of the table and owned by this frame by then.
 ///
-/// `pub(crate)`, not private: `crate::io`'s own tests are a second consumer
-/// -- production code there only ever stashes (its payloads are meant for a
-/// future Nova caller to take via `nova_rt_fs_take_bytes`, not for `io.rs`
-/// itself to take back out), but its tests call this directly to verify what
-/// a stash left behind, the same way this function's own tests here do.
-pub(crate) fn take(slot: Slot) -> usize {
+/// Private, not `pub(crate)` (final review, M4): every production caller is
+/// in this module -- `stash` below and the `nova_rt_fs_take_*` intrinsics --
+/// and `crate::io`'s production code only ever stashes (its payloads are
+/// meant for a future Nova caller to take via `nova_rt_fs_take_bytes`, not
+/// for `io.rs` itself to take back out). `crate::io`'s own *tests* are the
+/// one cross-module consumer, verifying what a stash left behind the same
+/// way this function's own tests here do; they reach this through
+/// [`take_for_test`] below instead of this function being widened just for
+/// them. `take` carries GC-root semantics (`remove_root`), so a
+/// broader-than-needed path to it is worth the extra indirection.
+fn take(slot: Slot) -> usize {
     let ptr = with_slot(slot, |field| {
         let ptr = *field;
         *field = 0;
@@ -256,6 +263,16 @@ pub(crate) fn take(slot: Slot) -> usize {
         gc::remove_root(ptr as *mut u8);
     }
     ptr
+}
+
+/// Test-only cross-module accessor for [`take`], for `crate::io`'s own tests
+/// -- the same reason [`stash_for_test`] exists for [`stash`], and a
+/// narrower pattern than widening `take` itself would have been: every
+/// *production* call to [`take`] is inside this module, so it never needed
+/// more than module-private visibility.
+#[cfg(test)]
+pub(crate) fn take_for_test(slot: Slot) -> usize {
+    take(slot)
 }
 
 /// Release every payload root task `id` still holds, and clear its slots.

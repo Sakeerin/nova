@@ -125,7 +125,7 @@ pub trait Write {
 // There is no I/O poller yet (`docs/adr/0009-async-execution-model.md`'s
 // residual-gaps list): a `read` blocks the whole executor for as long as the
 // OS read takes, so a terminal with nothing typed yet stalls every other
-// task, not only this one.
+// task on the thread, not only this one.
 pub record Stdin { }
 
 pub fn stdin() -> Stdin { Stdin { } }
