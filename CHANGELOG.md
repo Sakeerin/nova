@@ -1110,11 +1110,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     with no I/O poller yet, `Stdin::read` blocks the whole executor for as
     long as the OS read takes, so a program that spawns tasks and then
     reads stdin on an interactive terminal with nothing typed stalls every
-    other task until the user sends EOF — a filesystem read finishes on its
-    own; a terminal read waits on a human. Amended in place (dated note).
-  - `open`, `File` and `OpenOptions` remain deferred: building any of them
-    needs a handle with real lifetime management, which `Stdin`/`Stdout`/
-    `Stderr` (process-global, always open, never closed) do not.
+    other task on the thread until the user sends EOF — a filesystem read
+    finishes on its own; a terminal read waits on a human. Amended in place
+    (dated note).
+  - `open` and `File` remain deferred — the same two items
+    `docs/adr/0011-io-error-kinds.md` tracks: building either needs a
+    handle with real lifetime management, which `Stdin`/`Stdout`/`Stderr`
+    (process-global, always open, never closed) do not. `OpenOptions`,
+    `open`'s parameter type, does not exist yet either, but it is not a
+    separately deferred item in its own right — just part of the
+    signature `open` has not shipped.
   - **`print`/`println`/`eprint`/`eprintln` are deliberately unchanged.**
     They are synchronous language-level output primitives seeded into
     `Builtin::GLOBAL` (Phase 2.1 above), calling `nova_rt_print`/
