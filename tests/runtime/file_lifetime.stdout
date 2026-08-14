@@ -1,0 +1,4 @@
+close: ok
+close again: ok
+read after close: file descriptor is not open
+forged: err

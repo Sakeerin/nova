@@ -5,10 +5,10 @@
 // these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
 // A user definition of the same name shadows the one here.
 //
-// `File`, `open` and `OpenOptions` are a later increment. `Stdin`, `Stdout`
-// and `Stderr` below are process-global, always open and never closed, so
-// they exercise both traits with none of `File`'s handle-lifetime design
-// needed yet.
+// `File`, `open` and `OpenOptions` live in `std/fs`, not here: they need the
+// handle-lifetime design that module's own doc comment describes. `Stdin`,
+// `Stdout` and `Stderr` below are process-global, always open and never
+// closed, so they exercise both traits below with none of it.
 //
 // **The `Future<T>` spelling.** `async fn` in a trait *declaration* is
 // `E0900`, so `Read`/`Write` below are declared `fn ... -> Future<T>`
@@ -238,7 +238,15 @@ async fn read_all<T: Read>(reader: T) -> Result<Bytes, IoError> {
 // Reading only the first byte -- `fs_take_bytes().byte_at(0)` -- would
 // silently truncate any count at or above 256; a single write can exceed
 // that.
-fn decode_count(b: Bytes) -> Int {
+//
+// `pub` because `std/fs`'s `File` calls this same function directly for two
+// of its own payloads -- `open`'s new fd and `Write::write`'s byte count --
+// rather than a second Nova-level decoder. Both cross the boundary the
+// identical way this one does, 8 little-endian bytes in the payload slot,
+// because the status word already carries the `IoErrorKind`; the runtime
+// side that produces them (`crates/nova-runtime/src/file.rs`'s `stash_i64`)
+// says the same of its own encoding, one level down.
+pub fn decode_count(b: Bytes) -> Int {
     let ints = b.to_ints()
     let mut n = 0
     let mut i = ints.len() - 1

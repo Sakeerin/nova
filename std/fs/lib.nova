@@ -173,3 +173,136 @@ pub async fn read_dir(path: String) -> Result<[DirEntry], IoError> {
     }
     Ok(out)
 }
+
+// --- File, OpenOptions and open ---
+//
+// Unlike everything above, which opens, acts and closes inside one intrinsic
+// call, a `File` is a handle that survives between calls -- Nova's first
+// value holding an OS resource that way. Nova has no destructors, so
+// explicit `close` is the only release mechanism; a `File` that is never
+// closed leaks its descriptor until the process exits.
+
+// Options for `open`. Each flag forwards onto `std::fs::OpenOptions`'s own
+// method of the same name, in the order `open` below passes them to
+// `file_open`: read, write, append, truncate, create, create_new.
+//
+// No chainable builder: a receiver-mutating method cannot be called on a
+// temporary (`E0060`, measured), so `OpenOptions::reading().with_write()`
+// does not compile in this language. Use one of the three constructors
+// below, or build an exotic combination with `let mut o =
+// OpenOptions::default()` followed by field assignment.
+pub record OpenOptions {
+    read: Bool
+    write: Bool
+    append: Bool
+    truncate: Bool
+    create: Bool
+    create_new: Bool
+}
+
+// Every flag false. Passed to `open` as-is this fails -- measured:
+// `std::fs::OpenOptions` itself requires at least one of read/write/append
+// -- so this exists as the base for field assignment building an exotic
+// combination, not as an option set meant to be used directly.
+impl Default for OpenOptions {
+    fn default() -> OpenOptions {
+        OpenOptions { read: false, write: false, append: false, truncate: false, create: false, create_new: false }
+    }
+}
+
+impl OpenOptions {
+    pub fn reading() -> OpenOptions {
+        OpenOptions { read: true, write: false, append: false, truncate: false, create: false, create_new: false }
+    }
+
+    // Write + create + truncate: start this file fresh, creating it if it is
+    // not there yet and discarding any content it already has.
+    pub fn writing() -> OpenOptions {
+        OpenOptions { read: false, write: true, append: false, truncate: true, create: true, create_new: false }
+    }
+
+    // Append + create: add to this file, creating it if it is not there
+    // yet, and leaving any content it already has in place.
+    pub fn appending() -> OpenOptions {
+        OpenOptions { read: false, write: false, append: true, truncate: false, create: true, create_new: false }
+    }
+}
+
+// A handle to an open file. `fd` keys
+// `crates/nova-runtime/src/file.rs`'s thread-local table of open
+// `std::fs::File`s -- it is not an OS file descriptor number, and nothing
+// about its value means anything to a Nova program beyond identifying an
+// entry in that table.
+//
+// `fd` is not privacy-enforced -- no record field in this language is -- so
+// a program can build `File { fd: 9999 }` naming no file this module ever
+// opened. That is safe by design: absence from the handle table is
+// indistinguishable from closedness, so a forged, stale, or already-closed
+// handle behaves exactly like the real thing does once closed (see `close`
+// below).
+pub record File { fd: Int }
+
+// Open `path` under `options`.
+pub async fn open(path: String, options: OpenOptions) -> Result<File, IoError> {
+    let status = file_open(path, options.read, options.write, options.append, options.truncate, options.create, options.create_new)
+    if status == 0 {
+        return Ok(File { fd: decode_count(fs_take_bytes()) })
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl File {
+    // Closes the handle. Idempotent: a second or third call also returns
+    // `Ok(())`, because Nova has no move checking, so `self` by value cannot
+    // stop a second call the way it would in a language with real
+    // ownership. Closing a stale or forged handle is the same no-op: the
+    // table lookup a close performs simply removes nothing.
+    pub async fn close(self) -> Result<(), IoError> {
+        let status = file_close(self.fd)
+        if status == 0 {
+            return Ok(())
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+}
+
+// Any operation other than `close` against a handle this module's table does
+// not recognise -- already closed, stale, or forged -- reaches this same
+// `IoError { kind: Other }` by missing the same table lookup, whether the
+// operation is this function or `write_file`/`flush_file` below.
+async fn read_file(f: File, max: Int) -> Result<Bytes, IoError> {
+    let status = file_read(f.fd, max)
+    if status == 0 {
+        return Ok(fs_take_bytes())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Read for File {
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>> { read_file(self, max) }
+}
+
+// The write's byte count crosses the boundary the same way `std/io`'s
+// `write_stdout` decodes its own byte count: 8 little-endian bytes in the
+// payload slot, read back here by that same `decode_count` rather than a
+// second decoder.
+async fn write_file(f: File, buf: Bytes) -> Result<Int, IoError> {
+    let status = file_write(f.fd, buf)
+    if status == 0 {
+        return Ok(decode_count(fs_take_bytes()))
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+async fn flush_file(f: File) -> Result<(), IoError> {
+    let status = file_flush(f.fd)
+    if status == 0 {
+        return Ok(())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Write for File {
+    fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_file(self, buf) }
+    fn flush(self) -> Future<Result<(), IoError>> { flush_file(self) }
+}
