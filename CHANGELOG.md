@@ -1065,6 +1065,65 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `nova-spec/20-STDLIB.md` §4's `&mut [u8]`/`&[u8]` parameters are amended
     in place (dated note) rather than eventually built against.
 
+- `std/io`'s `Read`/`Write` traits and the three standard streams
+  (`docs/superpowers/specs/2026-08-13-read-write-and-stdio-design.md`):
+  closes the deferral the `Bytes` entry above left open for the `Read`/
+  `Write` traits and `stdin`/`stdout`/`stderr` — only `open`/`File` remain
+  deferred now (`docs/adr/0011-io-error-kinds.md`, narrowed in place).
+  - **`trait Read { fn read(self, max: Int) -> Future<Result<Bytes,
+    IoError>>; fn read_to_end(self) -> Future<Result<Bytes, IoError>> {
+    .. } }` and `trait Write { fn write(self, buf: Bytes) ->
+    Future<Result<Int, IoError>>; fn flush(self) -> Future<Result<(),
+    IoError>> }`**, plus fieldless records `Stdin`/`Stdout`/`Stderr`
+    (built by lowercase `stdin()`/`stdout()`/`stderr()`) implementing them
+    against the process's three standard streams.
+  - **Both traits are spelled `fn … -> Future<T>`, not `async fn … -> T`.**
+    `async fn` in a trait *declaration* is `E0900`, so neither trait can be
+    declared the second way at all. Calling an `async fn` without `.await`
+    produces its `Future` without running it, so a plain, non-`async` `fn`
+    can still return one, unawaited — every method on both traits,
+    including `read_to_end`'s default body, follows this shape.
+    `nova-spec/20-STDLIB.md` §4 is amended in place (dated note) to record
+    this, since the spec text there still shows the `async fn` spelling.
+  - **`stdin`/`stdout`/`stderr` return the concrete records, not `impl
+    Read`/`impl Write`**, because `impl Trait` in return position does not
+    parse at all (`P0001`) — the same amendment covers this.
+  - **EOF is an empty result from `read`; a short read is not EOF.** A pipe
+    or a terminal may hand back far fewer bytes than asked for and still
+    have more to give later, so `read_to_end`'s default loop keeps reading
+    on anything non-empty and stops only on a genuinely empty result.
+    Stopping as soon as a result looks "short" instead truncates output
+    against the common case, not an edge case — a real pipe or terminal
+    rarely hands back a chunk of exactly the size asked for.
+  - **`Write::write` may write fewer bytes than `buf` holds, and reports
+    exactly how many** — deliberately unlike `std/fs::write`'s write-all,
+    count-less `Result<(), IoError>`. A caller that needs a guaranteed full
+    write must loop on the returned count itself.
+  - Five new `Builtin::STD_ONLY` intrinsics (`io_stdin_read`,
+    `io_stdout_write`, `io_stderr_write`, `io_stdout_flush`,
+    `io_stderr_flush`) land this way, taking `STD_ONLY` from `[Builtin; 43]`
+    to `[Builtin; 48]`. `STD_MODULES` and `RESERVED_TYPE_NAMES` are both
+    unchanged at 7 — nothing new is reserved, and no existing program
+    breaks.
+  - `docs/adr/0009-async-execution-model.md` §1 gains a second instance of
+    its cooperative-scheduling hazard, worse in degree than `std/fs`'s:
+    with no I/O poller yet, `Stdin::read` blocks the whole executor for as
+    long as the OS read takes, so a program that spawns tasks and then
+    reads stdin on an interactive terminal with nothing typed stalls every
+    other task until the user sends EOF — a filesystem read finishes on its
+    own; a terminal read waits on a human. Amended in place (dated note).
+  - `open`, `File` and `OpenOptions` remain deferred: building any of them
+    needs a handle with real lifetime management, which `Stdin`/`Stdout`/
+    `Stderr` (process-global, always open, never closed) do not.
+  - **`print`/`println`/`eprint`/`eprintln` are deliberately unchanged.**
+    They are synchronous language-level output primitives seeded into
+    `Builtin::GLOBAL` (Phase 2.1 above), calling `nova_rt_print`/
+    `nova_rt_println`/`nova_rt_eprint`/`nova_rt_eprintln` directly — not
+    `std/io` trait methods, and not routed through `Stdout`/`Stderr` or the
+    `Write` trait. Nothing about this increment touches them, gives them a
+    `Future`-returning signature, or makes them fallible; they stay exactly
+    the fire-and-forget calls they already were.
+
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of

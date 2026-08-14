@@ -172,6 +172,20 @@ module std.io
 // `Result<Bytes, IoError>` and `content: Bytes`, not the `[u8]` shown there
 // -- and `open`/`File`/these two traits will too, once built. See
 // docs/adr/0011-io-error-kinds.md for the narrowed §5 deviation this leaves.
+//
+// AMENDED 2026-08-14 (branch `read-write-stdio`): neither trait below
+// compiles exactly as declared, and neither do `stdin`/`stdout`/`stderr`'s
+// return types further down. `async fn` in a trait *declaration* is
+// `E0900`, measured directly, so `Read` and `Write` ship instead as
+// `fn ... -> Future<T>`: calling an `async fn` without `.await` produces its
+// `Future` without running it, so a plain, non-`async` `fn` can still
+// return one, unawaited. Separately, `impl Trait` in return position does
+// not parse at all (`P0001`), so `stdin`/`stdout`/`stderr` return the
+// concrete, fieldless records `Stdin`/`Stdout`/`Stderr` instead of `impl
+// Read`/`impl Write` -- each has a plain, lowercase-named `fn` constructor,
+// not the trait-typed return shown below. See `std/io/lib.nova` for the
+// shipped signatures and docs/adr/0011-io-error-kinds.md for the deviation
+// this narrows, to `open`/`File` only.
 pub trait Read {
     async fn read(self, buf: &mut [u8]) -> Result<Int, IoError>
     async fn read_to_end(self, buf: &mut [u8]) -> Result<Int, IoError> { /* default */ }

@@ -145,6 +145,22 @@ Nova's byte I/O is buffer-**returning**, not the buffer-filling shape §4
 originally specified — so references are off the roadmap permanently, not
 merely still missing.
 
+**Narrowed 2026-08-14 (branch `read-write-stdio`):** `Read`, `Write` and
+concrete `Stdin`/`Stdout`/`Stderr` now exist too (`std/io/lib.nova`), over
+new intrinsics on this same status boundary. `Read`/`Write` ship as
+`fn ... -> Future<T>`, not `async fn ... -> T`, because the latter is
+`E0900` in a trait declaration; `stdin`/`stdout`/`stderr` return the
+concrete records `Stdin`/`Stdout`/`Stderr` rather than `impl Read`/`impl
+Write`, because `impl Trait` in return position does not parse (`P0001`) —
+both narrowings are recorded in `nova-spec/20-STDLIB.md` §4's own dated
+note. What remains deferred from this decision's original list is `open`
+and `File`, restricted by the property that still separates them rather
+than by how many are left: building either needs a handle with real
+lifetime management — acquired, held, and eventually closed. `Stdin`,
+`Stdout` and `Stderr` needed none of that (process-global, always open,
+never closed — `std/io/lib.nova`'s module doc), which is exactly why they,
+and the traits over them, could ship ahead of `open`/`File`.
+
 ### 3. `temp_dir() -> String` is added, and is not in §5 at all
 
 A fixture that writes, creates, or removes anything on disk needs a writable
@@ -230,6 +246,13 @@ other direction.
   type and, on top of it, `read` and `write` — both now compile and run.
   `open`, `File`, `Read`, `Write`, `stdin`, `stdout` and `stderr` remain
   `E0001`, exactly as this bullet originally described.
+
+  **Narrowed 2026-08-14 (branch `read-write-stdio`):** `Read`, `Write`,
+  `Stdin`, `Stdout` and `Stderr` now compile and run too (`std/io/lib.nova`).
+  What remain `E0001` are `open` and `File` — the property that still
+  separates them from everything already shipped, rather than a count, is
+  that building either needs a handle with real lifetime management, which
+  nothing shipped so far has needed.
 - **The drive loop is untouched.** `crates/nova-runtime/src/task.rs`'s
   `report_deadlock` default arm still assumes every `Wait` variant carries a
   deadline, which is correct as long as nothing can park on an external event —
