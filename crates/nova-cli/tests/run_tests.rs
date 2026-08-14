@@ -7048,3 +7048,96 @@ fn io_read_stdin_write_only_run() {
          PermissionDenied, not silently succeed on an empty read: {stdout:?}"
     );
 }
+
+// === Task 3 (file-open-openoptions increment): `std/fs`'s `File`,
+// `OpenOptions`, `open`, and `impl Read`/`Write for File` ===
+
+/// Open for writing, write, close, reopen for reading, `read_to_end`, close.
+/// Exercises `impl Write for File`, `impl Read for File` (through
+/// `read_to_end`'s default body in `std/io`, over `File`'s own `read`), and
+/// the inherent `File::close`, following `fs_bytes_roundtrip_run`'s shape.
+#[test]
+fn file_roundtrip_run() {
+    let tmp = unique_temp_dir("nova-file-roundtrip");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/file_roundtrip.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/file_roundtrip.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The increment's core resource-lifetime behaviour: `close` is idempotent,
+/// reading a handle this fixture itself closed is an ordinary `IoError`
+/// rather than a panic, and a Nova program can forge a `File` naming no file
+/// this module ever opened (`fd` is not privacy-enforced) and get the exact
+/// same safe treatment. See `tests/runtime/file_lifetime.nova`'s own doc
+/// comment for why `open_or_die` is fixture-local glue rather than `std/fs`
+/// surface.
+#[test]
+fn file_lifetime_run() {
+    let tmp = unique_temp_dir("nova-file-lifetime");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/file_lifetime.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/file_lifetime.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// `create_new` against an existing path, and a path under a missing parent
+/// directory, measured `AlreadyExists`/`NotFound` on this host -- consistent
+/// with `std/io/lib.nova`'s own doc comment, which already lists
+/// `AlreadyExists` and `NotFound` among the kinds a real OS condition pins,
+/// with no platform qualifier attached to either the way it attaches one to
+/// `PermissionDenied` (see the next paragraph).
+///
+/// **`#[cfg(windows)]`, for the third check bundled into the same fixture
+/// and the same golden-output comparison.** `tests/runtime/file_errors.nova`
+/// also opens a directory with `OpenOptions::reading()`, which this host
+/// measures as `PermissionDenied` -- consistent with that same doc comment's
+/// "(Windows only) `PermissionDenied`" note. **Reasoned, not measured, since
+/// no POSIX host is available in this environment:** POSIX `open(2)` permits
+/// read-only access to a directory (needed for e.g. reading it back by fd),
+/// so this exact call would plausibly *succeed* on Linux/macOS rather than
+/// fail at all, with a failure only reachable from an actual `read()`
+/// afterward -- reporting `IsADirectory`, a kind
+/// `crates/nova-runtime/src/fs.rs`'s `fail` has no arm for and therefore
+/// maps to `Other`, not `PermissionDenied`. Since one golden `.stdout` file
+/// covers all three checks in this one fixture, a real kind difference on
+/// just the directory check would fail the whole comparison on a platform
+/// that disagrees -- the same trade-off `fs_permission_denied_run` already
+/// made for a directory-flavoured check of its own, and the reason that test
+/// is `#[cfg(windows)]` too.
+#[cfg(windows)]
+#[test]
+fn file_errors_run() {
+    let tmp = unique_temp_dir("nova-file-errors");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/file_errors.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/file_errors.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

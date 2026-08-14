@@ -1,0 +1,41 @@
+// Open for writing, write, close, reopen for reading, `read_to_end`, close,
+// print the text. Exercises `impl Write for File` (`write`), `impl Read for
+// File` (through `read_to_end`'s default body in `std/io`, over `File`'s own
+// `read`), and `File::close`, the inherent `async fn`.
+async fn main() {
+    let path = "${temp_dir()}/nova_file_roundtrip_5a91.txt"
+    let _ = remove_file(path).await
+
+    let w = match open(path, OpenOptions::writing()).await {
+        Ok(f) => f
+        Err(e) => panic("open for writing: ${e.message}")
+    }
+    let n = match w.write(bytes_from_string("hello, file")).await {
+        Ok(count) => count
+        Err(e) => panic("write: ${e.message}")
+    }
+    println("wrote: ${n}")
+    match w.close().await {
+        Ok(_) => println("close: ok")
+        Err(e) => println("close: err")
+    }
+
+    let r = match open(path, OpenOptions::reading()).await {
+        Ok(f) => f
+        Err(e) => panic("open for reading: ${e.message}")
+    }
+    let content = match r.read_to_end().await {
+        Ok(b) => b
+        Err(e) => panic("read_to_end: ${e.message}")
+    }
+    match content.to_string() {
+        Some(s) => println("text: ${s}")
+        None => println("text: <non-utf8>")
+    }
+    match r.close().await {
+        Ok(_) => println("close2: ok")
+        Err(e) => println("close2: err")
+    }
+
+    let _ = remove_file(path).await
+}

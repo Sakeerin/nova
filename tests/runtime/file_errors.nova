@@ -1,0 +1,53 @@
+// The portable failure modes `open` reaches: `create_new` against a path
+// that already exists is `AlreadyExists`, and a path under a missing parent
+// directory is `NotFound`. Also checks opening a directory for reading,
+// which fails here -- **measured on Windows only** (`crates/nova-cli/tests/
+// run_tests.rs`'s `file_errors_run` gates this fixture to Windows for
+// exactly that reason; see its own doc comment for what differs on POSIX).
+//
+// `message` is platform text, so only `kind` is asserted -- the same
+// treatment `fs_io_types.nova` already applies.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
+async fn main() {
+    let base = "${temp_dir()}/nova_file_errors_probe"
+    let _ = remove_dir_all(base).await
+    let _ = create_dir_all(base).await
+
+    // `create_new` has no named constructor, since it is an exotic
+    // combination none of `reading`/`writing`/`appending` is -- built with
+    // `OpenOptions::default()` plus field assignment instead.
+    let existing = "${base}/exists.txt"
+    let _ = write_string(existing, "x").await
+    let mut create_new_opts = OpenOptions::default()
+    create_new_opts.write = true
+    create_new_opts.create_new = true
+    match open(existing, create_new_opts).await {
+        Ok(_) => println("create_new: unexpectedly ok")
+        Err(e) => println("create_new: ${kind_name(e.kind)}")
+    }
+
+    match open(base, OpenOptions::reading()).await {
+        Ok(_) => println("dir_read: unexpectedly ok")
+        Err(e) => println("dir_read: ${kind_name(e.kind)}")
+    }
+
+    let missing_parent = "${base}/nonexistent_subdir/inner.txt"
+    match open(missing_parent, OpenOptions::writing()).await {
+        Ok(_) => println("missing_parent: unexpectedly ok")
+        Err(e) => println("missing_parent: ${kind_name(e.kind)}")
+    }
+
+    let _ = remove_dir_all(base).await
+}

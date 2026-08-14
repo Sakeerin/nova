@@ -1,0 +1,45 @@
+// The increment's core behaviour: `close` is idempotent, any other
+// operation on a closed handle is an ordinary `IoError` rather than a panic
+// or a hang, and a Nova program can forge a `File` naming no file this
+// module ever opened -- `fd` is not privacy-enforced -- and get the exact
+// same safe treatment, because absence from the runtime's handle table is
+// what closedness *is* (`crates/nova-runtime/src/file.rs`'s own doc
+// comment).
+//
+// `open_or_die` is fixture-only glue, not `std/fs` surface: it exists so
+// `main` below reads close to the design spec's own sketch of this
+// behaviour, which passes `open`'s result straight to the caller rather
+// than threading an `Err` arm through code whose point is what happens
+// *after* a successful open.
+async fn open_or_die(path: String) -> File {
+    match open(path, OpenOptions::writing()).await {
+        Ok(f) => f
+        Err(e) => panic("open_or_die: ${e.message}")
+    }
+}
+
+async fn main() {
+    let path = "${temp_dir()}/nova_file_lifetime_c02d.txt"
+    let _ = remove_file(path).await
+    let f = open_or_die(path).await
+
+    match f.close().await { Ok(_) => println("close: ok") Err(e) => println("close: err") }
+    match f.close().await { Ok(_) => println("close again: ok") Err(e) => println("close again: err") }
+
+    let r = f.read(16).await
+    match r {
+        Ok(_) => println("read after close: unexpectedly ok")
+        Err(e) => println("read after close: ${e.message}")
+    }
+
+    // Bound to a local before matching: `match File { fd: 9999 }.read(…) …`
+    // is `P0001`, a record literal in match-scrutinee position.
+    let forged = File { fd: 9999 }
+    let g = forged.read(16).await
+    match g {
+        Ok(_) => println("forged: unexpectedly ok")
+        Err(e) => println("forged: err")
+    }
+
+    let _ = remove_file(path).await
+}
