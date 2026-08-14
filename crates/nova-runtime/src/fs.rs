@@ -51,24 +51,45 @@ use std::cell::RefCell;
 /// half (`io_error_kind_of`'s own arms) is pinned per-code by
 /// `fs_io_types.nova`. This Rust half, the one that produces a code from a
 /// real `std::io::ErrorKind` below, is pinned by a fixture that provokes the
-/// real OS condition for only four of the eight: `NotFound`
-/// (`fs_not_found.nova`), `AlreadyExists` (`fs_already_exists.nova`),
-/// `InvalidData` (`fs_invalid_data.nova`), and `PermissionDenied` on Windows
-/// only (`fs_permission_denied.nova`, reading a directory as a file — see
-/// that test's `#[cfg(windows)]` gate). `Interrupted`, `TimedOut` and
-/// `ConnectionRefused` are not reachable from `std/fs`'s `async fn`s at all,
-/// portably or otherwise, so no fixture can pin them. **Reasoned, not
-/// measured, for `read`/`write` (`byte-type` branch):** both route through
-/// this same `fail` function exactly as `read_to_string`/`write_string` do,
-/// over `std::fs::read`/`std::fs::write` rather than
-/// `std::fs::read_to_string`/`std::fs::write` — reading or writing raw bytes
-/// instead of UTF-8 text opens no path to a network- or signal-flavoured
-/// `ErrorKind` that plain-text local I/O did not already have, so the same
-/// unreachability is expected to hold, not separately provoked. The
-/// `_ => OTHER` fallback *is* reachable (e.g. `read_dir` on a plain file
-/// returns it), but nothing exercises it today. See
-/// `docs/adr/0011-io-error-kinds.md`, which states this split correctly and
-/// predates this correction.
+/// real OS condition for only four of the eight: `NotFound`, `AlreadyExists`,
+/// `InvalidData`, and `PermissionDenied` on Windows only.
+///
+/// **Corrected 2026-08-14 (branch `file-open-openoptions`): naming one
+/// fixture per kind, as this comment used to, went stale for three of those
+/// four the moment `file.rs`'s `open` began producing this same numbering
+/// from a second Rust source.** Per kind, now:
+/// - `NotFound`: `fs_not_found.nova` (`read_to_string` on a missing path),
+///   and independently `file_errors.nova` (`open` on a path under a missing
+///   parent directory).
+/// - `AlreadyExists`: `fs_already_exists.nova` (`create_dir` on an existing
+///   path, twice), and independently `file_errors.nova` (`open` with
+///   `create_new` on an existing path).
+/// - `InvalidData`: `fs_invalid_data.nova` only — `File::read` hands back
+///   `Bytes` and never decodes UTF-8, so nothing about `File` can provoke
+///   this one.
+/// - `PermissionDenied`, Windows only: `fs_permission_denied.nova`
+///   (`read_to_string` on a directory, `#[cfg(windows)]`), and independently
+///   `file_open_dir.nova` (`open` on a directory, `#[cfg(windows)]`).
+///
+/// `Interrupted`, `TimedOut` and `ConnectionRefused` are not reachable from
+/// `std/fs`'s `async fn`s at all, portably or otherwise, so no fixture can pin
+/// them. **Reasoned, not measured, for `read`/`write` (`byte-type` branch):**
+/// both route through this same `fail` function exactly as
+/// `read_to_string`/`write_string` do, over `std::fs::read`/`std::fs::write`
+/// rather than `std::fs::read_to_string`/`std::fs::write` — reading or
+/// writing raw bytes instead of UTF-8 text opens no path to a network- or
+/// signal-flavoured `ErrorKind` that plain-text local I/O did not already
+/// have, so the same unreachability is expected to hold, not separately
+/// provoked. The `_ => OTHER` fallback *is* reachable (e.g. `read_dir` on a
+/// plain file returns it, still unexercised).
+///
+/// **Corrected 2026-08-14: it is no longer true that nothing exercises this
+/// fallback.** `file.rs`'s closed/stale/forged-fd case (`closed_fd_error`)
+/// fabricates a `std::io::Error` of `ErrorKind::Other` on every table miss,
+/// unconditionally, which falls to this identical `_` arm — and
+/// `file_lifetime.nova`'s "read after close" check asserts on the exact
+/// message that arm stashes. See `docs/adr/0011-io-error-kinds.md`, which
+/// states this split correctly as of the same correction.
 pub const OK: i64 = 0;
 pub const NOT_FOUND: i64 = 1;
 pub const PERMISSION_DENIED: i64 = 2;

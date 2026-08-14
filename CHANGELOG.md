@@ -1129,6 +1129,94 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `Future`-returning signature, or makes them fallible; they stay exactly
     the fire-and-forget calls they already were.
 
+- `File`, `open`, `OpenOptions`, and `impl Read`/`impl Write for File`
+  (increment 3c of the `std/fs`-on-Strings decomposition, the last of it —
+  `docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md`):
+  `open`/`File` were `docs/adr/0011-io-error-kinds.md`'s last remaining
+  deviation from `nova-spec/20-STDLIB.md`, now **closed rather than narrowed
+  further** — every item that ADR ever named as deferred is shipped.
+  - **`File` is Nova's first value holding an OS resource across more than
+    one intrinsic call.** Every `std/fs` function before it opens, acts and
+    closes inside a single intrinsic, and increment 3b's three standard
+    streams are process-global and never closed, so nothing shipped so far
+    needed real handle lifetime management. `File` does:
+    `File { fd: Int }`, where `fd` keys a new thread-local table of open
+    `std::fs::File`s (`crates/nova-runtime/src/file.rs`), not an OS file
+    descriptor number.
+  - **`OpenOptions`** is a record of six `Bool` flags — `read`, `write`,
+    `append`, `truncate`, `create`, `create_new` — with `impl Default`
+    (every flag false) and three named constructors, `reading()`,
+    `writing()` (write + create + truncate) and `appending()` (append +
+    create), each forwarding one for one onto `std::fs::OpenOptions`'s own
+    method of the same name. No chainable builder: a receiver-mutating
+    method cannot be called on a temporary (`E0060`, measured), so
+    `OpenOptions::reading().with_write()` does not compile in this
+    language — an exotic combination starts from `OpenOptions::default()`
+    plus field assignment on a `let mut` local instead.
+  - **`pub async fn open(path: String, options: OpenOptions) -> Result<File,
+    IoError>`**, plus an inherent `pub async fn close(self) -> Result<(),
+    IoError>` on `File` — plain `async fn`, not the `Future<T>` spelling
+    increment 3b's *trait* methods needed, because that spelling is forced
+    only where `async fn` is illegal (a trait declaration) and `close` is
+    not one — and `impl Read for File` / `impl Write for File` over the same
+    two traits increment 3b shipped.
+  - **`close` is idempotent, and any other operation on a closed `File` is
+    an ordinary `IoError { kind: Other }`, never a panic, an abort, or a
+    read of freed memory.** Nova has no move checking, so `self` by value
+    cannot stop a second call to `close`, and no `IoErrorKind` variant
+    exists for "closed" — the message names the condition instead. A forged
+    handle (`File { fd: 9999 }`, constructible because Nova has no field
+    privacy) gets identical treatment, because **absence from the handle
+    table is what closedness is**: a closed fd, a stale fd and a forged fd
+    all miss the same lookup and become the same error.
+  - **Explicit `close` is the only release mechanism, and forgetting it
+    leaks the descriptor until the process exits — on every platform,
+    deliberately.** The collector already has a per-object notification
+    hook it could in principle use (`gc.rs`'s sweep calls
+    `task::forget_freed_state` on every freed address), but `File`'s
+    `fd: Int` representation makes using it impossible rather than merely
+    unbuilt — the collector never sees an integer field inside a record —
+    and collection does not run at all off Windows, so a backstop reachable
+    only there would encode a guarantee two of three supported platforms
+    cannot honor. Recorded in a new ADR, rather than fixed:
+    `docs/adr/0012-file-descriptor-lifecycle.md`.
+  - Five new `Builtin::STD_ONLY` intrinsics
+    (`nova_rt_file_open`/`close`/`read`/`write`/`flush`), taking `STD_ONLY`
+    from `[Builtin; 48]` to `[Builtin; 53]`. **`STD_MODULES` and
+    `RESERVED_TYPE_NAMES` are both unchanged at 7** — `File` and
+    `OpenOptions` are ordinary `std/fs` definitions, glob-imported and
+    shadowable like any other, so no name is reserved and no existing
+    program breaks.
+  - `std/io`'s `decode_count` — the function decoding a write's byte count
+    back out of the 8 little-endian bytes it crosses the runtime boundary
+    as — is now `pub`, so `std/fs`'s `File` wrappers can call it directly
+    for `open`'s new fd and `Write::write`'s byte count, rather than
+    duplicating it. Forced, not chosen: Nova's `Visibility` has exactly two
+    levels, `Pub` and `Private` — there is no `pub(crate)` tier — and only a
+    `Pub` item enters a module's exports, so `pub` was the only mechanism
+    available at all. Widens `std/io`'s public surface as a side effect.
+  - `nova-spec/20-STDLIB.md` §5 is amended in place (dated note) to define
+    `OpenOptions` as a type for the first time — the spec had named it as
+    `open`'s parameter since before this increment existed, but never
+    defined it — and to record that `File` carries an `Int` descriptor with
+    explicit `close`, not the opaque shape the code sample there still
+    shows. Two one-sentence gaps increment 3b left in §4 are also closed: a
+    short write is legal (`Write::write` may report fewer bytes than `buf`
+    holds — already true of increment 3b's shipped `write`, just not
+    previously stated), and `nova_rt_io_stdin_read` charges a generous `max`
+    in full, allocating its whole capacity eagerly before any read happens
+    (`File::read` shares the identical shape).
+  - Four new fixtures: `file_roundtrip.nova` (open for writing, write,
+    close, reopen for reading, `read_to_end`, close — exercising both trait
+    impls and the `Read` default increment 3b shipped), `file_lifetime.nova`
+    (idempotent close; a closed handle and a forged handle both fail as an
+    ordinary error rather than a panic or a hang), `file_errors.nova` (two
+    portable failures — `create_new` on an existing path, `open` under a
+    missing parent directory — ungated, on every platform), and
+    `file_open_dir.nova` (opening a directory for reading,
+    `#[cfg(windows)]`, split out from `file_errors.nova` so its two portable
+    checks run everywhere rather than only where the directory check needs).
+
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of
