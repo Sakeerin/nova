@@ -86,10 +86,25 @@ real-condition fixture — `NotFound`, `AlreadyExists`, `InvalidData` portably,
 and `PermissionDenied` on Windows only, provoked by `read_to_string` on a
 directory. (Note the shape matters: reading the temp directory *itself* gives
 `NotFound`, because Windows resolves a trailing-backslash-only path before
-checking access; the fixture reads a plain created subdirectory.) The remaining
-four — `Interrupted`, `TimedOut`, `ConnectionRefused`, `Other` — are not things
-`std/fs`'s functions can provoke portably in a test, so `fs_io_types.nova` instead pins
-the *numbering* directly — calling `io_error_kind_of(1)` through
+checking access; the fixture reads a plain created subdirectory.)
+
+**Corrected 2026-08-14 (branch `file-open-openoptions`): "provoked by
+`read_to_string` on a directory" is no longer the only way to `PermissionDenied`.**
+`open` (decision 2 below) reaches the identical condition a second,
+independent way — opening, rather than reading, the same shape of directory —
+pinned by `file_open_dir.nova`, `#[cfg(windows)]` for the identical reason.
+`NotFound` and `AlreadyExists` are likewise now each pinned twice over, by two
+of `open`'s portable failure checks in `file_errors.nova` (a missing parent
+directory; `create_new` on a path that already exists). Still **four** kinds
+pinned by a real condition, not five — a second path to an already-counted
+kind each time, not a new one — and `crates/nova-runtime/src/fs.rs`'s own
+status-code doc comment carries the full, corrected per-kind attribution
+rather than this paragraph restating it.
+
+The remaining four — `Interrupted`, `TimedOut`, `ConnectionRefused`, `Other`
+— are not things `std/fs`'s functions can provoke portably in a test, so
+`fs_io_types.nova` instead pins the *numbering* directly — calling
+`io_error_kind_of(1)` through
 `io_error_kind_of(7)`, the seven codes that map to a specific variant, plus
 `io_error_kind_of(0)` (the success status, not itself a kind) and
 `io_error_kind_of(99)` (a code nothing defines), both of which must land on
@@ -161,6 +176,24 @@ lifetime management — acquired, held, and eventually closed. `Stdin`,
 never closed — `std/io/lib.nova`'s module doc), which is exactly why they,
 and the traits over them, could ship ahead of `open`/`File`.
 
+**Closed 2026-08-14 (branch `file-open-openoptions`):** `open` and `File`
+were this decision's last remaining item, restricted by the identical
+property the note above already named — a handle with real lifetime
+management — not by a count. Both now exist (`std/fs/lib.nova`):
+`OpenOptions` (six `Bool` flags, `impl Default`, three named constructors —
+`reading`, `writing`, `appending`), `File { fd: Int }`, `pub async fn
+open(path: String, options: OpenOptions) -> Result<File, IoError>`, an
+inherent `pub async fn close(self) -> Result<(), IoError>`, and `impl Read
+for File` / `impl Write for File` over the two traits the narrowing above
+shipped. This decision's entire original list — `read`, `write`, `open`,
+`File`, plus `Read`, `Write`, `Stdin`, `Stdout`, `Stderr` from the narrowing
+above — is now shipped: nothing this decision ever named as deferred remains
+so, which is what makes this a closing rather than a further narrowing. The
+resource model `open`/`File` needed — why a handle survives between calls,
+and why closing one is left to the caller rather than the collector — is its
+own decision, recorded in `docs/adr/0012-file-descriptor-lifecycle.md` rather
+than here.
+
 ### 3. `temp_dir() -> String` is added, and is not in §5 at all
 
 A fixture that writes, creates, or removes anything on disk needs a writable
@@ -209,6 +242,22 @@ before the calling task's own suspend machinery is ever reached, so nothing
 yields. ADR 0009 §1 is amended in place (dated note, this ADR) to record that
 its "always" no longer holds without qualification.
 
+**Narrowed 2026-08-14 (branch `file-open-openoptions`): the guard's reach,
+not the property, is what changed.** `File`'s five operations
+(`nova_rt_file_open`/`close`/`read`/`write`/`flush`, a new
+`crates/nova-runtime/src/file.rs`) are `std/fs` intrinsics too, and by
+inspection none calls `stage_park` either, so the never-suspends property
+above still holds for them. What no longer holds is
+`no_filesystem_intrinsic_registers_a_park`'s own claim, in this section's
+opening paragraph, to cover "whichever `async fn`s `std/fs` exposes without
+needing a recount as more are added": it scans only `fs.rs`'s own source, and
+this is the first increment to put a `std/fs` intrinsic in a second Rust
+file, so a `stage_park` call added to `file.rs` alone would not fail that
+test.
+`File`'s never-suspends property is established here, by inspection and by
+`docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md`,
+rather than by that guard.
+
 ### `exists` cannot distinguish "absent" from "present but unreadable"
 
 §5 gives `exists` a `Bool` return, not a `Result`:
@@ -253,6 +302,11 @@ other direction.
   separates them from everything already shipped, rather than a count, is
   that building either needs a handle with real lifetime management, which
   nothing shipped so far has needed.
+
+  **Closed 2026-08-14 (branch `file-open-openoptions`): `open` and `File`
+  now compile and run too**, over the identical resource-handle mechanism the
+  narrowing above said they were waiting on. Nothing this bullet ever named
+  remains `E0001`.
 - **The drive loop is untouched.** `crates/nova-runtime/src/task.rs`'s
   `report_deadlock` default arm still assumes every `Wait` variant carries a
   deadline, which is correct as long as nothing can park on an external event —
@@ -327,14 +381,24 @@ other direction.
   `docs/superpowers/specs/2026-08-12-per-task-payload-slots-design.md` — the
   per-task table that replaces the thread-local `Cell` slots this ADR's
   Consequences section originally described (corrected above)
+- Design (2026-08-14 amendment):
+  `docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md` —
+  `OpenOptions`, `File`, `open`, `close`, closing decision 2's deviation
+  (above) and grounding `docs/adr/0012-file-descriptor-lifecycle.md`
 - Plan and ledger: `docs/superpowers/plans/2026-08-11-std-fs-strings.md`,
   `.superpowers/sdd/2026-08-11-std-fs-strings/`
 - `crates/nova-runtime/src/fs.rs`: the status constants, `fail`, and
-  `no_filesystem_intrinsic_registers_a_park`
+  `no_filesystem_intrinsic_registers_a_park`; `crates/nova-runtime/src/file.rs`
+  (2026-08-14): the open-file handle table and `open`/`close`/`read`/`write`/
+  `flush`, over the identical status boundary
 - `std/io/lib.nova`: `IoError`, `IoErrorKind`, `io_error_kind_of`
 - `std/fs/lib.nova`: the wrappers (including `read`/`write` from the
-  2026-08-12 amendment above), `DirEntry`, `temp_dir`
+  2026-08-12 amendment above), `DirEntry`, `temp_dir`, and (2026-08-14)
+  `OpenOptions`, `File`, `open`
 - Related: `docs/adr/0009-async-execution-model.md` §1 (the cooperative-
   scheduling hazard this increment's never-suspends property is a new instance
   of; amended in place by this ADR), `docs/adr/0004-stdlib-compile-model.md`
-  (why `std/io`/`std/fs` are Nova source compiled as implicit modules)
+  (why `std/io`/`std/fs` are Nova source compiled as implicit modules),
+  `docs/adr/0012-file-descriptor-lifecycle.md` (2026-08-14 — why `File` has no
+  close-on-collect backstop, the decision this ADR's own closed deviation
+  needed once `open`/`File` existed to need one)

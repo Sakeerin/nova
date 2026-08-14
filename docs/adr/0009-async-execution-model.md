@@ -328,6 +328,18 @@ afterwards.
   root at *completion* instead would free a heap-valued output while the task's
   own record still names it. A leak, not unsoundness. The natural fix point is a
   future `JoinHandle` drop or cancellation, i.e. the gap above.
+
+  **The identical shape recurs for a different resource (added 2026-08-14,
+  branch `file-open-openoptions`): a `File` that is never `close`d leaks its
+  OS descriptor until the process exits.** Inherited from this footgun, not a
+  fresh instance invented independently — but closing *that* gap raised a
+  question this one does not, since the collector has a per-object hook
+  (`gc.rs`'s sweep calls `task::forget_freed_state` on every freed address,
+  not only a task's) that looks like it could back a close-on-collect
+  backstop. Why it cannot, for `File` specifically, plus the platform gap
+  that would make such a backstop dishonest even if it could, is recorded as
+  its own decision rather than folded into this one:
+  `docs/adr/0012-file-descriptor-lifecycle.md`.
 - **Each `yield_now()` costs four allocations** — `yield_now` is itself an `async
   fn` wrapping a builtin, so a state object and a fat pointer for each of the two
   layers. Nothing caches or pools them.
@@ -586,3 +598,7 @@ Two companion rules, from the same evidence:
   collection tests, including the two that cover the executor's rooting
 - `docs/adr/0002-phase1-leaking-allocator.md` — why the collector is
   conservative, and why there is no unwinding to catch a panic with
+- `docs/adr/0012-file-descriptor-lifecycle.md` (2026-08-14) — the identically-
+  shaped leak this ADR's §1 first documented, recurring for `File`'s OS
+  descriptor instead of a task's state object, and why closing *that* one
+  needed its own document rather than a longer footgun bullet here

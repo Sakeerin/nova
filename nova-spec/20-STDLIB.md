@@ -170,8 +170,9 @@ module std.io
 // header over a GC leaf buffer, `std/bytes`) is the concrete buffer type:
 // `std/fs`'s `read`/`write` below in §5 already ship against it --
 // `Result<Bytes, IoError>` and `content: Bytes`, not the `[u8]` shown there
-// -- and `open`/`File`/these two traits will too, once built. See
-// docs/adr/0011-io-error-kinds.md for the narrowed §5 deviation this leaves.
+// -- and `open`/`File`/these two traits do too, now that all three are
+// built (2026-08-14, both amendments below). See docs/adr/0011-io-error-
+// kinds.md for the §5 deviation this left, since closed.
 //
 // AMENDED 2026-08-14 (branch `read-write-stdio`): neither trait below
 // compiles exactly as declared, and neither do `stdin`/`stdout`/`stderr`'s
@@ -184,8 +185,24 @@ module std.io
 // concrete, fieldless records `Stdin`/`Stdout`/`Stderr` instead of `impl
 // Read`/`impl Write` -- each has a plain, lowercase-named `fn` constructor,
 // not the trait-typed return shown below. See `std/io/lib.nova` for the
-// shipped signatures and docs/adr/0011-io-error-kinds.md for the deviation
-// this narrows, to `open`/`File` only.
+// shipped signatures and docs/adr/0011-io-error-kinds.md decision 2 for the
+// deviation this narrowed at the time, to `open`/`File` only -- closed since,
+// by the amendment §5 below records.
+//
+// AMENDED 2026-08-14 (branch `file-open-openoptions`): two clauses the note
+// above left unstated, both true of what it shipped. First, `Write::write`'s
+// `-> Result<Int, IoError>` implies a count without ever saying a *short*
+// write is legal -- it is: `write` is plain `write`, not `write_all`, so a
+// caller that needs every byte of `buf` sent must loop on the returned count
+// itself (stated on the Nova side by `std/io/lib.nova`'s own doc comment on
+// `Write::write`). Second, `nova_rt_io_stdin_read` allocates its caller's
+// `max` eagerly, before any read happens, so a generous *ceiling* is charged
+// in full even when the real read returns far fewer bytes or fails outright
+// -- `read(max)` expresses an upper bound, not a request for exactly that
+// many bytes, and paying for the bound up front was not stated anywhere a
+// caller would read it before this note. `crates/nova-runtime/src/file.rs`'s
+// `nova_rt_file_read` repeats the identical eager-allocation shape for
+// `File::read` below, once `File` existed to have one.
 pub trait Read {
     async fn read(self, buf: &mut [u8]) -> Result<Int, IoError>
     async fn read_to_end(self, buf: &mut [u8]) -> Result<Int, IoError> { /* default */ }
@@ -247,6 +264,39 @@ pub record DirEntry {
     pub is_dir: Bool
 }
 
+// AMENDED 2026-08-14 (branch `file-open-openoptions`): `OpenOptions` is
+// `open`'s parameter type above and has been since this section first named
+// it, but no document ever defined it as a type until now -- everywhere else
+// it appeared was prose *about* the gap, not a definition. It ships as a
+// record of six `Bool` flags, in the order `open` forwards them to the
+// runtime: read, write, append, truncate, create, create_new. `impl Default`
+// sets every flag false; that value alone is not a legal `open` argument
+// (`std::fs::OpenOptions` requires at least one of read/write/append), so it
+// exists as a base for field assignment, not for direct use. Three named
+// constructors cover the common cases instead: `reading()`, `writing()`
+// (write + create + truncate) and `appending()` (append + create). There is
+// no chainable builder: a receiver-mutating method cannot be called on a
+// temporary (`E0060`, measured), so `OpenOptions::reading().with_write()`
+// does not compile in this language -- an exotic combination starts from
+// `OpenOptions::default()` and assigns fields on a `let mut` binding instead.
+//
+// `File` below is written `{ /* opaque */ }` because nothing outside
+// `std/fs` should rely on its shape, but it is not opaque to the language
+// itself: it ships as `File { fd: Int }`, an `Int` key into a runtime-owned
+// table of open OS handles (`crates/nova-runtime/src/file.rs`), not an OS
+// file descriptor number. Nova has no destructors. The code block below
+// shows no `close` at all -- it is inherent (`pub async fn close(self) ->
+// Result<(), IoError>`), not a method of `Read` or `Write`, so it does not
+// appear in either `impl` -- and it is the only release mechanism: a `File`
+// that is never closed leaks its descriptor for the life of the process, on
+// every platform, deliberately (docs/adr/0012-file-descriptor-lifecycle.md).
+// `close` is idempotent, and any other operation on a closed, stale, or forged
+// handle (Nova has no field privacy, so `File { fd: 9999 }`, naming no file
+// this module ever opened, is ordinary, legal code) is an ordinary
+// `IoError { kind: Other }`, never a panic: absence from the handle table is
+// what closedness *is*, so a closed, a stale, and a forged handle all get
+// identical treatment. See docs/adr/0011-io-error-kinds.md decision 2, whose
+// deviation `open`/`File` were the last item of, now closed.
 pub async fn open(path: String, options: OpenOptions) -> Result<File, IoError>
 
 pub record File { /* opaque */ }
