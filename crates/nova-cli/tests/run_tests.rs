@@ -6910,12 +6910,18 @@ fn io_broken_stdout_run() {
 /// unconditionally, even though the pipe is still broken. So of the four
 /// wrappers a mutated status check could hide behind, this fixture closes
 /// three (`write_stdout`, `flush_stdout` above, `write_stderr` here);
-/// `flush_stderr`'s status check has no fixture-reachable failure found by
-/// this technique. No second technique was tried -- a Nova program has no
-/// way to invalidate its own file descriptors any more severely than
-/// closing their readers, which this technique already does -- so this is
-/// reported as an open gap rather than a search that was exhausted; see
-/// the report.
+/// `flush_stderr`'s status check has no fixture-reachable failure -- **settled, not open.**
+/// Rust 1.95's own source closes it: `StderrLock::flush` reaches the shared `RefCell<StderrRaw>`
+/// and calls `handle_ebadf(sys::stdio::Stderr::flush, || Ok(()))`, and the Windows platform
+/// module's `impl io::Write for Stderr` hardcodes `fn flush(&mut self) -> io::Result<()> { Ok(())
+/// }` -- there is no staging layer for a write to fail through, so this call cannot report `Err`
+/// on this platform, by construction, regardless of the pipe's state. No second fixture technique
+/// was needed: a Nova program has no way to invalidate its own file descriptors any more severely
+/// than closing their readers, which this technique already does, and that would not matter here
+/// regardless. **Measured by reading the standard library's own source on Windows; the identical
+/// claim for Unix is reasoned from the same shape, not run** -- no Unix host was available to
+/// check it. The `flush_stderr: ok` assertion below stays; it correctly pins today's platform
+/// behaviour.
 #[cfg(windows)]
 #[test]
 fn io_broken_stderr_run() {
@@ -6939,5 +6945,106 @@ fn io_broken_stderr_run() {
         "with nothing buffered (stderr never buffered either of the writes \
          above), flushing stderr must report Ok even though the pipe is \
          broken -- there is nothing pending for it to fail on: {stdout:?}"
+    );
+}
+
+/// Runs `path` (`tests/runtime/io_read_stdin_write_only.nova`) as a child
+/// process whose **stdin is a write-only file handle**, and returns the exit
+/// status and the full text of its stdout.
+///
+/// **Reuses `run_with_a_broken_pipe`'s spawn shape but needs none of its
+/// ordering (final review, I2).** That function must drop a pipe's read end
+/// before releasing the child from its own stdin block, because the break
+/// and the child's read race each other, and getting the order wrong would
+/// let the child observe a still-healthy stream. There is no such race
+/// here: `Stdio::from(File::create(..))` hands the child a handle that was
+/// never readable from the moment the process was created, so the child's
+/// very first `stdin().read(..)` fails at spawn-adjacent OS call time
+/// rather than blocking on anything this harness must later release. Both
+/// the child's stdout and stderr stay healthy -- only stdin is broken --
+/// so this can capture output the ordinary way with `Command::output`,
+/// unlike `run_with_a_broken_pipe`'s manual drop-then-read sequencing.
+///
+/// **`File::create` is deliberately write-only, not read-write.** On
+/// Windows this opens with `GENERIC_WRITE` alone, no `GENERIC_READ`, and a
+/// spawned child inherits that same restricted handle rather than a
+/// broader one -- confirmed by `io_read_stdin_write_only_run`'s own
+/// measured result, not assumed from the API name.
+#[cfg(windows)]
+fn run_with_a_write_only_stdin(path: &std::path::Path) -> (std::process::ExitStatus, String) {
+    use std::process::Stdio;
+
+    let stdin_path = std::env::temp_dir().join("nova_io_read_stdin_write_only_probe.txt");
+    let stdin_file = std::fs::File::create(&stdin_path)
+        .expect("create a write-only file to hand the child as its stdin");
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
+        .arg("run")
+        .arg(path)
+        .stdin(Stdio::from(stdin_file))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run nova with a write-only stdin");
+
+    // Best-effort: a leaked probe file does not affect correctness, and this
+    // harness has no child-process failure path that would leave the file
+    // locked on Windows the way a still-open handle would.
+    let _ = std::fs::remove_file(&stdin_path);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    (output.status, stdout)
+}
+
+/// `read_stdin`'s `Err` branch (`std/io/lib.nova`), reached deterministically
+/// through a write-only stdin handle rather than argued to be hard to reach.
+///
+/// **Closes the gap the branch's own records called "plausibly genuinely
+/// hard" (final review, I2).** That characterisation was true only of the
+/// broken-pipe *technique*: closing a stdin pipe yields ordinary EOF
+/// (`Ok(0)`), a path `read_stdin` already handles as success. A write-only
+/// handle is a different failure shape entirely -- the read never reaches
+/// EOF because it never reaches "empty"; it is refused before any bytes are
+/// considered, and this fixture is what proves that mechanically rather
+/// than by argument. This is not merely as deterministic as the
+/// broken-pipe fixtures above: it is *more* so, because there is no
+/// ordering to get right and no race window at all -- the handle is
+/// write-only from the instant the child exists, not made so by an action
+/// this harness takes after spawning.
+///
+/// **Measured on this host, not assumed:** deleting `read_stdin`'s status
+/// check (`std/io/lib.nova`, replacing its `Err(IoError { .. })` arm with
+/// `Ok(fs_take_bytes())`, the exact mutation the design named) turned this
+/// test's output from `read_stdin: err PermissionDenied` into
+/// `read_stdin: unexpectedly ok, len 0`, failing the assertion below with
+/// that exact string in the panic message. Reverting the mutation restored
+/// a pass. This doc comment describes what was actually run against this
+/// fixture, in that order, not a plan for what the mutation ought to do.
+///
+/// `#[cfg(windows)]` in the same style as `run_with_a_broken_pipe`'s two
+/// fixtures -- measured on Windows, reasoned rather than measured on Unix,
+/// because no Unix host is available here -- but for a different mechanism,
+/// not the same one: those two gate on `SIGPIPE`/`EPIPE` for a *write* to a
+/// broken pipe, while this technique is a *read*. Rust's own `unix.rs`
+/// shows `StdinRaw::read` wrapped in `handle_ebadf(.., || Ok(0))`, and a
+/// file opened `O_WRONLY` is textbook-POSIX `EBADF` on a `read()` call --
+/// so on Unix this exact technique would fold to `Ok(0)`, the identical
+/// value correct code already returns for real EOF. **That is a reason to
+/// expect this specific technique gives no signal there, not merely an
+/// unmeasured one**: unlike `run_with_a_broken_pipe`'s mechanism, which is
+/// reasoned to also *work* on Unix, this one is reasoned to *fold away* on
+/// Unix, which is why this fixture does not attempt a non-Windows variant
+/// rather than shipping one untested.
+#[cfg(windows)]
+#[test]
+fn io_read_stdin_write_only_run() {
+    let (status, stdout) = run_with_a_write_only_stdin(
+        &repo_root().join("tests/runtime/io_read_stdin_write_only.nova"),
+    );
+    assert!(status.success(), "the child process itself must exit 0");
+    assert!(
+        stdout.contains("read_stdin: err PermissionDenied"),
+        "a write-only stdin handle must make read_stdin's intrinsic report \
+         PermissionDenied, not silently succeed on an empty read: {stdout:?}"
     );
 }
