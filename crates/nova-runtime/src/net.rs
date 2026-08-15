@@ -1536,6 +1536,63 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
+    /// The gap the single-poll check above cannot see: nothing yet drove a
+    /// future through a *second* would-blocking poll while still parked, so
+    /// a `poll_read` that stages correctly the first time and silently skips
+    /// staging on every later `WouldBlock` -- "stage once ever" -- would
+    /// still pass every other test in this file. In production that shape is
+    /// a real hang: a task woken spuriously (this module's own comments on
+    /// `poll_read_timeout` already anticipate one) with no data actually
+    /// having arrived would re-poll, find `WouldBlock` again, and never
+    /// re-register interest -- nothing is left to wake it a second time.
+    ///
+    /// Drains between the two polls (`drain_stray_pending_park_for_test`):
+    /// `Staged` aborts on a same-kind pair (`try_stage`'s own doc comment),
+    /// which is exactly what makes the second `stage_io_park` call
+    /// observable at all rather than an immediate process abort.
+    #[test]
+    fn a_read_still_blocked_on_its_second_poll_stages_a_park_again() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+
+        let fut = unsafe { nova_rt_net_read_future(fd, 64) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(first, POLL_PENDING, "test setup: the first poll must park");
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Read, None)),
+            "test setup: the first poll must stage a park"
+        );
+
+        // No data was written on the peer in between: simulate a wake with
+        // nothing actually having arrived (a spurious wake, or the socket
+        // looking briefly ready and then not).
+        drain_stray_pending_park_for_test();
+
+        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            second, POLL_PENDING,
+            "still no data on the second poll -- must still park, not \
+             complete"
+        );
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Read, None)),
+            "a still-blocked read must stage a park again on its second \
+             poll, not only its first -- a future that stages once and \
+             never again leaves a spuriously-woken task parked forever with \
+             nothing left to wake it"
+        );
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
     #[test]
     fn a_read_with_data_already_waiting_completes_on_the_first_poll_without_parking() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1669,6 +1726,56 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
+    /// The write-side counterpart of
+    /// [`a_read_still_blocked_on_its_second_poll_stages_a_park_again`] -- see
+    /// that test's own doc comment for the gap this closes and why draining
+    /// between the two polls is required.
+    #[test]
+    fn a_write_still_blocked_on_its_second_poll_stages_a_park_again() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+
+        let chunk_bytes = vec![0xABu8; 1024 * 1024];
+        fill_send_buffer_until_would_block_for_test(fd, &chunk_bytes);
+
+        let chunk = crate::gc_bytes_for_test(&chunk_bytes);
+        let fut = unsafe { nova_rt_net_write_future(fd, chunk) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(first, POLL_PENDING, "test setup: the first poll must park");
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Write, None)),
+            "test setup: the first poll must stage a park"
+        );
+
+        // Nothing drained the peer in between: the send buffer is still
+        // full, simulating a wake with no room actually having opened up.
+        drain_stray_pending_park_for_test();
+
+        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            second, POLL_PENDING,
+            "the send buffer is still full on the second poll -- must still \
+             park, not complete"
+        );
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Write, None)),
+            "a still-full write must stage a park again on its second poll, \
+             not only its first -- a future that stages once and never \
+             again leaves a spuriously-woken task parked forever with \
+             nothing left to wake it"
+        );
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
     #[test]
     fn a_ready_write_stashes_its_byte_count_via_slot_buffer() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1794,6 +1901,71 @@ mod tests {
             None => panic!(
                 "read_timeout with no data waiting must genuinely stage a \
                  park, not merely return POLL_PENDING while parking nothing"
+            ),
+        }
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// The `read_timeout` counterpart of
+    /// [`a_read_still_blocked_on_its_second_poll_stages_a_park_again`] -- see
+    /// that test's own doc comment for the gap this closes and why draining
+    /// between the two polls is required. A generous `ms` keeps the deadline
+    /// nowhere near passing across the small, real time this test's own
+    /// drain step takes.
+    #[test]
+    fn a_read_timeout_still_blocked_on_its_second_poll_stages_a_park_again() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        // Kept alive but never written to.
+        let (_server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 5_000) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(first, POLL_PENDING, "test setup: the first poll must park");
+        match crate::task::staged_io_for_test() {
+            Some((socket, interest, deadline)) => {
+                assert_eq!(socket, expected_socket, "test setup");
+                assert_eq!(interest, Interest::Read, "test setup");
+                assert!(deadline.is_some(), "test setup");
+            }
+            None => panic!("test setup: the first poll must stage a park"),
+        }
+
+        // No data was written on the peer in between: simulate a wake with
+        // nothing actually having arrived and the deadline nowhere near due.
+        drain_stray_pending_park_for_test();
+
+        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            second, POLL_PENDING,
+            "still no data and the deadline is nowhere near passing -- must \
+             still park, not complete"
+        );
+        match crate::task::staged_io_for_test() {
+            Some((socket, interest, deadline)) => {
+                assert_eq!(
+                    socket, expected_socket,
+                    "must park on this exact socket again"
+                );
+                assert_eq!(interest, Interest::Read);
+                assert!(
+                    deadline.is_some(),
+                    "a still-blocked read_timeout must stage a park again \
+                     on its second poll, carrying its deadline again -- a \
+                     future that stages once and never again leaves a \
+                     spuriously-woken task parked forever with nothing left \
+                     to wake it"
+                );
+            }
+            None => panic!(
+                "a still-blocked read_timeout must stage a park again on \
+                 its second poll, not only its first"
             ),
         }
 
