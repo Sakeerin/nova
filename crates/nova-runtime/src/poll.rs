@@ -22,6 +22,8 @@
 //! that will. Until then the non-empty path is exercised only by this
 //! module's own tests, directly, against real loopback sockets.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// A socket as the poller sees it: the OS handle, widened to `i64` so
@@ -112,6 +114,49 @@ fn remaining(deadline: Option<Instant>) -> Option<Duration> {
 /// `wait`'s own doc comment) could actually resolve.
 const ERROR_RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
+/// A fixed point in time this module measures log rate-limiting against,
+/// lazily fixed on first use. Only relative elapsed time matters for
+/// [`LogGate`], so an arbitrary origin is fine.
+fn log_epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// How often a single `tracing::warn!` call site in this module may log, at
+/// most. `wait` can be re-called every [`ERROR_RETRY_BACKOFF`] for a
+/// condition that persists indefinitely (see `wait`'s own doc comment), and
+/// one call site (the Unix arm's `FD_SETSIZE` check) is reached once per
+/// out-of-range socket *inside* a single call besides -- unthrottled, either
+/// shape logs without bound for as long as the underlying condition lasts.
+const LOG_RATE_LIMIT: Duration = Duration::from_secs(1);
+
+/// Rate-limits one `tracing::warn!` call site to at most one line per
+/// [`LOG_RATE_LIMIT`], across however many times or however many sockets
+/// reach it within that window -- a cap per call site, not per socket, so
+/// this costs a fixed handful of bytes rather than growing with however many
+/// distinct sockets happen to trip it over the process's lifetime.
+struct LogGate(AtomicU64);
+
+impl LogGate {
+    const fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// `true` at most once per [`LOG_RATE_LIMIT`]; lock-free, so a
+    /// concurrent tie can rarely let two callers both through at once -- an
+    /// occasional duplicate line, not a correctness problem for a
+    /// diagnostic that must not itself panic or block.
+    fn allow(&self) -> bool {
+        let now_ms = log_epoch().elapsed().as_millis() as u64;
+        let prev_ms = self.0.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(prev_ms) < LOG_RATE_LIMIT.as_millis() as u64 {
+            return false;
+        }
+        self.0.store(now_ms, Ordering::Relaxed);
+        true
+    }
+}
+
 /// Set `socket` non-blocking, for `net.rs` (Task 3) to call right after a
 /// socket is created and before it is ever handed to [`wait`] or connected --
 /// the property a non-blocking `connect` depends on.
@@ -144,6 +189,13 @@ pub fn set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
 fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec<RawSocket> {
     use std::os::unix::io::RawFd;
 
+    // Rate-limit gates for this function's two `tracing::warn!` sites --
+    // `static` inside the function body rather than at module scope, since
+    // nothing outside this arm needs them and each persists across calls
+    // exactly the same way either way. See `LogGate`'s own doc comment.
+    static FD_SETSIZE_LOG_GATE: LogGate = LogGate::new();
+    static SELECT_ERROR_LOG_GATE: LogGate = LogGate::new();
+
     loop {
         // SAFETY: `fd_set` is a plain-old-data bit-mask type; zero-initializing
         // it is exactly what `FD_ZERO` does, and both sets are fully
@@ -170,14 +222,21 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             // one) with nothing else in this crate ever explaining why.
             // `tracing::warn!` rather than silence: `wait` must not panic,
             // and there is no channel back to the caller to report this
-            // per-socket (see `wait`'s own doc comment).
+            // per-socket (see `wait`'s own doc comment). Gated by
+            // `FD_SETSIZE_LOG_GATE` because this loop runs once per socket
+            // per call: without a gate, N out-of-range sockets would log N
+            // lines every single call `wait` makes for as long as they stay
+            // parked, which for a caller with no deadline may be forever.
             if fd < 0 || fd as usize >= libc::FD_SETSIZE {
-                tracing::warn!(
-                    raw_socket = sock.0,
-                    fd_setsize = libc::FD_SETSIZE,
-                    "poll::wait: socket is outside select's representable range \
-                     and will never be watched on this platform"
-                );
+                if FD_SETSIZE_LOG_GATE.allow() {
+                    tracing::warn!(
+                        raw_socket = sock.0,
+                        fd_setsize = libc::FD_SETSIZE,
+                        "poll::wait: at least one socket is outside select's \
+                         representable range and will never be watched on this \
+                         platform (rate-limited: at most one line per second)"
+                    );
+                }
                 continue;
             }
             any_watched = true;
@@ -241,23 +300,40 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
                 continue;
             }
             // Some other failure (e.g. a socket closed out from under this
-            // call). There is no ready set to trust, and no channel to say
-            // *which* socket broke so a caller could evict it (see `wait`'s
-            // own doc comment) -- so log what's knowable and back off rather
-            // than spin, exactly like the `!any_watched` case above: retrying
-            // immediately cannot fix a persistent failure, only waste CPU
-            // doing so.
-            tracing::warn!(
-                error = %err,
-                "poll::wait: select failed; backing off rather than spinning"
-            );
-            std::thread::sleep(timeout.unwrap_or(ERROR_RETRY_BACKOFF));
+            // call, detected mid-wait). There is no ready set to trust, and
+            // no channel to say *which* socket broke so a caller could evict
+            // it (see `wait`'s own doc comment) -- so log what's knowable
+            // (rate-limited, for the same reason as the `FD_SETSIZE` site
+            // above) and back off rather than spin, exactly like the
+            // `!any_watched` case above: retrying immediately cannot fix a
+            // persistent failure, only waste CPU doing so.
+            //
+            // **Recomputed here, not reused from `timeout` above:** `timeout`
+            // was bound *before* the blocking `select` call; sleeping that
+            // stale value again after `select` already blocked for some
+            // (possibly nearly the whole) remaining duration would sleep
+            // twice against the same deadline, nearly doubling it in the
+            // worst case. `remaining(deadline)` recomputed right here, after
+            // the call, is what the deadline actually has left *now*.
+            if SELECT_ERROR_LOG_GATE.allow() {
+                tracing::warn!(
+                    error = %err,
+                    "poll::wait: select failed; backing off rather than \
+                     spinning (rate-limited: at most one line per second)"
+                );
+            }
+            std::thread::sleep(remaining(deadline).unwrap_or(ERROR_RETRY_BACKOFF));
             return Vec::new();
         }
 
         let mut ready = Vec::new();
         for (sock, interest) in sockets {
             let fd = sock.0 as RawFd;
+            // Same predicate as the watch-set-building loop above, over the
+            // same immutable `sockets` slice, within this one call: anything
+            // skipped here was already logged there (rate-limited) moments
+            // earlier in this same call. Silent here is redundancy with an
+            // already-reported gap, not a second, unreported one.
             if fd < 0 || fd as usize >= libc::FD_SETSIZE {
                 continue;
             }
@@ -318,6 +394,12 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
         WSAGetLastError, WSAPoll, POLLRDNORM, POLLWRNORM, SOCKET_ERROR, WSAEINTR, WSAPOLLFD,
     };
 
+    // See the Unix arm's identically-purposed gate for why this exists: a
+    // persistent, non-`WSAEINTR` failure can recur on every call `wait`
+    // makes for as long as a task stays parked with no deadline, and without
+    // this gate that logs without bound.
+    static WSAPOLL_ERROR_LOG_GATE: LogGate = LogGate::new();
+
     loop {
         let mut fds: Vec<WSAPOLLFD> = sockets
             .iter()
@@ -353,12 +435,28 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
                 continue;
             }
             // Same reasoning as the Unix arm's non-EINTR branch: no channel
-            // to say which socket broke, so log what's knowable and back off
-            // rather than spin.
-            tracing::warn!(
-                error_code = err,
-                "poll::wait: WSAPoll failed; backing off rather than spinning"
-            );
+            // to say which socket broke, so log what's knowable (rate-limited,
+            // same reason as the Unix arm's gates) and back off rather than
+            // spin. `remaining(deadline)` is recomputed fresh right here,
+            // after `WSAPoll` already returned -- not reused from
+            // `timeout_ms` above, which was bound *before* the blocking call
+            // and would already be stale by this point for the same reason
+            // the Unix arm's `rc < 0` branch had to stop reusing its own
+            // pre-call value.
+            //
+            // `WSAGetLastError`'s numeric code is wrapped in an `io::Error`
+            // (valid here: on Windows, `WSAGetLastError` is directly mapped
+            // to `GetLastError`, which is exactly what `io::Error` formats)
+            // so this logs the same shape (`error = %…`) as the Unix arm,
+            // rather than a raw integer nothing else in this module prints.
+            if WSAPOLL_ERROR_LOG_GATE.allow() {
+                let io_err = std::io::Error::from_raw_os_error(err);
+                tracing::warn!(
+                    error = %io_err,
+                    "poll::wait: WSAPoll failed; backing off rather than \
+                     spinning (rate-limited: at most one line per second)"
+                );
+            }
             std::thread::sleep(remaining(deadline).unwrap_or(ERROR_RETRY_BACKOFF));
             return Vec::new();
         }
