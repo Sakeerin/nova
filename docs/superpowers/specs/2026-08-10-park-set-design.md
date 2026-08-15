@@ -30,8 +30,8 @@ blocks is the operations, not obtaining the stream. ADR 0009 asked for the diagn
 **Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 4) — §5 no longer holds eleven
 functions, and its other declarations are no longer two records.** Measured by extracting the section
 (`awk '/^## 5\. /,/^## 6\. /'`) at three revisions: at this spec's own commit `d8dd5c6`, §5 held 11
-functions, all of them `async fn`, plus 2 records and 2 impl blocks. At `758ad4d`: 11 functions, 3
-records, 2 impls. At `37489f8`: **14 functions, 3 records and 4 impl blocks** — increment 3c declared
+functions, all of them `async fn`, plus 2 records and 2 impl blocks. At `509834e`: 11 functions, 3
+records, 2 impls. At `b21e4a9`: **14 functions, 3 records and 4 impl blocks** — increment 3c declared
 `OpenOptions` in that section and gave it an `impl Default` and three named constructors, `reading()`,
 `writing()` and `appending()`.
 

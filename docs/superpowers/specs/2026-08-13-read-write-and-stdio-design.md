@@ -54,16 +54,16 @@ two of the restated property's three clauses are false, and round 3 retracted on
 omission. It should not have. Clause by clause, each checked rather than inferred:
 
 - **The closing clause** — "not defined as a type anywhere in `nova-spec/` or `docs/`" — is false in
-  both halves. The `nova-spec/` half broke at commit `758ad4d`, once `nova-spec/20-STDLIB.md` §5 gained
+  both halves. The `nova-spec/` half broke at commit `509834e`, once `nova-spec/20-STDLIB.md` §5 gained
   an actual `pub record OpenOptions { ... }` declaration. The `docs/` half broke earlier still, and by
   this branch's own first commit:
   `docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md` — itself a document under
-  `docs/` — has defined `OpenOptions` in full, in its own §2, since commit `1509a82`, whose parent
+  `docs/` — has defined `OpenOptions` in full, in its own §2, since commit `5ce065d`, whose parent
   `7207a41` is this branch's merge base with `main`. That is three commits after this very correction
-  was written (`867b122` → `fc7b252` → `7207a41` → `1509a82`, confirmed by walking the log rather than
+  was written (`867b122` → `fc7b252` → `7207a41` → `5ce065d`, confirmed by walking the log rather than
   assumed).
 - **The middle clause** — "the two this paragraph originally cited remain the only place it appears
-  *inside a signature*" — was **already false at that same `1509a82`**, and round 3 did not check it.
+  *inside a signature*" — was **already false at that same `5ce065d`**, and round 3 did not check it.
   That commit's §2 fence carries four further signature occurrences: `pub fn reading() -> OpenOptions`,
   `writing()`, `appending()`, and `pub async fn open(path: String, options: OpenOptions)`. Fix round 3
   then added three more to `nova-spec/20-STDLIB.md` §5 — those same three constructors.
