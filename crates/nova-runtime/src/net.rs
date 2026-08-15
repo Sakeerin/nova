@@ -1,5 +1,6 @@
-//! Open TCP connections, keyed by descriptor, and the two-phase, non-blocking
-//! `connect` that populates the table.
+//! Open TCP connections, keyed by descriptor; the two-phase, non-blocking
+//! `connect` that populates the table; and, since Task 4, the `read`,
+//! `write`, and `read_timeout` futures that act on it.
 //!
 //! # The table is `file.rs`'s model, not a second one
 //!
@@ -67,6 +68,8 @@ use crate::NovaStr;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 thread_local! {
     /// Open TCP connections by descriptor. `thread_local!` for the reason
@@ -130,11 +133,15 @@ fn remove_socket(fd: i64) {
 
 /// Stash `n` as an 8-byte little-endian `Bytes` payload in `Slot::Buffer`.
 ///
-/// The identical encoding `file.rs`'s own `stash_i64` uses for `open`'s new
-/// fd, reproduced here rather than shared across modules for the same reason
-/// that one gives: a second, self-contained implementation of one small
-/// encoding costs less than reaching past the four names this module imports
-/// from `fs`.
+/// The identical encoding `file.rs`'s own `stash_i64` (and `io.rs`'s
+/// `stash_count`) use, reproduced here rather than shared across modules for
+/// the same reason those give: a second, self-contained implementation of one
+/// small encoding costs less than reaching past the four names this module
+/// imports from `fs`. Used here for two different payloads across this
+/// module's life -- `connect`'s new fd ([`finish_connect`]) and, since Task 4,
+/// `write`'s reported byte count ([`try_write`]) -- the same dual use
+/// `file.rs`'s own copy of this function already has for `open`'s fd and
+/// `write`'s count.
 fn stash_i64(n: i64) {
     stash(Slot::Buffer, crate::bytes::gc_bytes(&n.to_le_bytes()));
 }
@@ -575,10 +582,418 @@ pub unsafe extern "C-unwind" fn nova_rt_net_connect_future(addr: *const NovaStr)
     })
 }
 
+// ---------------------------------------------------------------------------
+// `read`, `write`, and `read_timeout` -- Task 4.
+//
+// Each of these parks on `Interest::Read`/`Interest::Write` exactly the way
+// `connect` parks on `Interest::Write` above, through the same
+// `stage_io_park` seam. But unlike `connect` -- whose first poll (issue the
+// syscall) and second (check `SO_ERROR`) are two genuinely different
+// operations -- the retried operation here (a non-blocking `Read::read` or
+// `Write::write` call) is the *same* call on every poll. Neither `read` nor
+// `write` needs `connect`'s `STATE_SLOT_TAG` phase switch for that reason:
+// repeating the same attempt is exactly correct whether it is the first poll
+// or the fifth, and trying it before ever parking is what gives both of them
+// `poll_join`'s own optimisation for free -- data (or room) already waiting
+// completes on the very first poll, with no park staged at all.
+//
+// `read_timeout` still keeps a resume tag, but not to pick a different
+// *operation* the way `connect` does -- only to compute its absolute deadline
+// exactly once, the first time it is ever polled. See `poll_read_timeout`'s
+// own doc comment for why distinguishing "ready" from "timed out" cannot ride
+// the poll call itself and has to be re-derived instead.
+// ---------------------------------------------------------------------------
+
+/// What one non-blocking `Read::read` attempt against a socket produced.
+enum ReadStep {
+    /// The attempt settled: success (bytes stashed via `Slot::Buffer`,
+    /// truncated to what was actually read -- an **empty** result is EOF, a
+    /// **short** one is not) or a real I/O error (`fail`'s status) or the fd
+    /// was not open (`closed_fd_error`). Either way there is nothing left to
+    /// do but report this status.
+    Done(i64),
+    /// The fd is open but has nothing to read right now. Carries the raw
+    /// socket a caller should park on for `Interest::Read`.
+    WouldBlock(RawSocket),
+}
+
+/// One non-blocking `Read::read` attempt against `fd`, truncating and
+/// stashing the result via `Slot::Buffer` on success.
+///
+/// Shared by [`poll_read`] and [`poll_read_timeout`] -- the two futures this
+/// module builds that read differ only in what they do with a
+/// [`ReadStep::WouldBlock`] (park with no deadline, or park with one and
+/// separately watch for it passing), never in how the read itself works.
+///
+/// **An empty result is EOF, and a short read is not** -- the `truncate`
+/// below keeps exactly what `Read::read` reported, never padding with the
+/// rest of `buf`'s zeroed capacity. The Nova-level contract this mirrors is
+/// `io.rs`'s own `read_and_stash` and `file.rs`'s `nova_rt_file_read`: the
+/// test is `len() == 0`, never `len() < max`. Getting this backwards --
+/// checking `n < max` instead of stashing exactly `n` bytes -- truncates
+/// silently rather than hanging, measured twice on the `byte-type` branch
+/// (this task's own brief carries the same warning).
+///
+/// Guards `max` the way `nova_rt_io_stdin_read` and `nova_rt_file_read` do: a
+/// negative value aborts rather than wrapping into an enormous allocation
+/// request. A large `max` still allocates the whole capacity eagerly before
+/// any read happens, the identical known asymmetry those two already carry.
+fn try_read(fd: i64, max: i64) -> ReadStep {
+    let Ok(cap) = usize::try_from(max) else {
+        crate::task::abort_with("nova_rt_net: read: negative maximum")
+    };
+    let mut buf = vec![0u8; cap];
+    let outcome = with_fd(fd, |stream| match std::io::Read::read(stream, &mut buf) {
+        Ok(n) => {
+            buf.truncate(n);
+            stash(Slot::Buffer, crate::bytes::gc_bytes(&buf));
+            ReadStep::Done(OK)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            ReadStep::WouldBlock(raw_socket_of(stream))
+        }
+        Err(e) => ReadStep::Done(fail(&e)),
+    });
+    match outcome {
+        Some(step) => step,
+        None => ReadStep::Done(closed_fd_error()),
+    }
+}
+
+/// What one non-blocking `Write::write` attempt against a socket produced.
+/// Mirrors [`ReadStep`] exactly, against the opposite direction.
+enum WriteStep {
+    Done(i64),
+    WouldBlock(RawSocket),
+}
+
+/// One non-blocking `Write::write` attempt against `fd`, stashing the byte
+/// count actually written via [`stash_i64`] on success.
+///
+/// **May write fewer bytes than given.** One `Write::write` call, not a
+/// `write_all` loop -- deliberately unlike `std/fs`'s `write`, which promises
+/// no partial write. See `io.rs`'s own `write_and_stash` doc comment for the
+/// full contract this mirrors; a caller of this boundary that wants a
+/// guaranteed full write must loop on the returned count itself.
+fn try_write(fd: i64, bytes: &[u8]) -> WriteStep {
+    let outcome = with_fd(fd, |stream| match std::io::Write::write(stream, bytes) {
+        Ok(n) => {
+            stash_i64(n as i64);
+            WriteStep::Done(OK)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            WriteStep::WouldBlock(raw_socket_of(stream))
+        }
+        Err(e) => WriteStep::Done(fail(&e)),
+    });
+    match outcome {
+        Some(step) => step,
+        None => WriteStep::Done(closed_fd_error()),
+    }
+}
+
+/// Where a `read` future keeps its `fd` and `max` between polls.
+const READ_SLOT_FD: usize = STATE_SLOT_TEMPS;
+const READ_SLOT_MAX: usize = STATE_SLOT_TEMPS + 1;
+
+/// State size for a read future: the ABI minimum plus the two temp slots
+/// holding `fd` and `max`.
+const READ_STATE_SIZE: usize = STATE_MIN_SIZE + 16;
+
+const _: () = assert!(READ_STATE_SIZE >= (READ_SLOT_MAX + 1) * 8);
+
+/// The read future's poll function.
+///
+/// **No resume tag, unlike `connect`'s `poll_connect`.** See this section's
+/// own header comment for why: attempting the read is the same operation on
+/// every poll, so repeating it is always correct, and doing so before ever
+/// parking is what gives this future `poll_join`'s own optimisation for free
+/// -- if the socket already has data (or is at EOF), [`try_read`] returns
+/// [`ReadStep::Done`] on the very first call and this never parks at all.
+///
+/// Must not unwind, as every other `PollFn` in this crate must not: every
+/// fallible step -- the borrow inside [`try_read`]/`with_fd`, and the I/O call
+/// itself -- already returns a value this function maps into a status rather
+/// than unwrapping.
+unsafe extern "C-unwind" fn poll_read(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_net_read_future` built, at least
+    // `READ_STATE_SIZE` bytes, so both slots below are in bounds.
+    let fd = unsafe { slots.add(READ_SLOT_FD).read() };
+    let max = unsafe { slots.add(READ_SLOT_MAX).read() };
+    match try_read(fd, max) {
+        ReadStep::Done(status) => {
+            // SAFETY: same object, output slot.
+            unsafe { slots.add(STATE_SLOT_OUTPUT).write(status) };
+            POLL_READY
+        }
+        ReadStep::WouldBlock(socket) => {
+            stage_io_park(socket, Interest::Read, None);
+            POLL_PENDING
+        }
+    }
+}
+
+/// A fresh `Future<Int>` (a status, per this module's boundary design) that
+/// reads up to `max` bytes from `fd`, non-blockingly. On success, the bytes
+/// actually read -- truncated to what was available; empty means EOF, a short
+/// read is not -- are stashed via `Slot::Buffer`, exactly as `file.rs`'s
+/// `nova_rt_file_read` stashes its own.
+///
+/// **The state object is fresh on every call**, for the same reason
+/// `nova_rt_net_connect_future`'s own doc comment gives: the whole value
+/// carried across a suspension is this state object's own `fd`/`max`, so two
+/// reads in flight at once would otherwise corrupt each other.
+///
+/// # Safety
+/// No pointer argument, so no dereference precondition beyond `build_future`'s
+/// own; marked `unsafe extern "C-unwind"` for uniformity with this module's
+/// other future constructors.
+#[no_mangle]
+pub unsafe extern "C-unwind" fn nova_rt_net_read_future(fd: i64, max: i64) -> *mut u8 {
+    let poll: PollFn = poll_read;
+    build_future(poll, READ_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `READ_STATE_SIZE` block, and both
+        // slots are in bounds by the assertion above.
+        unsafe {
+            slots.add(READ_SLOT_FD).write(fd);
+            slots.add(READ_SLOT_MAX).write(max);
+        }
+    })
+}
+
+/// Where a `write` future keeps its `fd` and its `bytes` pointer between
+/// polls. Unlike `CONNECT_SLOT_SOCK`, this slot is never overwritten across
+/// the future's life -- there is only ever one phase.
+const WRITE_SLOT_FD: usize = STATE_SLOT_TEMPS;
+const WRITE_SLOT_BYTES: usize = STATE_SLOT_TEMPS + 1;
+
+/// State size for a write future: the ABI minimum plus the two temp slots
+/// holding `fd` and the `bytes` pointer.
+const WRITE_STATE_SIZE: usize = STATE_MIN_SIZE + 16;
+
+const _: () = assert!(WRITE_STATE_SIZE >= (WRITE_SLOT_BYTES + 1) * 8);
+
+/// The write future's poll function. Mirrors [`poll_read`] exactly, against
+/// the opposite direction and interest -- see that function's own doc comment
+/// for why neither needs a resume tag.
+unsafe extern "C-unwind" fn poll_write(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_net_write_future` built, at least
+    // `WRITE_STATE_SIZE` bytes, so both slots below are in bounds.
+    let fd = unsafe { slots.add(WRITE_SLOT_FD).read() };
+    let ptr = unsafe { slots.add(WRITE_SLOT_BYTES).read() } as *const NovaStr;
+    // SAFETY: `ptr` is the `NovaStr` `nova_rt_net_write_future` was given,
+    // kept alive by this state object's own GC root and scan -- this slot is
+    // never overwritten across this future's whole life, so it is still the
+    // original pointer on every poll.
+    let bytes = unsafe { crate::bytes::as_bytes(ptr) };
+    match try_write(fd, bytes) {
+        WriteStep::Done(status) => {
+            // SAFETY: same object, output slot.
+            unsafe { slots.add(STATE_SLOT_OUTPUT).write(status) };
+            POLL_READY
+        }
+        WriteStep::WouldBlock(socket) => {
+            stage_io_park(socket, Interest::Write, None);
+            POLL_PENDING
+        }
+    }
+}
+
+/// A fresh `Future<Int>` that writes `bytes` to `fd`, non-blockingly, possibly
+/// fewer of them than given (see [`try_write`]'s own doc comment). On
+/// success, the byte count actually written is stashed via `Slot::Buffer`,
+/// the identical 8-byte little-endian encoding [`stash_i64`] already uses for
+/// `connect`'s own fd.
+///
+/// # Safety
+/// `bytes` must point to a live `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C-unwind" fn nova_rt_net_write_future(
+    fd: i64,
+    bytes: *const NovaStr,
+) -> *mut u8 {
+    let poll: PollFn = poll_write;
+    build_future(poll, WRITE_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `WRITE_STATE_SIZE` block, and both
+        // slots are in bounds by the assertion above.
+        unsafe {
+            slots.add(WRITE_SLOT_FD).write(fd);
+            slots.add(WRITE_SLOT_BYTES).write(bytes as i64);
+        }
+    })
+}
+
+/// A fixed point in time `read_timeout`'s deadline arithmetic measures
+/// against, lazily fixed on first use.
+///
+/// The same technique `poll.rs`'s own (private) `log_epoch` uses, reproduced
+/// here rather than shared across modules -- only relative elapsed time is
+/// ever compared against it, so an arbitrary origin is fine, and this
+/// module's reason to want one is different from that one's (rate-limiting a
+/// log line there; encoding a deadline as a plain, scannable `i64` here). A
+/// `std::time::Instant` has no documented byte layout this module could
+/// safely write into one of its own state slots directly the way it writes a
+/// plain fd or count there -- so `read_timeout` stores milliseconds-since-
+/// this-epoch instead, the same spirit as `CONNECT_SLOT_SOCK` storing a plain
+/// fd rather than a `TcpStream`.
+fn deadline_epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// Milliseconds elapsed since [`deadline_epoch`], as a plain `i64` a
+/// `read_timeout` future's state object can hold in a scanned slot.
+///
+/// `i64::MAX` on the (astronomically distant) overflow case rather than
+/// unwrapping: this runs inside a generated poll boundary with no landing
+/// pads, the same reason every other fallible conversion in this module falls
+/// back to a value instead of panicking.
+fn now_epoch_ms() -> i64 {
+    i64::try_from(deadline_epoch().elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+/// An `Instant` `remaining_ms` milliseconds from now, clamping a non-positive
+/// value to "now" -- the identical clamp `task.rs`'s own (private)
+/// `deadline_from_ms` applies, for the identical reason: nothing stops a
+/// remaining duration computed from a stored deadline from having already
+/// reached zero, or gone negative, by the time this runs.
+fn instant_from_remaining_ms(remaining_ms: i64) -> Instant {
+    let ms = u64::try_from(remaining_ms).unwrap_or(0);
+    Instant::now() + Duration::from_millis(ms)
+}
+
+/// Where a `read_timeout` future keeps its state between polls.
+///
+/// [`RT_SLOT_DEADLINE`] is reused across the future's life exactly the way
+/// `CONNECT_SLOT_SOCK` reuses its own slot: before the first poll it holds
+/// the raw `ms` argument; the first poll reads that out and overwrites the
+/// same slot with the *absolute* deadline (epoch-relative milliseconds,
+/// [`now_epoch_ms`] plus `ms`), for every later poll to compare against.
+/// Computing the absolute deadline at first-poll time rather than at
+/// construction matches `task.rs`'s own `nova_rt_task_sleep_future`: a future
+/// built but not immediately polled should time out `ms` after it *starts
+/// running*, not after it was merely constructed.
+const RT_SLOT_FD: usize = STATE_SLOT_TEMPS;
+const RT_SLOT_MAX: usize = STATE_SLOT_TEMPS + 1;
+const RT_SLOT_DEADLINE: usize = STATE_SLOT_TEMPS + 2;
+
+/// State size for a `read_timeout` future: the ABI minimum plus the three
+/// temp slots holding `fd`, `max`, and the reused ms-then-deadline slot.
+const RT_STATE_SIZE: usize = STATE_MIN_SIZE + 24;
+
+const _: () = assert!(RT_STATE_SIZE >= (RT_SLOT_DEADLINE + 1) * 8);
+
+/// The `read_timeout` future's poll function.
+///
+/// **How this distinguishes "ready" from "timed out" with no help from the
+/// call itself.** The poll ABI is frozen and `task_ctx` is always null (see
+/// `task.rs`'s own `PollFn` doc comment), and `task.rs`'s wake paths
+/// (`wake_ready`/`wake_due`) just move a parked task back onto the ready
+/// queue -- neither records *why* for this function to read back on its next
+/// call. So this never asks; it re-derives the answer directly, the same way
+/// `finish_connect` re-derives a refusal from `SO_ERROR` rather than being
+/// told one occurred. Every poll retries [`try_read`] first -- if data (or
+/// EOF) is there, that settles it regardless of what woke this task. Only a
+/// [`ReadStep::WouldBlock`] needs the second check: has [`RT_SLOT_DEADLINE`]
+/// (an absolute deadline by now) already passed? If so, this reports
+/// `TIMED_OUT` (via `fail`, so a friendly message is stashed exactly like
+/// every other non-`OK` status here) -- the status constant `fs.rs` has
+/// carried since increment 1 with no producer until now. If not, this is a
+/// spurious wake (this crate's own poller should never produce one for a
+/// deadline that has not passed, but nothing here assumes that): re-stage the
+/// same wait, with whatever time is actually left, and try again next poll.
+unsafe extern "C-unwind" fn poll_read_timeout(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_net_read_timeout_future` built,
+    // at least `RT_STATE_SIZE` bytes, so every slot below is in bounds.
+    let fd = unsafe { slots.add(RT_SLOT_FD).read() };
+    let max = unsafe { slots.add(RT_SLOT_MAX).read() };
+    let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+    let deadline_ms = if tag == 0 {
+        // SAFETY: same object; this slot has held the raw `ms` argument since
+        // construction, and this is the first poll, so nothing has
+        // overwritten it yet.
+        let ms = unsafe { slots.add(RT_SLOT_DEADLINE).read() };
+        let deadline = now_epoch_ms().saturating_add(ms.max(0));
+        // SAFETY: same object; the address argument has already been read (it
+        // never lived here in the first place -- `fd`/`max` are separate
+        // slots), so overwriting this slot with the absolute deadline loses
+        // nothing a later poll still needs.
+        unsafe {
+            slots.add(RT_SLOT_DEADLINE).write(deadline);
+            slots.add(STATE_SLOT_TAG).write(1);
+        }
+        deadline
+    } else {
+        // SAFETY: same object; an earlier poll already overwrote this slot
+        // with the absolute deadline.
+        unsafe { slots.add(RT_SLOT_DEADLINE).read() }
+    };
+
+    match try_read(fd, max) {
+        ReadStep::Done(status) => {
+            // SAFETY: same object, output slot.
+            unsafe { slots.add(STATE_SLOT_OUTPUT).write(status) };
+            POLL_READY
+        }
+        ReadStep::WouldBlock(socket) => {
+            let remaining_ms = deadline_ms.saturating_sub(now_epoch_ms());
+            if remaining_ms <= 0 {
+                let status = fail(&std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "read_timeout: the deadline passed before any data was available",
+                ));
+                // SAFETY: same object, output slot.
+                unsafe { slots.add(STATE_SLOT_OUTPUT).write(status) };
+                return POLL_READY;
+            }
+            stage_io_park(
+                socket,
+                Interest::Read,
+                Some(instant_from_remaining_ms(remaining_ms)),
+            );
+            POLL_PENDING
+        }
+    }
+}
+
+/// A fresh `Future<Int>` that reads up to `max` bytes from `fd`,
+/// non-blockingly, reporting `TIMED_OUT` if `ms` milliseconds pass with
+/// nothing to read first. Otherwise identical to [`nova_rt_net_read_future`],
+/// including EOF/short-read semantics and where the bytes land on success.
+///
+/// Stages `Wait::Io { socket, interest: Interest::Read, deadline: Some(_) }`
+/// through `task.rs`'s `stage_io_park` seam -- the only operation in this
+/// module that ever passes a deadline through it; `connect`, plain `read`,
+/// and plain `write` each stage `None`.
+///
+/// # Safety
+/// No pointer argument, so no dereference precondition beyond `build_future`'s
+/// own.
+#[no_mangle]
+pub unsafe extern "C-unwind" fn nova_rt_net_read_timeout_future(
+    fd: i64,
+    max: i64,
+    ms: i64,
+) -> *mut u8 {
+    let poll: PollFn = poll_read_timeout;
+    build_future(poll, RT_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `RT_STATE_SIZE` block, and every
+        // slot here is in bounds by the assertion above.
+        unsafe {
+            slots.add(RT_SLOT_FD).write(fd);
+            slots.add(RT_SLOT_MAX).write(max);
+            slots.add(RT_SLOT_DEADLINE).write(ms);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs::CONNECTION_REFUSED;
+    use crate::fs::{CONNECTION_REFUSED, TIMED_OUT};
 
     /// Test-only: a `Future<unit>` that completes on its very first poll --
     /// used only to "pump" this thread's executor queue in
@@ -693,34 +1108,132 @@ mod tests {
         unsafe { crate::task::nova_rt_task_block_on(fut) }
     }
 
-    /// Test-only: attempt a one-byte, non-blocking read on `fd` and map the
-    /// outcome through the same [`fail`]/[`closed_fd_error`] paths
-    /// production code uses. This module has no production read yet (Task 4
-    /// adds `nova_rt_net_read_future`), so this exists only to let this
-    /// module's own tests exercise `with_fd`'s `None` arm through something
-    /// shaped like a real operation, the way `file.rs`'s tests exercise
-    /// `nova_rt_file_read` directly.
-    ///
-    /// A `WouldBlock` on a still-open, still-idle socket maps to the same
-    /// non-`OK` status `closed_fd_error` does (both fall to `fail`'s
-    /// `_ => OTHER` arm) -- so this cannot, by itself, distinguish "no data
-    /// yet" from "closed". [`is_open_for_test`] is this module's check for
-    /// that distinction instead.
-    fn read_status_for_test(fd: i64) -> i64 {
-        let mut buf = [0u8; 1];
-        match with_fd(fd, |stream| std::io::Read::read(stream, &mut buf)) {
-            Some(Ok(_)) => OK,
-            Some(Err(e)) => fail(&e),
-            None => closed_fd_error(),
-        }
-    }
-
     /// Test-only: whether `fd` is currently a live entry in the socket
     /// table -- the direct check for "absence from the table is
     /// closedness," without needing a read to distinguish "closed" from
-    /// "open but idle" the way [`read_status_for_test`] cannot.
+    /// "open but idle" (a `WouldBlock` on a still-open, still-idle socket
+    /// maps to the same non-`OK` status a closed one does -- both fall to
+    /// `fail`'s `_ => OTHER` arm).
     fn is_open_for_test(fd: i64) -> bool {
         with_fd(fd, |_| ()).is_some()
+    }
+
+    /// Test-only: the `(PollFn, state)` pair inside a future's `{ poll_code,
+    /// state }` fat pointer, so a test can invoke a future's own poll
+    /// function directly -- the same extraction
+    /// `connect_parks_on_its_first_poll_rather_than_completing_synchronously`
+    /// inlines for itself, factored out here since several of this module's
+    /// `read`/`write`/`read_timeout` tests need it too.
+    fn poll_fn_and_state(fut: *mut u8) -> (PollFn, *mut u8) {
+        // SAFETY: `fut` is a well-formed `{ poll_code, state }` fat pointer
+        // this module built.
+        let words = fut as *mut usize;
+        let poll_code = unsafe { words.add(crate::task::FUTURE_SLOT_POLL).read() };
+        let state = unsafe { words.add(crate::task::FUTURE_SLOT_STATE).read() } as *mut u8;
+        // SAFETY: `poll_code` is a `PollFn` bit pattern by `fut`'s own
+        // construction; a function pointer and a `usize` are both
+        // pointer-width.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_code) };
+        (poll, state)
+    }
+
+    /// Test-only: drain whatever this thread's `task`-module park staging
+    /// currently holds, by driving one real, never-parking poll through the
+    /// real executor.
+    ///
+    /// A test that calls a future's poll function directly (via
+    /// [`poll_fn_and_state`]) rather than through `nova_rt_task_block_on`
+    /// bypasses `poll_one`'s own cleanup -- see
+    /// `connect_parks_on_its_first_poll_rather_than_completing_synchronously`'s
+    /// doc comment for the same observation about its own manual poll. That
+    /// test immediately follows up with a real `block_on` call anyway, which
+    /// drains the leftover as a side effect; a test here that does *not* go
+    /// on to drive the same future through the real executor needs this
+    /// instead, so the stray entry cannot collide with whatever a *later*
+    /// test -- potentially sharing this OS thread, since `cargo test`'s
+    /// worker threads are reused across test functions -- stages next.
+    /// `poll_one` takes the staged park unconditionally after every poll it
+    /// runs, regardless of what it finds, which is what makes one harmless
+    /// pump call enough.
+    fn drain_stray_pending_park_for_test() {
+        let pump: PollFn = poll_ready_immediately_for_test;
+        let pump_fut = build_future(pump, STATE_MIN_SIZE, |_| {});
+        assert_eq!(
+            unsafe { crate::task::nova_rt_task_block_on(pump_fut) },
+            0,
+            "test cleanup: the pump future must complete immediately"
+        );
+    }
+
+    /// Test-only: take the pending `Slot::Buffer` payload as owned bytes --
+    /// the `Bytes` counterpart to [`take_fd`], for comparing a read's result
+    /// against an expected slice. Matches `file.rs`'s own `take_bytes` test
+    /// helper.
+    fn take_bytes_for_test() -> Vec<u8> {
+        let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
+        // SAFETY: test-only, for the reason `take_fd`'s comment gives: this
+        // same test stashed the payload earlier, with nothing allocated
+        // since.
+        unsafe { crate::bytes::as_bytes(ptr) }.to_vec()
+    }
+
+    /// Test-only: drive `fut` to completion via `nova_rt_task_spawn`, then
+    /// pump this thread's queue with an unrelated, immediately-ready future
+    /// through `nova_rt_task_block_on` -- the identical spawn-then-pump
+    /// technique
+    /// `a_successful_connect_stashes_its_fd_via_slot_buffer` uses (see that
+    /// test's own doc comment for why `block_on` cannot be called on `fut`
+    /// directly when a caller still needs to read its `fs::Slot::Buffer`
+    /// payload afterward: `block_on` releases it as part of returning).
+    /// Returns `fut`'s own task id (for reading its `Slot::Buffer` back via
+    /// [`with_test_current`]) and its final status.
+    fn spawn_and_pump_for_test(fut: *mut u8) -> (i64, i64) {
+        let id = unsafe { crate::task::nova_rt_task_spawn(fut) };
+        let pump: PollFn = poll_ready_immediately_for_test;
+        let pump_fut = build_future(pump, STATE_MIN_SIZE, |_| {});
+        assert_eq!(unsafe { crate::task::nova_rt_task_block_on(pump_fut) }, 0);
+        assert_ne!(
+            unsafe { crate::task::nova_rt_task_is_done(fut) },
+            0,
+            "test setup: the task must have been driven to completion as a \
+             side effect of draining this thread's whole queue"
+        );
+        (id, state_slot_of(fut, STATE_SLOT_OUTPUT))
+    }
+
+    /// Test-only: write `chunk` to `fd` repeatedly, through the shared
+    /// [`try_write`] helper directly (never `block_on`, which would hang this
+    /// test's own thread forever the moment a write genuinely needs to park
+    /// and nothing ever drains the peer), until one call reports
+    /// `WouldBlock`. Returns nothing -- callers only need the buffer to have
+    /// reached that state, not any particular count.
+    ///
+    /// **Why a loop of real writes, not a shrunk `SO_SNDBUF`.** A `setsockopt`
+    /// shrinking the send buffer to a few hundred bytes was tried first and
+    /// measured to have no effect on this task's own Windows host: a single
+    /// 256 KiB write against a socket with `SO_SNDBUF` set to 1024 still
+    /// reported the whole count accepted, and separately, repeated writes
+    /// against an un-drained peer were measured to be all-or-nothing on this
+    /// platform's loopback -- every call before the ceiling reports its full
+    /// requested count, and the first call at the ceiling reports
+    /// `WouldBlock` outright, never a partial count (this task's own report
+    /// records the probe). A generous iteration cap keeps this fast in
+    /// practice: reaching the ceiling took 2-8 calls in every measurement
+    /// that produced this comment.
+    fn fill_send_buffer_until_would_block_for_test(fd: i64, chunk: &[u8]) {
+        for _ in 0..256 {
+            match try_write(fd, chunk) {
+                WriteStep::Done(status) => {
+                    assert_eq!(status, OK, "a write that is not WouldBlock must succeed")
+                }
+                WriteStep::WouldBlock(_) => return,
+            }
+        }
+        panic!(
+            "test setup: the send buffer never filled within 256 writes of \
+             {} bytes each -- nothing drained the peer, so it must eventually",
+            chunk.len()
+        );
     }
 
     /// Test-only: a loopback address nothing is listening on -- bind, read
@@ -742,12 +1255,13 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
         // Idempotent: a second close finds nothing and still succeeds.
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
-        // Absence from the table IS closedness.
-        assert_ne!(
-            read_status_for_test(fd),
-            OK,
-            "a read on a closed fd must fail"
-        );
+        // Absence from the table IS closedness. Driven through the real
+        // production `read` future (Task 4), not a test-only bespoke read --
+        // this closed fd never has data waiting, so its `with_fd` `None` arm
+        // resolves on the very first poll, with no park involved.
+        let read_status =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_read_future(fd, 1)) };
+        assert_ne!(read_status, OK, "a read on a closed fd must fail");
     }
 
     #[test]
@@ -958,6 +1472,371 @@ mod tests {
                 .read()
         };
         let expected: PollFn = poll_connect;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `read`, `write`, and `read_timeout` -- Task 4.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_read_with_no_data_parks_and_completes_when_data_arrives() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (mut server, _) = listener.accept().expect("accept");
+
+        let fut = unsafe { nova_rt_net_read_future(fd, 64) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        // First poll: nothing to read, so the future must park rather than
+        // spin -- this project's own busy-spin hazard (this task's own
+        // brief names it by name). A mutation that treats "would block" as
+        // EOF, or that just re-attempts the read forever without ever
+        // staging a park, would both still eventually see the data written
+        // below and report the right bytes; only the *return value of this
+        // one poll* tells a real park apart from either.
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            first, POLL_PENDING,
+            "a read with no data waiting must park rather than complete \
+             synchronously"
+        );
+
+        std::io::Write::write_all(&mut server, b"hello").expect("write");
+
+        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(second, POLL_READY);
+        assert_eq!(
+            unsafe { (state as *mut i64).add(STATE_SLOT_OUTPUT).read() },
+            OK
+        );
+        let bytes = with_test_current(0, take_bytes_for_test);
+        assert_eq!(bytes, b"hello");
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    #[test]
+    fn a_read_with_data_already_waiting_completes_on_the_first_poll_without_parking() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (mut server, _) = listener.accept().expect("accept");
+        std::io::Write::write_all(&mut server, b"hi").expect("write");
+
+        let fut = unsafe { nova_rt_net_read_future(fd, 64) };
+        let (poll, state) = poll_fn_and_state(fut);
+        let status = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            status, POLL_READY,
+            "data already waiting must complete on the very first poll, not \
+             park -- poll_join's own optimisation, applied here to a read"
+        );
+        assert_eq!(
+            unsafe { (state as *mut i64).add(STATE_SLOT_OUTPUT).read() },
+            OK
+        );
+        let bytes = with_test_current(0, take_bytes_for_test);
+        assert_eq!(bytes, b"hi");
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// EOF is an **empty** result, and a successful one -- never mistaken for
+    /// a failure status. Driven through `read_timeout` rather than a single
+    /// manual poll of plain `read`: closing the peer delivers EOF
+    /// asynchronously (a FIN this process's own non-blocking read may not
+    /// observe for a brief moment), and a generous timeout lets the real
+    /// executor's park/wake loop absorb that instead of this test racing it
+    /// with one bare poll.
+    #[test]
+    fn an_eof_read_stashes_an_empty_payload_not_an_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (server, _) = listener.accept().expect("accept");
+        drop(server);
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 2_000) };
+        let (id, status) = spawn_and_pump_for_test(fut);
+        assert_eq!(status, OK, "EOF is a successful read, not a failure status");
+        let bytes = with_test_current(id, take_bytes_for_test);
+        assert_eq!(
+            bytes, b"" as &[u8],
+            "an empty read must stash a zero-length payload -- the EOF signal"
+        );
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// [`try_write`] directly, decoupled from the futures/executor machinery:
+    /// writing repeatedly with nothing ever draining the peer must
+    /// eventually report `WouldBlock`, not succeed forever. This is the
+    /// unit-level half of the busy-spin hazard this task's own brief names;
+    /// [`a_write_against_a_full_send_buffer_parks_rather_than_spinning`]
+    /// below is the future/executor-level half.
+    ///
+    /// **What this does not (and, measured on this task's own Windows host,
+    /// cannot reliably) show:** that a single write ever reports *fewer*
+    /// bytes than given. `try_write`'s own doc comment states that contract
+    /// and it is real -- `Write::write`, not `write_all`, exactly mirroring
+    /// `io.rs`'s identical choice -- but every write below either succeeds
+    /// with its whole requested count or reports `WouldBlock` outright with
+    /// none; a probe built to force a partial count (shrinking `SO_SNDBUF`,
+    /// then varying write sizes across the boundary it should create) never
+    /// produced one on this host, this task's own report records the
+    /// numbers.
+    #[test]
+    fn try_write_reports_would_block_once_the_send_buffer_fills() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+
+        let chunk = vec![0xABu8; 1024 * 1024];
+        fill_send_buffer_until_would_block_for_test(fd, &chunk);
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    #[test]
+    fn a_write_against_a_full_send_buffer_parks_rather_than_spinning() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+
+        let chunk_bytes = vec![0xABu8; 1024 * 1024];
+        // Fill the send buffer via repeated direct `try_write` calls first --
+        // not `block_on`, which would hang this test's own thread forever
+        // once a write genuinely needs to park and nothing ever drains the
+        // peer (see `fill_send_buffer_until_would_block_for_test`'s own doc
+        // comment).
+        fill_send_buffer_until_would_block_for_test(fd, &chunk_bytes);
+
+        // Now the production write future, against the same still-full
+        // buffer, must park rather than spin or silently fail -- this
+        // project's own busy-spin hazard, on the write side this time.
+        // Matches
+        // `connect_parks_on_its_first_poll_rather_than_completing_synchronously`'s
+        // own technique: only the *return value of one poll* tells a real
+        // park apart from a mutation that would still eventually succeed via
+        // `block_on` alone.
+        let chunk = crate::gc_bytes_for_test(&chunk_bytes);
+        let fut = unsafe { nova_rt_net_write_future(fd, chunk) };
+        let (poll, state) = poll_fn_and_state(fut);
+        let status = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            status, POLL_PENDING,
+            "a write against a full send buffer must park rather than spin \
+             or report a wrong status"
+        );
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    #[test]
+    fn a_ready_write_stashes_its_byte_count_via_slot_buffer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+
+        let payload = crate::gc_bytes_for_test(b"hello");
+        let fut = unsafe { nova_rt_net_write_future(fd, payload) };
+        let (id, status) = spawn_and_pump_for_test(fut);
+        assert_eq!(status, OK);
+        let count = with_test_current(id, take_fd);
+        assert_eq!(
+            count, 5,
+            "a freshly connected socket's send buffer is empty (per \
+             `poll.rs`'s own `wait_reports_a_socket_ready_for_write`), so a \
+             small write must report its whole length, not a short count"
+        );
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// Using any of the three futures this task adds against a closed fd is
+    /// an ordinary error, not a panic -- the async-future shape of
+    /// `file.rs`'s `using_a_file_after_close_is_an_error_not_a_panic`. Checks
+    /// all three individually, since a mutation could plausibly land in just
+    /// one of their `with_fd` `None` arms without touching the other two.
+    #[test]
+    fn using_a_closed_socket_is_an_error_not_a_panic_for_read_write_and_read_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+
+        let read_status =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_read_future(fd, 16)) };
+        assert_ne!(read_status, OK, "reading a closed socket must fail");
+
+        let payload = crate::gc_bytes_for_test(b"x");
+        let write_status =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_write_future(fd, payload)) };
+        assert_ne!(write_status, OK, "writing a closed socket must fail");
+
+        let read_timeout_status = unsafe {
+            crate::task::nova_rt_task_block_on(nova_rt_net_read_timeout_future(fd, 16, 50))
+        };
+        assert_ne!(
+            read_timeout_status, OK,
+            "read_timeout on a closed socket must fail"
+        );
+    }
+
+    /// A connected socket the far end never writes to: `read_timeout` must
+    /// report `TIMED_OUT`, not hang forever and not misreport success.
+    #[test]
+    fn a_read_timeout_against_a_silent_peer_reports_timed_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        // Kept alive but never written to.
+        let (_server, _) = listener.accept().expect("accept");
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 50) };
+        let status = unsafe { crate::task::nova_rt_task_block_on(fut) };
+        assert_eq!(status, TIMED_OUT);
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// The other half of `read_timeout`'s own branch: data that arrives well
+    /// before the deadline completes the read normally, with the real bytes
+    /// -- not every path through `poll_read_timeout` reports `TIMED_OUT`.
+    #[test]
+    fn a_read_timeout_completes_with_data_when_it_arrives_before_the_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (mut server, _) = listener.accept().expect("accept");
+        std::io::Write::write_all(&mut server, b"hi").expect("write");
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 5_000) };
+        let (id, status) = spawn_and_pump_for_test(fut);
+        assert_eq!(status, OK);
+        let bytes = with_test_current(id, take_bytes_for_test);
+        assert_eq!(bytes, b"hi");
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// The exact layout `nova_rt_net_read_future` builds -- the same
+    /// discipline `the_connect_futures_layout_is_the_one_the_abi_declares`
+    /// documents and for the identical reason.
+    ///
+    /// Built but never polled, so this never touches a real socket -- the fd
+    /// argument is a placeholder never looked up.
+    #[test]
+    fn the_read_futures_layout_is_the_one_the_abi_declares() {
+        let fut = unsafe { nova_rt_net_read_future(999_999, 64) };
+        assert_eq!(
+            crate::gc::object_info(fut as usize),
+            Some((crate::task::FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_STATE)
+                .read()
+        };
+        assert_eq!(
+            crate::gc::object_info(state),
+            Some((READ_STATE_SIZE, true)),
+            "the state object must be the ABI minimum plus the two temp \
+             slots holding fd and max, scanned"
+        );
+        let poll = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_POLL)
+                .read()
+        };
+        let expected: PollFn = poll_read;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
+    /// The exact layout `nova_rt_net_write_future` builds. Mirrors
+    /// `the_read_futures_layout_is_the_one_the_abi_declares` exactly.
+    ///
+    /// Built but never polled, so this never touches a real socket -- the fd
+    /// argument is a placeholder never looked up, and the payload is never
+    /// sent.
+    #[test]
+    fn the_write_futures_layout_is_the_one_the_abi_declares() {
+        let payload = crate::gc_bytes_for_test(b"unsent");
+        let fut = unsafe { nova_rt_net_write_future(999_999, payload) };
+        assert_eq!(
+            crate::gc::object_info(fut as usize),
+            Some((crate::task::FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_STATE)
+                .read()
+        };
+        assert_eq!(
+            crate::gc::object_info(state),
+            Some((WRITE_STATE_SIZE, true)),
+            "the state object must be the ABI minimum plus the two temp \
+             slots holding fd and the bytes pointer, scanned"
+        );
+        let poll = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_POLL)
+                .read()
+        };
+        let expected: PollFn = poll_write;
+        assert_eq!(
+            poll, expected as usize,
+            "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
+    /// The exact layout `nova_rt_net_read_timeout_future` builds. Mirrors the
+    /// two above, with the one additional temp slot the ms-then-deadline
+    /// reuse needs.
+    ///
+    /// Built but never polled, so this never touches a real socket -- the fd
+    /// argument is a placeholder never looked up.
+    #[test]
+    fn the_read_timeout_futures_layout_is_the_one_the_abi_declares() {
+        let fut = unsafe { nova_rt_net_read_timeout_future(999_999, 64, 50) };
+        assert_eq!(
+            crate::gc::object_info(fut as usize),
+            Some((crate::task::FUTURE_SIZE, true)),
+            "the fat pointer must be exactly the two-word future, scanned"
+        );
+        let state = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_STATE)
+                .read()
+        };
+        assert_eq!(
+            crate::gc::object_info(state),
+            Some((RT_STATE_SIZE, true)),
+            "the state object must be the ABI minimum plus the three temp \
+             slots holding fd, max, and the reused ms-then-deadline slot, \
+             scanned"
+        );
+        let poll = unsafe {
+            (fut as *mut usize)
+                .add(crate::task::FUTURE_SLOT_POLL)
+                .read()
+        };
+        let expected: PollFn = poll_read_timeout;
         assert_eq!(
             poll, expected as usize,
             "word 0 must be the poll function's address, not the state's"
