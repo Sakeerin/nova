@@ -1973,6 +1973,89 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
+    /// The gap the test above cannot see: it asserts a deadline is *present*
+    /// on the second poll (`deadline.is_some()`), never that it is the
+    /// *same* deadline. A `poll_read_timeout` that recomputes
+    /// `now_epoch_ms() + ms` fresh on every poll -- instead of reusing the
+    /// absolute deadline it committed to on its first -- would pass that
+    /// test, and the entire rest of the suite, while never actually
+    /// converging on a real deadline: a `read_timeout` against a silent peer
+    /// would extend its own deadline forever and never fire.
+    ///
+    /// **A deliberate, real 30ms sleep separates the two polls.** A
+    /// sub-millisecond gap (the natural cost of
+    /// `drain_stray_pending_park_for_test` alone, with no sleep) would not
+    /// reliably tell the two behaviours apart: both `now_epoch_ms()` calls
+    /// could land in the same truncated-millisecond bucket regardless of
+    /// which is present, making the bug invisible to a fast round trip.
+    ///
+    /// **Not exact equality.** `instant_from_remaining_ms` calls
+    /// `Instant::now()` fresh on every poll, so even a correct
+    /// implementation's staged `Instant` is never bit-identical across two
+    /// calls separated in real time -- only the absolute target it
+    /// approximates is meant to stay fixed. A drift well under the 30ms gap
+    /// is that fixed target reasserting itself through ordinary
+    /// millisecond-rounding; a drift approaching the full 30ms is the
+    /// deadline sliding forward with the clock instead.
+    #[test]
+    fn a_read_timeout_still_blocked_on_its_second_poll_preserves_its_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        // Kept alive but never written to.
+        let (_server, _) = listener.accept().expect("accept");
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 5_000) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(first, POLL_PENDING, "test setup: the first poll must park");
+        let first_deadline = match crate::task::staged_io_for_test() {
+            Some((_, _, Some(deadline))) => deadline,
+            other => panic!(
+                "test setup: the first poll must stage a park carrying a \
+                 deadline, got {other:?}"
+            ),
+        };
+
+        drain_stray_pending_park_for_test();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            second, POLL_PENDING,
+            "still no data after the sleep -- must still park, not complete"
+        );
+        let second_deadline = match crate::task::staged_io_for_test() {
+            Some((_, _, Some(deadline))) => deadline,
+            other => panic!(
+                "the second poll must stage a park carrying a deadline, got \
+                 {other:?}"
+            ),
+        };
+
+        let drift = if second_deadline >= first_deadline {
+            second_deadline - first_deadline
+        } else {
+            first_deadline - second_deadline
+        };
+        assert!(
+            drift < std::time::Duration::from_millis(10),
+            "read_timeout's deadline must be preserved across polls, not \
+             recomputed fresh each time -- expected the second poll's \
+             staged deadline to stay within a few milliseconds of the first \
+             (ordinary rounding jitter), got a drift of {drift:?} after a \
+             deliberate 30ms gap between polls; a drift approaching the \
+             full gap means the deadline is sliding forward with the clock \
+             instead of staying fixed, which would let a read_timeout \
+             against a silent peer extend its own deadline forever and \
+             never actually fire"
+        );
+
+        drain_stray_pending_park_for_test();
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
     /// The other half of `read_timeout`'s own branch: data that arrives well
     /// before the deadline completes the read normally, with the real bytes
     /// -- not every path through `poll_read_timeout` reports `TIMED_OUT`.
