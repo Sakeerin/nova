@@ -1488,6 +1488,7 @@ mod tests {
         let addr = listener.local_addr().expect("addr").to_string();
         let fd = connect_blocking_for_test(&addr);
         let (mut server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
 
         let fut = unsafe { nova_rt_net_read_future(fd, 64) };
         let (poll, state) = poll_fn_and_state(fut);
@@ -1498,12 +1499,26 @@ mod tests {
         // EOF, or that just re-attempts the read forever without ever
         // staging a park, would both still eventually see the data written
         // below and report the right bytes; only the *return value of this
-        // one poll* tells a real park apart from either.
+        // one poll* tells a real park apart from either -- **and only
+        // checking that return value is not enough either**: a future that
+        // strips its own `stage_io_park` call (returning `POLL_PENDING` with
+        // nothing staged at all) still returns `POLL_PENDING` here and still
+        // completes with the right bytes once driven through the real
+        // executor's busy re-queue, since `QUEUE` alone (not `PARKED`) would
+        // keep re-polling it. So this also reads back what was actually
+        // staged, not only the poll's return value.
         let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
         assert_eq!(
             first, POLL_PENDING,
             "a read with no data waiting must park rather than complete \
              synchronously"
+        );
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Read, None)),
+            "a read with no data waiting must genuinely stage a park on \
+             Interest::Read for this exact socket, with no deadline -- not \
+             merely return POLL_PENDING while parking nothing"
         );
 
         std::io::Write::write_all(&mut server, b"hello").expect("write");
@@ -1610,6 +1625,7 @@ mod tests {
         let addr = listener.local_addr().expect("addr").to_string();
         let fd = connect_blocking_for_test(&addr);
         let (_server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
 
         let chunk_bytes = vec![0xABu8; 1024 * 1024];
         // Fill the send buffer via repeated direct `try_write` calls first --
@@ -1626,7 +1642,12 @@ mod tests {
         // `connect_parks_on_its_first_poll_rather_than_completing_synchronously`'s
         // own technique: only the *return value of one poll* tells a real
         // park apart from a mutation that would still eventually succeed via
-        // `block_on` alone.
+        // `block_on` alone -- **and even that return value is not enough on
+        // its own**: a future that strips its own `stage_io_park` call still
+        // returns `POLL_PENDING` here and would still eventually succeed
+        // through the real executor's busy re-queue, since nothing would
+        // ever move it into `PARKED` at all. This also reads back what was
+        // actually staged.
         let chunk = crate::gc_bytes_for_test(&chunk_bytes);
         let fut = unsafe { nova_rt_net_write_future(fd, chunk) };
         let (poll, state) = poll_fn_and_state(fut);
@@ -1635,6 +1656,13 @@ mod tests {
             status, POLL_PENDING,
             "a write against a full send buffer must park rather than spin \
              or report a wrong status"
+        );
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Write, None)),
+            "a write against a full send buffer must genuinely stage a park \
+             on Interest::Write for this exact socket, with no deadline -- \
+             not merely return POLL_PENDING while parking nothing"
         );
 
         drain_stray_pending_park_for_test();
@@ -1707,6 +1735,69 @@ mod tests {
         let status = unsafe { crate::task::nova_rt_task_block_on(fut) };
         assert_eq!(status, TIMED_OUT);
 
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// The direct counterpart, for `read_timeout`, of the staged-park checks
+    /// [`a_read_with_no_data_parks_and_completes_when_data_arrives`] and
+    /// [`a_write_against_a_full_send_buffer_parks_rather_than_spinning`] make
+    /// for plain `read`/`write`.
+    ///
+    /// **Why this needs its own test rather than trusting
+    /// [`a_read_timeout_against_a_silent_peer_reports_timed_out`] above to
+    /// cover it.** That test drives `read_timeout` through the real executor
+    /// via `block_on` and only checks the *final* status. Measured: with
+    /// `poll_read_timeout`'s own `stage_io_park` call deleted, that test
+    /// still passes -- a future that returns `POLL_PENDING` with nothing
+    /// staged is simply re-queued onto `QUEUE` and busy-repolled every turn,
+    /// and this module's own deadline check is wall-clock based (via
+    /// `now_epoch_ms`), so ~50ms of CPU-spinning reaches the same `TIMED_OUT`
+    /// conclusion a genuine park-then-wake would. Only reading back what was
+    /// actually staged, via a manual single poll before anything drains it,
+    /// tells the two apart.
+    ///
+    /// Also the one place in this crate a deadline and an I/O wait
+    /// legitimately co-stage (`Staged`'s own doc comment) -- worth pinning
+    /// that the deadline is genuinely present, not just the socket/interest.
+    #[test]
+    fn a_read_timeout_with_no_data_stages_an_io_park_carrying_its_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        // Kept alive but never written to.
+        let (_server, _) = listener.accept().expect("accept");
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+
+        let fut = unsafe { nova_rt_net_read_timeout_future(fd, 64, 5_000) };
+        let (poll, state) = poll_fn_and_state(fut);
+        let status = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            status, POLL_PENDING,
+            "read_timeout with no data waiting must park rather than \
+             complete synchronously"
+        );
+
+        match crate::task::staged_io_for_test() {
+            Some((socket, interest, deadline)) => {
+                assert_eq!(
+                    socket, expected_socket,
+                    "must park on this exact socket, not an unrelated one"
+                );
+                assert_eq!(interest, Interest::Read);
+                assert!(
+                    deadline.is_some(),
+                    "read_timeout's park must carry its own deadline -- \
+                     without it, a passed deadline could never wake this \
+                     task independently of the socket becoming ready"
+                );
+            }
+            None => panic!(
+                "read_timeout with no data waiting must genuinely stage a \
+                 park, not merely return POLL_PENDING while parking nothing"
+            ),
+        }
+
+        drain_stray_pending_park_for_test();
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
