@@ -17,5 +17,23 @@ nova-diagnostics = { path = "../nova-diagnostics" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
+# `poll.rs`'s platform shim: `select`'s `fd_set` has a different bit-mask
+# layout on Linux (glibc, 64-bit words) than on macOS (Darwin, 32-bit words),
+# and hand-rolling both correctly with no way to run the macOS arm locally
+# would be exactly the "reasoned, not measured" risk this crate's poller
+# exists to close. `libc` already ships in this workspace's dependency graph
+# (via `rustix`, `errno`, and others), so pulling it in directly adds no new
+# supply-chain surface.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# `WSAPoll`'s `WSAPOLLFD` layout (a `usize`-sized `SOCKET` handle followed by
+# two `i16` fields) is simple enough to hand-write, but `windows-sys` gets the
+# `#[link(name = "ws2_32")]` pragma and the exact constant values right for
+# free, and -- like `libc` above -- is already in this workspace's dependency
+# graph via other crates.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock"] }
+
 [build-dependencies]
 cc = { workspace = true }
