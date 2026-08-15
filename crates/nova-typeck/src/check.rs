@@ -3949,6 +3949,11 @@ impl<'a> Checker<'a> {
             | Builtin::IoStderrWrite
             | Builtin::IoStdoutFlush
             | Builtin::IoStderrFlush
+            | Builtin::NetConnect
+            | Builtin::NetClose
+            | Builtin::NetRead
+            | Builtin::NetWrite
+            | Builtin::NetReadTimeout
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7193,6 +7198,19 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::IoStderrWrite => (vec![Ty::Bytes], Ty::Int),
         Builtin::IoStdoutFlush => (vec![], Ty::Int),
         Builtin::IoStderrFlush => (vec![], Ty::Int),
+        // Four of these five are future constructors, not status words —
+        // `Ty::Future(Box::new(Ty::Int))`, not a plain `Ty::Int` — unlike
+        // every `Fs*`/`File*`/`Io*` builtin above. `.await`ing the future
+        // produces the `Int` status. `NetClose` alone stays a plain status,
+        // matching `Builtin::FileClose`'s shape exactly.
+        Builtin::NetConnect => (vec![Ty::String], Ty::Future(Box::new(Ty::Int))),
+        Builtin::NetClose => (vec![Ty::Int], Ty::Int),
+        Builtin::NetRead => (vec![Ty::Int, Ty::Int], Ty::Future(Box::new(Ty::Int))),
+        Builtin::NetWrite => (vec![Ty::Int, Ty::Bytes], Ty::Future(Box::new(Ty::Int))),
+        Builtin::NetReadTimeout => (
+            vec![Ty::Int, Ty::Int, Ty::Int],
+            Ty::Future(Box::new(Ty::Int)),
+        ),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15210,6 +15228,32 @@ mod tests {
                     (vec![], Ty::Int),
                     "`io_stderr_flush()` in `std/io`'s `flush_stderr`, which \
                      backs `Stderr`'s `Write::flush`",
+                ),
+                Builtin::NetConnect => (
+                    (vec![Ty::String], Ty::Future(Box::new(Ty::Int))),
+                    "`net_connect(addr).await` in `std/net`'s `connect`",
+                ),
+                Builtin::NetClose => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`net_close(self.fd)` in `std/net`'s `TcpStream::close`",
+                ),
+                Builtin::NetRead => (
+                    (vec![Ty::Int, Ty::Int], Ty::Future(Box::new(Ty::Int))),
+                    "`net_read(s.fd, max).await` in `std/net`'s `read_stream`, \
+                     which backs `TcpStream`'s `Read::read`",
+                ),
+                Builtin::NetWrite => (
+                    (vec![Ty::Int, Ty::Bytes], Ty::Future(Box::new(Ty::Int))),
+                    "`net_write(s.fd, buf).await` in `std/net`'s `write_stream`, \
+                     which backs `TcpStream`'s `Write::write`",
+                ),
+                Builtin::NetReadTimeout => (
+                    (
+                        vec![Ty::Int, Ty::Int, Ty::Int],
+                        Ty::Future(Box::new(Ty::Int)),
+                    ),
+                    "`net_read_timeout(self.fd, max, ms).await` in `std/net`'s \
+                     `TcpStream::read_timeout`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),

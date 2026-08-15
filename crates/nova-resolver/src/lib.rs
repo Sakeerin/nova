@@ -393,6 +393,71 @@ builtins! {
     /// [`Builtin::IoStdoutFlush`] exactly, against the other stream.
     /// Std-only.
     IoStderrFlush,
+    /// `net_connect(addr: String) -> Future<Int>` — connect to `addr`
+    /// ("host:port"), non-blockingly.
+    ///
+    /// **A future constructor, not a status word — the one thing that makes
+    /// this builtin and the three below it unlike every `fs_*`/`file_*`/
+    /// `io_*` intrinsic above.** Those return an `i64` status directly,
+    /// synchronously; this one returns a `*mut u8` future state object
+    /// (surfaced to Nova as `Future<Int>`) that must itself be `.await`ed to
+    /// produce the `Int` status — `0` on success, with the new fd waiting in
+    /// [`Builtin::FsTakeBytes`] as an 8-byte little-endian payload, the same
+    /// reason [`Builtin::FileOpen`]'s new fd travels that way; otherwise an
+    /// `IoErrorKind` status code, as [`Builtin::FsReadToString`], including
+    /// `CONNECTION_REFUSED`'s first producer. A reader arriving here from
+    /// `file.rs` should not expect the old shape. Runtime symbol
+    /// `nova_rt_net_connect_future` (`crates/nova-runtime/src/net.rs`).
+    /// Std-only.
+    NetConnect,
+    /// `net_close(fd: Int) -> Int` — close `fd`, dropping the underlying
+    /// connection and releasing its OS handle.
+    ///
+    /// **The one member of this group of five that is not a future
+    /// constructor** — an ordinary status word, exactly
+    /// [`Builtin::FileClose`]'s shape, for the identical reason: idempotent,
+    /// since `std/net`'s `close` cannot consume its receiver (Nova has no
+    /// move checking), so a caller can always reach a second call, and
+    /// closing an already-closed, stale, or forged fd finds nothing in the
+    /// runtime's handle table and still reports success. No payload. Runtime
+    /// symbol `nova_rt_net_close` (`crates/nova-runtime/src/net.rs`).
+    /// Std-only.
+    NetClose,
+    /// `net_read(fd: Int, max: Int) -> Future<Int>` — read up to `max` bytes
+    /// from `fd`, non-blockingly.
+    ///
+    /// A future constructor, as [`Builtin::NetConnect`]'s doc comment
+    /// explains — `.await`ing it produces `0` on success, with the bytes
+    /// read waiting in [`Builtin::FsTakeBytes`]; otherwise an `IoErrorKind`
+    /// status code, as [`Builtin::FsReadToString`] — including a closed,
+    /// stale, or forged fd. An **empty** payload means end of stream; a
+    /// short read does not, the same contract [`Builtin::FileRead`] and
+    /// [`Builtin::IoStdinRead`] already carry. Runtime symbol
+    /// `nova_rt_net_read_future` (`crates/nova-runtime/src/net.rs`).
+    /// Std-only.
+    NetRead,
+    /// `net_write(fd: Int, buf: Bytes) -> Future<Int>` — write `buf` to `fd`
+    /// with one non-blocking `Write::write` attempt, not a `write_all` loop.
+    ///
+    /// A future constructor, as [`Builtin::NetConnect`]'s doc comment
+    /// explains — `.await`ing it produces `0` on success, with the number of
+    /// bytes actually written waiting in [`Builtin::FsTakeBytes`], encoded
+    /// as an 8-byte little-endian count, the same shape
+    /// [`Builtin::FileWrite`] uses; otherwise an `IoErrorKind` status code,
+    /// as [`Builtin::FsReadToString`] — including a closed, stale, or forged
+    /// fd. Runtime symbol `nova_rt_net_write_future`
+    /// (`crates/nova-runtime/src/net.rs`). Std-only.
+    NetWrite,
+    /// `net_read_timeout(fd: Int, max: Int, ms: Int) -> Future<Int>` — read
+    /// up to `max` bytes from `fd`, non-blockingly, reporting `TIMED_OUT` if
+    /// `ms` milliseconds pass with nothing to read first.
+    ///
+    /// A future constructor, as [`Builtin::NetConnect`]'s doc comment
+    /// explains — otherwise identical to [`Builtin::NetRead`], including
+    /// EOF/short-read semantics and where the bytes land on success. Runtime
+    /// symbol `nova_rt_net_read_timeout_future`
+    /// (`crates/nova-runtime/src/net.rs`). Std-only.
+    NetReadTimeout,
     /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
     /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
     /// Nova cannot read a `Bytes` value's own header (no length, indexing or
@@ -531,6 +596,11 @@ impl Builtin {
             Builtin::IoStderrWrite => "io_stderr_write",
             Builtin::IoStdoutFlush => "io_stdout_flush",
             Builtin::IoStderrFlush => "io_stderr_flush",
+            Builtin::NetConnect => "net_connect",
+            Builtin::NetClose => "net_close",
+            Builtin::NetRead => "net_read",
+            Builtin::NetWrite => "net_write",
+            Builtin::NetReadTimeout => "net_read_timeout",
             Builtin::BytesLen => "bytes_len",
             // Deliberately not "bytes_from_string" — see this variant's doc
             // comment for why that would collide with `std/bytes`'s own
@@ -574,7 +644,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 53] = [
+    pub const STD_ONLY: [Builtin; 58] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -618,6 +688,11 @@ impl Builtin {
         Builtin::IoStderrWrite,
         Builtin::IoStdoutFlush,
         Builtin::IoStderrFlush,
+        Builtin::NetConnect,
+        Builtin::NetClose,
+        Builtin::NetRead,
+        Builtin::NetWrite,
+        Builtin::NetReadTimeout,
         Builtin::BytesLen,
         Builtin::BytesFromString,
         Builtin::BytesIsUtf8,
@@ -2304,6 +2379,29 @@ mod tests {
                     b.name()
                 );
             }
+        }
+    }
+
+    /// The five `std/net` builtins are `STD_ONLY`, per the brief this task
+    /// was written against. `STD_ONLY.contains` rather than the loop
+    /// `no_std_only_builtin_is_a_reserved_word`/
+    /// `std_only_builtins_are_visible_inside_std_modules` already run over
+    /// the whole array: this test pins these five *by name*, so deleting one
+    /// from `STD_ONLY` (rather than merely narrowing its behaviour) fails
+    /// here specifically instead of only shrinking a loop bound elsewhere.
+    #[test]
+    fn the_net_builtins_are_std_only_and_build_futures() {
+        for b in [
+            Builtin::NetConnect,
+            Builtin::NetClose,
+            Builtin::NetRead,
+            Builtin::NetWrite,
+            Builtin::NetReadTimeout,
+        ] {
+            assert!(
+                Builtin::STD_ONLY.contains(&b),
+                "{b:?} must be invisible to user code"
+            );
         }
     }
 

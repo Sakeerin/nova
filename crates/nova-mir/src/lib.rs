@@ -323,6 +323,50 @@ rt_funcs! {
     /// `() -> i64` — flush stderr. Mirrors `IoStdoutFlush` against the other
     /// stream.
     IoStderrFlush,
+    /// `(ptr addr) -> ptr to { poll_code, state }` — a fresh future that
+    /// connects to `addr` ("host:port"), non-blockingly.
+    ///
+    /// **A future constructor, like `TaskSleepFuture`/`TaskJoinFuture` above
+    /// — not a status word**, unlike every `FsWrite`/`File*`/`Io*` variant
+    /// above it. `.await`ing the returned future produces the `i64` status:
+    /// `0` on success, with the new fd waiting in `FsTakeBytes` as an 8-byte
+    /// little-endian payload, as `FileOpen`'s own fd; otherwise an
+    /// `IoErrorKind` status code, as `FsReadToString`.
+    NetConnect,
+    /// `(i64 fd) -> i64` — close `fd`, dropping the underlying connection and
+    /// releasing its OS handle. Idempotent, as `FileClose`.
+    ///
+    /// **Not a future constructor** — the one member of this group of five
+    /// that returns its status directly, exactly `FileClose`'s shape.
+    NetClose,
+    /// `(i64 fd, i64 max) -> ptr to { poll_code, state }` — a fresh future
+    /// that reads up to `max` bytes from `fd`, non-blockingly.
+    ///
+    /// A future constructor, as `NetConnect`'s doc comment explains —
+    /// `.await`ing it produces `0` on success, with the bytes waiting in
+    /// `FsTakeBytes`; otherwise an `IoErrorKind` status code, as
+    /// `FsReadToString` — including a closed, stale, or forged fd. An empty
+    /// payload means end of stream; a short read does not.
+    NetRead,
+    /// `(i64 fd, ptr bytes) -> ptr to { poll_code, state }` — a fresh future
+    /// that writes the bytes to `fd` with one `Write::write` attempt, not a
+    /// `write_all` loop, non-blockingly.
+    ///
+    /// A future constructor, as `NetConnect`'s doc comment explains —
+    /// `.await`ing it produces `0` on success, with the byte count actually
+    /// written waiting in `FsTakeBytes`, encoded as an 8-byte little-endian
+    /// count, as `FileWrite`; otherwise an `IoErrorKind` status code, as
+    /// `FsReadToString` — including a closed, stale, or forged fd.
+    NetWrite,
+    /// `(i64 fd, i64 max, i64 ms) -> ptr to { poll_code, state }` — a fresh
+    /// future that reads up to `max` bytes from `fd`, non-blockingly,
+    /// reporting `TIMED_OUT` if `ms` milliseconds pass with nothing to read
+    /// first.
+    ///
+    /// A future constructor, as `NetConnect`'s doc comment explains —
+    /// otherwise identical to `NetRead`, including EOF/short-read semantics
+    /// and where the bytes land on success.
+    NetReadTimeout,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -410,6 +454,11 @@ impl RtFunc {
             RtFunc::IoStderrWrite => "nova_rt_io_stderr_write",
             RtFunc::IoStdoutFlush => "nova_rt_io_stdout_flush",
             RtFunc::IoStderrFlush => "nova_rt_io_stderr_flush",
+            RtFunc::NetConnect => "nova_rt_net_connect_future",
+            RtFunc::NetClose => "nova_rt_net_close",
+            RtFunc::NetRead => "nova_rt_net_read_future",
+            RtFunc::NetWrite => "nova_rt_net_write_future",
+            RtFunc::NetReadTimeout => "nova_rt_net_read_timeout_future",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -486,6 +535,17 @@ impl RtFunc {
             RtFunc::IoStdinRead => (vec![MirTy::I64], MirTy::I64),
             RtFunc::IoStdoutWrite | RtFunc::IoStderrWrite => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::IoStdoutFlush | RtFunc::IoStderrFlush => (vec![], MirTy::I64),
+            // Four of these five return `MirTy::Ptr` (a future's `{ poll_code,
+            // state }` pointer), not `MirTy::I64` — the same shape
+            // `TaskSleepFuture`/`TaskJoinFuture` use above, unlike every
+            // `FsWrite`/`File*`/`Io*` entry directly above this group.
+            // `NetClose` alone returns `MirTy::I64`, exactly `FileClose`'s
+            // shape.
+            RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),
+            RtFunc::NetWrite => (vec![MirTy::I64, MirTy::Ptr], MirTy::Ptr),
+            RtFunc::NetReadTimeout => (vec![MirTy::I64, MirTy::I64, MirTy::I64], MirTy::Ptr),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
