@@ -16,9 +16,15 @@
 // its duration, so a sibling task makes no progress during a large read. See
 // docs/adr/0011-io-error-kinds.md.
 //
-// `temp_dir` is the one exception and is a plain `fn`: it only queries the
-// environment and touches no filesystem, so there is nothing in it that could
-// ever suspend, and no future reason to change its signature either.
+// `temp_dir` is the one of them that reaches outward and is still a plain
+// `fn`: it only queries the environment and touches no filesystem, so there is
+// nothing in it that could ever suspend, and no future reason to change its
+// signature either. It is not the only plain `fn` in this module any more,
+// only the only exception -- `OpenOptions`'s `default`/`reading`/`writing`/
+// `appending` build a record of six `Bool`s and touch nothing at all, and
+// `impl Read for File`/`impl Write for File`'s methods are plain `fn`s
+// returning `Future`, which is how a suspending trait method is spelled in
+// this language.
 //
 // # The shape of these wrappers is load-bearing
 //

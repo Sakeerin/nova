@@ -1,4 +1,6 @@
 close: ok
 close again: ok
-read after close: file descriptor is not open
-forged: err
+read after close: Other file descriptor is not open
+write after close: Other file descriptor is not open
+flush after close: Other file descriptor is not open
+forged: Other file descriptor is not open

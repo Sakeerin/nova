@@ -458,6 +458,97 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// The flag that distinguishes each of `std/fs`'s three `OpenOptions`
+    /// constructors must reach the OS: `writing()` truncates, `appending()`
+    /// does not, and `reading()` refuses a write.
+    ///
+    /// Written because the `truncate`/`create`/`append` trio was unpinned
+    /// where the `read`/`write` pair was not. `append` was `0` at every
+    /// `nova_rt_file_open` call site in this file, and no test reopened a
+    /// path that already held content, so **transposing this function's
+    /// `truncate` and `create` arguments left the whole suite green** —
+    /// measured, not supposed. `writing()`'s tuple sets both flags and so
+    /// cannot see that swap at all; `appending()`'s sets only `create`, so
+    /// under the swap it opens truncating and destroys the concatenation
+    /// asserted below. That is why the append leg is the load-bearing one
+    /// here rather than a completeness exercise.
+    ///
+    /// The `reading()` leg is the design spec's §5 clause "`reading()` then
+    /// attempting a write fails", which was named as delivered and never
+    /// written.
+    ///
+    /// The tuples are read off `std/fs/lib.nova`'s three constructors in
+    /// this function's own parameter order — read, write, append, truncate,
+    /// create, create_new. What this level cannot see is a change to those
+    /// constructors themselves, which do not exist here;
+    /// `tests/runtime/file_roundtrip.nova` pins them from the Nova side.
+    #[test]
+    fn each_constructors_flags_reach_the_os() {
+        let path = unique_temp_path("constructor-flags");
+        let p = crate::gc_str(&path);
+        let _ = std::fs::remove_file(&path);
+
+        // `OpenOptions::writing()` — write + truncate + create.
+        assert_eq!(unsafe { nova_rt_file_open(p, 0, 1, 0, 1, 1, 0) }, OK);
+        let fd = take_fd();
+        assert_eq!(
+            unsafe { nova_rt_file_write(fd, crate::bytes::gc_bytes(b"first")) },
+            OK
+        );
+        assert_eq!(unsafe { nova_rt_file_close(fd) }, OK);
+
+        // `OpenOptions::appending()` — append + create, and no truncate.
+        assert_eq!(
+            unsafe { nova_rt_file_open(p, 0, 0, 1, 0, 1, 0) },
+            OK,
+            "opening for appending must succeed"
+        );
+        let fd = take_fd();
+        assert_eq!(
+            unsafe { nova_rt_file_write(fd, crate::bytes::gc_bytes(b"-second")) },
+            OK
+        );
+        assert_eq!(unsafe { nova_rt_file_close(fd) }, OK);
+        assert_eq!(
+            std::fs::read(&path).expect("the appended-to file must be readable"),
+            b"first-second",
+            "appending() must leave content the file already had in place"
+        );
+
+        // `OpenOptions::writing()` again, this time over a file that has
+        // content: only the newest payload may survive.
+        assert_eq!(unsafe { nova_rt_file_open(p, 0, 1, 0, 1, 1, 0) }, OK);
+        let fd = take_fd();
+        assert_eq!(
+            unsafe { nova_rt_file_write(fd, crate::bytes::gc_bytes(b"third")) },
+            OK
+        );
+        assert_eq!(unsafe { nova_rt_file_close(fd) }, OK);
+        assert_eq!(
+            std::fs::read(&path).expect("the rewritten file must be readable"),
+            b"third",
+            "writing() must discard content the file already had"
+        );
+
+        // `OpenOptions::reading()` — read only, so a write must fail rather
+        // than report a byte count for bytes that never landed.
+        assert_eq!(unsafe { nova_rt_file_open(p, 1, 0, 0, 0, 0, 0) }, OK);
+        let fd = take_fd();
+        assert_ne!(
+            unsafe { nova_rt_file_write(fd, crate::bytes::gc_bytes(b"nope")) },
+            OK,
+            "writing a read-only handle must fail, not silently succeed"
+        );
+        assert_eq!(unsafe { nova_rt_file_close(fd) }, OK);
+        assert_eq!(
+            std::fs::read(&path).expect("the read-only-opened file must be readable"),
+            b"third",
+            "a write the OS rejected must not have reached the file"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// This module's own panic-freedom claim, pinned the same mechanical way
     /// `fs::tests::no_slot_access_can_panic_on_a_borrow`,
     /// `bytes::tests::no_bytes_intrinsic_can_panic`, and

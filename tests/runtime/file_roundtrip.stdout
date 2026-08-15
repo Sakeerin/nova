@@ -1,4 +1,12 @@
 wrote: 330
+flush: ok
+wrote after flush: 8
 close: ok
-text: hello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, file
+appended: 9
+close_a: ok
+text: hello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, filehello, file-flushed-appended
 close2: ok
+rewrote: 9
+close3: ok
+text2: rewritten
+close4: ok

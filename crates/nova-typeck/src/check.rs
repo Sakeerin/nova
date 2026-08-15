@@ -15164,23 +15164,27 @@ mod tests {
                         ],
                         Ty::Int,
                     ),
-                    "no call site yet -- `std/fs`'s `File` and `open` are a later task",
+                    "`file_open(path, read, write, append, truncate, create, \
+                     create_new)` in `std/fs`'s `open`",
                 ),
                 Builtin::FileClose => (
                     (vec![Ty::Int], Ty::Int),
-                    "no call site yet -- `std/fs`'s `File::close` is a later task",
+                    "`file_close(self.fd)` in `std/fs`'s `File::close`",
                 ),
                 Builtin::FileRead => (
                     (vec![Ty::Int, Ty::Int], Ty::Int),
-                    "no call site yet -- `impl Read for File` is a later task",
+                    "`file_read(f.fd, max)` in `std/fs`'s `read_file`, which \
+                     backs `File`'s `Read::read`",
                 ),
                 Builtin::FileWrite => (
                     (vec![Ty::Int, Ty::Bytes], Ty::Int),
-                    "no call site yet -- `impl Write for File` is a later task",
+                    "`file_write(f.fd, buf)` in `std/fs`'s `write_file`, which \
+                     backs `File`'s `Write::write`",
                 ),
                 Builtin::FileFlush => (
                     (vec![Ty::Int], Ty::Int),
-                    "no call site yet -- `impl Write for File` is a later task",
+                    "`file_flush(f.fd)` in `std/fs`'s `flush_file`, which backs \
+                     `File`'s `Write::flush`",
                 ),
                 Builtin::IoStdinRead => (
                     (vec![Ty::Int], Ty::Int),

@@ -7052,10 +7052,15 @@ fn io_read_stdin_write_only_run() {
 // === Task 3 (file-open-openoptions increment): `std/fs`'s `File`,
 // `OpenOptions`, `open`, and `impl Read`/`Write for File` ===
 
-/// Open for writing, write, close, reopen for reading, `read_to_end`, close.
-/// Exercises `impl Write for File`, `impl Read for File` (through
-/// `read_to_end`'s default body in `std/io`, over `File`'s own `read`), and
-/// the inherent `File::close`, following `fs_bytes_roundtrip_run`'s shape.
+/// Open for writing, write, flush, close, reopen for appending, write, reopen
+/// for reading, `read_to_end`, close — then reopen for writing once more to
+/// prove that leg truncates what the append left. Exercises `impl Write for
+/// File` (`write` and `flush`), `impl Read for File` (through `read_to_end`'s
+/// default body in `std/io`, over `File`'s own `read`), the inherent
+/// `File::close`, and all three `OpenOptions` constructors, following
+/// `fs_bytes_roundtrip_run`'s shape. See the fixture's own doc comment for why
+/// the append, re-truncate and flush legs are there — each kills a mutation
+/// that survived the whole suite before them.
 #[test]
 fn file_roundtrip_run() {
     let tmp = unique_temp_dir("nova-file-roundtrip");
@@ -7075,12 +7080,13 @@ fn file_roundtrip_run() {
 }
 
 /// The increment's core resource-lifetime behaviour: `close` is idempotent,
-/// reading a handle this fixture itself closed is an ordinary `IoError`
-/// rather than a panic, and a Nova program can forge a `File` naming no file
-/// this module ever opened (`fd` is not privacy-enforced) and get the exact
-/// same safe treatment. See `tests/runtime/file_lifetime.nova`'s own doc
-/// comment for why `open_or_die` is fixture-local glue rather than `std/fs`
-/// surface.
+/// reading, writing or flushing a handle this fixture itself closed is an
+/// ordinary `IoError` of kind `Other` rather than a panic, and a Nova program
+/// can forge a `File` naming no file this module ever opened (`fd` is not
+/// privacy-enforced) and get the exact same safe treatment. See
+/// `tests/runtime/file_lifetime.nova`'s own doc comment for why `open_or_die`
+/// is fixture-local glue rather than `std/fs` surface, and why it opens
+/// read+write rather than through `OpenOptions::writing()`.
 #[test]
 fn file_lifetime_run() {
     let tmp = unique_temp_dir("nova-file-lifetime");
