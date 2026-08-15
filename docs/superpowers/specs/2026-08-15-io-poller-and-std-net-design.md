@@ -166,6 +166,28 @@ So the wake reason cannot ride the call. It travels through the per-task slot ta
 increment 3a built, the same channel payloads already use: `read_timeout` stages
 the park, and on re-poll takes a slot saying ready or timed out.
 
+**Corrected 2026-08-16 (branch `io-poller-std-net`, Task 7 review): the
+paragraph above is factually wrong, and no such mechanism was ever built.**
+`crates/nova-runtime/src/task.rs` has no `SLOTS` and no `stash` call anywhere
+in it — `grep -n "SLOTS\|stash(" crates/nova-runtime/src/task.rs` returns
+zero matches. The "per-task slot table" this paragraph names is `fs.rs`'s
+`SLOTS`, built for carrying a *payload* (a byte buffer, a count) from one
+poll to a later one; no wake path in `task.rs` ever writes a wake reason into
+it, or into anything else, because `task.rs`'s wake paths (`wake_ready`,
+`wake_due`) only ever move a parked task back onto the ready queue.
+
+What shipped instead, in `crates/nova-runtime/src/net.rs`'s
+`poll_read_timeout`, needs no channel at all: every poll retries the read
+first, unconditionally — if data (or EOF) is there, that settles it
+regardless of what woke the task. Only a `WouldBlock` result asks the second
+question, and it asks the future's *own* state object, not a shared table:
+has the absolute deadline stored in `RT_SLOT_DEADLINE` already passed? This
+re-derives "ready vs. timed out" from retried, current state on every poll
+instead of being told the answer — the identical pattern `finish_connect`
+already uses to re-derive a connection refusal from `SO_ERROR` rather than
+being told one occurred, and `poll_read_timeout`'s own doc comment in
+`net.rs` states both the mechanism and that analogy directly.
+
 ---
 
 ## 4. The runtime boundary

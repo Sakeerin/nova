@@ -90,6 +90,31 @@ use std::cell::RefCell;
 /// `file_lifetime.nova`'s "read after close" check asserts on the exact
 /// message that arm stashes. See `docs/adr/0011-io-error-kinds.md`, which
 /// states this split correctly as of the same correction.
+///
+/// **Corrected 2026-08-16 (branch `io-poller-std-net`): the "not reachable ...
+/// so no fixture can pin them" paragraph above is now stale for two of its
+/// three kinds, and the per-kind breakdown two paragraphs up goes four
+/// fixture-pinned kinds to six.** `TIMED_OUT` and `CONNECTION_REFUSED` have
+/// carried this numbering with no producer since increment 1, because no
+/// filesystem operation can produce either — `crates/nova-runtime/src/net.rs`'s
+/// two-phase `connect` and its `read_timeout` future are their first. A
+/// `connect` to a loopback port nothing is listening on is refused either
+/// synchronously (an immediate `ECONNREFUSED`/`WSAECONNREFUSED`, routine for
+/// a closed loopback port) or via the second poll's `SO_ERROR` check, both
+/// paths through this identical `fail` (`net.rs`'s own module doc comment,
+/// "`CONNECTION_REFUSED` gets its first producer"), pinned end to end by
+/// `tests/runtime/net_refused.nova` (`net_refused_run`,
+/// `crates/nova-cli/tests/run_tests.rs`). `read_timeout` reports `TIMED_OUT`
+/// when its deadline passes with a read still would-blocking, pinned by
+/// `tests/runtime/net_timeout.nova` (`net_timeout_run`), which also pins the
+/// opposite direction in the same fixture — a deadline comfortably longer
+/// than the peer's own delay must still succeed with the real data, not fire
+/// merely because a deadline is in play at all. Six of the eight status
+/// codes are therefore fixture-pinned now: the original four two paragraphs
+/// up, plus these two. Only `INTERRUPTED` remains genuinely unreachable from
+/// either module's `async fn`s, portably or otherwise — the "reasoned, not
+/// measured" argument above, made for all three together, now supports
+/// `INTERRUPTED` alone.
 pub const OK: i64 = 0;
 pub const NOT_FOUND: i64 = 1;
 pub const PERMISSION_DENIED: i64 = 2;

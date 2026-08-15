@@ -1,0 +1,180 @@
+# ADR 0013 — The I/O poller: a third wake source, polled only at the drained-queue point
+
+**Numbering:** confirmed against `docs/adr/`'s actual contents rather than
+trusted from the plan — `0001` through `0012` all exist with no gap, so
+`0013` is next.
+
+## Status
+
+Accepted (2026-08-16). The I/O poller and `std/net` increment, branch
+`io-poller-std-net` (`docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md`).
+
+## Context
+
+Before this increment, `crates/nova-runtime/src/task.rs`'s executor had
+exactly two wake sources: a deadline passing (`Wait::Deadline`, `sleep`) and a
+task completing (`Wait::Task`, `join`). `run_to_completion`'s drained-queue
+branch matched `Option<Instant>` and, on `Some`, called `std::thread::sleep`
+directly — the only place this thread ever blocked. Nothing let a task
+suspend on socket readiness, and `std/net` did not exist: `docs/adr/0009-async-execution-model.md`
+§1 recorded "parking on a genuine external event (I/O readiness) is still
+owed to `std/io`" as an open residual gap through two prior amendments.
+
+A TCP client needs to suspend a task while a `connect`, `read`, or `write`
+would block, run a sibling task in the meantime, and resume when the socket
+is ready or a deadline (for `read_timeout`) passes first. That needs a third
+wake source the executor can wait on alongside the existing two, without
+touching the collector's thread-locality invariant ADR 0009 §1 already spent
+its argument establishing.
+
+## Decision
+
+**A new module, `crates/nova-runtime/src/poll.rs`, gives the executor a third
+wake source: socket readiness.** `Wait` gains a third variant:
+
+```rust
+enum Wait {
+    Deadline(Instant),
+    Task(i64),
+    Io { socket: RawSocket, interest: Interest, deadline: Option<Instant> },
+}
+```
+
+The deadline rides inside `Wait::Io` rather than being staged as a second
+`PARKED` entry, because one task has exactly one `PARKED` entry and a second
+entry would mean every wake path had to remember to remove two. This is what
+lets `read_timeout` — the one operation that needs both an I/O wait and a
+deadline at once — stage a single combined park (`task.rs`'s `Staged` struct,
+which now holds one deadline slot and one I/O slot instead of one wider
+`Wait`, so a deadline and an I/O wait from the same poll compose instead of
+colliding).
+
+**The poller itself is `select` on Unix and `WSAPoll` on Windows, behind one
+`#[cfg]` seam in `poll.rs`, both driven through one platform-independent
+entry point:**
+
+```rust
+pub fn wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec<RawSocket>
+```
+
+An empty `sockets` slice with a deadline is definitionally a sleep — nothing
+distinguishes it from the old timer-only path — so `wait`'s empty-set branch
+calls `std::thread::sleep` itself, and `task.rs`'s own direct call to it is
+deleted rather than kept as a second timing path to keep in sync. `poll::wait`
+is now the one place this thread ever blocks, for any reason.
+
+**The wait happens only where `run_to_completion`'s ready queue drains, not
+once per task turn.** `run_to_completion` already calls the cheap per-turn
+check `wake_due` after every single poll — a `Vec` scan over `PARKED`, no
+blocking — so a self-requeuing task can never starve a due deadline (or,
+after this increment, a due I/O timeout) even though it keeps the queue from
+ever looking drained. Polling the socket set itself on every turn the same
+way was considered and declined on cost: `wake_due`'s per-turn check is a
+`Vec` scan, while a socket poll is a syscall (`select`/`WSAPoll`), and paying
+that on every single task turn — most of which involve no I/O wait at all —
+is a materially different cost than a scan. So the real wait, `poll::wait`,
+is reached only from the drained-queue branch, exactly where `std::thread::sleep`
+used to be reached: there is genuinely nothing else to run, so blocking this
+thread is correct.
+
+That branch now matches both dimensions at once instead of `Option<Instant>`
+alone:
+
+| earliest deadline | I/O parks | action |
+|---|---|---|
+| none | none | `report_deadlock()` |
+| none | some | `poll::wait(&io, None)` — wait on sockets, no timeout |
+| some | none | `poll::wait(&[], Some(at))` — this **is** the sleep |
+| some | some | `poll::wait(&io, Some(at))` |
+
+`report_deadlock()` is therefore reachable only when both dimensions are
+empty — a task parked on I/O with no deadline is legitimate waiting on a peer
+that may still answer, not a deadlock. The consequences of that — a
+permanently-runnable task starving I/O the identical way it already starves a
+deadline, and an I/O wait never being reported as a deadlock at all — are two
+new footguns of ADR 0009 §1's existing shape and are recorded there, not
+duplicated here (`docs/adr/0009-async-execution-model.md` §1, 2026-08-16
+amendment).
+
+## Alternatives considered
+
+- **A poller thread signalling the executor, and a thread pool offloading
+  blocking file I/O.** Declined for the same reason ADR 0009 §1 already
+  established for thread-per-task generally, applied here to a narrower
+  case: `PARKED`, `QUEUE`, `SLOTS` (`fs.rs`), `FILES` (`file.rs`), and the
+  collector's own roots (`HEAP`, `PINNED`, `gc.rs`) are all `thread_local!`.
+  A second thread's collector cannot see an object allocated on this
+  thread's heap, and this thread's collector cannot see anything the second
+  thread allocated — the identical use-after-free argument ADR 0009 §1 makes
+  against thread-per-task, not a new one. A poller thread or a worker pool
+  would be invisible to every one of those tables and to the collector, so
+  neither can safely touch Nova state; only a same-thread poll, consulted
+  from `run_to_completion`'s own loop, can.
+- **IOCP / completion-based file I/O.** Declined for a different reason than
+  the thread-based alternatives above, not the same one: this is the only
+  route that would make `std/fs` itself genuinely suspend (regular files are
+  not readiness-pollable by `select`/`WSAPoll` the way sockets are — that is
+  what a completion-based interface exists for), and building it is a
+  subsystem in its own right, out of scope for an increment whose surface is
+  `std/net`. Nothing about `stack_base()`'s Windows-only precise bounds
+  (below) forces this choice the way it bears on the thread-based
+  alternatives — a completion port can be polled from the same thread that
+  already owns `PARKED`/`QUEUE` — so this is left declined on scope, not
+  re-argued on thread-locality grounds it does not actually turn on.
+- **A zero-timeout poll after every task turn**, matching `wake_due`'s own
+  per-turn cadence exactly instead of confining the real wait to the
+  drained-queue point. Declined on cost, per the Decision section above: a
+  `Vec` scan on every turn is cheap, a syscall on every turn is not. The
+  consequence — a permanently-runnable task starving I/O — is accepted and
+  recorded in ADR 0009 §1 rather than engineered around here.
+- **Requiring every `Wait::Io` to carry a deadline**, making an I/O wait with
+  no deadline unrepresentable by construction and the "never a deadlock"
+  question moot. Declined because "block until data arrives, however long
+  that takes" becomes inexpressible — the ordinary shape of a `read` or
+  `write` with no `read_timeout`-style bound.
+
+## Consequences
+
+- **`std::thread::sleep` no longer appears anywhere in `task.rs`.** The one
+  remaining call lives in `poll.rs`'s own empty-socket-set branch, reached
+  from the drained-queue match's `(Some(at), true)` arm.
+- **A parked task's `PARKED` entry is exactly one, always** — `Staged` folds
+  a deadline staged alongside an I/O wait into that same `Wait::Io`'s own
+  `deadline` field rather than creating a second entry, so every wake path
+  (`wake_due`, `wake_ready`, `deadlock_report`) still only ever has to
+  consider one entry per task id.
+- **This thread blocks in exactly one place, `poll::wait`, whenever a
+  deadline, an I/O wait, or both remain to wait on** — there is no second
+  timing path and no second I/O path to keep in sync with it. When neither
+  remains, the drained-queue match's fourth arm never reaches `poll::wait` at
+  all: `report_deadlock()` aborts the process immediately instead.
+- **The two new footguns this decision's shape produces — I/O starvation
+  under a permanently-runnable task, and an I/O wait never reported as a
+  deadlock — are recorded in `docs/adr/0009-async-execution-model.md` §1**,
+  which already carries the identically-shaped deadline-starvation and
+  livelock footguns from the park-set amendment, rather than restated here.
+
+## References
+
+- Design: `docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md`
+  §3.1 (the drained-queue-only wait), §3.2 (`Wait` gains a variant), §3.3
+  (`Staged` widens), §3.4 (an I/O wait is never a deadlock), §6 (alternatives,
+  in the design's own words)
+- `crates/nova-runtime/src/poll.rs`: `RawSocket`, `Interest`, `wait`,
+  `set_nonblocking`, and the `#[cfg(unix)]`/`#[cfg(windows)]` `platform_wait`
+  arms (`select`/`WSAPoll`)
+- `crates/nova-runtime/src/task.rs`: `Wait`, `Staged`, `stage_park`,
+  `stage_io_park`, `run_to_completion`'s drained-queue match, `earliest_deadline`,
+  `io_parks`, `wake_ready`, `wake_due`, `deadlock_report`/`report_deadlock`
+- `crates/nova-runtime/src/net.rs`: the first production source of a
+  non-empty socket set for `poll::wait` to see — `connect`, `read`, `write`,
+  and `read_timeout`'s poll functions each stage a `Wait::Io` through
+  `stage_io_park`; `task.rs`'s `run_to_completion` remains `poll::wait`'s only
+  caller
+- `docs/adr/0009-async-execution-model.md` §1: the thread-local-heap argument
+  this decision's first alternative reapplies, and the 2026-08-16 amendment
+  recording this decision's two new footguns
+- `docs/adr/0012-file-descriptor-lifecycle.md`: `stack_base()`'s Windows-only
+  precise bounds and why collection does not run at all off Windows —
+  the same property this decision's second alternative (IOCP) notes does not
+  itself decide the question, unlike the first

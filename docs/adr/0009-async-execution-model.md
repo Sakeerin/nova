@@ -258,6 +258,41 @@ afterwards.
   (`docs/superpowers/specs/2026-08-10-park-set-design.md` §6, which is also
   where the deadlock fixture's own shape is argued from this same
   distinction).
+
+  **AMENDED 2026-08-16 (branch `io-poller-std-net`): two more footguns of
+  this same shape, both consequences of the I/O poller's own design rather
+  than oversights (`docs/adr/0013-io-poller.md`).** `Wait` gained a third
+  variant, `Wait::Io`, when `std/net`'s `connect`/`read`/`write`/`read_timeout`
+  gave a task something external to suspend on besides a deadline or a
+  sibling task.
+
+  **A permanently-runnable task starves I/O, joining the first footgun
+  above rather than opening a new family.** The poller (`crates/nova-runtime/src/poll.rs`'s
+  `wait`) is consulted only at the same drained-queue point `report_deadlock`
+  already was — `run_to_completion`'s per-poll `wake_due` check still runs
+  after every turn, but it only wakes a *due* deadline, never a socket, and
+  the real socket wait happens exclusively in the branch reached once the
+  ready queue is empty. So a task that never parks keeps that branch
+  unreached indefinitely, and a sibling parked on a socket that is, in fact,
+  ready gets no chance to notice — the identical suppression the
+  permanently-runnable-task footgun above already names for a due deadline,
+  now covering an I/O wait too, because both wake sources share the one
+  drained-queue consultation point.
+
+  **An I/O wait is never reported as a deadlock, so a program waiting on a
+  peer that never sends hangs silently.** `run_to_completion`'s drained-queue
+  match reaches `report_deadlock()` only when both the deadline dimension and
+  the I/O dimension are empty (`docs/adr/0013-io-poller.md`'s Decision
+  section); a park set holding even one `Wait::Io` instead calls `poll::wait`
+  and blocks this thread on it, however long that takes. This follows the identical
+  livelock precedent stated immediately above for a `yield_now`-looping join
+  target: separating "waiting for a peer that will eventually send" from
+  "waiting for a peer that never will" is the halting problem, and this
+  project already declines to approximate it for the join case, so declining
+  it again for I/O is consistency, not a fresh decision. **The cost is stated
+  rather than hidden:** a program that connects to a peer that accepts the
+  connection and then never writes back hangs with no diagnostic, and
+  `nova test` has no per-test timeout to bound it.
 - **`spawn` used to accept the same future twice, with no check at all** —
   registering it as two independent tasks that both drove one shared state
   object, corrupting whichever one polled second. **Closed on branch
@@ -411,6 +446,23 @@ afterwards.
   the thread indefinitely**, not merely for a bounded duration. Recorded
   here, in §1, because this is where a reader debugging a stalled program
   looks first — a doc comment on the intrinsic alone is not enough.
+
+  **AMENDED 2026-08-16 (branch `io-poller-std-net`): "no I/O poller yet" /
+  "no I/O poller exists yet" in the two paragraphs above is now stale —
+  a real poller exists (`crates/nova-runtime/src/poll.rs`,
+  `docs/adr/0013-io-poller.md`) — but neither consequence is closed by it,
+  for two different reasons.** `std/fs` still never suspends, and the reason
+  has *changed*, not merely aged: it is no longer "no poller has been built
+  yet" but "a regular file is not readiness-pollable by this poller, or any
+  like it, on any of this project's three CI platforms" — an architectural
+  fact rather than a roadmap gap (`docs/adr/0013-io-poller.md`,
+  `nova-spec/20-STDLIB.md` §4's 2026-08-16 amendment). `std/io`'s `Stdin::read`
+  still blocks the whole executor too, and unlike `std/fs` this one really is
+  still just unbuilt: stdin is, in principle, a handle this poller's
+  mechanism could watch, but nothing in this increment wires `std/io` to it —
+  `std/net` is this poller's only caller (`crates/nova-runtime/src/net.rs`).
+  Both consequences therefore stand exactly as stated above; only the reason
+  for the first has moved from temporary to structural.
 - **`spawn` starts nothing.** A task is queued, and the queue is drained only
   while a `block_on` call is running — so a `spawn` with no `block_on` anywhere
   above it never runs at all, silently. `async fn main` is driven by `block_on`,
@@ -602,3 +654,7 @@ Two companion rules, from the same evidence:
   shaped leak this ADR's §1 first documented, recurring for `File`'s OS
   descriptor instead of a task's state object, and why closing *that* one
   needed its own document rather than a longer footgun bullet here
+- `docs/adr/0013-io-poller.md` (2026-08-16) — the executor's third wake
+  source, socket readiness, and the two footgun bullets this ADR's §1 gained
+  in its 2026-08-16 amendment above, joining the deadline-starvation and
+  livelock footguns this document already carried for the same reason

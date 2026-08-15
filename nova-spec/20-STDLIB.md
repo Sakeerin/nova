@@ -33,6 +33,12 @@ std/task         async runtime primitives
 prior entries — added above. Like `std/strings`, `std/regex`, `std/process` and `std/net`, it has no
 dedicated numbered section below yet.
 
+**AMENDED 2026-08-16 (branch `io-poller-std-net`): the paragraph above is now
+stale for one of its four names.** `std/net` gained a dedicated section, §16,
+appended after §15 rather than inserted in module-index order (see §16's own
+opening note for why). `std/bytes`, `std/strings`, `std/regex` and
+`std/process` still have no dedicated numbered section below.
+
 ---
 
 ## 2. `std/core` — Foundational Types
@@ -204,6 +210,32 @@ module std.io
 // caller would read it before this note. `crates/nova-runtime/src/file.rs`'s
 // `nova_rt_file_read` repeats the identical eager-allocation shape for
 // `File::read` below, once `File` existed to have one.
+//
+// AMENDED 2026-08-16 (branch `io-poller-std-net`): after this increment,
+// **`std/fs` suspends nowhere and `std/net` suspends everywhere** -- two
+// different wrapper shapes are both live in this stdlib at once, and a
+// reader who has only met one of them should know the other exists.
+// `std/fs`'s `async fn`s (§5) call a plain, status-returning intrinsic with
+// no `.await` inside them at all, so the underlying operation always runs to
+// completion inside the first poll -- not merely because no poller existed
+// yet, but because a regular file is not readiness-pollable on any of this
+// project's three CI platforms the way a socket is; that is what a
+// completion-based interface (IOCP, `io_uring`) exists for, and building one
+// is a subsystem of its own, out of scope here (`docs/adr/0013-io-poller.md`).
+// `std/net`'s wrappers (§16) instead call a *future-constructing* intrinsic
+// and `.await` it -- `crates/nova-runtime/src/net.rs`'s `connect`, `read`,
+// `write` and `read_timeout` are Rust-built futures with their own poll
+// function, parked through the executor's new third wake source (socket
+// readiness, `crates/nova-runtime/src/poll.rs`) exactly as `sleep` parks on
+// a deadline -- so every one of them can genuinely suspend the calling task
+// and let a sibling run, which `tests/runtime/net_interleave.nova` pins end
+// to end. This is an honest consequence of files not being
+// readiness-pollable, not an inconsistency to reconcile. Separately,
+// `TimedOut` and `ConnectionRefused` below -- both already listed since the
+// 2026-08-11 amendment, with no producer -- gain their first ones in
+// `std/net`'s `connect` and `read_timeout`; see
+// `crates/nova-runtime/src/fs.rs`'s own pinned-kinds comment for exactly
+// which fixture pins which of the eight.
 pub trait Read {
     async fn read(self, buf: &mut [u8]) -> Result<Int, IoError>
     async fn read_to_end(self, buf: &mut [u8]) -> Result<Int, IoError> { /* default */ }
@@ -685,3 +717,75 @@ core → fmt/io → collections → strings → fs → time/log → task → syn
 - Every public item has `///` doc comment
 - Examples in doc comments are tested by `nova test --doc`
 - `nova doc` generates a static HTML site like rustdoc
+
+---
+
+## 16. `std/net`
+
+**Numbered out of the module-index order above** (§1 lists `std/net`
+immediately after `std/fs`/`std/bytes`), the same way `std/bytes`,
+`std/strings`, `std/regex` and `std/process` have no dedicated section at
+all. Appended here rather than inserted between §5 and §6 so no existing
+numbered section — several of which are cross-referenced by number
+elsewhere in this repository — has to be renumbered.
+
+```nova
+module std.net
+
+pub record TcpStream { /* opaque */ }
+
+pub async fn connect(addr: String) -> Result<TcpStream, IoError>
+
+impl TcpStream {
+    pub async fn close(self) -> Result<(), IoError>
+    pub async fn read_timeout(self, max: Int, ms: Int) -> Result<Bytes, IoError>
+}
+
+impl Read for TcpStream { ... }
+impl Write for TcpStream { ... }
+```
+
+`addr` is `"host:port"`, resolved through the identical mechanism
+`std::net::TcpStream::connect` itself uses, taking the first resolved
+address for a multi-address name (`crates/nova-runtime/src/net.rs`'s own
+`resolve_addr`). `TcpStream` is written `{ /* opaque */ }` for the same
+reason `File` is in §5: nothing outside this module should rely on its
+shape, but it is not opaque to the language itself — it ships as
+`TcpStream { fd: Int }`, an `Int` key into a runtime-owned table of open
+sockets, not an OS socket handle. Nova has no field privacy, so
+`TcpStream { fd: 9999 }`, naming no connection this module ever opened, is
+ordinary, legal code; `close` is idempotent and any other operation on a
+closed, stale, or forged handle is an ordinary `IoError { kind: Other }`,
+never a panic — absence from the socket table is what closedness *is*,
+identically to `File` in §5.
+
+`read_timeout` has no `std/fs` analogue (nothing there takes a deadline), so
+it ships as a second inherent method beside `close` rather than folded into
+`Read`, which has no room for a third argument. It reports `TimedOut` if
+`ms` milliseconds pass with nothing to read first; otherwise it behaves
+exactly like `Read::read` below it, including EOF/short-read semantics — an
+**empty** result is end of stream, and a **short** one is not.
+
+`impl Read for TcpStream` and `impl Write for TcpStream` reuse §4's traits
+unchanged — `read`/`write`/`flush`, the `Future<T>`-returning spelling those
+trait methods already require. `Write::write` may write fewer bytes than
+given — one non-blocking attempt, not a `write_all` loop — identically to
+§4's own contract for the trait, and deliberately unlike `std/fs`'s
+top-level, count-less, write-all `write` function in §5 (`File`'s own
+`impl Write`, sharing this same trait, already carries the same
+short-write contract `TcpStream` does here). `flush` always returns
+`Ok(())` immediately, with no runtime call at all: one `write` call against
+a `TcpStream` is already one unbuffered syscall, so there is no userspace
+write buffer for a flush to push anything out of — the same reasoning
+`std::io::Write for std::net::TcpStream` in Rust's own standard library
+rests on.
+
+**`connect`, `read`, `write`, and `read_timeout` genuinely suspend the
+calling task rather than blocking the whole executor**, per §4's 2026-08-16
+amendment and `docs/adr/0013-io-poller.md` — the property this module exists
+to add. `close` and `flush` do not: `close` calls a plain status-returning
+intrinsic with no `.await`, and `flush` never calls a runtime intrinsic at
+all, for the reasons given above. `bind`/`accept`/`TcpListener` (a server
+side), UDP, and Unix sockets are all named in §1's module-index line for
+`std/net`, but none of the three is built by this section; each remains a
+future increment's to add.
