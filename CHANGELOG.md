@@ -1182,8 +1182,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     cannot honor. Recorded in a new ADR, rather than fixed:
     `docs/adr/0012-file-descriptor-lifecycle.md`.
   - Five new `Builtin::STD_ONLY` intrinsics
-    (`nova_rt_file_open`/`close`/`read`/`write`/`flush`), taking `STD_ONLY`
-    from `[Builtin; 48]` to `[Builtin; 53]`. **`STD_MODULES` and
+    (`file_open`, `file_close`, `file_read`, `file_write`, `file_flush`),
+    taking `STD_ONLY` from `[Builtin; 48]` to `[Builtin; 53]`. **`STD_MODULES` and
     `RESERVED_TYPE_NAMES` are both unchanged at 7** — `File` and
     `OpenOptions` are ordinary `std/fs` definitions, glob-imported and
     shadowable like any other, so no name is reserved and no existing

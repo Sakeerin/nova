@@ -1,7 +1,9 @@
-// Open for writing, write, close, reopen for reading, `read_to_end`, close,
-// print the text. Exercises `impl Write for File` (`write`), `impl Read for
-// File` (through `read_to_end`'s default body in `std/io`, over `File`'s own
-// `read`), and `File::close`, the inherent `async fn`.
+// Open for writing, write, flush, close, reopen for appending, write again,
+// reopen for reading, `read_to_end`, close, print the text -- then reopen for
+// writing once more to prove that leg truncates. Exercises `impl Write for
+// File` (`write` and `flush`), `impl Read for File` (through `read_to_end`'s
+// default body in `std/io`, over `File`'s own `read`), `File::close`, the
+// inherent `async fn`, and all three `OpenOptions` constructors.
 //
 // The payload is `"hello, file".repeat(30)`, past the 256-byte threshold
 // where a write's byte count -- 8 little-endian bytes, decoded by
@@ -14,6 +16,33 @@
 // bytes than that, so none of them could independently catch that mutation
 // -- only the pre-existing `io_streams_run` could. Confirmed by re-applying
 // that exact mutation after this change: see the task report.
+//
+// # Why the append and re-truncate legs are here
+//
+// `OpenOptions::appending()` had **no call site anywhere in the repository**
+// and `writing()`'s truncation was never observed against a file that
+// already held content -- the fixture removed the path first. The final
+// whole-branch review measured what that costs: transposing `open`'s
+// `options.truncate` and `options.create` arguments below, and separately
+// rewriting `appending()` to truncate, each left the entire suite green.
+// The two legs added here are what kills those. They are the Nova-level
+// half of a pair: `file.rs`'s `each_constructors_flags_reach_the_os` pins
+// that the runtime forwards a given flag tuple to the OS faithfully, and
+// these pin that the three constructors produce the tuples that claim to.
+// Neither can see the other's mutation.
+//
+// The `flush()` leg is here for a narrower reason: no `.nova` fixture called
+// `flush()` on a `File` at all, and both Rust callers of
+// `nova_rt_file_flush` pass a descriptor absent from the handle table, so
+// its success arm was executed by nothing. Rewiring `Builtin::FileFlush` to
+// `RtFunc::FileClose` in `lower.rs` type-checks -- both are `(I64) -> I64`
+// -- and shipped an `f.flush()` that closed the file, with the suite green.
+// A bare `flush()` call does not kill that: measured, and it does not,
+// because the bytes are already out and the `close` that follows is
+// idempotent either way. What kills it is the write *after* the flush,
+// through the same handle -- so that leg is the load-bearing one, not the
+// `flush()` call itself. `file_lifetime.nova`'s flush-after-close leg kills
+// the same mutation independently, from the opposite side.
 async fn main() {
     let path = "${temp_dir()}/nova_file_roundtrip_5a91.txt"
     let _ = remove_file(path).await
@@ -27,9 +56,37 @@ async fn main() {
         Err(e) => panic("write: ${e.message}")
     }
     println("wrote: ${n}")
+    match w.flush().await {
+        Ok(_) => println("flush: ok")
+        Err(e) => println("flush: ${e.message}")
+    }
+    // Written *through the same handle* after the flush, so the handle has
+    // to have survived it. Without this second write a `flush` lowered to
+    // `close` is invisible here: the 330 bytes are already out, and the
+    // explicit `close` below is idempotent, so the golden would not move.
+    let n2 = match w.write(bytes_from_string("-flushed")).await {
+        Ok(count) => count
+        Err(e) => panic("write after flush: ${e.message}")
+    }
+    println("wrote after flush: ${n2}")
     match w.close().await {
         Ok(_) => println("close: ok")
         Err(e) => println("close: err")
+    }
+
+    // `appending()` must leave what is already there in place.
+    let a = match open(path, OpenOptions::appending()).await {
+        Ok(f) => f
+        Err(e) => panic("open for appending: ${e.message}")
+    }
+    let m = match a.write(bytes_from_string("-appended")).await {
+        Ok(count) => count
+        Err(e) => panic("append: ${e.message}")
+    }
+    println("appended: ${m}")
+    match a.close().await {
+        Ok(_) => println("close_a: ok")
+        Err(e) => println("close_a: err")
     }
 
     let r = match open(path, OpenOptions::reading()).await {
@@ -47,6 +104,39 @@ async fn main() {
     match r.close().await {
         Ok(_) => println("close2: ok")
         Err(e) => println("close2: err")
+    }
+
+    // `writing()` over a file that already has content must discard it --
+    // the one claim in that constructor's own doc comment no test made.
+    let w2 = match open(path, OpenOptions::writing()).await {
+        Ok(f) => f
+        Err(e) => panic("reopen for writing: ${e.message}")
+    }
+    let k = match w2.write(bytes_from_string("rewritten")).await {
+        Ok(count) => count
+        Err(e) => panic("rewrite: ${e.message}")
+    }
+    println("rewrote: ${k}")
+    match w2.close().await {
+        Ok(_) => println("close3: ok")
+        Err(e) => println("close3: err")
+    }
+
+    let r2 = match open(path, OpenOptions::reading()).await {
+        Ok(f) => f
+        Err(e) => panic("reopen for reading: ${e.message}")
+    }
+    let after = match r2.read_to_end().await {
+        Ok(b) => b
+        Err(e) => panic("read_to_end again: ${e.message}")
+    }
+    match after.to_string() {
+        Some(s) => println("text2: ${s}")
+        None => println("text2: <non-utf8>")
+    }
+    match r2.close().await {
+        Ok(_) => println("close4: ok")
+        Err(e) => println("close4: err")
     }
 
     let _ = remove_file(path).await

@@ -6,13 +6,55 @@
 // what closedness *is* (`crates/nova-runtime/src/file.rs`'s own doc
 // comment).
 //
+// All three post-close operations are checked, not just `read`: a mutation
+// could land in any one of `read_file`/`write_file`/`flush_file`'s status
+// checks without touching the other two. Deleting `write_file`'s `if status
+// == 0` in particular makes every failed write report `Ok(0)` -- silent
+// data loss -- and, before this leg existed, left the whole suite green.
+//
+// `kind` is printed alongside `message` because the design spec's §8 claims
+// use-after-close's `IoError { kind: Other }` is "pinned by tests" and
+// nothing asserted the kind: changing `closed_fd_error` to
+// `ErrorKind::NotFound` kept the message identical and the suite green.
+// `message` here is the runtime's own fabricated string, not OS text -- the
+// table lookup misses before any syscall runs -- so pinning it is portable,
+// unlike `file_errors.nova`, which asserts only `kind` for that reason.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
 // `open_or_die` is fixture-only glue, not `std/fs` surface: it exists so
 // `main` below reads close to the design spec's own sketch of this
 // behaviour, which passes `open`'s result straight to the caller rather
 // than threading an `Err` arm through code whose point is what happens
 // *after* a successful open.
+//
+// Read **and** write, built from `OpenOptions::default()` because no named
+// constructor is that combination -- deliberately, not incidentally. Under
+// `OpenOptions::writing()`'s write-only handle the read-after-close check
+// below still failed when `close` was mutated to leave its table entry in
+// place, but it failed with a real OS permission error rather than the
+// handle-table miss this fixture exists to catch, so the golden's pinned
+// message was doing the work instead of the behaviour. `file.rs`'s sibling
+// `using_a_file_after_close_is_an_error_not_a_panic` was hardened against
+// exactly this and records the same measurement; this fixture had been left
+// in the pre-hardening shape.
 async fn open_or_die(path: String) -> File {
-    match open(path, OpenOptions::writing()).await {
+    let mut opts = OpenOptions::default()
+    opts.read = true
+    opts.write = true
+    opts.truncate = true
+    opts.create = true
+    match open(path, opts).await {
         Ok(f) => f
         Err(e) => panic("open_or_die: ${e.message}")
     }
@@ -29,7 +71,19 @@ async fn main() {
     let r = f.read(16).await
     match r {
         Ok(_) => println("read after close: unexpectedly ok")
-        Err(e) => println("read after close: ${e.message}")
+        Err(e) => println("read after close: ${kind_name(e.kind)} ${e.message}")
+    }
+
+    let w = f.write(bytes_from_string("x")).await
+    match w {
+        Ok(_) => println("write after close: unexpectedly ok")
+        Err(e) => println("write after close: ${kind_name(e.kind)} ${e.message}")
+    }
+
+    let fl = f.flush().await
+    match fl {
+        Ok(_) => println("flush after close: unexpectedly ok")
+        Err(e) => println("flush after close: ${kind_name(e.kind)} ${e.message}")
     }
 
     // Bound to a local before matching: `match File { fd: 9999 }.read(…) …`
@@ -38,7 +92,7 @@ async fn main() {
     let g = forged.read(16).await
     match g {
         Ok(_) => println("forged: unexpectedly ok")
-        Err(e) => println("forged: err")
+        Err(e) => println("forged: ${kind_name(e.kind)} ${e.message}")
     }
 
     let _ = remove_file(path).await
