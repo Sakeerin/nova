@@ -216,8 +216,19 @@ sentence for `temp_dir` to contradict — only an omission, recorded here.
 ### These `async fn`s never suspend
 
 Every `async fn` `std/fs` exposes runs its filesystem operation
-synchronously inside the first poll: there is no I/O poller yet, so there is
-nothing to suspend on.
+synchronously inside the first poll: there is nothing to suspend on.
+
+**AMENDED 2026-08-16 (branch `io-poller-std-net`): the sentence above used to
+read "there is no I/O poller yet, so there is nothing to suspend on", and its
+first clause is now stale.** A real poller exists
+(`crates/nova-runtime/src/poll.rs`, `docs/adr/0013-io-poller.md`) and
+`std/net` suspends on it. The limitation this section records is unchanged,
+but its cause is structural rather than temporary: a regular file is not
+readiness-pollable by `select`/`WSAPoll` on any of this project's three CI
+platforms, so a completion-based interface (IOCP) — declined on scope in
+ADR 0013 — is what `std/fs` would actually need. Recorded the same way, and
+for the same reason, as `docs/adr/0009-async-execution-model.md` §1's own
+2026-08-16 amendment.
 `no_filesystem_intrinsic_registers_a_park` (`crates/nova-runtime/src/fs.rs`)
 pins this at its source by asserting that `fs.rs`'s own production code
 contains no `stage_park` call — the only way a `std/fs` intrinsic could reach

@@ -32,6 +32,30 @@
 // process -- like every other `std/net` fixture's own port file (see
 // `net_roundtrip.nova`'s header for the accepted hazard that follows from
 // that).
+//
+// **Added 2026-08-16 (final whole-branch review): exactly what this fixture
+// guards, and what it does not.** The design spec
+// (`docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md` §5)
+// named a blocking `connect` as the mutation this fixture exists to kill.
+// It does not kill that one. Moving `connect` into `main` -- correct for the
+// confound described above -- also moves it out of the window this fixture
+// measures, so a `connect` made genuinely OS-blocking on its own passes here
+// and everywhere else in the suite.
+//
+// What this fixture does kill is **the read-blocking shape**: a `read` that
+// blocks the executor's thread instead of parking, whether directly or as a
+// consequence of the socket never being set non-blocking at all. That is the
+// property the interleaving assertion actually measures, and it is the one
+// worth having -- the read is where a real program waits.
+//
+// An isolated connect-only blocking syscall is **not guarded**, here or
+// anywhere. No structural guard was built for it deliberately:
+// `net.rs`'s `start_connect` folds "would block" and "already succeeded" into
+// the identical `Started::WouldBlock` (see above), and un-folding them to
+// assert on the difference is platform-fragile, because a loopback `connect`
+// legitimately returns `rc == 0` on Linux. That would trade a documented gap
+// for a flaky test. The gap is recorded in the design spec's §7 as well, dated
+// the same day, rather than left implied by this fixture's name.
 async fn count_to_three() -> Int {
     let mut i = 0
     while i < 3 {

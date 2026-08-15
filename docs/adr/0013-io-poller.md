@@ -135,9 +135,20 @@ amendment).
 
 ## Consequences
 
-- **`std::thread::sleep` no longer appears anywhere in `task.rs`.** The one
-  remaining call lives in `poll.rs`'s own empty-socket-set branch, reached
-  from the drained-queue match's `(Some(at), true)` arm.
+- **`std::thread::sleep` no longer appears anywhere in `task.rs`.** That half
+  holds: the three matches left in that file are doc-comment prose, not calls.
+  **Corrected 2026-08-16 (final whole-branch review): this bullet went on to
+  say "the one remaining call lives in `poll.rs`'s own empty-socket-set
+  branch". `poll.rs` has four production calls, not one.** The empty-set sleep
+  inside `wait`, reached from the drained-queue match's `(Some(at), true)` arm,
+  is the only one that implements a *wait*. The other three are
+  `ERROR_RETRY_BACKOFF` sleeps on paths that report "nothing ready" for a
+  reason retrying cannot fix — the Unix arm's `!any_watched` branch, the Unix
+  arm's non-`EINTR` `select` failure, and the Windows arm's non-`WSAEINTR`
+  `WSAPoll` failure — and they bound the CPU cost of a stuck condition rather
+  than waiting on anything (see `ERROR_RETRY_BACKOFF`'s own doc comment). All
+  four are still inside `poll::wait`, so "this thread blocks in exactly one
+  place" below is unaffected; only the count was wrong.
 - **A parked task's `PARKED` entry is exactly one, always** — `Staged` folds
   a deadline staged alongside an I/O wait into that same `Wait::Io`'s own
   `deadline` field rather than creating a second entry, so every wake path
@@ -146,8 +157,11 @@ amendment).
 - **This thread blocks in exactly one place, `poll::wait`, whenever a
   deadline, an I/O wait, or both remain to wait on** — there is no second
   timing path and no second I/O path to keep in sync with it. When neither
-  remains, the drained-queue match's fourth arm never reaches `poll::wait` at
-  all: `report_deadlock()` aborts the process immediately instead.
+  remains, the drained-queue match's **first** arm — `(None, true)`, in source
+  order — never reaches `poll::wait` at all: `report_deadlock()` aborts the
+  process immediately instead. (Corrected 2026-08-16, final whole-branch
+  review: this said "fourth arm". It is the first of the four, matching the
+  order of the Decision section's own table above.)
 - **The two new footguns this decision's shape produces — I/O starvation
   under a permanently-runnable task, and an I/O wait never reported as a
   deadlock — are recorded in `docs/adr/0009-async-execution-model.md` §1**,

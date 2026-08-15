@@ -122,10 +122,17 @@ pub trait Write {
 // reading it more than once keeps reading from wherever the last read left
 // off, the same as calling `std::io::stdin()` more than once in Rust.
 //
-// There is no I/O poller yet (`docs/adr/0009-async-execution-model.md`'s
-// residual-gaps list): a `read` blocks the whole executor for as long as the
-// OS read takes, so a terminal with nothing typed yet stalls every other
-// task on the thread, not only this one.
+// A `read` here blocks the whole executor for as long as the OS read takes,
+// so a terminal with nothing typed yet stalls every other task on the thread,
+// not only this one. This used to say "there is no I/O poller yet"; amended
+// 2026-08-16 (branch `io-poller-std-net`), because one now exists
+// (`crates/nova-runtime/src/poll.rs`, docs/adr/0013-io-poller.md). The
+// consequence above is unchanged and this one really is still just unbuilt --
+// unlike `std/fs`, whose reason is structural, stdin is in principle a handle
+// this poller's mechanism could watch, but nothing wires `std/io` to it:
+// `std/net` is the poller's only caller. See
+// `docs/adr/0009-async-execution-model.md` §1's 2026-08-16 amendment, which
+// records both halves.
 pub record Stdin { }
 
 pub fn stdin() -> Stdin { Stdin { } }

@@ -10,11 +10,20 @@
 //
 // Every function that touches the filesystem is an `async fn` per
 // `nova-spec/20-STDLIB.md` §5, but **none of them suspends**: the operation
-// runs synchronously inside the poll, because there is no I/O poller yet. The
-// signature is what matters — it does not change when a poller lands, so no
-// call site breaks then. The cost is that a call blocks the whole executor for
-// its duration, so a sibling task makes no progress during a large read. See
-// docs/adr/0011-io-error-kinds.md.
+// runs synchronously inside the poll. This used to say "because there is no
+// I/O poller yet"; amended 2026-08-16 (branch `io-poller-std-net`), because a
+// real poller now exists (`crates/nova-runtime/src/poll.rs`,
+// docs/adr/0013-io-poller.md) and `std/net` genuinely suspends on it. The
+// reason this module still does not has *changed*, not merely aged: it is no
+// longer a roadmap gap but a structural fact — a regular file is not
+// readiness-pollable by `select`/`WSAPoll`, or anything like them, on any of
+// this project's three CI platforms, so making `std/fs` suspend needs a
+// completion-based interface (IOCP), which ADR 0013 declines on scope. See
+// docs/adr/0009-async-execution-model.md §1's 2026-08-16 amendment. The
+// signature is what matters — it did not change when the poller landed, and no
+// call site broke, exactly as this comment predicted. The cost is that a call
+// blocks the whole executor for its duration, so a sibling task makes no
+// progress during a large read. See docs/adr/0011-io-error-kinds.md.
 //
 // `temp_dir` is the one of them that reaches outward and is still a plain
 // `fn`: it only queries the environment and touches no filesystem, so there is
