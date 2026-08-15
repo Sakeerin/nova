@@ -272,6 +272,30 @@ pub(crate) fn set_current_for_test(id: Option<i64>) {
     CURRENT.with(|c| c.set(id));
 }
 
+/// Test-only: the I/O half of whatever this thread's current poll has staged
+/// so far in [`PENDING_PARK`] -- the socket, its interest, and the deadline
+/// (if any) riding alongside it -- without exposing [`Wait`] or [`Staged`]
+/// themselves. `None` if nothing with a socket is staged (nothing at all, or
+/// only a bare `Wait::Task`/`Wait::Deadline`, neither of which has one).
+///
+/// `net.rs`'s own tests need this to assert that a future's would-block
+/// branch genuinely staged a park with the *expected* socket and interest --
+/// not merely that `POLL_PENDING` came back, which a future that stages
+/// nothing at all and busy-spins through `QUEUE` would also return. Reading
+/// [`PENDING_PARK`] here does not widen what `net.rs` can construct or match:
+/// `Wait` and `stage_park` stay private to this module, and this hands back
+/// plain data extracted from `Staged`, which is a different, already-`Copy`
+/// type nothing outside this module can build a fake instance of.
+#[cfg(test)]
+pub(crate) fn staged_io_for_test() -> Option<(RawSocket, Interest, Option<Instant>)> {
+    PENDING_PARK.with(|cell| {
+        let staged = cell.get();
+        staged
+            .io
+            .map(|(socket, interest)| (socket, interest, staged.deadline))
+    })
+}
+
 /// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
 /// the collector has just returned to the allocator.
 ///
