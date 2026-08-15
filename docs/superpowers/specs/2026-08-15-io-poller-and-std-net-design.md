@@ -333,6 +333,36 @@ only under some *other* test, that fixture is not doing its job.
   `--all-targets --all-features -- -D warnings`; `fmt --all --check` clean; and
   **no `reason = "…"`** in any lint attribute (MSRV 1.78).
 
+**Corrected 2026-08-16 (branch `io-poller-std-net`, final whole-branch review):
+the mutation-6 bullet above overstates what shipped, and the branch does not
+meet it as written.** Mutation 6 in the form §5 specifies it — `connect` made
+genuinely OS-blocking, by issuing it on a blocking socket with
+`set_nonblocking` applied only on the success paths so the refusal path stays
+byte-identical — **passes the whole suite** (970 passed / 0 failed / 8 ignored /
+44 targets). Two independent causes, each sufficient on its own:
+
+- **`tests/runtime/net_interleave.nova` calls `connect` in `main`, before
+  either task is spawned.** That was deliberate and is the right call for what
+  that fixture measures (its own header explains the confound it removes), but
+  it takes `connect` out of the interleaving window the fixture asserts on. The
+  variant the fixture does kill is the *wider* one that also drops
+  `set_nonblocking`, which makes the `read` blocking too — so what is actually
+  guarded end to end is **the read-blocking shape**, not a blocking `connect`.
+- **`net.rs`'s `start_connect` folds `rc == 0` and would-block into one
+  `Started::WouldBlock`.** Both `platform_connect` arms return `Ok(stream)` for
+  `rc == 0` and for `WSAEWOULDBLOCK`/`EINPROGRESS` alike, so
+  `connect_parks_on_its_first_poll_rather_than_completing_synchronously`
+  returns `POLL_PENDING` either way and structurally cannot observe whether the
+  syscall blocked.
+
+**An isolated connect-only blocking syscall is therefore not guarded, and no
+structural guard was added for it.** Asserting would-block at that seam is
+platform-fragile in a way that would trade a documentation gap for a flaky
+test: a loopback `connect` legitimately returns `rc == 0` on Linux, which is
+precisely why the two outcomes were folded in the first place. The DoD bullet
+above should be read as: mutations 1–5 each fail at least one test, and
+mutation 6's read-blocking form fails the interleaving fixture specifically.
+
 ---
 
 ## 8. What is measured and what is reasoned

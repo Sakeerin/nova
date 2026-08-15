@@ -585,16 +585,18 @@ fn stage_park(wait: Wait) {
 /// Stage an I/O park: wake the current task once `socket` is ready for
 /// `interest`, or once `deadline` passes, whichever comes first.
 ///
-/// The narrow seam `net.rs` (Task 3) stages an I/O wait through, so it never
-/// needs to construct a [`Wait`] itself. `Wait` and [`stage_park`] stay
-/// private -- every exhaustive match on `Wait` lives in this module, so a
-/// fifth variant is a compile error here rather than a silent miss in a
-/// sibling module that matched on it.
+/// The narrow seam `net.rs` stages an I/O wait through, so it never needs to
+/// construct a [`Wait`] itself. `Wait` and [`stage_park`] stay private --
+/// every exhaustive match on `Wait` lives in this module, so a fifth variant
+/// is a compile error here rather than a silent miss in a sibling module that
+/// matched on it.
 ///
-/// `#[allow(dead_code)]`: this task ships no I/O, so nothing calls this yet
-/// -- `net.rs` is this function's first caller. Added now, ahead of its own
-/// caller, so Task 3 never has to touch this file to reach `Wait::Io`.
-#[allow(dead_code)]
+/// `net.rs` calls this from four production sites: `poll_connect`
+/// (`Interest::Write`), `poll_read` (`Interest::Read`), `poll_write`
+/// (`Interest::Write`) and `poll_read_timeout` (`Interest::Read`, and the only
+/// one of the four that passes a `deadline`). An earlier `#[allow(dead_code)]`
+/// here recorded that no caller existed yet; it has been removed with its
+/// reason rather than left to mask a real dead-code finding.
 pub(crate) fn stage_io_park(socket: RawSocket, interest: Interest, deadline: Option<Instant>) {
     stage_park(Wait::Io {
         socket,
@@ -976,11 +978,14 @@ fn earliest_deadline() -> Option<Instant> {
 /// Every socket a parked task is waiting on, paired with the interest it is
 /// waiting for.
 ///
-/// This task never populates a [`Wait::Io`] entry in production -- nothing
-/// yet stages one outside this module's own tests -- so this always returns
-/// empty here; it exists now so `run_to_completion`'s drive loop already
-/// asks [`PARKED`] the right question, and Task 2's sockets need nothing new
-/// from this function when they start showing up in it.
+/// This returns a non-empty vector in production now: `net.rs` stages a
+/// [`Wait::Io`] from each of its four poll functions (see [`stage_io_park`]),
+/// so an ordinary Nova program awaiting a `connect`, `read`, `write` or
+/// `read_timeout` puts a real socket here, and `run_to_completion`'s
+/// drained-queue match hands it to `poll::wait`. An earlier version of this
+/// comment said the opposite -- that nothing outside this module's own tests
+/// ever staged one, so this always returned empty -- which was true only
+/// before `net.rs` existed.
 fn io_parks() -> Vec<(RawSocket, Interest)> {
     PARKED.with(|parked| {
         parked
@@ -999,10 +1004,18 @@ fn io_parks() -> Vec<(RawSocket, Interest)> {
 /// Move every task parked on a [`Wait::Io`] whose socket is in `ready` back
 /// onto the ready queue.
 ///
-/// The I/O counterpart of [`wake_tasks_waiting_on`] and [`wake_due`]: called
-/// with whatever `poll::wait` reports ready, so it is always a no-op today --
-/// `poll::wait` never reports anything ready while this task's socket set is
-/// always empty (see [`io_parks`]).
+/// The I/O counterpart of [`wake_tasks_waiting_on`] and [`wake_due`], and the
+/// increment's central new wake source: called with whatever `poll::wait`
+/// reports ready, which is now a genuinely non-empty set whenever a `net.rs`
+/// operation's socket becomes ready (see [`io_parks`]). An earlier version of
+/// this comment called it "always a no-op today", true only while nothing
+/// production ever staged a `Wait::Io`.
+///
+/// The `ready.contains(&socket)` guard below is what makes this wake *only*
+/// the tasks whose own socket is ready; the `retain`'s trailing `_ => true`
+/// would swallow the loss of that guard silently, so
+/// `wake_ready_wakes_only_the_task_whose_socket_is_ready` pins it
+/// behaviourally.
 fn wake_ready(ready: Vec<RawSocket>) {
     if ready.is_empty() {
         return;
@@ -1036,8 +1049,14 @@ fn wake_ready(ready: Vec<RawSocket>) {
 /// its timeout firing, so it must wake the task exactly as a bare
 /// `Wait::Deadline` does -- it just also happens to leave that task's
 /// socket, if `poll::wait` ever reported one ready at the same moment,
-/// unconsumed; nothing in this task ever makes that observable, since
-/// nothing here ever populates a `Wait::Io` outside a test.
+/// unconsumed. That is reachable in production now that `net.rs`'s
+/// `read_timeout` stages a timed `Wait::Io`, and it is harmless for the reason
+/// `poll_read_timeout`'s own doc comment gives: every poll retries the read
+/// before consulting the deadline, so a task woken by its timeout still
+/// observes data that arrived at the same instant and reports success rather
+/// than a spurious `TimedOut`. An earlier version of this comment said nothing
+/// here ever populated a `Wait::Io` outside a test, which stopped being true
+/// when `net.rs` landed.
 ///
 /// Called by [`run_to_completion`] after every single poll (cheap: one pass
 /// over [`PARKED`], no blocking) so a self-requeuing task can never starve a
@@ -3013,6 +3032,69 @@ mod tests {
         QUEUE.with(|q| q.borrow_mut().clear());
     }
 
+    /// `wake_ready`'s `ready.contains(&socket)` guard, behaviourally -- the
+    /// exact counterpart of
+    /// `wake_due_wakes_a_due_io_wait_and_leaves_the_rest_parked`, for the
+    /// other of this module's two I/O wake paths, and needed for the same
+    /// reason it was: the `retain`'s trailing `_ => true` swallows any
+    /// narrowing mistake silently. Widening that arm to a bare
+    /// `Wait::Io { .. }` -- waking *every* I/O-parked task no matter which
+    /// socket `poll::wait` actually reported ready -- compiles, and before
+    /// this test it also passed the whole suite. This is the increment's
+    /// central new wake source, and nothing else asserted it consults the
+    /// ready set at all.
+    ///
+    /// Two entries on different sockets, one of them reported ready: a mutant
+    /// that wakes too many fails the `PARKED` assertion, one that wakes too
+    /// few fails the `QUEUE` assertion. `wake_ready` reads no clock and does
+    /// no I/O, so nothing here depends on timing.
+    #[test]
+    fn wake_ready_wakes_only_the_task_whose_socket_is_ready() {
+        let ready_sock = RawSocket(11);
+        let idle_sock = RawSocket(22);
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((
+                1,
+                Wait::Io {
+                    socket: ready_sock,
+                    interest: Interest::Read,
+                    deadline: None,
+                },
+            ));
+            p.push((
+                2,
+                Wait::Io {
+                    socket: idle_sock,
+                    interest: Interest::Read,
+                    deadline: None,
+                },
+            ));
+        });
+        wake_ready(vec![ready_sock]);
+        assert_eq!(
+            QUEUE.with(|q| q.borrow().clone()),
+            std::collections::VecDeque::from([1]),
+            "only the task parked on the socket poll::wait reported ready \
+             must be woken"
+        );
+        assert_eq!(
+            PARKED.with(|p| p.borrow().clone()),
+            vec![(
+                2,
+                Wait::Io {
+                    socket: idle_sock,
+                    interest: Interest::Read,
+                    deadline: None,
+                }
+            )],
+            "a task parked on a socket that was not reported ready must stay \
+             parked"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
     /// How many times `poll_spin_n_times` reports `POLL_PENDING`, without
     /// ever staging a park, before it completes. Large enough that "the
     /// spinner already finished" and "the spinner still has turns left" are
@@ -3308,10 +3390,16 @@ mod tests {
     /// waiting on i/o, not fall through to a deadline-shaped or task-shaped
     /// message -- and, more importantly, `run_to_completion`'s drive loop
     /// must never treat it as a deadlock in the first place (see the
-    /// `(None, false)` arm there). This test covers only the message; the
-    /// `(None, false)` arm itself has no dedicated test because this task
-    /// ships no way to populate a real, unresolved `Wait::Io` through
-    /// `run_to_completion` -- nothing outside a test ever stages one.
+    /// `(None, false)` arm there). This test covers only the message. The
+    /// `(None, false)` arm itself still has no dedicated *unit* test, but no
+    /// longer for the reason an earlier version of this comment gave -- that
+    /// nothing outside a test could populate a real, unresolved `Wait::Io`
+    /// through `run_to_completion`. `net.rs` now stages exactly that from
+    /// three of its four operations (`connect`, `read` and `write` all pass
+    /// `deadline: None`), so the arm is reached in production and end to end by
+    /// every `std/net` runtime fixture: `tests/runtime/net_interleave.nova`'s
+    /// `connect` in `main` parks the only live task on an untimed `Wait::Io`
+    /// and drains the queue behind it, which is that arm exactly.
     #[test]
     fn a_park_on_io_with_no_deadline_is_not_a_deadlock() {
         let report = with_parked(

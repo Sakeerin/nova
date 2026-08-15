@@ -6,10 +6,13 @@
 // `std/io`; `TcpStream` implements both here, the same split `std/fs`'s
 // `File` already follows.
 //
-// **This module's operations genuinely suspend.** Unlike `std/fs`'s own
-// module doc comment, which states plainly that none of its `async fn`s
-// suspend because there is no I/O poller yet, `connect`, `read`, `write` and
-// `read_timeout` below run against `crates/nova-runtime/src/net.rs`'s
+// **This module's operations genuinely suspend.** Unlike `std/fs`, whose own
+// module doc comment states plainly that none of its `async fn`s suspend --
+// and not because no poller exists, but because a regular file is not
+// readiness-pollable by `select`/`WSAPoll` on any of this project's three CI
+// platforms (docs/adr/0013-io-poller.md's IOCP alternative) -- `connect`,
+// `read`, `write` and `read_timeout` below run against
+// `crates/nova-runtime/src/net.rs`'s
 // non-blocking sockets and this crate's real poller
 // (`crates/nova-runtime/src/poll.rs`): a call that cannot complete
 // immediately parks the calling task and lets a sibling task run in the

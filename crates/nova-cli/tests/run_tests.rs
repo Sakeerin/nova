@@ -7306,6 +7306,14 @@ impl Drop for EchoServer {
 /// trip (`crates/nova-runtime/src/net.rs`'s own module doc comment) — rather
 /// than a hardcoded high port number some other process on the host might
 /// genuinely be listening on.
+///
+/// **Accepted, unengineered race:** between the `drop` below and the fixture's
+/// own `connect`, nothing stops the OS handing that just-released port to some
+/// other process, which would turn the expected refusal into a connection and
+/// fail `net_refused_run`. Measured at 0 occurrences in 40 consecutive runs on
+/// this project's own hosts, and closing it would mean holding a port open to
+/// prove nothing is listening on it — so it is recorded here rather than
+/// engineered around.
 fn write_refused_port_file(label: &str) -> std::path::PathBuf {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");

@@ -2390,8 +2390,16 @@ mod tests {
     /// the whole array: this test pins these five *by name*, so deleting one
     /// from `STD_ONLY` (rather than merely narrowing its behaviour) fails
     /// here specifically instead of only shrinking a loop bound elsewhere.
+    ///
+    /// `STD_ONLY` membership is the whole of what this asserts. It was
+    /// originally named `..._and_build_futures`, which promised a second
+    /// property its body never checked -- that coverage genuinely exists, in
+    /// `nova-typeck`'s `builtin_signatures_are_what_the_std_call_sites_use`
+    /// (`crates/nova-typeck/src/check.rs`), which is where each builtin's
+    /// `Future<_>` return type is actually pinned against its `std/net` call
+    /// site.
     #[test]
-    fn the_net_builtins_are_std_only_and_build_futures() {
+    fn the_net_builtins_are_std_only() {
         for b in [
             Builtin::NetConnect,
             Builtin::NetClose,

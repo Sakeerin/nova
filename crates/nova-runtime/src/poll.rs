@@ -17,10 +17,15 @@
 //! in `task.rs` had to change to pick up the real poller, because `task.rs`
 //! already only calls [`wait`] and never sleeps itself.
 //!
-//! **Still true today:** no caller in this crate ever builds a non-empty
-//! `sockets` slice yet -- `net.rs` (Task 3) is this module's first caller
-//! that will. Until then the non-empty path is exercised only by this
-//! module's own tests, directly, against real loopback sockets.
+//! **No longer true, as of 2026-08-16 (branch `io-poller-std-net`):** this
+//! module's doc comment used to say no caller in this crate ever builds a
+//! non-empty `sockets` slice. `net.rs` now does -- `connect`, `read`, `write`
+//! and `read_timeout`'s poll functions stage a `Wait::Io` through `task.rs`'s
+//! `stage_io_park` at four sites between them, so `task.rs`'s `io_parks`
+//! returns a non-empty slice in production and the non-empty path below is
+//! reached by ordinary Nova programs, not only by this module's own tests
+//! against real loopback sockets. Those tests remain the only thing that
+//! exercises it *directly*.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -36,14 +41,13 @@ pub struct RawSocket(pub i64);
 
 /// What a task is waiting for a socket to become ready for.
 ///
-/// `#[allow(dead_code)]`: `wait` below only *matches* on these variants, and
-/// a match is not a construction, so the non-test build still never builds
-/// one -- `net.rs` (Task 3) is this enum's first production caller, staging a
-/// `Wait::Io` with a real interest. The seam is added now, not deleted and
-/// re-added later, so `Wait::Io` (`task.rs`) has a real type to name an
-/// interest with today.
+/// Both variants are constructed in production now: `net.rs` stages
+/// `Interest::Write` for a `connect` and a `write`, and `Interest::Read` for a
+/// `read` and a `read_timeout`. An earlier `#[allow(dead_code)]` here recorded
+/// that `wait` below only *matched* on them and nothing built one outside a
+/// test; that stopped being true when `net.rs` landed, and the attribute is
+/// gone with it rather than left to mask a genuinely dead variant later.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)]
 pub enum Interest {
     Read,
     Write,
@@ -69,8 +73,16 @@ pub enum Interest {
 /// off rather than spin -- but `Vec<RawSocket>` has no channel to say *which*
 /// socket is broken, so a caller cannot evict it from its own park set.
 /// Closing that needs either a richer return type (e.g. separating "ready"
-/// from "errored" sockets) or an out-of-band failure report, and no caller
-/// exists yet (`net.rs`, Task 3) to say which shape it actually needs.
+/// from "errored" sockets) or an out-of-band failure report. A caller now
+/// exists -- `net.rs` -- and the gap is still open, so this is no longer
+/// "nobody is here to say which shape it needs" but a known, unaddressed
+/// consequence: of `net.rs`'s four operations only `read_timeout` stages a
+/// deadline, so a `connect`, `read` or `write` whose socket this function
+/// silently stops watching is never woken again at all. It is not re-polled,
+/// so its own retry-the-syscall-every-poll structure never gets the chance to
+/// surface an error either. That is the Unix arm's "starves until its own
+/// deadline (if it has one)" hazard below, reached by three of the four
+/// operations that have no deadline to starve until.
 /// `tracing::warn!` logs the condition in the meantime -- but rate-limited
 /// (see [`LogGate`]), so the *log* does not close the gap either: at most one
 /// line per second per call site, naming at most one socket (always the first
@@ -188,14 +200,13 @@ impl LogGate {
     }
 }
 
-/// Set `socket` non-blocking, for `net.rs` (Task 3) to call right after a
-/// socket is created and before it is ever handed to [`wait`] or connected --
-/// the property a non-blocking `connect` depends on.
-///
-/// `#[allow(dead_code)]`: this task ships no `net.rs`, so nothing in
-/// production calls this yet -- `net.rs` (Task 3) is this function's first
-/// caller. This module's own tests exercise it in the meantime.
-#[allow(dead_code)]
+/// Set `socket` non-blocking, called from `net.rs`'s `platform_connect` right
+/// after a socket is created and before it is ever handed to [`wait`] or
+/// connected -- the property a non-blocking `connect` depends on. Both
+/// `platform_connect` arms call it, so this is live on Unix and on Windows
+/// alike, and an earlier `#[allow(dead_code)]` recording that `net.rs` did not
+/// exist yet has been removed rather than left to mask a real dead-code
+/// finding.
 pub fn set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
     platform_set_nonblocking(socket)
 }
@@ -392,10 +403,10 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
     }
 }
 
-// Dead-code note: see `set_nonblocking`'s own doc comment above -- this is
-// reached only through that function today.
+// Reached only through `set_nonblocking` above, which `net.rs` calls -- so
+// this is live, and the `#[allow(dead_code)]` that used to sit here (for as
+// long as `net.rs` did not exist) is gone with its reason.
 #[cfg(unix)]
-#[allow(dead_code)]
 fn platform_set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
     let fd = socket.0 as std::os::unix::io::RawFd;
     // SAFETY: `fcntl(F_GETFL)` reads flags for `fd`; no buffer is written.
@@ -520,10 +531,10 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
     }
 }
 
-// Dead-code note: see `set_nonblocking`'s own doc comment above -- this is
-// reached only through that function today.
+// Reached only through `set_nonblocking` above, which `net.rs` calls -- so
+// this is live, and the `#[allow(dead_code)]` that used to sit here (for as
+// long as `net.rs` did not exist) is gone with its reason.
 #[cfg(windows)]
-#[allow(dead_code)]
 fn platform_set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
     use windows_sys::Win32::Networking::WinSock::{ioctlsocket, FIONBIO, SOCKET_ERROR};
 
@@ -769,6 +780,68 @@ mod tests {
         assert!(
             start.elapsed() >= interval,
             "the timer-only path must actually sleep out the deadline, not return early"
+        );
+    }
+
+    #[test]
+    fn wait_with_no_deadline_blocks_until_a_socket_becomes_ready() {
+        // The mutation this pins: `platform_wait`'s no-deadline timeout --
+        // `-1` on Windows, a null `timeval` pointer on Unix -- replaced by a
+        // zero timeout, so an untimed wait polls once and returns instantly
+        // instead of blocking. That contradicts `wait`'s own documented
+        // guarantee ("**No deadline and a non-empty `sockets` blocks
+        // indefinitely**") and it is exactly the path `net.rs`'s `connect`,
+        // `read` and `write` all take: all three stage `deadline: None`.
+        // Every other non-empty-set test in this module is blind to it, since
+        // each either has data waiting before the call
+        // (`wait_reports_a_socket_with_data_waiting`,
+        // `wait_reports_a_socket_ready_for_write`) or a deadline that fires
+        // (`wait_returns_empty_when_the_deadline_passes_first`) -- none of
+        // them ever asks this function to wait for something that is not
+        // ready yet.
+        //
+        // Timing-based, and deliberately loose about it: the writer sleeps
+        // `WRITE_DELAY` before writing and this asserts only that the wait
+        // lasted at least `MIN_BLOCKED`, comfortably under it, since
+        // `thread::sleep` may overshoot but never undershoots. The mutant is
+        // caught twice over besides, and the first catch needs no clock at
+        // all -- a zero-timeout poll finds nothing ready and returns an empty
+        // vec, failing the readiness assertion outright. Elapsed time is
+        // measured the same way `wait_with_no_sockets_and_a_deadline_sleeps_until_it`
+        // already measures it here, against the same `>=` shape.
+        const WRITE_DELAY: Duration = Duration::from_millis(50);
+        const MIN_BLOCKED: Duration = Duration::from_millis(40);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (mut server, _) = listener.accept().expect("accept");
+
+        let sock = RawSocket(raw_of(&client));
+        let start = Instant::now();
+        // `start` is read before the thread is spawned, so the write cannot
+        // land earlier than `WRITE_DELAY` after it -- the elapsed assertion
+        // below can only be generous, never optimistic.
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(WRITE_DELAY);
+            std::io::Write::write_all(&mut server, b"late").expect("write");
+        });
+
+        let ready = wait(&[(sock, Interest::Read)], None);
+        let elapsed = start.elapsed();
+        writer.join().expect("writer thread");
+
+        assert_eq!(
+            ready,
+            vec![sock],
+            "an untimed wait must block until the socket genuinely becomes \
+             ready and then report it, not return early with nothing"
+        );
+        assert!(
+            elapsed >= MIN_BLOCKED,
+            "an untimed wait must actually block: nothing was written for \
+             {WRITE_DELAY:?}, so this wait cannot legitimately have returned \
+             after {elapsed:?}"
         );
     }
 
