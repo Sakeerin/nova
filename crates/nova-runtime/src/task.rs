@@ -22,6 +22,7 @@
 //! order be pinned by a test rather than merely observed.
 
 use crate::gc;
+use crate::poll::{Interest, RawSocket};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -163,6 +164,16 @@ enum Wait {
     Deadline(Instant),
     /// Wake once the task with this id completes.
     Task(i64),
+    /// Wake once `socket` is ready for `interest`, or `deadline` passes.
+    ///
+    /// The deadline rides inside this variant rather than being parked as a
+    /// second entry: one task must have exactly one `PARKED` entry, or every
+    /// wake path has to remember to remove two.
+    Io {
+        socket: RawSocket,
+        interest: Interest,
+        deadline: Option<Instant>,
+    },
 }
 
 thread_local! {
@@ -224,9 +235,18 @@ thread_local! {
     /// The task `poll_one` is polling right now, so a park staged from inside
     /// that poll knows whose it is without `task_ctx` having to carry it.
     static CURRENT: Cell<Option<i64>> = const { Cell::new(None) };
-    /// A park staged by the poll in progress. Read by `poll_one` once the
-    /// status is known: committed on `POLL_PENDING`, discarded on `POLL_READY`.
-    static PENDING_PARK: Cell<Option<Wait>> = const { Cell::new(None) };
+    /// What the poll in progress has staged so far -- at most one deadline
+    /// and at most one I/O wait (see [`Staged`]), folded by
+    /// [`staged_to_wait`] into the single [`Wait`] `poll_one` reads once the
+    /// status is known: committed on `POLL_PENDING`, discarded on
+    /// `POLL_READY`.
+    static PENDING_PARK: Cell<Staged> = const {
+        Cell::new(Staged {
+            deadline: None,
+            io: None,
+            task: None,
+        })
+    };
 }
 
 /// The task currently being polled, or `None` outside a poll.
@@ -378,23 +398,151 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
     id
 }
 
+/// A poll may stage at most one deadline and at most one I/O wait.
+///
+/// Two of the *same* kind still aborts: that abort is what catches an inner
+/// future's `POLL_PENDING` failing to propagate, and it must keep doing so.
+/// Only the one legitimate combination -- a deadline and an I/O wait, from a
+/// single `read_timeout` -- becomes newly legal, and [`staged_to_wait`] is
+/// where the two are folded into the single [`Wait::Io`] entry [`PARKED`]
+/// actually holds.
+///
+/// `task` is not in the brief's own sketch of this struct, which only names
+/// the two kinds that newly compose. It is here because [`Wait::Task`]
+/// (`poll_join`'s wait) still has to be exclusive with everything, itself
+/// included -- nothing about waiting on a sibling task composes with a
+/// timeout or a socket the way a deadline and an I/O wait do, so a `Task`
+/// park stacked against a `Deadline` or `Io` one must still abort exactly as
+/// any two same-kind parks do.
+#[derive(Default, Clone, Copy, Debug)]
+struct Staged {
+    deadline: Option<Instant>,
+    io: Option<(RawSocket, Interest)>,
+    task: Option<i64>,
+}
+
+/// Fold everything staged so far back into the single [`Wait`] [`PARKED`]
+/// holds, or `None` if nothing was staged this poll.
+///
+/// One task must have exactly one `PARKED` entry ([`Wait::Io`]'s own doc
+/// comment), so this is where a deadline staged alongside an I/O wait is
+/// folded into that `Wait::Io`'s own `deadline` field instead of becoming a
+/// second entry. `task` wins first only because [`try_stage`] never lets it
+/// coexist with the other two -- if it is set, they are not.
+fn staged_to_wait(staged: Staged) -> Option<Wait> {
+    if let Some(id) = staged.task {
+        return Some(Wait::Task(id));
+    }
+    if let Some((socket, interest)) = staged.io {
+        return Some(Wait::Io {
+            socket,
+            interest,
+            deadline: staged.deadline,
+        });
+    }
+    staged.deadline.map(Wait::Deadline)
+}
+
+/// Try to add `wait` to `staged`, or report what it collided with.
+///
+/// Pure and non-aborting on purpose, unlike [`stage_park`] itself: a test
+/// exercising the actual collision would have to go through
+/// [`abort_with`]'s `std::process::abort()`, which `#[should_panic]`'s
+/// `catch_unwind` cannot intercept -- an aborting test would take the whole
+/// test binary down with it, not just fail. This is the half a test can call
+/// directly to check the collision is detected, the same way
+/// [`deadlock_report`] is the half a test can call to check
+/// [`report_deadlock`]'s text without ending the process.
+///
+/// Exhaustive on `wait` with no wildcard, like every other match on `Wait`
+/// in this module: a fourth variant must be considered here too.
+fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
+    let mut next = staged;
+    match wait {
+        Wait::Deadline(at) => {
+            if next.deadline.is_some() || next.task.is_some() {
+                return Err(collision_msg(staged, wait));
+            }
+            next.deadline = Some(at);
+        }
+        Wait::Io {
+            socket,
+            interest,
+            deadline,
+        } => {
+            if next.io.is_some() || next.task.is_some() {
+                return Err(collision_msg(staged, wait));
+            }
+            if let Some(at) = deadline {
+                if next.deadline.is_some() {
+                    return Err(collision_msg(staged, wait));
+                }
+                next.deadline = Some(at);
+            }
+            next.io = Some((socket, interest));
+        }
+        Wait::Task(id) => {
+            if next.deadline.is_some() || next.io.is_some() || next.task.is_some() {
+                return Err(collision_msg(staged, wait));
+            }
+            next.task = Some(id);
+        }
+    }
+    Ok(next)
+}
+
+/// The "two parks staged" message [`stage_park`] aborts with, built from
+/// whatever `previous` already resolves to and the new `wait` that collided
+/// with it.
+///
+/// Panics if `previous` is empty -- [`try_stage`]'s every early return passes
+/// a `previous` that made at least one of its own fields `Some`, so this is a
+/// bug in this function's only caller, not a reachable state.
+fn collision_msg(previous: Staged, wait: Wait) -> String {
+    let previous = staged_to_wait(previous)
+        .expect("collision_msg: called with nothing staged to collide with");
+    format!(
+        "nova_rt: two parks staged in one poll ({previous:?} then {wait:?}); \
+         an inner future's POLL_PENDING did not propagate"
+    )
+}
+
 /// Record that the task currently being polled wants to park on `wait`.
 ///
 /// Called from inside a poll function -- [`poll_sleep`], [`poll_join`], and
-/// this module's own tests -- so it must not panic: both cells hold `Copy`
-/// values and neither borrow can fail. The two aborts below are
+/// this module's own tests -- so it must not panic: [`Staged`] is `Copy` and
+/// held in a `Cell`, so neither borrow can fail. The two aborts below are
 /// compiler-or-runtime bugs rather than user error, which is why they end the
 /// process rather than returning a status.
 fn stage_park(wait: Wait) {
     if CURRENT.with(Cell::get).is_none() {
         abort_with("nova_rt: a park was staged outside a poll");
     }
-    if let Some(previous) = PENDING_PARK.with(|p| p.replace(Some(wait))) {
-        abort_with(&format!(
-            "nova_rt: two parks staged in one poll ({previous:?} then {wait:?}); \
-             an inner future's POLL_PENDING did not propagate"
-        ));
-    }
+    PENDING_PARK.with(|cell| match try_stage(cell.get(), wait) {
+        Ok(next) => cell.set(next),
+        Err(msg) => abort_with(&msg),
+    });
+}
+
+/// Stage an I/O park: wake the current task once `socket` is ready for
+/// `interest`, or once `deadline` passes, whichever comes first.
+///
+/// The narrow seam `net.rs` (Task 3) stages an I/O wait through, so it never
+/// needs to construct a [`Wait`] itself. `Wait` and [`stage_park`] stay
+/// private -- every exhaustive match on `Wait` lives in this module, so a
+/// fifth variant is a compile error here rather than a silent miss in a
+/// sibling module that matched on it.
+///
+/// `#[allow(dead_code)]`: this task ships no I/O, so nothing calls this yet
+/// -- `net.rs` is this function's first caller. Added now, ahead of its own
+/// caller, so Task 3 never has to touch this file to reach `Wait::Io`.
+#[allow(dead_code)]
+pub(crate) fn stage_io_park(socket: RawSocket, interest: Interest, deadline: Option<Instant>) {
+    stage_park(Wait::Io {
+        socket,
+        interest,
+        deadline,
+    });
 }
 
 /// Poll task `id` once. On [`POLL_PENDING`], re-queue it for another turn --
@@ -450,7 +598,7 @@ unsafe fn poll_one(id: i64) {
     // that then returned `POLL_READY`. Leaving it staged would park the next
     // task polled; committing it would leave a finished task in `PARKED`,
     // faking a deadlock for the rest of the process.
-    let staged = PENDING_PARK.with(|p| p.take());
+    let staged = staged_to_wait(PENDING_PARK.with(|p| p.take()));
     if status == POLL_PENDING {
         match staged {
             Some(wait) => PARKED.with(|parked| parked.borrow_mut().push((id, wait))),
@@ -673,17 +821,22 @@ fn take_output_internal(id: i64) -> i64 {
 ///    anything kept re-queueing. Task 2's own end-to-end fixture is what
 ///    surfaced this: `sleep`, awaited underneath what was then a spinning
 ///    `join`, hung indefinitely until this per-poll check was added.
-///    [`wake_due_deadlines`], which sleeps, is reached only from the
-///    drained-queue branch below, where sleeping is correct because there is
-///    genuinely nothing left to run; a park set holding nothing but
-///    `Wait::Task` entries there is a genuine deadlock, since nothing still
-///    running can ever finish and wake one, and [`report_deadlock`] ends the
-///    process naming each one instead of hanging silently. `sleep` (Task 2)
-///    and a parking `join` (Task 3) are what let Nova source reach any of
-///    this at all: before `sleep`, `yield_now` was the only suspension an
-///    `async fn` body could await, and it never stages a `Wait`, so nothing
-///    compiled from Nova source could ever populate [`PARKED`] in the first
-///    place.
+///    `poll::wait`, which is where the real sleeping (or, from Task 2 on,
+///    socket waiting) now happens, is reached only from the
+///    drained-queue branch below, where blocking this thread is correct
+///    because there is genuinely nothing left to run; a park set holding
+///    nothing but `Wait::Task` entries and no I/O wait there is a genuine
+///    deadlock, since nothing still running can ever finish and wake one, and
+///    [`report_deadlock`] ends the process naming each one instead of hanging
+///    silently. A `Wait::Io` park changes what "nothing left to run" means:
+///    waiting on a socket that some *other* process must make ready is
+///    legitimate waiting, not a deadlock, so `report_deadlock` is reachable
+///    only when both the deadline and the I/O dimensions are empty (see the
+///    drained-queue match below). `sleep` (Task 2) and a parking `join`
+///    (Task 3) are what let Nova source reach any of this at all: before
+///    `sleep`, `yield_now` was the only suspension an `async fn` body could
+///    await, and it never stages a `Wait`, so nothing compiled from Nova
+///    source could ever populate [`PARKED`] in the first place.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).
@@ -711,12 +864,27 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
             break;
         }
         // The ready queue is empty and something is still parked. A remaining
-        // deadline can refill the queue; a park set holding nothing but
-        // `Wait::Task` entries cannot, because nothing is running to finish.
-        match earliest_deadline() {
-            Some(at) => wake_due_deadlines(at),
-            None => report_deadlock(),
+        // deadline or a live I/O wait can each refill the queue on their own;
+        // a park set holding nothing but `Wait::Task` entries -- neither
+        // dimension populated -- cannot, because nothing is running to
+        // finish. This match is the executor's only remaining wait: sleeping
+        // *is* waiting on an empty socket set (the `(Some(at), true)` arm),
+        // so there is exactly one place this thread ever blocks, and
+        // `task.rs` itself no longer knows how.
+        let io: Vec<(RawSocket, Interest)> = io_parks();
+        match (earliest_deadline(), io.is_empty()) {
+            // Nothing can ever wake anything: the only true deadlock.
+            (None, true) => report_deadlock(),
+            // Waiting on a peer is legitimate waiting, not a deadlock.
+            (None, false) => wake_ready(crate::poll::wait(&io, None)),
+            // No sockets and a deadline IS a sleep -- there is no second
+            // timing path; `poll::wait` does the actual blocking.
+            (Some(at), true) => {
+                crate::poll::wait(&[], Some(at));
+            }
+            (Some(at), false) => wake_ready(crate::poll::wait(&io, Some(at))),
         }
+        wake_due(Instant::now());
     }
     // The queue is empty, and the root task was in it, so it must have
     // finished -- the only way out of the queue is completion. Asserted
@@ -731,7 +899,8 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
 }
 
 /// The soonest instant any parked task is waiting for, if any is waiting on
-/// the clock at all.
+/// the clock at all -- a bare [`Wait::Deadline`], or the deadline riding
+/// inside a [`Wait::Io`].
 fn earliest_deadline() -> Option<Instant> {
     PARKED.with(|parked| {
         parked
@@ -739,29 +908,52 @@ fn earliest_deadline() -> Option<Instant> {
             .iter()
             .filter_map(|&(_, wait)| match wait {
                 Wait::Deadline(at) => Some(at),
+                Wait::Io { deadline, .. } => deadline,
                 Wait::Task(_) => None,
             })
             .min()
     })
 }
 
-/// Move every parked task whose deadline is `<= now` back onto the ready
-/// queue, leaving every other entry -- a [`Wait::Task`], or a
-/// [`Wait::Deadline`] still in the future -- exactly where it was.
+/// Every socket a parked task is waiting on, paired with the interest it is
+/// waiting for.
 ///
-/// The wake half of what used to be [`wake_due_deadlines`]' whole job,
-/// pulled apart from the sleep half so [`run_to_completion`] can call this
-/// half after every poll (cheap: one pass over [`PARKED`], no sleeping) while
-/// still calling [`wake_due_deadlines`] only when the ready queue is
-/// genuinely empty (the only time sleeping this thread is correct). See
-/// `run_to_completion`'s doc comment for why checking only at the
-/// drained-queue point is not enough on its own.
-fn wake_due(now: Instant) {
+/// This task never populates a [`Wait::Io`] entry in production -- nothing
+/// yet stages one outside this module's own tests -- so this always returns
+/// empty here; it exists now so `run_to_completion`'s drive loop already
+/// asks [`PARKED`] the right question, and Task 2's sockets need nothing new
+/// from this function when they start showing up in it.
+fn io_parks() -> Vec<(RawSocket, Interest)> {
+    PARKED.with(|parked| {
+        parked
+            .borrow()
+            .iter()
+            .filter_map(|&(_, wait)| match wait {
+                Wait::Io {
+                    socket, interest, ..
+                } => Some((socket, interest)),
+                Wait::Deadline(_) | Wait::Task(_) => None,
+            })
+            .collect()
+    })
+}
+
+/// Move every task parked on a [`Wait::Io`] whose socket is in `ready` back
+/// onto the ready queue.
+///
+/// The I/O counterpart of [`wake_tasks_waiting_on`] and [`wake_due`]: called
+/// with whatever `poll::wait` reports ready, so it is always a no-op today --
+/// `poll::wait` never reports anything ready while this task's socket set is
+/// always empty (see [`io_parks`]).
+fn wake_ready(ready: Vec<RawSocket>) {
+    if ready.is_empty() {
+        return;
+    }
     let woken = PARKED.with(|parked| {
         let mut parked = parked.borrow_mut();
         let mut woken = Vec::new();
         parked.retain(|&(id, wait)| match wait {
-            Wait::Deadline(deadline) if deadline <= now => {
+            Wait::Io { socket, .. } if ready.contains(&socket) => {
                 woken.push(id);
                 false
             }
@@ -777,28 +969,64 @@ fn wake_due(now: Instant) {
     });
 }
 
-/// Sleep until `at`, then wake whatever is due by then.
+/// Move every parked task whose deadline is `<= now` back onto the ready
+/// queue, leaving every other entry -- a [`Wait::Task`], an untimed
+/// [`Wait::Io`], or a [`Wait::Deadline`] (bare or riding inside a
+/// [`Wait::Io`]) still in the future -- exactly where it was.
 ///
-/// Called only from `run_to_completion`'s drained-queue branch, where
-/// sleeping is correct because there is nothing else left to run in the
-/// meantime. Contrast [`wake_due`], which `run_to_completion` also calls
-/// after every single poll specifically so this function's sleep is never
-/// the *only* place a deadline gets checked.
-fn wake_due_deadlines(at: Instant) {
-    let now = Instant::now();
-    if at > now {
-        std::thread::sleep(at - now);
-    }
-    wake_due(Instant::now());
+/// Once an I/O wait carries a deadline, a passed deadline on that wait *is*
+/// its timeout firing, so it must wake the task exactly as a bare
+/// `Wait::Deadline` does -- it just also happens to leave that task's
+/// socket, if `poll::wait` ever reported one ready at the same moment,
+/// unconsumed; nothing in this task ever makes that observable, since
+/// nothing here ever populates a `Wait::Io` outside a test.
+///
+/// Called by [`run_to_completion`] after every single poll (cheap: one pass
+/// over [`PARKED`], no blocking) so a self-requeuing task can never starve a
+/// deadline -- see its doc comment -- and again after every `poll::wait` call
+/// in the drained-queue branch, which is the one place this thread actually
+/// blocks.
+fn wake_due(now: Instant) {
+    let woken = PARKED.with(|parked| {
+        let mut parked = parked.borrow_mut();
+        let mut woken = Vec::new();
+        parked.retain(|&(id, wait)| match wait {
+            Wait::Deadline(deadline) if deadline <= now => {
+                woken.push(id);
+                false
+            }
+            Wait::Io {
+                deadline: Some(deadline),
+                ..
+            } if deadline <= now => {
+                woken.push(id);
+                false
+            }
+            _ => true,
+        });
+        woken
+    });
+    QUEUE.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        for id in woken {
+            queue.push_back(id);
+        }
+    });
 }
 
 /// The deadlock message: a headline plus one line per parked task.
 ///
 /// Separate from [`report_deadlock`] so a test can assert the text without
-/// aborting. A `Wait::Deadline` cannot reach here through `run_to_completion`,
-/// which calls it only when `earliest_deadline()` is `None` -- but it is
-/// printed rather than treated as unreachable, because a panic on an abort
-/// path would replace a clear diagnostic with a confusing one.
+/// aborting. `run_to_completion` reaches `report_deadlock` -- and so this --
+/// only from its drive loop's `(None, true)` arm: no deadline anywhere in
+/// [`PARKED`] *and* no I/O wait anywhere in it either. A bare `Wait::Deadline`
+/// or a timed `Wait::Io` therefore cannot actually reach here through that
+/// path, and neither can an untimed `Wait::Io`, since `io.is_empty()` would
+/// have been `false`. Every arm below is still printed rather than treated as
+/// unreachable, because a panic on an abort path would replace a clear
+/// diagnostic with a confusing one, and this function is also called
+/// directly by this module's own tests with whatever `PARKED` contents they
+/// choose.
 fn deadlock_report() -> String {
     let entries = PARKED.with(|parked| parked.borrow().clone());
     let plural = if entries.len() == 1 {
@@ -819,6 +1047,14 @@ fn deadlock_report() -> String {
             }
             Wait::Deadline(_) => {
                 report.push_str(&format!("  task {id} is waiting on a deadline\n"));
+            }
+            Wait::Io { deadline: None, .. } => {
+                report.push_str(&format!("  task {id} is waiting on i/o\n"));
+            }
+            Wait::Io {
+                deadline: Some(_), ..
+            } => {
+                report.push_str(&format!("  task {id} is waiting on i/o with a deadline\n"));
             }
         }
     }
@@ -1062,6 +1298,14 @@ unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) 
 /// is a silent miscompile rather than a failure -- this project has already
 /// shipped one miscompile from two sites drifting apart.
 ///
+/// `pub(crate)`, not private: `net.rs` (Task 3) builds sockets' futures the
+/// same way every future in this file is built, so it needs this constructor
+/// rather than a second copy of the layout it writes -- the same reason
+/// [`abort_with`] is `pub(crate)` rather than private. `Wait` and
+/// [`stage_park`] stay private regardless; a wider `build_future` does not
+/// let `net.rs` construct a `Wait` or match on one, which is the property
+/// this task exists to protect (see [`stage_io_park`]).
+///
 /// `state` is registered as a GC root across the second allocation, which can
 /// collect while `state` is named only by this frame. That ordering is the
 /// subtle part every caller previously had to reproduce.
@@ -1077,7 +1321,11 @@ unsafe extern "C-unwind" fn poll_yield_once(state: *mut u8, _task_ctx: *mut u8) 
 /// compile-time constant today, so this can only fire on a caller's own
 /// mistake, not on Nova input, and release builds already pay for the bug via
 /// the out-of-bounds read itself if the assert is compiled out.
-fn build_future(poll: PollFn, state_size: usize, init: impl FnOnce(*mut i64)) -> *mut u8 {
+pub(crate) fn build_future(
+    poll: PollFn,
+    state_size: usize,
+    init: impl FnOnce(*mut i64),
+) -> *mut u8 {
     debug_assert!(
         state_size >= STATE_MIN_SIZE,
         "build_future: state_size {state_size} is smaller than STATE_MIN_SIZE \
@@ -1313,6 +1561,27 @@ mod tests {
     /// path every other future in the system does.
     fn test_future(poll: PollFn) -> *mut u8 {
         build_future(poll, STATE_MIN_SIZE, |_| {})
+    }
+
+    /// Run `f` with [`PARKED`] set to exactly `entries` for its duration,
+    /// restoring whatever was there before once `f` returns.
+    ///
+    /// The precedent for splitting a diagnostic this way is
+    /// [`deadlock_report`] itself: separating the text-only half of a
+    /// diagnostic from the half that ends the process (`report_deadlock`) is
+    /// what lets a test assert on it at all. This does the analogous job for
+    /// the fixture a test needs `PARKED` to hold -- seeding it directly
+    /// rather than driving a real `spawn_internal`/`poll_one` sequence just
+    /// to get a specific `Wait` into the park set, and restoring the prior
+    /// contents afterward rather than assuming `PARKED` started empty (the
+    /// way this file's other `PARKED.with(|p| p.borrow_mut().clear())`
+    /// tests do), so a test using this helper composes safely even nested
+    /// inside one that does not.
+    fn with_parked<T>(entries: &[(i64, Wait)], f: impl FnOnce() -> T) -> T {
+        let previous = PARKED.with(|p| p.replace(entries.to_vec()));
+        let result = f();
+        PARKED.with(|p| *p.borrow_mut() = previous);
+        result
     }
 
     #[test]
@@ -2244,6 +2513,112 @@ mod tests {
         let _ = id;
     }
 
+    /// A poll function that stages a bare deadline and then an I/O wait, in
+    /// two separate `stage_park` calls, on its first poll -- the one
+    /// legitimate two-parks-in-one-poll combination this task makes legal --
+    /// and completes on its second.
+    unsafe extern "C-unwind" fn poll_deadline_then_io(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `STATE_MIN_SIZE` state object built by
+        // `test_future`, so both slots are in bounds.
+        let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if tag == 0 {
+            unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+            stage_park(Wait::Deadline(Instant::now() + Duration::from_secs(30)));
+            stage_park(Wait::Io {
+                socket: RawSocket(9),
+                interest: Interest::Read,
+                deadline: None,
+            });
+            return POLL_PENDING;
+        }
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    /// Two separate `stage_park` calls in the same poll -- one bare
+    /// `Wait::Deadline`, one untimed `Wait::Io` -- must not abort, and must
+    /// fold into exactly one `PARKED` entry carrying both: `Wait::Io` with
+    /// its own `deadline` field now populated. Exactly one entry, not two,
+    /// is the property `Wait::Io`'s own doc comment states: one task has one
+    /// `PARKED` entry, or every wake path has to remove two.
+    #[test]
+    fn a_deadline_and_an_io_wait_stage_together() {
+        let fut = test_future(poll_deadline_then_io);
+        // SAFETY: `fut` is a well-formed future from `test_future`.
+        let id = unsafe { spawn_internal(fut) };
+        let popped = QUEUE.with(|q| q.borrow_mut().pop_front());
+        assert_eq!(popped, Some(id), "spawn should have queued it");
+        // SAFETY: `id` was just popped from `QUEUE`.
+        unsafe { poll_one(id) };
+
+        let entries = PARKED.with(|p| p.borrow().clone());
+        assert_eq!(
+            entries.len(),
+            1,
+            "a deadline staged alongside an I/O wait must fold into ONE \
+             PARKED entry, not two -- got: {entries:?}"
+        );
+        match entries[0].1 {
+            Wait::Io {
+                socket,
+                interest,
+                deadline,
+            } => {
+                assert_eq!(socket, RawSocket(9));
+                assert_eq!(interest, Interest::Read);
+                assert!(
+                    deadline.is_some(),
+                    "the separately-staged deadline must ride inside this \
+                     Io wait"
+                );
+            }
+            other => panic!("expected a single Wait::Io entry, got {other:?}"),
+        }
+        PARKED.with(|p| p.borrow_mut().clear());
+    }
+
+    /// `try_stage` is the non-aborting half of `stage_park`'s collision
+    /// check (see its own doc comment for why: `stage_park`'s real abort
+    /// goes through `abort_with`'s `std::process::abort()`, which
+    /// `#[should_panic]` cannot catch without taking the whole test binary
+    /// down with it). Two `Wait::Deadline` stages in the same poll must
+    /// still collide -- unchanged behaviour from before this task, now
+    /// checked directly rather than through a process abort.
+    #[test]
+    fn two_deadlines_in_one_poll_still_abort() {
+        let staged = try_stage(Staged::default(), Wait::Deadline(Instant::now()))
+            .expect("the first deadline in a poll stages cleanly");
+        let err = try_stage(staged, Wait::Deadline(Instant::now()))
+            .expect_err("a second deadline in the same poll must collide");
+        assert!(err.contains("two parks staged in one poll"), "got: {err}");
+    }
+
+    /// The new same-kind collision this task introduces: two `Wait::Io`
+    /// stages in the same poll must abort exactly as two deadlines do --
+    /// widening what one poll may stage must not widen which same-kind
+    /// collisions it tolerates. See `two_deadlines_in_one_poll_still_abort`
+    /// for why this checks `try_stage` directly rather than `stage_park`'s
+    /// actual abort.
+    #[test]
+    fn two_io_waits_in_one_poll_still_abort() {
+        let first = Wait::Io {
+            socket: RawSocket(1),
+            interest: Interest::Read,
+            deadline: None,
+        };
+        let second = Wait::Io {
+            socket: RawSocket(2),
+            interest: Interest::Write,
+            deadline: None,
+        };
+        let staged =
+            try_stage(Staged::default(), first).expect("the first I/O wait stages cleanly");
+        let err =
+            try_stage(staged, second).expect_err("a second I/O wait in the same poll must collide");
+        assert!(err.contains("two parks staged in one poll"), "got: {err}");
+    }
+
     #[test]
     fn a_deadline_park_is_woken_and_the_task_completes() {
         let fut = test_future(poll_park_once);
@@ -2416,12 +2791,12 @@ mod tests {
         PARKED.with(|p| p.borrow_mut().clear());
     }
 
-    /// `earliest_deadline` and `wake_due_deadlines` with both `Wait` variants
-    /// live in `PARKED` at once -- every other test here populates one
-    /// variant only. Task 3 (a parking `join`) is what makes that coexistence
-    /// real: a sleeping task and a joining task waiting side by side. Both
-    /// functions must ignore `Wait::Task` entries entirely: they are not
-    /// deadline candidates, and they must not be woken by a deadline arriving.
+    /// `earliest_deadline` and `wake_due` with both `Wait` variants live in
+    /// `PARKED` at once -- every other test here populates one variant only.
+    /// Task 3 (a parking `join`) is what makes that coexistence real: a
+    /// sleeping task and a joining task waiting side by side. Both functions
+    /// must ignore `Wait::Task` entries entirely: they are not deadline
+    /// candidates, and they must not be woken by a deadline arriving.
     ///
     /// **Two phases with disjoint `PARKED` contents, not one shared
     /// scenario.** A first version of this test shared a single already-due
@@ -2433,10 +2808,17 @@ mod tests {
     /// tried. Phase 1 fixes this by putting every real deadline in the
     /// future, so a mutant's freshly-read "now" is detectably *smaller* than
     /// the expected answer instead of larger or equal. Phase 2 keeps the
-    /// original already-due shape for `wake_due_deadlines`, which that
-    /// mutation-check already kills and does not need to change.
+    /// original already-due shape for `wake_due`, which that mutation-check
+    /// already kills and does not need to change.
+    ///
+    /// Calls `wake_due` directly rather than through `run_to_completion`'s
+    /// drive loop or the deleted `wake_due_deadlines` (this task folded the
+    /// sleep half of that function into `poll::wait` and left only the wake
+    /// half, which is `wake_due` itself): `due` is already in the past by the
+    /// time it is read again below, so `wake_due(Instant::now())` takes the
+    /// same "wake it now" branch `wake_due_deadlines(due)` used to.
     #[test]
-    fn earliest_deadline_and_wake_due_deadlines_ignore_task_waits() {
+    fn earliest_deadline_and_wake_due_ignore_task_waits() {
         // Phase 1: earliest_deadline must return the real minimum, not a
         // Wait::Task-contributed value. Both deadlines sit comfortably in the
         // future (1s, 30s) so a mutant's `Instant::now()` -- evaluated no
@@ -2458,22 +2840,22 @@ mod tests {
         );
         PARKED.with(|p| p.borrow_mut().clear());
 
-        // Phase 2: wake_due_deadlines must wake only the due Deadline entry
-        // and must not treat a Wait::Task entry as one. `due` is already in
-        // the past by the time it is used below (test setup takes nonzero
-        // time), so `wake_due_deadlines` takes its `at <= now` branch and
-        // never calls `thread::sleep`.
+        // Phase 2: wake_due must wake only the due Deadline entry and must
+        // not treat a Wait::Task entry as one. `due` is already in the past
+        // by the time `wake_due` reads `Instant::now()` below (test setup
+        // takes nonzero time), so this exercises the same "wake it now"
+        // branch `wake_due_deadlines(due)` used to, without sleeping.
         let due = Instant::now();
         PARKED.with(|p| {
             let mut p = p.borrow_mut();
             p.push((4, Wait::Task(999)));
             p.push((5, Wait::Deadline(due)));
         });
-        wake_due_deadlines(due);
+        wake_due(Instant::now());
         assert_eq!(
             PARKED.with(|p| p.borrow().clone()),
             vec![(4, Wait::Task(999))],
-            "wake_due_deadlines must leave the Task entry parked"
+            "wake_due must leave the Task entry parked"
         );
         assert_eq!(
             QUEUE.with(|q| q.borrow().clone()),
@@ -2663,8 +3045,8 @@ mod tests {
     /// The suspend path: joining a task that has not yet finished parks on
     /// `Wait::Task`, and is woken -- moved back onto the ready queue -- the
     /// moment the target completes, with no re-poll of the joiner in between
-    /// and no involvement of `wake_due`/`wake_due_deadlines`, which handle
-    /// only `Wait::Deadline`.
+    /// and no involvement of `wake_due`, which never treats a `Wait::Task`
+    /// entry as due -- only a bare `Wait::Deadline` or a timed `Wait::Io`.
     ///
     /// The join future is spawned directly as the joiner task, the same way
     /// `joining_an_already_done_task_completes_without_parking` does: a
@@ -2773,6 +3155,33 @@ mod tests {
             "singular headline -- got: {report}"
         );
         PARKED.with(|p| p.borrow_mut().clear());
+    }
+
+    /// The whole point of this task: an I/O park must describe itself as
+    /// waiting on i/o, not fall through to a deadline-shaped or task-shaped
+    /// message -- and, more importantly, `run_to_completion`'s drive loop
+    /// must never treat it as a deadlock in the first place (see the
+    /// `(None, false)` arm there). This test covers only the message; the
+    /// `(None, false)` arm itself has no dedicated test because this task
+    /// ships no way to populate a real, unresolved `Wait::Io` through
+    /// `run_to_completion` -- nothing outside a test ever stages one.
+    #[test]
+    fn a_park_on_io_with_no_deadline_is_not_a_deadlock() {
+        let report = with_parked(
+            &[(
+                7,
+                Wait::Io {
+                    socket: RawSocket(-1),
+                    interest: Interest::Read,
+                    deadline: None,
+                },
+            )],
+            deadlock_report,
+        );
+        assert!(
+            report.contains("waiting on i/o"),
+            "an I/O park must describe itself, got: {report}"
+        );
     }
 
     /// A poll function that stages a park and then reports `POLL_READY` anyway --
