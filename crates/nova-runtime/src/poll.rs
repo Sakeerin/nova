@@ -146,13 +146,27 @@ impl LogGate {
     /// concurrent tie can rarely let two callers both through at once -- an
     /// occasional duplicate line, not a correctness problem for a
     /// diagnostic that must not itself panic or block.
+    ///
+    /// **Stores the last-allowed timestamp offset by one, so `0` means
+    /// "never logged yet" rather than colliding with a real elapsed time of
+    /// `0`ms.** Without the offset, a fresh gate's `0` sentinel is
+    /// indistinguishable from an actual first call landing at `elapsed() ==
+    /// 0` (as one always does: [`log_epoch`] is fixed to `Instant::now()` by
+    /// whichever gate touches it first, so *that* gate's own first `elapsed()`
+    /// reads back ~0) -- `0.saturating_sub(0) < LOG_RATE_LIMIT` is `true`,
+    /// denying the very first call at every site, forever losing the first
+    /// (and often most diagnostically valuable) occurrence of whatever this
+    /// gates.
     fn allow(&self) -> bool {
         let now_ms = log_epoch().elapsed().as_millis() as u64;
-        let prev_ms = self.0.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(prev_ms) < LOG_RATE_LIMIT.as_millis() as u64 {
-            return false;
+        let prev_raw = self.0.load(Ordering::Relaxed);
+        if prev_raw != 0 {
+            let prev_ms = prev_raw - 1;
+            if now_ms.saturating_sub(prev_ms) < LOG_RATE_LIMIT.as_millis() as u64 {
+                return false;
+            }
         }
-        self.0.store(now_ms, Ordering::Relaxed);
+        self.0.store(now_ms.saturating_add(1), Ordering::Relaxed);
         true
     }
 }
@@ -253,8 +267,10 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
 
         let timeout = remaining(deadline);
         if !any_watched {
-            // Every socket was filtered out above (each already logged); there
-            // is nothing for `select` to watch. Back off rather than spin:
+            // Every socket was filtered out above (each already checked
+            // against `FD_SETSIZE`, and logged if this call's rate-limit
+            // gate allowed it -- see `LogGate`); there is nothing for
+            // `select` to watch. Back off rather than spin:
             // retrying immediately cannot change the outcome, so bound the
             // cost to `ERROR_RETRY_BACKOFF` when there is no deadline to defer
             // to instead of returning instantly forever.
@@ -331,9 +347,12 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             let fd = sock.0 as RawFd;
             // Same predicate as the watch-set-building loop above, over the
             // same immutable `sockets` slice, within this one call: anything
-            // skipped here was already logged there (rate-limited) moments
-            // earlier in this same call. Silent here is redundancy with an
-            // already-reported gap, not a second, unreported one.
+            // skipped here was already *checked* there moments earlier in
+            // this same call -- and logged too, if this call happened to be
+            // the one in every `LOG_RATE_LIMIT` window that `LogGate` let
+            // through, but not otherwise. Silent here is redundancy with an
+            // already-checked condition, not a second, unreported one; it is
+            // not a claim that a log line necessarily exists for it.
             if fd < 0 || fd as usize >= libc::FD_SETSIZE {
                 continue;
             }
@@ -499,6 +518,44 @@ fn platform_set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_log_gate_allows_its_first_call() {
+        // The bug this pins: `allow()`'s internal timestamp starts at the
+        // sentinel `0`, and a fresh gate's very first call can itself land
+        // at `elapsed() == 0` (see `allow`'s own doc comment on why) --
+        // treating `0` as an ordinary elapsed time rather than "never
+        // logged yet" denies this call, silently losing the first
+        // occurrence of whatever the gate protects, forever.
+        let gate = LogGate::new();
+        assert!(
+            gate.allow(),
+            "a fresh gate's first call must not be swallowed"
+        );
+    }
+
+    #[test]
+    fn a_log_gate_denies_a_second_call_inside_the_rate_limit_window() {
+        let gate = LogGate::new();
+        assert!(gate.allow(), "first call must be allowed");
+        assert!(
+            !gate.allow(),
+            "a second call inside the rate-limit window must be denied, \
+             or the gate is not rate-limiting anything"
+        );
+    }
+
+    #[test]
+    fn a_log_gate_allows_again_once_the_rate_limit_window_elapses() {
+        let gate = LogGate::new();
+        assert!(gate.allow(), "first call must be allowed");
+        std::thread::sleep(LOG_RATE_LIMIT + Duration::from_millis(50));
+        assert!(
+            gate.allow(),
+            "a call after the rate-limit window elapses must be allowed \
+             again, not stuck denied forever"
+        );
+    }
 
     #[test]
     fn an_empty_socket_set_with_no_deadline_returns_immediately_with_nothing_ready() {
