@@ -465,13 +465,24 @@ mod tests {
     /// Written because the `truncate`/`create`/`append` trio was unpinned
     /// where the `read`/`write` pair was not. `append` was `0` at every
     /// `nova_rt_file_open` call site in this file, and no test reopened a
-    /// path that already held content, so **transposing this function's
-    /// `truncate` and `create` arguments left the whole suite green** —
-    /// measured, not supposed. `writing()`'s tuple sets both flags and so
-    /// cannot see that swap at all; `appending()`'s sets only `create`, so
-    /// under the swap it opens truncating and destroys the concatenation
-    /// asserted below. That is why the append leg is the load-bearing one
-    /// here rather than a completeness exercise.
+    /// path that already held content.
+    ///
+    /// The mutation that shipped green was the one at the **`std/fs` call
+    /// site** — transposing `options.truncate` and `options.create` where
+    /// `open` forwards them — and it is `tests/runtime/file_roundtrip.nova`
+    /// that kills it. Transposing *this function's own* `truncate` and
+    /// `create` parameters was never a survivor:
+    /// `create_new_on_an_existing_path_fails` already caught it. Both
+    /// measured, not supposed.
+    ///
+    /// What this test adds is the other half — that each constructor's tuple,
+    /// once forwarded, reaches the OS with the effect its name claims.
+    /// `writing()`'s tuple sets both flags and so cannot see a
+    /// truncate/create swap at all; `appending()`'s sets only `create`, so
+    /// under one this test's own open asks for append and truncate together,
+    /// which `std::fs::OpenOptions` rejects outright. It therefore fails at
+    /// "opening for appending must succeed" rather than by observing a
+    /// truncation.
     ///
     /// The `reading()` leg is the design spec's §5 clause "`reading()` then
     /// attempting a write fails", which was named as delivered and never

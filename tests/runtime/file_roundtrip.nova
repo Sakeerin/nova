@@ -25,11 +25,14 @@
 // whole-branch review measured what that costs: transposing `open`'s
 // `options.truncate` and `options.create` arguments below, and separately
 // rewriting `appending()` to truncate, each left the entire suite green.
-// The two legs added here are what kills those. They are the Nova-level
-// half of a pair: `file.rs`'s `each_constructors_flags_reach_the_os` pins
-// that the runtime forwards a given flag tuple to the OS faithfully, and
-// these pin that the three constructors produce the tuples that claim to.
-// Neither can see the other's mutation.
+// The append leg is what kills both of those; the re-truncate leg kills a
+// third, de-truncating `writing()`. They are the Nova-level half of a pair:
+// `file.rs`'s `each_constructors_flags_reach_the_os` pins that the runtime
+// forwards a given flag tuple to the OS faithfully, and these pin that the
+// three constructors produce the tuples they claim to. The blindness runs
+// one way only: that Rust test hardcodes the tuples, so it cannot see a
+// change to the constructors, while this fixture goes through
+// `nova_rt_file_open` and does see a transposition there.
 //
 // The `flush()` leg is here for a narrower reason: no `.nova` fixture called
 // `flush()` on a `File` at all, and both Rust callers of
