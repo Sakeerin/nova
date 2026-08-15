@@ -1,0 +1,7 @@
+close: ok
+close again: ok
+read after close: Other socket is not open
+write after close: Other socket is not open
+read_timeout after close: Other socket is not open
+flush after close: ok
+forged: Other socket is not open

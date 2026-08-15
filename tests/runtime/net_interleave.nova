@@ -1,0 +1,78 @@
+// The fixture that decides the increment.
+//
+// `net_roundtrip.nova` proves the bytes come back correct, but a fully
+// blocking `connect`/`read`/`write` underneath the identical Nova-level
+// surface would produce the identical correct bytes there too -- an
+// end-to-end test that only checks the final result cannot tell a real
+// poller from a busy spin or an outright blocking call, because all three
+// eventually produce the same answer. This fixture is the one that can: it
+// spawns a counter alongside a socket read and asserts that the counter's
+// own output lands **between** the socket task's "wrote" and "read" lines,
+// not merely somewhere in the whole program's output.
+//
+// **`connect` runs in `main`, before either task is spawned -- deliberately.**
+// `crates/nova-runtime/src/net.rs`'s `connect` always parks exactly once on
+// its first poll no matter how fast the underlying syscall actually settles
+// (`start_connect` folds "genuinely would-block" and "already succeeded"
+// into the identical `Started::WouldBlock` outcome -- see that module's own
+// doc comment). A cooperative executor drains its whole ready queue before
+// ever blocking on I/O, so if `connect` were called *inside* the spawned
+// reader task, `counter` would run to completion during *that* park --
+// before the socket task ever reaches its write or its read -- and have
+// nothing left to interleave with during the read's own wait. Connecting in
+// `main` first removes that confound: the only suspension inside the
+// interleaving window this fixture measures is the read.
+//
+// The paired server (`crates/nova-cli/tests/run_tests.rs`'s `EchoServer`,
+// `net_interleave_run`) sleeps briefly after accepting, before echoing
+// anything back, so the reader's `read` is guaranteed to find nothing yet
+// and genuinely suspend rather than racing real loopback latency.
+//
+// The port file this reads is named for this fixture alone, not this
+// process -- like every other `std/net` fixture's own port file (see
+// `net_roundtrip.nova`'s header for the accepted hazard that follows from
+// that).
+async fn count_to_three() -> Int {
+    let mut i = 0
+    while i < 3 {
+        println("counter: ${i}")
+        yield_now().await
+        i = i + 1
+    }
+    i
+}
+
+async fn read_after_connecting(s: TcpStream) -> Int {
+    let n = match s.write(bytes_from_string("ping")).await {
+        Ok(count) => count
+        Err(e) => panic("write: ${e.message}")
+    }
+    println("reader: wrote ${n}")
+    let data = match s.read(64).await {
+        Ok(b) => b
+        Err(e) => panic("read: ${e.message}")
+    }
+    match data.to_string() {
+        Some(text) => println("reader: read ${text}")
+        None => println("reader: read <non-utf8>")
+    }
+    let _ = s.close().await
+    n
+}
+
+async fn main() {
+    let port = match read_to_string("${temp_dir()}/nova_net_interleave_port.txt").await {
+        Ok(p) => p.trim()
+        Err(e) => panic("read port file: ${e.message}")
+    }
+    let addr = "127.0.0.1:${port}"
+    let s = match connect(addr).await {
+        Ok(s) => s
+        Err(e) => panic("connect: ${e.message}")
+    }
+
+    let reader = spawn(read_after_connecting(s))
+    let counter = spawn(count_to_three())
+    let _ = reader.join().await
+    let _ = counter.join().await
+}

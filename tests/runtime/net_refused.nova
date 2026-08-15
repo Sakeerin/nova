@@ -1,0 +1,42 @@
+// `connect` against a loopback port nothing is listening on:
+// `crates/nova-cli/tests/run_tests.rs`'s `write_refused_port_file`
+// (`net_refused_run`) reserves an ephemeral port and immediately drops the
+// listener, so nothing answers there by the time this fixture connects --
+// `ConnectionRefused`'s first producer
+// (`crates/nova-runtime/src/net.rs`'s own module doc comment).
+//
+// The message is real OS text, not this runtime's own fabricated string, so
+// only `kind` is asserted here -- the same choice `fs_not_found.nova` and
+// `fs_permission_denied.nova` make for their own OS-produced errors, for the
+// identical reason (`std/io/lib.nova`'s own doc comment on `IoError.message`).
+//
+// The port file this reads is named for this fixture alone, not this
+// process -- see `net_roundtrip.nova`'s header for the accepted hazard that
+// follows from that.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
+async fn main() {
+    let port = match read_to_string("${temp_dir()}/nova_net_refused_port.txt").await {
+        Ok(p) => p.trim()
+        Err(e) => panic("read port file: ${e.message}")
+    }
+    let addr = "127.0.0.1:${port}"
+    match connect(addr).await {
+        Ok(s) => {
+            println("connect: unexpectedly ok")
+            let _ = s.close().await
+        }
+        Err(e) => println("connect: ${kind_name(e.kind)}")
+    }
+}

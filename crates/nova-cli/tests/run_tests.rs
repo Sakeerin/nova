@@ -7176,3 +7176,250 @@ fn file_open_dir_run() {
         .stdout(expected);
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// === Task 6 (I/O poller and std/net increment): std/net fixtures ===
+//
+// Every fixture below needs a real TCP peer at a port it cannot know in
+// advance (the OS hands out an ephemeral one), so each test binds one itself
+// and hands the Nova program the port number through a file: `EchoServer`
+// (and `write_refused_port_file`, for the one fixture that wants nothing
+// listening) writes it, and the paired `.nova` fixture reads it back with
+// `fs::read_to_string`.
+//
+// **That file's path is derived from the fixture's own name alone, not this
+// process** — unlike `unique_temp_dir`, which folds in `std::process::id()`
+// specifically to keep concurrent runs of this same binary from colliding.
+// Two concurrent `cargo test` invocations racing the *same* test would
+// collide on this path — the identical latent hazard `write_test_project`'s
+// fixed `unique_name`-only directory already carries (see that function's
+// own comment, above). A fixed port would be flakier (a stale process, or a
+// genuinely concurrent suite run, could already hold it) and generating the
+// `.nova` source itself would break the static-file-plus-golden convention
+// every other runtime fixture in this file follows, so this hazard is
+// accepted rather than engineered around, the same call this file already
+// makes for `write_test_project`. None of these fixtures touch `TMPDIR`/
+// `TMP`/`TEMP`: Nova's `temp_dir()` and this harness's own
+// `std::env::temp_dir()` calls therefore resolve to the identical, real OS
+// temp directory on both sides with no override needed.
+
+/// A one-shot loopback TCP server for a `std/net` fixture: binds
+/// `127.0.0.1:0`, writes the ephemeral port to a well-known path the paired
+/// `.nova` fixture reads with `fs::read_to_string`, then accepts exactly one
+/// connection and echoes back whatever it reads, byte for byte, until the
+/// peer's own half closes.
+///
+/// `delay_ms`, when non-zero, sleeps once right after `accept` and before
+/// the first read — long enough that a fixture's `read`/`read_timeout`
+/// against this connection is guaranteed to find nothing yet and genuinely
+/// suspend, rather than racing real loopback latency (which is normally fast
+/// enough that a plain round trip could occasionally resolve before a
+/// sibling task ever got a turn). `net_interleave_run` and `net_timeout_run`
+/// both depend on this; `net_roundtrip_run` and `net_lifetime_run` pass `0`.
+///
+/// The accepting thread polls a non-blocking listener against `shutdown`
+/// rather than blocking in `accept` forever, so a fixture that never
+/// connects at all (a failing test, before it ever reaches `connect`) still
+/// lets `Drop` join the thread and end the process cleanly instead of
+/// leaking one parked in a blocking `accept` for the rest of this test
+/// binary's life.
+struct EchoServer {
+    port_path: std::path::PathBuf,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EchoServer {
+    fn start(label: &str, delay_ms: u64) -> EchoServer {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+        listener
+            .set_nonblocking(true)
+            .expect("listener supports non-blocking accept");
+        let port = listener
+            .local_addr()
+            .expect("bound listener has a local address")
+            .port();
+        let port_path = std::env::temp_dir().join(format!("nova_{label}_port.txt"));
+        std::fs::write(&port_path, port.to_string())
+            .expect("write the port file the paired fixture reads");
+
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_for_thread = std::sync::Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        if shutdown_for_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => return,
+                }
+            };
+            // Reverts to blocking for this thread's own reads/writes below —
+            // this thread has nothing else to do while serving one
+            // connection, so there is no reason to poll it too.
+            if stream.set_nonblocking(false).is_err() {
+                return;
+            }
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            let mut buf = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stream, &mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        if std::io::Write::write_all(&mut stream, &buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+
+        EchoServer {
+            port_path,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for EchoServer {
+    fn drop(&mut self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let _ = std::fs::remove_file(&self.port_path);
+    }
+}
+
+/// A port on `127.0.0.1` with nothing listening: reserve an ephemeral one,
+/// then immediately drop the listener so the OS releases it again before any
+/// fixture connects. `net_refused_run`'s loopback `connect` to this port
+/// gets an OS-level refusal — an immediate RST, needing no network round
+/// trip (`crates/nova-runtime/src/net.rs`'s own module doc comment) — rather
+/// than a hardcoded high port number some other process on the host might
+/// genuinely be listening on.
+fn write_refused_port_file(label: &str) -> std::path::PathBuf {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+    let port = listener
+        .local_addr()
+        .expect("bound listener has a local address")
+        .port();
+    drop(listener);
+    let port_path = std::env::temp_dir().join(format!("nova_{label}_port.txt"));
+    std::fs::write(&port_path, port.to_string())
+        .expect("write the port file the paired fixture reads");
+    port_path
+}
+
+/// `connect`, `impl Write for TcpStream`, `impl Read for TcpStream`, and
+/// `TcpStream::close` against a real loopback echo server. See the
+/// fixture's own header for why this alone cannot tell a real poller from a
+/// blocking one — `net_interleave_run`, below, is the test that can.
+#[test]
+fn net_roundtrip_run() {
+    let _server = EchoServer::start("net_roundtrip", 0);
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/net_roundtrip.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_roundtrip.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The fixture that decides the increment: asserts that a sibling task's own
+/// output lands between a socket task's "wrote" and "read" lines, which only
+/// a real, non-blocking poller can produce. See
+/// `tests/runtime/net_interleave.nova`'s own header for the full reasoning,
+/// including why `connect` runs before either task is spawned.
+///
+/// The paired server sleeps 150ms after accepting before echoing anything —
+/// long enough for the counter task's three `yield_now` steps (each costing
+/// no real wall-clock time at all) to run to completion while the reader
+/// waits, on any machine this suite runs on, and short enough not to slow
+/// the suite down.
+#[test]
+fn net_interleave_run() {
+    let _server = EchoServer::start("net_interleave", 150);
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/net_interleave.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_interleave.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `TcpStream::read_timeout` in both directions: too-short and comfortably
+/// long, against one real connection. See `tests/runtime/net_timeout.nova`'s
+/// own header for why both directions matter.
+///
+/// The paired server sleeps 250ms after accepting before echoing anything —
+/// comfortably longer than the fixture's own 80ms short deadline and
+/// comfortably shorter than its 3000ms long one.
+#[test]
+fn net_timeout_run() {
+    let _server = EchoServer::start("net_timeout", 250);
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/net_timeout.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_timeout.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `connect` against a loopback port nothing is listening on —
+/// `ConnectionRefused`'s first producer end to end. See
+/// `tests/runtime/net_refused.nova`'s own header.
+#[test]
+fn net_refused_run() {
+    let port_path = write_refused_port_file("net_refused");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/net_refused.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_refused.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+    let _ = std::fs::remove_file(&port_path);
+}
+
+/// The increment's core resource-lifetime behaviour for `TcpStream`: `close`
+/// is idempotent, reading, writing or timing out a handle this fixture
+/// itself closed is an ordinary `IoError` of kind `Other` rather than a
+/// panic, `flush` stays a no-op even then, and a Nova program can forge a
+/// `TcpStream` naming no connection this module ever opened (`fd` is not
+/// privacy-enforced) and get the exact same safe treatment. See
+/// `tests/runtime/net_lifetime.nova`'s own header, which follows
+/// `file_lifetime.nova`'s shape exactly.
+#[test]
+fn net_lifetime_run() {
+    let _server = EchoServer::start("net_lifetime", 0);
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/net_lifetime.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_lifetime.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
