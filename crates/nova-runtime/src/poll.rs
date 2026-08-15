@@ -59,6 +59,18 @@ pub enum Interest {
 /// This function must not panic: it runs from `task.rs`'s drive loop, between
 /// polls, where nothing catches an unwind. No `unwrap`/`expect`/indexing/
 /// fallible `format!` here or in anything it calls.
+///
+/// **A known, reported limitation, not an oversight:** a persistent
+/// (non-`EINTR`) failure from the platform poll call, or a socket the
+/// platform's primitive cannot represent at all (see the Unix arm's
+/// `FD_SETSIZE` note), makes this function report "nothing ready" and back
+/// off rather than spin -- but `Vec<RawSocket>` has no channel to say *which*
+/// socket is broken, so a caller cannot evict it from its own park set.
+/// Closing that needs either a richer return type (e.g. separating "ready"
+/// from "errored" sockets) or an out-of-band failure report, and no caller
+/// exists yet (`net.rs`, Task 3) to say which shape it actually needs.
+/// `tracing::warn!` logs the condition in the meantime, so it is at least
+/// diagnosable rather than silent.
 pub fn wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec<RawSocket> {
     if sockets.is_empty() {
         if let Some(at) = deadline {
@@ -89,6 +101,16 @@ fn remaining(deadline: Option<Instant>) -> Option<Duration> {
         }
     })
 }
+
+/// How long a platform arm sleeps, when it has no deadline to defer to,
+/// before reporting "nothing ready" for a reason retrying cannot fix on its
+/// own (every socket unwatchable, or a persistent non-`EINTR` failure). A
+/// task genuinely stuck this way makes no more progress no matter how often
+/// `wait` is called again; this constant bounds the *cost* of being stuck --
+/// CPU spent busy-looping `task.rs`'s drive loop -- not the stuck condition
+/// itself, which only a caller with a channel to evict the bad socket (see
+/// `wait`'s own doc comment) could actually resolve.
+const ERROR_RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Set `socket` non-blocking, for `net.rs` (Task 3) to call right after a
 /// socket is created and before it is ever handed to [`wait`] or connected --
@@ -141,9 +163,21 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             let fd = sock.0 as RawFd;
             // A negative fd or one `select` cannot represent in an `fd_set`
             // (`FD_SETSIZE` wide) is skipped rather than handed to `FD_SET`,
-            // which is documented UB for an out-of-range fd. This is a
-            // defensive bound, not a path any caller in this task reaches.
+            // which is documented UB for an out-of-range fd. `select`'s
+            // ceiling is inherent, not this module's to lift -- but a task
+            // parked on a socket this skips is never watched by any future
+            // call either, so it starves until its own deadline (if it has
+            // one) with nothing else in this crate ever explaining why.
+            // `tracing::warn!` rather than silence: `wait` must not panic,
+            // and there is no channel back to the caller to report this
+            // per-socket (see `wait`'s own doc comment).
             if fd < 0 || fd as usize >= libc::FD_SETSIZE {
+                tracing::warn!(
+                    raw_socket = sock.0,
+                    fd_setsize = libc::FD_SETSIZE,
+                    "poll::wait: socket is outside select's representable range \
+                     and will never be watched on this platform"
+                );
                 continue;
             }
             any_watched = true;
@@ -160,12 +194,12 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
 
         let timeout = remaining(deadline);
         if !any_watched {
-            // Every socket was filtered out above; there is nothing for
-            // `select` to watch. Behave like the empty-set path: wait out the
-            // deadline (if any) and report nothing ready.
-            if let Some(d) = timeout {
-                std::thread::sleep(d);
-            }
+            // Every socket was filtered out above (each already logged); there
+            // is nothing for `select` to watch. Back off rather than spin:
+            // retrying immediately cannot change the outcome, so bound the
+            // cost to `ERROR_RETRY_BACKOFF` when there is no deadline to defer
+            // to instead of returning instantly forever.
+            std::thread::sleep(timeout.unwrap_or(ERROR_RETRY_BACKOFF));
             return Vec::new();
         }
 
@@ -198,7 +232,8 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
         };
 
         if rc < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
                 // EINTR: a signal interrupted the wait before any socket
                 // became ready or the timeout elapsed. Retry with the
                 // deadline recomputed above rather than reporting readiness
@@ -206,8 +241,17 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
                 continue;
             }
             // Some other failure (e.g. a socket closed out from under this
-            // call). There is no ready set to trust; report nothing rather
-            // than guessing, and let the caller re-poll.
+            // call). There is no ready set to trust, and no channel to say
+            // *which* socket broke so a caller could evict it (see `wait`'s
+            // own doc comment) -- so log what's knowable and back off rather
+            // than spin, exactly like the `!any_watched` case above: retrying
+            // immediately cannot fix a persistent failure, only waste CPU
+            // doing so.
+            tracing::warn!(
+                error = %err,
+                "poll::wait: select failed; backing off rather than spinning"
+            );
+            std::thread::sleep(timeout.unwrap_or(ERROR_RETRY_BACKOFF));
             return Vec::new();
         }
 
@@ -255,11 +299,17 @@ fn platform_set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
 //
 // **Verified**: built with `cargo build -p nova-runtime` and exercised for
 // real by this module's own tests (`wait_reports_a_socket_with_data_waiting`,
+// `wait_reports_a_socket_ready_for_write`,
 // `wait_returns_empty_when_the_deadline_passes_first`, and
 // `set_nonblocking_makes_a_read_return_would_block_instead_of_blocking`)
-// against real loopback `TcpStream`s on this task's own Windows host. This is
-// the arm the design spec called out as *reasoned, not measured* for socket
-// pollability -- on Windows, it is now measured.
+// against real loopback `TcpStream`s on this task's own Windows host. Both
+// `Interest::Read` and `Interest::Write` are exercised, so both the
+// `POLLRDNORM` and `POLLWRNORM` branches ran for real, not just `Read`. This
+// is the arm the design spec called out as *reasoned, not measured* for
+// socket pollability -- on Windows, it is now measured. The non-`EINTR`
+// error/backoff branch below is not exercised by any test (there is no way
+// to force `WSAPoll` to fail without a real socket-level fault) and remains
+// reasoned rather than measured.
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
@@ -296,11 +346,20 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
         if rc == SOCKET_ERROR {
             // SAFETY: `WSAGetLastError` takes no arguments and just reads
             // thread-local error state.
-            if unsafe { WSAGetLastError() } == WSAEINTR {
+            let err = unsafe { WSAGetLastError() };
+            if err == WSAEINTR {
                 // EINTR: retry with the deadline recomputed above rather than
                 // reporting readiness that was never observed.
                 continue;
             }
+            // Same reasoning as the Unix arm's non-EINTR branch: no channel
+            // to say which socket broke, so log what's knowable and back off
+            // rather than spin.
+            tracing::warn!(
+                error_code = err,
+                "poll::wait: WSAPoll failed; backing off rather than spinning"
+            );
+            std::thread::sleep(remaining(deadline).unwrap_or(ERROR_RETRY_BACKOFF));
             return Vec::new();
         }
 
@@ -391,6 +450,22 @@ mod tests {
             "the client socket has data and must be ready"
         );
         let _ = &mut client;
+    }
+
+    #[test]
+    fn wait_reports_a_socket_ready_for_write() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let client = std::net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+
+        let sock = RawSocket(raw_of(&client));
+        let ready = wait(&[(sock, Interest::Write)], None);
+        assert_eq!(
+            ready,
+            vec![sock],
+            "a freshly connected socket's send buffer is empty and must be write-ready"
+        );
     }
 
     #[test]
