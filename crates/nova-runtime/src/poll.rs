@@ -556,13 +556,68 @@ mod tests {
         // logged yet" denies this call, silently losing the first
         // occurrence of whatever the gate protects.
         //
-        // Deliberately the real-clock `allow()` and not `allow_at()`: this is
-        // the only test that exercises the delegation, so a broken clock
-        // reading in `allow` cannot hide behind the tests that inject one.
+        // Still the real-clock `allow()` rather than `allow_at()`, so the
+        // delegation is at least executed here -- but executing it is *all*
+        // this test does, and an earlier version of this comment claimed more
+        // than that. The `prev_raw == 0` short-circuit returns `true` before
+        // `now_ms` is compared to anything, so this assertion holds whatever
+        // `allow` reads, including a hardcoded constant.
+        // `allow_stamps_the_gate_with_a_live_clock_reading` is what actually
+        // pins the reading.
         let gate = LogGate::new();
         assert!(
             gate.allow(),
             "a fresh gate's first call must not be swallowed"
+        );
+    }
+
+    #[test]
+    fn allow_stamps_the_gate_with_a_live_clock_reading() {
+        // `allow()` must hand `allow_at` a *live* reading, not a constant.
+        // Nothing else in this module can see that, and the two obvious
+        // candidates both miss it:
+        //
+        // - A fresh gate's first call is allowed by the `prev_raw == 0`
+        //   short-circuit, before `now_ms` reaches any comparison.
+        // - Two real-clock calls in a row cannot see it either: a frozen
+        //   reading leaves the measured gap at `0`, which is inside the
+        //   window and therefore denied -- indistinguishable from the genuine
+        //   sub-second gap those two calls actually have.
+        //
+        // In `allow`'s *return values* the difference only surfaces after a
+        // full `LOG_RATE_LIMIT` of real time, which is precisely the
+        // one-second sleep this module refuses to pay. So this reads back the
+        // timestamp the call recorded instead, which is observable
+        // immediately.
+        //
+        // Worth the test because a frozen clock is the exact mirror of the
+        // unbounded-logging defect: every gap stays `0`, so every gate denies
+        // forever after its first line -- permanent silence in the diagnostic
+        // that exists so a starving socket is not silent.
+        //
+        // The sleep here is irreducible (a clock cannot be observed advancing
+        // without letting time pass) but it is 30ms, not a `LOG_RATE_LIMIT`:
+        // it only has to put the epoch far enough behind that a genuine
+        // reading cannot itself be `0`, which is what would let a hardcoded
+        // `0` masquerade as one.
+        let _ = log_epoch();
+        std::thread::sleep(Duration::from_millis(30));
+
+        let before = log_epoch().elapsed().as_millis() as u64;
+        let gate = LogGate::new();
+        assert!(gate.allow(), "a fresh gate's first call must be allowed");
+        let after = log_epoch().elapsed().as_millis() as u64;
+
+        // `Instant::elapsed` is monotonic, so the reading `allow` took is
+        // bracketed by the two around it -- no timing slack to flake on.
+        let recorded = gate.0.load(Ordering::Relaxed);
+        assert!(recorded != 0, "an allowed call must record a timestamp");
+        let stamped = recorded - 1;
+        assert!(
+            stamped >= before && stamped <= after,
+            "allow() must stamp the gate with what log_epoch() reads at the \
+             moment of the call ({before}..={after}ms), not a constant: got \
+             {stamped}ms"
         );
     }
 
