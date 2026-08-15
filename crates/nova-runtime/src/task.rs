@@ -2695,11 +2695,13 @@ mod tests {
     /// branch now matches `(earliest_deadline(), io_parks().is_empty())`, and
     /// the real sleep this finding is about now runs in `poll::wait`'s
     /// empty-socket-set branch (`poll.rs`), reached from the `(Some(at),
-    /// true)` arm of that match. The finding's own claim survives the
-    /// rename: that arm is still reachable from no Rust-level test in this
-    /// module today, for the same reason -- every deadline test here stages
-    /// one already due, so `wake_due`'s per-poll check still wakes it first,
-    /// same as before this correction.
+    /// true)` arm of that match. That arm -- unlike this finding's original
+    /// claim about its predecessor -- **is** covered, by the test just below:
+    /// `two_not_yet_due_deadlines_drain_the_queue_then_wake_in_deadline_order`
+    /// stages two not-yet-due deadlines specifically so the ready queue
+    /// drains with both still parked, forcing exactly this branch to consult
+    /// `earliest_deadline()` and actually sleep (see that test's own doc
+    /// comment, which predates this correction and already says so).
     unsafe extern "C-unwind" fn poll_park_after_delay(state: *mut u8, _task_ctx: *mut u8) -> i64 {
         let slots = state as *mut i64;
         // SAFETY: `state` is a `make_future(_, 2)` object: TAG, OUTPUT, a
