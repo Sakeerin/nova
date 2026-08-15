@@ -43,6 +43,16 @@ mod gc;
 /// module beside `fs` and `bytes`, reusing `fs`'s per-task slot table rather
 /// than owning a second one.
 pub mod io;
+/// The open-socket table and the two-phase, non-blocking `connect` for
+/// `std/net`'s `TcpStream`. Private, like [`file`]: nothing outside this
+/// crate names `net::` directly -- the `nova_rt_net_*` symbols reach the JIT
+/// and linked binaries through their `#[no_mangle]` C names and through
+/// [`symbols`], both of which need only this module's *items* public, not
+/// the module path itself. Branch `io-poller-std-net`'s Task 3 added this
+/// module beside `file`, reusing `file`'s handle-table model rather than
+/// inventing a second one, and `poll`'s `RawSocket`/`Interest`/
+/// `set_nonblocking` rather than a second socket representation.
+mod net;
 /// The executor's third wake source (socket readiness), and the two types
 /// (`RawSocket`, `Interest`) that let `task.rs` name a socket wait without
 /// depending on this module's platform types. Private, like [`gc`] and
@@ -540,6 +550,11 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_file_read", file::nova_rt_file_read as *const u8),
         ("nova_rt_file_write", file::nova_rt_file_write as *const u8),
         ("nova_rt_file_flush", file::nova_rt_file_flush as *const u8),
+        (
+            "nova_rt_net_connect_future",
+            net::nova_rt_net_connect_future as *const u8,
+        ),
+        ("nova_rt_net_close", net::nova_rt_net_close as *const u8),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",
