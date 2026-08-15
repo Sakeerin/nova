@@ -1196,14 +1196,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     levels, `Pub` and `Private` — there is no `pub(crate)` tier — and only a
     `Pub` item enters a module's exports, so `pub` was the only mechanism
     available at all. Widens `std/io`'s public surface as a side effect.
-  - `nova-spec/20-STDLIB.md` §5 is amended in place (dated note) to add
+  - `nova-spec/20-STDLIB.md` §5 is amended in place (dated notes) to add
     `OpenOptions`'s `pub record` declaration, with no `pub` on any field —
-    Nova has no field privacy to enforce either way, the same reason
-    `std/fs/lib.nova`'s own shipped record has none — since the spec had
-    named it as `open`'s parameter since before this increment existed but
-    never declared it as a type, and to record that `File` carries an
-    `Int` descriptor with explicit `close`, not the opaque shape the code
-    sample there still shows. Two one-sentence gaps increment 3b left in §4
+    Nova has no field privacy to enforce either way — together with its
+    `impl Default` and the `impl OpenOptions` block holding `reading()`,
+    `writing()` and `appending()`, bodies elided in that section's own
+    style. The section had named `OpenOptions` as `open`'s parameter since
+    before this increment existed but never declared it as a type, and its
+    own prose described the `Default` impl and the three constructors while
+    the code fence showed neither. Amended also to record that `File`
+    carries an `Int` descriptor with explicit `close`, not the opaque shape
+    the code sample there still shows. Two one-sentence gaps increment 3b
+    left in §4
     are also closed: a short write is legal (`Write::write` may report
     fewer bytes than `buf`
     holds — already true of increment 3b's shipped `write`, just not

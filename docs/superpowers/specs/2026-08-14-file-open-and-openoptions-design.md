@@ -19,7 +19,7 @@ filtered out part of the tree it claimed to cover.
 
 **Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 3): both of the preceding paragraph's
 claims about `OpenOptions` are now false, not merely narrowed.** `nova-spec/20-STDLIB.md` §5 now declares
-`pub record OpenOptions { ... }` directly (added at commit `7d1af14`, after a review round found that an
+`pub record OpenOptions { ... }` directly (added at commit `758ad4d`, after a review round found that an
 earlier amendment there had narrated a definition without actually supplying one) — so neither "no
 document defines it as a type" nor "name it only as `open`'s parameter type" still holds for the normative
 spec. **The bolded chronology claim, "This spec is the first document to define it," is unaffected**: it

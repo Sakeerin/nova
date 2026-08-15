@@ -48,16 +48,32 @@ still-missing piece of a later increment's scope; the two this paragraph origina
 only place it appears *inside a signature*; and it is not defined as a type anywhere in `nova-spec/` or
 `docs/`, under either kind of mention.
 
-**Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 3): both halves of that closing clause
-are now false, and the second half already was.** The `nova-spec/` half broke at commit `7d1af14`, once
-`nova-spec/20-STDLIB.md` §5 gained an actual `pub record OpenOptions { ... }` declaration. The `docs/`
-half broke earlier, and independently of anything this branch did: `docs/superpowers/specs/
-2026-08-14-file-open-and-openoptions-design.md` — itself a document under `docs/` — has defined
-`OpenOptions` in full, in its own §2, since commit `1509a82`, which landed three commits after this very
-correction was written (`867b122` → `fc7b252` → `7207a41` → `1509a82`, confirmed by walking the log rather
-than assumed). This paragraph's central property was therefore already false by the time its
-own successor increment shipped, and neither falsification took a misreading to produce — both are the
-ordinary, expected consequence of a chartered increment doing exactly the job it was chartered for.
+**Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 3; corrected again in fix round 4):
+two of the restated property's three clauses are false, and round 3 retracted only one of them.** Round
+3 wrote "both halves of that closing clause are now false," which certifies the other two clauses by
+omission. It should not have. Clause by clause, each checked rather than inferred:
+
+- **The closing clause** — "not defined as a type anywhere in `nova-spec/` or `docs/`" — is false in
+  both halves. The `nova-spec/` half broke at commit `758ad4d`, once `nova-spec/20-STDLIB.md` §5 gained
+  an actual `pub record OpenOptions { ... }` declaration. The `docs/` half broke earlier still, and by
+  this branch's own first commit:
+  `docs/superpowers/specs/2026-08-14-file-open-and-openoptions-design.md` — itself a document under
+  `docs/` — has defined `OpenOptions` in full, in its own §2, since commit `1509a82`, whose parent
+  `7207a41` is this branch's merge base with `main`. That is three commits after this very correction
+  was written (`867b122` → `fc7b252` → `7207a41` → `1509a82`, confirmed by walking the log rather than
+  assumed).
+- **The middle clause** — "the two this paragraph originally cited remain the only place it appears
+  *inside a signature*" — was **already false at that same `1509a82`**, and round 3 did not check it.
+  That commit's §2 fence carries four further signature occurrences: `pub fn reading() -> OpenOptions`,
+  `writing()`, `appending()`, and `pub async fn open(path: String, options: OpenOptions)`. Fix round 3
+  then added three more to `nova-spec/20-STDLIB.md` §5 — those same three constructors.
+- **The leading clause** survives only on the narrow reading that scopes "those other mentions" to the
+  two elsewhere in this document, the front-matter status line and the Non-Goals bullet, which do still
+  name `OpenOptions` as a piece of a later increment's scope. As a present-tense claim over the corpus
+  it fails too: the 3c design spec's §2 *defines* it rather than naming it.
+
+None of these falsifications took a misreading to produce — all are the ordinary, expected consequence
+of a chartered increment doing exactly the job it was chartered for.
 
 That is the lesson worth keeping, since this paragraph replaced a retracted *count* on the theory that a
 property "does not go stale the same way." The lesson is not that a property is more durable than a count

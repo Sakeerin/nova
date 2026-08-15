@@ -265,13 +265,16 @@ pub record DirEntry {
     pub is_dir: Bool
 }
 
-// AMENDED 2026-08-14 (branch `file-open-openoptions`): `OpenOptions` is
-// `open`'s parameter type below and has been since this section first named
-// it, but this document never declared it as a type until now. Declared
-// here with no `pub` on any field -- Nova has no field privacy at all
-// (`File` below is the identical case), so marking a field `pub` or not
-// changes nothing about who can read or construct one; the declaration
-// below simply doesn't.
+// AMENDED 2026-08-14, reworded 2026-08-15 (branch `file-open-openoptions`):
+// `OpenOptions` is `open`'s parameter type below and has been since this
+// section first named it, but this document never declared it as a type
+// until now. Declared here with no `pub` on any field -- Nova has no field
+// privacy at all (`File` below is the identical case), so marking a field
+// `pub` or not changes nothing about who can read or construct one; the
+// declaration below simply doesn't. (The 2026-08-15 reword replaced a
+// clause that grounded the missing `pub` in `std/fs/lib.nova`'s current
+// bytes with the language rule stated above. The declaration itself is
+// unchanged from 2026-08-14.)
 pub record OpenOptions {
     read: Bool
     write: Bool
@@ -281,6 +284,15 @@ pub record OpenOptions {
     create_new: Bool
 }
 
+// AMENDED 2026-08-15 (branch `file-open-openoptions`): the two `impl`
+// blocks below are added to the declared surface. The prose further down
+// has named `impl Default` and the three constructors as part of what
+// `std/fs` ships since this section's 2026-08-14 note, but the fence
+// showed only the record -- so the section described a surface it did not
+// declare. Bodies are elided (`{ ... }`) in this section's own style, the
+// way `File`'s trait impls below are. This closes a gap between the prose
+// and the fence, not a gap in what the language allows: Nova has no field
+// privacy, so a record literal could always build an `OpenOptions`.
 impl Default for OpenOptions { ... }
 
 impl OpenOptions {
