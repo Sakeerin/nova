@@ -27,6 +27,26 @@ constructors `stdin`/`stdout`/`stderr` (`:180-182`) are **not** async and do not
 blocks is the operations, not obtaining the stream. ADR 0009 asked for the diagnostic to exist
 *before* the primitive that can deadlock, which is why this lands first.
 
+**Corrected 2026-08-15 (branch `file-open-openoptions`, fix round 4) — §5 no longer holds eleven
+functions, and its other declarations are no longer two records.** Measured by extracting the section
+(`awk '/^## 5\. /,/^## 6\. /'`) at three revisions: at this spec's own commit `d8dd5c6`, §5 held 11
+functions, all of them `async fn`, plus 2 records and 2 impl blocks, so the sentence above was accurate
+as written. At `758ad4d`: 11 functions, 3 records, 2 impls. At `37489f8`: **14 functions, 3 records and
+4 impl blocks** — increment 3c declared `OpenOptions` in that section and gave it an `impl Default` and
+three named constructors, `reading()`, `writing()` and `appending()`.
+
+**The blocking-operations claim survives, and its figure is still eleven — but as a count of
+`async fn`s, not of functions.** §5's eleven `async fn`s are the same eleven today as at `d8dd5c6`:
+the ten filesystem calls plus `open`. The three added functions are `pub fn`, not `pub async fn`, and
+they build a value rather than touching the filesystem, so they are neither blocking operations nor
+counter-examples to "the blocking operations are `async fn`." Read the sentence above as **all eleven
+`async fn`s in §5 `std/fs`**, not as a statement of how many declarations that section contains.
+
+The line references throughout that sentence (`:158-164`, `:180-182`, `:192-201`, `:210`) were exact at
+`d8dd5c6` and had **already** drifted before this branch began — at `7207a41`, this branch's merge base
+with `main`, §5's ten filesystem calls sat at `:232-241` and `open` at `:250`. They are positions in a
+living file, not stable citations; resolve them by name.
+
 There is already a reachable hang of this shape: `JoinHandle::join` is
 `while !task_is_done(self.fut) { yield_now().await }` (`std/task/lib.nova:73`), so joining a task
 that never finishes spins at one poll per turn with no output and no diagnostic.
