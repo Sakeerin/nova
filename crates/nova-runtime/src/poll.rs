@@ -71,8 +71,12 @@ pub enum Interest {
 /// Closing that needs either a richer return type (e.g. separating "ready"
 /// from "errored" sockets) or an out-of-band failure report, and no caller
 /// exists yet (`net.rs`, Task 3) to say which shape it actually needs.
-/// `tracing::warn!` logs the condition in the meantime, so it is at least
-/// diagnosable rather than silent.
+/// `tracing::warn!` logs the condition in the meantime -- but rate-limited
+/// (see [`LogGate`]), so the *log* does not close the gap either: at most one
+/// line per second per call site, naming at most one socket (always the first
+/// in `sockets` order to trip the check), with every other affected socket in
+/// that call and every call inside that window silent. The condition becomes
+/// visible; *which* sockets are affected still does not.
 pub fn wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec<RawSocket> {
     if sockets.is_empty() {
         if let Some(at) = deadline {
@@ -149,16 +153,29 @@ impl LogGate {
     ///
     /// **Stores the last-allowed timestamp offset by one, so `0` means
     /// "never logged yet" rather than colliding with a real elapsed time of
-    /// `0`ms.** Without the offset, a fresh gate's `0` sentinel is
-    /// indistinguishable from an actual first call landing at `elapsed() ==
-    /// 0` (as one always does: [`log_epoch`] is fixed to `Instant::now()` by
-    /// whichever gate touches it first, so *that* gate's own first `elapsed()`
-    /// reads back ~0) -- `0.saturating_sub(0) < LOG_RATE_LIMIT` is `true`,
-    /// denying the very first call at every site, forever losing the first
-    /// (and often most diagnostically valuable) occurrence of whatever this
-    /// gates.
+    /// `0`ms.** Without the offset the sentinel is just an ordinary
+    /// timestamp, so a fresh gate's first call reduced to
+    /// `now_ms.saturating_sub(0) < LOG_RATE_LIMIT` -- denied exactly when
+    /// that gate was first reached within [`LOG_RATE_LIMIT`] of the instant
+    /// [`log_epoch`] was fixed, and allowed normally when it was first
+    /// reached after that. That window always caught the gate that fixed the
+    /// epoch, since [`log_epoch`] is `Instant::now()` at whichever gate
+    /// touches it first and so *that* gate's own first `elapsed()` reads back
+    /// ~0. Where a platform arm has a single gate (Windows) that is every
+    /// site; where it has two (Unix) a gate first reached later than the
+    /// window was unaffected. Narrower than "every site, forever" -- but every
+    /// call it did deny lost the first, and often most diagnostically
+    /// valuable, occurrence of whatever that gate protects.
     fn allow(&self) -> bool {
-        let now_ms = log_epoch().elapsed().as_millis() as u64;
+        self.allow_at(log_epoch().elapsed().as_millis() as u64)
+    }
+
+    /// [`LogGate::allow`] against a caller-supplied clock reading, in
+    /// milliseconds since [`log_epoch`]. Split out so this module's tests can
+    /// pin the window's exact boundaries -- and the re-arm after one opens --
+    /// without sleeping through a real [`LOG_RATE_LIMIT`]. Production reads
+    /// the clock in `allow` and pays nothing for the split.
+    fn allow_at(&self, now_ms: u64) -> bool {
         let prev_raw = self.0.load(Ordering::Relaxed);
         if prev_raw != 0 {
             let prev_ms = prev_raw - 1;
@@ -267,10 +284,15 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
 
         let timeout = remaining(deadline);
         if !any_watched {
-            // Every socket was filtered out above (each already checked
-            // against `FD_SETSIZE`, and logged if this call's rate-limit
-            // gate allowed it -- see `LogGate`); there is nothing for
-            // `select` to watch. Back off rather than spin:
+            // Every socket was filtered out above, each *checked* against
+            // `FD_SETSIZE`; there is nothing for `select` to watch. At most
+            // one of them was logged, and possibly none: `FD_SETSIZE_LOG_GATE`
+            // holds no per-call state and `allow()` is called once per skipped
+            // socket, so on a call it opens for, the first skipped socket
+            // takes that window's single line and the rest are silent -- and
+            // on a call inside an already-spent window, all of them are. Not
+            // a claim that a log line exists for any particular socket here.
+            // Back off rather than spin:
             // retrying immediately cannot change the outcome, so bound the
             // cost to `ERROR_RETRY_BACKOFF` when there is no deadline to defer
             // to instead of returning instantly forever.
@@ -348,9 +370,10 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             // Same predicate as the watch-set-building loop above, over the
             // same immutable `sockets` slice, within this one call: anything
             // skipped here was already *checked* there moments earlier in
-            // this same call -- and logged too, if this call happened to be
-            // the one in every `LOG_RATE_LIMIT` window that `LogGate` let
-            // through, but not otherwise. Silent here is redundancy with an
+            // this same call -- and logged too, but only if it was the one
+            // socket that took that window's single line (see the
+            // `!any_watched` branch above for why it is one, not one per
+            // socket), and not otherwise. Silent here is redundancy with an
             // already-checked condition, not a second, unreported one; it is
             // not a claim that a log line necessarily exists for it.
             if fd < 0 || fd as usize >= libc::FD_SETSIZE {
@@ -519,14 +542,23 @@ fn platform_set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// [`LOG_RATE_LIMIT`] as the millisecond count `LogGate::allow_at`
+    /// actually compares against, so the tests below name the gate's own
+    /// boundary rather than a hard-coded number that could drift from it.
+    const LIMIT_MS: u64 = LOG_RATE_LIMIT.as_millis() as u64;
+
     #[test]
     fn a_fresh_log_gate_allows_its_first_call() {
         // The bug this pins: `allow()`'s internal timestamp starts at the
         // sentinel `0`, and a fresh gate's very first call can itself land
-        // at `elapsed() == 0` (see `allow`'s own doc comment on why) --
+        // at `elapsed() == 0` (see `allow`'s own doc comment on when) --
         // treating `0` as an ordinary elapsed time rather than "never
         // logged yet" denies this call, silently losing the first
-        // occurrence of whatever the gate protects, forever.
+        // occurrence of whatever the gate protects.
+        //
+        // Deliberately the real-clock `allow()` and not `allow_at()`: this is
+        // the only test that exercises the delegation, so a broken clock
+        // reading in `allow` cannot hide behind the tests that inject one.
         let gate = LogGate::new();
         assert!(
             gate.allow(),
@@ -537,23 +569,54 @@ mod tests {
     #[test]
     fn a_log_gate_denies_a_second_call_inside_the_rate_limit_window() {
         let gate = LogGate::new();
-        assert!(gate.allow(), "first call must be allowed");
+        assert!(gate.allow_at(0), "first call must be allowed");
         assert!(
-            !gate.allow(),
+            !gate.allow_at(LIMIT_MS - 1),
             "a second call inside the rate-limit window must be denied, \
              or the gate is not rate-limiting anything"
         );
     }
 
     #[test]
-    fn a_log_gate_allows_again_once_the_rate_limit_window_elapses() {
+    fn a_log_gate_allows_a_call_exactly_at_the_window_boundary() {
+        // The window is "*less than* `LOG_RATE_LIMIT` since the last allowed
+        // line", so a call at exactly that distance is already outside it.
+        // Pins two off-by-ones nothing else here can see, because only an
+        // injected clock can land a call on the boundary at all: a `<=` in
+        // the gap comparison, and a stored offset other than the `1`
+        // `allow_at` subtracts back off (a `2` against that `-1` read dates
+        // every stored line 1ms into the future, making this call's measured
+        // gap `LIMIT_MS - 1` -- inside the window, denied).
         let gate = LogGate::new();
-        assert!(gate.allow(), "first call must be allowed");
-        std::thread::sleep(LOG_RATE_LIMIT + Duration::from_millis(50));
+        assert!(gate.allow_at(0), "first call must be allowed");
         assert!(
-            gate.allow(),
+            gate.allow_at(LIMIT_MS),
+            "a call exactly LOG_RATE_LIMIT after the last allowed line is \
+             outside the window and must be allowed"
+        );
+    }
+
+    #[test]
+    fn a_log_gate_allows_again_once_the_rate_limit_window_elapses() {
+        let past_window = LIMIT_MS + 50;
+        let gate = LogGate::new();
+        assert!(gate.allow_at(0), "first call must be allowed");
+        assert!(
+            gate.allow_at(past_window),
             "a call after the rate-limit window elapses must be allowed \
              again, not stuck denied forever"
+        );
+        // The other half of that: allowing a line must also *re-arm* the
+        // gate. If the allow-after-window path returns without recording its
+        // own timestamp, the gate keeps measuring against the very first line
+        // forever, so every later call is allowed and rate-limiting silently
+        // switches itself off after one window -- the unbounded logging this
+        // type exists to prevent. One call past the window cannot see that;
+        // a second call, back inside the new window, can.
+        assert!(
+            !gate.allow_at(past_window + 1),
+            "allowing a line must re-arm the gate: the call right after one \
+             is inside a fresh window and must be denied"
         );
     }
 
