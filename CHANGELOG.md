@@ -1225,6 +1225,140 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `#[cfg(windows)]`, split out from `file_errors.nova` so its two portable
     checks run everywhere rather than only where the directory check needs).
 
+- **The I/O poller and `std/net`** (`docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md`,
+  `docs/adr/0013-io-poller.md`): the executor's third wake source, and
+  Nova's first standard-library networking — a program can now connect to a
+  loopback server, write, read with a timeout, and close, with a sibling
+  task demonstrably running while it waits.
+  - **A new module, `crates/nova-runtime/src/poll.rs`, gives the executor a
+    third wake source: socket readiness**, alongside the existing deadline
+    (`sleep`) and task-completion (`join`) sources. `Wait` gains a third
+    variant, `Wait::Io { socket, interest, deadline: Option<Instant> }` —
+    the deadline rides inside the variant rather than becoming a second
+    `PARKED` entry — and `stage_park`'s staging area widens from one `Wait`
+    slot to a `deadline`/`io`/`task` triple, so a `read_timeout` can stage a
+    deadline and an I/O wait together in one poll, the one new legal
+    combination. The poller itself is `select` on Unix and `WSAPoll` on
+    Windows behind one `#[cfg]` seam, both reached through one
+    platform-independent `poll::wait(sockets, deadline)`.
+  - **The wait happens only where `run_to_completion`'s ready queue drains,
+    not once per task turn.** The existing per-poll `wake_due` check (a
+    cheap `Vec` scan) still runs after every single poll so a self-requeuing
+    task cannot starve a due deadline or a due I/O timeout, but the real
+    wait — now covering both a deadline and a socket set at once — is
+    reached only once nothing is left to run, exactly where
+    `std::thread::sleep` used to be called directly. That call is now
+    deleted from `task.rs` entirely: an empty socket set with a timeout *is*
+    a sleep, and `poll::wait`'s own empty-set branch does it, so there is no
+    second timing path to keep in sync.
+  - **A task parked on I/O is never reported as a deadlock.** The
+    drained-queue branch now matches both the earliest deadline and the
+    live socket set at once, and reaches `report_deadlock()` only when
+    *both* are empty — a park set holding even one `Wait::Io` instead blocks
+    in `poll::wait`, however long that takes. `docs/adr/0009-async-execution-model.md`
+    §1 gains two footguns of this same shape in a 2026-08-16 amendment: a
+    permanently-runnable task starves I/O the identical way it already
+    starves a deadline (joining that existing footgun rather than opening a
+    new family), and a program waiting on a peer that never sends hangs
+    with no diagnostic at all, following this project's own livelock
+    precedent — telling "will eventually answer" from "never will" is the
+    halting problem.
+  - **`std/net`**, an eighth `STD_MODULES` entry (`"$std.net"`,
+    `STD_MODULES` 7 → 8): `TcpStream { fd: Int }` — an `Int` key into a
+    runtime-owned socket table, not an OS handle, the same shape `File`
+    already established — with `connect(addr: String) -> Result<TcpStream,
+    IoError>`, an inherent `close`, an inherent `read_timeout(max, ms)`
+    (no `std/fs` analogue takes a deadline, so this is a second method
+    beside `close` rather than folded into `Read`), and `impl Read`/`impl
+    Write for TcpStream` reusing `std/io`'s existing traits. `close` is
+    idempotent and any operation on a closed, stale, or forged handle
+    (`TcpStream { fd: 9999 }` compiles — Nova has no field privacy) is an
+    ordinary `IoError { kind: Other }`, never a panic, identically to
+    `File`. Five new `Builtin::STD_ONLY` intrinsics (`net_connect`,
+    `net_close`, `net_read`, `net_write`, `net_read_timeout`) land this way,
+    taking `STD_ONLY` from `[Builtin; 53]` to `[Builtin; 58]`.
+    `RESERVED_TYPE_NAMES` stays at 7 — `TcpStream` is an ordinary `std/net`
+    definition, glob-imported and shadowable like any other, so no name is
+    reserved and no existing program breaks.
+  - **`connect`, `read`, `write`, and `read_timeout` genuinely suspend the
+    calling task when they cannot complete immediately** — unlike every
+    `std/fs` operation shipped so far, and unlike `std/net`'s own `close`
+    and `flush`, neither of which suspends: `close` calls a plain
+    status-returning intrinsic with no `.await` at all, the identical shape
+    `std/fs`'s `File::close` already uses, and `flush` is a hardcoded
+    `Ok(())` with no runtime call whatsoever, since one `write` here is
+    already one unbuffered syscall with no userspace buffer to push out.
+    The four that do suspend are Rust-built futures with their own poll
+    functions (`crates/nova-runtime/src/net.rs`), parked through the new
+    poller exactly as `sleep` parks on a deadline, joining the family of
+    hand-written poll functions `task.rs` already contains
+    (`poll_yield_once`, `poll_sleep`) as the first such functions outside
+    `task.rs` itself. `connect` is a two-phase parker: a non-blocking
+    socket and `connect` syscall on the first poll, parked on *write*
+    readiness, then a `SO_ERROR` check (via `std::net::TcpStream`'s own
+    `take_error`) on the second poll to tell a genuine connection from a
+    refusal — a blocking `connect` would pass every loopback test in this
+    project while defeating the whole increment, so the non-blocking
+    two-phase shape is specified out, not merely chosen. `read`/`write`
+    have no such phase split: the same non-blocking attempt is retried on
+    every poll, which is also what gives them `poll_join`'s own
+    would-already-be-ready optimisation for free. `read_timeout` computes
+    its absolute deadline once, on its first poll, then re-derives "ready
+    vs. timed out" on every later poll by retrying the read first and
+    consulting the stored deadline only on a would-block — the same pattern
+    `finish_connect` already uses to re-derive a refusal from `SO_ERROR`
+    rather than being told one occurred, not a wake-reason channel (an
+    earlier design draft's per-task-slot-table description of this was
+    factually wrong and is corrected in place,
+    `docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md` §3.5).
+  - **`ConnectionRefused` and `TimedOut` gain their first producers.** Both
+    have carried their status-code numbering since increment 1
+    (`docs/adr/0011-io-error-kinds.md`) with nothing able to produce either,
+    because no filesystem operation can: `connect` against a loopback port
+    nothing is listening on is `std/net`'s first `ConnectionRefused`, and
+    `read_timeout` against a peer that never answers before the deadline is
+    its first `TimedOut`. `crates/nova-runtime/src/fs.rs`'s pinned-kinds
+    status comment goes four fixture-pinned kinds to six accordingly,
+    dated in place rather than silently rewritten — only `Interrupted`
+    remains unreachable from either module's `async fn`s now.
+  - **Five new fixtures**, each run under `nova run` against a real
+    loopback `TcpListener` a small test-only echo server binds per fixture
+    (`crates/nova-cli/tests/run_tests.rs`'s `EchoServer`): `net_roundtrip.nova`
+    (connect, write, read, close — the correctness baseline); `net_interleave.nova`
+    (the fixture that decides the increment — asserts a spawned counter
+    task's own output lands *between* a socket task's "wrote" and "read"
+    lines, which only a real, non-blocking poller can produce, since a
+    merely-correct round trip cannot tell a real poller from a blocking or
+    busy-spinning one underneath the identical Nova-level surface);
+    `net_timeout.nova` (`read_timeout` pinned in both directions — a
+    deadline shorter than the peer's own delay must report `TimedOut`, and
+    one comfortably longer must still succeed with the real data);
+    `net_refused.nova` (`ConnectionRefused` against a reserved-then-dropped
+    loopback port); and `net_lifetime.nova` (idempotent `close`, and a
+    closed, stale, or forged handle all treated as an ordinary error,
+    following `file_lifetime.nova`'s own shape).
+  - `nova-spec/20-STDLIB.md` gains a `std/net` section (§16, appended rather
+    than inserted so no existing numbered section — several of which are
+    cross-referenced by number elsewhere in this repository — needs
+    renumbering) and a §4 note on the asymmetry this increment leaves
+    standing: **`std/fs` suspends nowhere and `std/net` suspends
+    everywhere**, two different wrapper shapes now both live in this
+    stdlib — an honest consequence of regular files not being
+    readiness-pollable the way sockets are, on any of this project's three
+    CI platforms, not an inconsistency to reconcile.
+  - **Threads and a completion-based file-I/O poller (IOCP/`io_uring`) were
+    both considered and declined, for two different reasons.** A poller
+    thread or a worker pool would be invisible to `PARKED`, `QUEUE`,
+    `SLOTS`, `FILES`, and the collector's own thread-local roots — the
+    identical use-after-free argument `docs/adr/0009-async-execution-model.md`
+    §1 already makes against thread-per-task generally, applied here to a
+    narrower case. IOCP is declined for a separate, scope reason instead:
+    it is the only route that would make `std/fs` itself genuinely
+    suspend, and building it is a subsystem of its own, out of scope for an
+    increment whose surface is `std/net`. Full reasoning, including why the
+    thread-local argument does not by itself decide the IOCP question, is
+    in `docs/adr/0013-io-poller.md`.
+
 ### Changed (Phase 2 — behaviour changes)
 
 Filed here as well as under Added, because each of these changes the meaning of
