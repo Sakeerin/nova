@@ -273,8 +273,10 @@ pub record DirEntry {
 // `pub` or not changes nothing about who can read or construct one; the
 // declaration below simply doesn't. (The 2026-08-15 reword replaced a
 // clause that grounded the missing `pub` in `std/fs/lib.nova`'s current
-// bytes with the language rule stated above. The declaration itself is
-// unchanged from 2026-08-14.)
+// bytes with the language rule stated above. The declaration below was not
+// touched by that reword, but it is not from 2026-08-14 either: it was
+// added on 2026-08-15 (`758ad4d`), the 2026-08-14 amendment above having
+// named the type without ever declaring it.)
 pub record OpenOptions {
     read: Bool
     write: Bool
