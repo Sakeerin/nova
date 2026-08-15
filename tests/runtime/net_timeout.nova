@@ -1,0 +1,68 @@
+// `TcpStream::read_timeout`, in both directions: a deadline shorter than the
+// server's own delay must report `TimedOut`, and a deadline comfortably
+// longer than it must still succeed with the real data -- pinning that the
+// deadline is honoured both ways, not merely that *some* error appears.
+// Getting the honouring backwards (always firing, or never firing) survives
+// a check of only one direction; this fixture checks both against the same
+// connection, against the same server delay
+// (`crates/nova-cli/tests/run_tests.rs`'s `EchoServer`, `net_timeout_run`).
+//
+// The port file this reads is named for this fixture alone, not this
+// process -- see `net_roundtrip.nova`'s header for the accepted hazard that
+// follows from that.
+//
+// `kind_name` and its 8-arm match are duplicated from `file_lifetime.nova`
+// (and every other fixture that prints an `IoErrorKind`) rather than shared:
+// each `.nova` fixture here is compiled standalone, with no fixture-to-
+// fixture `import`.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
+async fn main() {
+    let port = match read_to_string("${temp_dir()}/nova_net_timeout_port.txt").await {
+        Ok(p) => p.trim()
+        Err(e) => panic("read port file: ${e.message}")
+    }
+    let addr = "127.0.0.1:${port}"
+    let s = match connect(addr).await {
+        Ok(s) => s
+        Err(e) => panic("connect: ${e.message}")
+    }
+
+    // Nothing has been written yet and the server is still asleep, so this
+    // deadline -- far shorter than the server's own delay -- must pass with
+    // nothing to read.
+    match s.read_timeout(64, 80).await {
+        Ok(_) => println("short deadline: unexpectedly ok")
+        Err(e) => println("short deadline: ${kind_name(e.kind)}")
+    }
+
+    let n = match s.write(bytes_from_string("ping")).await {
+        Ok(count) => count
+        Err(e) => panic("write: ${e.message}")
+    }
+    println("wrote: ${n}")
+
+    // A deadline comfortably longer than the server's own delay: this must
+    // succeed with the echoed bytes, not time out just because a deadline is
+    // in play at all.
+    match s.read_timeout(64, 3000).await {
+        Ok(b) => match b.to_string() {
+            Some(text) => println("long deadline: ${text}")
+            None => println("long deadline: <non-utf8>")
+        }
+        Err(e) => println("long deadline: ${kind_name(e.kind)}")
+    }
+
+    let _ = s.close().await
+}

@@ -1,0 +1,46 @@
+// Connect to a loopback echo server (`crates/nova-cli/tests/run_tests.rs`'s
+// `EchoServer`), write a payload, read the echo back, and check it matches
+// byte for byte. Exercises `connect`, `impl Write for TcpStream` (`write`),
+// `impl Read for TcpStream` (`read`), and `TcpStream::close`.
+//
+// This alone proves nothing about suspension -- see `net_interleave.nova`'s
+// own header. A fully blocking `connect`/`read`/`write` underneath this
+// exact same Nova-level surface produces the identical correct bytes here;
+// only the interleaving fixture can tell the two apart.
+//
+// The payload is past the 256-byte threshold where a write's byte count --
+// 8 little-endian bytes, decoded by `std/io`'s shared `decode_count` -- would
+// silently under-report under a decoder truncated to one byte, the same
+// reasoning `file_roundtrip.nova`'s own header gives for its payload size.
+async fn main() {
+    let port = match read_to_string("${temp_dir()}/nova_net_roundtrip_port.txt").await {
+        Ok(p) => p.trim()
+        Err(e) => panic("read port file: ${e.message}")
+    }
+    let addr = "127.0.0.1:${port}"
+    let s = match connect(addr).await {
+        Ok(s) => s
+        Err(e) => panic("connect: ${e.message}")
+    }
+
+    let payload = "hello, net".repeat(30)
+    let n = match s.write(bytes_from_string(payload)).await {
+        Ok(count) => count
+        Err(e) => panic("write: ${e.message}")
+    }
+    println("wrote: ${n}")
+
+    let echoed = match s.read(n).await {
+        Ok(b) => b
+        Err(e) => panic("read: ${e.message}")
+    }
+    match echoed.to_string() {
+        Some(text) => println("echoed matches: ${text == payload}")
+        None => println("echoed: <non-utf8>")
+    }
+
+    match s.close().await {
+        Ok(_) => println("close: ok")
+        Err(e) => println("close: err")
+    }
+}

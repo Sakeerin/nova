@@ -1,0 +1,87 @@
+// The increment's core resource-lifetime behaviour, following
+// `file_lifetime.nova`'s own shape exactly: `close` is idempotent, any other
+// operation against a handle this fixture itself closed is an ordinary
+// `IoError` of kind `Other` rather than a panic or a hang, and a Nova
+// program can forge a `TcpStream` naming no connection this module ever
+// opened -- `fd` is not privacy-enforced -- and get the exact same safe
+// treatment, because absence from the runtime's socket table is what
+// closedness *is* (`crates/nova-runtime/src/net.rs`'s own module doc
+// comment).
+//
+// `read`, `write`, `read_timeout` AND `flush` are all checked here, not just
+// `read` -- a mutation could land in any one of `read_stream`/`write_stream`/
+// `TcpStream::read_timeout`'s own status check without touching the others.
+// `flush` is the one exception with nothing to check: it is an immediate
+// `Ok(())` regardless of the handle's state (see `std/net/lib.nova`'s own
+// doc comment on `flush_stream`), so this fixture still calls it after close
+// to pin that it stays a no-op rather than starting to check the fd, but
+// prints a fixed "ok" rather than branching on a result that can never be
+// `Err`.
+//
+// The message for the closed/stale/forged case is this runtime's own
+// fabricated text, "socket is not open" -- deliberately different from
+// `std/fs`'s "file descriptor is not open", pinning that `std/net` reaches
+// its own `closed_fd_error` rather than `std/fs`'s.
+//
+// The port file this reads is named for this fixture alone, not this
+// process -- see `net_roundtrip.nova`'s header for the accepted hazard that
+// follows from that.
+fn kind_name(k: IoErrorKind) -> String {
+    match k {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
+
+async fn main() {
+    let port = match read_to_string("${temp_dir()}/nova_net_lifetime_port.txt").await {
+        Ok(p) => p.trim()
+        Err(e) => panic("read port file: ${e.message}")
+    }
+    let addr = "127.0.0.1:${port}"
+    let s = match connect(addr).await {
+        Ok(s) => s
+        Err(e) => panic("connect: ${e.message}")
+    }
+
+    match s.close().await { Ok(_) => println("close: ok") Err(e) => println("close: err") }
+    match s.close().await { Ok(_) => println("close again: ok") Err(e) => println("close again: err") }
+
+    let r = s.read(16).await
+    match r {
+        Ok(_) => println("read after close: unexpectedly ok")
+        Err(e) => println("read after close: ${kind_name(e.kind)} ${e.message}")
+    }
+
+    let w = s.write(bytes_from_string("x")).await
+    match w {
+        Ok(_) => println("write after close: unexpectedly ok")
+        Err(e) => println("write after close: ${kind_name(e.kind)} ${e.message}")
+    }
+
+    let rt = s.read_timeout(16, 50).await
+    match rt {
+        Ok(_) => println("read_timeout after close: unexpectedly ok")
+        Err(e) => println("read_timeout after close: ${kind_name(e.kind)} ${e.message}")
+    }
+
+    // Always `Ok(())` -- see this fixture's own header.
+    let _ = s.flush().await
+    println("flush after close: ok")
+
+    // Bound to a local before matching: `match TcpStream { fd: 9999 }.read(…) …`
+    // is `P0001`, a record literal in match-scrutinee position (the same
+    // shape `file_lifetime.nova`'s own forged-handle leg avoids).
+    let forged = TcpStream { fd: 9999 }
+    let g = forged.read(16).await
+    match g {
+        Ok(_) => println("forged: unexpectedly ok")
+        Err(e) => println("forged: ${kind_name(e.kind)} ${e.message}")
+    }
+}

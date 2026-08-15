@@ -1,0 +1,144 @@
+// Nova standard library — networking.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
+// Error types (`IoError`/`IoErrorKind`) and the `Read`/`Write` traits live in
+// `std/io`; `TcpStream` implements both here, the same split `std/fs`'s
+// `File` already follows.
+//
+// **This module's operations genuinely suspend.** Unlike `std/fs`'s own
+// module doc comment, which states plainly that none of its `async fn`s
+// suspend because there is no I/O poller yet, `connect`, `read`, `write` and
+// `read_timeout` below run against `crates/nova-runtime/src/net.rs`'s
+// non-blocking sockets and this crate's real poller
+// (`crates/nova-runtime/src/poll.rs`): a call that cannot complete
+// immediately parks the calling task and lets a sibling task run in the
+// meantime, rather than blocking the whole executor's thread. See
+// `tests/runtime/net_interleave.nova` for the fixture that actually proves
+// this end to end — a merely-correct round trip cannot, because a fully
+// blocking implementation underneath this exact same Nova-level surface
+// would produce the identical bytes.
+//
+// **The `Future<T>` spelling.** `async fn` in a trait *declaration* is
+// `E0900`, exactly as `std/io`'s own header explains — so `Read`/`Write`
+// below are implemented as plain, non-`async` `fn`s returning `Future<T>`,
+// each one calling a private `async fn` and returning its future unawaited.
+//
+// **Every wrapper below awaits its own future-constructor builtin (`net_connect`/
+// `net_read`/`net_write`/`net_read_timeout`) exactly once, then reads the
+// per-task payload/message slot with no further `.await` in between.** Those
+// slots are per-task, keyed on the polling task
+// (`crates/nova-runtime/src/fs.rs`'s `SLOTS`/`slot_index`), so a sibling task
+// cannot clobber them — but within one task a second operation still
+// overwrites that same task's own slot, so a wrapper that awaited again
+// before reading its result could read back a payload its own later call had
+// already replaced. Keep them straight-line, the same discipline `std/fs`
+// and `std/io` already document for their own wrappers.
+//
+// `net_close` is the one exception, exactly as `crates/nova-runtime/src/net.rs`'s
+// own doc comment for `Builtin::NetClose` states: an ordinary status word,
+// not a future constructor, so `TcpStream::close` below calls it directly,
+// with no `.await` at all — the identical shape `std/fs`'s `File::close`
+// already uses for `file_close`.
+
+pub record TcpStream { fd: Int }
+
+// Connect to `addr` ("host:port"), suspending the calling task until the
+// connection settles (or fails) rather than blocking every other task on
+// this thread for the round trip.
+pub async fn connect(addr: String) -> Result<TcpStream, IoError> {
+    let status = net_connect(addr).await
+    if status == 0 {
+        return Ok(TcpStream { fd: decode_count(fs_take_bytes()) })
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl TcpStream {
+    // Closes the connection. Idempotent: a second or third call also
+    // returns `Ok(())`, because Nova has no move checking, so `self` by
+    // value cannot stop a second call — the identical reasoning `std/fs`'s
+    // `File::close` documents. Closing a stale or forged `TcpStream` is the
+    // same no-op: the runtime's socket table lookup simply removes nothing.
+    pub async fn close(self) -> Result<(), IoError> {
+        let status = net_close(self.fd)
+        if status == 0 {
+            return Ok(())
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+
+    // Reads up to `max` bytes, reporting `TimedOut` if `ms` milliseconds
+    // pass with nothing to read first. Otherwise identical to `Read::read`
+    // below, including EOF/short-read semantics: an **empty** result is end
+    // of stream, and a short read is not.
+    //
+    // No `std/fs` analogue exists (no timeout-based read there), so this is
+    // modelled as a second inherent method on `TcpStream`, parallel to
+    // `close` above, rather than folded into the `Read` trait, which has no
+    // room for a third argument.
+    pub async fn read_timeout(self, max: Int, ms: Int) -> Result<Bytes, IoError> {
+        let status = net_read_timeout(self.fd, max, ms).await
+        if status == 0 {
+            return Ok(fs_take_bytes())
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+}
+
+// Any operation other than `close` against an `fd` the runtime's socket
+// table does not recognise — already closed, stale, or forged (`TcpStream`'s
+// field is not privacy-enforced, so `TcpStream { fd: 9999 }` compiles and
+// names no connection this module ever opened) — reaches this same
+// `IoError { kind: Other }` by missing the same table lookup, whether the
+// operation is this function, `write_stream` below, or `read_timeout` above.
+async fn read_stream(s: TcpStream, max: Int) -> Result<Bytes, IoError> {
+    let status = net_read(s.fd, max).await
+    if status == 0 {
+        return Ok(fs_take_bytes())
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl Read for TcpStream {
+    fn read(self, max: Int) -> Future<Result<Bytes, IoError>> { read_stream(self, max) }
+}
+
+// The write's byte count crosses the boundary the same way `std/fs`'s
+// `write_file` decodes its own: 8 little-endian bytes in the payload slot,
+// read back here by that same shared `decode_count`.
+//
+// **May write fewer bytes than given** — one non-blocking `Write::write`
+// attempt, not a `write_all` loop, per `net_write`'s own doc comment
+// (`crates/nova-runtime/src/net.rs`). Mirrors `std/io`'s `Write::write`
+// contract exactly, deliberately unlike `std/fs`'s count-less, write-all
+// `write`: a caller here that needs a guaranteed full write must loop on the
+// returned count itself.
+async fn write_stream(s: TcpStream, buf: Bytes) -> Result<Int, IoError> {
+    let status = net_write(s.fd, buf).await
+    if status == 0 {
+        return Ok(decode_count(fs_take_bytes()))
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Always `Ok(())`, immediately, with no builtin call at all.
+//
+// **Deliberate, not a stub** — the same reasoning `std/io`'s own
+// `flush_stderr` doc comment gives for a status check it calls "provably
+// unpinnable": one `write` here is already one unbuffered syscall (`net_write`
+// wraps a single `std::net::TcpStream::write` attempt), so there is no
+// userspace buffer for a flush to push out, exactly the shape Rust's own
+// `impl Write for std::net::TcpStream` uses for the identical reason. There
+// is no `net_flush` builtin and this task deliberately does not add a sixth
+// one to back a no-op. **If `std/net` ever grows write buffering, this
+// becomes load-bearing and needs a real intrinsic** — a future reader should
+// not mistake this for an oversight.
+async fn flush_stream(s: TcpStream) -> Result<(), IoError> {
+    Ok(())
+}
+
+impl Write for TcpStream {
+    fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_stream(self, buf) }
+    fn flush(self) -> Future<Result<(), IoError>> { flush_stream(self) }
+}
