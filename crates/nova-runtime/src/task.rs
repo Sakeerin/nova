@@ -454,14 +454,29 @@ fn staged_to_wait(staged: Staged) -> Option<Wait> {
 /// [`deadlock_report`] is the half a test can call to check
 /// [`report_deadlock`]'s text without ending the process.
 ///
+/// Every collision below extracts the specific `Wait` it collided with
+/// directly out of whichever `Staged` field an `if let Some(_)` just proved
+/// is populated, and passes that straight to [`collision_msg`] -- never
+/// through [`staged_to_wait`], which would need to be asked to resolve a
+/// `Staged` that might have nothing in it. `stage_park` is called from
+/// inside a poll function, so nothing in this call chain may panic (see its
+/// own doc comment): an `.expect()` provably unreachable *today* is still a
+/// panic that could cross a poll boundary the day this function's logic
+/// changed under it without that assumption being re-checked, so the
+/// unreachable case is written out of existence here rather than asserted
+/// away.
+///
 /// Exhaustive on `wait` with no wildcard, like every other match on `Wait`
 /// in this module: a fourth variant must be considered here too.
 fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
     let mut next = staged;
     match wait {
         Wait::Deadline(at) => {
-            if next.deadline.is_some() || next.task.is_some() {
-                return Err(collision_msg(staged, wait));
+            if let Some(prev_at) = next.deadline {
+                return Err(collision_msg(Wait::Deadline(prev_at), wait));
+            }
+            if let Some(prev_id) = next.task {
+                return Err(collision_msg(Wait::Task(prev_id), wait));
             }
             next.deadline = Some(at);
         }
@@ -470,20 +485,43 @@ fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
             interest,
             deadline,
         } => {
-            if next.io.is_some() || next.task.is_some() {
-                return Err(collision_msg(staged, wait));
+            if let Some((prev_socket, prev_interest)) = next.io {
+                return Err(collision_msg(
+                    Wait::Io {
+                        socket: prev_socket,
+                        interest: prev_interest,
+                        deadline: next.deadline,
+                    },
+                    wait,
+                ));
+            }
+            if let Some(prev_id) = next.task {
+                return Err(collision_msg(Wait::Task(prev_id), wait));
             }
             if let Some(at) = deadline {
-                if next.deadline.is_some() {
-                    return Err(collision_msg(staged, wait));
+                if let Some(prev_at) = next.deadline {
+                    return Err(collision_msg(Wait::Deadline(prev_at), wait));
                 }
                 next.deadline = Some(at);
             }
             next.io = Some((socket, interest));
         }
         Wait::Task(id) => {
-            if next.deadline.is_some() || next.io.is_some() || next.task.is_some() {
-                return Err(collision_msg(staged, wait));
+            if let Some(prev_id) = next.task {
+                return Err(collision_msg(Wait::Task(prev_id), wait));
+            }
+            if let Some(prev_at) = next.deadline {
+                return Err(collision_msg(Wait::Deadline(prev_at), wait));
+            }
+            if let Some((prev_socket, prev_interest)) = next.io {
+                return Err(collision_msg(
+                    Wait::Io {
+                        socket: prev_socket,
+                        interest: prev_interest,
+                        deadline: next.deadline,
+                    },
+                    wait,
+                ));
             }
             next.task = Some(id);
         }
@@ -491,16 +529,12 @@ fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
     Ok(next)
 }
 
-/// The "two parks staged" message [`stage_park`] aborts with, built from
-/// whatever `previous` already resolves to and the new `wait` that collided
-/// with it.
+/// The "two parks staged" message [`stage_park`] aborts with.
 ///
-/// Panics if `previous` is empty -- [`try_stage`]'s every early return passes
-/// a `previous` that made at least one of its own fields `Some`, so this is a
-/// bug in this function's only caller, not a reachable state.
-fn collision_msg(previous: Staged, wait: Wait) -> String {
-    let previous = staged_to_wait(previous)
-        .expect("collision_msg: called with nothing staged to collide with");
+/// Takes the colliding `Wait` values directly, not a [`Staged`] that might
+/// resolve to nothing: see [`try_stage`]'s doc comment for why that
+/// distinction is the fix, not a stylistic preference.
+fn collision_msg(previous: Wait, wait: Wait) -> String {
     format!(
         "nova_rt: two parks staged in one poll ({previous:?} then {wait:?}); \
          an inner future's POLL_PENDING did not propagate"
@@ -2654,6 +2688,18 @@ mod tests {
     /// `Some(_at) => report_deadlock()` left all 59 pre-existing
     /// `nova-runtime` tests green; only the end-to-end `nova run` gate
     /// (`gate_task_sleep_order_runs`) caught it.
+    ///
+    /// **Corrected 2026-08-15 (branch `io-poller-std-net`, Task 1): that
+    /// quoted match and `wake_due_deadlines` are both gone, and no
+    /// `thread::sleep` runs in `task.rs` anywhere anymore.** The drained-queue
+    /// branch now matches `(earliest_deadline(), io_parks().is_empty())`, and
+    /// the real sleep this finding is about now runs in `poll::wait`'s
+    /// empty-socket-set branch (`poll.rs`), reached from the `(Some(at),
+    /// true)` arm of that match. The finding's own claim survives the
+    /// rename: that arm is still reachable from no Rust-level test in this
+    /// module today, for the same reason -- every deadline test here stages
+    /// one already due, so `wake_due`'s per-poll check still wakes it first,
+    /// same as before this correction.
     unsafe extern "C-unwind" fn poll_park_after_delay(state: *mut u8, _task_ctx: *mut u8) -> i64 {
         let slots = state as *mut i64;
         // SAFETY: `state` is a `make_future(_, 2)` object: TAG, OUTPUT, a
@@ -2861,6 +2907,81 @@ mod tests {
             QUEUE.with(|q| q.borrow().clone()),
             std::collections::VecDeque::from([5]),
             "the task whose deadline arrived must be the one re-queued"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
+    /// `wake_due`'s `Wait::Io { deadline: Some(_), .. }` arm, behaviourally.
+    ///
+    /// Reverting that arm still compiles (the trailing `_ => true` swallows
+    /// it silently), which is exactly what makes it *not* one of the two
+    /// compiler-forced sites -- unlike `earliest_deadline`/`deadlock_report`,
+    /// nothing here stops a backwards `<=`/`<` or a dropped `woken.push` from
+    /// shipping green. Three entries, one of each shape a timed `Wait::Io`
+    /// can be in relative to `now`, so a mutant that wakes too many or too
+    /// few is caught either way: a due I/O wait (must wake), a not-yet-due
+    /// one (must not), and an untimed one (must never be treated as due at
+    /// all, the same property `earliest_deadline_and_wake_due_ignore_task_waits`
+    /// checks for `Wait::Task`).
+    #[test]
+    fn wake_due_wakes_a_due_io_wait_and_leaves_the_rest_parked() {
+        let due = Instant::now();
+        let not_due = due + Duration::from_secs(30);
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((
+                1,
+                Wait::Io {
+                    socket: RawSocket(1),
+                    interest: Interest::Read,
+                    deadline: Some(due),
+                },
+            ));
+            p.push((
+                2,
+                Wait::Io {
+                    socket: RawSocket(2),
+                    interest: Interest::Write,
+                    deadline: Some(not_due),
+                },
+            ));
+            p.push((
+                3,
+                Wait::Io {
+                    socket: RawSocket(3),
+                    interest: Interest::Read,
+                    deadline: None,
+                },
+            ));
+        });
+        wake_due(Instant::now());
+        assert_eq!(
+            QUEUE.with(|q| q.borrow().clone()),
+            std::collections::VecDeque::from([1]),
+            "only the due I/O wait's task must be woken"
+        );
+        assert_eq!(
+            PARKED.with(|p| p.borrow().clone()),
+            vec![
+                (
+                    2,
+                    Wait::Io {
+                        socket: RawSocket(2),
+                        interest: Interest::Write,
+                        deadline: Some(not_due),
+                    }
+                ),
+                (
+                    3,
+                    Wait::Io {
+                        socket: RawSocket(3),
+                        interest: Interest::Read,
+                        deadline: None,
+                    }
+                ),
+            ],
+            "the not-yet-due and the untimed I/O waits must stay parked"
         );
         PARKED.with(|p| p.borrow_mut().clear());
         QUEUE.with(|q| q.borrow_mut().clear());
