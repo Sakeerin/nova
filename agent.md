@@ -81,6 +81,16 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 ### Commits
 - Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`.
 - One logical change per commit; body explains *why*.
+- **Never cite a commit SHA that is not yet on `main`.** PRs land with
+  `gh pr merge --rebase`, which rewrites every commit on the branch, so a
+  document that cites its own branch's history points at nothing the moment it
+  merges. This is measured, not theoretical: six such citations went stale
+  across four increments before anyone checked, three of them shipped to `main`
+  and sat there unnoticed, and each one was an increment's own design-spec
+  commit cited by that same increment's later docs. Cite the branch name and
+  date instead, or add the SHA in a follow-up once it is on `main`.
+  A cited SHA is durable only if `git merge-base --is-ancestor <sha> main`
+  already succeeds when you write it.
 
 ### Dependencies
 - All workspace dependencies declared in root `Cargo.toml` under `[workspace.dependencies]`.

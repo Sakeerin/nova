@@ -24,7 +24,7 @@
 - **No line-number citation in a doc comment that points into its own file, and none into another file this branch edits.** Name the symbol. This project shipped the same-file form twice and the cross-file form three times, every instance stale on arrival or falsified by its own branch.
 - Every fixture path unique per process.
 - Commit messages to a **UTF-8 file**, applied with `git commit -F` — **never a heredoc.** Body ends `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. **Never push.**
-- Branch: `file-open-openoptions`, already created; spec committed at `1509a82`.
+- Branch: `file-open-openoptions`, already created; spec committed at `5ce065d`.
 
 ## The ten seams a new intrinsic touches
 

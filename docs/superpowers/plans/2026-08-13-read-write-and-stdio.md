@@ -23,7 +23,7 @@
 - **No line-number citation in a doc comment that points into its own file.** The previous branch shipped that twice, both stale on arrival. Name the symbol.
 - Every fixture path unique per process.
 - Commit messages to a **UTF-8 file**, applied with `git commit -F` — **never a heredoc.** Body ends `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. **Never push.**
-- Branch: `read-write-stdio`, already created; spec committed at `b85cadf`.
+- Branch: `read-write-stdio`, already created; spec committed at `5815a3d`.
 
 ## The ten seams a new intrinsic touches
 

@@ -22,7 +22,7 @@
 - Every fixture path unique per process.
 - Commit messages written to a **UTF-8 file** and applied with `git commit -F` — **never a heredoc.** Every commit body ends with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
 - **Never push.**
-- Branch: `per-task-slots`, already created, spec committed at `0bebc66`.
+- Branch: `per-task-slots`, already created, spec committed at `3e596e5`.
 
 ## File Structure
 

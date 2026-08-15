@@ -275,7 +275,7 @@ pub record DirEntry {
 // clause that grounded the missing `pub` in `std/fs/lib.nova`'s current
 // bytes with the language rule stated above. The declaration below was not
 // touched by that reword, but it is not from 2026-08-14 either: it was
-// added on 2026-08-15 (`758ad4d`), the 2026-08-14 amendment above having
+// added on 2026-08-15 (`509834e`), the 2026-08-14 amendment above having
 // named the type without ever declaring it.)
 pub record OpenOptions {
     read: Bool
