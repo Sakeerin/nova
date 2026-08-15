@@ -555,6 +555,18 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             net::nova_rt_net_connect_future as *const u8,
         ),
         ("nova_rt_net_close", net::nova_rt_net_close as *const u8),
+        (
+            "nova_rt_net_read_future",
+            net::nova_rt_net_read_future as *const u8,
+        ),
+        (
+            "nova_rt_net_write_future",
+            net::nova_rt_net_write_future as *const u8,
+        ),
+        (
+            "nova_rt_net_read_timeout_future",
+            net::nova_rt_net_read_timeout_future as *const u8,
+        ),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",
