@@ -9,6 +9,17 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Every cargo invocation below passes `--locked` (except `cargo fmt`, which
+# takes no such flag). `Cargo.lock` is tracked, and without `--locked` cargo
+# silently rewrites it in place whenever it disagrees with a `Cargo.toml` --
+# so a leg would quietly test a dependency set the lock does not describe,
+# which is most of what committing the lock was meant to prevent. With it, a
+# stale lock fails as "the lock file needs to be updated" instead.
+#
+# It matters most on the MSRV leg: cargo 1.78 predates the MSRV-aware
+# resolver (1.84), so a fresh resolve there picks newest-compatible and dies
+# parsing an `edition2024` manifest before any Nova source compiles. That is
+# exactly how that leg was red before the lock was committed.
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -24,9 +35,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
       - name: cargo test
-        run: cargo test --workspace --all-features --no-fail-fast
+        run: cargo test --locked --workspace --all-features --no-fail-fast
 
       # The eight `#[ignore]`d GC root tests are the only coverage of `PINNED`
       # actually being HONOURED by a real collection -- the registry could be
@@ -58,7 +69,7 @@ jobs:
       # this step starts covering them everywhere with no CI change.
       - name: cargo test (ignored GC scan tests; advisory, may flake)
         continue-on-error: true
-        run: cargo test --workspace --all-features -- --ignored
+        run: cargo test --locked --workspace --all-features -- --ignored
 
   fmt:
     name: Rustfmt
@@ -92,7 +103,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   msrv:
     name: MSRV (1.78)
@@ -154,4 +165,4 @@ jobs:
       # it would conflate "the pin works now" with "the wider surface is
       # clean", and benches drag in criterion, whose own floor moves
       # independently of ours.
-      - run: cargo check --workspace
+      - run: cargo check --locked --workspace
