@@ -1836,7 +1836,7 @@ mod tests {
     /// happen to seed (final review, I2).
     ///
     /// **Mutation, confirmed to survive before this test existed** (measured
-    /// directly against `b19156a`, in an isolated worktree, apart from just
+    /// directly against `3037908`, in an isolated worktree, apart from just
     /// re-running the review's own report): `release_task_slots` collecting
     /// `[entry.buffer, 0, 0]` instead of
     /// `[entry.buffer, entry.array, entry.message]` passed all 78
