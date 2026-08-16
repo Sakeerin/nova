@@ -1280,6 +1280,61 @@ mod tests {
         }
     }
 
+    /// Test-only: block until `fd`'s peer address is actually reportable, and
+    /// hand it back -- so a test can assert *which* address a connect landed on
+    /// without assuming that answer is available the instant this module calls
+    /// the connection established.
+    ///
+    /// **Why a single `peer_addr` call is not enough, measured rather than
+    /// guessed.** `finish_connect` calls a connect established when the socket
+    /// has been reported write-ready and `TcpStream::take_error` (`SO_ERROR`)
+    /// reports no error -- the POSIX completion test for a non-blocking
+    /// connect, and the only thing this module promises. On Darwin that is
+    /// *not* sufficient for `getpeername` to answer: the first CI run of
+    /// [`an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`] failed
+    /// on `macos-latest` alone, with `peer_addr` reporting
+    /// `NotConnected`/`ENOTCONN` (errno 57) immediately after `block_on`
+    /// returned `OK`, while the ubuntu and windows legs of the same run passed.
+    /// The executor had genuinely waited: a connect parks as `Wait::Io` with no
+    /// deadline, so `run_to_completion` blocks in `crate::poll::wait` on real
+    /// write-readiness before the second poll ever runs.
+    ///
+    /// This is the same loopback asynchrony [`await_peer_bytes_for_test`] and
+    /// [`fill_send_buffer_until_would_block_for_test`] were both built for,
+    /// seen a third time at the handshake instead of at data transfer, and it
+    /// is handled the same way: observe the state actually arriving, never
+    /// sleep a fixed time for it, and fail with a message of this helper's own
+    /// if it never does. **It leaves a real question about `finish_connect`
+    /// standing, deliberately unanswered here**: if write-readiness plus a
+    /// clear `SO_ERROR` can precede a usable connection on Darwin, that check
+    /// cannot distinguish "not finished yet" from "finished successfully", on
+    /// the V4 path just as much as this one. Nothing in this project depended on
+    /// the difference before, because nothing asked a freshly connected socket
+    /// anything about itself -- so this helper records the observation and
+    /// scopes the fix out rather than changing shared production behaviour on
+    /// the strength of one measurement.
+    ///
+    /// Tolerates exactly `NotConnected`, the one transient that was measured.
+    /// Any other error fails immediately rather than being retried into a
+    /// timeout, and so does an address that never arrives.
+    fn await_peer_addr_for_test(fd: i64) -> SocketAddr {
+        let socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match with_fd(fd, |stream| stream.peer_addr()).expect("fd must be open") {
+                Ok(addr) => return addr,
+                Err(e) if e.kind() == std::io::ErrorKind::NotConnected => {}
+                Err(e) => panic!("test setup: reading the peer address failed: {e}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the connection this module reported established never became \
+                 reportable by getpeername at all"
+            );
+            crate::poll::wait(&[(socket, Interest::Write)], Some(deadline));
+        }
+    }
+
     /// Test-only: take the pending `Slot::Buffer` payload as owned bytes --
     /// the `Bytes` counterpart to [`take_fd`], for comparing a read's result
     /// against an expected slice. Matches `file.rs`'s own `take_bytes` test
@@ -1726,16 +1781,17 @@ mod tests {
         // `finish_connect`'s `OK` is `SO_ERROR` reporting no error -- so a
         // sockaddr this arm built wrong (a port that skipped `to_be`, a family
         // the socket does not have) fails here rather than being tolerated.
+        // Which address it landed on is then checked separately, through
+        // [`await_peer_addr_for_test`] rather than a bare `peer_addr` call --
+        // see that helper's own doc comment for the Darwin measurement that
+        // forced the distinction, and for the question it leaves standing.
         assert_eq!(
             unsafe { crate::task::nova_rt_task_block_on(fut) },
             OK,
             "a V6 connect to a live ::1 listener must establish"
         );
-        let peer = with_fd(fd, |stream| stream.peer_addr())
-            .expect("fd must still be open")
-            .expect("an established connection must have a peer address");
         assert_eq!(
-            peer,
+            await_peer_addr_for_test(fd),
             listener.local_addr().expect("addr"),
             "connect must have landed on this test's own ::1 listener, over \
              IPv6 -- not on whatever other address a mis-built sockaddr_in6 \
