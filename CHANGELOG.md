@@ -9,6 +9,29 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.1] - 2026-08-16
+
+Standard-library-core progress milestone, and a **pre-release on purpose**.
+Phase 2 is not done: of the 13 module groups in `nova-spec/00-MASTER-SPEC.md`
+§3, six are complete, two are partial, and five are unstarted — and the Phase 2
+gate (`examples/05-json-api` at 10k+ req/sec, with methodology in
+`docs/benchmarks/`) cannot yet be assessed, because neither artifact exists.
+§7 reserves `v0.{phase}.0` for a phase that is DONE, so this ships as
+`v0.2.0-alpha.1` and leaves `v0.2.0` for the gate.
+
+What it does deliver, on top of v0.1.0: a module system, an async runtime with
+a real single-threaded executor and three wake sources, a `Bytes` type,
+`std/io` with `Read`/`Write` and stdio, `std/fs` on both Strings and bytes with
+`File`/`open`/`OpenOptions`, `std/collections`, `std/strings`, `std/test` with
+`nova test`, and an I/O poller with a `std/net` TCP client that demonstrably
+suspends rather than spins.
+
+Verified at the tag: `cargo build --locked --workspace` then 973 passed, 0
+failed, 8 ignored across 44 targets; `clippy --locked --all-targets
+--all-features -D warnings` and `cargo fmt --all --check` clean; seven CI
+checks green on ubuntu, windows and macos, including an MSRV 1.78 leg that
+asserts the compiler it runs.
+
 ### Added (Phase 2 — standard library core, in progress)
 - Module system (Phase 2.0): multi-file programs with `import`. One file is one
   module (its file stem); `import m` brings all of module `m`'s `pub` items into
@@ -1593,6 +1616,30 @@ code that already compiled. Full detail is in the `### Added` entries above.
   task's last unread payload still leaks until the process exits, one per
   leaked task now instead of one per thread. No Nova-visible signature
   changed; `std/fs/lib.nova` was not touched.
+
+### Known limitations / follow-ups (not blockers for this pre-release)
+- **Phase 2 is incomplete.** Unstarted: `std/time`, `std/log`, `std/sync`,
+  `std/http`, `std/json`, `std/crypto`. Partial: `std/net` is a TCP **client**
+  only where the spec calls for TCP and UDP; and `std/fmt` has no module of its
+  own — its `print`/`println`/`eprint`/`eprintln` surface ships as compiler
+  builtins, while the `Formatter` builder in `nova-spec/20-STDLIB.md` §3 is not
+  delivered. The Phase 2 gate needs `examples/05-json-api` and
+  `docs/benchmarks/`, neither of which exists yet.
+- Precise GC stack bounds remain Windows-only: `gc::stack_base` returns `None`
+  everywhere else, so collection is skipped there (leak-until-exit). The eight
+  `#[cfg(windows)]` root tests that exercise a real conservative scan stay
+  `#[ignore]`d and run advisory-only in CI, per
+  `docs/adr/0010-conservative-scan-root-test-gating.md`.
+- A task whose output is neither taken nor released still leaks its last
+  payload until the process exits (`docs/adr/0009-async-execution-model.md` §1).
+- Files are deliberately blocking: no OS reports readiness for regular files,
+  so `std/fs` reads and writes do not park. Only sockets, timers and joins do.
+- `nova build --release` needs a discovered LLVM toolchain on the machine —
+  `clang` (or `NOVA_CLANG`), falling back to `llc` (or `NOVA_LLC`).
+- The MSRV leg checks `--workspace` but not `--all-targets`, so an MSRV
+  violation in a test or bench still passes unnoticed; widening it is blocked
+  on an `assert_cmd` floor. `Cargo.lock` is now tracked, which pins the
+  dependency set CI resolves — so upstream breakage no longer surfaces unaided.
 
 ## [0.1.0] - 2026-07-23
 
