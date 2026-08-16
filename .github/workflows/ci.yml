@@ -70,9 +70,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Two legs, because a one-OS clippy is blind in both directions: an
+  # ubuntu-only run never compiles the 33 `#[cfg(windows)]` regions across 7
+  # files, and anything used only on Windows lints as dead there. Both halves
+  # have bitten this project -- two of the five defects PR #2 fixed were
+  # Windows-only code reading as dead on ubuntu, and three lints in
+  # `net.rs`'s Unix arm reached CI on PR #8 because no local host runs Linux.
+  #
+  # No macos leg: the tree has no `target_os = "macos"` or `target_vendor =
+  # "apple"` cfg at all, so macos would lint exactly what ubuntu does.
   clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
+    name: Clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
