@@ -51,10 +51,11 @@
 //! no Unix or macOS toolchain was reachable from this task's environment,
 //! the identical status `poll.rs`'s own Unix arm already records. The BSD
 //! (`sockaddr_in`/`sockaddr_in6`) layouts carry a leading `sin_len`/`sin6_len`
-//! field this module's socket-address literals do not set explicitly --
-//! struct-update syntax pulls it from a zeroed base instead, which `connect`
-//! is widely documented to tolerate, but that tolerance is asserted from
-//! documentation here, not from a passing test on that platform. The Windows
+//! field this module's socket-address construction does not set explicitly --
+//! it zeroes the whole struct and assigns only the fields every Unix has, so
+//! the length byte stays zero, which `connect` is widely documented to
+//! tolerate, but that tolerance is asserted from documentation here, not from
+//! a passing test on that platform. The Windows
 //! arm was built and exercised for real against real loopback sockets, on
 //! this task's own Windows host, the same way `poll.rs`'s Windows arm was.
 
@@ -222,7 +223,7 @@ fn raw_socket_of(stream: &TcpStream) -> RawSocket {
 /// every `?` after that point closes it via `Drop` rather than leaking it.
 #[cfg(unix)]
 fn platform_connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
-    use std::os::unix::io::{AsRawFd, FromRawFd};
+    use std::os::unix::io::FromRawFd;
 
     let domain = match addr {
         SocketAddr::V4(_) => libc::AF_INET,
@@ -241,17 +242,26 @@ fn platform_connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
 
     let rc = match addr {
         SocketAddr::V4(a) => {
-            // `..unsafe { zeroed() }` rather than naming every field: BSD's
-            // `sockaddr_in` carries a leading `sin_len` this literal does not
-            // set (see this module's own "reasoned, not measured" note).
-            let sin = libc::sockaddr_in {
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: a.port().to_be(),
-                sin_addr: libc::in_addr {
-                    s_addr: u32::from(*a.ip()).to_be(),
-                },
-                sin_zero: [0; 8],
-                ..unsafe { std::mem::zeroed() }
+            // Zero the whole struct, then assign field by field -- not a
+            // struct literal, because `sockaddr_in`'s *field set* differs
+            // across Unix. BSD and Darwin carry a leading `sin_len` that Linux
+            // does not have at all, so a literal naming only the portable
+            // fields needs a `..zeroed()` base on Darwin and has nothing left
+            // to take from one on Linux, where `clippy::needless_update`
+            // rejects it as an error under this project's `-D warnings`. This
+            // form names no field that does not exist on every platform, and
+            // leaves every field it does not name -- `sin_len` included, where
+            // it exists, and `sin_zero` everywhere -- zeroed on all of them,
+            // exactly what the struct-update base achieved.
+            //
+            // SAFETY: `sockaddr_in` is a plain C struct of integers and byte
+            // arrays with no niche or validity invariant, so all-zero is a
+            // valid value for it on every platform this arm compiles for.
+            let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = a.port().to_be();
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from(*a.ip()).to_be(),
             };
             // SAFETY: `fd` is the socket just created above; `sin` is a
             // live, correctly sized `sockaddr_in` for the duration of this
@@ -265,17 +275,23 @@ fn platform_connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
             }
         }
         SocketAddr::V6(a) => {
-            let sin6 = libc::sockaddr_in6 {
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: a.port().to_be(),
-                sin6_flowinfo: a.flowinfo(),
-                sin6_addr: libc::in6_addr {
-                    s6_addr: a.ip().octets(),
-                },
-                sin6_scope_id: a.scope_id(),
-                ..unsafe { std::mem::zeroed() }
+            // Zeroed struct then per-field assignment, for the identical
+            // reason the `V4` arm above documents at length: BSD and Darwin
+            // carry a leading `sin6_len` that Linux does not have.
+            //
+            // SAFETY: as for `sockaddr_in` above -- a plain C struct with no
+            // validity invariant, for which all-zero is a valid value.
+            let mut sin6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = a.port().to_be();
+            sin6.sin6_flowinfo = a.flowinfo();
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: a.ip().octets(),
             };
-            // SAFETY: same as the `V4` arm above, for `sockaddr_in6`.
+            sin6.sin6_scope_id = a.scope_id();
+            // SAFETY: same as the `V4` arm's `connect` above: `fd` is the
+            // socket just created, and `sin6` is a live, correctly sized
+            // `sockaddr_in6` for the duration of this call.
             unsafe {
                 libc::connect(
                     fd,
@@ -1165,6 +1181,67 @@ mod tests {
         );
     }
 
+    /// Test-only: block until `expected` bytes the peer has written are
+    /// genuinely sitting in `fd`'s receive buffer, so a test that asserts what
+    /// one specific poll returns can establish that precondition instead of
+    /// assuming it.
+    ///
+    /// **Why any test needs this.** `Write::write_all` on the peer socket
+    /// returns once the bytes are in the *sender's* send buffer. Moving them
+    /// into this socket's receive buffer is a separate, kernel-internal step,
+    /// and nothing in `write_all`'s contract says it has already happened by
+    /// the time the call returns. On Linux and Windows loopback delivery
+    /// completes inside the writing syscall in practice, so a non-blocking read
+    /// issued immediately afterwards finds the data and a test that assumed so
+    /// passes; on macOS it does not, and
+    /// [`a_read_with_data_already_waiting_completes_on_the_first_poll_without_parking`]
+    /// failed on `macos-latest` CI for exactly that reason while every other
+    /// test in this module passed there -- including every test whose read
+    /// goes through the real executor's park/wake loop, which absorbs the
+    /// delay. [`an_eof_read_stashes_an_empty_payload_not_an_error`] already
+    /// records the same asynchrony for the FIN a peer's `close` delivers, and
+    /// takes that same executor-driven way out; the two tests calling this
+    /// helper cannot, because what they assert *is* the return value of one
+    /// particular poll.
+    ///
+    /// **Observes the arrival; never waits a fixed time for it.** `peek`
+    /// reports what is in the receive buffer without consuming it, so this can
+    /// be called as often as it likes and the read under test still sees every
+    /// byte. What it blocks in between attempts is [`crate::poll::wait`] on
+    /// real read-readiness -- this crate's own poller, the same primitive the
+    /// executor parks tasks on -- not a sleep. So a caller proceeds the instant
+    /// the precondition it assumes actually holds, and fails with this
+    /// helper's own message rather than a bare `POLL_PENDING` mismatch if it
+    /// never does. The deadline is a bound on the failure, not a wait anyone
+    /// pays for on the passing path: where delivery is synchronous the first
+    /// `peek` already succeeds and `wait` is never reached at all.
+    ///
+    /// A `peek` reporting *fewer* than `expected` bytes loops the same way a
+    /// `WouldBlock` does. That case leaves the socket readable, so `wait`
+    /// returns at once and this spins rather than blocking -- bounded by the
+    /// same deadline, and transient by construction, since the peer these
+    /// tests use has already written the whole payload before this is called.
+    fn await_peer_bytes_for_test(fd: i64, expected: usize) {
+        let socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut buf = vec![0u8; expected];
+        loop {
+            let peeked = with_fd(fd, |stream| stream.peek(&mut buf)).expect("fd must be open");
+            match peeked {
+                Ok(n) if n >= expected => return,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("test setup: peeking for the peer's bytes failed: {e}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test setup: the {expected} bytes the peer wrote never reached \
+                 this socket's receive buffer"
+            );
+            crate::poll::wait(&[(socket, Interest::Read)], Some(deadline));
+        }
+    }
+
     /// Test-only: take the pending `Slot::Buffer` payload as owned bytes --
     /// the `Bytes` counterpart to [`take_fd`], for comparing a read's result
     /// against an expected slice. Matches `file.rs`'s own `take_bytes` test
@@ -1522,6 +1599,11 @@ mod tests {
         );
 
         std::io::Write::write_all(&mut server, b"hello").expect("write");
+        // The write returning does not mean the bytes have reached *this*
+        // socket yet, and this second poll is the only one this test gets --
+        // see [`await_peer_bytes_for_test`] for the platform this distinction
+        // was caught on and why a park/wake-driven test does not need it.
+        await_peer_bytes_for_test(fd, b"hello".len());
 
         let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
         assert_eq!(second, POLL_READY);
@@ -1593,6 +1675,13 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
+    /// **"Already waiting" is established, not assumed.** This test asserts
+    /// what the *first* poll of a fresh read future returns, so the data has to
+    /// actually be in this socket's receive buffer before that poll runs --
+    /// which the peer's `write_all` returning does not by itself mean.
+    /// [`await_peer_bytes_for_test`] observes the arrival; its doc comment
+    /// carries the platform difference that caught this and why a fixed sleep
+    /// would be the wrong fix.
     #[test]
     fn a_read_with_data_already_waiting_completes_on_the_first_poll_without_parking() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1600,6 +1689,7 @@ mod tests {
         let fd = connect_blocking_for_test(&addr);
         let (mut server, _) = listener.accept().expect("accept");
         std::io::Write::write_all(&mut server, b"hi").expect("write");
+        await_peer_bytes_for_test(fd, b"hi".len());
 
         let fut = unsafe { nova_rt_net_read_future(fd, 64) };
         let (poll, state) = poll_fn_and_state(fut);
