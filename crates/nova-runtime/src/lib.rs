@@ -56,9 +56,9 @@ mod net;
 /// The executor's third wake source (socket readiness), and the two types
 /// (`RawSocket`, `Interest`) that let `task.rs` name a socket wait without
 /// depending on this module's platform types. Private, like [`gc`] and
-/// `file`: nothing outside this crate needs `poll::` directly -- `task.rs`
-/// (this crate) is its only caller today, and `net.rs` (Task 3) will be its
-/// second.
+/// `file`: nothing outside this crate needs `poll::` directly -- its two
+/// callers are both in this crate, `task.rs` (for `wait`) and `net.rs` (for
+/// `set_nonblocking` and `wait`).
 mod poll;
 /// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,
 /// `POLL_READY`, `STATE_SLOT_TAG`, `STATE_SLOT_TEMPS`) are not all read by

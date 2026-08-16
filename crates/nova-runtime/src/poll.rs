@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 
 /// A socket as the poller sees it: the OS handle, widened to `i64` so
 /// `task.rs` can hold one in `Wait` without depending on this module's
-/// platform types, and so a future `net.rs` (Task 3) and `task.rs` agree on
-/// one socket representation without either depending on the other's.
+/// platform types, and so `net.rs` and `task.rs` agree on one socket
+/// representation without either depending on the other's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
 pub struct RawSocket(pub i64);
