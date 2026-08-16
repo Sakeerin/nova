@@ -84,8 +84,61 @@ jobs:
   msrv:
     name: MSRV (1.78)
     runs-on: ubuntu-latest
+
+    # `dtolnay/rust-toolchain@1.78` INSTALLS 1.78 and makes it the rustup
+    # *default* -- and a `rust-toolchain.toml` in the repo root outranks the
+    # default, so `cargo` here kept running `stable`. That is not a deduction
+    # from rustup's precedence table; rustup says it itself in this job's own
+    # log, in reply to the action's `rustup default 1.78.0`:
+    #
+    #     info: note that the toolchain 'stable-x86_64-unknown-linux-gnu' is
+    #     currently in use (overridden by '.../nova/rust-toolchain.toml')
+    #
+    # So every green "MSRV (1.78)" before this comment landed checked the
+    # workspace at `stable` and proved nothing about the published 1.78 floor.
+    #
+    # `RUSTUP_TOOLCHAIN` is an *environment* override, which outranks the file.
+    # The action never sets it -- the only vars it writes to $GITHUB_ENV are
+    # CARGO_HOME, CARGO_INCREMENTAL, CARGO_TERM_COLOR,
+    # CARGO_REGISTRIES_CRATES_IO_PROTOCOL and CARGO_HTTP_MULTIPLEXING -- so
+    # this job has to set it.
+    env:
+      # The one place this job's compiler is named. Write it as an exact
+      # `x.y.z`: the guard step below compares `rustc --version` against this
+      # literal, so a truncated or target-qualified value fails the job loudly
+      # instead of quietly weakening it. `name:` above tracks it by hand.
+      RUSTUP_TOOLCHAIN: "1.78.0"
+
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.78
       - uses: Swatinem/rust-cache@v2
+
+      # A job called "MSRV (1.78)" that silently runs a different compiler is
+      # worse than no job at all, because it reports success. This step is what
+      # makes the name honest -- whatever the cause, now or the day someone
+      # bumps `rust-toolchain.toml`, retargets the action, or deletes the
+      # `env:` above. It runs BEFORE `cargo check` so that a mis-pinned job
+      # fails on the pin itself rather than on a misleading pile of compile
+      # errors, or on nothing at all.
+      - name: Assert this job really runs the MSRV compiler
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+          actual="$(rustc --version | cut -d' ' -f2)"
+          if [ "$actual" != "$RUSTUP_TOOLCHAIN" ]; then
+            echo "::error title=MSRV job is not running the MSRV compiler::rustc is $actual, expected $RUSTUP_TOOLCHAIN -- so this job's result says nothing about the 1.78 floor. Check whether rust-toolchain.toml or some other rustup override now outranks the RUSTUP_TOOLCHAIN env set on this job."
+            exit 1
+          fi
+          echo "Confirmed: this job checks the workspace with rustc $actual."
+
+      # Deliberately NOT `--all-targets`, which would additionally check tests,
+      # benches and examples -- where an MSRV violation (a `reason = "..."` in
+      # a lint attribute, say) still passes unnoticed today. Widening the
+      # surface belongs here, but as its own commit: bundled with the pin above
+      # it would conflate "the pin works now" with "the wider surface is
+      # clean", and benches drag in criterion, whose own floor moves
+      # independently of ours.
       - run: cargo check --workspace
