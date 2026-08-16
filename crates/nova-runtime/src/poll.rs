@@ -214,17 +214,31 @@ pub fn set_nonblocking(socket: RawSocket) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 // Unix: `select`.
 //
-// **Not built or run in this task.** No Unix or macOS toolchain was reachable
-// from this task's environment (a WSL2 Ubuntu attempt is recorded in the
-// task report), so this arm is reasoned from `select(2)`/`libc` semantics,
-// not measured -- the same status the design spec already recorded for
-// socket pollability off Windows. Using `libc` rather than hand-rolling
-// `fd_set` narrows what "reasoned" has to cover: `fd_set`'s bit-mask element
-// width differs between glibc (64-bit words) and Darwin (32-bit words), and
-// `libc` supplies the per-target layout rather than this module guessing it,
-// so the open risk is "does `select` on a loopback socket behave as
-// documented on Linux and macOS", not also "did this module's own `fd_set`
-// arithmetic match either platform's memory layout".
+// **Now measured, on both Unix platforms, in CI.** This arm was written
+// reasoned rather than measured: no Unix or macOS toolchain was reachable from
+// any environment this increment was implemented or reviewed in (a WSL2 Ubuntu
+// attempt is recorded in the task report), so it was argued from
+// `select(2)`/`libc` semantics -- the same status the design spec recorded for
+// socket pollability off Windows. `Test (ubuntu-latest)` and
+// `Test (macos-latest)` build it and run this module's own real-loopback tests
+// against it: `wait_reports_a_socket_with_data_waiting`,
+// `wait_reports_a_socket_ready_for_write`,
+// `wait_with_no_deadline_blocks_until_a_socket_becomes_ready`,
+// `wait_returns_empty_when_the_deadline_passes_first`, and
+// `set_nonblocking_makes_a_read_return_would_block_instead_of_blocking` all
+// pass on both. So both the read and write `fd_set` branches, the timed wait,
+// and the indefinite wait ran for real on glibc and on Darwin.
+//
+// That also settles the layout risk this note used to carry rather than
+// merely narrowing it. Using `libc`'s per-target `fd_set` instead of
+// hand-rolled bit arithmetic mattered because the bit-mask element width
+// differs between glibc (64-bit words) and Darwin (32-bit words); both widths
+// are now exercised, not just argued to be handled.
+//
+// **Still reasoned, not measured:** the `FD_SETSIZE` rejection path and the
+// non-`EINTR` error/backoff path below. No test reaches either -- one needs a
+// descriptor number above `FD_SETSIZE`, the other a real socket-level fault --
+// so both remain read-not-run on every platform, Windows included.
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]

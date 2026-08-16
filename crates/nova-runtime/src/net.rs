@@ -48,16 +48,27 @@
 //!
 //! This module's Unix arm (`platform_connect`'s `#[cfg(unix)]` half) was
 //! written and read against `connect(2)`/`libc` semantics, not built or run:
-//! no Unix or macOS toolchain was reachable from this task's environment,
-//! the identical status `poll.rs`'s own Unix arm already records. The BSD
-//! (`sockaddr_in`/`sockaddr_in6`) layouts carry a leading `sin_len`/`sin6_len`
-//! field this module's socket-address construction does not set explicitly --
-//! it zeroes the whole struct and assigns only the fields every Unix has, so
-//! the length byte stays zero, which `connect` is widely documented to
-//! tolerate, but that tolerance is asserted from documentation here, not from
-//! a passing test on that platform. The Windows
-//! arm was built and exercised for real against real loopback sockets, on
-//! this task's own Windows host, the same way `poll.rs`'s Windows arm was.
+//! no Unix or macOS toolchain was reachable from any environment this
+//! increment was implemented or reviewed in, the identical status `poll.rs`'s
+//! own Unix arm recorded. **CI has since measured the IPv4 half of it on both
+//! platforms**: every test and fixture in this project connects to a
+//! `127.0.0.1` loopback address, so `Test (ubuntu-latest)` and
+//! `Test (macos-latest)` drive the `SocketAddr::V4` path for real. That
+//! answers the BSD-layout question for `sockaddr_in`: these layouts carry a
+//! leading `sin_len` this module's socket-address construction does not set
+//! explicitly -- it zeroes the whole struct and assigns only the fields every
+//! Unix has, so the length byte stays zero -- and a Darwin `connect` demonstrably
+//! accepts that, rather than the claim resting on documentation alone.
+//!
+//! **The `SocketAddr::V6` path is still reasoned, not measured, on every
+//! platform.** Nothing in this project passes an IPv6 address to `connect`, so
+//! neither `sockaddr_in6` arm -- Unix or Windows -- has ever run, and
+//! `sin6_len`-left-zero carries exactly the documentation-only status
+//! `sin_len` used to.
+//!
+//! The Windows arm's IPv4 path was built and exercised for real against real
+//! loopback sockets on this task's own Windows host, the same way `poll.rs`'s
+//! Windows arm was, and `Test (windows-latest)` re-runs it on every push.
 
 use crate::fs::{fail, stash, Slot, OK};
 use crate::poll::{set_nonblocking, Interest, RawSocket};
