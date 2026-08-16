@@ -1132,7 +1132,16 @@ impl<'a> Parser<'a> {
             // block-final position, treat as trailing.
             if let Some(stmt) = self.try_parse_stmt() {
                 match stmt.value {
-                    Stmt::Expr(ref e) if !self.check(&Token::RBrace) => {
+                    // `_`, not `ref e`: this arm pushes `stmt` whole and never
+                    // reads the expression, and the guard does not either. A
+                    // by-value binding would move out of `stmt.value` and
+                    // break the `push`, which is what the old `ref` was
+                    // guarding against -- but `_` binds nothing at all, so it
+                    // is safe here and does not warn. Only rustc 1.78 reported
+                    // the unused binding; stable does not, which is why this
+                    // survived until the MSRV job began running its own
+                    // compiler.
+                    Stmt::Expr(_) if !self.check(&Token::RBrace) => {
                         stmts.push(stmt);
                     }
                     Stmt::Expr(e) => {
