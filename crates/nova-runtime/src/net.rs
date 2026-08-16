@@ -1085,9 +1085,14 @@ mod tests {
 
     /// Test-only: run `f` with `CURRENT` set to `task_id`, restoring
     /// whatever it held before -- the same technique `fs.rs`'s
-    /// `stash_for_test` uses. Only [`a_successful_connect_stashes_its_fd_via_slot_buffer`]
-    /// needs this, to read `fs::Slot::Buffer` back under the connect task's
-    /// own identity, per that test's own doc comment on why.
+    /// `stash_for_test` uses. Needed wherever a test drives code that touches
+    /// task-keyed state with no real task around it: staging a park aborts
+    /// outside a task context, and `fs::Slot` is keyed on `current_task`. The
+    /// id only has to agree between the stash and the read back, which is why
+    /// most call sites below pass `0`; the few that pass a real `id` are
+    /// reading what an actually-spawned task stashed -- see
+    /// [`a_successful_connect_stashes_its_fd_via_slot_buffer`] for the case
+    /// that motivated this helper.
     fn with_test_current<R>(task_id: i64, f: impl FnOnce() -> R) -> R {
         let previous = crate::task::current_task();
         crate::task::set_current_for_test(Some(task_id));
@@ -1285,38 +1290,62 @@ mod tests {
     /// without assuming that answer is available the instant this module calls
     /// the connection established.
     ///
-    /// **Why a single `peer_addr` call is not enough, measured rather than
-    /// guessed.** `finish_connect` calls a connect established when the socket
-    /// has been reported write-ready and `TcpStream::take_error` (`SO_ERROR`)
-    /// reports no error -- the POSIX completion test for a non-blocking
-    /// connect, and the only thing this module promises. On Darwin that is
-    /// *not* sufficient for `getpeername` to answer: the first CI run of
-    /// [`an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`] failed
-    /// on `macos-latest` alone, with `peer_addr` reporting
-    /// `NotConnected`/`ENOTCONN` (errno 57) immediately after `block_on`
-    /// returned `OK`, while the ubuntu and windows legs of the same run passed.
-    /// The executor had genuinely waited: a connect parks as `Wait::Io` with no
-    /// deadline, so `run_to_completion` blocks in `crate::poll::wait` on real
-    /// write-readiness before the second poll ever runs.
+    /// **Why a single `peer_addr` call is not enough, and why the reason is
+    /// the calling test's own shape rather than the platform's.** Its one
+    /// caller, [`an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`],
+    /// polls the connect future **by hand** and then hands *that same future*
+    /// to `block_on`. The manual poll sets `STATE_SLOT_TAG` to 1 and stages its
+    /// park into a `CURRENT` borrowed by `with_test_current`, which is restored
+    /// on the way out -- so no task ever exists to commit that park to
+    /// `PARKED`. `block_on` then spawns the future fresh, its first poll of it
+    /// reads `tag == 1`, and [`poll_connect`] drops straight into
+    /// [`finish_connect`]. **`crate::poll::wait` never runs for this socket at
+    /// all**, so `SO_ERROR` is clear here because nothing has *failed* yet --
+    /// microseconds after `connect` was issued -- not because the connection
+    /// completed. On loopback it usually has anyway; on Darwin, sometimes it
+    /// has not, and `getpeername` says `NotConnected`/`ENOTCONN` (errno 57).
     ///
-    /// This is the same loopback asynchrony [`await_peer_bytes_for_test`] and
-    /// [`fill_send_buffer_until_would_block_for_test`] were both built for,
-    /// seen a third time at the handshake instead of at data transfer, and it
-    /// is handled the same way: observe the state actually arriving, never
-    /// sleep a fixed time for it, and fail with a message of this helper's own
-    /// if it never does. **It leaves a real question about `finish_connect`
-    /// standing, deliberately unanswered here**: if write-readiness plus a
-    /// clear `SO_ERROR` can precede a usable connection on Darwin, that check
-    /// cannot distinguish "not finished yet" from "finished successfully", on
-    /// the V4 path just as much as this one. Nothing in this project depended on
-    /// the difference before, because nothing asked a freshly connected socket
-    /// anything about itself -- so this helper records the observation and
-    /// scopes the fix out rather than changing shared production behaviour on
-    /// the strength of one measurement.
+    /// **What that retires.** An earlier version of this comment read the same
+    /// failure as Darwin reporting a socket write-ready before it was usable,
+    /// and left a question standing about whether [`finish_connect`]'s success
+    /// condition -- write-readiness plus a clear `SO_ERROR`, the POSIX
+    /// completion test for a non-blocking connect -- could tell "not finished
+    /// yet" from "finished successfully" on any platform. A throwaway probe
+    /// settled it (`macos-latest` CI, PR #15, closed unmerged): of **522**
+    /// second polls sampled for write-readiness, `SO_ERROR` and `peer_addr`
+    /// together, the **520** that were reached through a real
+    /// `crate::poll::wait` readiness report had a usable connection every
+    /// time, and the **2** that reported `ENOTCONN` were *not* write-ready and
+    /// had been woken by nothing at all. Darwin never claimed readiness it did
+    /// not have. `finish_connect` needs no stronger check, and its
+    /// precondition is simply not satisfied by a pre-polled future.
     ///
-    /// Tolerates exactly `NotConnected`, the one transient that was measured.
-    /// Any other error fails immediately rather than being retried into a
-    /// timeout, and so does an address that never arrives.
+    /// Those 2 samples came one from this helper's caller and one from
+    /// [`connect_parks_on_its_first_poll_rather_than_completing_synchronously`],
+    /// which is built the same way over V4 -- so the shape is the cause, not
+    /// anything specific to IPv6. That test needs no helper only because it
+    /// never asks its socket about itself, so the same in-flight connect is
+    /// invisible there rather than absent.
+    ///
+    /// So `block_on` returning `OK` to a caller that pre-polled proves only
+    /// that nothing had failed by then. That is worth knowing before reading
+    /// either test's `OK` as evidence the connection established: what proves
+    /// *that* is the peer address arriving, below. Restructuring both tests to
+    /// drive the park for real -- and so make their `OK` load-bearing -- would
+    /// remove the need for this helper; it is deliberately not done here,
+    /// because a park honoured end to end is already covered by the
+    /// `net_*.nova` fixtures and by every other `connect` test in this module.
+    ///
+    /// The handling is the same as [`await_peer_bytes_for_test`] and
+    /// [`fill_send_buffer_until_would_block_for_test`] use for genuine
+    /// loopback asynchrony, even though the cause here is different: observe
+    /// the state actually arriving, never sleep a fixed time for it, and fail
+    /// with a message of this helper's own if it never does.
+    ///
+    /// Tolerates exactly `NotConnected`, the one transient that was measured
+    /// (2 of 522 samples, `macos-latest` only). Any other error fails
+    /// immediately rather than being retried into a timeout, and so does an
+    /// address that never arrives.
     fn await_peer_addr_for_test(fd: i64) -> SocketAddr {
         let socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1777,14 +1806,18 @@ mod tests {
         );
 
         // The other half: it really connects. `block_on` drives the same
-        // future the rest of the way through the real executor, and
-        // `finish_connect`'s `OK` is `SO_ERROR` reporting no error -- so a
-        // sockaddr this arm built wrong (a port that skipped `to_be`, a family
-        // the socket does not have) fails here rather than being tolerated.
-        // Which address it landed on is then checked separately, through
-        // [`await_peer_addr_for_test`] rather than a bare `peer_addr` call --
-        // see that helper's own doc comment for the Darwin measurement that
-        // forced the distinction, and for the question it leaves standing.
+        // future the rest of the way, and `finish_connect`'s `OK` is
+        // `SO_ERROR` reporting no error. Read that `OK` for no more than it is
+        // worth here: because the poll above already set the tag, this poll
+        // runs without any `poll::wait` in between, so `OK` says nothing had
+        // failed yet -- see [`await_peer_addr_for_test`]'s own doc comment for
+        // the measurement behind that, and for what it retires.
+        //
+        // A sockaddr this arm built wrong is therefore caught at one of the
+        // two ends rather than in the middle: a family the socket does not
+        // have is rejected by `connect` itself, so it never parks and the
+        // assertion above fails; a port that skipped `to_be` names some other
+        // address, which the assertion below never sees arrive.
         assert_eq!(
             unsafe { crate::task::nova_rt_task_block_on(fut) },
             OK,
