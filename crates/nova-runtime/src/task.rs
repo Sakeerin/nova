@@ -662,7 +662,10 @@ unsafe fn poll_one(id: i64) {
     if status == POLL_PENDING {
         match staged {
             Some(wait) => PARKED.with(|parked| parked.borrow_mut().push((id, wait))),
-            None => QUEUE.with(|queue| queue.borrow_mut().push_back(id)),
+            None => {
+                bump_bare_requeue();
+                QUEUE.with(|queue| queue.borrow_mut().push_back(id));
+            }
         }
         return;
     }
@@ -719,6 +722,7 @@ fn wake_tasks_waiting_on(done_id: i64) {
     QUEUE.with(|queue| {
         let mut queue = queue.borrow_mut();
         for id in woken {
+            bump_task_wake();
             queue.push_back(id);
         }
     });
@@ -1001,6 +1005,100 @@ fn io_parks() -> Vec<(RawSocket, Interest)> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// SPIKE INSTRUMENTATION -- throwaway, on branch
+// `spike/darwin-connect-write-readiness`, never to be merged.
+//
+// `net.rs`'s connect probe has to know *which* wake source moved a task back
+// onto the ready queue, because the hypothesis it exists to rule out is that
+// `poll_connect`'s second poll can run without `poll::wait` ever having
+// reported that socket ready. Each of this module's four re-queue sites bumps
+// one counter below; the probe prints the per-connect delta.
+//
+// Compiled on every platform -- so clippy (ubuntu + windows) and the MSRV job
+// type-check and lint it -- but inert off macOS: every `bump_*` returns before
+// touching the cell, so no platform but Darwin observes anything at all.
+// ---------------------------------------------------------------------------
+
+/// How many times each wake source has re-queued a task on this thread.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WakeTally {
+    /// [`wake_ready`]: `poll::wait` reported this task's socket ready. The
+    /// only legitimate waker of an untimed `Wait::Io` such as a `connect`'s.
+    pub(crate) io: u64,
+    /// [`wake_due`]: a deadline passed -- bare, or riding inside a
+    /// `Wait::Io`. A `connect` parks with `deadline: None`, so this must not
+    /// move for one.
+    pub(crate) deadline: u64,
+    /// [`wake_tasks_waiting_on`]: a joined task finished.
+    pub(crate) task: u64,
+    /// [`poll_one`]: `POLL_PENDING` with no park staged at all -- an immediate
+    /// re-queue with no wake source involved. A `connect` staging its park
+    /// correctly never reaches this.
+    pub(crate) requeue: u64,
+}
+
+thread_local! {
+    static WAKE_TALLY: Cell<WakeTally> = const {
+        Cell::new(WakeTally {
+            io: 0,
+            deadline: 0,
+            task: 0,
+            requeue: 0,
+        })
+    };
+}
+
+/// The running tally, for `net.rs`'s spike probe to difference across one
+/// connect.
+pub(crate) fn wake_tally_for_spike() -> WakeTally {
+    WAKE_TALLY.with(Cell::get)
+}
+
+fn bump_io_wake() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    WAKE_TALLY.with(|cell| {
+        let mut tally = cell.get();
+        tally.io = tally.io.saturating_add(1);
+        cell.set(tally);
+    });
+}
+
+fn bump_deadline_wake() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    WAKE_TALLY.with(|cell| {
+        let mut tally = cell.get();
+        tally.deadline = tally.deadline.saturating_add(1);
+        cell.set(tally);
+    });
+}
+
+fn bump_task_wake() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    WAKE_TALLY.with(|cell| {
+        let mut tally = cell.get();
+        tally.task = tally.task.saturating_add(1);
+        cell.set(tally);
+    });
+}
+
+fn bump_bare_requeue() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    WAKE_TALLY.with(|cell| {
+        let mut tally = cell.get();
+        tally.requeue = tally.requeue.saturating_add(1);
+        cell.set(tally);
+    });
+}
+
 /// Move every task parked on a [`Wait::Io`] whose socket is in `ready` back
 /// onto the ready queue.
 ///
@@ -1035,6 +1133,7 @@ fn wake_ready(ready: Vec<RawSocket>) {
     QUEUE.with(|queue| {
         let mut queue = queue.borrow_mut();
         for id in woken {
+            bump_io_wake();
             queue.push_back(id);
         }
     });
@@ -1086,6 +1185,7 @@ fn wake_due(now: Instant) {
     QUEUE.with(|queue| {
         let mut queue = queue.borrow_mut();
         for id in woken {
+            bump_deadline_wake();
             queue.push_back(id);
         }
     });

@@ -39,6 +39,21 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
+      # SPIKE ONLY -- throwaway, on branch
+      # `spike/darwin-connect-write-readiness`, never to be merged.
+      #
+      # `net.rs`'s connect probe writes its findings with `eprintln!`, which
+      # libtest captures and then discards for a *passing* test -- and the probe
+      # deliberately prints rather than asserting, so every test here passes and
+      # the step above would show nothing. `--nocapture` is what puts the lines
+      # in the log. Scoped to nova-runtime (the only crate with a probe) and to
+      # macOS (the only platform the probe is not inert on), and left running
+      # its tests in parallel on purpose: the original failure was intermittent
+      # under a loaded runner, and serialising would remove exactly that.
+      - name: SPIKE probe output (macOS only, uncaptured)
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p nova-runtime --all-features -- --nocapture
+
       # The eight `#[ignore]`d GC root tests are the only coverage of `PINNED`
       # actually being HONOURED by a real collection -- the registry could be
       # populated perfectly and ignored by the marker, and only these eight

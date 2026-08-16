@@ -525,6 +525,107 @@ fn start_connect(slots: *mut i64) -> Started {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SPIKE PROBE -- throwaway, on branch `spike/darwin-connect-write-readiness`,
+// never to be merged.
+//
+// One macOS CI run saw `peer_addr` report `ENOTCONN` immediately after a
+// `connect` future's `block_on` returned `OK`. Two worlds explain that, and
+// this probe exists only to tell them apart, at `poll_connect`'s second poll,
+// before `finish_connect` decides anything:
+//
+//   * Darwin genuinely reports a socket write-ready with `SO_ERROR` clear
+//     while `getpeername` still says not-connected -- in which case
+//     `finish_connect`'s success condition is insufficient on every platform's
+//     V4 path as much as V6; or
+//   * the task was woken without its socket ever being ready -- a spurious
+//     wake or a ready-set mismatch in `wake_ready`, which is our bug, in the
+//     wake path.
+//
+// It prints, and never asserts: three recorded values per connect say more
+// than a failed assertion, and this branch exists to produce data.
+//
+// Compiled on every platform -- so clippy (ubuntu + windows) and the MSRV job
+// type-check and lint it -- but inert off macOS: both functions return before
+// issuing any syscall, so no platform but Darwin observes anything at all.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// SPIKE: the wake tally as of this thread's previous probe, so each line
+    /// prints a per-connect delta instead of a running total. Tuple rather
+    /// than `WakeTally` so the initializer is a plain `const` expression:
+    /// `(io, deadline, task, requeue)`.
+    static SPIKE_LAST_TALLY: Cell<(u64, u64, u64, u64)> = const { Cell::new((0, 0, 0, 0)) };
+    /// SPIKE: how many probe lines this thread has emitted, so a reader can
+    /// tell a missing sample from a repeated one.
+    static SPIKE_SEQ: Cell<u64> = const { Cell::new(0) };
+}
+
+/// SPIKE: is `table_fd`'s socket write-ready *right now*?
+///
+/// `poll::wait` with an already-passed deadline: `remaining` clamps that to
+/// `Duration::ZERO`, which both platform arms turn into a zero timeout, so the
+/// underlying `select`/`WSAPoll` answers and returns immediately rather than
+/// blocking this poll. Write-readiness on a connected socket is
+/// level-triggered and persists while the send buffer has room, so a connected
+/// socket answers `Some(true)` and a still-connecting one `Some(false)`.
+/// `None` means the question was not asked: off macOS, or the fd was somehow
+/// no longer in the table.
+///
+/// Called before `take_error`, never after: reading `SO_ERROR` is destructive,
+/// and the ordering keeps this reading the state `finish_connect` is about to
+/// judge rather than a state the probe itself changed.
+fn spike_write_ready(table_fd: i64) -> Option<bool> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let socket = with_fd(table_fd, |stream| raw_socket_of(stream))?;
+    let ready = crate::poll::wait(&[(socket, Interest::Write)], Some(Instant::now()));
+    Some(ready.contains(&socket))
+}
+
+/// SPIKE: print one greppable line recording the three questions plus which
+/// wake source actually re-queued this task.
+///
+/// `taken` is the single `take_error` result `finish_connect` also decides on
+/// -- borrowed, not re-read, so the probe cannot consume a pending socket
+/// error out from under the decision.
+///
+/// Prints through `eprintln!` and builds no intermediate `String`: this file's
+/// `no_net_intrinsic_can_panic` guard forbids string formatting in production
+/// code by name, and nothing here unwraps, expects, indexes or borrows a
+/// `RefCell`, so no panic can cross this poll boundary. (That guard is
+/// textual, so it also trips on the forbidden name appearing in a comment --
+/// which is how this doc comment first read, and why it no longer spells it.)
+fn spike_report_probe(
+    table_fd: i64,
+    write_ready: Option<bool>,
+    taken: &Option<std::io::Result<Option<std::io::Error>>>,
+) {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let peer = with_fd(table_fd, |stream| stream.peer_addr());
+    let local = with_fd(table_fd, |stream| stream.local_addr());
+    let tally = crate::task::wake_tally_for_spike();
+    let (prev_io, prev_dl, prev_task, prev_requeue) = SPIKE_LAST_TALLY.with(Cell::get);
+    SPIKE_LAST_TALLY.with(|cell| cell.set((tally.io, tally.deadline, tally.task, tally.requeue)));
+    let seq = SPIKE_SEQ.with(|cell| {
+        let next = cell.get().saturating_add(1);
+        cell.set(next);
+        next
+    });
+    let d_io = tally.io.wrapping_sub(prev_io);
+    let d_dl = tally.deadline.wrapping_sub(prev_dl);
+    let d_task = tally.task.wrapping_sub(prev_task);
+    let d_requeue = tally.requeue.wrapping_sub(prev_requeue);
+    eprintln!(
+        "NOVA_SPIKE_CONNECT seq={seq} fd={table_fd} write_ready={write_ready:?} \
+         so_error={taken:?} peer_addr={peer:?} local_addr={local:?} \
+         wake_delta=io:{d_io},dl:{d_dl},task:{d_task},requeue:{d_requeue}"
+    );
+}
+
 /// The second poll's work: look up the socket `start_connect` registered and
 /// check whether it finished connecting or was refused.
 ///
@@ -538,7 +639,15 @@ fn finish_connect(slots: *mut i64) -> i64 {
     // SAFETY: same object; `start_connect` overwrote this slot with the
     // table fd before parking, and this is the second poll.
     let table_fd = unsafe { slots.add(CONNECT_SLOT_SOCK).read() };
-    match with_fd(table_fd, |stream| stream.take_error()) {
+    // SPIKE PROBE (throwaway) -- ask the OS about write-readiness *before*
+    // `SO_ERROR` is read, since reading it is destructive. `take_error` is
+    // then called exactly once, as it always was, and its single result is
+    // both reported by the probe and used for the decision below, so no
+    // platform sees a different answer than it did without the probe.
+    let write_ready = spike_write_ready(table_fd);
+    let taken = with_fd(table_fd, |stream| stream.take_error());
+    spike_report_probe(table_fd, write_ready, &taken);
+    match taken {
         Some(Ok(None)) => {
             stash_i64(table_fd);
             OK
@@ -1799,6 +1908,66 @@ mod tests {
         );
         let (_server, _) = listener.accept().expect("accept");
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// SPIKE (throwaway, branch `spike/darwin-connect-write-readiness`): drive
+    /// many real connects -- V4 and V6 -- all the way through the real
+    /// executor, so `finish_connect`'s probe records its triple many times over
+    /// rather than once.
+    ///
+    /// The failure this spike exists to explain was intermittent: one macOS leg
+    /// out of three, on the first run of the V6 connect test, and green since.
+    /// A single sample therefore proves nothing either way, so this loops and
+    /// the report is a distribution rather than one reading.
+    ///
+    /// **Not gated to macOS, deliberately.** The probe itself is inert
+    /// elsewhere, and keeping this test compiled on every leg is what keeps
+    /// clippy (ubuntu + windows, `-D warnings`) and the MSRV job looking at the
+    /// same code the macOS leg runs -- this tree has no `target_os = "macos"`
+    /// `#[cfg]` and so no macOS clippy leg to catch anything gated behind one.
+    /// The connects are real everywhere; only the printing is Darwin-only.
+    ///
+    /// Reads the new fd from [`NEXT_FD`] rather than from the state object:
+    /// `block_on` releases that object's GC root as part of returning, and
+    /// across hundreds of iterations there is real allocation in between, so
+    /// [`state_slot_of`]'s "unrooted but not yet swept" assumption stops
+    /// holding. The table's next-fd counter is monotonic and thread-local and
+    /// `register_new_socket` is its only consumer, so the value read just
+    /// before a connect is exactly the fd that connect will register -- and the
+    /// assertion below fails loudly rather than closing some other socket if
+    /// that ever stops being true.
+    ///
+    /// Never accepts the connection before the probe runs, matching the
+    /// original failure:
+    /// [`an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`] calls
+    /// `accept` only after its own `peer_addr` check.
+    #[test]
+    fn spike_many_real_connects_record_the_probes_triple() {
+        // Enough samples to make an intermittent answer visible, cheap enough
+        // to pay for on all three legs: a loopback bind/connect/close is
+        // microseconds.
+        const ITERATIONS: usize = 250;
+
+        for spec in ["127.0.0.1:0", "[::1]:0"] {
+            for i in 0..ITERATIONS {
+                let listener = std::net::TcpListener::bind(spec).expect("bind");
+                let addr = listener.local_addr().expect("addr").to_string();
+                let expected_fd = NEXT_FD.with(|next| next.get());
+                let addr_ptr = crate::gc_str(&addr);
+                let fut = unsafe { nova_rt_net_connect_future(addr_ptr) };
+                assert_eq!(
+                    unsafe { crate::task::nova_rt_task_block_on(fut) },
+                    OK,
+                    "spike iteration {i} on {spec}: connect must establish"
+                );
+                assert!(
+                    is_open_for_test(expected_fd),
+                    "spike iteration {i} on {spec}: the fd the table was about \
+                     to hand out is not the one this connect registered"
+                );
+                assert_eq!(unsafe { nova_rt_net_close(expected_fd) }, OK);
+            }
+        }
     }
 
     /// The one test that proves `finish_connect`'s successful path really
