@@ -1041,15 +1041,26 @@ mod tests {
     /// `file.rs`'s own `take_fd` test helper.
     fn take_fd() -> i64 {
         let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
-        // SAFETY: test-only. Whatever last stashed into `Slot::Buffer` did so
-        // earlier in this same test, with nothing allocated since, so the
-        // payload has not been swept.
+        // Checked before the dereference, not after: an empty slot hands back
+        // a null pointer, and reading a `NovaStr` through it is a crash rather
+        // than any assertion failure a reader could act on.
+        // [`poll_write_until_it_parks_for_test`] is the caller that can reach
+        // this, if a would-block arm ever reports a bare success without a
+        // count behind it.
+        assert!(
+            !ptr.is_null(),
+            "nothing at all was pending in Slot::Buffer -- whatever was \
+             expected to stash a count did not"
+        );
+        // SAFETY: test-only, and non-null by the check above. Whatever last
+        // stashed into `Slot::Buffer` did so earlier in this same test, with
+        // nothing allocated since, so the payload has not been swept.
         let bytes = unsafe { crate::bytes::as_bytes(ptr) };
         let Ok(arr) = <[u8; 8]>::try_from(bytes) else {
             panic!(
                 "stash_i64 stashes an 8-byte payload; got {} bytes instead -- \
-                 either nothing was pending or the encoding changed without \
-                 updating this test helper to match",
+                 the encoding changed without updating this test helper to \
+                 match (an empty slot is caught above, not here)",
                 bytes.len()
             );
         };
@@ -1308,6 +1319,23 @@ mod tests {
     /// records the probe). A generous iteration cap keeps this fast in
     /// practice: reaching the ceiling took 2-8 calls in every measurement
     /// that produced this comment.
+    ///
+    /// **The fullness this establishes is instantaneous, not durable.** All a
+    /// returned `WouldBlock` says is that the buffer was full at the instant
+    /// of that one syscall. TCP frees a sender's buffered bytes as the peer
+    /// ACKs them, and the peer ACKs whatever fits in its own receive buffer,
+    /// so room can reappear at any moment until that receive buffer is full
+    /// as well -- and on macOS's loopback the transfer that leads to those
+    /// ACKs keeps happening after the writing syscall has returned, the same
+    /// asynchrony [`await_peer_bytes_for_test`] exists for, seen from the
+    /// sending end. A caller that asserts on the return value of one
+    /// particular poll must therefore re-establish fullness and re-poll
+    /// rather than assume this call's result still holds when that poll
+    /// finally runs; [`poll_write_until_it_parks_for_test`] is that loop, and
+    /// both callers asserting a park go through it.
+    /// [`try_write_reports_would_block_once_the_send_buffer_fills`] is the
+    /// one caller that does not need it: it asserts nothing at all after this
+    /// returns, so it has no precondition left to lose.
     fn fill_send_buffer_until_would_block_for_test(fd: i64, chunk: &[u8]) {
         for _ in 0..256 {
             match try_write(fd, chunk) {
@@ -1320,6 +1348,109 @@ mod tests {
         panic!(
             "test setup: the send buffer never filled within 256 writes of \
              {} bytes each -- nothing drained the peer, so it must eventually",
+            chunk.len()
+        );
+    }
+
+    /// Test-only: poll `fut` -- a write future over `fd` -- until one poll
+    /// runs against a genuinely full send buffer, and assert that *that* poll
+    /// both returned `POLL_PENDING` and staged a park on `socket` for
+    /// `Interest::Write` with no deadline. Re-fills with `chunk` and polls
+    /// again whenever a poll instead finds room and completes. `context`
+    /// names the poll in every failure message.
+    ///
+    /// **Why one fill-then-poll is not enough.**
+    /// [`fill_send_buffer_until_would_block_for_test`] establishes fullness
+    /// from one syscall's result, and it is only true at that instant (see
+    /// that helper's own doc comment for the TCP mechanism). Every caller
+    /// then has a gap to cross before the poll under test runs -- building
+    /// the payload, building the future, reaching into its fat pointer -- and
+    /// on macOS's loopback the kernel keeps moving bytes to the peer across
+    /// that gap, the peer ACKs them, room reappears, and the write completes
+    /// instead of parking.
+    /// `a_write_against_a_full_send_buffer_parks_rather_than_spinning` failed
+    /// on `macos-latest` CI exactly that way -- `POLL_READY` where
+    /// `POLL_PENDING` was asserted -- on a pull request whose entire diff was
+    /// comment text, while the ubuntu and windows legs of the same run passed
+    /// and the same test had passed on macOS one commit earlier. A
+    /// behavioural failure a comment cannot cause is a flake by elimination.
+    ///
+    /// **Bounded, and not a sleep.** Nothing here waits for a fixed time:
+    /// each attempt re-establishes the precondition with real writes and
+    /// re-polls, so the passing path on a platform that never drains pays one
+    /// iteration. The loop terminates because the drain is finite -- nothing
+    /// ever reads the peer these tests use, so the total it can ever ACK is
+    /// bounded by its own receive buffer, each attempt's completing write
+    /// takes back all the room that appeared (`Write::write` writes as much
+    /// as fits) and the re-fill above it takes the rest, and once the peer's
+    /// receive buffer is full it advertises a zero window and no further room
+    /// can appear at all. That fixpoint, not a timeout, is what makes the
+    /// bound reachable.
+    ///
+    /// **Tolerating a drain does not weaken what the two callers exist for.**
+    /// The two properties they are built around both still hold on exactly
+    /// one poll's result. A `poll_write` that stripped its own
+    /// `stage_io_park` call would still return `POLL_PENDING` from the
+    /// attempt that finds the buffer full, so the staged-park assertion --
+    /// not the status -- is still what catches it. And `POLL_READY` is
+    /// tolerated only as a *successful write of a positive count*: a
+    /// would-block arm that reported a failure status instead of parking
+    /// fails the output-slot assertion on the first attempt, and one that
+    /// reported a zero-byte success -- room that cannot have appeared --
+    /// fails the count assertion just as immediately. Neither is quietly
+    /// retried away.
+    fn poll_write_until_it_parks_for_test(
+        fd: i64,
+        chunk: &[u8],
+        fut: *mut u8,
+        socket: RawSocket,
+        context: &str,
+    ) {
+        let (poll, state) = poll_fn_and_state(fut);
+        for _ in 0..64 {
+            fill_send_buffer_until_would_block_for_test(fd, chunk);
+            // SAFETY: `poll`/`state` are the pair inside `fut`, a well-formed
+            // future this module built; `task_ctx` is null, as `poll_one`'s
+            // own call passes.
+            let status = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+            if status == POLL_PENDING {
+                assert_eq!(
+                    crate::task::staged_io_for_test(),
+                    Some((socket, Interest::Write, None)),
+                    "{context} must genuinely stage a park on Interest::Write \
+                     for this exact socket, with no deadline -- not merely \
+                     return POLL_PENDING while parking nothing"
+                );
+                return;
+            }
+            assert_eq!(
+                status, POLL_READY,
+                "{context} returned neither of the two statuses the ABI \
+                 defines"
+            );
+            // Checked before the count below, not after: a failure status
+            // stashes a message rather than a byte count, so reading the
+            // count first would decode an empty `Slot::Buffer`.
+            assert_eq!(
+                state_slot_of(fut, STATE_SLOT_OUTPUT),
+                OK,
+                "{context} did not park, so the only tolerable reason is that \
+                 room reappeared and this write took it -- a failure status \
+                 is the wrong status, not a drained buffer"
+            );
+            let written = with_test_current(0, take_fd);
+            assert!(
+                written > 0,
+                "{context} reported a successful write of {written} bytes, so \
+                 no room can have reappeared -- a would-block reporting a \
+                 zero-byte write instead of parking"
+            );
+        }
+        panic!(
+            "{context}: 64 attempts, each re-filling the send buffer with \
+             {}-byte writes until one reported WouldBlock, and not one of \
+             them ever parked -- nothing reads the peer, so the room a drain \
+             can free is bounded by its receive buffer and has to run out",
             chunk.len()
         );
     }
@@ -1777,6 +1908,28 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
+    /// The production write future, against a full send buffer, must park
+    /// rather than spin or silently fail -- this project's own busy-spin
+    /// hazard, on the write side this time. Matches
+    /// `connect_parks_on_its_first_poll_rather_than_completing_synchronously`'s
+    /// own technique: only the *return value of one poll* tells a real park
+    /// apart from a mutation that would still eventually succeed via
+    /// `block_on` alone -- **and even that return value is not enough on its
+    /// own**: a future that strips its own `stage_io_park` call still returns
+    /// `POLL_PENDING` here and would still eventually succeed through the
+    /// real executor's busy re-queue, since nothing would ever move it into
+    /// `PARKED` at all. So the staged park is read back too, not only the
+    /// poll's return value.
+    ///
+    /// Both of those checks, and the reason the full buffer has to be
+    /// re-established around each attempt rather than assumed to survive the
+    /// gap between the fill and the poll, live in
+    /// [`poll_write_until_it_parks_for_test`].
+    ///
+    /// The fill goes through repeated direct `try_write` calls, never
+    /// `block_on`, which would hang this test's own thread forever the moment
+    /// a write genuinely needs to park with nothing ever draining the peer
+    /// (see [`fill_send_buffer_until_would_block_for_test`]).
     #[test]
     fn a_write_against_a_full_send_buffer_parks_rather_than_spinning() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1786,41 +1939,14 @@ mod tests {
         let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
 
         let chunk_bytes = vec![0xABu8; 1024 * 1024];
-        // Fill the send buffer via repeated direct `try_write` calls first --
-        // not `block_on`, which would hang this test's own thread forever
-        // once a write genuinely needs to park and nothing ever drains the
-        // peer (see `fill_send_buffer_until_would_block_for_test`'s own doc
-        // comment).
-        fill_send_buffer_until_would_block_for_test(fd, &chunk_bytes);
-
-        // Now the production write future, against the same still-full
-        // buffer, must park rather than spin or silently fail -- this
-        // project's own busy-spin hazard, on the write side this time.
-        // Matches
-        // `connect_parks_on_its_first_poll_rather_than_completing_synchronously`'s
-        // own technique: only the *return value of one poll* tells a real
-        // park apart from a mutation that would still eventually succeed via
-        // `block_on` alone -- **and even that return value is not enough on
-        // its own**: a future that strips its own `stage_io_park` call still
-        // returns `POLL_PENDING` here and would still eventually succeed
-        // through the real executor's busy re-queue, since nothing would
-        // ever move it into `PARKED` at all. This also reads back what was
-        // actually staged.
         let chunk = crate::gc_bytes_for_test(&chunk_bytes);
         let fut = unsafe { nova_rt_net_write_future(fd, chunk) };
-        let (poll, state) = poll_fn_and_state(fut);
-        let status = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
-        assert_eq!(
-            status, POLL_PENDING,
-            "a write against a full send buffer must park rather than spin \
-             or report a wrong status"
-        );
-        assert_eq!(
-            crate::task::staged_io_for_test(),
-            Some((expected_socket, Interest::Write, None)),
-            "a write against a full send buffer must genuinely stage a park \
-             on Interest::Write for this exact socket, with no deadline -- \
-             not merely return POLL_PENDING while parking nothing"
+        poll_write_until_it_parks_for_test(
+            fd,
+            &chunk_bytes,
+            fut,
+            expected_socket,
+            "a write against a full send buffer",
         );
 
         drain_stray_pending_park_for_test();
@@ -1831,6 +1957,22 @@ mod tests {
     /// [`a_read_still_blocked_on_its_second_poll_stages_a_park_again`] -- see
     /// that test's own doc comment for the gap this closes and why draining
     /// between the two polls is required.
+    ///
+    /// **Why the second round re-fills too, and what "second poll" means
+    /// here.** The read counterpart establishes its precondition by *not*
+    /// writing on the peer, which nothing can undo, so its two polls can sit
+    /// back to back. The write side's precondition is a full send buffer,
+    /// which the kernel can undo between any two polls
+    /// ([`poll_write_until_it_parks_for_test`] carries the mechanism), and the
+    /// `drain_stray_pending_park_for_test` call between the two rounds is
+    /// itself such a gap -- it runs a real `block_on`. So each round
+    /// re-establishes fullness and retries until a poll genuinely blocks,
+    /// which means the second round's parking poll is the future's second
+    /// *or later*. That is exactly the property at issue: what the "stage once
+    /// ever" shape this test exists to kill gets wrong is every would-block
+    /// poll after its first, whichever number it lands on. With the drained
+    /// park taken in between, the second round's staged park can only have
+    /// come from a fresh `stage_io_park` call.
     #[test]
     fn a_write_still_blocked_on_its_second_poll_stages_a_park_again() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1840,37 +1982,30 @@ mod tests {
         let expected_socket = with_fd(fd, |stream| raw_socket_of(stream)).expect("fd must be open");
 
         let chunk_bytes = vec![0xABu8; 1024 * 1024];
-        fill_send_buffer_until_would_block_for_test(fd, &chunk_bytes);
-
         let chunk = crate::gc_bytes_for_test(&chunk_bytes);
         let fut = unsafe { nova_rt_net_write_future(fd, chunk) };
-        let (poll, state) = poll_fn_and_state(fut);
 
-        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
-        assert_eq!(first, POLL_PENDING, "test setup: the first poll must park");
-        assert_eq!(
-            crate::task::staged_io_for_test(),
-            Some((expected_socket, Interest::Write, None)),
-            "test setup: the first poll must stage a park"
+        poll_write_until_it_parks_for_test(
+            fd,
+            &chunk_bytes,
+            fut,
+            expected_socket,
+            "test setup: the first poll of a write against a full send buffer",
         );
 
-        // Nothing drained the peer in between: the send buffer is still
-        // full, simulating a wake with no room actually having opened up.
+        // Nothing drained the peer deliberately in between: the send buffer
+        // is filled right back up below, simulating a wake with no room
+        // actually having opened up.
         drain_stray_pending_park_for_test();
 
-        let second = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
-        assert_eq!(
-            second, POLL_PENDING,
-            "the send buffer is still full on the second poll -- must still \
-             park, not complete"
-        );
-        assert_eq!(
-            crate::task::staged_io_for_test(),
-            Some((expected_socket, Interest::Write, None)),
-            "a still-full write must stage a park again on its second poll, \
-             not only its first -- a future that stages once and never \
-             again leaves a spuriously-woken task parked forever with \
-             nothing left to wake it"
+        poll_write_until_it_parks_for_test(
+            fd,
+            &chunk_bytes,
+            fut,
+            expected_socket,
+            "a still-full write on a later poll -- a future that stages once \
+             and never again leaves a spuriously-woken task parked forever \
+             with nothing left to wake it",
         );
 
         drain_stray_pending_park_for_test();
