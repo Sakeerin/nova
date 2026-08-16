@@ -60,11 +60,27 @@
 //! Unix has, so the length byte stays zero -- and a Darwin `connect` demonstrably
 //! accepts that, rather than the claim resting on documentation alone.
 //!
-//! **The `SocketAddr::V6` path is still reasoned, not measured, on every
-//! platform.** Nothing in this project passes an IPv6 address to `connect`, so
-//! neither `sockaddr_in6` arm -- Unix or Windows -- has ever run, and
-//! `sin6_len`-left-zero carries exactly the documentation-only status
-//! `sin_len` used to.
+//! **The `SocketAddr::V6` path is measured too now, on all three platforms.**
+//! It was not for this module's whole life before that: nothing in this project
+//! passed an IPv6 address to `connect`, so neither `sockaddr_in6` arm -- Unix
+//! or Windows -- had ever run, and `sin6_len`-left-zero carried exactly the
+//! documentation-only status `sin_len` used to.
+//! `an_ipv6_connect_parks_on_its_first_poll_and_then_establishes` closed that:
+//! it binds a `::1` loopback listener and dials it through the real
+//! `nova_rt_net_connect_future`, so both arms execute on every leg of CI, and
+//! a Darwin `connect` demonstrably accepts a `sockaddr_in6` whose leading
+//! `sin6_len` this module leaves zero -- the same claim the V4 path's
+//! `sin_len` had to wait for CI to settle, settled the same way.
+//!
+//! Two fields inside that arm remain unmeasured, and cannot reasonably be
+//! otherwise: `sin6_flowinfo` and `sin6_scope_id` are both zero for `::1`, and
+//! `std`'s own `SocketAddr` parser accepts no textual syntax for either, so no
+//! address string that can reach [`resolve_addr`] from `std/net`'s
+//! `connect(addr: String)` produces a non-zero value for them at all. That
+//! bounds the exposure rather than leaving it open: the two assignments are
+//! unreachable as anything but zero from the only surface a Nova program has.
+//! See that test's own doc comment for the rest of what it does and does not
+//! pin down.
 //!
 //! The Windows arm's IPv4 path was built and exercised for real against real
 //! loopback sockets on this task's own Windows host, the same way `poll.rs`'s
@@ -1597,6 +1613,135 @@ mod tests {
         // else shares this thread's tables afterward.
         assert_eq!(unsafe { crate::task::nova_rt_task_block_on(fut) }, OK);
         let fd = state_slot_of(fut, CONNECT_SLOT_SOCK);
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// The one test that reaches `platform_connect`'s `SocketAddr::V6` arm at
+    /// all, on any platform. Every other test in this file and every
+    /// `tests/runtime/net_*.nova` fixture connects to `127.0.0.1`, so until
+    /// this test both `sockaddr_in6` arms -- Unix and Windows -- were shipped
+    /// code with zero coverage, and `sin6_len`-left-zero on Darwin carried
+    /// exactly the documentation-only status `sin_len` held before CI first
+    /// drove the V4 path for real (this module's own doc comment records both).
+    ///
+    /// **The bracketed literal is the Nova-visible spelling, and this pins
+    /// that it resolves.** `std/net`'s `connect` takes a `String` and hands it
+    /// to this module unchanged, so whether a Nova caller can reach the V6 arm
+    /// at all is entirely a question about [`resolve_addr`] -- which runs
+    /// `std`'s own `ToSocketAddrs`, and that parses a `[::1]:0`-style bracketed
+    /// literal as a `SocketAddr` before it ever considers a name lookup. Hence
+    /// the address below is `TcpListener::local_addr().to_string()`, already
+    /// bracketed exactly as a caller would have to write it, and hence the
+    /// `resolve_addr` assertion: with a V4 address coming back out of it
+    /// nothing that follows would touch the arm this test exists for, and the
+    /// test would pass while covering the V4 arm one more redundant time.
+    ///
+    /// **Not gated, and deliberately not a skip.** All three CI runners are
+    /// expected to have `::1` on their loopback interface, independently of
+    /// having no IPv6 route off the machine. A platform where that turned out
+    /// false fails this test's `bind` loudly, which is the intended outcome:
+    /// this project's one platform-divergent fixture
+    /// (`tests/runtime/file_open_dir.nova`) is `#[cfg(windows)]`-gated with its
+    /// reason written down rather than silently skipped, and a swallowed
+    /// `bind` failure turning into a pass would be precisely the silent skip
+    /// that convention exists to rule out. Should a runner ever lack `::1`, the
+    /// remedy is a gate with its reason recorded here, not a tolerated error.
+    ///
+    /// **Asserts on one poll, not only on the outcome.** Follows
+    /// [`connect_parks_on_its_first_poll_rather_than_completing_synchronously`]
+    /// for the reason that test's own doc comment gives -- a blocking V6
+    /// connect would return `POLL_READY` here and still establish the
+    /// connection, and an end-to-end test that merely drives the executor
+    /// cannot tell a park from a busy spin, since both eventually complete. It
+    /// additionally reads back *what was staged*, which that older test does
+    /// not: a `poll_connect` returning `POLL_PENDING` while staging nothing
+    /// would be busy-re-queued through `QUEUE` and still complete, the same
+    /// hole the `read`/`write` tests below already close for themselves.
+    ///
+    /// **What this cannot distinguish: `sin6_flowinfo` and `sin6_scope_id`.**
+    /// Both are zero for `::1`, and both are zero in a `sockaddr_in6` whose
+    /// construction dropped them, so an implementation that never assigned
+    /// either passes this test. That limit is real and not reasonably
+    /// closable, but it is also bounded: `std`'s `SocketAddr` parser accepts no
+    /// textual syntax for either field, so no `String` a Nova caller can write
+    /// yields a non-zero value for them through [`resolve_addr`] at all. The
+    /// two assignments are unreachable from the Nova surface as anything but
+    /// zero, which makes dropping them unobservable rather than
+    /// untested-and-load-bearing.
+    ///
+    /// **`sin6_addr` is pinned, and that was measured rather than assumed.** A
+    /// construction that left the address zeroed dials `[::]`, the unspecified
+    /// address, and the standing worry was that a platform substitutes loopback
+    /// for it the way every platform here does for IPv4's `0.0.0.0` -- which
+    /// would land that mutation on this test's own listener and survive it,
+    /// `peer_addr` check included, since the address the connection settles on
+    /// would *be* the substituted one. Measured on Windows: it does not, and
+    /// the connect fails outright. Reversed octets fail there too. Whether
+    /// Linux and Darwin refuse `[::]` the same way is reasoned, not measured
+    /// -- the Unix arms of this file are exercised only by CI, and the
+    /// pre-existing V4 tests carry the identical open question about `0.0.0.0`
+    /// for the identical reason, so this is a property of loopback-only
+    /// testing rather than something this test gave up.
+    #[test]
+    fn an_ipv6_connect_parks_on_its_first_poll_and_then_establishes() {
+        let listener = std::net::TcpListener::bind("[::1]:0").expect(
+            "bind an IPv6 loopback listener -- see this test's own doc comment \
+             on why a runner without ::1 must fail here rather than skip",
+        );
+        let addr = listener.local_addr().expect("addr").to_string();
+        assert!(
+            matches!(resolve_addr(&addr), Ok(SocketAddr::V6(_))),
+            "test setup: {addr} must resolve to a V6 socket address, or \
+             nothing below reaches platform_connect's V6 arm at all"
+        );
+
+        let addr_ptr = crate::gc_str(&addr);
+        let fut = unsafe { nova_rt_net_connect_future(addr_ptr) };
+        let (poll, state) = poll_fn_and_state(fut);
+        // SAFETY: `poll`/`state` are the pair inside `fut`, a well-formed
+        // future this module just built; `task_ctx` is null, matching every
+        // other call site in this crate. `stage_io_park` aborts outside a task
+        // context, so one is borrowed for this one manual poll and restored
+        // afterward, the same technique the V4 park test above uses.
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            first, POLL_PENDING,
+            "a non-blocking V6 connect must park on its first poll rather \
+             than complete synchronously"
+        );
+
+        let fd = state_slot_of(fut, CONNECT_SLOT_SOCK);
+        let expected_socket = with_fd(fd, |stream| raw_socket_of(stream))
+            .expect("the first poll must have registered its connecting socket");
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Write, None)),
+            "a V6 connect must genuinely stage a park on Interest::Write for \
+             this exact socket, with no deadline -- not merely return \
+             POLL_PENDING while parking nothing"
+        );
+
+        // The other half: it really connects. `block_on` drives the same
+        // future the rest of the way through the real executor, and
+        // `finish_connect`'s `OK` is `SO_ERROR` reporting no error -- so a
+        // sockaddr this arm built wrong (a port that skipped `to_be`, a family
+        // the socket does not have) fails here rather than being tolerated.
+        assert_eq!(
+            unsafe { crate::task::nova_rt_task_block_on(fut) },
+            OK,
+            "a V6 connect to a live ::1 listener must establish"
+        );
+        let peer = with_fd(fd, |stream| stream.peer_addr())
+            .expect("fd must still be open")
+            .expect("an established connection must have a peer address");
+        assert_eq!(
+            peer,
+            listener.local_addr().expect("addr"),
+            "connect must have landed on this test's own ::1 listener, over \
+             IPv6 -- not on whatever other address a mis-built sockaddr_in6 \
+             happened to name"
+        );
+        let (_server, _) = listener.accept().expect("accept");
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
