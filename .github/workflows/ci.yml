@@ -165,4 +165,14 @@ jobs:
       # it would conflate "the pin works now" with "the wider surface is
       # clean", and benches drag in criterion, whose own floor moves
       # independently of ours.
+      # `-D warnings`, because an MSRV floor is about what 1.78 *accepts*, and
+      # a lint 1.78 emits but stable does not is exactly the drift this job
+      # exists to catch. It went in together with the one such warning in the
+      # tree (`nova-parser`'s `grammar.rs`, an unused `ref e` binding): the
+      # fix alone would have left nothing enforcing it, and the flag alone
+      # would have been red on arrival. Measured before adding: with that one
+      # line fixed, `RUSTFLAGS=-D warnings` at 1.78 is clean across the
+      # workspace.
       - run: cargo check --locked --workspace
+        env:
+          RUSTFLAGS: -D warnings
