@@ -9,6 +9,87 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`std/time`**, a ninth `STD_MODULES` entry (`"$std.time"`, `STD_MODULES`
+  8 → 9): `Instant { nanos: Int }` and `Duration { nanos: Int }`, both a
+  nanosecond count — `Instant`'s since a single process-monotonic origin
+  (`crates/nova-runtime/src/time.rs`'s `epoch()`, a `OnceLock<Instant>`),
+  `Duration`'s a plain span. Eight methods, each one line of Nova arithmetic
+  over the field: `Instant::now()`, `Instant::elapsed(self)`,
+  `Instant::duration_since(self, earlier)` (saturating at zero rather than
+  going negative), and `Duration::from_secs`/`from_millis`/`from_micros`/
+  `as_secs`/`as_millis`. The three constructors **saturate** at the largest
+  representable value instead of wrapping Nova's `Int` past `i64::MAX`, so a
+  duration built from an overflowing count clamps rather than silently
+  going negative and making `sleep` wake instantly. One new runtime
+  intrinsic, `time_now_nanos() -> Int` (`Builtin::STD_ONLY` 58 → 59), narrows
+  the clock reading to `i64`, itself saturating at `i64::MAX` rather than
+  wrapping. `RESERVED_TYPE_NAMES` stays at 7 — `Instant`/`Duration` are
+  ordinary, glob-imported, shadowable `std/time` records, not builtin
+  types, the same standing `TcpStream` and `File` already have.
+- `pub async fn sleep(d: Duration)`, in `std/time` — see Changed, below, for
+  the breaking half of moving it out of `std/task`.
+- The sleep parker is retyped from milliseconds to nanoseconds and renamed
+  in the same change, so the unit change cannot pass silently: `Builtin::
+  TaskSleepFuture` → `Builtin::TaskSleepFutureNanos`, `"task_sleep_future"`
+  → `"task_sleep_future_nanos"`, `RtFunc::TaskSleepFuture` → `RtFunc::
+  TaskSleepFutureNanos`, `nova_rt_task_sleep_future` → `nova_rt_task_sleep_
+  future_nanos`, `deadline_from_ms` → `deadline_from_nanos`, `SLEEP_SLOT_MS`
+  → `SLEEP_SLOT_NANOS`. Twelve call sites across four crates updated
+  mechanically; the typed and MIR signatures are unchanged (`(Int) ->
+  Future<unit>` / `(vec![MirTy::I64], MirTy::Ptr)`) — only the integer's
+  meaning and every name carrying "ms" changed.
+- The poller's zero-timeout invariant now holds down to sub-millisecond
+  deadlines: a remaining duration greater than zero converts to **at least
+  one** platform timeout unit — 1µs on Unix (`select_timeout`), 1ms on
+  Windows (`wsapoll_timeout_ms`), both in `crates/nova-runtime/src/poll.rs`
+  — never truncating to a zero timeout that would turn a park into a busy
+  spin. A remaining duration of exactly zero still converts to zero, since
+  the deadline has already passed. Both arms are pinned by their own unit
+  tests, one per platform.
+- A structural test accessor, `staged_deadline_for_test()` (mirroring the
+  existing `staged_io_for_test()`), closes a gap this design found rather
+  than assumed: the only existing sleep coverage
+  (`tests/runtime/task_sleep_order.nova`) is scale-invariant, so a
+  millisecond-to-nanosecond conversion off by a factor of a million would
+  still pass unnoticed. The new test asserts a 50ms sleep stages a deadline
+  whose **magnitude**, not merely presence, is right — measured against a
+  `before = Instant::now()` taken ahead of the poll, so the lower bound
+  holds by monotonicity regardless of scheduling jitter.
+
+### Changed
+
+Filed here as well as under Added, because this changes the meaning of code
+that already compiled.
+
+- **`std/task::sleep(ms: Int)` is removed; `sleep` now lives in `std/time`,
+  over a `Duration` instead of a bare `Int`** (full detail in the Added
+  entry above). This breaks every program calling `sleep` with a raw
+  integer: `sleep(200)` becomes `sleep(Duration::from_millis(200))`.
+  Same-name coexistence across the two modules was not available to soften
+  the move — `import_std_module` seeds each std module's exports
+  first-write-wins with no diagnostic (`scope.values.entry(n).or_insert(*r)`,
+  `crates/nova-resolver/src/lib.rs`), and `$std.task` is registered ahead of
+  `$std.time`, so a lingering `std/task::sleep` would simply have made
+  `std/time::sleep` invisible in every importing module instead of
+  coexisting with it. Accepted rather than fixed a different way, in the
+  same register `Bytes` joining `RESERVED_TYPE_NAMES` was: a trap silently
+  resolving to whichever definition loads first is worse than one migration
+  line.
+- **`timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>`**,
+  specified in `nova-spec/20-STDLIB.md` §9, **is deliberately not delivered
+  by this increment** — recorded here so the gap reads as a decision, not
+  an oversight. Three measured blockers: `try_stage` treats a second staged
+  deadline as a collision and a collision aborts the process, so both
+  `timeout(d, sleep(..))` and `timeout(d, handle.join())` would abort;
+  `poll_sleep` is edge-triggered where `poll_join` is level-triggered, so a
+  wake merged from an unrelated source could make a timed-out sleep report
+  a completion it never earned; and nothing yet defines what happens to an
+  abandoned inner future's socket registration or GC root when the outer
+  `timeout` fires first. Also recorded in
+  `docs/superpowers/specs/2026-08-17-std-time-design.md` §1 and
+  `nova-spec/20-STDLIB.md` §9's own amendment.
+
 ## [0.2.0-alpha.1] - 2026-08-16
 
 Standard-library-core progress milestone, and a **pre-release on purpose**.

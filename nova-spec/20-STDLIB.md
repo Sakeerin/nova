@@ -523,6 +523,34 @@ pub async fn sleep(d: Duration)
 pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>
 ```
 
+**AMENDED 2026-08-17 (branch `std-time`): `Instant` and `Duration` ship as
+declared above, `timeout`/`TimeoutError` do not, and the `/* opaque */`
+markers state an intent this language cannot enforce.** Both records are
+`{ nanos: Int }` — nanoseconds since a single process-monotonic origin for
+`Instant`, a nanosecond count for `Duration` — with no status-code boundary
+at all, since neither performs I/O and `Instant::now()` is infallible.
+`/* opaque */` above is aspirational, not enforced: Nova has no field
+privacy (`check_record_literal` in `nova-typeck` never consults a field's
+`pub` marker), so `Duration { nanos: -1_000_000_000 }` compiles from any
+module and reaches `sleep` having bypassed every saturating constructor —
+the identical situation `std/net`'s `TcpStream { fd: Int }` (§16) and
+`std/fs`'s `File { fd: Int }` (§5) already document for their own records;
+`/* opaque */` is not currently expressible in this language, for any
+record. `timeout<T>` and `TimeoutError` are not implemented: `try_stage`
+treats a second staged deadline as a collision and a collision aborts the
+process, so both `timeout(d, sleep(..))` and `timeout(d, handle.join())`
+would abort; `poll_sleep` is edge-triggered where `poll_join` is
+level-triggered, so a wake merged from an unrelated source could make a
+timed-out sleep report a completion it never earned; and nothing yet
+defines what happens to an abandoned inner future's socket registration or
+GC root when the outer `timeout` fires first. Separately, the "at least"
+contract `sleep` already promises is platform-asymmetric in its
+granularity: a remaining duration always rounds **up**, to at least one
+microsecond on Unix but at least one whole millisecond on Windows, never
+down to zero, so a real wait can never collapse into a busy spin on either
+platform (`crates/nova-runtime/src/poll.rs`'s `select_timeout` and
+`wsapoll_timeout_ms`).
+
 ---
 
 ## 10. `std/log`

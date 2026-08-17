@@ -33,7 +33,7 @@ pub record Instant { nanos: Int }
 pub record Duration { nanos: Int }
 ```
 
-Both fields are **private** — no `pub` — which is what makes them opaque as §9 requires, and it matches `std/net`'s `TcpStream { fd: Int }` exactly. `std/time`'s own `impl` blocks reach the field because they are in the same module.
+**Correction, made during this increment's own review: the claim this paragraph originally made here was false.** Neither field has `pub`, but that does not make them opaque. `check_record_literal` in `nova-typeck` never consults a field's `pub` marker — Nova has no field privacy at all, measured rather than assumed — so any module can write `Duration { nanos: -1_000_000_000 }` directly and reach `sleep` having bypassed every saturating constructor in §3. This is not new to `std/time`: `std/net`'s `TcpStream { fd: Int }` and `std/fs`'s `File { fd: Int }` (`nova-spec/20-STDLIB.md` §16 and §5) already document the identical fact for their own records. The declaration below omits `pub` on each field for the same reason those two do: nothing outside `std/time` should rely on the field's presence or name, even though the language does not enforce that. `std/time`'s own `impl` blocks reach the field because they are in the same module, unaffected by any of this — the record still discloses the field's shape everywhere else, exactly as `TcpStream` and `File` do.
 
 `Instant.nanos` is nanoseconds since a single process epoch, so every value is non-negative and two `Instant`s are comparable by subtraction. `Duration.nanos` is a nanosecond count.
 
