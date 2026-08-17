@@ -428,8 +428,8 @@ fn select_timeout(d: std::time::Duration) -> libc::timeval {
         micros
     };
     libc::timeval {
-        tv_sec: i64::try_from(micros / 1_000_000).unwrap_or(i64::MAX) as libc::time_t,
-        tv_usec: (micros % 1_000_000) as libc::suseconds_t,
+        tv_sec: libc::time_t::try_from(micros / 1_000_000).unwrap_or(libc::time_t::MAX),
+        tv_usec: libc::suseconds_t::try_from(micros % 1_000_000).unwrap_or(libc::suseconds_t::MAX),
     }
 }
 
