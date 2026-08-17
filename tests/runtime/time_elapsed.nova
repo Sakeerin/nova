@@ -1,0 +1,9 @@
+fn main() {
+    let start = Instant::now()
+    let d = start.elapsed()
+    // A real clock, so assert a range rather than a value. Reaching here takes
+    // far less than an hour, and `elapsed` must never be negative.
+    println("${d.as_millis() >= 0}")
+    println("${d.as_secs() < 3600}")
+    println("${Instant::now().duration_since(start).as_millis() >= 0}")
+}

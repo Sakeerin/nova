@@ -7431,3 +7431,55 @@ fn net_lifetime_run() {
         .success()
         .stdout(expected);
 }
+
+/// `Duration`'s three constructors and two accessors, over fixed inputs with
+/// no real clock involved. See `tests/runtime/time_conversions.nova`'s own
+/// header for why the fourth line (`from_micros(1).as_millis()` is `0`) is
+/// pinned deliberately rather than accidental.
+#[test]
+fn time_conversions_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/time_conversions.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/time_conversions.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Each of `Duration`'s three constructors given one argument past its cap,
+/// which an unclamped constructor would wrap into a negative `Int`, plus
+/// `Instant::duration_since` saturating at zero when the arguments are the
+/// wrong way round. See `tests/runtime/time_saturation.nova`'s own header.
+#[test]
+fn time_saturation_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/time_saturation.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/time_saturation.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `Instant::now`/`elapsed`/`duration_since` against the real monotonic
+/// clock. A real clock varies, so the fixture asserts a range rather than a
+/// value; see `tests/runtime/time_elapsed.nova`'s own header.
+#[test]
+fn time_elapsed_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/time_elapsed.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/time_elapsed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

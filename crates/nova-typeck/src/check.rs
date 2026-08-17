@@ -3963,7 +3963,8 @@ impl<'a> Checker<'a> {
             | Builtin::BytesConcat
             | Builtin::BytesToInts
             | Builtin::BytesFromInts
-            | Builtin::BytesEq => "",
+            | Builtin::BytesEq
+            | Builtin::TimeNowNanos => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7221,6 +7222,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::BytesToInts => (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
         Builtin::BytesFromInts => (vec![Ty::Array(Box::new(Ty::Int))], Ty::Bytes),
         Builtin::BytesEq => (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
+        Builtin::TimeNowNanos => (vec![], Ty::Int),
     }
 }
 
@@ -15294,6 +15296,10 @@ mod tests {
                 Builtin::BytesEq => (
                     (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
                     "`bytes_eq(self, other)` in `impl Eq for Bytes`",
+                ),
+                Builtin::TimeNowNanos => (
+                    (vec![], Ty::Int),
+                    "`time_now_nanos()` in `std/time`'s `Instant::now`",
                 ),
             }
         }

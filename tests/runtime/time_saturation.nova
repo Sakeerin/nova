@@ -1,0 +1,7 @@
+fn main() {
+    println("${Duration::from_secs(9_223_372_037).as_secs()}")
+    println("${Duration::from_millis(9_223_372_036_855).as_secs()}")
+    println("${Duration::from_micros(9_223_372_036_854_776).as_secs()}")
+    let early = Instant::now()
+    println("${early.duration_since(Instant::now()).as_millis()}")
+}
