@@ -3921,7 +3921,7 @@ impl<'a> Checker<'a> {
             | Builtin::TaskDrive
             | Builtin::TaskOutput
             | Builtin::TaskYieldFuture
-            | Builtin::TaskSleepFuture
+            | Builtin::TaskSleepFutureNanos
             | Builtin::TaskJoinFuture
             | Builtin::FsReadToString
             | Builtin::FsWriteString
@@ -7160,7 +7160,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::TaskDrive => (vec![future_of_param0()], Ty::Unit),
         Builtin::TaskOutput => (vec![future_of_param0()], Ty::Param(0)),
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
-        Builtin::TaskSleepFuture => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
+        Builtin::TaskSleepFutureNanos => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskJoinFuture => (vec![future_of_param0()], Ty::Future(Box::new(Ty::Unit))),
         Builtin::FsReadToString => (vec![Ty::String], Ty::Int),
         Builtin::FsWriteString => (vec![Ty::String, Ty::String], Ty::Int),
@@ -15094,9 +15094,9 @@ mod tests {
                     (vec![], Ty::Future(Box::new(Ty::Unit))),
                     "`task_yield_future().await` in `std/task`'s `yield_now`",
                 ),
-                Builtin::TaskSleepFuture => (
+                Builtin::TaskSleepFutureNanos => (
                     (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
-                    "`task_sleep_future(ms).await` in `std/task`'s `sleep`",
+                    "`task_sleep_future_nanos(nanos).await` in `std/time`'s `sleep`",
                 ),
                 Builtin::TaskJoinFuture => (
                     (

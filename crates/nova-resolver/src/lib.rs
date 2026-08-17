@@ -196,18 +196,18 @@ builtins! {
     /// Its future is built by `nova_rt_task_yield_future`, the one poll
     /// function `nova-mir`'s async transform did not generate. Std-only.
     TaskYieldFuture,
-    /// `task_sleep_future(ms: Int) -> Future<unit>` — a fresh future that
-    /// parks for `ms` milliseconds, then completes.
+    /// `task_sleep_future_nanos(nanos: Int) -> Future<unit>` — a fresh future
+    /// that parks for `nanos` nanoseconds, then completes.
     ///
     /// The first builtin that actually parks: unlike
     /// [`Builtin::TaskYieldFuture`], which always resumes on the next turn,
     /// this future registers a deadline with the executor's park set (Task
     /// 1's `Wait::Deadline`) and is not polled again until that deadline
-    /// passes. Backs `std/task`'s `sleep`. A builtin for the same reason
+    /// passes. Backs `std/time`'s `sleep`. A builtin for the same reason
     /// `task_yield_future` is: an `async fn` body suspends only at an
     /// `.await`, and nothing expressible in Nova produces a future that
     /// starts out pending. Std-only.
-    TaskSleepFuture,
+    TaskSleepFutureNanos,
     /// `task_join_future(fut: Future<T>) -> Future<unit>` — a fresh future
     /// that parks until the task named by `fut`'s state completes, then
     /// completes itself.
@@ -226,7 +226,7 @@ builtins! {
     /// deadlock, and is not reported: nothing there is parked, so it still
     /// costs one poll per turn forever, undiagnosed
     /// (`docs/adr/0009-async-execution-model.md` §1's 2026-08-10 amendment).
-    /// A builtin for the same reason `task_sleep_future`
+    /// A builtin for the same reason `task_sleep_future_nanos`
     /// is: an `async fn` body suspends only at an `.await`, and nothing
     /// expressible in Nova produces a future that starts out pending.
     /// Std-only.
@@ -577,7 +577,7 @@ impl Builtin {
             Builtin::TaskDrive => "task_drive",
             Builtin::TaskOutput => "task_output",
             Builtin::TaskYieldFuture => "task_yield_future",
-            Builtin::TaskSleepFuture => "task_sleep_future",
+            Builtin::TaskSleepFutureNanos => "task_sleep_future_nanos",
             Builtin::TaskJoinFuture => "task_join_future",
             Builtin::FsReadToString => "fs_read_to_string",
             Builtin::FsWriteString => "fs_write_string",
@@ -670,7 +670,7 @@ impl Builtin {
         Builtin::TaskDrive,
         Builtin::TaskOutput,
         Builtin::TaskYieldFuture,
-        Builtin::TaskSleepFuture,
+        Builtin::TaskSleepFutureNanos,
         Builtin::TaskJoinFuture,
         Builtin::FsReadToString,
         Builtin::FsWriteString,

@@ -18,8 +18,8 @@
 // discriminate the thing it was meant to prove. See task-3-report.md for
 // the trace and for the design spec passage (3.3) that independently
 // predicts exactly this: "`spawn(forever_yielding())` alongside
-// `sleep(10).await` would hang for good" -- the same mechanism, one task
-// earlier.
+// `sleep(Duration::from_millis(10)).await` would hang for good" -- the same
+// mechanism, one task earlier.
 //
 // The cycle below has no such task: `a` and `b` each park on the other
 // exactly once, on their first and only poll, so the queue drains for real.

@@ -601,7 +601,7 @@ unsafe extern "C-unwind" fn poll_connect(state: *mut u8, _task_ctx: *mut u8) -> 
 /// non-blockingly.
 ///
 /// **The state object is fresh on every call**, not shared, for the same
-/// reason `nova_rt_task_sleep_future`'s doc comment gives: the whole value
+/// reason `nova_rt_task_sleep_future_nanos`'s doc comment gives: the whole value
 /// carried across a suspension is this state object's own resume tag and
 /// socket slot, so two connects in flight at once would otherwise corrupt
 /// each other.
@@ -915,9 +915,9 @@ fn instant_from_remaining_ms(remaining_ms: i64) -> Instant {
 /// same slot with the *absolute* deadline (epoch-relative milliseconds,
 /// [`now_epoch_ms`] plus `ms`), for every later poll to compare against.
 /// Computing the absolute deadline at first-poll time rather than at
-/// construction matches `task.rs`'s own `nova_rt_task_sleep_future`: a future
-/// built but not immediately polled should time out `ms` after it *starts
-/// running*, not after it was merely constructed.
+/// construction matches `task.rs`'s own `nova_rt_task_sleep_future_nanos`: a
+/// future built but not immediately polled should time out `ms` after it
+/// *starts running*, not after it was merely constructed.
 const RT_SLOT_FD: usize = STATE_SLOT_TEMPS;
 const RT_SLOT_MAX: usize = STATE_SLOT_TEMPS + 1;
 const RT_SLOT_DEADLINE: usize = STATE_SLOT_TEMPS + 2;

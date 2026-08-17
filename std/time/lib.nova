@@ -102,3 +102,20 @@ impl Duration {
         self.nanos / NANOS_PER_MILLI
     }
 }
+
+// Suspend the current task for at least `d`.
+//
+// Parks rather than spins: this registers a deadline with the executor and is
+// not polled again until that deadline passes, so a sleeping task costs no
+// polls at all. Contrast `std/task`'s `yield_now`, which is re-queued
+// immediately and deliberately.
+//
+// "At least" is exact, and platform-dependent in one direction only. The
+// executor waits with microsecond granularity on Unix and whole milliseconds
+// on Windows, and a wait is always rounded **up** to the granularity
+// available -- so a sub-millisecond sleep on Windows takes about a
+// millisecond. Rounding up is what makes "at least" true; rounding down would
+// also spin. A non-positive `d` wakes immediately rather than being rejected.
+pub async fn sleep(d: Duration) {
+    task_sleep_future_nanos(d.nanos).await
+}

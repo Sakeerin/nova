@@ -95,7 +95,7 @@
 //!   `nova_rt_task_yield_future`'s `poll_yield_once` (what `yield_now`
 //!   awaits, because an `async fn` body suspends only at an `.await` and
 //!   nothing in the language is a future that is not already ready) and
-//!   `nova_rt_task_sleep_future`'s `poll_sleep` (what `sleep` awaits) are two
+//!   `nova_rt_task_sleep_future_nanos`'s `poll_sleep` (what `sleep` awaits) are two
 //!   of them, not an exhaustive count — `nova_rt_task_join_future`'s
 //!   `poll_join` (what `join` awaits) is a third, added after this paragraph
 //!   was first written, and there may be more by the time this is read.
@@ -119,7 +119,7 @@
 //!
 //! **Corrected 2026-08-11: the inner future a body awaits is a different
 //! allocation, and is not outside this argument.** `task_yield_future`,
-//! `task_sleep_future` and `task_join_future` are called from the awaiting
+//! `task_sleep_future_nanos` and `task_join_future` are called from the awaiting
 //! body itself, so that call -- and the `build_future`/`gc::alloc` inside
 //! it -- runs in the generated `$poll` frame that awaits the result, on
 //! whichever poll first reaches it. Its own no-panic argument is not

@@ -296,6 +296,19 @@ pub(crate) fn staged_io_for_test() -> Option<(RawSocket, Interest, Option<Instan
     })
 }
 
+/// The deadline currently staged by the poll in progress, if any.
+///
+/// The deadline counterpart of [`staged_io_for_test`], and it exists for the
+/// same reason: an outcome test cannot tell a park from a busy spin, because
+/// both complete. Before this, nothing could observe a staged deadline at all
+/// -- so a `sleep` whose unit conversion was wrong by a factor of a million
+/// still passed `tests/runtime/task_sleep_order.nova`, which only pins the
+/// order of a 200 and a 20.
+#[cfg(test)]
+pub(crate) fn staged_deadline_for_test() -> Option<Instant> {
+    PENDING_PARK.with(|cell| cell.get().deadline)
+}
+
 /// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
 /// the collector has just returned to the allocator.
 ///
@@ -1463,14 +1476,15 @@ pub extern "C-unwind" fn nova_rt_task_yield_future() -> *mut u8 {
 /// fail.
 unsafe extern "C-unwind" fn poll_sleep(state: *mut u8, _task_ctx: *mut u8) -> i64 {
     let slots = state as *mut i64;
-    // SAFETY: `state` is the state object `nova_rt_task_sleep_future` built,
-    // of at least `STATE_MIN_SIZE` bytes, so every slot below is in bounds.
+    // SAFETY: `state` is the state object `nova_rt_task_sleep_future_nanos`
+    // built, of at least `STATE_MIN_SIZE` bytes, so every slot below is in
+    // bounds.
     let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
     if tag == 0 {
         unsafe { slots.add(STATE_SLOT_TAG).write(1) };
         // SAFETY: same object; the deadline was stored here at construction.
-        let ms = unsafe { slots.add(SLEEP_SLOT_MS).read() };
-        stage_park(Wait::Deadline(deadline_from_ms(ms)));
+        let nanos = unsafe { slots.add(SLEEP_SLOT_NANOS).read() };
+        stage_park(Wait::Deadline(deadline_from_nanos(nanos)));
         return POLL_PENDING;
     }
     // SAFETY: same object, output slot.
@@ -1478,40 +1492,40 @@ unsafe extern "C-unwind" fn poll_sleep(state: *mut u8, _task_ctx: *mut u8) -> i6
     POLL_READY
 }
 
-/// `ms` milliseconds from now, clamping a negative value to "now".
+/// `nanos` nanoseconds from now, clamping a non-positive value to "now".
 ///
 /// Nova's `Int` is signed and nothing stops `sleep(-1)`; treating it as an
 /// immediate wake keeps the executor's invariants intact without inventing a
 /// new failure mode for an argument that is merely useless.
-fn deadline_from_ms(ms: i64) -> Instant {
-    let ms = u64::try_from(ms).unwrap_or(0);
-    Instant::now() + Duration::from_millis(ms)
+fn deadline_from_nanos(nanos: i64) -> Instant {
+    let nanos = u64::try_from(nanos).unwrap_or(0);
+    Instant::now() + Duration::from_nanos(nanos)
 }
 
-/// Where `nova_rt_task_sleep_future` stores its argument. One past the last
-/// slot the ABI reserves, so the state object is one word larger than
+/// Where `nova_rt_task_sleep_future_nanos` stores its argument. One past the
+/// last slot the ABI reserves, so the state object is one word larger than
 /// `STATE_MIN_SIZE`.
-const SLEEP_SLOT_MS: usize = STATE_SLOT_TEMPS;
+const SLEEP_SLOT_NANOS: usize = STATE_SLOT_TEMPS;
 
 /// State size for a sleep future: the ABI minimum plus the one temp slot
-/// holding `ms`.
+/// holding `nanos`.
 const SLEEP_STATE_SIZE: usize = STATE_MIN_SIZE + 8;
 
-const _: () = assert!(SLEEP_STATE_SIZE >= (SLEEP_SLOT_MS + 1) * 8);
+const _: () = assert!(SLEEP_STATE_SIZE >= (SLEEP_SLOT_NANOS + 1) * 8);
 
-/// A fresh `Future<unit>` that parks for `ms` milliseconds, then completes.
+/// A fresh `Future<unit>` that parks for `nanos` nanoseconds, then completes.
 ///
 /// Same layout obligation as [`nova_rt_task_yield_future`]: a scanned
 /// [`FUTURE_SIZE`] fat pointer over a scanned state object, built to the
 /// layout `async_lower.rs` independently emits. A fresh state object per call,
 /// because the resume tag *and* the deadline are per-suspension.
 #[no_mangle]
-pub extern "C-unwind" fn nova_rt_task_sleep_future(ms: i64) -> *mut u8 {
+pub extern "C-unwind" fn nova_rt_task_sleep_future_nanos(nanos: i64) -> *mut u8 {
     let poll: PollFn = poll_sleep;
     build_future(poll, SLEEP_STATE_SIZE, |slots| {
         // SAFETY: `slots` addresses a live `SLEEP_STATE_SIZE` block, and
-        // `SLEEP_SLOT_MS` is in bounds by the assertion above.
-        unsafe { slots.add(SLEEP_SLOT_MS).write(ms) };
+        // `SLEEP_SLOT_NANOS` is in bounds by the assertion above.
+        unsafe { slots.add(SLEEP_SLOT_NANOS).write(nanos) };
     })
 }
 
@@ -2356,27 +2370,28 @@ mod tests {
         );
     }
 
-    /// The exact layout `nova_rt_task_sleep_future` builds, read back from
-    /// the collector's own records -- the same discipline as
+    /// The exact layout `nova_rt_task_sleep_future_nanos` builds, read back
+    /// from the collector's own records -- the same discipline as
     /// `the_yield_futures_layout_is_the_one_the_abi_declares`, and for the
     /// identical reason, but this one is load-bearing in a way that test is
     /// not: a review of this function caught a `build_future` call site
     /// passing `STATE_MIN_SIZE` where `SLEEP_STATE_SIZE` belonged -- one word
-    /// short of what `nova_rt_task_sleep_future`'s own `init` closure writes
-    /// -- and neither existing guard caught it. The compile-time assertion
-    /// beside `SLEEP_STATE_SIZE` is a relation between two constants and is
-    /// blind to what a call site actually passes; `build_future`'s own
-    /// `debug_assert!(state_size >= STATE_MIN_SIZE)` is a floor, and
-    /// `STATE_MIN_SIZE` itself satisfies its own floor. Reading the words
-    /// back out of the state object cannot catch it either, for the same
-    /// reason the sibling test's doc comment gives: a too-small allocation
-    /// with slop after it still reads back whatever was written, silently,
-    /// until something else happens to occupy that word. Only the
-    /// collector's own recorded size distinguishes "16 bytes, and `ms` was
-    /// written one word past the end" from "24 bytes, exactly as declared."
+    /// short of what `nova_rt_task_sleep_future_nanos`'s own `init` closure
+    /// writes -- and neither existing guard caught it. The compile-time
+    /// assertion beside `SLEEP_STATE_SIZE` is a relation between two
+    /// constants and is blind to what a call site actually passes;
+    /// `build_future`'s own `debug_assert!(state_size >= STATE_MIN_SIZE)` is
+    /// a floor, and `STATE_MIN_SIZE` itself satisfies its own floor. Reading
+    /// the words back out of the state object cannot catch it either, for
+    /// the same reason the sibling test's doc comment gives: a too-small
+    /// allocation with slop after it still reads back whatever was written,
+    /// silently, until something else happens to occupy that word. Only the
+    /// collector's own recorded size distinguishes "16 bytes, and `nanos`
+    /// was written one word past the end" from "24 bytes, exactly as
+    /// declared."
     #[test]
     fn the_sleep_futures_layout_is_the_one_the_abi_declares() {
-        let fut = nova_rt_task_sleep_future(0);
+        let fut = nova_rt_task_sleep_future_nanos(0);
         assert_eq!(
             gc::object_info(fut as usize),
             Some((FUTURE_SIZE, true)),
@@ -2387,7 +2402,7 @@ mod tests {
             gc::object_info(state),
             Some((SLEEP_STATE_SIZE, true)),
             "the state object must be the ABI minimum plus the one temp slot \
-             holding `ms`, scanned"
+             holding `nanos`, scanned"
         );
         // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block.
         let poll = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
@@ -2395,6 +2410,49 @@ mod tests {
         assert_eq!(
             poll, expected as usize,
             "word 0 must be the poll function's address, not the state's"
+        );
+    }
+
+    /// A 50ms sleep must stage a deadline roughly 50ms out -- the magnitude,
+    /// not merely the presence of some deadline.
+    ///
+    /// `before` is captured **outside** the poll on purpose. The staged
+    /// deadline is computed at or after `before`, so by monotonicity the
+    /// difference is at least the requested 50ms however long this thread is
+    /// descheduled; measuring from after the poll could drift below any lower
+    /// bound and flake. The window is loose against jitter and tight against
+    /// unit errors: a millionfold overshoot stages ~50,000 seconds and fails
+    /// the upper bound, a millionfold undershoot stages ~50ns and fails the
+    /// lower one.
+    #[test]
+    fn a_sleep_stages_a_deadline_of_the_right_magnitude() {
+        let before = Instant::now();
+        let fut = nova_rt_task_sleep_future_nanos(50 * 1_000_000);
+        // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block, so word 0
+        // is its poll function -- exactly how
+        // `the_sleep_futures_layout_is_the_one_the_abi_declares` reads it.
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: that word is a `PollFn` bit pattern by `fut`'s own
+        // construction; a fn pointer and a `usize` are both pointer-width.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+
+        // `stage_park` aborts outside a task context, so borrow one for this
+        // single manual poll and put back whatever was there.
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        // SAFETY: `poll`/`state` are the pair inside `fut`; `task_ctx` is
+        // always null, matching every other call site in this crate.
+        let first = unsafe { poll(state, std::ptr::null_mut()) };
+        let staged = staged_deadline_for_test();
+        set_current_for_test(previous);
+
+        assert_eq!(first, POLL_PENDING, "a sleep must park on its first poll");
+        let staged = staged.expect("a sleep must stage a deadline");
+        let delta = staged.duration_since(before);
+        assert!(
+            delta >= Duration::from_millis(40) && delta <= Duration::from_millis(500),
+            "a 50ms sleep staged a deadline {delta:?} out -- a unit error, not jitter"
         );
     }
 
