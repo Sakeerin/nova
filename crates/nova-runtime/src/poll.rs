@@ -325,8 +325,7 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             // indefinitely.
             None => std::ptr::null_mut(),
             Some(d) => {
-                tv.tv_sec = d.as_secs() as libc::time_t;
-                tv.tv_usec = libc::suseconds_t::from(d.subsec_micros() as i32);
+                tv = select_timeout(d);
                 std::ptr::addr_of_mut!(tv)
             }
         };
@@ -408,6 +407,32 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
     }
 }
 
+/// A `Duration` as a `select` timeout, **never rounding a real wait down to
+/// zero**.
+///
+/// `select` treats an all-zero `timeval` as "poll and return at once", so a
+/// remaining duration under one microsecond would truncate to zero and the
+/// drive loop would spin until the deadline passed. Any non-zero duration
+/// therefore becomes at least one microsecond.
+///
+/// This is not a workaround for the platform: `sleep` promises to suspend for
+/// *at least* the requested time, so rounding up honours the contract and
+/// truncating down breaks it. Exactly zero stays zero, because then the
+/// deadline really has passed.
+#[cfg(unix)]
+fn select_timeout(d: std::time::Duration) -> libc::timeval {
+    let micros = d.as_micros();
+    let micros = if micros == 0 && !d.is_zero() {
+        1
+    } else {
+        micros
+    };
+    libc::timeval {
+        tv_sec: i64::try_from(micros / 1_000_000).unwrap_or(i64::MAX) as libc::time_t,
+        tv_usec: (micros % 1_000_000) as libc::suseconds_t,
+    }
+}
+
 // Reached only through `set_nonblocking` above, which `net.rs` calls -- so
 // this is live, and the `#[allow(dead_code)]` that used to sit here (for as
 // long as `net.rs` did not exist) is gone with its reason.
@@ -475,7 +500,7 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             // `None` (no deadline): `WSAPoll` blocks indefinitely on a
             // negative timeout.
             None => -1,
-            Some(d) => i32::try_from(d.as_millis()).unwrap_or(i32::MAX),
+            Some(d) => wsapoll_timeout_ms(d),
         };
 
         // SAFETY: `fds` is a live, uniquely-owned buffer of `fds.len()`
@@ -534,6 +559,27 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
         }
         return ready;
     }
+}
+
+/// A `Duration` as a `WSAPoll` timeout in whole milliseconds, **never
+/// rounding a real wait down to zero**.
+///
+/// `WSAPoll` returns immediately on `0`, so a sub-millisecond remainder would
+/// truncate to zero and the drive loop would spin until the deadline passed.
+/// Any non-zero duration becomes at least 1ms -- which is also the only
+/// behaviour consistent with `sleep` promising *at least* the requested time.
+/// Windows is the coarser of the two arms: 1ms is the finest wait it can
+/// express, so sub-millisecond sleeps are rounded up here and cannot be
+/// honoured exactly.
+#[cfg(windows)]
+fn wsapoll_timeout_ms(d: std::time::Duration) -> i32 {
+    let millis = d.as_millis();
+    let millis = if millis == 0 && !d.is_zero() {
+        1
+    } else {
+        millis
+    };
+    i32::try_from(millis).unwrap_or(i32::MAX)
 }
 
 // Reached only through `set_nonblocking` above, which `net.rs` calls -- so
@@ -866,6 +912,56 @@ mod tests {
             err.kind(),
             std::io::ErrorKind::WouldBlock,
             "a non-blocking socket with nothing to read must fail with WouldBlock, not block"
+        );
+    }
+
+    /// A remaining duration below one microsecond must not become a zero
+    /// `timeval`. `select` with an all-zero timeout returns immediately, so
+    /// the drive loop would re-poll and spin until the deadline passed --
+    /// which no end-to-end test can distinguish from a fast completion.
+    #[cfg(unix)]
+    #[test]
+    fn a_sub_microsecond_wait_rounds_up_to_one_microsecond() {
+        let tv = select_timeout(Duration::from_nanos(1));
+        assert_eq!((tv.tv_sec, tv.tv_usec), (0, 1));
+    }
+
+    /// Exactly zero still means zero: the deadline has passed, and returning
+    /// immediately is the correct answer rather than a spin.
+    #[cfg(unix)]
+    #[test]
+    fn a_zero_wait_stays_zero() {
+        let tv = select_timeout(Duration::ZERO);
+        assert_eq!((tv.tv_sec, tv.tv_usec), (0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_second_is_carried_in_tv_sec() {
+        let tv = select_timeout(Duration::from_millis(1500));
+        assert_eq!((tv.tv_sec, tv.tv_usec), (1, 500_000));
+    }
+
+    /// The same rule one unit coarser: `WSAPoll` takes whole milliseconds and
+    /// treats 0 as "return at once".
+    #[cfg(windows)]
+    #[test]
+    fn a_sub_millisecond_wait_rounds_up_to_one_millisecond() {
+        assert_eq!(wsapoll_timeout_ms(Duration::from_micros(500)), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_zero_wait_stays_zero() {
+        assert_eq!(wsapoll_timeout_ms(Duration::ZERO), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_long_wait_saturates_rather_than_wrapping() {
+        assert_eq!(
+            wsapoll_timeout_ms(Duration::from_secs(u64::MAX / 1000)),
+            i32::MAX
         );
     }
 }
