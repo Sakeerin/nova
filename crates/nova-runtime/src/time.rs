@@ -45,17 +45,26 @@ mod tests {
         assert_eq!(epoch(), epoch());
     }
 
+    /// A reading must advance by at least as much wall time as really passed.
+    ///
+    /// This is the assertion the earlier version of this test lacked: a
+    /// non-negativity check cannot fail, because `as_nanos` is `u128` and the
+    /// `unwrap_or(i64::MAX)` fallback is positive, so it held for any
+    /// implementation at all -- including one returning a constant. Sleeping a
+    /// real interval and requiring the delta to cover it kills a frozen clock,
+    /// a constant, and a reading taken from the wrong origin, while still not
+    /// being able to flake: the clock is monotonic and `sleep` guarantees a
+    /// lower bound, so the delta can only be larger than the interval.
     #[test]
-    fn readings_are_non_negative_and_non_decreasing() {
+    fn a_reading_advances_by_at_least_the_time_that_passed() {
+        let slept = std::time::Duration::from_millis(2);
         let first = nova_rt_time_now_nanos();
+        std::thread::sleep(slept);
         let second = nova_rt_time_now_nanos();
+        let delta = second - first;
         assert!(
-            first >= 0,
-            "a reading relative to the process epoch cannot be negative: {first}"
-        );
-        assert!(
-            second >= first,
-            "monotonic clock went backwards: {second} < {first}"
+            delta >= i64::try_from(slept.as_nanos()).expect("2ms fits in i64"),
+            "a {slept:?} sleep advanced the clock by only {delta}ns"
         );
     }
 }

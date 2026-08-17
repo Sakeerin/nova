@@ -871,16 +871,16 @@ pub unsafe extern "C-unwind" fn nova_rt_net_write_future(
 /// A fixed point in time `read_timeout`'s deadline arithmetic measures
 /// against, lazily fixed on first use.
 ///
-/// The same technique `poll.rs`'s own (private) `log_epoch` uses, reproduced
-/// here rather than shared across modules -- only relative elapsed time is
-/// ever compared against it, so an arbitrary origin is fine, and this
-/// module's reason to want one is different from that one's (rate-limiting a
-/// log line there; encoding a deadline as a plain, scannable `i64` here). A
-/// `std::time::Instant` has no documented byte layout this module could
-/// safely write into one of its own state slots directly the way it writes a
-/// plain fd or count there -- so `read_timeout` stores milliseconds-since-
-/// this-epoch instead, the same spirit as `CONNECT_SLOT_SOCK` storing a plain
-/// fd rather than a `TcpStream`.
+/// **A separate origin from `crate::time::epoch`, on purpose.** Only relative
+/// elapsed time is ever compared against this one, so an arbitrary origin is
+/// fine -- but what this module needs from a clock reading is a different job
+/// from what `crate::time::epoch` is for: encoding a deadline as a plain,
+/// scannable `i64` a state slot can hold, not handing back a
+/// `std::time::Instant` itself. A `std::time::Instant` has no documented byte
+/// layout this module could safely write into one of its own state slots
+/// directly the way it writes a plain fd or count there -- so `read_timeout`
+/// stores milliseconds-since-this-epoch instead, the same spirit as
+/// `CONNECT_SLOT_SOCK` storing a plain fd rather than a `TcpStream`.
 fn deadline_epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     *EPOCH.get_or_init(Instant::now)
