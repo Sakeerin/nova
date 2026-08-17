@@ -4,22 +4,26 @@
 // these names need no `import`. A user definition of the same name shadows the
 // one here (see docs/adr/0004-stdlib-compile-model.md).
 //
-// This module is the whole of the surface between Nova source and the
-// single-threaded cooperative executor in `crates/nova-runtime/src/task.rs`.
-// Every function here is a thin wrapper over a std-only builtin, and each
-// wrapper exists because the builtin it calls cannot be generic on its own: a
-// builtin's signature is a fixed list of types, so `Future<T>` in one of them
-// means "the first type parameter of whatever generic function is calling me"
-// (see `builtin_signature` in `nova-typeck`). That is why every generic
-// function below declares exactly one type parameter, and why it is `T`.
+// This module, together with `std/time`'s `sleep`, is the whole of the
+// surface between Nova source and the single-threaded cooperative executor in
+// `crates/nova-runtime/src/task.rs`. `sleep` lives in `std/time` because it
+// takes a `Duration`, but it wraps `task_sleep_future_nanos`, whose runtime
+// function and park set both live here -- a maintainer auditing every seam
+// into the park set needs both modules, not just this one. Every function
+// here is a thin wrapper over a std-only builtin, and each wrapper exists
+// because the builtin it calls cannot be generic on its own: a builtin's
+// signature is a fixed list of types, so `Future<T>` in one of them means
+// "the first type parameter of whatever generic function is calling me" (see
+// `builtin_signature` in `nova-typeck`). That is why every generic function
+// below declares exactly one type parameter, and why it is `T`.
 //
 // The executor is single-threaded and has no wakers of its own: a suspended
 // task is re-queued for its next turn unless it parks — waiting on a
-// deadline (`sleep`) or another task's completion (`join`) — in which case
-// it resumes only once that deadline passes or that task finishes, the
-// executor's only two wake sources. `spawn` starts nothing on its own, and
-// every task on a thread is advanced only while a `block_on` call is
-// running. See that module's own doc comment, and ADR 0009.
+// deadline (`std/time`'s `sleep`) or another task's completion (`join`) —
+// in which case it resumes only once that deadline passes or that task
+// finishes, the executor's only two wake sources. `spawn` starts nothing on
+// its own, and every task on a thread is advanced only while a `block_on`
+// call is running. See that module's own doc comment, and ADR 0009.
 
 // A handle on a spawned task, holding nothing but the future it is driving.
 //

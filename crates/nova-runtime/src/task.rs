@@ -1482,7 +1482,8 @@ unsafe extern "C-unwind" fn poll_sleep(state: *mut u8, _task_ctx: *mut u8) -> i6
     let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
     if tag == 0 {
         unsafe { slots.add(STATE_SLOT_TAG).write(1) };
-        // SAFETY: same object; the deadline was stored here at construction.
+        // SAFETY: same object; the duration (in nanoseconds) was stored here
+        // at construction -- the deadline itself is computed below, now.
         let nanos = unsafe { slots.add(SLEEP_SLOT_NANOS).read() };
         stage_park(Wait::Deadline(deadline_from_nanos(nanos)));
         return POLL_PENDING;
@@ -2445,6 +2446,19 @@ mod tests {
         // always null, matching every other call site in this crate.
         let first = unsafe { poll(state, std::ptr::null_mut()) };
         let staged = staged_deadline_for_test();
+        // This manual poll never goes through `poll_one`'s own cleanup, so
+        // unlike a real poll, the `Wait::Deadline` it just staged is left
+        // sitting in `PENDING_PARK` unless something here drains it. Left in
+        // place, the next test to stage a park on this thread -- if one runs
+        // before anything else clears it, which `--test-threads=1` makes
+        // deterministic rather than merely possible -- collides with it, and
+        // `stage_park` aborts the whole process over two parks it never
+        // staged itself. Draining with the same `Cell::take` `poll_one` uses
+        // (line ~674) resets `PENDING_PARK` to empty, exactly as if this
+        // poll's park had been committed and later cleared.
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
         set_current_for_test(previous);
 
         assert_eq!(first, POLL_PENDING, "a sleep must park on its first poll");
