@@ -68,6 +68,8 @@ mod poll;
 /// which both defeats their purpose and makes rustc's `dead_code` lint treat
 /// them as genuinely dead, since nothing inside this crate alone uses them.
 pub mod task;
+/// The monotonic clock behind `std/time`.
+mod time;
 
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
 #[repr(C)]
@@ -598,6 +600,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             bytes::nova_rt_bytes_from_ints as *const u8,
         ),
         ("nova_rt_bytes_eq", bytes::nova_rt_bytes_eq as *const u8),
+        (
+            "nova_rt_time_now_nanos",
+            time::nova_rt_time_now_nanos as *const u8,
+        ),
     ]
 }
 
