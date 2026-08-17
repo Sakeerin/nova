@@ -28,7 +28,6 @@
 //! exercises it *directly*.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// A socket as the poller sees it: the OS handle, widened to `i64` so
@@ -130,14 +129,6 @@ fn remaining(deadline: Option<Instant>) -> Option<Duration> {
 /// `wait`'s own doc comment) could actually resolve.
 const ERROR_RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
-/// A fixed point in time this module measures log rate-limiting against,
-/// lazily fixed on first use. Only relative elapsed time matters for
-/// [`LogGate`], so an arbitrary origin is fine.
-fn log_epoch() -> Instant {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
-}
-
 /// How often a single `tracing::warn!` call site in this module may log, at
 /// most. `wait` can be re-called every [`ERROR_RETRY_BACKOFF`] for a
 /// condition that persists indefinitely (see `wait`'s own doc comment), and
@@ -169,9 +160,9 @@ impl LogGate {
     /// timestamp, so a fresh gate's first call reduced to
     /// `now_ms.saturating_sub(0) < LOG_RATE_LIMIT` -- denied exactly when
     /// that gate was first reached within [`LOG_RATE_LIMIT`] of the instant
-    /// [`log_epoch`] was fixed, and allowed normally when it was first
+    /// `crate::time::epoch` was fixed, and allowed normally when it was first
     /// reached after that. That window always caught the gate that fixed the
-    /// epoch, since [`log_epoch`] is `Instant::now()` at whichever gate
+    /// epoch, since `crate::time::epoch` is `Instant::now()` at whichever gate
     /// touches it first and so *that* gate's own first `elapsed()` reads back
     /// ~0. Where a platform arm has a single gate (Windows) that is every
     /// site; where it has two (Unix) a gate first reached later than the
@@ -179,11 +170,11 @@ impl LogGate {
     /// call it did deny lost the first, and often most diagnostically
     /// valuable, occurrence of whatever that gate protects.
     fn allow(&self) -> bool {
-        self.allow_at(log_epoch().elapsed().as_millis() as u64)
+        self.allow_at(crate::time::epoch().elapsed().as_millis() as u64)
     }
 
     /// [`LogGate::allow`] against a caller-supplied clock reading, in
-    /// milliseconds since [`log_epoch`]. Split out so this module's tests can
+    /// milliseconds since `crate::time::epoch`. Split out so this module's tests can
     /// pin the window's exact boundaries -- and the re-arm after one opens --
     /// without sleeping through a real [`LOG_RATE_LIMIT`]. Production reads
     /// the clock in `allow` and pays nothing for the split.
@@ -625,13 +616,13 @@ mod tests {
         // it only has to put the epoch far enough behind that a genuine
         // reading cannot itself be `0`, which is what would let a hardcoded
         // `0` masquerade as one.
-        let _ = log_epoch();
+        let _ = crate::time::epoch();
         std::thread::sleep(Duration::from_millis(30));
 
-        let before = log_epoch().elapsed().as_millis() as u64;
+        let before = crate::time::epoch().elapsed().as_millis() as u64;
         let gate = LogGate::new();
         assert!(gate.allow(), "a fresh gate's first call must be allowed");
-        let after = log_epoch().elapsed().as_millis() as u64;
+        let after = crate::time::epoch().elapsed().as_millis() as u64;
 
         // `Instant::elapsed` is monotonic, so the reading `allow` took is
         // bracketed by the two around it -- no timing slack to flake on.
@@ -640,7 +631,7 @@ mod tests {
         let stamped = recorded - 1;
         assert!(
             stamped >= before && stamped <= after,
-            "allow() must stamp the gate with what log_epoch() reads at the \
+            "allow() must stamp the gate with what crate::time::epoch() reads at the \
              moment of the call ({before}..={after}ms), not a constant: got \
              {stamped}ms"
         );
