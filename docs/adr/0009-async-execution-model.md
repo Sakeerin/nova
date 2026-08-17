@@ -629,12 +629,21 @@ Two companion rules, from the same evidence:
   `spawn_internal`, `take_output_internal`, `nova_rt_task_block_on`,
   `nova_rt_task_yield_future` — and, from the 2026-08-10 `park-set` amendment
   above, `Wait`, `PARKED`, `stage_park`, `wake_due`/`wake_due_deadlines`,
-  `wake_tasks_waiting_on`, `nova_rt_task_sleep_future`,
-  `nova_rt_task_join_future`, `deadlock_report`/`report_deadlock`
+  `wake_tasks_waiting_on`, `nova_rt_task_sleep_future_nanos`,
+  `nova_rt_task_join_future`, `deadlock_report`/`report_deadlock` —
+  `nova_rt_task_sleep_future_nanos` was `nova_rt_task_sleep_future`, renamed
+  and retyped from milliseconds to nanoseconds in the same change
+  (2026-08-17, `std-time`)
 - `crates/nova-mir/src/async_lower.rs`: the state-machine transform, the
   `Spiller`, and the state-size guard
-- `std/task/lib.nova`: `spawn`, `JoinHandle`, `join`, `yield_now`, `block_on`,
-  and `sleep` (2026-08-10, `park-set`)
+- `std/task/lib.nova`: `spawn`, `JoinHandle`, `join`, `yield_now`, `block_on`
+  (2026-08-10, `park-set`) — `sleep` no longer lives here; it moved to
+  `std/time/lib.nova`, over a `Duration` rather than a bare `Int` of
+  milliseconds (2026-08-17, `std-time`)
+- `std/time/lib.nova`: `Instant`, `Duration`, `sleep` (2026-08-17,
+  `std-time`) — `sleep` is `std/task`'s former primitive, retyped from
+  `(ms: Int)` to `(d: Duration)` in the same change that retyped its parker,
+  `nova_rt_task_sleep_future_nanos` above, from milliseconds to nanoseconds
 - Gate: `tests/runtime/async_tasks.{nova,stdout}`, registered as
   `gate_async_tasks_run`, `gate_async_tasks_build_standalone` and
   `gate_async_tasks_under_gc_stress` (`crates/nova-cli/tests/run_tests.rs`)
