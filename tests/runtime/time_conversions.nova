@@ -1,0 +1,8 @@
+fn main() {
+    println("${Duration::from_secs(1).as_millis()}")
+    println("${Duration::from_millis(1500).as_secs()}")
+    println("${Duration::from_millis(1500).as_millis()}")
+    println("${Duration::from_micros(1).as_millis()}")
+    println("${Duration::from_micros(2500).as_millis()}")
+    println("${Duration::from_secs(0).as_secs()}")
+}

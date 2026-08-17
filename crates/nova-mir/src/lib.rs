@@ -393,6 +393,8 @@ rt_funcs! {
     BytesFromInts,
     /// `(bytes, bytes) -> i8` — byte-for-byte equality.
     BytesEq,
+    /// `() -> i64` — nanoseconds since the runtime's process epoch.
+    TimeNowNanos,
 }
 
 impl RtFunc {
@@ -469,6 +471,7 @@ impl RtFunc {
             RtFunc::BytesToInts => "nova_rt_bytes_to_ints",
             RtFunc::BytesFromInts => "nova_rt_bytes_from_ints",
             RtFunc::BytesEq => "nova_rt_bytes_eq",
+            RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
         }
     }
 
@@ -556,6 +559,7 @@ impl RtFunc {
             RtFunc::BytesToInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesFromInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
+            RtFunc::TimeNowNanos => (vec![], MirTy::I64),
         }
     }
 }

@@ -1,0 +1,96 @@
+// A point on this process's monotonic clock.
+//
+// Opaque: `nanos` is private, so a program obtains an `Instant` only from
+// `now()` and compares two only through `duration_since` or `elapsed`. Held
+// as nanoseconds since the runtime's single process epoch, so a reading is
+// never negative and two `Instant`s are ordered by subtraction.
+pub record Instant { nanos: Int }
+
+// A span of time, opaque for the same reason and held in nanoseconds.
+//
+// Nanoseconds rather than a coarser unit because all three constructors below
+// are then exactly representable, and because `elapsed` is a measurement whose
+// precision a coarser unit would discard.
+pub record Duration { nanos: Int }
+
+const NANOS_PER_SEC: Int = 1_000_000_000
+const NANOS_PER_MILLI: Int = 1_000_000
+const NANOS_PER_MICRO: Int = 1_000
+
+// The largest argument each constructor can scale without overflowing an
+// `Int` of nanoseconds, and the clamped result for anything larger.
+//
+// These exist because **Nova's `Int` wraps** -- measured:
+// `9223372036854775807 + 1` is `-9223372036854775808`. A wrapped duration can
+// be negative, and `sleep` treats a non-positive duration as an immediate
+// wake, so an unclamped `from_secs` would turn "sleep for ages" into "do not
+// sleep at all", silently. Clamping yields a saturated answer instead of a
+// wrong one -- the no-panic analogue of Rust's `Duration::from_secs`, which
+// panics on the same overflow.
+const MAX_SECS: Int = 9_223_372_036
+const MAX_MILLIS: Int = 9_223_372_036_854
+const MAX_MICROS: Int = 9_223_372_036_854_775
+const MAX_NANOS: Int = 9_223_372_036_854_775_807
+
+impl Instant {
+    // The current reading of the monotonic clock.
+    pub fn now() -> Instant {
+        Instant { nanos: time_now_nanos() }
+    }
+
+    // How long since `self`. Zero if `self` is somehow in the future.
+    pub fn elapsed(self) -> Duration {
+        Instant::now().duration_since(self)
+    }
+
+    // The span from `earlier` to `self`, **saturating at zero** so an elapsed
+    // time can never come back negative when the arguments are the wrong way
+    // round.
+    pub fn duration_since(self, earlier: Instant) -> Duration {
+        if self.nanos <= earlier.nanos {
+            Duration { nanos: 0 }
+        } else {
+            Duration { nanos: self.nanos - earlier.nanos }
+        }
+    }
+}
+
+impl Duration {
+    // Whole seconds. Clamps above `MAX_SECS`; see the constants above.
+    pub fn from_secs(s: Int) -> Duration {
+        if s > MAX_SECS {
+            Duration { nanos: MAX_NANOS }
+        } else {
+            Duration { nanos: s * NANOS_PER_SEC }
+        }
+    }
+
+    // Whole milliseconds. Clamps above `MAX_MILLIS`.
+    pub fn from_millis(ms: Int) -> Duration {
+        if ms > MAX_MILLIS {
+            Duration { nanos: MAX_NANOS }
+        } else {
+            Duration { nanos: ms * NANOS_PER_MILLI }
+        }
+    }
+
+    // Whole microseconds. Clamps above `MAX_MICROS`.
+    pub fn from_micros(us: Int) -> Duration {
+        if us > MAX_MICROS {
+            Duration { nanos: MAX_NANOS }
+        } else {
+            Duration { nanos: us * NANOS_PER_MICRO }
+        }
+    }
+
+    // Whole seconds, truncating. `from_millis(1500).as_secs()` is `1`.
+    pub fn as_secs(self) -> Int {
+        self.nanos / NANOS_PER_SEC
+    }
+
+    // Whole milliseconds, truncating. `from_micros(1).as_millis()` is `0`,
+    // which `tests/runtime/time_conversions.nova` pins deliberately.
+    pub fn as_millis(self) -> Int {
+        self.nanos / NANOS_PER_MILLI
+    }
+}

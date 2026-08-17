@@ -542,6 +542,15 @@ builtins! {
     /// `Bytes` equality is reached only through the `Eq` trait's `eq` method,
     /// so `binary_result_ty` needs no `Ty::Bytes` arm for `==`/`!=`. Std-only.
     BytesEq,
+    /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
+    /// process epoch, monotonic and never negative.
+    ///
+    /// The only part of `std/time` that cannot be Nova code: `Instant` and
+    /// `Duration` arithmetic is plain multiplication, division and
+    /// subtraction over a private `Int`, so nothing else in §9 needs to cross
+    /// into Rust. Saturates at `i64::MAX` rather than wrapping; see
+    /// `nova_rt_time_now_nanos`. Std-only.
+    TimeNowNanos,
 }
 
 impl Builtin {
@@ -617,6 +626,7 @@ impl Builtin {
             // `pub fn bytes_from_ints` wrapper.
             Builtin::BytesFromInts => "bytes_from_ints_intrinsic",
             Builtin::BytesEq => "bytes_eq",
+            Builtin::TimeNowNanos => "time_now_nanos",
         }
     }
 
@@ -644,7 +654,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 58] = [
+    pub const STD_ONLY: [Builtin; 59] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -703,6 +713,7 @@ impl Builtin {
         Builtin::BytesToInts,
         Builtin::BytesFromInts,
         Builtin::BytesEq,
+        Builtin::TimeNowNanos,
     ];
 }
 
@@ -1209,7 +1220,7 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 8] = [
+pub const STD_MODULES: [(&str, &str); 9] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
     ("$std.bytes", include_str!("../../../std/bytes/lib.nova")),
     ("$std.io", include_str!("../../../std/io/lib.nova")),
@@ -1224,6 +1235,7 @@ pub const STD_MODULES: [(&str, &str); 8] = [
     ),
     ("$std.task", include_str!("../../../std/task/lib.nova")),
     ("$std.net", include_str!("../../../std/net/lib.nova")),
+    ("$std.time", include_str!("../../../std/time/lib.nova")),
 ];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
