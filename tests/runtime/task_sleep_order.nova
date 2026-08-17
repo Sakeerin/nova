@@ -1,10 +1,10 @@
 async fn slow() {
-    sleep(200).await
+    sleep(Duration::from_millis(200)).await
     println("slow")
 }
 
 async fn quick() {
-    sleep(20).await
+    sleep(Duration::from_millis(20)).await
     println("quick")
 }
 

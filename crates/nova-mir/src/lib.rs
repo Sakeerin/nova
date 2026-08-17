@@ -225,10 +225,10 @@ rt_funcs! {
     /// `() -> ptr to { poll_code, state }` — a fresh future that reports
     /// pending once and then completes. What `std/task`'s `yield_now` awaits.
     TaskYieldFuture,
-    /// `(i64 ms) -> ptr to { poll_code, state }` — a fresh future that parks
-    /// for `ms` milliseconds via the executor's park set, then completes.
-    /// What `std/task`'s `sleep` awaits.
-    TaskSleepFuture,
+    /// `(i64 nanos) -> ptr to { poll_code, state }` — a fresh future that
+    /// parks for `nanos` nanoseconds via the executor's park set, then
+    /// completes. What `std/time`'s `sleep` awaits.
+    TaskSleepFutureNanos,
     /// `(ptr to { poll_code, state }) -> ptr to { poll_code, state }` — a
     /// fresh future that parks via the executor's park set until the task
     /// named by the given future's state completes, then completes itself.
@@ -326,7 +326,7 @@ rt_funcs! {
     /// `(ptr addr) -> ptr to { poll_code, state }` — a fresh future that
     /// connects to `addr` ("host:port"), non-blockingly.
     ///
-    /// **A future constructor, like `TaskSleepFuture`/`TaskJoinFuture` above
+    /// **A future constructor, like `TaskSleepFutureNanos`/`TaskJoinFuture` above
     /// — not a status word**, unlike every `FsWrite`/`File*`/`Io*` variant
     /// above it. `.await`ing the returned future produces the `i64` status:
     /// `0` on success, with the new fd waiting in `FsTakeBytes` as an 8-byte
@@ -428,7 +428,7 @@ impl RtFunc {
             RtFunc::TaskTakeOutput => "nova_rt_task_take_output",
             RtFunc::TaskRelease => "nova_rt_task_release",
             RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
-            RtFunc::TaskSleepFuture => "nova_rt_task_sleep_future",
+            RtFunc::TaskSleepFutureNanos => "nova_rt_task_sleep_future_nanos",
             RtFunc::TaskJoinFuture => "nova_rt_task_join_future",
             RtFunc::FsReadToString => "nova_rt_fs_read_to_string",
             RtFunc::FsWriteString => "nova_rt_fs_write_string",
@@ -502,7 +502,7 @@ impl RtFunc {
             RtFunc::TaskTakeOutput => (vec![MirTy::I64], MirTy::I64),
             RtFunc::TaskRelease => (vec![MirTy::Ptr], MirTy::Unit),
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
-            RtFunc::TaskSleepFuture => (vec![MirTy::I64], MirTy::Ptr),
+            RtFunc::TaskSleepFutureNanos => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
@@ -540,7 +540,7 @@ impl RtFunc {
             RtFunc::IoStdoutFlush | RtFunc::IoStderrFlush => (vec![], MirTy::I64),
             // Four of these five return `MirTy::Ptr` (a future's `{ poll_code,
             // state }` pointer), not `MirTy::I64` — the same shape
-            // `TaskSleepFuture`/`TaskJoinFuture` use above, unlike every
+            // `TaskSleepFutureNanos`/`TaskJoinFuture` use above, unlike every
             // `FsWrite`/`File*`/`Io*` entry directly above this group.
             // `NetClose` alone returns `MirTy::I64`, exactly `FileClose`'s
             // shape.

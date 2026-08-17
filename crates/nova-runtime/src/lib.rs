@@ -474,8 +474,8 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             task::nova_rt_task_yield_future as *const u8,
         ),
         (
-            "nova_rt_task_sleep_future",
-            task::nova_rt_task_sleep_future as *const u8,
+            "nova_rt_task_sleep_future_nanos",
+            task::nova_rt_task_sleep_future_nanos as *const u8,
         ),
         (
             "nova_rt_task_join_future",

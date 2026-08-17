@@ -689,7 +689,9 @@ impl<'a> Lowerer<'a> {
                     // machine class.
                     Builtin::TaskDrive => Lowering::Runtime(RtFunc::TaskBlockOn),
                     Builtin::TaskYieldFuture => Lowering::Runtime(RtFunc::TaskYieldFuture),
-                    Builtin::TaskSleepFuture => Lowering::Runtime(RtFunc::TaskSleepFuture),
+                    Builtin::TaskSleepFutureNanos => {
+                        Lowering::Runtime(RtFunc::TaskSleepFutureNanos)
+                    }
                     Builtin::TaskJoinFuture => Lowering::Runtime(RtFunc::TaskJoinFuture),
                     Builtin::TaskOutput => Lowering::FutureOutput,
                     Builtin::FsReadToString => Lowering::Runtime(RtFunc::FsReadToString),
