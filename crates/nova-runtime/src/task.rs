@@ -2889,7 +2889,8 @@ mod tests {
     }
 
     /// A **timed** `Wait::Io` and a bare `Wait::Deadline` merge to the
-    /// earlier, in either order.
+    /// earlier, regardless of arrival order **or** which side carries which
+    /// magnitude.
     ///
     /// `two_deadlines_in_one_poll_merge_to_the_earlier` only ever stages a
     /// bare `Wait::Deadline` on both sides, so it never reaches `try_stage`'s
@@ -2897,35 +2898,42 @@ mod tests {
     /// when `next.deadline` is already `Some` from an earlier stage *and*
     /// the incoming `Wait::Io` itself carries `deadline: Some(_)`.
     ///
-    /// The first half below stages the bare deadline *first*, so it lands in
-    /// `next.deadline` as `soon` -- the **earlier** value -- before the
-    /// timed `Io` arrives carrying `later`. That ordering is deliberate: it
-    /// is what makes the assertion distinguish `prev.min(at)` from a mutant
-    /// that discards `prev` and keeps only the incoming `at`
-    /// (`Some(prev) => at`). Staging the earlier value *second* instead
-    /// (bare `Deadline(later)` first, timed `Io` carrying `soon`) would
-    /// still assert `soon` under the correct code, but that mutant would
-    /// *also* produce `soon` there, since the incoming value already
-    /// happens to be the smaller one -- that ordering cannot tell the merge
-    /// from the mutant, which is why it is not used here (verified by
-    /// actually introducing that mutant against that ordering before
-    /// settling on this one: it passed).
+    /// That site is `match next.deadline { Some(prev) => prev.min(at), None
+    /// => at }`, and a two-argument `min` breaks in two independent ways --
+    /// `Some(prev) => at` (discard the already-staged deadline, keep only
+    /// the incoming one) and `Some(prev) => prev` (the opposite: freeze on
+    /// the already-staged one, discard the incoming one) -- each invisible
+    /// whenever the surviving argument already happens to be the smaller
+    /// one. Catching both takes both magnitude assignments, the same
+    /// principle `two_deadlines_in_one_poll_merge_to_the_earlier` already
+    /// establishes for the standalone arm ("a single-order test passes
+    /// against a `min` written backwards"):
     ///
-    /// The second half (timed `Io` staged first, bare deadline second)
-    /// instead goes back through the standalone `Wait::Deadline` arm, which
-    /// is covered elsewhere -- it stays here anyway, because what is under
-    /// test is that the *end state* does not depend on arrival order, not
-    /// which branch happened to run. Do not delete it as "redundant".
+    /// 1. bare `Deadline(soon)` staged first, timed `Io` carrying `later`
+    ///    second -- `prev` (`soon`) is already the smaller value, so a
+    ///    `Some(prev) => prev` mutant would accidentally produce the right
+    ///    answer here; only a `Some(prev) => at` mutant is caught.
+    /// 2. bare `Deadline(later)` staged first, timed `Io` carrying `soon`
+    ///    second -- the reverse: `at` (`soon`) is now the smaller value, so
+    ///    a `Some(prev) => at` mutant would accidentally produce the right
+    ///    answer here; only a `Some(prev) => prev` mutant is caught.
+    ///
+    /// Both are required and neither is redundant with the other -- do not
+    /// delete one because the other "already covers the merge".
+    ///
+    /// A third case (timed `Io` staged first, bare deadline second) instead
+    /// goes through the standalone `Wait::Deadline` arm, which is covered
+    /// elsewhere -- it stays here anyway, because what it demonstrates is
+    /// that the *end state* does not depend on arrival order, not which
+    /// branch happened to run. Do not delete it as "redundant" either.
     #[test]
     fn a_timed_io_wait_and_a_bare_deadline_merge_to_the_earlier_in_either_order() {
         let base = Instant::now();
         let soon = base + Duration::from_secs(1);
         let later = base + Duration::from_secs(30);
 
-        // Bare deadline (the earlier value) first, timed Io carrying the
-        // later value second -- the previously-uncovered site, and the only
-        // ordering of these two magnitudes that a `Some(prev) => at` mutant
-        // gets wrong.
+        // Case 1: bare deadline (the earlier value) first, timed Io carrying
+        // the later value second -- catches a `Some(prev) => at` mutant.
         let staged =
             try_stage(Staged::default(), Wait::Deadline(soon)).expect("bare deadline stages");
         let staged = try_stage(
@@ -2940,12 +2948,31 @@ mod tests {
         assert_eq!(
             staged.deadline,
             Some(soon),
-            "deadline-then-timed-io must keep the earlier"
+            "deadline(soon)-then-timed-io(later) must keep the earlier"
         );
 
-        // Timed Io (carrying the earlier value) first, bare deadline (the
-        // later value) second -- routes through the standalone
-        // `Wait::Deadline` arm instead.
+        // Case 2: bare deadline (the later value) first, timed Io carrying
+        // the earlier value second -- catches a `Some(prev) => prev` mutant.
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(later)).expect("bare deadline stages");
+        let staged = try_stage(
+            staged,
+            Wait::Io {
+                socket: RawSocket(1),
+                interest: Interest::Read,
+                deadline: Some(soon),
+            },
+        )
+        .expect("a timed Io wait must merge with a staged deadline, not collide");
+        assert_eq!(
+            staged.deadline,
+            Some(soon),
+            "deadline(later)-then-timed-io(soon) must keep the earlier"
+        );
+
+        // Case 3: timed Io (carrying the earlier value) first, bare deadline
+        // (the later value) second -- routes through the standalone
+        // `Wait::Deadline` arm instead, demonstrating order-independence.
         let staged = try_stage(
             Staged::default(),
             Wait::Io {
@@ -2965,31 +2992,37 @@ mod tests {
     }
 
     /// A **timed** `Wait::Task` and a bare `Wait::Deadline` merge to the
-    /// earlier, in either order -- the `Wait::Task` counterpart of
+    /// earlier, regardless of arrival order **or** which side carries which
+    /// magnitude -- the `Wait::Task` counterpart of
     /// `a_timed_io_wait_and_a_bare_deadline_merge_to_the_earlier_in_either_order`,
     /// for the same reason: `a_task_wait_and_a_deadline_co_stage_in_either_order`
     /// only ever stages `Wait::Task { deadline: None, .. }`, so it never
-    /// reaches the `Wait::Task` arm's own inner `deadline` merge either.
+    /// reaches the `Wait::Task` arm's own inner `deadline` merge either, and
+    /// that site breaks in the same two independent ways a two-argument
+    /// `min` always can: `Some(prev) => at` (discard the already-staged
+    /// deadline) and `Some(prev) => prev` (discard the incoming one), each
+    /// invisible whenever the surviving argument already happens to be the
+    /// smaller one.
     ///
-    /// Same deliberate ordering as the `Io` version and for the same reason:
-    /// the bare deadline stages first, carrying the **earlier** value
-    /// (`soon`), so the timed task wait's own `later` value must lose to it
-    /// -- the only pairing a `Some(prev) => at` mutant (discard `prev`, keep
-    /// the incoming `at`) gets wrong. The reverse order (timed task first,
-    /// bare deadline second) goes back through the standalone
-    /// `Wait::Deadline` arm and stays here anyway, for the same
+    /// 1. bare `Deadline(soon)` staged first, timed task carrying `later`
+    ///    second -- catches a `Some(prev) => at` mutant.
+    /// 2. bare `Deadline(later)` staged first, timed task carrying `soon`
+    ///    second -- catches a `Some(prev) => prev` mutant.
+    ///
+    /// Both are required and neither is redundant with the other. The third
+    /// case (timed task first, bare deadline second) goes back through the
+    /// standalone `Wait::Deadline` arm and stays here anyway, for the same
     /// order-independence reason given in the `Io` version -- do not delete
-    /// it as "redundant".
+    /// any of the three as "redundant".
     #[test]
     fn a_timed_task_wait_and_a_bare_deadline_merge_to_the_earlier_in_either_order() {
         let base = Instant::now();
         let soon = base + Duration::from_secs(1);
         let later = base + Duration::from_secs(30);
 
-        // Bare deadline (the earlier value) first, timed task carrying the
-        // later value second -- the previously-uncovered site, and the only
-        // ordering of these two magnitudes that a `Some(prev) => at` mutant
-        // gets wrong.
+        // Case 1: bare deadline (the earlier value) first, timed task
+        // carrying the later value second -- catches a `Some(prev) => at`
+        // mutant.
         let staged =
             try_stage(Staged::default(), Wait::Deadline(soon)).expect("bare deadline stages");
         let staged = try_stage(
@@ -3003,12 +3036,32 @@ mod tests {
         assert_eq!(
             staged.deadline,
             Some(soon),
-            "deadline-then-timed-task must keep the earlier"
+            "deadline(soon)-then-timed-task(later) must keep the earlier"
         );
 
-        // Timed task (carrying the earlier value) first, bare deadline (the
-        // later value) second -- routes through the standalone
-        // `Wait::Deadline` arm instead.
+        // Case 2: bare deadline (the later value) first, timed task carrying
+        // the earlier value second -- catches a `Some(prev) => prev`
+        // mutant.
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(later)).expect("bare deadline stages");
+        let staged = try_stage(
+            staged,
+            Wait::Task {
+                id: 7,
+                deadline: Some(soon),
+            },
+        )
+        .expect("a timed task wait must merge with a staged deadline, not collide");
+        assert_eq!(
+            staged.deadline,
+            Some(soon),
+            "deadline(later)-then-timed-task(soon) must keep the earlier"
+        );
+
+        // Case 3: timed task (carrying the earlier value) first, bare
+        // deadline (the later value) second -- routes through the
+        // standalone `Wait::Deadline` arm instead, demonstrating
+        // order-independence.
         let staged = try_stage(
             Staged::default(),
             Wait::Task {
