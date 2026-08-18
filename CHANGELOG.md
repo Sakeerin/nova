@@ -21,12 +21,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `as_secs`/`as_millis`. The three constructors **saturate** at the largest
   representable value instead of wrapping Nova's `Int` past `i64::MAX`, so a
   duration built from an overflowing count clamps rather than silently
-  going negative and making `sleep` wake instantly. One new runtime
-  intrinsic, `time_now_nanos() -> Int` (`Builtin::STD_ONLY` 58 → 59), narrows
-  the clock reading to `i64`, itself saturating at `i64::MAX` rather than
-  wrapping. `RESERVED_TYPE_NAMES` stays at 7 — `Instant`/`Duration` are
-  ordinary, glob-imported, shadowable `std/time` records, not builtin
-  types, the same standing `TcpStream` and `File` already have.
+  going negative and making `sleep` wake instantly. `net.rs`'s own
+  `deadline_epoch` is a second, separate origin that predates this change
+  and remains, by choice, for `read_timeout`'s deadline arithmetic — not
+  folded into `epoch()`. One new runtime intrinsic, `time_now_nanos() ->
+  Int` (`Builtin::STD_ONLY` 58 → 59), narrows the clock reading to `i64`,
+  itself saturating at `i64::MAX` rather than wrapping.
+  `RESERVED_TYPE_NAMES` stays at 7 — `Instant`/`Duration` are ordinary,
+  glob-imported, shadowable `std/time` records, not builtin types, the
+  same standing `TcpStream` and `File` already have.
 - `pub async fn sleep(d: Duration)`, in `std/time` — see Changed, below, for
   the breaking half of moving it out of `std/task`.
 - The sleep parker is retyped from milliseconds to nanoseconds and renamed
@@ -35,10 +38,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   → `"task_sleep_future_nanos"`, `RtFunc::TaskSleepFuture` → `RtFunc::
   TaskSleepFutureNanos`, `nova_rt_task_sleep_future` → `nova_rt_task_sleep_
   future_nanos`, `deadline_from_ms` → `deadline_from_nanos`, `SLEEP_SLOT_MS`
-  → `SLEEP_SLOT_NANOS`. Twelve call sites across four crates updated
-  mechanically; the typed and MIR signatures are unchanged (`(Int) ->
-  Future<unit>` / `(vec![MirTy::I64], MirTy::Ptr)`) — only the integer's
-  meaning and every name carrying "ms" changed.
+  → `SLEEP_SLOT_NANOS`. Every compiler-seam call site — resolver, typeck,
+  MIR, and the runtime symbol table — was updated mechanically to match;
+  the typed and MIR signatures are unchanged (`(Int) -> Future<unit>` /
+  `(vec![MirTy::I64], MirTy::Ptr)`) — only the integer's meaning and every
+  name carrying "ms" changed.
 - The poller's zero-timeout invariant now holds down to sub-millisecond
   deadlines: a remaining duration greater than zero converts to **at least
   one** platform timeout unit — 1µs on Unix (`select_timeout`), 1ms on
