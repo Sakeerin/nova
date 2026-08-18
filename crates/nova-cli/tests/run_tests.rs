@@ -7494,3 +7494,89 @@ fn time_elapsed_run() {
         .success()
         .stdout(expected);
 }
+
+/// `timeout` when the inner future completes well inside the deadline:
+/// `Ok`'s branch runs, not `Err`'s. Prints which branch ran, not an
+/// ordering, so a unit error in the comparison cannot pass by accident.
+#[test]
+fn timeout_ok_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/timeout_ok.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_ok.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `timeout` when the deadline elapses well before the inner future would
+/// finish: `Err`'s branch runs, not `Ok`'s. The inner future is never
+/// spawned, so abandoning it costs nothing further once the deadline fires.
+#[test]
+fn timeout_elapsed_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/timeout_elapsed.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_elapsed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `timeout` returning the inner future's value, not the combinator's status.
+///
+/// The one fixture that distinguishes those: a `task_output` reading the
+/// timeout future's own output slot prints `0` here instead of `42`.
+#[test]
+fn timeout_value_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/timeout_value.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_value.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `timeout` wrapping a `JoinHandle::join()` future on a task that finishes
+/// well inside the deadline: one of the Task+Deadline pair that aborted the
+/// process before Task 1 widened the executor's park set.
+#[test]
+fn timeout_join_ok_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/timeout_join_ok.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_join_ok.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `timeout` wrapping a `JoinHandle::join()` future on a task that sleeps
+/// past the deadline: the other half of the Task+Deadline pair that aborted
+/// the process before Task 1 widened the executor's park set. The spawned
+/// task keeps running after the join is abandoned, so this fixture's own
+/// sleep is kept short rather than dramatic.
+#[test]
+fn timeout_join_elapsed_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/timeout_join_elapsed.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_join_elapsed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

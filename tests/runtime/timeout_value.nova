@@ -1,0 +1,20 @@
+// The one fixture that pins where `timeout`'s value comes from: the inner
+// future's own output slot, not the timeout combinator's status slot.
+//
+// `answer()` never awaits anything, so it completes on `task_timeout_future`'s
+// very first poll -- long before the 30-second deadline could ever matter.
+// `timeout`'s status word is `0` (completed) either way; the only thing this
+// distinguishes is which output slot `Ok(v)` reads. A `task_output` reading
+// the *timeout* future's own slot instead of `answer()`'s prints the status
+// code, `0`, here -- not `42`. Nothing else in this suite tells those two
+// apart.
+async fn answer() -> Int {
+    42
+}
+
+async fn main() {
+    match timeout(Duration::from_secs(30), answer()).await {
+        Ok(v) => println("${v}")
+        Err(_) => println("elapsed")
+    }
+}

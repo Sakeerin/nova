@@ -231,6 +231,17 @@ builtins! {
     /// expressible in Nova produces a future that starts out pending.
     /// Std-only.
     TaskJoinFuture,
+    /// `task_timeout_future(nanos: Int, fut: Future<T>) -> Future<Int>` — a
+    /// fresh future that polls `fut` until it completes or `nanos` nanoseconds
+    /// pass, producing `0` if the inner future completed and `1` if the
+    /// deadline elapsed.
+    ///
+    /// Carries a status rather than the value, which is what keeps it
+    /// expressible: a builtin's signature is a fixed list of types, and the
+    /// value is read separately with [`Builtin::TaskOutput`] on the inner
+    /// future, from the slot the inner future itself wrote. Backs `std/time`'s
+    /// `timeout`. Std-only.
+    TaskTimeoutFuture,
     /// `fs_read_to_string(path: String) -> Int` — read `path` as UTF-8.
     ///
     /// Returns a status code (`0` on success, an `IoErrorKind` code otherwise
@@ -579,6 +590,7 @@ impl Builtin {
             Builtin::TaskYieldFuture => "task_yield_future",
             Builtin::TaskSleepFutureNanos => "task_sleep_future_nanos",
             Builtin::TaskJoinFuture => "task_join_future",
+            Builtin::TaskTimeoutFuture => "task_timeout_future",
             Builtin::FsReadToString => "fs_read_to_string",
             Builtin::FsWriteString => "fs_write_string",
             Builtin::FsTakeString => "fs_take_string",
@@ -654,7 +666,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 59] = [
+    pub const STD_ONLY: [Builtin; 60] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -672,6 +684,7 @@ impl Builtin {
         Builtin::TaskYieldFuture,
         Builtin::TaskSleepFutureNanos,
         Builtin::TaskJoinFuture,
+        Builtin::TaskTimeoutFuture,
         Builtin::FsReadToString,
         Builtin::FsWriteString,
         Builtin::FsTakeString,

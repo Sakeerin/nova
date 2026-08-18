@@ -1,0 +1,16 @@
+// A long sleep behind a short timeout: the deadline wins the race, so
+// `timeout` reports `Err` and this prints which branch ran, not an
+// ordering. The inner sleep is never spawned as its own task, so once the
+// deadline elapses this future is simply abandoned -- nothing waits out the
+// remaining 3 seconds of a sleep nobody asked to see finish.
+async fn work() -> Int {
+    sleep(Duration::from_secs(3)).await
+    1
+}
+
+async fn main() {
+    match timeout(Duration::from_millis(20), work()).await {
+        Ok(_) => println("ok")
+        Err(_) => println("elapsed")
+    }
+}

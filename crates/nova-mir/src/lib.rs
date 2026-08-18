@@ -234,6 +234,9 @@ rt_funcs! {
     /// named by the given future's state completes, then completes itself.
     /// What `std/task`'s `join` awaits.
     TaskJoinFuture,
+    /// `(i64, ptr) -> ptr to { poll_code, state }` — a future that polls its
+    /// inner future under a deadline
+    TaskTimeoutFuture,
     /// `(str) -> i64` — read the path as UTF-8. `0` on success, with the
     /// contents waiting in `FsTakeString`; otherwise an `IoErrorKind` status
     /// code (`crates/nova-runtime/src/fs.rs`).
@@ -430,6 +433,7 @@ impl RtFunc {
             RtFunc::TaskYieldFuture => "nova_rt_task_yield_future",
             RtFunc::TaskSleepFutureNanos => "nova_rt_task_sleep_future_nanos",
             RtFunc::TaskJoinFuture => "nova_rt_task_join_future",
+            RtFunc::TaskTimeoutFuture => "nova_rt_task_timeout_future",
             RtFunc::FsReadToString => "nova_rt_fs_read_to_string",
             RtFunc::FsWriteString => "nova_rt_fs_write_string",
             RtFunc::FsTakeString => "nova_rt_fs_take_string",
@@ -504,6 +508,7 @@ impl RtFunc {
             RtFunc::TaskYieldFuture => (vec![], MirTy::Ptr),
             RtFunc::TaskSleepFutureNanos => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::TaskTimeoutFuture => (vec![MirTy::I64, MirTy::Ptr], MirTy::Ptr),
             RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::FsTakeString
