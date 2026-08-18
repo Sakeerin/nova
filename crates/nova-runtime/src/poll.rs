@@ -434,10 +434,18 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
 /// drive loop would spin until the deadline passed. Any non-zero duration
 /// therefore becomes at least one microsecond.
 ///
-/// This is not a workaround for the platform: `sleep` promises to suspend for
-/// *at least* the requested time, so rounding up honours the contract and
-/// truncating down breaks it. Exactly zero stays zero, because then the
-/// deadline really has passed.
+/// This is not a workaround for `sleep`'s "at least" contract: the
+/// truncation above already rounds a 1.5µs remainder down to 1µs, the same
+/// as everywhere else, and that truncation does not break the contract.
+/// What makes "at least" hold is `task.rs`'s `wake_due`, which wakes a
+/// parked task only once its deadline is `<=` the clock reading it is
+/// checked against, so a `select` that returns early because its own
+/// timeout truncated short just reports "nothing ready" and the drive loop
+/// re-parks on the same deadline instead of waking the sleeper ahead of
+/// schedule. The lift exists solely to keep `select` from ever seeing an
+/// all-zero timeout, which it would treat as "poll and return at once" and
+/// turn into the busy spin described above. Exactly zero stays zero,
+/// because then the deadline really has passed.
 #[cfg(unix)]
 fn select_timeout(d: std::time::Duration) -> libc::timeval {
     let micros = d.as_micros();
@@ -585,9 +593,15 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
 ///
 /// `WSAPoll` returns immediately on `0`, so a sub-millisecond remainder would
 /// truncate to zero and the drive loop would spin until the deadline passed.
-/// Any non-zero duration becomes at least 1ms -- which is also the only
-/// behaviour consistent with `sleep` promising *at least* the requested time.
-/// Windows is the coarser of the two arms: 1ms is the finest wait it can
+/// Any non-zero duration therefore becomes at least 1ms -- but that lift
+/// exists only to avoid the zero case, not because rounding up is what makes
+/// `sleep`'s "at least" guarantee hold. What actually makes "at least" hold
+/// is `task.rs`'s `wake_due`, which wakes a parked task only once its
+/// deadline is `<=` the clock reading it is checked against: a `WSAPoll`
+/// that returns early because its own timeout truncated short just reports
+/// "nothing ready," and the drive loop re-parks on the same deadline instead
+/// of waking the sleeper ahead of schedule. Windows is the coarser of the
+/// two arms: 1ms is the finest wait it can
 /// express, so sub-millisecond sleeps are rounded up here and cannot be
 /// honoured exactly.
 #[cfg(windows)]
