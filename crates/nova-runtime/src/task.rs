@@ -929,14 +929,22 @@ fn take_output_internal(id: i64) -> i64 {
 ///    socket waiting) now happens, is reached only from the
 ///    drained-queue branch below, where blocking this thread is correct
 ///    because there is genuinely nothing left to run; a park set holding
-///    nothing but `Wait::Task` entries and no I/O wait there is a genuine
-///    deadlock, since nothing still running can ever finish and wake one, and
-///    [`report_deadlock`] ends the process naming each one instead of hanging
-///    silently. A `Wait::Io` park changes what "nothing left to run" means:
-///    waiting on a socket that some *other* process must make ready is
-///    legitimate waiting, not a deadlock, so `report_deadlock` is reachable
-///    only when both the deadline and the I/O dimensions are empty (see the
-///    drained-queue match below). `sleep` (Task 2) and a parking `join`
+///    nothing but *bare* `Wait::Task` entries and no I/O wait there is a
+///    genuine deadlock, since nothing still running can ever finish and wake
+///    one, and [`report_deadlock`] ends the process naming each one instead
+///    of hanging silently. A `Wait::Io` park changes what "nothing left to
+///    run" means: waiting on a socket that some *other* process must make
+///    ready is legitimate waiting, not a deadlock. A **timed** `Wait::Task`
+///    changes it the same way: its own clock, not some other task's
+///    progress, is what eventually wakes it, so it is legitimate waiting too
+///    -- [`earliest_deadline`] reports its deadline exactly as it would a
+///    bare `Wait::Deadline` or a timed `Wait::Io`'s (see that function's own
+///    doc comment), which is what routes the drained-queue match below to a
+///    sleep instead of to `report_deadlock`. So `report_deadlock` is
+///    reachable only when the deadline dimension -- which now includes any
+///    timed `Wait::Task` -- and the I/O dimension are *both* empty, i.e.
+///    every remaining park is a bare `Wait::Task` (see the drained-queue
+///    match below). `sleep` (Task 2) and a parking `join`
 ///    (Task 3) are what let Nova source reach any of this at all: before
 ///    `sleep`, `yield_now` was the only suspension an `async fn` body could
 ///    await, and it never stages a `Wait`, so nothing compiled from Nova
@@ -968,8 +976,9 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
             break;
         }
         // The ready queue is empty and something is still parked. A remaining
-        // deadline or a live I/O wait can each refill the queue on their own;
-        // a park set holding nothing but `Wait::Task` entries -- neither
+        // deadline (bare, or riding inside an I/O wait or a task wait) or a
+        // live I/O wait can each refill the queue on their own; a park set
+        // holding nothing but *bare* `Wait::Task` entries -- neither
         // dimension populated -- cannot, because nothing is running to
         // finish. This match is the executor's only remaining wait: sleeping
         // *is* waiting on an empty socket set (the `(Some(at), true)` arm),
@@ -3045,6 +3054,69 @@ mod tests {
             "the long deadline must wake after the short one -- deadline \
              order, not spawn order, since long was spawned first -- so it \
              must see the short task already done"
+        );
+    }
+
+    /// A poll function that stages a *timed* task wait -- not yet due -- on
+    /// its first poll and completes on its second. The target id (`999`)
+    /// never names a real task, and is not meant to: this exists to drive a
+    /// park set of nothing but one timed `Wait::Task` through the real
+    /// drained-queue branch, so only the deadline can wake it, the same way
+    /// `poll_park_after_delay` does for a bare `Wait::Deadline`.
+    unsafe extern "C-unwind" fn poll_park_on_timed_task_wait(
+        state: *mut u8,
+        _task_ctx: *mut u8,
+    ) -> i64 {
+        let slots = state as *mut i64;
+        // SAFETY: `state` is a `STATE_MIN_SIZE` object from `test_future`.
+        let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
+        if tag == 0 {
+            unsafe { slots.add(STATE_SLOT_TAG).write(1) };
+            stage_park(Wait::Task {
+                id: 999,
+                deadline: Some(Instant::now() + Duration::from_millis(15)),
+            });
+            return POLL_PENDING;
+        }
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    /// Corrects `run_to_completion`'s own doc comment: a park set holding
+    /// nothing but a *timed* `Wait::Task`, and no I/O wait, is legitimate
+    /// waiting, not a deadlock -- only a *bare* one is. Before this test, no
+    /// test drove that exact park set through `run_to_completion` itself;
+    /// `earliest_deadline_counts_a_timed_task_wait_and_ignores_a_bare_one`
+    /// checks `earliest_deadline` in isolation, and
+    /// `wake_due_wakes_a_task_wait_whose_deadline_elapsed` checks `wake_due`
+    /// in isolation, but neither exercises the
+    /// `(earliest_deadline(), io.is_empty())` match in the drained-queue
+    /// branch, which is the one place `report_deadlock` -- and its
+    /// `std::process::abort()` -- could fire on this exact park set. If
+    /// `earliest_deadline` ever again stopped reporting a timed task wait's
+    /// deadline, this test would not fail cleanly: it would abort the whole
+    /// test binary, which is the loud failure this class of regression
+    /// deserves.
+    ///
+    /// Uses a not-yet-due deadline, not an already-due one, for the same
+    /// reason `two_not_yet_due_deadlines_drain_the_queue_then_wake_in_deadline_order`
+    /// does: an already-due deadline would be caught by the per-poll
+    /// `wake_due` check before the queue ever drains, never reaching the
+    /// drained-queue match this test exists to exercise.
+    #[test]
+    fn a_lone_timed_task_wait_sleeps_instead_of_deadlocking() {
+        let fut = test_future(poll_park_on_timed_task_wait);
+        // SAFETY: well-formed future from `test_future`.
+        let out = unsafe { run_to_completion(fut) };
+        assert_eq!(
+            out, 0,
+            "a lone timed task wait must be woken by its own deadline and \
+             complete, not deadlock"
+        );
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "the park set must be empty once the loop exits"
         );
     }
 
