@@ -26,19 +26,37 @@ const NANOS_PER_MILLI: Int = 1_000_000
 const NANOS_PER_MICRO: Int = 1_000
 
 // The largest argument each constructor can scale without overflowing an
-// `Int` of nanoseconds, and the clamped result for anything larger.
+// `Int` of nanoseconds, and the smallest without underflowing one -- the
+// clamped result on either side is whichever extreme of `Int` that
+// direction saturates to.
 //
 // These exist because **Nova's `Int` wraps** -- measured:
 // `9223372036854775807 + 1` is `-9223372036854775808`. A wrapped duration can
-// be negative, and `sleep` treats a non-positive duration as an immediate
-// wake, so an unclamped `from_secs` would turn "sleep for ages" into "do not
-// sleep at all", silently. Clamping yields a saturated answer instead of a
-// wrong one -- the no-panic analogue of Rust's `Duration::from_secs`, which
-// panics on the same overflow.
+// land on either sign. Too large wraps negative, and `sleep` treats a
+// non-positive duration as an immediate wake, so an unclamped `from_secs`
+// would turn "sleep for ages" into "do not sleep at all", silently. Too
+// negative wraps positive -- measured: `Duration::from_secs(-9_223_372_037)
+// .as_secs()` and `Duration::from_secs(9_223_372_037).as_secs()` both return
+// `9223372036`, byte-identical -- so an unclamped low end would turn
+// "wake immediately" into "sleep for roughly 292 years", the exact inversion
+// clamping exists to prevent, just on the other side of zero. Clamping both
+// directions yields a saturated answer instead of a wrong one -- the
+// no-panic analogue of Rust's `Duration::from_secs`, which panics on the
+// same overflow (Rust's version takes an unsigned argument and so has no low
+// side to clamp).
 const MAX_SECS: Int = 9_223_372_036
 const MAX_MILLIS: Int = 9_223_372_036_854
 const MAX_MICROS: Int = 9_223_372_036_854_775
 const MAX_NANOS: Int = 9_223_372_036_854_775_807
+const MIN_SECS: Int = -MAX_SECS
+const MIN_MILLIS: Int = -MAX_MILLIS
+const MIN_MICROS: Int = -MAX_MICROS
+// One further from zero than `-MAX_NANOS`: `Int` is two's-complement, so its
+// negative range holds one more value than its positive range, and this is
+// that value -- the most-negative `Int` representable, computed rather than
+// spelled out because the positive literal one larger than `MAX_NANOS` would
+// itself overflow.
+const MIN_NANOS: Int = -MAX_NANOS - 1
 
 impl Instant {
     // The current reading of the monotonic clock.
@@ -64,28 +82,35 @@ impl Instant {
 }
 
 impl Duration {
-    // Whole seconds. Clamps above `MAX_SECS`; see the constants above.
+    // Whole seconds. Clamps above `MAX_SECS` and below `MIN_SECS`; see the
+    // constants above.
     pub fn from_secs(s: Int) -> Duration {
         if s > MAX_SECS {
             Duration { nanos: MAX_NANOS }
+        } else if s < MIN_SECS {
+            Duration { nanos: MIN_NANOS }
         } else {
             Duration { nanos: s * NANOS_PER_SEC }
         }
     }
 
-    // Whole milliseconds. Clamps above `MAX_MILLIS`.
+    // Whole milliseconds. Clamps above `MAX_MILLIS` and below `MIN_MILLIS`.
     pub fn from_millis(ms: Int) -> Duration {
         if ms > MAX_MILLIS {
             Duration { nanos: MAX_NANOS }
+        } else if ms < MIN_MILLIS {
+            Duration { nanos: MIN_NANOS }
         } else {
             Duration { nanos: ms * NANOS_PER_MILLI }
         }
     }
 
-    // Whole microseconds. Clamps above `MAX_MICROS`.
+    // Whole microseconds. Clamps above `MAX_MICROS` and below `MIN_MICROS`.
     pub fn from_micros(us: Int) -> Duration {
         if us > MAX_MICROS {
             Duration { nanos: MAX_NANOS }
+        } else if us < MIN_MICROS {
+            Duration { nanos: MIN_NANOS }
         } else {
             Duration { nanos: us * NANOS_PER_MICRO }
         }
@@ -110,12 +135,18 @@ impl Duration {
 // polls at all. Contrast `std/task`'s `yield_now`, which is re-queued
 // immediately and deliberately.
 //
-// "At least" is exact, and platform-dependent in one direction only. The
+// "At least" is exact, and platform-dependent in its granularity only. The
 // executor waits with microsecond granularity on Unix and whole milliseconds
-// on Windows, and a wait is always rounded **up** to the granularity
-// available -- so a sub-millisecond sleep on Windows takes about a
-// millisecond. Rounding up is what makes "at least" true; rounding down would
-// also spin. A non-positive `d` wakes immediately rather than being rejected.
+// on Windows, truncating a remaining duration the ordinary way and lifting
+// only a result that truncated all the way to zero back up to one unit --
+// never down to zero, not always up. So a sub-millisecond sleep on Windows
+// takes about a millisecond, but a 1.5ms remainder there becomes 1ms, not
+// 2ms. What makes "at least" hold regardless is the executor's own wake
+// check: a task parked on a deadline is only woken once that deadline is
+// `<=` the clock reading it is checked against, so a platform wait that
+// returns early just re-parks on the same deadline instead of waking the
+// sleeper ahead of schedule. A non-positive `d` wakes immediately rather
+// than being rejected.
 pub async fn sleep(d: Duration) {
     task_sleep_future_nanos(d.nanos).await
 }

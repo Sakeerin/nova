@@ -104,10 +104,15 @@ pub fn wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec
 /// The time remaining until `deadline`, clamped so it is never negative.
 ///
 /// Nova's `Int` is signed and a timed wait built from it can carry a deadline
-/// that is already in the past (mirrors `task.rs`'s `deadline_from_ms`, which
-/// clamps the same way for the timer-only path). `None` means "no deadline":
-/// block indefinitely rather than returning a zero timeout, which would make
-/// an I/O wait busy-loop instead of actually waiting.
+/// that is already in the past (mirrors the clamp `task.rs`'s
+/// `deadline_from_nanos` applies on the other side of the same conversion:
+/// there, a non-positive duration-from-now is clamped to an `Instant` of
+/// "now" rather than one in the past; here, an `Instant` already in the past
+/// is clamped to a `Duration` of zero rather than a negative one -- the same
+/// guard against a stale deadline, applied to whichever of the two values the
+/// caller happens to be holding). `None` means "no deadline": block
+/// indefinitely rather than returning a zero timeout, which would make an
+/// I/O wait busy-loop instead of actually waiting.
 fn remaining(deadline: Option<Instant>) -> Option<Duration> {
     deadline.map(|at| {
         let now = Instant::now();
@@ -159,16 +164,30 @@ impl LogGate {
     /// `0`ms.** Without the offset the sentinel is just an ordinary
     /// timestamp, so a fresh gate's first call reduced to
     /// `now_ms.saturating_sub(0) < LOG_RATE_LIMIT` -- denied exactly when
-    /// that gate was first reached within [`LOG_RATE_LIMIT`] of the instant
-    /// `crate::time::epoch` was fixed, and allowed normally when it was first
-    /// reached after that. That window always caught the gate that fixed the
-    /// epoch, since `crate::time::epoch` is `Instant::now()` at whichever gate
-    /// touches it first and so *that* gate's own first `elapsed()` reads back
-    /// ~0. Where a platform arm has a single gate (Windows) that is every
-    /// site; where it has two (Unix) a gate first reached later than the
-    /// window was unaffected. Narrower than "every site, forever" -- but every
-    /// call it did deny lost the first, and often most diagnostically
-    /// valuable, occurrence of whatever that gate protects.
+    /// that gate was first reached within [`LOG_RATE_LIMIT`] of whenever
+    /// `crate::time::epoch` was fixed. Back when this module owned that
+    /// epoch privately (`log_epoch`, since folded into `crate::time::epoch`),
+    /// that bound a small, specific set: a gate's own `allow` was the only
+    /// caller, so the fixing moment *was* some gate's first touch, and only
+    /// a second gate reached soon after could also land in the window.
+    /// **That containment does not carry over now that the epoch is
+    /// shared.** Any caller can fix it first -- concretely,
+    /// `nova_rt_time_now_nanos`, reachable from any Nova program that calls
+    /// `Instant::now()`, and ordinary use of the clock is a far more likely
+    /// first toucher than a warning path that only fires under socket
+    /// exhaustion or a persistent I/O failure. So the epoch may already be
+    /// old by the time any gate is first reached, or it may be fixed moments
+    /// before one -- and because the fixing event is no longer pinned to a
+    /// gate's own activity, that "moments before" case can catch either or
+    /// both of a platform's gates independently of which one happens to run
+    /// first, not just whichever gate the old, self-fixing epoch guaranteed
+    /// to catch. Where a platform arm has a single gate (Windows) that is
+    /// still every site, trivially; where it has two (Unix) both are equally
+    /// exposed to whenever some unrelated caller fixes the shared epoch,
+    /// with no ordering between the two gates left to bound it further.
+    /// Every call it does deny still only ever loses the first, and often
+    /// most diagnostically valuable, occurrence of whatever that gate
+    /// protects.
     fn allow(&self) -> bool {
         self.allow_at(crate::time::epoch().elapsed().as_millis() as u64)
     }

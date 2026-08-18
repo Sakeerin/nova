@@ -460,12 +460,12 @@ fn platform_connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
 
 /// Where the connect future keeps its socket between polls. One past the
 /// last slot the ABI reserves, so the state object is one word larger than
-/// `STATE_MIN_SIZE` -- the same arrangement `SLEEP_SLOT_MS` uses.
+/// `STATE_MIN_SIZE` -- the same arrangement `SLEEP_SLOT_NANOS` uses.
 ///
 /// Reused for two different values across the future's short life: before
 /// the first poll it holds the address argument's `NovaStr` pointer (kept
 /// alive by this state object's own GC root/scan, exactly as
-/// `SLEEP_SLOT_MS` needs no rooting of its own for a plain `Int`); the first
+/// `SLEEP_SLOT_NANOS` needs no rooting of its own for a plain `Int`); the first
 /// poll reads that out and overwrites this same slot with the socket's table
 /// fd for the second poll to look back up.
 const CONNECT_SLOT_SOCK: usize = STATE_SLOT_TEMPS;
@@ -899,7 +899,7 @@ fn now_epoch_ms() -> i64 {
 
 /// An `Instant` `remaining_ms` milliseconds from now, clamping a non-positive
 /// value to "now" -- the identical clamp `task.rs`'s own (private)
-/// `deadline_from_ms` applies, for the identical reason: nothing stops a
+/// `deadline_from_nanos` applies, for the identical reason: nothing stops a
 /// remaining duration computed from a stored deadline from having already
 /// reached zero, or gone negative, by the time this runs.
 fn instant_from_remaining_ms(remaining_ms: i64) -> Instant {
