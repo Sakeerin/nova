@@ -3608,6 +3608,18 @@ mod tests {
     /// which same-kind collisions it tolerates. See `try_stage`'s own doc
     /// comment for why this checks `try_stage` directly rather than
     /// `stage_park`'s actual abort.
+    ///
+    /// `try_stage` has **four** `Err` branches -- the `Wait::Io` arm rejecting
+    /// `next.io` and `next.task`, and the `Wait::Task` arm rejecting
+    /// `next.task` and `next.io` -- and for a while this was the only test of
+    /// any of them, while the widening added a `deadline:` field to all four
+    /// reconstructed waits that nothing observed. This one covers the
+    /// `Wait::Io` arm's `next.io` branch; the two tests below cover the other
+    /// three. All four now check the `deadline:` field as well, because
+    /// `collision_msg` receives a `Wait` this function *reconstructs* from
+    /// `Staged` rather than the one that was originally staged, so a mutant
+    /// hard-coding `deadline: None` there would lose the merged deadline from
+    /// every collision diagnostic with no test noticing.
     #[test]
     fn two_io_waits_in_one_poll_still_abort() {
         let first = Wait::Io {
@@ -3625,6 +3637,148 @@ mod tests {
         let err =
             try_stage(staged, second).expect_err("a second I/O wait in the same poll must collide");
         assert!(err.contains("two parks staged in one poll"), "got: {err}");
+        assert!(
+            err.contains("deadline: None"),
+            "with no deadline staged, the reconstructed I/O wait must say so: {err}"
+        );
+
+        // The same collision with a deadline already merged in, so the
+        // `deadline:` field the reconstruction fills from `next.deadline` is
+        // actually observed.
+        let staged = try_stage(
+            Staged::default(),
+            Wait::Deadline(Instant::now() + Duration::from_secs(5)),
+        )
+        .expect("a bare deadline stages");
+        let staged = try_stage(staged, first).expect("an I/O wait joins a staged deadline");
+        let err = try_stage(staged, second)
+            .expect_err("a second I/O wait must still collide, deadline or not");
+        assert!(
+            err.contains("deadline: Some("),
+            "the merged deadline must appear in the wait the diagnostic \
+             reconstructs: {err}"
+        );
+    }
+
+    /// Task+Task in one poll must still abort -- the collision spec §6.1 asked
+    /// for by name ("Task+Task and Io+Io **still abort**, so the widening did
+    /// not widen too far") and that no test covered.
+    ///
+    /// It is not merely hygiene. `poll_timeout`'s abandonment path makes these
+    /// branches production-reachable: before it discarded the park its
+    /// abandoned inner staged, this exact pairing is what aborted the process
+    /// from `timeout(d, h1.join())` followed by `h2.join().await`. The
+    /// behaviour under test is the one that *should* abort -- a genuine
+    /// two-parks-in-one-poll bug -- so it has to keep aborting while the
+    /// abandonment case stops reaching it.
+    ///
+    /// Both ids are named in the assertions, and in order: the diagnostic's
+    /// value is that it says *which* two waits clashed, so a mutant reporting
+    /// the incoming wait twice, or reversing the pair, would still contain
+    /// "two parks staged in one poll".
+    #[test]
+    fn two_task_waits_in_one_poll_still_abort() {
+        let first = Wait::Task {
+            id: 1,
+            deadline: None,
+        };
+        let second = Wait::Task {
+            id: 2,
+            deadline: None,
+        };
+        let staged =
+            try_stage(Staged::default(), first).expect("the first task wait stages cleanly");
+        let err = try_stage(staged, second)
+            .expect_err("a second task wait in the same poll must collide");
+        assert!(err.contains("two parks staged in one poll"), "got: {err}");
+        assert!(
+            err.contains("Task { id: 1, deadline: None } then Task { id: 2"),
+            "the diagnostic must name the already-staged wait first and the \
+             incoming one second: {err}"
+        );
+
+        // Again with a deadline already merged in -- the `Wait::Task` arm's own
+        // reconstruction of the previous task wait, whose `deadline:` field is
+        // otherwise unobserved by any test.
+        let at = Instant::now() + Duration::from_secs(5);
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(at)).expect("a bare deadline stages");
+        let staged = try_stage(staged, first).expect("a task wait joins a staged deadline");
+        let err = try_stage(staged, second)
+            .expect_err("a second task wait must still collide, deadline or not");
+        assert!(
+            err.contains("deadline: Some("),
+            "the merged deadline must appear in the wait the diagnostic \
+             reconstructs: {err}"
+        );
+    }
+
+    /// A `Wait::Task` and a `Wait::Io` in one poll must still abort, **in
+    /// either order** -- the last two of `try_stage`'s four `Err` branches
+    /// (`Wait::Io`'s `next.task` rejection and `Wait::Task`'s `next.io` one).
+    ///
+    /// Both orders, because they are two *different* branches in two different
+    /// match arms, not one property observed twice: deleting either rejection
+    /// leaves the other passing. Nothing about waiting on a sibling task
+    /// composes with waiting on a socket the way a deadline composes with
+    /// both, which is the distinction `Staged`'s doc comment draws and this
+    /// pins.
+    #[test]
+    fn a_task_wait_and_an_io_wait_in_one_poll_still_abort_in_either_order() {
+        let task = Wait::Task {
+            id: 3,
+            deadline: None,
+        };
+        let io = Wait::Io {
+            socket: RawSocket(4),
+            interest: Interest::Write,
+            deadline: None,
+        };
+        let at = Instant::now() + Duration::from_secs(5);
+
+        // Task first, then Io -- `try_stage`'s `Wait::Io` arm, `next.task`
+        // branch, which reconstructs the previous wait as a `Wait::Task`.
+        let staged = try_stage(Staged::default(), task).expect("the task wait stages cleanly");
+        let err = try_stage(staged, io).expect_err("an I/O wait must not join a staged task wait");
+        assert!(err.contains("two parks staged in one poll"), "got: {err}");
+        assert!(
+            err.contains("Task { id: 3, deadline: None } then Io {"),
+            "the diagnostic must reconstruct the staged task wait, then name \
+             the incoming I/O wait: {err}"
+        );
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(at)).expect("a bare deadline stages");
+        let staged = try_stage(staged, task).expect("a task wait joins a staged deadline");
+        let err = try_stage(staged, io)
+            .expect_err("an I/O wait must still collide with a timed task wait");
+        assert!(
+            err.contains("deadline: Some("),
+            "the merged deadline must ride in the reconstructed task wait: {err}"
+        );
+
+        // Io first, then Task -- `try_stage`'s `Wait::Task` arm, `next.io`
+        // branch, which reconstructs the previous wait as a `Wait::Io`.
+        let staged = try_stage(Staged::default(), io).expect("the I/O wait stages cleanly");
+        let err = try_stage(staged, task).expect_err("a task wait must not join a staged I/O wait");
+        assert!(err.contains("two parks staged in one poll"), "got: {err}");
+        assert!(
+            err.contains("Io { socket: RawSocket(4)"),
+            "the diagnostic must reconstruct the staged I/O wait with its own \
+             socket, not the incoming task wait: {err}"
+        );
+        assert!(
+            err.contains("then Task { id: 3"),
+            "and name the incoming task wait second: {err}"
+        );
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(at)).expect("a bare deadline stages");
+        let staged = try_stage(staged, io).expect("an I/O wait joins a staged deadline");
+        let err = try_stage(staged, task)
+            .expect_err("a task wait must still collide with a timed I/O wait");
+        assert!(
+            err.contains("deadline: Some("),
+            "the merged deadline must ride in the reconstructed I/O wait: {err}"
+        );
     }
 
     /// Two deadlines in one poll merge to the earlier, **in either order**.
