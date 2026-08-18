@@ -4,10 +4,25 @@
 // `answer()` never awaits anything, so it completes on `task_timeout_future`'s
 // very first poll -- long before the 30-second deadline could ever matter.
 // `timeout`'s status word is `0` (completed) either way; the only thing this
-// distinguishes is which output slot `Ok(v)` reads. A `task_output` reading
-// the *timeout* future's own slot instead of `answer()`'s prints the status
-// code, `0`, here -- not `42`. Nothing else in this suite tells those two
-// apart.
+// distinguishes is which output slot `Ok(v)` reads.
+//
+// Writing `task_output` on the *timeout* future's own handle instead of
+// `answer()`'s does not reach runtime here: Nova checks a generic function's
+// body once, with its own type parameter held rigid, so `task_output`'s
+// `Future<T>` parameter can never unify with the timeout future's concrete
+// `Future<Int>` -- that mistake is rejected at compile time (`E0010`),
+// regardless of what any call site instantiates `T` as. Measured directly
+// (Task 4's report): the equivalent Nova-source mutation fails to compile,
+// it does not run and print `0`.
+//
+// This fixture's discriminating power is one layer down from there, at the
+// runtime/lowering boundary the type system cannot see into: a bug in
+// `nova-mir`'s lowering of `Builtin::TaskOutput`, a wrong slot layout in the
+// runtime's future-state object, or `task_timeout_future`'s own Rust-side
+// signature mistakenly widened to return `Future<Param(0)>` instead of the
+// concrete `Future<Int>` it actually produces -- any of those would compile
+// clean and still print the status code, `0`, here instead of `42`. Nothing
+// else in this suite would catch it.
 async fn answer() -> Int {
     42
 }

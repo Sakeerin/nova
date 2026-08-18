@@ -7530,8 +7530,11 @@ fn timeout_elapsed_run() {
 
 /// `timeout` returning the inner future's value, not the combinator's status.
 ///
-/// The one fixture that distinguishes those: a `task_output` reading the
-/// timeout future's own output slot prints `0` here instead of `42`.
+/// The one fixture that distinguishes those -- see `tests/runtime/
+/// timeout_value.nova`'s own header for why a "wrong slot" mutation can't be
+/// demonstrated at the Nova-source level (the type checker rejects it) and
+/// what this fixture actually guards instead (the runtime/lowering layer
+/// underneath the type checker).
 #[test]
 fn timeout_value_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/timeout_value.stdout"))
