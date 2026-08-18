@@ -1536,68 +1536,89 @@ pub extern "C-unwind" fn nova_rt_task_yield_future() -> *mut u8 {
     build_future(poll, YIELD_STATE_SIZE, |_slots| {})
 }
 
-/// Report [`POLL_PENDING`] on the first poll, having staged a deadline park,
-/// and [`POLL_READY`] on the second.
+/// Report [`POLL_READY`] once the stored deadline has passed, and
+/// [`POLL_PENDING`] with the deadline re-staged until then.
 ///
-/// **It must not unwind**, for the reason [`poll_yield_once`] states: this is a
-/// hand-written [`PollFn`], so `async_lower.rs`'s argument that no unwind
-/// crosses a generated poll frame does not cover it. Unlike `poll_yield_once`
-/// it does touch runtime state, so that obligation is discharged by
-/// [`stage_park`] holding only `Copy` values in `Cell`s -- no borrow here can
-/// fail.
+/// **Level-triggered and tag-free**, which makes this structurally identical
+/// to [`poll_join`]. It has to be: since a deadline may accompany any wait and
+/// two deadlines merge to the earlier, this future can be polled because
+/// *another* wait's deadline fired. An edge-triggered version -- returning
+/// ready on its second poll regardless of the clock -- would report a
+/// completion it had not earned.
+///
+/// **Must not unwind**, for the reason [`poll_yield_once`] states. Every
+/// helper it calls is panic-free by construction; see
+/// [`instant_from_deadline_nanos`] on why the old `Instant + Duration` was not.
 unsafe extern "C-unwind" fn poll_sleep(state: *mut u8, _task_ctx: *mut u8) -> i64 {
     let slots = state as *mut i64;
     // SAFETY: `state` is the state object `nova_rt_task_sleep_future_nanos`
-    // built, of at least `STATE_MIN_SIZE` bytes, so every slot below is in
-    // bounds.
-    let tag = unsafe { slots.add(STATE_SLOT_TAG).read() };
-    if tag == 0 {
-        unsafe { slots.add(STATE_SLOT_TAG).write(1) };
-        // SAFETY: same object; the duration (in nanoseconds) was stored here
-        // at construction -- the deadline itself is computed below, now.
-        let nanos = unsafe { slots.add(SLEEP_SLOT_NANOS).read() };
-        stage_park(Wait::Deadline(deadline_from_nanos(nanos)));
-        return POLL_PENDING;
+    // built, of at least `SLEEP_STATE_SIZE` bytes, so both slots are in bounds.
+    let deadline = unsafe { slots.add(SLEEP_SLOT_DEADLINE_NANOS).read() };
+    if crate::time::now_nanos() >= deadline {
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
+        return POLL_READY;
     }
-    // SAFETY: same object, output slot.
-    unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
-    POLL_READY
+    stage_park(Wait::Deadline(instant_from_deadline_nanos(deadline)));
+    POLL_PENDING
 }
 
-/// `nanos` nanoseconds from now, clamping a non-positive value to "now".
+/// A deadline `nanos` nanoseconds from now, as nanoseconds since
+/// `crate::time::epoch()`, clamping a non-positive argument to "now".
 ///
 /// Nova's `Int` is signed and nothing stops `sleep(-1)`; treating it as an
 /// immediate wake keeps the executor's invariants intact without inventing a
-/// new failure mode for an argument that is merely useless.
-fn deadline_from_nanos(nanos: i64) -> Instant {
-    let nanos = u64::try_from(nanos).unwrap_or(0);
-    Instant::now() + Duration::from_nanos(nanos)
+/// new failure mode for an argument that is merely useless. Saturating rather
+/// than wrapping, for the same reason the reading itself saturates.
+fn deadline_nanos_from_now(nanos: i64) -> i64 {
+    crate::time::now_nanos().saturating_add(nanos.max(0))
 }
 
-/// Where `nova_rt_task_sleep_future_nanos` stores its argument. One past the
-/// last slot the ABI reserves, so the state object is one word larger than
-/// `STATE_MIN_SIZE`.
-const SLEEP_SLOT_NANOS: usize = STATE_SLOT_TEMPS;
+/// A deadline in epoch-nanoseconds as an `Instant`, for staging.
+///
+/// **`checked_add`, not `+`.** `Instant + Duration` panics on overflow, and
+/// this is reached from [`poll_sleep`], a hand-written `PollFn` across which
+/// no panic may pass. The previous `Instant::now() + Duration::from_nanos(..)`
+/// carried that panic on a path nothing had ruled out.
+fn instant_from_deadline_nanos(deadline: i64) -> Instant {
+    let ns = u64::try_from(deadline).unwrap_or(0);
+    crate::time::epoch()
+        .checked_add(Duration::from_nanos(ns))
+        .unwrap_or_else(Instant::now)
+}
+
+/// Where `nova_rt_task_sleep_future_nanos` stores its **deadline**, as
+/// nanoseconds since `crate::time::epoch()`.
+///
+/// Renamed from `SLEEP_SLOT_NANOS`, which held a *duration*. The slot is an
+/// `i64` either way, so changing what the integer means while keeping its
+/// name would be invisible to the compiler -- the same hazard that made the
+/// previous increment rename this parker rather than only retype it.
+const SLEEP_SLOT_DEADLINE_NANOS: usize = STATE_SLOT_TEMPS;
 
 /// State size for a sleep future: the ABI minimum plus the one temp slot
-/// holding `nanos`.
+/// holding the deadline.
 const SLEEP_STATE_SIZE: usize = STATE_MIN_SIZE + 8;
 
-const _: () = assert!(SLEEP_STATE_SIZE >= (SLEEP_SLOT_NANOS + 1) * 8);
+const _: () = assert!(SLEEP_STATE_SIZE >= (SLEEP_SLOT_DEADLINE_NANOS + 1) * 8);
 
 /// A fresh `Future<unit>` that parks for `nanos` nanoseconds, then completes.
 ///
 /// Same layout obligation as [`nova_rt_task_yield_future`]: a scanned
 /// [`FUTURE_SIZE`] fat pointer over a scanned state object, built to the
 /// layout `async_lower.rs` independently emits. A fresh state object per call,
-/// because the resume tag *and* the deadline are per-suspension.
+/// because the deadline is per-suspension.
 #[no_mangle]
 pub extern "C-unwind" fn nova_rt_task_sleep_future_nanos(nanos: i64) -> *mut u8 {
     let poll: PollFn = poll_sleep;
     build_future(poll, SLEEP_STATE_SIZE, |slots| {
         // SAFETY: `slots` addresses a live `SLEEP_STATE_SIZE` block, and
-        // `SLEEP_SLOT_NANOS` is in bounds by the assertion above.
-        unsafe { slots.add(SLEEP_SLOT_NANOS).write(nanos) };
+        // `SLEEP_SLOT_DEADLINE_NANOS` is in bounds by the assertion above.
+        unsafe {
+            slots
+                .add(SLEEP_SLOT_DEADLINE_NANOS)
+                .write(deadline_nanos_from_now(nanos))
+        };
     })
 }
 
@@ -2542,6 +2563,71 @@ mod tests {
             delta >= Duration::from_millis(40) && delta <= Duration::from_millis(500),
             "a 50ms sleep staged a deadline {delta:?} out -- a unit error, not jitter"
         );
+    }
+
+    /// A sleep polled before its deadline must re-stage **the same deadline**
+    /// and stay pending.
+    ///
+    /// Asserted by identity, not existence: a mutant that re-stages
+    /// `Instant::now()` satisfies "some deadline is staged" and then spins
+    /// forever, which an existence check cannot distinguish from correct.
+    #[test]
+    fn a_sleep_polled_early_re_stages_the_same_deadline() {
+        let fut = nova_rt_task_sleep_future_nanos(60 * 1_000_000_000);
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: word 0 is a `PollFn` bit pattern by `fut`'s own construction.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        // SAFETY: `poll`/`state` are the pair inside `fut`; `task_ctx` is null.
+        let first = unsafe { poll(state, std::ptr::null_mut()) };
+        let staged_first = staged_deadline_for_test();
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        // SAFETY: same pair, polled a second time before the deadline.
+        let second = unsafe { poll(state, std::ptr::null_mut()) };
+        let staged_second = staged_deadline_for_test();
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        set_current_for_test(previous);
+
+        assert_eq!(
+            first, POLL_PENDING,
+            "a 60s sleep must park on its first poll"
+        );
+        assert_eq!(
+            second, POLL_PENDING,
+            "and must stay pending when polled again before its deadline"
+        );
+        assert_eq!(
+            staged_second, staged_first,
+            "the re-staged deadline must be the original, not a fresh one"
+        );
+    }
+
+    /// A sleep whose deadline has passed completes.
+    #[test]
+    fn a_sleep_polled_after_its_deadline_completes() {
+        let fut = nova_rt_task_sleep_future_nanos(0);
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: as above.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        // SAFETY: as above.
+        let status = unsafe { poll(state, std::ptr::null_mut()) };
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        set_current_for_test(previous);
+
+        assert_eq!(status, POLL_READY, "a zero-nanosecond sleep is already due");
     }
 
     /// The exact layout `nova_rt_task_join_future` builds, read back from the

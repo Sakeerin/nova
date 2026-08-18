@@ -29,15 +29,23 @@ pub(crate) fn epoch() -> Instant {
 
 /// Nanoseconds since [`epoch`], saturating at `i64::MAX`.
 ///
+/// The one place a clock reading becomes an `i64`. `task.rs` encodes deadlines
+/// against this so a deadline fits an `i64` state slot, which a
+/// `std::time::Instant` cannot: it has no documented byte layout.
+///
 /// **Saturates rather than wrapping.** `as_nanos` is `u128`, and a bare
 /// `as i64` would wrap after roughly 292 years of process uptime. A wrapped
 /// reading is negative, `std/time` computes `Duration`s from it by
 /// subtraction, and `sleep` treats a non-positive duration as an immediate
 /// wake -- so a wrap would turn a very long sleep into no sleep at all. A
 /// clamp keeps a useless answer from becoming a wrong one.
+pub(crate) fn now_nanos() -> i64 {
+    i64::try_from(epoch().elapsed().as_nanos()).unwrap_or(i64::MAX)
+}
+
 #[no_mangle]
 pub extern "C-unwind" fn nova_rt_time_now_nanos() -> i64 {
-    i64::try_from(epoch().elapsed().as_nanos()).unwrap_or(i64::MAX)
+    now_nanos()
 }
 
 #[cfg(test)]
