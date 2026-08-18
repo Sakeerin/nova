@@ -29,9 +29,17 @@ pub(crate) fn epoch() -> Instant {
 
 /// Nanoseconds since [`epoch`], saturating at `i64::MAX`.
 ///
-/// The one place a clock reading becomes an `i64`. `task.rs` encodes deadlines
-/// against this so a deadline fits an `i64` state slot, which a
-/// `std::time::Instant` cannot: it has no documented byte layout.
+/// The conversion `task.rs` encodes its sleep/timeout deadlines against, so a
+/// deadline fits an `i64` state slot, which a `std::time::Instant` cannot: it
+/// has no documented byte layout.
+///
+/// **Not the only clock-reading-to-`i64` conversion in this crate**, scoped
+/// the same way [`epoch`]'s own doc comment scopes itself: `net.rs`'s
+/// `now_epoch_ms` does the identical kind of conversion, in milliseconds
+/// rather than nanoseconds, against its own separate origin
+/// (`net.rs`'s `deadline_epoch`) for `read_timeout`'s unrelated deadline
+/// arithmetic. This doc comment speaks only for readings taken through
+/// [`epoch`].
 ///
 /// **Saturates rather than wrapping.** `as_nanos` is `u128`, and a bare
 /// `as i64` would wrap after roughly 292 years of process uptime. A wrapped

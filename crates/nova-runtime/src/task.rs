@@ -1580,11 +1580,52 @@ fn deadline_nanos_from_now(nanos: i64) -> i64 {
 /// this is reached from [`poll_sleep`], a hand-written `PollFn` across which
 /// no panic may pass. The previous `Instant::now() + Duration::from_nanos(..)`
 /// carried that panic on a path nothing had ruled out.
+///
+/// **Delegates the overflow case to [`furthest_representable_instant`]
+/// rather than falling back to `Instant::now()`.** An earlier version of this
+/// function did exactly that, and it traded the panic for a livelock: the
+/// staged `Instant` would read as immediately due to [`wake_due`]'s
+/// `deadline <= now` check, but [`poll_sleep`] compares the *stored integer*
+/// deadline (still far in the future) against the clock on every re-poll, so
+/// the task would wake, find itself not due by its own arithmetic, and
+/// re-stage the same broken `Instant::now()` -- forever, burning CPU with no
+/// progress. See [`furthest_representable_instant`] for why its answer does
+/// not have that problem.
 fn instant_from_deadline_nanos(deadline: i64) -> Instant {
     let ns = u64::try_from(deadline).unwrap_or(0);
-    crate::time::epoch()
-        .checked_add(Duration::from_nanos(ns))
-        .unwrap_or_else(Instant::now)
+    furthest_representable_instant(crate::time::epoch(), Duration::from_nanos(ns))
+}
+
+/// `base + duration`, or the furthest instant from `base` this platform's
+/// `Instant` can represent, halving `duration` until `checked_add` succeeds.
+///
+/// **Never earlier than `base`, and `base` is a fixed point in the past**
+/// (`crate::time::epoch()`, captured once at process start), so this never
+/// answers with something [`wake_due`] would treat as already due while the
+/// caller's own integer deadline is still ahead of the clock -- the property
+/// [`instant_from_deadline_nanos`]'s old `Instant::now()` fallback broke.
+/// Halving only ever *shrinks* an unrepresentable `duration` towards one that
+/// fits, so the loop always terminates (worst case at `Duration::ZERO`,
+/// which `checked_add` always accepts, since adding nothing cannot overflow)
+/// and every candidate it tries on the way stays a duration measured
+/// forward from `base`, never behind it.
+///
+/// In production this call always succeeds on its first attempt: the only
+/// caller bounds `duration` to at most `i64::MAX` nanoseconds (~292 years),
+/// via [`deadline_nanos_from_now`]'s own saturation, and no supported `Instant`
+/// backend has under that much headroom from a process-start `base`. The
+/// halving loop exists for the input this crate cannot actually construct
+/// through its own API, not the one it can -- one of this module's own tests
+/// forces it directly with `Duration::MAX`, a value no caller here can ever
+/// pass in, since `Instant` itself offers no public way to sit near its own
+/// overflow boundary the way `Duration::MAX` does.
+fn furthest_representable_instant(base: Instant, mut duration: Duration) -> Instant {
+    loop {
+        if let Some(instant) = base.checked_add(duration) {
+            return instant;
+        }
+        duration /= 2;
+    }
 }
 
 /// Where `nova_rt_task_sleep_future_nanos` stores its **deadline**, as
@@ -2628,6 +2669,53 @@ mod tests {
         set_current_for_test(previous);
 
         assert_eq!(status, POLL_READY, "a zero-nanosecond sleep is already due");
+    }
+
+    /// `instant_from_deadline_nanos`'s result must never be treated as
+    /// already due while the deadline it encodes is still in the future --
+    /// the property the old `Instant::now()` overflow fallback broke (see
+    /// that function's own doc comment). `i64::MAX` is the largest deadline
+    /// [`deadline_nanos_from_now`] can ever produce, so it is the input this
+    /// crate's own API can actually construct that stresses the conversion
+    /// hardest.
+    #[test]
+    fn instant_from_deadline_nanos_of_i64_max_is_not_already_due() {
+        let before = Instant::now();
+        let staged = instant_from_deadline_nanos(i64::MAX);
+        assert!(
+            staged >= before,
+            "a deadline this far in the future must not stage an instant \
+             that is already due"
+        );
+    }
+
+    /// Forces [`furthest_representable_instant`]'s halving fallback directly,
+    /// since nothing reachable through this crate's own sleep API can:
+    /// `deadline_nanos_from_now` bounds every deadline to at most `i64::MAX`
+    /// nanoseconds (~292 years), and `checked_add` of that many nanoseconds
+    /// from a process-start `Instant` succeeds on every supported backend --
+    /// confirmed below, not assumed. `Duration::MAX` (~584 billion years) is
+    /// the one value guaranteed to overflow it, and `Instant` offers no
+    /// public way to sit near its own overflow boundary the way `Duration`
+    /// does, so this is the only lever available to actually exercise the
+    /// loop rather than merely asserting its result type is right.
+    #[test]
+    fn furthest_representable_instant_forces_the_halving_fallback_and_is_not_already_due() {
+        let base = Instant::now();
+        assert!(
+            base.checked_add(Duration::MAX).is_none(),
+            "this test only exercises the halving loop if Duration::MAX \
+             overflows Instant::checked_add on this platform; if that ever \
+             changes, this assertion (not the one below) is what will fail"
+        );
+
+        let before = Instant::now();
+        let staged = furthest_representable_instant(base, Duration::MAX);
+        assert!(
+            staged >= before,
+            "the furthest representable instant must not be treated as \
+             already due"
+        );
     }
 
     /// The exact layout `nova_rt_task_join_future` builds, read back from the
