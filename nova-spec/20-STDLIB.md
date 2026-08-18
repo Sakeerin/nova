@@ -524,7 +524,8 @@ pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>
 ```
 
 **AMENDED 2026-08-17 (branch `std-time`): `Instant` and `Duration` ship as
-declared above, `timeout`/`TimeoutError` do not, and the `/* opaque */`
+declared above** — `timeout`/`TimeoutError` followed in a later increment,
+recorded in the 2026-08-18 amendment below — **and the `/* opaque */`
 markers state an intent this language cannot enforce.** Both records are
 `{ nanos: Int }` — nanoseconds since a single process-monotonic origin for
 `Instant`, a nanosecond count for `Duration` — with no status-code boundary
@@ -536,14 +537,7 @@ module and reaches `sleep` having bypassed every saturating constructor —
 the identical situation `std/net`'s `TcpStream { fd: Int }` (§16) and
 `std/fs`'s `File { fd: Int }` (§5) already document for their own records;
 `/* opaque */` is not currently expressible in this language, for any
-record. `timeout<T>` and `TimeoutError` are not implemented: `try_stage`
-treats a second staged deadline as a collision and a collision aborts the
-process, so both `timeout(d, sleep(..))` and `timeout(d, handle.join())`
-would abort; `poll_sleep` is edge-triggered where `poll_join` is
-level-triggered, so a wake merged from an unrelated source could make a
-timed-out sleep report a completion it never earned; and nothing yet
-defines what happens to an abandoned inner future's socket registration or
-GC root when the outer `timeout` fires first. Separately, the "at least"
+record. Separately, the "at least"
 contract `sleep` already promises is platform-asymmetric in its
 granularity, but not because the wait itself always rounds up: `select_timeout`
 (Unix) and `wsapoll_timeout_ms` (Windows) truncate a remaining duration to
@@ -559,6 +553,28 @@ ready," and the drive loop simply re-polls and re-parks on the same
 deadline rather than waking the sleeper ahead of schedule
 (`crates/nova-runtime/src/poll.rs`'s `select_timeout` and
 `wsapoll_timeout_ms`; `crates/nova-runtime/src/task.rs`'s `wake_due`).
+
+**AMENDED 2026-08-18 (branch `timeout-combinator`): `timeout<T>` and
+`TimeoutError` now ship too, closing §9 entirely.** Delivered over one new
+builtin, `task_timeout_future`, and one hand-written `PollFn`,
+`poll_timeout`, which polls the inner future before checking the deadline,
+so a future that already completed is never reported as timed out. Getting
+here needed the executor to widen: a deadline may now accompany any wait
+and two deadlines merge to the earlier by `min` (`Wait::Task` grew a
+`deadline: Option<Instant>` field), and `poll_sleep` became level-triggered
+like `poll_join` instead of edge-triggered, so a wake merged from an
+unrelated deadline cannot make it fabricate a completion. **`timeout`
+abandons its inner future; it does not cancel it** — the poll ABI has no
+cancellation hook, so on timeout the inner is simply never polled again.
+That costs nothing for `sleep` (GC reclaims its state), `join` (the joined
+task runs on independently), or `read`/`write` (the caller still holds the
+`TcpStream`), but it costs a socket for `connect`: `start_connect` registers
+the socket in the poller's table and only `finish_connect` removes it, so a
+`connect` abandoned mid-attempt leaves an entry nothing can reach or close,
+leaking it until process exit — the same standing
+`docs/adr/0012-file-descriptor-lifecycle.md` already accepts for any
+unclosed descriptor. Design:
+`docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`.
 
 ---
 

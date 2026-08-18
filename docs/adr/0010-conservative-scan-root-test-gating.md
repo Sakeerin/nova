@@ -114,6 +114,58 @@ both remedies above plausibly backfired for the same reason — forcing tighter
 temporal and spatial proximity between scan tests, or changing frame layout,
 changes which stale bytes are still readable.
 
+## A differently-shaped data point (2026-08-18 amendment, branch `timeout-combinator`)
+
+A different symptom, found incidentally while building a GC-rooting test for
+the new `timeout<T>` combinator, and recorded here because it is adjacent to
+this document's subject without being an instance of the mechanism above.
+
+**Measured:** `gc.rs`'s own `an_unregistered_object_is_swept` test, reproduced
+*verbatim* — byte-identical code, the same `hide`/`reveal` plus
+null-by-reassignment technique — into `task.rs`'s test module. In its home
+module it reliably swept the unregistered object, 10/10 runs. Relocated into
+`task.rs`, unchanged, it failed to sweep 5/5 runs: the object survived every
+time.
+
+**This is not this document's flakiness, and is a different flavour of the
+same underlying sensitivity.** The mechanism recorded above (`is_none()`
+tests failing 25–35% of runs at default parallelism) is stochastic: the same
+test, in the same binary and module, sometimes passes and sometimes does
+not. This is the opposite shape — **fully deterministic** in both places,
+always swept at home and never swept relocated, reproduced on every sample
+taken rather than a fraction of them — and it tracks which **test binary**
+the code compiles into, not scheduling or parallelism; running it alone,
+serially, changed nothing. It is consistent with, and a sharper illustration
+of, the sensitivity to code shape and call-chain layout this document's
+"Two remedies" section already found, extended one axis further: not just
+*which* test in a module fails, but whether the identical technique can
+sweep at all, depending on what module it is compiled into.
+
+**Not chased further, because a fix already existed for the actual need.**
+The rooting test being built did not need the real, stack-scanning collector
+at all — `gc::sweep_with_roots_for_test(roots: &[usize])` marks and sweeps
+against an explicit root slice, consulting neither the stack nor `PINNED`,
+so it needed no `hide`/`reveal` defeat-conservatism trick and no
+`#[cfg(windows)]` gate to begin with. Switching to it is what let
+`a_timeouts_inner_future_survives_a_root_set_sweep_of_only_its_own_state`
+(`crates/nova-runtime/src/task.rs`) run deterministically on all three CI
+platforms — strictly better than making the stack-scanning version work
+would have been, since that version could never have been ungated by this
+document's own Decision below regardless of how reliable it became.
+
+**Recorded as an amendment, not folded into "The mechanism, as measured"
+above, because the two are different findings that happen to share a
+subsystem.** The evidence above stays scoped to `gc.rs`'s own two test
+modules under real parallelism; this is one additional data point about the
+same conservative-scan technique behaving oppositely depending on which test
+binary runs it. It changes nothing in this document's Decision — the eight
+tests stay `#[ignore]`d exactly as before, and none of them were touched or
+re-examined. Its value is prospective: for whoever next reaches for
+`hide`/`reveal` or a real `gc::collect()` in a *new* test module, expecting
+`gc.rs`'s own reliability to travel with the technique — it measurably does
+not, and `sweep_with_roots_for_test`'s explicit root set is the tool that
+sidesteps the question entirely rather than re-fighting it.
+
 ## Decision
 
 1. **All eight tests carry an unconditional `#[ignore]`**, in debug and release
@@ -172,8 +224,14 @@ neither should be implemented on the strength of this document alone.
 
 ## References
 
-- `crates/nova-runtime/src/gc.rs` — the collector, and `mod registry`.
-- `crates/nova-runtime/src/task.rs` — `mod root_registration`.
+- `crates/nova-runtime/src/gc.rs` — the collector, `mod registry`, and
+  `sweep_with_roots_for_test`/`collect_with_roots` (2026-08-18 amendment).
+- `crates/nova-runtime/src/task.rs` — `mod root_registration`, and
+  `a_timeouts_inner_future_survives_a_root_set_sweep_of_only_its_own_state`'s
+  own doc comment, which carries the 2026-08-18 amendment's measurement in
+  more detail.
 - `.github/workflows/ci.yml` — the advisory `--ignored` step.
 - `docs/adr/0002-phase1-leaking-allocator.md` — why the collector is
   conservative in the first place.
+- `.superpowers/sdd/2026-08-18-timeout-combinator/task-3-report.md` and
+  `progress.md` — the 2026-08-18 amendment's source measurement.

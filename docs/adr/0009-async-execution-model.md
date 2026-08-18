@@ -293,6 +293,46 @@ afterwards.
   rather than hidden:** a program that connects to a peer that accepts the
   connection and then never writes back hangs with no diagnostic, and
   `nova test` has no per-test timeout to bound it.
+
+  **AMENDED 2026-08-18 (branch `timeout-combinator`): the park set's staging
+  rule widens, `Wait::Task` grows a field, and `sleep` stops being
+  edge-triggered — plus the combinator this made possible.** `try_stage` no
+  longer treats a second staged deadline as an automatic collision: a
+  deadline may now accompany any wait, and two deadlines merge to the
+  earlier by `min`. `Wait::Task(id)`, quoted above as a bare tuple, is now
+  `Wait::Task { id: i64, deadline: Option<Instant> }`, following the shape
+  `Wait::Io { deadline: Some(..), .. }` already had. Every other pairing —
+  Task+Task, Io+Io — still collides and aborts, unchanged.
+  `earliest_deadline` and `deadlock_report` are exhaustive matches the
+  compiler forced onto the wider shape; `wake_due`'s `retain` is not — it
+  ends in `_ => true` — so it needed an explicit added arm, and omitting it
+  produces no compile error, no panic, and no diagnostic, only a silent
+  hang.
+
+  This is what let `poll_sleep` stop being edge-triggered: under `min`
+  merging a task can now be woken for a deadline that is not its own, so
+  `poll_sleep` re-checks `now >= deadline` on every poll instead of
+  completing unconditionally on its second one — the same shape `poll_join`
+  already had, and now structurally identical to it. It stores a
+  **deadline** (epoch-nanoseconds) rather than a duration, computed once at
+  construction; the slot is renamed again, `SLEEP_SLOT_NANOS` →
+  `SLEEP_SLOT_DEADLINE_NANOS`, the second such rename in two increments
+  (`std/time` renamed the whole parker for the identical reason: an `i64`
+  slot's meaning can change while its name does not, invisibly to the
+  compiler).
+
+  **The new combinator this answers:** `timeout<T>(d: Duration, fut:
+  Future<T>) -> Result<T, TimeoutError>` (`std/time`), over one new builtin,
+  `task_timeout_future`, and one hand-written `PollFn`, `poll_timeout`,
+  which polls the inner future before checking the deadline. `timeout`
+  **abandons** its inner future on timeout rather than cancelling it — the
+  poll ABI has no cancellation hook — which is free for `sleep`, `join`,
+  and `read`/`write`, and leaks a socket for `connect` until process exit
+  (`docs/adr/0012-file-descriptor-lifecycle.md`'s existing stance on any
+  unclosed descriptor). No new ADR: none of this deviates from
+  `nova-spec`; design in
+  `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`, full
+  detail in `nova-spec/20-STDLIB.md` §9's 2026-08-18 amendment.
 - **`spawn` used to accept the same future twice, with no check at all** —
   registering it as two independent tasks that both drove one shared state
   object, corrupting whichever one polled second. **Closed on branch
@@ -633,7 +673,12 @@ Two companion rules, from the same evidence:
   `nova_rt_task_join_future`, `deadlock_report`/`report_deadlock` —
   `nova_rt_task_sleep_future_nanos` was `nova_rt_task_sleep_future`, renamed
   and retyped from milliseconds to nanoseconds in the same change
-  (2026-08-17, `std-time`)
+  (2026-08-17, `std-time`) — and, from the 2026-08-18 `timeout-combinator`
+  amendment above, `try_stage`, `earliest_deadline`, `poll_sleep`,
+  `deadline_nanos_from_now`, `instant_from_deadline_nanos`,
+  `SLEEP_SLOT_DEADLINE_NANOS` (was `SLEEP_SLOT_NANOS`), `poll_timeout`,
+  `nova_rt_task_timeout_future`, `TIMEOUT_SLOT_INNER`,
+  `TIMEOUT_SLOT_DEADLINE_NANOS`
 - `crates/nova-mir/src/async_lower.rs`: the state-machine transform, the
   `Spiller`, and the state-size guard
 - `std/task/lib.nova`: `spawn`, `JoinHandle`, `join`, `yield_now`, `block_on`
@@ -644,6 +689,7 @@ Two companion rules, from the same evidence:
   `std-time`) — `sleep` is `std/task`'s former primitive, retyped from
   `(ms: Int)` to `(d: Duration)` in the same change that retyped its parker,
   `nova_rt_task_sleep_future_nanos` above, from milliseconds to nanoseconds
+  — `timeout<T>`, `TimeoutError` added (2026-08-18, `timeout-combinator`)
 - Gate: `tests/runtime/async_tasks.{nova,stdout}`, registered as
   `gate_async_tasks_run`, `gate_async_tasks_build_standalone` and
   `gate_async_tasks_under_gc_stress` (`crates/nova-cli/tests/run_tests.rs`)
@@ -653,6 +699,14 @@ Two companion rules, from the same evidence:
   and `tests/runtime/task_sleep_order.{nova,stdout}`, registered as
   `task_deadlock_reports_and_aborts_instead_of_hanging_forever` and
   `gate_task_sleep_order_runs` (`crates/nova-cli/tests/run_tests.rs`)
+- Design (2026-08-18 amendment): `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`
+  — the staging widening, `poll_sleep`'s level-triggering, and the
+  `timeout<T>` combinator itself; fixtures:
+  `tests/runtime/timeout_ok.{nova,stdout}`,
+  `tests/runtime/timeout_elapsed.{nova,stdout}`,
+  `tests/runtime/timeout_value.{nova,stdout}`,
+  `tests/runtime/timeout_join_ok.{nova,stdout}`,
+  `tests/runtime/timeout_join_elapsed.{nova,stdout}`
 - Spec: `nova-spec/13-RUNTIME.md` §4.2 (honoured), §4.1 and §4.4 (deviations
   recorded in §1); `nova-spec/20-STDLIB.md` §13 (`spawn_blocking`, not provided)
 - `docs/adr/0010-conservative-scan-root-test-gating.md` — the `#[ignore]`d

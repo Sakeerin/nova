@@ -60,6 +60,32 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose **magnitude**, not merely presence, is right — measured against a
   `before = Instant::now()` taken ahead of the poll, so the lower bound
   holds by monotonicity regardless of scheduling jitter.
+- **`timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>`**,
+  in `std/time` (`Builtin::STD_ONLY` 59 → 60; `STD_MODULES` stays 9;
+  `RESERVED_TYPE_NAMES` stays 7 — `TimeoutError {}` is an ordinary record,
+  the first in `std` with no field to disclose because it has none). Built
+  over one new builtin, `task_timeout_future`, and one hand-written
+  `PollFn`, `poll_timeout`, which polls the inner future *before* checking
+  the deadline — so work that already completed is never reported as timed
+  out, and `timeout(Duration::from_secs(0), ready_future)` returns `Ok`, the
+  least surprising answer. **The contract is abandonment, not
+  cancellation**: on timeout, `timeout` returns `Err(TimeoutError {})` and
+  simply stops polling the inner future — nothing tells it that it lost the
+  race, and the poll ABI has no cancellation hook to tell it with. Measured
+  against what each inner future owns mid-park, this is free for `sleep`
+  (its state is GC-reclaimed), `join` (the joined task runs on
+  independently), and `read`/`write` (the caller still holds the
+  `TcpStream`). **`connect` is the one leak**: `start_connect` registers a
+  socket in the poller's table and only `finish_connect` removes it, so a
+  timed-out `connect` leaves a socket entry nothing can reach or close — it
+  leaks until process exit, the same standing
+  `docs/adr/0012-file-descriptor-lifecycle.md` already accepts for any
+  unclosed descriptor. Documented at `timeout`'s own doc comment and at
+  `std/net::connect`. Five new fixtures (`timeout_ok`, `timeout_elapsed`,
+  `timeout_value`, `timeout_join_ok`, `timeout_join_elapsed`) cover both
+  branches, the `task_output(fut)` read that must come from the inner
+  future's own slot, and both directions of the `timeout`-over-`join`
+  pairing that used to abort the process.
 
 ### Changed
 
@@ -80,19 +106,42 @@ that already compiled.
   same register `Bytes` joining `RESERVED_TYPE_NAMES` was: a trap silently
   resolving to whichever definition loads first is worse than one migration
   line.
-- **`timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>`**,
-  specified in `nova-spec/20-STDLIB.md` §9, **is deliberately not delivered
-  by this increment** — recorded here so the gap reads as a decision, not
-  an oversight. Three measured blockers: `try_stage` treats a second staged
-  deadline as a collision and a collision aborts the process, so both
-  `timeout(d, sleep(..))` and `timeout(d, handle.join())` would abort;
-  `poll_sleep` is edge-triggered where `poll_join` is level-triggered, so a
-  wake merged from an unrelated source could make a timed-out sleep report
-  a completion it never earned; and nothing yet defines what happens to an
-  abandoned inner future's socket registration or GC root when the outer
-  `timeout` fires first. Also recorded in
-  `docs/superpowers/specs/2026-08-17-std-time-design.md` §1 and
-  `nova-spec/20-STDLIB.md` §9's own amendment.
+- **A deadline may now accompany any wait, not only `Wait::Deadline` and
+  `Wait::Io`.** `try_stage` no longer treats a second staged deadline as an
+  automatic collision: two deadlines merge to the earlier by `min`, and
+  `Wait::Task` grows a field to carry one — `Wait::Task(i64)` becomes
+  `Wait::Task { id: i64, deadline: Option<Instant> }`. Every other pairing
+  (Task+Task, Io+Io) still collides and aborts, unchanged.
+  `earliest_deadline` and `deadlock_report` are exhaustive matches the
+  compiler forced onto the new shape; `wake_due` is not — its `retain` ends
+  in `_ => true` — so it needed an explicit added arm, pinned by a test that
+  fails if that arm is missing (omitting it does not fail to compile, panic,
+  or diagnose anything; it just hangs).
+- **`sleep` is level-triggered, not edge-triggered.** `poll_sleep` now
+  re-checks `now >= deadline` on every poll instead of completing
+  unconditionally on its second one, becoming structurally identical to
+  `poll_join` — forced by the widening above, since a task can now be woken
+  for a deadline that is not its own. It also stores a **deadline** in
+  epoch-nanoseconds rather than a duration: the slot is renamed again,
+  `SLEEP_SLOT_NANOS` → `SLEEP_SLOT_DEADLINE_NANOS`, and `deadline_from_
+  nanos` is replaced by two helpers, `deadline_nanos_from_now` (clamps a
+  raw duration argument to non-negative, once, at construction) and
+  `instant_from_deadline_nanos` (converts the stored absolute deadline back
+  to an `Instant` for staging, via a halving-loop fallback so a
+  `checked_add` overflow cannot produce a deadline the executor treats as
+  already due). Consequence worth naming: a sleep or timeout's deadline now
+  runs from **construction**, not first poll — invisible for
+  `sleep(d).await` written inline, observable for a future built and held
+  before being awaited.
+- **`timeout<T>`, previously recorded here as deliberately not delivered,
+  shipped in this increment** — see Added, above, for the abandonment
+  contract. Its three blockers are each resolved by a change above: the
+  staging collision, by the widened `try_stage`; `poll_sleep`'s
+  edge-triggering, by making it level-triggered; and the undefined
+  abandonment semantics, by choosing abandonment and documenting its one
+  leak (`connect`). Also recorded in `nova-spec/20-STDLIB.md` §9's own
+  amendment and
+  `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`.
 
 ## [0.2.0-alpha.1] - 2026-08-16
 

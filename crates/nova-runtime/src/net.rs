@@ -460,14 +460,14 @@ fn platform_connect(addr: SocketAddr) -> std::io::Result<TcpStream> {
 
 /// Where the connect future keeps its socket between polls. One past the
 /// last slot the ABI reserves, so the state object is one word larger than
-/// `STATE_MIN_SIZE` -- the same arrangement `SLEEP_SLOT_NANOS` uses.
+/// `STATE_MIN_SIZE` -- the same arrangement `SLEEP_SLOT_DEADLINE_NANOS` uses.
 ///
 /// Reused for two different values across the future's short life: before
 /// the first poll it holds the address argument's `NovaStr` pointer (kept
 /// alive by this state object's own GC root/scan, exactly as
-/// `SLEEP_SLOT_NANOS` needs no rooting of its own for a plain `Int`); the first
-/// poll reads that out and overwrites this same slot with the socket's table
-/// fd for the second poll to look back up.
+/// `SLEEP_SLOT_DEADLINE_NANOS` needs no rooting of its own for a plain
+/// `Int`); the first poll reads that out and overwrites this same slot with
+/// the socket's table fd for the second poll to look back up.
 const CONNECT_SLOT_SOCK: usize = STATE_SLOT_TEMPS;
 
 /// State size for a connect future: the ABI minimum plus the one temp slot
@@ -898,10 +898,19 @@ fn now_epoch_ms() -> i64 {
 }
 
 /// An `Instant` `remaining_ms` milliseconds from now, clamping a non-positive
-/// value to "now" -- the identical clamp `task.rs`'s own (private)
-/// `deadline_from_nanos` applies, for the identical reason: nothing stops a
-/// remaining duration computed from a stored deadline from having already
-/// reached zero, or gone negative, by the time this runs.
+/// value to "now": nothing stops a remaining duration, recomputed from a
+/// stored deadline on every poll, from having already reached zero or gone
+/// negative by the time this runs.
+///
+/// Not the same shape as `task.rs`'s own clamp anymore. Its `deadline_from_
+/// nanos` used to recompute a remaining duration from "now" the identical
+/// way this function does; the `timeout-combinator` increment eliminated
+/// that shape entirely -- `task.rs` now computes a sleep's or a timeout's
+/// deadline exactly once, at construction, via `deadline_nanos_from_now`,
+/// whose `nanos.max(0)` clamp guards a fresh duration *argument* rather than
+/// a value re-derived at every poll, and nothing time-relative is recomputed
+/// on that side again. `read_timeout` still recomputes here on every poll,
+/// because nothing in that increment touched `net.rs`.
 fn instant_from_remaining_ms(remaining_ms: i64) -> Instant {
     let ms = u64::try_from(remaining_ms).unwrap_or(0);
     Instant::now() + Duration::from_millis(ms)
