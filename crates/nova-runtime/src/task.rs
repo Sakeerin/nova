@@ -1721,6 +1721,107 @@ pub unsafe extern "C-unwind" fn nova_rt_task_join_future(future: *mut u8) -> *mu
     })
 }
 
+/// Where a timeout future stores the inner future's `{ poll_code, state }`
+/// fat pointer.
+///
+/// The state object is scanned (`build_future` allocates with
+/// `gc::alloc(size, true)`), so storing this pointer is the whole of the
+/// rooting: it keeps the inner future and, transitively, its state reachable
+/// for exactly as long as the timeout future itself.
+const TIMEOUT_SLOT_INNER: usize = STATE_SLOT_TEMPS;
+
+/// Where a timeout future stores its deadline, as nanoseconds since
+/// `crate::time::epoch()` -- the same encoding `SLEEP_SLOT_DEADLINE_NANOS` uses.
+const TIMEOUT_SLOT_DEADLINE_NANOS: usize = STATE_SLOT_TEMPS + 1;
+
+/// State size for a timeout future: the ABI minimum plus two temp slots.
+const TIMEOUT_STATE_SIZE: usize = STATE_MIN_SIZE + 16;
+
+const _: () = assert!(TIMEOUT_STATE_SIZE >= (TIMEOUT_SLOT_DEADLINE_NANOS + 1) * 8);
+
+/// The inner future completed before the deadline.
+pub const TIMEOUT_STATUS_COMPLETED: i64 = 0;
+
+/// The deadline passed with the inner future still pending.
+pub const TIMEOUT_STATUS_ELAPSED: i64 = 1;
+
+/// Poll the inner future, then this timeout's own deadline.
+///
+/// **That order is deliberate.** Polling the inner first means work that
+/// completed is never reported as timed out, and it makes a zero-duration
+/// timeout over an already-ready future succeed -- the least surprising
+/// answer. The order is only *available* because `poll_sleep` is
+/// level-triggered: with an edge-triggered sleep, a woken sleep could report a
+/// completion it had not earned, forcing a deadline-first check as a defence.
+///
+/// **Abandonment needs no code here.** When the inner returns
+/// [`POLL_PENDING`] and this function then returns [`POLL_READY`], the inner
+/// has already staged a park -- and [`poll_one`] takes `PENDING_PARK`
+/// unconditionally, discarding it. The mechanism that stops a finished task
+/// faking a deadlock cleans up the abandoned park for free.
+///
+/// **Must not unwind.** Every slot access is a raw read with the SAFETY note
+/// below; an out-of-range status from the inner poll goes to [`abort_with`],
+/// the same route a staging collision takes, never `panic!`.
+unsafe extern "C-unwind" fn poll_timeout(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_task_timeout_future` built, at
+    // least `TIMEOUT_STATE_SIZE` bytes, so every slot below is in bounds.
+    let inner = unsafe { slots.add(TIMEOUT_SLOT_INNER).read() } as *mut u8;
+    // SAFETY: same object.
+    let deadline = unsafe { slots.add(TIMEOUT_SLOT_DEADLINE_NANOS).read() };
+
+    // SAFETY: `inner` is the fat pointer written at construction, so word 0 is
+    // its poll function and word 1 its state -- the layout `build_future`
+    // guarantees and `async_lower.rs` independently emits.
+    let inner_poll_addr = unsafe { (inner as *mut usize).add(FUTURE_SLOT_POLL).read() };
+    // SAFETY: that word is a `PollFn` bit pattern by the inner future's own
+    // construction; a fn pointer and a `usize` are both pointer-width.
+    let inner_poll: PollFn = unsafe { std::mem::transmute(inner_poll_addr) };
+    // SAFETY: same fat pointer, state word.
+    let inner_state = unsafe { (inner as *mut usize).add(FUTURE_SLOT_STATE).read() } as *mut u8;
+
+    // SAFETY: `inner_poll`/`inner_state` are the pair inside `inner`;
+    // `task_ctx` is always null, matching every other call site in this crate.
+    let inner_status = unsafe { inner_poll(inner_state, std::ptr::null_mut()) };
+    if inner_status == POLL_READY {
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(TIMEOUT_STATUS_COMPLETED) };
+        return POLL_READY;
+    }
+    if inner_status != POLL_PENDING {
+        abort_with(&format!(
+            "nova_rt: a future polled by a timeout returned {inner_status}, which is \
+             neither POLL_PENDING ({POLL_PENDING}) nor POLL_READY ({POLL_READY})"
+        ));
+    }
+    if crate::time::now_nanos() >= deadline {
+        // SAFETY: same object, output slot.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).write(TIMEOUT_STATUS_ELAPSED) };
+        return POLL_READY;
+    }
+    stage_park(Wait::Deadline(instant_from_deadline_nanos(deadline)));
+    POLL_PENDING
+}
+
+/// A fresh `Future<Int>` that polls `fut` until it completes or `nanos`
+/// nanoseconds pass, reporting which happened.
+///
+/// The value is **not** carried here: the inner future wrote its own output
+/// slot, and Nova reads it with `task_output` on the inner future itself, so
+/// nothing moves an `i64` that might be a scalar or a pointer.
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_task_timeout_future(nanos: i64, fut: *mut u8) -> *mut u8 {
+    let poll: PollFn = poll_timeout;
+    let deadline = deadline_nanos_from_now(nanos);
+    build_future(poll, TIMEOUT_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `TIMEOUT_STATE_SIZE` block, and both
+        // slots are in bounds by the assertion above.
+        unsafe { slots.add(TIMEOUT_SLOT_INNER).write(fut as i64) };
+        unsafe { slots.add(TIMEOUT_SLOT_DEADLINE_NANOS).write(deadline) };
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,6 +1881,38 @@ mod tests {
         // SAFETY: `future` is a `make_future` result, so word
         // `FUTURE_SLOT_STATE` is the state object's address.
         unsafe { (future as *mut usize).add(FUTURE_SLOT_STATE).read() }
+    }
+
+    /// Poll a future once under a borrowed task context, draining any park it
+    /// staged.
+    ///
+    /// The park must be drained: `stage_park` aborts the process when a second
+    /// deadline is staged over a first, so a leftover entry kills a later test
+    /// under `--test-threads=1`.
+    #[cfg(test)]
+    fn poll_once_for_test(fut: *mut u8) -> i64 {
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: word 0 is a `PollFn` bit pattern by `fut`'s own construction.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        // SAFETY: `poll`/`state` are the pair inside `fut`; `task_ctx` is null.
+        let status = unsafe { poll(state, std::ptr::null_mut()) };
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        set_current_for_test(previous);
+        status
+    }
+
+    /// The value a future wrote to its own output slot.
+    #[cfg(test)]
+    fn output_of_for_test(fut: *mut u8) -> i64 {
+        let slots = state_of(fut) as *mut i64;
+        // SAFETY: every future this module builds is at least
+        // `STATE_MIN_SIZE`, so the output slot is in bounds.
+        unsafe { slots.add(STATE_SLOT_OUTPUT).read() }
     }
 
     /// Build a future with a `STATE_MIN_SIZE` state and nothing in it but the
@@ -2716,6 +2849,100 @@ mod tests {
             "the furthest representable instant must not be treated as \
              already due"
         );
+    }
+
+    /// The inner future is polled **before** the deadline is checked, so work
+    /// that completed is never reported as timed out -- and a zero-duration
+    /// timeout over an already-ready future succeeds.
+    ///
+    /// Reversing the order in `poll_timeout` fails exactly this.
+    #[test]
+    fn a_zero_duration_timeout_over_a_ready_future_reports_completed() {
+        let inner = nova_rt_task_sleep_future_nanos(0);
+        let fut = nova_rt_task_timeout_future(0, inner);
+        let status = poll_once_for_test(fut);
+        assert_eq!(status, POLL_READY);
+        assert_eq!(
+            output_of_for_test(fut),
+            TIMEOUT_STATUS_COMPLETED,
+            "the inner future was ready, so this must not report elapsed"
+        );
+    }
+
+    /// A past deadline over a future that will not complete reports elapsed.
+    #[test]
+    fn an_expired_timeout_over_a_pending_future_reports_elapsed() {
+        let inner = nova_rt_task_sleep_future_nanos(60 * 1_000_000_000);
+        let fut = nova_rt_task_timeout_future(0, inner);
+        let status = poll_once_for_test(fut);
+        assert_eq!(status, POLL_READY);
+        assert_eq!(output_of_for_test(fut), TIMEOUT_STATUS_ELAPSED);
+    }
+
+    /// A live timeout over a pending inner parks, and the staged park carries
+    /// **both** the inner's wait and this timeout's deadline, merged.
+    ///
+    /// Written with the raw poll idiom rather than `poll_once_for_test`,
+    /// because that helper drains `PENDING_PARK` before returning and this
+    /// test must read `staged_deadline_for_test()` **before** the drain.
+    #[test]
+    fn a_live_timeout_over_a_pending_future_stages_both_deadlines_merged() {
+        let inner = nova_rt_task_sleep_future_nanos(60 * 1_000_000_000);
+        let fut = nova_rt_task_timeout_future(1_000_000, inner);
+        let before = Instant::now();
+        // SAFETY: `fut` is this call's own `FUTURE_SIZE`-byte block, so word 0
+        // is its poll function.
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: that word is a `PollFn` bit pattern by `fut`'s own
+        // construction; a fn pointer and a `usize` are both pointer-width.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        // SAFETY: `poll`/`state` are the pair inside `fut`; `task_ctx` is
+        // always null, matching every other call site in this crate.
+        let status = unsafe { poll(state, std::ptr::null_mut()) };
+        let staged = staged_deadline_for_test();
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        set_current_for_test(previous);
+
+        assert_eq!(
+            status, POLL_PENDING,
+            "neither the inner nor the deadline is done"
+        );
+        let staged = staged.expect("a park must be staged");
+        let delta = staged.duration_since(before);
+        assert!(
+            delta <= Duration::from_secs(1),
+            "the merged deadline must be the timeout's 1ms, not the inner's \
+             60s -- got {delta:?}"
+        );
+    }
+
+    /// The inner future survives a collection while only the timeout's state
+    /// references it, which is what makes storing its fat pointer sufficient.
+    ///
+    /// `#[cfg(windows)]`, matching `gc::collect_for_test` itself: that
+    /// function only exists on this platform (its own doc comment explains
+    /// why -- `stack_base` has a real implementation only on Windows, so a
+    /// real collection is only exercised here). Without this gate the test
+    /// would fail to compile everywhere else.
+    #[cfg(windows)]
+    #[test]
+    fn a_timeouts_inner_future_survives_a_collection() {
+        let inner = nova_rt_task_sleep_future_nanos(60 * 1_000_000_000);
+        let inner_state = state_of(inner);
+        let fut = nova_rt_task_timeout_future(60 * 1_000_000_000, inner);
+        gc::collect_for_test();
+        assert!(
+            gc::object_info(inner_state).is_some(),
+            "the inner state must stay live: the timeout's scanned state \
+             holds its fat pointer"
+        );
+        let _ = fut;
     }
 
     /// The exact layout `nova_rt_task_join_future` builds, read back from the
