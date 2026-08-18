@@ -2922,27 +2922,69 @@ mod tests {
         );
     }
 
-    /// The inner future survives a collection while only the timeout's state
-    /// references it, which is what makes storing its fat pointer sufficient.
+    /// The inner future's state survives a sweep whose **entire** root set is
+    /// the timeout's own state, which is what proves the timeout's stored fat
+    /// pointer -- not some other reachability path -- is what keeps it alive.
     ///
-    /// `#[cfg(windows)]`, matching `gc::collect_for_test` itself: that
-    /// function only exists on this platform (its own doc comment explains
-    /// why -- `stack_base` has a real implementation only on Windows, so a
-    /// real collection is only exercised here). Without this gate the test
-    /// would fail to compile everywhere else.
-    #[cfg(windows)]
+    /// **Deliberately `gc::sweep_with_roots_for_test`, not
+    /// `gc::collect_for_test`.** An earlier version of this test used the
+    /// real, stack-scanning collector and tried to defeat the conservative
+    /// scan's false positives with the `hide`/`reveal` bit-complement
+    /// technique `gc.rs`'s own `registry` tests use. That did not work: two
+    /// throwaway probes (reproducing `gc.rs`'s own
+    /// `an_unregistered_object_is_swept` verbatim, and stripping this test
+    /// down to no timeout/combinator code at all) both showed the object
+    /// surviving a real collection regardless, purely because it ran inside
+    /// `task.rs`'s test binary rather than `gc.rs`'s -- the identical
+    /// technique reliably sweeps in `gc.rs`'s own module and reliably does
+    /// not here. That is a property of the stack-scanning path and this
+    /// binary, not of anything this combinator does, and it made the
+    /// stack-scanning version structurally unable to fail against a
+    /// constructor that never wrote `TIMEOUT_SLOT_INNER` -- passing 20/20
+    /// runs whether or not the bug was present.
+    ///
+    /// `sweep_with_roots_for_test` sidesteps that path entirely: no stack
+    /// scan, and -- confirmed by reading `collect_with_roots`'s own body,
+    /// not merely trusting its doc comment -- no consultation of `PINNED`
+    /// (the `add_root` registry) either. Its marking loop iterates only the
+    /// `roots` slice a caller passes in; `PINNED` is copied into that set by
+    /// `collect()` alone, which this path never calls. So the only way
+    /// `inner_state` can survive this sweep is through `fut_state`'s own
+    /// scanned contents, which is exactly the property under test.
+    ///
+    /// The assertion just above the sweep checks the other way a root could
+    /// leak: if `build_future`'s `add_root`/`remove_root` pairing ever left
+    /// either state pinned, `PINNED` would be non-empty for it. Confirmed
+    /// rather than assumed, per the same standard applied to `PINNED`
+    /// itself above.
+    ///
+    /// No `#[cfg(windows)]`: `sweep_with_roots_for_test` is `#[cfg(test)]`
+    /// only, so -- unlike the version this replaces -- this test compiles
+    /// and runs on every platform.
     #[test]
-    fn a_timeouts_inner_future_survives_a_collection() {
+    fn a_timeouts_inner_future_survives_a_root_set_sweep_of_only_its_own_state() {
         let inner = nova_rt_task_sleep_future_nanos(60 * 1_000_000_000);
         let inner_state = state_of(inner);
         let fut = nova_rt_task_timeout_future(60 * 1_000_000_000, inner);
-        gc::collect_for_test();
+        let fut_state = state_of(fut);
+
+        assert_eq!(
+            gc::root_count(inner_state) + gc::root_count(fut_state),
+            0,
+            "build_future's add_root/remove_root pairing left a root pinned \
+             on one of these states; this test would pass regardless of \
+             TIMEOUT_SLOT_INNER if PINNED were consulted here (it is not,\
+             but this state should never arise regardless)"
+        );
+
+        gc::sweep_with_roots_for_test(&[fut_state]);
+
         assert!(
             gc::object_info(inner_state).is_some(),
-            "the inner state must stay live: the timeout's scanned state \
-             holds its fat pointer"
+            "the inner state must stay live: with only the timeout's own \
+             state in the root set, the inner state is reachable through \
+             nothing but the fat pointer TIMEOUT_SLOT_INNER stores"
         );
-        let _ = fut;
     }
 
     /// The exact layout `nova_rt_task_join_future` builds, read back from the
