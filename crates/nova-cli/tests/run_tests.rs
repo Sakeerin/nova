@@ -7583,3 +7583,42 @@ fn timeout_join_elapsed_run() {
         .success()
         .stdout(expected);
 }
+
+/// An elapsed `timeout` over a join, followed by a second `join().await` in
+/// the same task: the abandoned inner's `Wait::Task` must not survive into the
+/// next suspension of that same task poll.
+///
+/// Before `poll_timeout` restored `PENDING_PARK`, this aborted the process
+/// with "two parks staged in one poll" and an exit code of 127 -- from
+/// ordinary Nova source. `.success()` plus the golden is therefore the whole
+/// assertion: the abort produced neither.
+#[test]
+fn timeout_elapsed_then_join_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/timeout_elapsed_then_join.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_elapsed_then_join.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Two sequential elapsing `timeout`s over joins -- the same abandonment
+/// leftover, crossed by a second combinator rather than by a bare `join`, and
+/// the idiomatic shape (a retry loop, or two timed joins in sequence).
+#[test]
+fn timeout_elapsed_twice_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/timeout_elapsed_twice.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/timeout_elapsed_twice.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

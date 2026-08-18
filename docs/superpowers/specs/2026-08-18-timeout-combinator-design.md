@@ -109,16 +109,24 @@ Built through the existing `build_future`. State layout, with `STATE_MIN_SIZE` =
 
 ```
 read the inner fat pointer and the deadline
+snapshot PENDING_PARK
 call the inner's poll(state, null)
-  POLL_READY    -> write status 0 (completed); return POLL_READY
-  POLL_PENDING  -> if now >= deadline: write status 1 (elapsed); return POLL_READY
+  POLL_READY    -> restore the snapshot; write status 0 (completed); return POLL_READY
+  POLL_PENDING  -> if now >= deadline: restore the snapshot;
+                                       write status 1 (elapsed); return POLL_READY
                    else: stage Wait::Deadline(deadline); return POLL_PENDING
   anything else -> abort_with, naming the status
 ```
 
 **Polling the inner before checking the deadline** means work that completed is never reported as timed out, and it makes `timeout(Duration::from_secs(0), ready_future)` return `Ok` — the least surprising answer. That order is only *available* because §3.4 made `poll_sleep` level-triggered; with edge triggering, deadline-first would have been forced as a defence against a woken sleep fabricating a completion.
 
-**Abandonment needs no code.** When the inner returns `POLL_PENDING` and this poll then returns `POLL_READY`, the inner has already staged a park — and `poll_one` takes `PENDING_PARK` unconditionally, discarding it. Its own comment says so: *"Taken unconditionally, which is what discards a park staged by a poll that then returned `POLL_READY`."* The mechanism that stops a finished task faking a deadlock cleans up the abandoned park for free.
+**Abandonment needs two lines. ~~Abandonment needs no code.~~** **Correction, made after the whole-branch review measured it: this paragraph was wrong, and it is the author-side error that produced the one Critical finding on this branch.** It originally read: *"When the inner returns `POLL_PENDING` and this poll then returns `POLL_READY`, the inner has already staged a park — and `poll_one` takes `PENDING_PARK` unconditionally, discarding it. ... The mechanism that stops a finished task faking a deadlock cleans up the abandoned park for free."*
+
+`poll_one`'s unconditional `PENDING_PARK.take()` is real, but it fires **once per task poll, not once per future** — and §2 of this very document says so ("`PENDING_PARK` is **one slot per task poll, not per future**"), which makes this an internal contradiction rather than a missing fact. A generated state machine advances through as many awaits as complete in one poll, so an abandoned inner's park stays in `PENDING_PARK` and the *next* suspension in that same task poll stages against it. A `Wait::Deadline` merges harmlessly; every other pairing reaches `abort_with` with a message blaming an inner future's `POLL_PENDING` for something it did not do. Measured: `timeout(d, h.join())` followed by any other parking suspension aborts the process with exit code 127.
+
+So `poll_timeout` snapshots `PENDING_PARK` before polling the inner and **restores** the snapshot — not `Staged::default()` — on both `POLL_READY` exits. Restoring keeps the contract *local*: the function hands the slot back exactly as it found it, which composes with a nested timeout and with an earlier abandonment in the same task poll, where clearing would discard a park `poll_timeout` never staged. A local invariant is the one that survives the next combinator, and `select`/`race` will have exactly this shape. The pending path deliberately leaves the slot alone — there the inner's park must survive to merge with the timeout's own deadline, which is the whole point of §3's widening.
+
+The abandonment **contract** is unchanged by the correction: still abandonment rather than cancellation, still free for `sleep`/`join`/`read`/`write`, still leaking a socket for `connect` (§5). Only the claim that it needed no code was false.
 
 **No panic may cross this boundary.** Every slot access carries a SAFETY comment; the out-of-range inner status goes to `abort_with`, the same route a staging collision takes, never `panic!`.
 

@@ -1,0 +1,31 @@
+// Two sequential `timeout`s over joins, both elapsing -- the second of the two
+// shapes that aborted the process before `poll_timeout` discarded its
+// abandoned inner's park, and the idiomatic one: a retry loop, or two timed
+// joins in sequence.
+//
+// The first timeout abandons `h1.join()`'s `Wait::Task` and returns
+// `POLL_READY`, so `main`'s state machine advances to the second timeout inside
+// the same poll -- and `h2.join()`'s own `Wait::Task` then staged against the
+// leftover. Task+Task collides and `stage_park` aborts.
+//
+// Distinct from `timeout_elapsed_then_join.nova` in what it pins: there the
+// second suspension is a bare `join`, here it is a second `timeout`, so the
+// leftover is crossed by another combinator rather than by a plain parker. Both
+// workers outlive `main`'s answer and are drained by `block_on`.
+async fn worker() -> Int {
+    sleep(Duration::from_millis(300)).await
+    1
+}
+
+async fn main() {
+    let h1 = spawn(worker())
+    let h2 = spawn(worker())
+    match timeout(Duration::from_millis(0), h1.join()).await {
+        Ok(_) => println("first: ok")
+        Err(_) => println("first: elapsed")
+    }
+    match timeout(Duration::from_millis(0), h2.join()).await {
+        Ok(_) => println("second: ok")
+        Err(_) => println("second: elapsed")
+    }
+}
