@@ -1,0 +1,20 @@
+// `timeout` over a `JoinHandle::join()` future, on a spawned task that sleeps
+// past the deadline. The other half of the Task+Deadline pair that aborted
+// the process before Task 1 widened the executor's park set to admit both
+// wait kinds on the same future at once.
+//
+// The worker keeps running after `timeout` abandons the join -- it was
+// spawned, so `block_on` still drains it before the process exits, which is
+// why its sleep is kept short rather than dramatic.
+async fn worker() -> Int {
+    sleep(Duration::from_millis(300)).await
+    1
+}
+
+async fn main() {
+    let h = spawn(worker())
+    match timeout(Duration::from_millis(20), h.join()).await {
+        Ok(_) => println("ok")
+        Err(_) => println("elapsed")
+    }
+}

@@ -693,6 +693,7 @@ impl<'a> Lowerer<'a> {
                         Lowering::Runtime(RtFunc::TaskSleepFutureNanos)
                     }
                     Builtin::TaskJoinFuture => Lowering::Runtime(RtFunc::TaskJoinFuture),
+                    Builtin::TaskTimeoutFuture => Lowering::Runtime(RtFunc::TaskTimeoutFuture),
                     Builtin::TaskOutput => Lowering::FutureOutput,
                     Builtin::FsReadToString => Lowering::Runtime(RtFunc::FsReadToString),
                     Builtin::FsWriteString => Lowering::Runtime(RtFunc::FsWriteString),

@@ -3923,6 +3923,7 @@ impl<'a> Checker<'a> {
             | Builtin::TaskYieldFuture
             | Builtin::TaskSleepFutureNanos
             | Builtin::TaskJoinFuture
+            | Builtin::TaskTimeoutFuture
             | Builtin::FsReadToString
             | Builtin::FsWriteString
             | Builtin::FsTakeString
@@ -7162,6 +7163,10 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::TaskYieldFuture => (vec![], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskSleepFutureNanos => (vec![Ty::Int], Ty::Future(Box::new(Ty::Unit))),
         Builtin::TaskJoinFuture => (vec![future_of_param0()], Ty::Future(Box::new(Ty::Unit))),
+        Builtin::TaskTimeoutFuture => (
+            vec![Ty::Int, future_of_param0()],
+            Ty::Future(Box::new(Ty::Int)),
+        ),
         Builtin::FsReadToString => (vec![Ty::String], Ty::Int),
         Builtin::FsWriteString => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::FsTakeString => (vec![], Ty::String),
@@ -15104,6 +15109,13 @@ mod tests {
                         Ty::Future(Box::new(Ty::Unit)),
                     ),
                     "`task_join_future(self.fut).await` in `JoinHandle<T>::join`",
+                ),
+                Builtin::TaskTimeoutFuture => (
+                    (
+                        vec![Ty::Int, Ty::Future(Box::new(Ty::Param(0)))],
+                        Ty::Future(Box::new(Ty::Int)),
+                    ),
+                    "`task_timeout_future(nanos, fut).await` in `std/time`'s `timeout`",
                 ),
                 Builtin::FsReadToString => (
                     (vec![Ty::String], Ty::Int),

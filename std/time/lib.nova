@@ -150,3 +150,37 @@ impl Duration {
 pub async fn sleep(d: Duration) {
     task_sleep_future_nanos(d.nanos).await
 }
+
+// What `task_timeout_future` reports when the inner future finished first.
+const TIMEOUT_COMPLETED: Int = 0
+
+// The error `timeout` reports when `d` elapsed before the inner future
+// completed.
+//
+// Carries nothing, and needs to: the caller passed `d` in, so it already has
+// the only fact there is. It is the one record in this library with no field
+// to disclose as un-enforced, because it has no field.
+pub record TimeoutError {}
+
+// Run `fut`, giving up after `d`.
+//
+// Returns `Ok` with the future's value if it completed within `d`, and
+// `Err(TimeoutError {})` if `d` elapsed first. A non-positive `d` still polls
+// `fut` once, so an already-complete future succeeds rather than reporting a
+// timeout it never had a chance to beat.
+//
+// **On timeout the inner future is ABANDONED, not cancelled.** Nothing tells
+// it that it was dropped. That is free for a `sleep` (its state is collected),
+// for a `join` (the joined task runs on independently), and for a `read` or
+// `write` (the caller still holds the `TcpStream` and can close it). It is
+// **not** free for `std/net`'s `connect`: a timed-out connect leaves a socket
+// registered that nothing can reach or close, and it leaks until the process
+// exits -- which is what `docs/adr/0012-file-descriptor-lifecycle.md` already
+// says of any descriptor nobody closes.
+pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError> {
+    if task_timeout_future(d.nanos, fut).await == TIMEOUT_COMPLETED {
+        Ok(task_output(fut))
+    } else {
+        Err(TimeoutError {})
+    }
+}

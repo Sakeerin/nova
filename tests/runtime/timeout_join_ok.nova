@@ -1,0 +1,16 @@
+// `timeout` over a `JoinHandle::join()` future, on a spawned task that
+// finishes well inside the deadline. One of the Task+Deadline pair that
+// aborted the process before Task 1 widened the executor's park set to
+// admit both wait kinds on the same future at once.
+async fn worker() -> Int {
+    sleep(Duration::from_millis(20)).await
+    1
+}
+
+async fn main() {
+    let h = spawn(worker())
+    match timeout(Duration::from_secs(30), h.join()).await {
+        Ok(_) => println("ok")
+        Err(_) => println("elapsed")
+    }
+}
