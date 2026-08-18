@@ -1,0 +1,34 @@
+// An elapsed `timeout` over a join, followed by another `join().await` in the
+// same task -- the shape that aborted the process before `poll_timeout`
+// discarded its abandoned inner's park.
+//
+// `poll_one` takes `PENDING_PARK` once per *task poll*, not once per future, so
+// the `Wait::Task` `h1.join()` staged before `timeout` gave up on it used to
+// still be sitting there when `h2.join()` staged its own. Task+Task collides,
+// `stage_park` aborts, and the message blamed "an inner future's POLL_PENDING"
+// for something it never did. Both suspensions land in one poll of `main`
+// because the zero-duration timeout completes on its first poll, so the
+// generated state machine runs straight on to the next await.
+//
+// A zero-duration deadline rather than a short one: `timeout` polls the inner
+// first and only then compares the clock, so `Duration::from_millis(0)` is
+// already elapsed on that first poll with no timing assumption at all. The
+// workers' 300ms is what guarantees neither join is already satisfied.
+//
+// Both workers keep running after the timeout abandons the first join -- they
+// were spawned, so `block_on` drains them before the process exits.
+async fn worker() -> Int {
+    sleep(Duration::from_millis(300)).await
+    1
+}
+
+async fn main() {
+    let h1 = spawn(worker())
+    let h2 = spawn(worker())
+    match timeout(Duration::from_millis(0), h1.join()).await {
+        Ok(_) => println("first: ok")
+        Err(_) => println("first: elapsed")
+    }
+    let v = h2.join().await
+    println("second: ${v}")
+}

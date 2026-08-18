@@ -313,6 +313,23 @@ pub(crate) fn staged_deadline_for_test() -> Option<Instant> {
     PENDING_PARK.with(|cell| cell.get().deadline)
 }
 
+/// The task wait staged by the poll in progress, if any -- the third and last
+/// of [`Staged`]'s fields, completing the set with [`staged_io_for_test`] and
+/// [`staged_deadline_for_test`].
+///
+/// Added because with only two of the three readable, no test could assert
+/// that the slot is **empty**, and "empty" is exactly the postcondition
+/// [`poll_timeout`]'s abandonment path has to establish: an abandoned inner's
+/// leftover [`Wait::Task`] was invisible to every accessor that existed, which
+/// is why a whole class of two-parks-in-one-poll aborts shipped green. An
+/// existence check on the other two fields cannot substitute -- the leftover
+/// this closes is a `task`, and a `Deadline` merges rather than colliding, so
+/// `task` is the one field whose staleness is both invisible and fatal.
+#[cfg(test)]
+pub(crate) fn staged_task_for_test() -> Option<i64> {
+    PENDING_PARK.with(|cell| cell.get().task)
+}
+
 /// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
 /// the collector has just returned to the allocator.
 ///
@@ -1754,11 +1771,42 @@ pub const TIMEOUT_STATUS_ELAPSED: i64 = 1;
 /// level-triggered: with an edge-triggered sleep, a woken sleep could report a
 /// completion it had not earned, forcing a deadline-first check as a defence.
 ///
-/// **Abandonment needs no code here.** When the inner returns
-/// [`POLL_PENDING`] and this function then returns [`POLL_READY`], the inner
-/// has already staged a park -- and [`poll_one`] takes `PENDING_PARK`
-/// unconditionally, discarding it. The mechanism that stops a finished task
-/// faking a deadlock cleans up the abandoned park for free.
+/// **Abandonment takes two lines, not none.** This function was first written
+/// on the claim that it needed none: when the inner returns [`POLL_PENDING`]
+/// and this function then returns [`POLL_READY`], the inner has already staged
+/// a park, and [`poll_one`] takes `PENDING_PARK` unconditionally. That
+/// mechanism is real, but it fires **once per task poll, not once per
+/// future**, which is not what abandonment needs. A generated state machine
+/// advances through as many awaits as complete in one poll, so an abandoned
+/// inner's park sits in `PENDING_PARK` and the *next* suspension in that same
+/// task poll stages against it. A [`Wait::Deadline`] merges harmlessly; every
+/// other pairing reaches [`abort_with`] through [`try_stage`], with a message
+/// blaming an inner future's `POLL_PENDING` for something it did not do.
+/// `timeout(d, h.join())` followed by any other parking suspension aborted the
+/// process for exactly that reason.
+///
+/// So `PENDING_PARK` is snapshotted before the inner is polled and
+/// **restored** -- not cleared to `Staged::default()` -- on both
+/// [`POLL_READY`] exits. Restoring the snapshot keeps the contract *local*:
+/// this function hands the slot back exactly as it found it, so it composes
+/// with a nested timeout and with an earlier abandonment in the same task
+/// poll, where clearing would silently discard a park this function never
+/// staged. A local invariant is also the one that survives the next
+/// combinator: `select`/`race` will have this same shape. `Staged` is `Copy`
+/// in a `Cell`, so neither the read nor the write can fail -- keep it that
+/// way, since no panic may cross this boundary.
+///
+/// The pending path deliberately leaves the slot alone. There the inner's park
+/// must survive to merge with this timeout's own deadline, which is the entire
+/// point of the staging widening.
+///
+/// The test-only `poll_once_for_test` drains the slot unconditionally for the
+/// same hazard seen from the other side; its own doc comment records why.
+///
+/// The abandonment *contract* is unchanged by any of this: abandonment is
+/// still not cancellation, still free for `sleep`/`join`/`read`/`write`, and
+/// still leaks a socket for `connect` (`std/time`'s own doc comment, and §5 of
+/// this increment's design). Only the claim that it needed no code was false.
 ///
 /// **Must not unwind.** Every slot access is a raw read with the SAFETY note
 /// below; an out-of-range status from the inner poll goes to [`abort_with`],
@@ -1781,10 +1829,16 @@ unsafe extern "C-unwind" fn poll_timeout(state: *mut u8, _task_ctx: *mut u8) -> 
     // SAFETY: same fat pointer, state word.
     let inner_state = unsafe { (inner as *mut usize).add(FUTURE_SLOT_STATE).read() } as *mut u8;
 
+    // Whatever this task poll had already staged before the inner ran, so both
+    // completing exits below can hand the slot back exactly as they found it.
+    // Cannot fail: `Staged` is `Copy` in a `Cell` (see the doc comment above).
+    let park_before_inner = PENDING_PARK.with(Cell::get);
+
     // SAFETY: `inner_poll`/`inner_state` are the pair inside `inner`;
     // `task_ctx` is always null, matching every other call site in this crate.
     let inner_status = unsafe { inner_poll(inner_state, std::ptr::null_mut()) };
     if inner_status == POLL_READY {
+        PENDING_PARK.with(|cell| cell.set(park_before_inner));
         // SAFETY: same object, output slot.
         unsafe { slots.add(STATE_SLOT_OUTPUT).write(TIMEOUT_STATUS_COMPLETED) };
         return POLL_READY;
@@ -1796,6 +1850,9 @@ unsafe extern "C-unwind" fn poll_timeout(state: *mut u8, _task_ctx: *mut u8) -> 
         ));
     }
     if crate::time::now_nanos() >= deadline {
+        // The abandonment path: the inner just parked and is about to be
+        // dropped on the floor, so its park goes with it.
+        PENDING_PARK.with(|cell| cell.set(park_before_inner));
         // SAFETY: same object, output slot.
         unsafe { slots.add(STATE_SLOT_OUTPUT).write(TIMEOUT_STATUS_ELAPSED) };
         return POLL_READY;
@@ -1889,6 +1946,14 @@ mod tests {
     /// The park must be drained: `stage_park` aborts the process when a second
     /// deadline is staged over a first, so a leftover entry kills a later test
     /// under `--test-threads=1`.
+    ///
+    /// That is the same hazard [`poll_timeout`] has to handle in production,
+    /// seen from the other side -- and the reason this helper drains
+    /// *unconditionally*, rather than only when the poll came back
+    /// `POLL_PENDING`, is precisely that a poll returning `POLL_READY` can
+    /// still have left something staged. This helper may therefore not be used
+    /// by any test that needs to read the slot after the poll; those tests
+    /// write the raw poll idiom out longhand instead.
     #[cfg(test)]
     fn poll_once_for_test(fut: *mut u8) -> i64 {
         let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
@@ -2919,6 +2984,299 @@ mod tests {
             delta <= Duration::from_secs(1),
             "the merged deadline must be the timeout's 1ms, not the inner's \
              60s -- got {delta:?}"
+        );
+    }
+
+    /// Everything one poll left staged in `PENDING_PARK`, read before the
+    /// drain -- the three [`Staged`] fields as the three `*_for_test`
+    /// accessors report them, `io` keeping the deadline that rides *inside*
+    /// the I/O wait rather than folding it away.
+    #[derive(Debug)]
+    struct StagedForTest {
+        deadline: Option<Instant>,
+        io: Option<(RawSocket, Interest, Option<Instant>)>,
+        task: Option<i64>,
+    }
+
+    /// Poll `fut` once under a borrowed task context, optionally with
+    /// `pre_staged` already staged first, and hand back both the status and
+    /// everything left staged.
+    ///
+    /// `poll_once_for_test` cannot serve these tests: it drains
+    /// `PENDING_PARK` before returning and hands back only the status, so the
+    /// leftover-park property is precisely what it destroys. The drain still
+    /// has to happen -- a park left staged aborts the next test to stage one
+    /// under `--test-threads=1` -- so it happens here, after the read.
+    ///
+    /// `pre_staged` is what makes "restores what it found" testable at all:
+    /// with an empty slot going in, restoring a snapshot and clearing to
+    /// `Staged::default()` are indistinguishable.
+    fn poll_once_and_read_staged_for_test(
+        fut: *mut u8,
+        pre_staged: Option<Wait>,
+    ) -> (i64, StagedForTest) {
+        let poll_addr = unsafe { (fut as *mut usize).add(FUTURE_SLOT_POLL).read() };
+        // SAFETY: word 0 is a `PollFn` bit pattern by `fut`'s own construction.
+        let poll: PollFn = unsafe { std::mem::transmute(poll_addr) };
+        let state = state_of(fut) as *mut u8;
+
+        let previous = current_task();
+        set_current_for_test(Some(0));
+        if let Some(wait) = pre_staged {
+            stage_park(wait);
+        }
+        // SAFETY: `poll`/`state` are the pair inside `fut`; `task_ctx` is
+        // always null, matching every other call site in this crate.
+        let status = unsafe { poll(state, std::ptr::null_mut()) };
+        let staged = StagedForTest {
+            deadline: staged_deadline_for_test(),
+            io: staged_io_for_test(),
+            task: staged_task_for_test(),
+        };
+        PENDING_PARK.with(|cell| {
+            cell.take();
+        });
+        set_current_for_test(previous);
+        (status, staged)
+    }
+
+    /// A poll function that parks on a **non-deadline** wait -- a bare
+    /// `Wait::Task` -- and never completes.
+    ///
+    /// Non-deadline on purpose. A `Wait::Deadline` left behind by an abandoned
+    /// inner merges with the next suspension's deadline and is then corrected
+    /// by level-triggering, so it cannot expose a leftover park; a
+    /// `Wait::Task` or a `Wait::Io` collides and aborts the process. Every
+    /// shipped fixture and every unit test used a `sleep` inner, which stages
+    /// only a deadline, which is the entire reason the leftover went unseen.
+    ///
+    /// `id: 0` names no task that has to exist: `stage_park` does not resolve
+    /// ids, and nothing here reaches `staged_to_wait` or the wake paths.
+    unsafe extern "C-unwind" fn poll_parks_on_a_task_forever(
+        _state: *mut u8,
+        _task_ctx: *mut u8,
+    ) -> i64 {
+        stage_park(Wait::Task {
+            id: 0,
+            deadline: None,
+        });
+        POLL_PENDING
+    }
+
+    /// A poll function that parks on a `Wait::Io` and never completes -- the
+    /// other non-deadline wait, and the one `staged_io_for_test` reads.
+    unsafe extern "C-unwind" fn poll_parks_on_an_io_forever(
+        _state: *mut u8,
+        _task_ctx: *mut u8,
+    ) -> i64 {
+        stage_park(Wait::Io {
+            socket: RawSocket(9),
+            interest: Interest::Read,
+            deadline: None,
+        });
+        POLL_PENDING
+    }
+
+    /// A poll function that stages a park and *then* returns `POLL_READY` --
+    /// exactly the shape `poll_one`'s "taken unconditionally" comment
+    /// describes, reproduced here so `poll_timeout`'s completed exit can be
+    /// held to the same postcondition as its elapsed one.
+    unsafe extern "C-unwind" fn poll_parks_then_completes(
+        state: *mut u8,
+        _task_ctx: *mut u8,
+    ) -> i64 {
+        stage_park(Wait::Task {
+            id: 0,
+            deadline: None,
+        });
+        // SAFETY: `state` is a `STATE_MIN_SIZE` state object from
+        // `make_future`, so the output slot is in bounds.
+        unsafe { (state as *mut i64).add(STATE_SLOT_OUTPUT).write(0) };
+        POLL_READY
+    }
+
+    /// The other half of spec §6.3's structural pending test: a live timeout
+    /// over an inner that parks on something that is **not** a deadline stages
+    /// the inner's own wait *and* the timeout's deadline, merged into it.
+    ///
+    /// `a_live_timeout_over_a_pending_future_stages_both_deadlines_merged`
+    /// covers the deadline half with a `sleep` inner, which stages only a
+    /// deadline, so `staged_io_for_test` went unexercised by any
+    /// `poll_timeout` test and no unit test polled a timeout over a
+    /// non-deadline inner at all. This is the assertion that was one line from
+    /// finding the abandonment bug: it is the same `StagedForTest` read, on
+    /// the same inner shape, differing only in whether the deadline has
+    /// already passed.
+    #[test]
+    fn a_live_timeout_over_an_io_parking_inner_stages_the_io_wait_and_the_deadline() {
+        let inner = make_future(poll_parks_on_an_io_forever, 0);
+        let before = Instant::now();
+        let fut = nova_rt_task_timeout_future(5 * 1_000_000_000, inner);
+
+        let (status, staged) = poll_once_and_read_staged_for_test(fut, None);
+
+        assert_eq!(
+            status, POLL_PENDING,
+            "neither the inner nor the 5s deadline is done"
+        );
+        let (socket, interest, io_deadline) = staged
+            .io
+            .expect("the inner's I/O wait must survive into the staged park");
+        assert_eq!((socket, interest), (RawSocket(9), Interest::Read));
+        let io_deadline = io_deadline.expect(
+            "the timeout's own deadline must ride *inside* the inner's I/O \
+             wait -- one task, one PARKED entry",
+        );
+        assert_eq!(
+            staged.deadline,
+            Some(io_deadline),
+            "the deadline `staged_io_for_test` reports and the one \
+             `staged_deadline_for_test` reports are the same single deadline"
+        );
+        // The inner stages no deadline of its own, so any deadline here is the
+        // timeout's -- and its magnitude is what pins the unit conversion.
+        let delta = io_deadline.duration_since(before);
+        assert!(
+            delta >= Duration::from_secs(4) && delta <= Duration::from_secs(30),
+            "a 5s timeout staged a deadline {delta:?} out -- a unit error, \
+             not jitter"
+        );
+        assert_eq!(
+            staged.task, None,
+            "nothing staged a task wait, so this must be empty"
+        );
+    }
+
+    /// An **elapsed** timeout must leave nothing staged by the inner it just
+    /// abandoned.
+    ///
+    /// The structural guard for the abandonment bug: `poll_one` takes
+    /// `PENDING_PARK` once per *task poll*, not once per future, so a leftover
+    /// `Wait::Task` here collides with the next suspension in the same task
+    /// poll and aborts the process -- reachable from
+    /// `timeout(d, h.join())` followed by any other parking suspension. See
+    /// [`poll_timeout`]'s own doc comment.
+    ///
+    /// Deliberately a *unit* test as well as two fixtures: the fixtures cover
+    /// the two shapes anyone happened to think of, this covers the property.
+    #[test]
+    fn an_elapsed_timeout_discards_the_park_its_abandoned_inner_staged() {
+        let inner = make_future(poll_parks_on_a_task_forever, 0);
+        let fut = nova_rt_task_timeout_future(0, inner);
+
+        let (status, staged) = poll_once_and_read_staged_for_test(fut, None);
+
+        assert_eq!(status, POLL_READY, "a zero-duration timeout is already due");
+        assert_eq!(
+            output_of_for_test(fut),
+            TIMEOUT_STATUS_ELAPSED,
+            "the inner never completes, so this is the elapsed exit"
+        );
+        assert_eq!(
+            staged.task, None,
+            "the abandoned inner's task wait must not survive this poll: the \
+             next suspension in this same task poll would collide with it and \
+             abort the process"
+        );
+        assert_eq!(staged.deadline, None, "nothing staged a deadline");
+        assert!(staged.io.is_none(), "nothing staged an I/O wait");
+    }
+
+    /// The same postcondition over an inner that parked on an **`Io`** wait
+    /// rather than a `Task` one.
+    ///
+    /// The review that found this bug measured the `Task` shape end-to-end and
+    /// recorded the `Io` shapes as *inferred* -- the leftover mechanism looked
+    /// kind-agnostic and `try_stage` was probed directly, but no `Io` case was
+    /// run, because end-to-end it needs a socket fixture. This is that
+    /// measurement, one layer down where no socket is needed: the abandoned
+    /// park is discarded regardless of which field of `Staged` it occupies.
+    /// "Probe one shape, generalise the conclusion" is how the bug got in;
+    /// asserting the generalisation is cheaper than repeating the mistake.
+    #[test]
+    fn an_elapsed_timeout_discards_an_io_park_its_abandoned_inner_staged() {
+        let inner = make_future(poll_parks_on_an_io_forever, 0);
+        let fut = nova_rt_task_timeout_future(0, inner);
+
+        let (status, staged) = poll_once_and_read_staged_for_test(fut, None);
+
+        assert_eq!(status, POLL_READY, "a zero-duration timeout is already due");
+        assert_eq!(output_of_for_test(fut), TIMEOUT_STATUS_ELAPSED);
+        assert!(
+            staged.io.is_none(),
+            "the abandoned inner's I/O wait must not survive this poll either \
+             -- got {:?}",
+            staged.io
+        );
+        assert_eq!(staged.task, None, "and nothing staged a task wait");
+        assert_eq!(staged.deadline, None, "and nothing staged a deadline");
+    }
+
+    /// The **completed** exit is held to the same postcondition, over an inner
+    /// that stages a park and then returns `POLL_READY` in the same poll.
+    ///
+    /// Not a hypothetical shape: it is the one `poll_one`'s "taken
+    /// unconditionally" comment exists for. Both of `poll_timeout`'s
+    /// `POLL_READY` exits hand the slot back as they found it, so both are
+    /// tested; covering only the elapsed one would leave half the contract
+    /// resting on the belief that no inner ever does this.
+    #[test]
+    fn a_completed_timeout_discards_a_park_its_inner_staged_before_completing() {
+        let inner = make_future(poll_parks_then_completes, 0);
+        let fut = nova_rt_task_timeout_future(30 * 1_000_000_000, inner);
+
+        let (status, staged) = poll_once_and_read_staged_for_test(fut, None);
+
+        assert_eq!(status, POLL_READY, "the inner completed");
+        assert_eq!(
+            output_of_for_test(fut),
+            TIMEOUT_STATUS_COMPLETED,
+            "the inner beat the 30s deadline"
+        );
+        assert_eq!(
+            staged.task, None,
+            "a park staged by a poll that then completed must not survive \
+             this poll either"
+        );
+    }
+
+    /// `poll_timeout` **restores** what it found rather than clearing to
+    /// `Staged::default()`.
+    ///
+    /// The distinction is the whole design of the fix, and it is invisible
+    /// unless something was already staged: with an empty slot going in, a
+    /// snapshot restore and a clear produce the same answer. Here a deadline
+    /// is staged *before* the timeout runs -- an earlier suspension in the
+    /// same task poll, or an enclosing timeout -- and it must still be there
+    /// afterwards, while the abandoned inner's task wait must not.
+    ///
+    /// A deadline rather than an `Io` or `Task` pre-stage on purpose: those
+    /// would *collide* with the inner's own `Wait::Task` inside
+    /// `stage_park`, which aborts the process, and an aborting test takes the
+    /// whole test binary down instead of failing (see `try_stage`'s doc
+    /// comment). A deadline merges, so this test can still fail cleanly
+    /// against every mutant it is aimed at.
+    #[test]
+    fn an_elapsed_timeout_restores_the_park_staged_before_it_rather_than_clearing() {
+        let already_staged = Instant::now() + Duration::from_secs(30);
+        let inner = make_future(poll_parks_on_a_task_forever, 0);
+        let fut = nova_rt_task_timeout_future(0, inner);
+
+        let (status, staged) =
+            poll_once_and_read_staged_for_test(fut, Some(Wait::Deadline(already_staged)));
+
+        assert_eq!(status, POLL_READY, "a zero-duration timeout is already due");
+        assert_eq!(output_of_for_test(fut), TIMEOUT_STATUS_ELAPSED);
+        assert_eq!(
+            staged.task, None,
+            "the abandoned inner's task wait must be gone"
+        );
+        assert_eq!(
+            staged.deadline,
+            Some(already_staged),
+            "a park staged before this timeout ran must survive it -- \
+             clearing to Staged::default() would discard a park poll_timeout \
+             never staged, and this is the assertion that says so"
         );
     }
 

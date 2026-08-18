@@ -81,11 +81,29 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leaks until process exit, the same standing
   `docs/adr/0012-file-descriptor-lifecycle.md` already accepts for any
   unclosed descriptor. Documented at `timeout`'s own doc comment and at
-  `std/net::connect`. Five new fixtures (`timeout_ok`, `timeout_elapsed`,
-  `timeout_value`, `timeout_join_ok`, `timeout_join_elapsed`) cover both
-  branches, the `task_output(fut)` read that must come from the inner
-  future's own slot, and both directions of the `timeout`-over-`join`
-  pairing that used to abort the process.
+  `std/net::connect`. **Abandoning the inner future also discards the park it
+  staged**: `poll_timeout` snapshots the executor's `PENDING_PARK` slot before
+  polling the inner and restores that snapshot on both of its completing
+  exits. `poll_one` does take the slot unconditionally, but once per *task
+  poll* rather than once per future, so without this an abandoned inner's
+  `Wait::Task` or `Wait::Io` was still staged when the next suspension in that
+  same task poll staged its own — a collision, and a `std::process::abort()`
+  reachable from `timeout(d, h.join())` followed by any other parking
+  suspension, under a diagnostic that misattributed it to an inner future's
+  `POLL_PENDING` not propagating. The snapshot is *restored* rather than
+  cleared, which makes the guarantee local ("the slot is handed back exactly
+  as it was found") and so composes with nested timeouts and with an earlier
+  abandonment in the same poll. Seven new fixtures (`timeout_ok`,
+  `timeout_elapsed`, `timeout_value`, `timeout_join_ok`,
+  `timeout_join_elapsed`, `timeout_elapsed_then_join`,
+  `timeout_elapsed_twice`) cover both branches, the `task_output(fut)` read
+  that must come from the inner future's own slot, both directions of the
+  `timeout`-over-`join` pairing that used to abort the process, and both
+  shapes of the abandoned-park collision. A third test accessor,
+  `staged_task_for_test()`, joins `staged_io_for_test()` and
+  `staged_deadline_for_test()`: with only two of the three fields readable no
+  test could assert the staged slot is *empty*, which is exactly the
+  postcondition the abandonment path has to establish.
 
 ### Changed
 
