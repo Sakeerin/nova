@@ -162,8 +162,12 @@ struct Task {
 enum Wait {
     /// Wake once the clock reaches this instant.
     Deadline(Instant),
-    /// Wake once the task with this id completes.
-    Task(i64),
+    /// Wake once the task with this id completes, or once `deadline` passes.
+    ///
+    /// The deadline rides inside this variant for the same reason it rides
+    /// inside [`Wait::Io`]: one task must have exactly one `PARKED` entry, or
+    /// every wake path has to remember to remove two.
+    Task { id: i64, deadline: Option<Instant> },
     /// Wake once `socket` is ready for `interest`, or `deadline` passes.
     ///
     /// The deadline rides inside this variant rather than being parked as a
@@ -446,11 +450,13 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
 ///
 /// `task` is not in the brief's own sketch of this struct, which only names
 /// the two kinds that newly compose. It is here because [`Wait::Task`]
-/// (`poll_join`'s wait) still has to be exclusive with everything, itself
-/// included -- nothing about waiting on a sibling task composes with a
-/// timeout or a socket the way a deadline and an I/O wait do, so a `Task`
-/// park stacked against a `Deadline` or `Io` one must still abort exactly as
-/// any two same-kind parks do.
+/// (`poll_join`'s wait) still has to be exclusive with a second task wait or
+/// with an I/O wait -- nothing about waiting on a sibling task composes with
+/// a socket the way a deadline and an I/O wait do, so a `Task` park stacked
+/// against another `Task` or an `Io` one still aborts exactly as any two
+/// same-kind parks do. A `Deadline`, though, composes with a `Task` wait the
+/// same way it composes with an `Io` one: `timeout(d, handle.join())` stages
+/// exactly that pair, and [`try_stage`] merges rather than collides.
 #[derive(Default, Clone, Copy, Debug)]
 struct Staged {
     deadline: Option<Instant>,
@@ -464,11 +470,16 @@ struct Staged {
 /// One task must have exactly one `PARKED` entry ([`Wait::Io`]'s own doc
 /// comment), so this is where a deadline staged alongside an I/O wait is
 /// folded into that `Wait::Io`'s own `deadline` field instead of becoming a
-/// second entry. `task` wins first only because [`try_stage`] never lets it
-/// coexist with the other two -- if it is set, they are not.
+/// second entry. `task` still wins first, but it no longer wins by exclusion:
+/// [`try_stage`] now lets a deadline coexist with it, so this folds
+/// `staged.deadline` into the returned [`Wait::Task`]'s own `deadline` field,
+/// exactly as the `io` branch below already does for `Wait::Io`.
 fn staged_to_wait(staged: Staged) -> Option<Wait> {
     if let Some(id) = staged.task {
-        return Some(Wait::Task(id));
+        return Some(Wait::Task {
+            id,
+            deadline: staged.deadline,
+        });
     }
     if let Some((socket, interest)) = staged.io {
         return Some(Wait::Io {
@@ -481,6 +492,14 @@ fn staged_to_wait(staged: Staged) -> Option<Wait> {
 }
 
 /// Try to add `wait` to `staged`, or report what it collided with.
+///
+/// A deadline never collides here: staging a second [`Wait::Deadline`], or
+/// one alongside a [`Wait::Task`] or inside a [`Wait::Io`] that already
+/// carries one, merges to the earlier of the two by [`Instant::min`] instead
+/// of erroring -- see [`Staged`]'s own doc comment for why `task` and `io`
+/// still exclude each other and themselves even though a deadline now
+/// composes with either. What still collides is a same-kind clash (two
+/// `Wait::Io`s, two `Wait::Task`s) or a `Wait::Task` crossing a `Wait::Io`.
 ///
 /// Pure and non-aborting on purpose, unlike [`stage_park`] itself: a test
 /// exercising the actual collision would have to go through
@@ -509,13 +528,10 @@ fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
     let mut next = staged;
     match wait {
         Wait::Deadline(at) => {
-            if let Some(prev_at) = next.deadline {
-                return Err(collision_msg(Wait::Deadline(prev_at), wait));
-            }
-            if let Some(prev_id) = next.task {
-                return Err(collision_msg(Wait::Task(prev_id), wait));
-            }
-            next.deadline = Some(at);
+            next.deadline = Some(match next.deadline {
+                Some(prev) => prev.min(at),
+                None => at,
+            });
         }
         Wait::Io {
             socket,
@@ -533,22 +549,31 @@ fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
                 ));
             }
             if let Some(prev_id) = next.task {
-                return Err(collision_msg(Wait::Task(prev_id), wait));
+                return Err(collision_msg(
+                    Wait::Task {
+                        id: prev_id,
+                        deadline: next.deadline,
+                    },
+                    wait,
+                ));
             }
             if let Some(at) = deadline {
-                if let Some(prev_at) = next.deadline {
-                    return Err(collision_msg(Wait::Deadline(prev_at), wait));
-                }
-                next.deadline = Some(at);
+                next.deadline = Some(match next.deadline {
+                    Some(prev) => prev.min(at),
+                    None => at,
+                });
             }
             next.io = Some((socket, interest));
         }
-        Wait::Task(id) => {
+        Wait::Task { id, deadline } => {
             if let Some(prev_id) = next.task {
-                return Err(collision_msg(Wait::Task(prev_id), wait));
-            }
-            if let Some(prev_at) = next.deadline {
-                return Err(collision_msg(Wait::Deadline(prev_at), wait));
+                return Err(collision_msg(
+                    Wait::Task {
+                        id: prev_id,
+                        deadline: next.deadline,
+                    },
+                    wait,
+                ));
             }
             if let Some((prev_socket, prev_interest)) = next.io {
                 return Err(collision_msg(
@@ -559,6 +584,12 @@ fn try_stage(staged: Staged, wait: Wait) -> Result<Staged, String> {
                     },
                     wait,
                 ));
+            }
+            if let Some(at) = deadline {
+                next.deadline = Some(match next.deadline {
+                    Some(prev) => prev.min(at),
+                    None => at,
+                });
             }
             next.task = Some(id);
         }
@@ -721,7 +752,7 @@ fn wake_tasks_waiting_on(done_id: i64) {
         let mut parked = parked.borrow_mut();
         let mut woken = Vec::new();
         parked.retain(|&(id, wait)| match wait {
-            Wait::Task(target) if target == done_id => {
+            Wait::Task { id: target, .. } if target == done_id => {
                 woken.push(id);
                 false
             }
@@ -973,7 +1004,8 @@ unsafe fn run_to_completion(future: *mut u8) -> i64 {
 
 /// The soonest instant any parked task is waiting for, if any is waiting on
 /// the clock at all -- a bare [`Wait::Deadline`], or the deadline riding
-/// inside a [`Wait::Io`].
+/// inside a [`Wait::Io`] or a [`Wait::Task`]. A `Wait::Task` with no deadline
+/// contributes nothing, the same as an untimed `Wait::Io`.
 fn earliest_deadline() -> Option<Instant> {
     PARKED.with(|parked| {
         parked
@@ -982,7 +1014,7 @@ fn earliest_deadline() -> Option<Instant> {
             .filter_map(|&(_, wait)| match wait {
                 Wait::Deadline(at) => Some(at),
                 Wait::Io { deadline, .. } => deadline,
-                Wait::Task(_) => None,
+                Wait::Task { deadline, .. } => deadline,
             })
             .min()
     })
@@ -1008,7 +1040,7 @@ fn io_parks() -> Vec<(RawSocket, Interest)> {
                 Wait::Io {
                     socket, interest, ..
                 } => Some((socket, interest)),
-                Wait::Deadline(_) | Wait::Task(_) => None,
+                Wait::Deadline(_) | Wait::Task { .. } => None,
             })
             .collect()
     })
@@ -1054,9 +1086,10 @@ fn wake_ready(ready: Vec<RawSocket>) {
 }
 
 /// Move every parked task whose deadline is `<= now` back onto the ready
-/// queue, leaving every other entry -- a [`Wait::Task`], an untimed
-/// [`Wait::Io`], or a [`Wait::Deadline`] (bare or riding inside a
-/// [`Wait::Io`]) still in the future -- exactly where it was.
+/// queue, leaving every other entry -- an untimed [`Wait::Io`] or
+/// [`Wait::Task`], or a [`Wait::Deadline`] (bare, or riding inside a
+/// [`Wait::Io`] or a [`Wait::Task`]) still in the future -- exactly where it
+/// was.
 ///
 /// Once an I/O wait carries a deadline, a passed deadline on that wait *is*
 /// its timeout firing, so it must wake the task exactly as a bare
@@ -1070,6 +1103,17 @@ fn wake_ready(ready: Vec<RawSocket>) {
 /// than a spurious `TimedOut`. An earlier version of this comment said nothing
 /// here ever populated a `Wait::Io` outside a test, which stopped being true
 /// when `net.rs` landed.
+///
+/// A timed `Wait::Task` wakes on the same rule as a timed `Wait::Io` above:
+/// its deadline passing is its own timeout firing, which this function is
+/// what notices -- [`wake_tasks_waiting_on`] is the only other thing that
+/// ever removes a `Wait::Task` entry, and it reacts to the target completing,
+/// never to the clock. **This arm is not compiler-forced the way
+/// [`earliest_deadline`]'s and [`deadlock_report`]'s matches are**: this
+/// function's `retain` ends in a wildcard, so a timed `Wait::Task` with no
+/// arm here would fall through it, park forever, and fail nothing at compile
+/// time -- see `wake_due_wakes_a_task_wait_whose_deadline_elapsed`, the test
+/// that exists because nothing else would catch it.
 ///
 /// Called by [`run_to_completion`] after every single poll (cheap: one pass
 /// over [`PARKED`], no blocking) so a self-requeuing task can never starve a
@@ -1086,6 +1130,13 @@ fn wake_due(now: Instant) {
                 false
             }
             Wait::Io {
+                deadline: Some(deadline),
+                ..
+            } if deadline <= now => {
+                woken.push(id);
+                false
+            }
+            Wait::Task {
                 deadline: Some(deadline),
                 ..
             } if deadline <= now => {
@@ -1130,9 +1181,20 @@ fn deadlock_report() -> String {
     );
     for (id, wait) in entries {
         match wait {
-            Wait::Task(target) => {
+            Wait::Task {
+                id: target,
+                deadline: None,
+            } => {
                 report.push_str(&format!(
                     "  task {id} is waiting for task {target} to finish\n"
+                ));
+            }
+            Wait::Task {
+                id: target,
+                deadline: Some(_),
+            } => {
+                report.push_str(&format!(
+                    "  task {id} is waiting for task {target} to finish, with a deadline\n"
                 ));
             }
             Wait::Deadline(_) => {
@@ -1551,7 +1613,10 @@ unsafe extern "C-unwind" fn poll_join(state: *mut u8, _task_ctx: *mut u8) -> i64
         unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
         return POLL_READY;
     }
-    stage_park(Wait::Task(target));
+    stage_park(Wait::Task {
+        id: target,
+        deadline: None,
+    });
     POLL_PENDING
 }
 
@@ -2727,28 +2792,12 @@ mod tests {
         PARKED.with(|p| p.borrow_mut().clear());
     }
 
-    /// `try_stage` is the non-aborting half of `stage_park`'s collision
-    /// check (see its own doc comment for why: `stage_park`'s real abort
-    /// goes through `abort_with`'s `std::process::abort()`, which
-    /// `#[should_panic]` cannot catch without taking the whole test binary
-    /// down with it). Two `Wait::Deadline` stages in the same poll must
-    /// still collide -- unchanged behaviour from before this task, now
-    /// checked directly rather than through a process abort.
-    #[test]
-    fn two_deadlines_in_one_poll_still_abort() {
-        let staged = try_stage(Staged::default(), Wait::Deadline(Instant::now()))
-            .expect("the first deadline in a poll stages cleanly");
-        let err = try_stage(staged, Wait::Deadline(Instant::now()))
-            .expect_err("a second deadline in the same poll must collide");
-        assert!(err.contains("two parks staged in one poll"), "got: {err}");
-    }
-
-    /// The new same-kind collision this task introduces: two `Wait::Io`
-    /// stages in the same poll must abort exactly as two deadlines do --
-    /// widening what one poll may stage must not widen which same-kind
-    /// collisions it tolerates. See `two_deadlines_in_one_poll_still_abort`
-    /// for why this checks `try_stage` directly rather than `stage_park`'s
-    /// actual abort.
+    /// The same-kind collision this task keeps: two `Wait::Io` stages in the
+    /// same poll must still abort -- widening what one poll may stage (a
+    /// deadline now composes with a task wait or an I/O wait) must not widen
+    /// which same-kind collisions it tolerates. See `try_stage`'s own doc
+    /// comment for why this checks `try_stage` directly rather than
+    /// `stage_park`'s actual abort.
     #[test]
     fn two_io_waits_in_one_poll_still_abort() {
         let first = Wait::Io {
@@ -2766,6 +2815,68 @@ mod tests {
         let err =
             try_stage(staged, second).expect_err("a second I/O wait in the same poll must collide");
         assert!(err.contains("two parks staged in one poll"), "got: {err}");
+    }
+
+    /// Two deadlines in one poll merge to the earlier, **in either order**.
+    ///
+    /// Both orders on purpose: order-independence is the property, and a
+    /// single-order test passes against a `min` written backwards.
+    #[test]
+    fn two_deadlines_in_one_poll_merge_to_the_earlier() {
+        let base = Instant::now();
+        let soon = base + Duration::from_secs(1);
+        let later = base + Duration::from_secs(30);
+
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(later)).expect("first deadline stages");
+        let staged = try_stage(staged, Wait::Deadline(soon))
+            .expect("a second deadline must merge, not collide");
+        assert_eq!(
+            staged.deadline,
+            Some(soon),
+            "later-then-sooner must keep the earlier"
+        );
+
+        let staged =
+            try_stage(Staged::default(), Wait::Deadline(soon)).expect("first deadline stages");
+        let staged = try_stage(staged, Wait::Deadline(later))
+            .expect("a second deadline must merge, not collide");
+        assert_eq!(
+            staged.deadline,
+            Some(soon),
+            "sooner-then-later must keep the earlier"
+        );
+    }
+
+    /// A task wait and a deadline co-stage, in either order -- this is the
+    /// pair `timeout(d, handle.join())` needs and that aborted the process
+    /// before this increment.
+    #[test]
+    fn a_task_wait_and_a_deadline_co_stage_in_either_order() {
+        let at = Instant::now() + Duration::from_secs(5);
+
+        let staged = try_stage(
+            Staged::default(),
+            Wait::Task {
+                id: 7,
+                deadline: None,
+            },
+        )
+        .expect("task stages");
+        let staged = try_stage(staged, Wait::Deadline(at))
+            .expect("a deadline must join a task wait, not collide");
+        assert_eq!((staged.task, staged.deadline), (Some(7), Some(at)));
+
+        let staged = try_stage(Staged::default(), Wait::Deadline(at)).expect("deadline stages");
+        let staged = try_stage(
+            staged,
+            Wait::Task {
+                id: 7,
+                deadline: None,
+            },
+        )
+        .expect("a task wait must join a deadline, not collide");
+        assert_eq!((staged.task, staged.deadline), (Some(7), Some(at)));
     }
 
     #[test]
@@ -2954,79 +3065,106 @@ mod tests {
         PARKED.with(|p| p.borrow_mut().clear());
     }
 
-    /// `earliest_deadline` and `wake_due` with both `Wait` variants live in
-    /// `PARKED` at once -- every other test here populates one variant only.
-    /// Task 3 (a parking `join`) is what makes that coexistence real: a
-    /// sleeping task and a joining task waiting side by side. Both functions
-    /// must ignore `Wait::Task` entries entirely: they are not deadline
-    /// candidates, and they must not be woken by a deadline arriving.
+    /// `wake_due` must wake a task wait whose deadline elapsed.
     ///
-    /// **Two phases with disjoint `PARKED` contents, not one shared
-    /// scenario.** A first version of this test shared a single already-due
-    /// `Wait::Deadline` across both checks and could not catch
-    /// `Wait::Task(_) => Some(Instant::now())`: on a monotonic clock, a value
-    /// read *during* `earliest_deadline`'s call can only be later than one
-    /// read *before* it (test setup happens first), so `.min()` still picked
-    /// the real, earlier deadline under that mutant, every time it was
-    /// tried. Phase 1 fixes this by putting every real deadline in the
-    /// future, so a mutant's freshly-read "now" is detectably *smaller* than
-    /// the expected answer instead of larger or equal. Phase 2 keeps the
-    /// original already-due shape for `wake_due`, which that mutation-check
-    /// already kills and does not need to change.
+    /// **This is the only test that fails if `wake_due`'s timed-task arm is
+    /// missing.** Its `retain` ends in `_ => true`, so an unhandled timed
+    /// `Wait::Task` is not a compile error, not a panic and not a diagnostic
+    /// -- the task simply stays parked for the rest of the process.
     ///
-    /// Calls `wake_due` directly rather than through `run_to_completion`'s
-    /// drive loop or the deleted `wake_due_deadlines` (this task folded the
-    /// sleep half of that function into `poll::wait` and left only the wake
-    /// half, which is `wake_due` itself): `due` is already in the past by the
-    /// time it is read again below, so `wake_due(Instant::now())` takes the
-    /// same "wake it now" branch `wake_due_deadlines(due)` used to.
+    /// Clears `PARKED`/`QUEUE` at both ends, not just the end: the test this
+    /// task retires (`earliest_deadline_and_wake_due_ignore_task_waits`) only
+    /// cleared at the end of each phase, on the unstated assumption that
+    /// whatever ran before it on the same libtest worker thread had already
+    /// left both empty. `assert!(PARKED...is_empty())` below is exactly the
+    /// kind of check that assumption can silently falsify, so this test does
+    /// not carry it forward.
     #[test]
-    fn earliest_deadline_and_wake_due_ignore_task_waits() {
-        // Phase 1: earliest_deadline must return the real minimum, not a
-        // Wait::Task-contributed value. Both deadlines sit comfortably in the
-        // future (1s, 30s) so a mutant's `Instant::now()` -- evaluated no
-        // earlier than `base`, since it can only run after this test's own
-        // setup -- lands near `base`, strictly before `soon`.
+    fn wake_due_wakes_a_task_wait_whose_deadline_elapsed() {
+        PARKED.with(|p| p.borrow_mut().clear());
+        QUEUE.with(|q| q.borrow_mut().clear());
+        let past = Instant::now();
+        PARKED.with(|p| {
+            p.borrow_mut().push((
+                41,
+                Wait::Task {
+                    id: 999,
+                    deadline: Some(past),
+                },
+            ));
+        });
+        wake_due(past + Duration::from_millis(1));
+        let queued = QUEUE.with(|q| q.borrow().contains(&41));
+        assert!(
+            queued,
+            "a timed task wait whose deadline passed must be re-queued"
+        );
+        assert!(
+            PARKED.with(|p| p.borrow().is_empty()),
+            "and it must be removed from PARKED, not woken twice"
+        );
+        PARKED.with(|p| p.borrow_mut().clear());
+        QUEUE.with(|q| q.borrow_mut().clear());
+    }
+
+    /// A **timed** task wait contributes its deadline; a **bare** one still
+    /// contributes nothing. This is the split of the old
+    /// `earliest_deadline_and_wake_due_ignore_task_waits`, whose name asserted
+    /// the half that this increment reverses.
+    ///
+    /// Cleared at the start as well as the end, for the same
+    /// worker-thread-reuse reason given in
+    /// `wake_due_wakes_a_task_wait_whose_deadline_elapsed`'s doc comment.
+    #[test]
+    fn earliest_deadline_counts_a_timed_task_wait_and_ignores_a_bare_one() {
+        PARKED.with(|p| p.borrow_mut().clear());
         let base = Instant::now();
         let soon = base + Duration::from_secs(1);
         let later = base + Duration::from_secs(30);
         PARKED.with(|p| {
             let mut p = p.borrow_mut();
-            p.push((1, Wait::Task(999)));
-            p.push((2, Wait::Deadline(later)));
+            p.push((
+                1,
+                Wait::Task {
+                    id: 999,
+                    deadline: None,
+                },
+            ));
+            p.push((
+                2,
+                Wait::Task {
+                    id: 998,
+                    deadline: Some(later),
+                },
+            ));
             p.push((3, Wait::Deadline(soon)));
+        });
+        assert_eq!(earliest_deadline(), Some(soon));
+
+        PARKED.with(|p| p.borrow_mut().clear());
+        PARKED.with(|p| {
+            let mut p = p.borrow_mut();
+            p.push((
+                1,
+                Wait::Task {
+                    id: 999,
+                    deadline: None,
+                },
+            ));
+            p.push((
+                2,
+                Wait::Task {
+                    id: 998,
+                    deadline: Some(later),
+                },
+            ));
         });
         assert_eq!(
             earliest_deadline(),
-            Some(soon),
-            "a Wait::Task entry must not contribute a candidate to the minimum"
+            Some(later),
+            "a timed task wait is the only deadline here and must be found"
         );
         PARKED.with(|p| p.borrow_mut().clear());
-
-        // Phase 2: wake_due must wake only the due Deadline entry and must
-        // not treat a Wait::Task entry as one. `due` is already in the past
-        // by the time `wake_due` reads `Instant::now()` below (test setup
-        // takes nonzero time), so this exercises the same "wake it now"
-        // branch `wake_due_deadlines(due)` used to, without sleeping.
-        let due = Instant::now();
-        PARKED.with(|p| {
-            let mut p = p.borrow_mut();
-            p.push((4, Wait::Task(999)));
-            p.push((5, Wait::Deadline(due)));
-        });
-        wake_due(Instant::now());
-        assert_eq!(
-            PARKED.with(|p| p.borrow().clone()),
-            vec![(4, Wait::Task(999))],
-            "wake_due must leave the Task entry parked"
-        );
-        assert_eq!(
-            QUEUE.with(|q| q.borrow().clone()),
-            std::collections::VecDeque::from([5]),
-            "the task whose deadline arrived must be the one re-queued"
-        );
-        PARKED.with(|p| p.borrow_mut().clear());
-        QUEUE.with(|q| q.borrow_mut().clear());
     }
 
     /// `wake_due`'s `Wait::Io { deadline: Some(_), .. }` arm, behaviourally.
@@ -3039,8 +3177,9 @@ mod tests {
     /// can be in relative to `now`, so a mutant that wakes too many or too
     /// few is caught either way: a due I/O wait (must wake), a not-yet-due
     /// one (must not), and an untimed one (must never be treated as due at
-    /// all, the same property `earliest_deadline_and_wake_due_ignore_task_waits`
-    /// checks for `Wait::Task`).
+    /// all -- the same property a bare `Wait::Task` has, and
+    /// `wake_due_wakes_a_task_wait_whose_deadline_elapsed` is the analogous
+    /// check on `wake_due`'s `Wait::Task` arm).
     #[test]
     fn wake_due_wakes_a_due_io_wait_and_leaves_the_rest_parked() {
         let due = Instant::now();
@@ -3345,9 +3484,11 @@ mod tests {
 
     /// The suspend path: joining a task that has not yet finished parks on
     /// `Wait::Task`, and is woken -- moved back onto the ready queue -- the
-    /// moment the target completes, with no re-poll of the joiner in between
-    /// and no involvement of `wake_due`, which never treats a `Wait::Task`
-    /// entry as due -- only a bare `Wait::Deadline` or a timed `Wait::Io`.
+    /// moment the target completes, with no re-poll of the joiner in
+    /// between. `poll_join` always stages its wait with `deadline: None`
+    /// (only a wrapping combinator like a timeout merges one in), so this
+    /// bare park has no involvement of `wake_due` either -- only a *timed*
+    /// `Wait::Task`, like a timed `Wait::Io`, would ever reach it.
     ///
     /// The join future is spawned directly as the joiner task, the same way
     /// `joining_an_already_done_task_completes_without_parking` does: a
@@ -3383,7 +3524,13 @@ mod tests {
         );
         assert_eq!(
             PARKED.with(|p| p.borrow().clone()),
-            vec![(joiner_id, Wait::Task(target_id))],
+            vec![(
+                joiner_id,
+                Wait::Task {
+                    id: target_id,
+                    deadline: None
+                }
+            )],
             "the joiner must be parked on the target's id, not re-queued"
         );
         assert!(
@@ -3420,8 +3567,20 @@ mod tests {
     fn a_deadlock_names_every_parked_task_and_its_reason() {
         PARKED.with(|p| {
             let mut p = p.borrow_mut();
-            p.push((1, Wait::Task(2)));
-            p.push((2, Wait::Task(1)));
+            p.push((
+                1,
+                Wait::Task {
+                    id: 2,
+                    deadline: None,
+                },
+            ));
+            p.push((
+                2,
+                Wait::Task {
+                    id: 1,
+                    deadline: None,
+                },
+            ));
         });
         let report = deadlock_report();
         assert!(report.contains("2 tasks are parked"), "got: {report}");
@@ -3445,7 +3604,15 @@ mod tests {
     /// unwakeable.
     #[test]
     fn a_task_parked_on_itself_is_reported_as_a_deadlock() {
-        PARKED.with(|p| p.borrow_mut().push((3, Wait::Task(3))));
+        PARKED.with(|p| {
+            p.borrow_mut().push((
+                3,
+                Wait::Task {
+                    id: 3,
+                    deadline: None,
+                },
+            ))
+        });
         let report = deadlock_report();
         assert!(
             report.contains("task 3 is waiting for task 3 to finish"),
@@ -3495,7 +3662,10 @@ mod tests {
     /// the shape that would strand a finished task in the park set.
     unsafe extern "C-unwind" fn poll_stage_then_ready(state: *mut u8, _task_ctx: *mut u8) -> i64 {
         let slots = state as *mut i64;
-        stage_park(Wait::Task(0));
+        stage_park(Wait::Task {
+            id: 0,
+            deadline: None,
+        });
         // SAFETY: `state` is a `STATE_MIN_SIZE` object from `test_future`.
         unsafe { slots.add(STATE_SLOT_OUTPUT).write(0) };
         POLL_READY
