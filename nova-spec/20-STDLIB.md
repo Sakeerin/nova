@@ -545,11 +545,20 @@ timed-out sleep report a completion it never earned; and nothing yet
 defines what happens to an abandoned inner future's socket registration or
 GC root when the outer `timeout` fires first. Separately, the "at least"
 contract `sleep` already promises is platform-asymmetric in its
-granularity: a remaining duration always rounds **up**, to at least one
-microsecond on Unix but at least one whole millisecond on Windows, never
-down to zero, so a real wait can never collapse into a busy spin on either
-platform (`crates/nova-runtime/src/poll.rs`'s `select_timeout` and
-`wsapoll_timeout_ms`).
+granularity, but not because the wait itself always rounds up: `select_timeout`
+(Unix) and `wsapoll_timeout_ms` (Windows) truncate a remaining duration to
+whole microseconds or whole milliseconds the ordinary way, and only lift a
+result that truncated all the way to zero back up to one unit — never down
+to zero, not always up. A 1.5µs remainder becomes 1µs; a 1.5ms remainder
+becomes 1ms on Windows — both rounded down, just not past the point where a
+real wait would collapse into a busy spin. What still makes "at least" true
+is `task.rs`'s `wake_due`, which wakes a parked task only once its deadline
+is `<=` the clock reading it is checked against: a platform wait that
+returns early because its own timeout truncated short reports "nothing
+ready," and the drive loop simply re-polls and re-parks on the same
+deadline rather than waking the sleeper ahead of schedule
+(`crates/nova-runtime/src/poll.rs`'s `select_timeout` and
+`wsapoll_timeout_ms`; `crates/nova-runtime/src/task.rs`'s `wake_due`).
 
 ---
 

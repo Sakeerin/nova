@@ -93,7 +93,8 @@ Both spellings are **measured, not assumed**: no-receiver associated functions a
 A new file `crates/nova-runtime/src/time.rs`, following the one-responsibility-per-module shape of `net.rs`, `file.rs`, `io.rs` and `poll.rs`.
 
 ```rust
-/// The single process-monotonic origin every clock reading is relative to.
+/// The process-monotonic origin every clock reading taken through this
+/// module is relative to.
 pub(crate) fn epoch() -> std::time::Instant
 
 #[no_mangle]
@@ -102,7 +103,7 @@ pub extern "C-unwind" fn nova_rt_time_now_nanos() -> i64
 
 `epoch()` is a `OnceLock<Instant>` initialized on first read, so every reading is non-negative. `nova_rt_time_now_nanos` returns `epoch().elapsed().as_nanos()` narrowed to `i64`, **saturating at `i64::MAX`** rather than wrapping.
 
-**This replaces an existing epoch rather than adding a second one.** `poll.rs` already has `fn log_epoch() -> Instant` (`crates/nova-runtime/src/poll.rs:136`), a `OnceLock<Instant>` with exactly one caller — `LogGate::allow` at `poll.rs:182`. `log_epoch` is deleted and that caller reads `crate::time::epoch()`. Two independent origins that happen to agree is worse than one that is named for what it is.
+**This folds one existing epoch into `epoch()`, but a second survives elsewhere.** `poll.rs` already has `fn log_epoch() -> Instant` (`crates/nova-runtime/src/poll.rs:136`), a `OnceLock<Instant>` with exactly one caller — `LogGate::allow` at `poll.rs:182`. `log_epoch` is deleted and that caller reads `crate::time::epoch()` instead, so those two origins do become one. `net.rs`'s own `deadline_epoch` (`crates/nova-runtime/src/net.rs:885`) is untouched by this increment: it encodes `read_timeout`'s deadlines as scannable `i64` state-slot offsets, carries its own tests, and rewriting shipped timing code is out of scope here. So this change leaves the process with two independent monotonic origins by choice, not one — `crate::time::epoch` (shared by `time.rs` and `poll.rs`) and `net.rs::deadline_epoch` (used only by `read_timeout`), each named for what it is rather than left to happen to agree.
 
 ---
 
