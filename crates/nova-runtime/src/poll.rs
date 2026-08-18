@@ -335,23 +335,18 @@ fn platform_wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -
             return Vec::new();
         }
 
-        let mut tv = libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        };
-        let tv_ptr = match timeout {
+        let mut tv = timeout.map(select_timeout);
+        let tv_ptr = match tv.as_mut() {
             // `None` (no deadline): a null timeout tells `select` to block
             // indefinitely.
             None => std::ptr::null_mut(),
-            Some(d) => {
-                tv = select_timeout(d);
-                std::ptr::addr_of_mut!(tv)
-            }
+            Some(tv) => std::ptr::addr_of_mut!(*tv),
         };
 
         // SAFETY: `max_fd + 1` bounds both sets; every fd set into either was
         // checked above to be non-negative and below `FD_SETSIZE`; `tv_ptr`
-        // is either null or points at `tv`, which outlives this call.
+        // is either null or points at the `timeval` inside `tv`, which
+        // outlives this call.
         let rc = unsafe {
             libc::select(
                 max_fd + 1,
