@@ -7450,8 +7450,15 @@ fn time_conversions_run() {
         .stdout(expected);
 }
 
-/// Each of `Duration`'s three constructors given one argument past its cap,
-/// which an unclamped constructor would wrap into a negative `Int`, plus
+/// Four printed lines: `Duration`'s three constructors -- `from_secs`,
+/// `from_millis`, `from_micros` -- each given one argument past its upper
+/// cap, which an unclamped constructor would wrap into a negative `Int`,
+/// plus `from_secs` given one argument past its lower cap, on the negative
+/// side, which an unclamped constructor would wrap the other way -- into a
+/// positive `Int` byte-identical to the correctly-clamped result on the
+/// first line. That second direction is the more insidious failure: an
+/// unclamped negative wraps to roughly +292 years, so `sleep` of it would
+/// park for centuries where it should wake immediately. A fifth line covers
 /// `Instant::duration_since` saturating at zero when the arguments are the
 /// wrong way round. See `tests/runtime/time_saturation.nova`'s own header.
 #[test]
@@ -7470,7 +7477,11 @@ fn time_saturation_run() {
 
 /// `Instant::now`/`elapsed`/`duration_since` against the real monotonic
 /// clock. A real clock varies, so the fixture asserts a range rather than a
-/// value; see `tests/runtime/time_elapsed.nova`'s own header.
+/// value; see `tests/runtime/time_elapsed.nova`'s own header. The fixture
+/// sleeps 5ms and requires the measured elapsed time to cover it -- that
+/// sleep is the only thing in the whole test suite that would fail against
+/// a frozen or mis-wired clock, so it is load-bearing, not incidental, and
+/// must survive any future trim of the suite's running time.
 #[test]
 fn time_elapsed_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/time_elapsed.stdout"))
