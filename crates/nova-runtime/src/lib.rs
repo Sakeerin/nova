@@ -482,6 +482,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             task::nova_rt_task_join_future as *const u8,
         ),
         (
+            "nova_rt_task_timeout_future",
+            task::nova_rt_task_timeout_future as *const u8,
+        ),
+        (
             "nova_rt_fs_read_to_string",
             fs::nova_rt_fs_read_to_string as *const u8,
         ),
