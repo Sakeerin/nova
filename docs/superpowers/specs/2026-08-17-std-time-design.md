@@ -21,6 +21,8 @@
 ### Out, deliberately
 
 - **`timeout<T>(d, fut) -> Result<T, TimeoutError>`** and `TimeoutError`. §9 lists them; they are their own increment. Measured reasons: `try_stage` (`crates/nova-runtime/src/task.rs:495`) treats a second deadline as a collision and a collision calls `abort_with`, so `timeout(d, sleep(..))` (Deadline+Deadline) and `timeout(d, handle.join())` (Task+Deadline) would abort the process; `poll_sleep` is edge-triggered where `poll_join` is level-triggered, so a merged earlier wake would make a sleep report completion it has not earned; and nothing defines what happens to an abandoned inner future's socket registration or GC root. Those are executor-semantics questions and belong with the widening that answers them.
+
+  **Answered: `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`, branch `timeout-combinator`.** All three blockers above were resolved there — the staging widening, `poll_sleep` made level-triggered, and abandonment chosen as the contract — and `timeout<T>`/`TimeoutError` shipped. Not open work; a reader landing here looking for it should go there instead.
 - **Wall-clock time.** §9 specifies a monotonic `Instant` only. `std/log` will eventually want a timestamp, which is a wall clock; adding one now is speculation, so it waits for the increment that needs it.
 - **`as_micros`, `as_nanos`, `from_nanos`, `Duration` arithmetic operators, `Instant` ordering.** Not in §9. YAGNI.
 

@@ -104,15 +104,21 @@ pub fn wait(sockets: &[(RawSocket, Interest)], deadline: Option<Instant>) -> Vec
 /// The time remaining until `deadline`, clamped so it is never negative.
 ///
 /// Nova's `Int` is signed and a timed wait built from it can carry a deadline
-/// that is already in the past (mirrors the clamp `task.rs`'s
-/// `deadline_from_nanos` applies on the other side of the same conversion:
-/// there, a non-positive duration-from-now is clamped to an `Instant` of
-/// "now" rather than one in the past; here, an `Instant` already in the past
-/// is clamped to a `Duration` of zero rather than a negative one -- the same
-/// guard against a stale deadline, applied to whichever of the two values the
-/// caller happens to be holding). `None` means "no deadline": block
-/// indefinitely rather than returning a zero timeout, which would make an
-/// I/O wait busy-loop instead of actually waiting.
+/// that is already in the past, so this clamps for the same reason `task.rs`'s
+/// `deadline_nanos_from_now` clamps its own `nanos` argument
+/// (`nanos.max(0)`): a non-positive value must not produce a negative
+/// `Duration` here, or an `Instant` earlier than "now" there. The two are no
+/// longer mirror images of the same conversion the way this function and the
+/// old `deadline_from_nanos` once were: `deadline_from_nanos` recomputed an
+/// `Instant` from "now" on every use, clamping staleness at that point;
+/// `deadline_nanos_from_now` computes a deadline exactly once, at
+/// construction, and clamps a raw duration *argument* instead -- nothing
+/// time-relative is recomputed on the `task.rs` side of a timed wait
+/// afterward. This function still recomputes on every call, since `wait`
+/// re-derives the remaining `Duration` from a stored `Instant` deadline each
+/// time a platform arm runs. `None` means "no deadline": block indefinitely
+/// rather than returning a zero timeout, which would make an I/O wait
+/// busy-loop instead of actually waiting.
 fn remaining(deadline: Option<Instant>) -> Option<Duration> {
     deadline.map(|at| {
         let now = Instant::now();
