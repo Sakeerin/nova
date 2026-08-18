@@ -1,6 +1,8 @@
 //! Monotonic clock readings for `std/time`.
 //!
-//! One origin and one intrinsic, deliberately. `Instant` and `Duration`
+//! One origin and one intrinsic for this module's own readings, deliberately
+//! -- `net.rs` keeps a second, separate origin of its own, for unrelated
+//! reasons (see [`epoch`]'s doc comment). `Instant` and `Duration`
 //! arithmetic is Nova code in `std/time/lib.nova` -- a subtraction does not
 //! need to cross into Rust. This module exists only because a clock reading
 //! is the one thing in §9 that Nova cannot express at all.
@@ -8,13 +10,18 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
-/// The single process-monotonic origin every reading is relative to,
-/// initialized on first read so no reading is ever negative.
+/// The process-monotonic origin every reading taken *through this module* is
+/// relative to, initialized on first read so no reading is ever negative.
 ///
-/// **Shared on purpose.** `poll.rs`'s log rate limiter reads this same origin;
-/// it used to own a second `OnceLock<Instant>` of its own (`log_epoch`). Two
-/// independent origins that merely happen to agree is worse than one named for
-/// what it is.
+/// **Shared with `poll.rs`'s log rate limiter, not with the whole process.**
+/// `poll.rs` used to own a second `OnceLock<Instant>` of its own (`log_epoch`)
+/// and now reads this one instead -- two independent origins that merely
+/// happened to agree was worse than one named for what it is. That fold does
+/// not make this the process's only origin, though: `net.rs`'s own
+/// `deadline_epoch` is a second, separate `OnceLock<Instant>` that survives,
+/// kept for `read_timeout`'s deadline arithmetic by a deliberate choice
+/// recorded there. The process has two monotonic origins by design; this doc
+/// comment speaks only for this one.
 pub(crate) fn epoch() -> Instant {
     static EPOCH: OnceLock<Instant> = OnceLock::new();
     *EPOCH.get_or_init(Instant::now)

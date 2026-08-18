@@ -1,9 +1,21 @@
-fn main() {
+async fn main() {
     let start = Instant::now()
+    sleep(Duration::from_millis(5)).await
     let d = start.elapsed()
-    // A real clock, so assert a range rather than a value. Reaching here takes
-    // far less than an hour, and `elapsed` must never be negative.
-    println("${d.as_millis() >= 0}")
+    // A real sleep, not a frozen clock, so `elapsed` can only come back at or
+    // above the interval actually slept -- this cannot flake, by the same
+    // argument that justified Task 1's own clock test: the clock is
+    // monotonic and `sleep` guarantees a lower bound, so the measurement can
+    // only exceed the interval, never fall short of it. The earlier `>= 0`
+    // here passed against a constant clock, so a `time_now_nanos` mis-wired
+    // to any other zero-argument `-> Int` builtin would have left this
+    // fixture, and every other `time_*` fixture, green. This is now the only
+    // end-to-end coverage of that intrinsic through the resolver/typeck/
+    // MIR/JIT path -- the Rust unit test that catches a frozen clock calls
+    // the symbol directly and exercises none of it -- and incidentally the
+    // only end-to-end coverage of `sleep`'s `Duration` signature beyond
+    // ordering.
+    println("${d.as_millis() >= 5}")
     println("${d.as_secs() < 3600}")
-    println("${Instant::now().duration_since(start).as_millis() >= 0}")
+    println("${Instant::now().duration_since(start).as_millis() >= 5}")
 }

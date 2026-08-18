@@ -2,6 +2,15 @@ fn main() {
     println("${Duration::from_secs(9_223_372_037).as_secs()}")
     println("${Duration::from_millis(9_223_372_036_855).as_secs()}")
     println("${Duration::from_micros(9_223_372_036_854_776).as_secs()}")
+    // The low-end mirror of the first line above: one past `MIN_SECS`, on
+    // the negative side. An unclamped constructor wraps a large negative
+    // count positive, so this must come back negative -- if it comes back
+    // matching the first line's `9223372036` instead, the low clamp has
+    // regressed and `sleep` would treat "sleep for ~292 years" as "wake
+    // immediately"'s exact inversion. Only `from_secs` is pinned here; the
+    // other two constructors clamp the identical way for the identical
+    // reason.
+    println("${Duration::from_secs(-9_223_372_037).as_secs()}")
     let early = Instant::now()
     println("${early.duration_since(Instant::now()).as_millis()}")
 }
