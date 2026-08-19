@@ -1443,8 +1443,48 @@ fn run_succeeds_when_async_fn_is_never_called() {
 
 // === nova build: standalone executables ===
 
+/// Build `source` to a standalone executable named `exe_name`, run it, and
+/// return its stdout.
+///
+/// **The directory carries this process's id.** The 27 `exe_name`s are unique
+/// *within* this binary, so there was never an intra-run collision — but
+/// without a per-process component every `run_tests` invocation on the machine
+/// wrote, executed and then deleted the *same absolute paths*. Two runs
+/// overlapping at all (two checkouts, a worktree, a developer alongside CI, two
+/// `cargo test` invocations) had one process deleting or overwriting an image
+/// another was executing. That is a named candidate mechanism for this
+/// binary's known flake, which hits a different test name each run and always
+/// passes in isolation: one such failure was observed as exit code
+/// `0xC0000005` (ACCESS_VIOLATION) with *empty* stdout and stderr, which is
+/// what running a half-written or swapped-out image looks like and not what a
+/// Nova-level bug looks like. It also broke this branch's own constraint that
+/// every fixture path be unique per process — these were unique only per
+/// machine. Not a proven diagnosis: Windows Defender scanning a freshly
+/// written `.exe` explains the same symptom equally well, and a genuine
+/// intermittent codegen bug is not excluded. It is cheap to eliminate, and
+/// eliminating it either fixes the flake or narrows it.
+///
+/// **The per-test `remove_file` stays, and the directory itself is never
+/// removed -- not recursively, and not even best-effort.** All 27 `exe_name`s
+/// share this one directory inside a single process, and these tests run on
+/// parallel threads. A per-test `remove_dir_all` would have tests deleting each
+/// other's executables mid-execution, manufacturing the exact flake this change
+/// exists to remove.
+///
+/// A best-effort *non*-recursive `remove_dir` looks safe by comparison: it can
+/// only succeed when the directory is already empty, so it can never delete a
+/// sibling's executable. **MEASURED: it is not safe.** A full-workspace run with
+/// one added here failed three `*_build_standalone` tests at once, each with
+/// `failed to write ...\<name>.exe.nova.obj: The system cannot find the path
+/// specified. (os error 3)`. One test's `remove_dir` won a race against a
+/// sibling that had already passed `create_dir_all` and was about to write into
+/// the directory. Emptiness is not the invariant that matters; "no sibling is
+/// between `create_dir_all` and `nova build`" is, and nothing available here can
+/// establish it. So the directory is left behind: one empty per-process
+/// directory in the system temp folder is a far cheaper residue than a
+/// self-inflicted parallel-execution flake.
 fn build_and_run(source: &str, exe_name: &str) -> String {
-    let dir = std::env::temp_dir().join("nova-build-tests");
+    let dir = std::env::temp_dir().join(format!("nova-build-tests-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let exe = dir.join(format!("{exe_name}{}", std::env::consts::EXE_SUFFIX));
     nova()
