@@ -69,6 +69,15 @@ impl Log {
     // the runtime's getter installs the same default on first read, so a
     // program that never calls this still logs. This is the override spelled
     // explicitly.
+    //
+    // This literal duplicates the runtime's own default (`DEFAULT` in
+    // `crates/nova-runtime/src/log.rs`) rather than reading it back — there
+    // is no intrinsic that returns "the default", only `log_set_config`,
+    // which takes one explicit configuration to install. The duplication is
+    // pinned equal by `log_init_resets_to_default_run`
+    // (`crates/nova-cli/tests/run_tests.rs`), which overwrites a
+    // configuration wrong in both fields with a call to `init()` and checks
+    // that the runtime's actual default comes back, not the wrong one.
     pub fn init() {
         Log::init_with(LogConfig { level: Info, format: Human, output: Stderr })
     }
