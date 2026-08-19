@@ -1,0 +1,4 @@
+fn main() {
+    Log::init_with(LogConfig { level: Info, format: Human, output: Stdout })
+    Log::info("on-stdout")
+}

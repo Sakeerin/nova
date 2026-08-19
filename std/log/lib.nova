@@ -1,0 +1,87 @@
+// Levels, ordered by `to_int` below. The order is load-bearing: filtering
+// compares those integers, because Nova has no `==` on sum types
+// (`E0013`), so `to_int` is the only mechanism available rather than a
+// convenience.
+pub type LogLevel = | Trace | Debug | Info | Warn | Error
+
+// One variant today. `Json` arrives with the increment that brings string
+// escaping; declaring the field now means adding that variant later breaks
+// only exhaustive matches, where adding a *field* to `LogConfig` would
+// break every construction site.
+pub type LogFormat = | Human
+
+// `File(String)` arrives with the increment that adds a synchronous
+// file-write path; every `std/fs` write is `async fn` today.
+pub type LogOutput = | Stderr | Stdout
+
+pub record LogConfig {
+    pub level: LogLevel
+    pub format: LogFormat
+    pub output: LogOutput
+}
+
+// The logger's namespace. An empty record because Nova has no free-standing
+// namespaces, and associated functions rather than top-level ones because a
+// top-level `pub fn` is glob-imported into every module: `error`, `info` and
+// `debug` at top level would take those names from all user code, and
+// `import_std_module` resolves such a collision silently in the *user's*
+// favour — making this module's `error` unreachable with no diagnostic.
+// `std/strings` refused the same trade for `join`.
+pub record Log {}
+
+impl LogLevel {
+    pub fn to_int(self) -> Int {
+        match self { Trace => 0, Debug => 1, Info => 2, Warn => 3, Error => 4 }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Trace => "TRACE"
+            Debug => "DEBUG"
+            Info => "INFO"
+            Warn => "WARN"
+            Error => "ERROR"
+        }
+    }
+}
+
+// `match` rather than `out == Stderr`: there is no equality on sum types.
+fn to_stderr_flag(out: LogOutput) -> Int {
+    match out { Stderr => 1, Stdout => 0 }
+}
+
+// Emit one line if `level` clears the configured threshold.
+//
+// Private, so the glob import never binds it and it takes no name from user
+// code. The threshold is checked *before* the clock is read and the line is
+// built, so a filtered-out call costs one intrinsic and no allocation.
+//
+// The comparison is `<`, which makes the threshold inclusive: at threshold
+// `Info`, an `Info` message is emitted.
+fn emit(level: LogLevel, msg: String) {
+    if level.to_int() < log_config_level() { return }
+    let line = "${SystemTime::now().to_iso8601()} ${level.label()} ${msg}"
+    if log_config_to_stderr() == 1 { eprintln(line) } else { println(line) }
+}
+
+impl Log {
+    // Install the default: `Info`, `Human`, `Stderr`. Not a prerequisite —
+    // the runtime's getter installs the same default on first read, so a
+    // program that never calls this still logs. This is the override spelled
+    // explicitly.
+    pub fn init() {
+        Log::init_with(LogConfig { level: Info, format: Human, output: Stderr })
+    }
+
+    // `config.format` is deliberately unread: `LogFormat` has one variant,
+    // so there is nothing to branch on yet.
+    pub fn init_with(config: LogConfig) {
+        log_set_config(config.level.to_int(), to_stderr_flag(config.output))
+    }
+
+    pub fn trace(msg: String) { emit(Trace, msg) }
+    pub fn debug(msg: String) { emit(Debug, msg) }
+    pub fn info(msg: String)  { emit(Info, msg) }
+    pub fn warn(msg: String)  { emit(Warn, msg) }
+    pub fn error(msg: String) { emit(Error, msg) }
+}

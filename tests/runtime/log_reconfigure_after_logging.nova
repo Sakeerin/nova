@@ -1,0 +1,7 @@
+fn main() {
+    Log::info("before")
+    Log::init_with(LogConfig { level: Error, format: Human, output: Stderr })
+    Log::info("after-silenced")
+    Log::error("after-kept")
+    println("done")
+}

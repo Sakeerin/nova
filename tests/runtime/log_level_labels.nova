@@ -1,0 +1,8 @@
+fn main() {
+    Log::init_with(LogConfig { level: Trace, format: Human, output: Stdout })
+    Log::trace("a")
+    Log::debug("b")
+    Log::info("c")
+    Log::warn("d")
+    Log::error("e")
+}
