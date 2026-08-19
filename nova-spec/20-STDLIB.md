@@ -576,6 +576,31 @@ leaking it until process exit — the same standing
 unclosed descriptor. Design:
 `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`.
 
+**AMENDED 2026-08-19 (branch `std-log-core`): a new record, `SystemTime`,
+ships in `std/time` — an addition to this section, not a correction of the
+code block above, which still declares only `Instant` and `Duration`
+correctly.** `SystemTime { nanos: Int }` counts nanoseconds since the
+**Unix** epoch, read by a new intrinsic, `nova_rt_time_now_epoch_nanos`,
+deliberately distinct from `crate::time::now_nanos()`/`epoch()`, which are
+process-relative and answer a different question. It is a **separate
+type** from `Instant`, not a method on it: `Instant`'s whole contract is
+that it is monotonic and comparable by subtraction within one process, and
+a wall clock is neither — it can jump backwards when NTP corrects it. Two
+types that cannot be confused for one another is the point. `SystemTime::
+to_iso8601()` renders fixed-width ISO-8601 to milliseconds
+(`2026-08-19T02:40:13.123Z`), computed entirely in Nova over Hinnant's
+civil-from-days algorithm. **UTC only, and permanently so**: `00-MASTER-
+SPEC.md` §6's Rust crate list is FINAL and carries no date/time crate, so
+there is no timezone database this stdlib could consult even if a local
+offset were wanted, and it is not — a local-time rendering would be a guess
+that is wrong twice a year in every DST zone, with no way to get it right.
+This **discharges the wall-clock deferral** this section's own design
+recorded (`docs/superpowers/specs/2026-08-17-std-time-design.md` §1): *"§9
+specifies a monotonic `Instant` only. `std/log` will eventually want a
+timestamp, which is a wall clock; adding one now is speculation, so it
+waits for the increment that needs it."* `std/log` (§10) is that
+increment, and the timestamp it needed is `SystemTime`.
+
 ---
 
 ## 10. `std/log`
@@ -602,6 +627,64 @@ pub type LogLevel = | Trace | Debug | Info | Warn | Error
 pub type LogFormat = | Human | Json
 pub type LogOutput = | Stderr | Stdout | File(String)
 ```
+
+**AMENDED 2026-08-19 (branch `std-log-core`): shipped, with one shape
+deviation from the block above and two variants deferred rather than
+missing.** The five level functions are **associated functions on an
+empty record, `Log`** (`Log::info("...")`, `Log::error("...")`, and so
+on) rather than the top-level `pub fn`s shown above. Nova has no import
+statements and no qualified paths — every std module's public names are
+glob-imported into every other module — and `import_std_module`
+(`crates/nova-resolver/src/lib.rs:1305-1311`) resolves a name collision
+between a std module and the importing module **silently, in the
+importing module's favour**: "leaving any name a module already defines
+or imports untouched." A top-level `pub fn error` would therefore make
+`std/log`'s own `error` unreachable in any module that defined its own,
+with no diagnostic anywhere — a logging call resolving to the wrong
+function is a worse failure than one that fails to compile.
+`std/strings/lib.nova:248-252` already declined this same trade for
+`join`, for the identical reason, stated in the source: "a top-level `pub
+fn` is glob-imported into every module and would take the name `join`
+from all user code." `Log` itself is an ordinary, empty, glob-imported
+record — Nova has no free-standing namespaces — so `RESERVED_TYPE_NAMES`
+stays at 7 and `STD_MODULES` goes 9 → 10.
+
+`LogFormat::Json`, `LogOutput::File(String)`, and the TTY detection that
+would choose between `Human` and `Json` automatically are a **named next
+increment, not gaps left by this one**: `LogConfig` already carries a
+`format` field and `LogOutput` already has two of its eventual three
+variants, specifically so that increment adds only variants, not fields —
+adding a *variant* later breaks only exhaustive matches, where adding a
+*field* to `LogConfig` would break every existing construction site.
+`serde_json` is already on the FINAL crate list (`00-MASTER-SPEC.md` §6),
+which is what makes that increment's escaping a choice rather than a
+hand-rolling exercise. No TTY-detection facility (`isatty`, `is_terminal`,
+`GetConsoleMode`) exists anywhere in `crates/` today.
+
+**Every level function returns nothing and cannot fail.** `std/io`'s
+`Write` trait is entirely `async`, and `.await`ing a log call would make
+logging impossible from any synchronous function, including
+`Display::fmt` and a panic path — so logging is built instead over the
+existing synchronous `println`/`eprintln` builtins, which already write
+without a `Result`. A logger has nowhere left to report a write failure on
+stderr; propagating one would only move the same unanswerable question to
+every call site.
+
+**Separately, and not particular to this section:** the `module std.log`
+line that opens this section's code block above does not parse — `grep -n
+"^module " std/*/lib.nova` returns zero hits across all ten shipped
+modules, none of which declares a `module` line at all. This is not a
+`std/log` deviation; it is a pre-existing gap in this document that
+predates this increment and reaches every one of `nova-spec`'s dotted
+`module std.x` headers — `module std.core` (§2, :47), `std.fmt` (§3,
+:146), `std.io` (§4, :167), `std.fs` (§5, :280), `std.http` (§6, :378),
+`std.json` (§7, :436), `std.crypto` (§8), `std.time` (§9), `std.log`
+(§10, above), `std.test` (§11), `std.collections` (§12), `std.sync` and
+`std.task` (§13), and `std.net` (§16) — thirteen numbered sections in
+all. A reader who checks only this section would otherwise conclude
+`std/log` alone fails to conform; it does not stand out, and no section
+here does. Recorded rather than fixed: correcting thirteen headers is a
+documentation pass of its own and out of scope for a records-only task.
 
 ---
 

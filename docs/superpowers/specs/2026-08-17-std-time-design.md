@@ -24,6 +24,8 @@
 
   **Answered: `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`, branch `timeout-combinator`.** All three blockers above were resolved there — the staging widening, `poll_sleep` made level-triggered, and abandonment chosen as the contract — and `timeout<T>`/`TimeoutError` shipped. Not open work; a reader landing here looking for it should go there instead.
 - **Wall-clock time.** §9 specifies a monotonic `Instant` only. `std/log` will eventually want a timestamp, which is a wall clock; adding one now is speculation, so it waits for the increment that needs it.
+
+  **Answered: `docs/superpowers/specs/2026-08-19-std-log-core-design.md`, branch `std-log-core`.** `std/log` was the increment that needed it, exactly as named above: `SystemTime { nanos: Int }` shipped in `std/time`, a wall clock deliberately kept a separate type from `Instant` since `Instant`'s contract is monotonicity and a wall clock can jump backwards under NTP, rendering UTC-only and permanently so — `00-MASTER-SPEC.md` §6's crate list is FINAL and carries no date/time crate, so there is no timezone database to consult. Not open work; a reader landing here looking for it should go there instead.
 - **`as_micros`, `as_nanos`, `from_nanos`, `Duration` arithmetic operators, `Instant` ordering.** Not in §9. YAGNI.
 
 ---
