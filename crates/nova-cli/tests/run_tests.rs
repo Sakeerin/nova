@@ -7861,7 +7861,13 @@ fn log_init_resets_to_default_run() {
         .lines()
         .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
         .collect();
-    assert_eq!(levels, vec!["INFO yes"]);
+    // Stdout is asserted *first*, deliberately, so a failure says which field
+    // of `init()`'s default drifted rather than only that one did. The two
+    // mutations this test exists to catch are otherwise indistinguishable: a
+    // wrong level drops the line, a wrong destination moves it, and both leave
+    // stderr empty. Checking stdout first separates them -- a misrouted line
+    // shows up here as an unexpected extra line, while a dropped one leaves
+    // stdout correct and fails the stderr assertion below.
     let expected = std::fs::read_to_string(
         repo_root().join("tests/runtime/log_init_resets_to_default.stdout"),
     )
@@ -7869,4 +7875,5 @@ fn log_init_resets_to_default_run() {
     .replace("\r\n", "\n");
     let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     assert_eq!(stdout, expected);
+    assert_eq!(levels, vec!["INFO yes"]);
 }
