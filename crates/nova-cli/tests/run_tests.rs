@@ -7707,7 +7707,15 @@ fn timeout_elapsed_twice_run() {
 
 /// No `init` call anywhere: the default threshold is `Info`, so `Trace` and
 /// `Debug` are dropped while `Info`, `Warn` and `Error` reach stderr.
-/// `Info` at threshold `Info` is what fails if `<` becomes `<=`.
+/// `Info` at threshold `Info` is what fails if `<` becomes `<=` -- though not
+/// uniquely. Every fixture here logs a message at its own threshold, so all
+/// five catch that mutation; this one is simply the cheapest to read. An
+/// earlier version of this comment claimed it was the only one, which was
+/// measured false by running the isolated mutation against all five.
+///
+/// The stdout golden is asserted as well, and pins what the stderr assertion
+/// cannot: that the program ran to *completion*. Without it, a logger that
+/// emitted three correct lines and then died would still pass.
 #[test]
 fn log_default_level_run() {
     let out = nova()
@@ -7724,6 +7732,12 @@ fn log_default_level_run() {
         levels,
         vec!["INFO yes-info", "WARN yes-warn", "ERROR yes-error"]
     );
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/log_default_level.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, expected);
 }
 
 /// `init_with` at `Warn` raises the threshold above the default `Info`:
