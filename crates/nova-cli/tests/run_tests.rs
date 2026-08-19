@@ -7552,6 +7552,24 @@ fn system_time_iso8601_run() {
         .stdout(expected);
 }
 
+/// The live clock, asserted on shape rather than value: the year must be a
+/// plausible four digits and the rendering must be exactly 24 characters
+/// ending in `Z`. A process-relative reading would render as 1970 and fail
+/// the first check.
+#[test]
+fn system_time_now_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/system_time_now.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/system_time_now.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `timeout` when the inner future completes well inside the deadline:
 /// `Ok`'s branch runs, not `Err`'s. Prints which branch ran, not an
 /// ordering, so a unit error in the comparison cannot pass by accident.

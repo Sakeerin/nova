@@ -56,6 +56,26 @@ pub extern "C-unwind" fn nova_rt_time_now_nanos() -> i64 {
     now_nanos()
 }
 
+/// Nanoseconds since the Unix epoch, saturating at `i64::MAX`.
+///
+/// **Deliberately does not reuse [`now_nanos`] or [`epoch`].** Those read
+/// from a process-start `OnceLock` and answer "how long has this process
+/// been running"; this answers "what time is it". Same unit, same width,
+/// different quantity — which is exactly the shape of mistake that forced
+/// the `SLEEP_SLOT_MS` → `SLEEP_SLOT_NANOS` → `SLEEP_SLOT_DEADLINE_NANOS`
+/// renames, twice, because the type never changed while the meaning did.
+///
+/// A clock set before 1970 makes `duration_since` fail; that returns `0`
+/// rather than a negative value, so the calendar math downstream never has
+/// to interpret one.
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_time_now_epoch_nanos() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_nanos()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +108,24 @@ mod tests {
         assert!(
             delta >= i64::try_from(slept.as_nanos()).expect("2ms fits in i64"),
             "a {slept:?} sleep advanced the clock by only {delta}ns"
+        );
+    }
+
+    /// The wall clock reads from the Unix epoch, not from this module's
+    /// process epoch. A reading taken now must sit after 2026-01-01 and
+    /// before 2100-01-01 — a window wide enough to never be flaky and narrow
+    /// enough to fail if the reading is actually a process-relative value,
+    /// which would be a handful of milliseconds.
+    #[test]
+    fn the_wall_clock_reads_from_the_unix_epoch_not_the_process_epoch() {
+        let n = nova_rt_time_now_epoch_nanos();
+        assert!(
+            n > 1_767_225_600_000_000_000,
+            "wall clock returned {n}, which is before 2026-01-01; a process-relative reading looks like this"
+        );
+        assert!(
+            n < 4_102_444_800_000_000_000,
+            "wall clock returned {n}, after 2100-01-01"
         );
     }
 }
