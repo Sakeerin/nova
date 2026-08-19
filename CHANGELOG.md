@@ -106,6 +106,68 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `staged_deadline_for_test()`: with only two of the three fields readable no
   test could assert the staged slot is *empty*, which is exactly the
   postcondition the abandonment path has to establish.
+- **`SystemTime`, a wall-clock addition to `std/time`** (`pub record
+  SystemTime { nanos: Int }`, nanoseconds since the Unix epoch) —
+  deliberately a **separate type** from `Instant`, not a method on it:
+  `Instant`'s whole contract is monotonicity within one process, and a wall
+  clock has none — it can jump backwards when NTP corrects it. Two methods:
+  `SystemTime::now()`, reading a new runtime intrinsic,
+  `time_now_epoch_nanos() -> Int` (`Builtin::STD_ONLY` 60 → 61) that shares
+  nothing with the existing `now_nanos()`/`epoch()` — those answer "how
+  long has this process been running," this answers "what time is it," and
+  the two must not be confused despite sharing a unit and a width, the same
+  register `SLEEP_SLOT_MS` → `SLEEP_SLOT_NANOS` → `SLEEP_SLOT_DEADLINE_
+  NANOS` was renamed twice to avoid; and `SystemTime::to_iso8601() ->
+  String`, rendering fixed-width ISO-8601 UTC to milliseconds
+  (`2026-08-19T02:40:13.123Z`) computed entirely in Nova via Hinnant's
+  civil-from-days algorithm, behind private `pad2`/`pad3`/`civil_from_days`
+  helpers. **UTC only, and permanently so**: `00-MASTER-SPEC.md` §6's Rust
+  crate list is FINAL and carries no date/time crate, so there is no
+  timezone database to consult and a local-time offset would be a guess
+  that is wrong twice a year in every DST zone. The intrinsic
+  (`crates/nova-runtime/src/time.rs`'s `nova_rt_time_now_epoch_nanos`)
+  saturates at `i64::MAX` — the rendered timestamp silently stops advancing
+  past the year 2262, recorded rather than guarded — and returns `0` for a
+  clock set before 1970 rather than propagating a negative value into the
+  calendar math. `RESERVED_TYPE_NAMES` stays at 7 — `SystemTime` is an
+  ordinary, glob-imported `std/time` record, the same standing `Instant`
+  and `Duration` already have. This discharges the wall-clock deferral
+  `std/time`'s own design recorded: "`std/log` will eventually want a
+  timestamp, which is a wall clock; adding one now is speculation, so it
+  waits for the increment that needs it" — this is that increment.
+- **`std/log`, a tenth `STD_MODULES` entry** (`"$std.log"`, `STD_MODULES` 9
+  → 10): `Log`, `LogLevel`, `LogFormat`, `LogOutput`, `LogConfig`, and
+  `init`/`init_with`. The five level functions — `trace`/`debug`/`info`/
+  `warn`/`error` — ship as **associated functions on an empty record,
+  `Log`** (`Log::info("...")`), not the top-level `pub fn`s `nova-spec`
+  §10 originally showed: Nova has no import statements and no qualified
+  paths, so every std module's public names are glob-imported into every
+  other module, and `import_std_module` resolves a name collision silently
+  in the *user's* favour (`crates/nova-resolver/src/lib.rs:1305-1311`) — a
+  top-level `error` would have made `std/log`'s own `error` unreachable
+  with no diagnostic. `std/strings`'s `join` (`std/strings/lib.nova:
+  248-252`) set this precedent first, for the identical reason. Filtering
+  compares `LogLevel::to_int()` (`Trace` 0 through `Error` 4) against a
+  configured threshold with `<`, inclusive at the threshold, because Nova
+  has no `==` on sum types. Two outputs ship, `Stderr` and `Stdout`;
+  `LogFormat` has one variant today, `Human`. Configuration lives in the
+  runtime (`crates/nova-runtime/src/log.rs`), a thread-local
+  `Cell<Option<Config>>` whose getters resolve `None` to `Config { level: 2
+  /* Info */, to_stderr: true }` — the entire auto-initialize rule: a
+  program that never calls `Log::init()` still logs, and
+  `init()`/`init_with(config)` are an explicit override rather than a
+  prerequisite, with last-writer-wins semantics. Three new intrinsics,
+  `log_config_level`, `log_config_to_stderr` and `log_set_config`
+  (`Builtin::STD_ONLY` 61 → 64) — **two separate getters, not one packed
+  integer**, deliberately: packing would reintroduce the exact hazard this
+  project has now hit twice, an `i64` whose meaning changes while its type
+  does not. Log calls return nothing and cannot fail — a logger has
+  nowhere left to report a stderr write failure. Deferred to a named later
+  increment, not left as unnoticed gaps: `LogFormat::Json`,
+  `LogOutput::File(String)`, and the TTY detection needed to choose
+  between `Human` and `Json` automatically. `RESERVED_TYPE_NAMES` stays at
+  7 — `Log` and `LogConfig` are ordinary, glob-imported `std/log` records
+  and sum types, not builtin types.
 
 ### Changed
 
