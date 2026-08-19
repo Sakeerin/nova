@@ -1,0 +1,13 @@
+// `Log::init()` must install exactly the runtime's default -- `Info`
+// threshold, `Stderr` destination -- not whatever a prior `init_with` left
+// behind. The `init_with` below is wrong in *both* fields (`Error`,
+// `Stdout`), so a correct `init()` overwrites it: `debug` stays silenced and
+// `info` reaches stderr. A wrong level drops the `info` line; a wrong
+// destination moves it to stdout instead.
+fn main() {
+    Log::init_with(LogConfig { level: Error, format: Human, output: Stdout })
+    Log::init()
+    Log::debug("no")
+    Log::info("yes")
+    println("done")
+}

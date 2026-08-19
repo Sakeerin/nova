@@ -7834,3 +7834,34 @@ fn log_level_labels_run() {
         vec!["TRACE a", "DEBUG b", "INFO c", "WARN d", "ERROR e"]
     );
 }
+
+/// `Log::init()` must install exactly the runtime's default -- `Info`
+/// threshold, stderr -- not whatever `init_with` left behind. The fixture
+/// first installs a configuration wrong in *both* fields (`Error` threshold,
+/// `Stdout` destination); a correct `init()` overwrites it, so `debug` stays
+/// silenced and `info` reaches stderr. This is the fixture that pins
+/// `std/log/lib.nova`'s `init()` literal against the runtime's `DEFAULT`
+/// (`crates/nova-runtime/src/log.rs`): a wrong level drops the `info` line
+/// entirely, and a wrong destination moves it to stdout instead.
+#[test]
+fn log_init_resets_to_default_run() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_init_resets_to_default.nova"))
+        .assert()
+        .success();
+    let output = out.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    let levels: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
+        .collect();
+    assert_eq!(levels, vec!["INFO yes"]);
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/log_init_resets_to_default.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, expected);
+}
