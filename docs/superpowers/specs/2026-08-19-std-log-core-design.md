@@ -2,6 +2,8 @@
 
 **Status:** approved 2026-08-19. Base: `main` == `origin/main` == `64e2be6`, 470 commits, 0 merge commits, 1009 tests (8 deliberately ignored), clean tree, seven CI checks green, tagged `v0.2.0-alpha.1`.
 
+**Every `file:line` citation below is relative to that baseline**, and several have since drifted — this increment added four builtins to `crates/nova-resolver/src/lib.rs`, which moved everything under them. `import_std_module`'s doc comment was `:1281` and is now `:1305`; the four print builtins were `:571-574` and are now `:586-589`. Both were correct when written, which is precisely why the citation style is the problem rather than the numbers: **a line number in a design doc is a claim that expires, and this one expired against the increment's own edits.** Locate by content, not by line, and treat any number here as a hint about where to grep.
+
 **Goal.** Give Nova a logger: `nova-spec/20-STDLIB.md` §10 minus its JSON format, file output and TTY detection, plus the wall clock §10 needs and §9 deliberately does not have.
 
 **Approach in one line.** The runtime contributes a clock reading and a three-field configuration cell; every formatting, padding and filtering decision is Nova code, and the writing reuses the `println`/`eprintln` builtins that already exist.
@@ -37,7 +39,7 @@
 
 **Why not `std/fmt` yet.** What position 2 still needs is thinner than its position suggests and murkier than §10. `Display` already exists (`std/core/lib.nova:98`, `pub trait Display { fn fmt(self) -> String }`) with impls for `Int`/`Float`/`Bool`/`Char`/`String`, and string interpolation already calls it. So two thirds of `std/fmt` would be **replacing working mechanisms**: moving four functioning builtins behind a module, and re-pointing interpolation's desugaring at a Nova-level `format(parts: [FormatPart]) -> String`. The remaining third, `pub record Formatter { ... }`, has its body elided in the spec — there is no specified behaviour to build, so a `std/fmt` increment would begin by designing what §3 left blank. That is a real increment and it deserves its own scoping conversation; it is not a thing to sweep in ahead of a fully-specified module.
 
-**The deviation gets an ADR**, not a footnote, because `00-MASTER-SPEC.md` §0 requires one for deviations and because this is the *second* time position 2 has been passed over — the first was Phase 2.1, recorded in `docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md`, which deferred `std/fmt` + `std/io` behind async. An undocumented skip that happens twice stops looking like a decision and starts looking like an oversight.
+**The deviation gets an ADR**, not a footnote, because `00-MASTER-SPEC.md` **§7 item 5** requires one ("ADR written for any decision deviating from this spec") and because this is the *second* time position 2 has been passed over — the first was Phase 2.1, recorded in `docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md`, which deferred `std/fmt` + `std/io` behind async. An undocumented skip that happens twice stops looking like a decision and starts looking like an oversight.
 
 ---
 
