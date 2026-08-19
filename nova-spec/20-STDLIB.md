@@ -672,8 +672,10 @@ every call site.
 
 **Separately, and not particular to this section:** the `module std.log`
 line that opens this section's code block above does not parse — `grep -n
-"^module " std/*/lib.nova` returns zero hits across all ten shipped
-modules, none of which declares a `module` line at all. This is not a
+"^module " std/*/lib.nova` returns zero hits across all eleven std module
+sources the glob matches (the ten in `STD_MODULES` plus `std/test`, which
+is deliberately held out of it and seeded only under `nova test`), none of
+which declares a `module` line at all. This is not a
 `std/log` deviation; it is a pre-existing gap in this document that
 predates this increment and reaches every one of `nova-spec`'s dotted
 `module std.x` headers — `module std.core` (§2, :47), `std.fmt` (§3,
