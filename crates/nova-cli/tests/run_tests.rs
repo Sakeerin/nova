@@ -7573,8 +7573,13 @@ fn timeout_elapsed_run() {
 /// The one fixture that distinguishes those -- see `tests/runtime/
 /// timeout_value.nova`'s own header for why a "wrong slot" mutation can't be
 /// demonstrated at the Nova-source level (the type checker rejects it) and
-/// what this fixture actually guards instead (the runtime/lowering layer
-/// underneath the type checker).
+/// what this fixture actually guards instead. Measured, not reasoned: a
+/// slot-layout bug in `poll_timeout` (writing the combinator's status into the
+/// *inner's* output slot too) fails **this test and nothing else in the
+/// workspace**. A `nova-mir` `Builtin::TaskOutput` lowering bug also makes this
+/// fixture print `0` instead of `42`, but 18 tests in this file fail under it,
+/// so this fixture is not what guards that -- an earlier version of the header
+/// claimed otherwise for both.
 #[test]
 fn timeout_value_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/timeout_value.stdout"))

@@ -1616,26 +1616,64 @@ fn instant_from_deadline_nanos(deadline: i64) -> Instant {
 /// `base + duration`, or the furthest instant from `base` this platform's
 /// `Instant` can represent, halving `duration` until `checked_add` succeeds.
 ///
-/// **Never earlier than `base`, and `base` is a fixed point in the past**
-/// (`crate::time::epoch()`, captured once at process start), so this never
-/// answers with something [`wake_due`] would treat as already due while the
-/// caller's own integer deadline is still ahead of the clock -- the property
-/// [`instant_from_deadline_nanos`]'s old `Instant::now()` fallback broke.
+/// **The guarantee is that this does not answer with something [`wake_due`]
+/// would treat as already due while the caller's own integer deadline is still
+/// ahead of the clock** -- the property [`instant_from_deadline_nanos`]'s old
+/// `Instant::now()` fallback broke. It holds **empirically, not structurally**,
+/// and the distinction matters enough to state precisely, because an earlier
+/// version of this comment claimed a proof that does not hold.
+///
+/// The false proof was: "never earlier than `base`, and `base` is a fixed point
+/// in the past, so it can never be already due". That is a non-sequitur.
+/// "result >= base" and "base is in the past" together permit "result < now",
+/// which is exactly the already-due case. The loop's actual lower bound is
+/// `base + H/2`, where `H` is this platform's `Instant` headroom from `base`,
+/// since halving overshoots by at most 2x. With `H >= uptime` that bound is
+/// `epoch + uptime/2`, which is *before* `now`.
+///
+/// What actually holds, on both counts that matter:
+///
+/// - **Headroom vastly exceeds uptime on every supported backend.** `H` is
+///   measured from a process-start `base`, and no supported `Instant`
+///   representation runs out within ~292 years of it, so the loop halves once
+///   or twice at most and lands astronomically far out -- not near `now`.
+///   `furthest_representable_instant_forces_the_halving_fallback_and_is_not_already_due`
+///   asserts that, with a first assertion that fails (rather than silently
+///   passing) if a platform ever stops overflowing on `Duration::MAX`.
+/// - **The fallback is unreachable through this crate's API at all.** The sole
+///   caller is [`instant_from_deadline_nanos`], fed by
+///   [`deadline_nanos_from_now`], which saturates at `i64::MAX` nanoseconds
+///   (~292 years); `checked_add` of that from a process-start `base` succeeds
+///   on the first attempt everywhere. Only a test forcing `Duration::MAX`
+///   directly reaches the loop.
+///
+/// **Rejected alternative: clamping the result forward** -- returning
+/// `max(candidate, Instant::now() + Duration::from_nanos(1))` to make the
+/// property structural instead of empirical. It looks like a strict
+/// improvement and it is the opposite: **it reintroduces the exact livelock
+/// this function exists to prevent.** [`poll_sleep`] re-checks the *stored
+/// integer* deadline, which in the overflow case is astronomically large, so a
+/// staged `Instant` of `now + 1ns` makes [`wake_due`] wake the task a
+/// nanosecond later, `poll_sleep` finds its own deadline unreached, re-stages,
+/// and the process burns a 1ns-per-iteration busy loop making no progress --
+/// the same defect the `.unwrap_or_else(Instant::now)` fallback had. The clamp
+/// fires only in the very case it would have to be right about, and there it is
+/// wrong. (It would also reintroduce a panicking `Instant + Duration` on a path
+/// no panic may cross.) Do not add it.
+///
 /// Halving only ever *shrinks* an unrepresentable `duration` towards one that
 /// fits, so the loop always terminates (worst case at `Duration::ZERO`,
 /// which `checked_add` always accepts, since adding nothing cannot overflow)
 /// and every candidate it tries on the way stays a duration measured
 /// forward from `base`, never behind it.
 ///
-/// In production this call always succeeds on its first attempt: the only
-/// caller bounds `duration` to at most `i64::MAX` nanoseconds (~292 years),
-/// via [`deadline_nanos_from_now`]'s own saturation, and no supported `Instant`
-/// backend has under that much headroom from a process-start `base`. The
-/// halving loop exists for the input this crate cannot actually construct
-/// through its own API, not the one it can -- one of this module's own tests
-/// forces it directly with `Duration::MAX`, a value no caller here can ever
-/// pass in, since `Instant` itself offers no public way to sit near its own
-/// overflow boundary the way `Duration::MAX` does.
+/// The halving loop therefore exists for the input this crate cannot actually
+/// construct through its own API, not the one it can -- one of this module's
+/// own tests forces it directly with `Duration::MAX`, a value no caller here
+/// can ever pass in, since `Instant` itself offers no public way to sit near
+/// its own overflow boundary the way `Duration::MAX` does. Should a second
+/// caller ever arrive with an unbounded duration, the empirical argument above
+/// is what has to be re-checked -- and the clamp is still not the answer.
 fn furthest_representable_instant(base: Instant, mut duration: Duration) -> Instant {
     loop {
         if let Some(instant) = base.checked_add(duration) {

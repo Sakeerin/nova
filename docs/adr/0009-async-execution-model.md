@@ -668,7 +668,14 @@ Two companion rules, from the same evidence:
   `STATE_SLOT_*`, `STATE_MIN_SIZE`, `poll_one`, `run_to_completion`,
   `spawn_internal`, `take_output_internal`, `nova_rt_task_block_on`,
   `nova_rt_task_yield_future` — and, from the 2026-08-10 `park-set` amendment
-  above, `Wait`, `PARKED`, `stage_park`, `wake_due`/`wake_due_deadlines`,
+  above, `Wait`, `PARKED`, `stage_park`, `wake_due`/`wake_due_deadlines`
+  (`wake_due_deadlines` was **deleted** on 2026-08-15, branch
+  `io-poller-std-net`: the drained-queue branch it served now matches on
+  `(earliest_deadline(), io_parks().is_empty())` and the real sleep it owned
+  moved to `poll::wait`, so no `thread::sleep` runs in `task.rs` at all —
+  recorded at `two_not_yet_due_deadlines_drain_the_queue_then_wake_in_deadline_order`'s
+  doc comment. Named here rather than removed, because this amendment is dated
+  and its history is worth more than a tidy identifier list),
   `wake_tasks_waiting_on`, `nova_rt_task_sleep_future_nanos`,
   `nova_rt_task_join_future`, `deadlock_report`/`report_deadlock` —
   `nova_rt_task_sleep_future_nanos` was `nova_rt_task_sleep_future`, renamed
