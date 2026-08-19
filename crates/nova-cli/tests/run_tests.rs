@@ -7877,3 +7877,34 @@ fn log_init_resets_to_default_run() {
     assert_eq!(stdout, expected);
     assert_eq!(levels, vec!["INFO yes"]);
 }
+
+/// Zero-padding an Int: single digit, zero, a negative where the sign counts
+/// toward the width, an over-wide value returned unpadded, and a negative
+/// width clamped by the early return.
+#[test]
+fn fmt_int_pad_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fmt_int_pad.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fmt_int_pad.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Space-padding a String at a width above, equal to and below its length.
+/// The brackets in the fixture make trailing padding visible in the golden.
+#[test]
+fn fmt_string_pad_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fmt_string_pad.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fmt_string_pad.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
