@@ -1,0 +1,12 @@
+// ISO-8601 rendering, against fixed nanosecond values rather than the clock.
+// Each row pins one way the formatter can silently break; see the plan's
+// table for what each is for. The 2100 row fails any leap rule that only
+// tests divisibility by 4, and the last row fails an unpadded formatter.
+fn main() {
+    println(SystemTime { nanos: 0 }.to_iso8601())
+    println(SystemTime { nanos: 951_782_400_000_000_000 }.to_iso8601())
+    println(SystemTime { nanos: 1_709_164_800_000_000_000 }.to_iso8601())
+    println(SystemTime { nanos: 4_107_542_400_000_000_000 }.to_iso8601())
+    println(SystemTime { nanos: 1_767_225_599_999_000_000 }.to_iso8601())
+    println(SystemTime { nanos: 1_756_598_463_007_000_000 }.to_iso8601())
+}
