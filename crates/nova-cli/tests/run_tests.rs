@@ -7810,10 +7810,15 @@ fn log_stdout_output_run() {
 }
 
 /// All five labels, at threshold `Trace` so every one emits, routed to
-/// stdout so a live clock doesn't need stderr capture too. This is the
-/// fixture that fails if `Warn` and `Error` swap in `LogLevel::to_int`,
-/// because the threshold ordering changes which lines appear -- and it pins
-/// every label string.
+/// stdout so a live clock doesn't need stderr capture too. This pins the
+/// five label strings and their emit order at a threshold that admits every
+/// level. It does *not* catch `Warn` and `Error` swapping in
+/// `LogLevel::to_int` -- measured: at threshold `Trace` every level's
+/// `to_int()` clears the filter regardless of numbering, and `label()`
+/// (`std/log/lib.nova`) never consults `to_int()`, so the output is
+/// byte-identical under that swap. `log_init_with_threshold_run` is the
+/// fixture that catches it: its threshold is `Warn`, so the swap pushes
+/// `Error` below it and `"ERROR kept-error"` disappears.
 #[test]
 fn log_level_labels_run() {
     let out = nova()
