@@ -401,6 +401,14 @@ rt_funcs! {
     /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
     /// `TimeNowNanos`, which is process-relative.
     TimeNowEpochNanos,
+    /// `() -> i64` — the logger's configured threshold, as `LogLevel::to_int`
+    /// numbers it.
+    LogConfigLevel,
+    /// `() -> i64` — `1` for stderr, `0` for stdout.
+    LogConfigToStderr,
+    /// `(i64 level, i64 to_stderr) -> unit` — install a logger configuration,
+    /// overwriting any previous one.
+    LogSetConfig,
 }
 
 impl RtFunc {
@@ -480,6 +488,9 @@ impl RtFunc {
             RtFunc::BytesEq => "nova_rt_bytes_eq",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
             RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
+            RtFunc::LogConfigLevel => "nova_rt_log_config_level",
+            RtFunc::LogConfigToStderr => "nova_rt_log_config_to_stderr",
+            RtFunc::LogSetConfig => "nova_rt_log_set_config",
         }
     }
 
@@ -570,6 +581,9 @@ impl RtFunc {
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
             RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
+            RtFunc::LogConfigLevel => (vec![], MirTy::I64),
+            RtFunc::LogConfigToStderr => (vec![], MirTy::I64),
+            RtFunc::LogSetConfig => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
         }
     }
 }

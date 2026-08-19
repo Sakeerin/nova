@@ -740,6 +740,9 @@ impl<'a> Lowerer<'a> {
                     Builtin::BytesEq => Lowering::Runtime(RtFunc::BytesEq),
                     Builtin::TimeNowNanos => Lowering::Runtime(RtFunc::TimeNowNanos),
                     Builtin::TimeNowEpochNanos => Lowering::Runtime(RtFunc::TimeNowEpochNanos),
+                    Builtin::LogConfigLevel => Lowering::Runtime(RtFunc::LogConfigLevel),
+                    Builtin::LogConfigToStderr => Lowering::Runtime(RtFunc::LogConfigToStderr),
+                    Builtin::LogSetConfig => Lowering::Runtime(RtFunc::LogSetConfig),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

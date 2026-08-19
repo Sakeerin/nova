@@ -567,6 +567,16 @@ builtins! {
     /// `TimeNowNanos`, which is relative to this process's own start, not
     /// to 1970. Std-only.
     TimeNowEpochNanos,
+    /// `log_config_level() -> Int` — the logger's configured threshold, as
+    /// `nova_rt_log_config_level` reads it. Std-only.
+    LogConfigLevel,
+    /// `log_config_to_stderr() -> Int` — `1` for stderr, `0` for stdout, as
+    /// `nova_rt_log_config_to_stderr` reads it. Std-only.
+    LogConfigToStderr,
+    /// `log_set_config(level: Int, to_stderr: Int) -> unit` — install a
+    /// logger configuration, overwriting any previous one, via
+    /// `nova_rt_log_set_config`. Std-only.
+    LogSetConfig,
 }
 
 impl Builtin {
@@ -645,6 +655,9 @@ impl Builtin {
             Builtin::BytesEq => "bytes_eq",
             Builtin::TimeNowNanos => "time_now_nanos",
             Builtin::TimeNowEpochNanos => "time_now_epoch_nanos",
+            Builtin::LogConfigLevel => "log_config_level",
+            Builtin::LogConfigToStderr => "log_config_to_stderr",
+            Builtin::LogSetConfig => "log_set_config",
         }
     }
 
@@ -672,7 +685,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 61] = [
+    pub const STD_ONLY: [Builtin; 64] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -734,6 +747,9 @@ impl Builtin {
         Builtin::BytesEq,
         Builtin::TimeNowNanos,
         Builtin::TimeNowEpochNanos,
+        Builtin::LogConfigLevel,
+        Builtin::LogConfigToStderr,
+        Builtin::LogSetConfig,
     ];
 }
 

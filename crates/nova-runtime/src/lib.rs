@@ -43,6 +43,11 @@ mod gc;
 /// module beside `fs` and `bytes`, reusing `fs`'s per-task slot table rather
 /// than owning a second one.
 pub mod io;
+/// The logger's configuration cell for `std/log`. Private, like [`file`],
+/// [`net`], [`poll`] and [`time`]: nothing outside this crate names `log::`
+/// directly -- the three `nova_rt_log_*` symbols reach the JIT and linked
+/// binaries through their `#[no_mangle]` C names and through [`symbols`].
+mod log;
 /// The open-socket table and the two-phase, non-blocking `connect` for
 /// `std/net`'s `TcpStream`. Private, like [`file`]: nothing outside this
 /// crate names `net::` directly -- the `nova_rt_net_*` symbols reach the JIT
@@ -611,6 +616,18 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_time_now_epoch_nanos",
             time::nova_rt_time_now_epoch_nanos as *const u8,
+        ),
+        (
+            "nova_rt_log_config_level",
+            log::nova_rt_log_config_level as *const u8,
+        ),
+        (
+            "nova_rt_log_config_to_stderr",
+            log::nova_rt_log_config_to_stderr as *const u8,
+        ),
+        (
+            "nova_rt_log_set_config",
+            log::nova_rt_log_set_config as *const u8,
         ),
     ]
 }
