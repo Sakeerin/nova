@@ -63,7 +63,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError>`**,
   in `std/time` (`Builtin::STD_ONLY` 59 → 60; `STD_MODULES` stays 9;
   `RESERVED_TYPE_NAMES` stays 7 — `TimeoutError {}` is an ordinary record,
-  the first in `std` with no field to disclose because it has none). Built
+  the one record in `std/time` with no field to disclose because it has none;
+  `std/io`'s `Stdin`/`Stdout`/`Stderr` are fieldless too, so this is not a
+  first anywhere wider than its own library). Built
   over one new builtin, `task_timeout_future`, and one hand-written
   `PollFn`, `poll_timeout`, which polls the inner future *before* checking
   the deadline — so work that already completed is never reported as timed
@@ -145,10 +147,23 @@ that already compiled.
   nanos` is replaced by two helpers, `deadline_nanos_from_now` (clamps a
   raw duration argument to non-negative, once, at construction) and
   `instant_from_deadline_nanos` (converts the stored absolute deadline back
-  to an `Instant` for staging, via a halving-loop fallback so a
-  `checked_add` overflow cannot produce a deadline the executor treats as
-  already due). Consequence worth naming: a sleep or timeout's deadline now
-  runs from **construction**, not first poll — invisible for
+  to an `Instant` for staging, replacing a panicking `Instant + Duration`
+  with `checked_add` plus a halving-loop fallback). The fallback's own
+  guarantee is stated carefully rather than absolutely: it is **not**
+  structurally impossible for it to hand back an instant the executor treats
+  as already due — the loop's lower bound is `base + headroom/2`, which the
+  arithmetic alone does not put ahead of `now`. What holds is empirical and
+  holds twice over: `Instant` headroom from a process-start `base` vastly
+  exceeds process uptime on every supported backend, so the loop lands
+  astronomically far out; and the fallback is unreachable through this
+  crate's API at all, because `deadline_nanos_from_now` saturates at
+  `i64::MAX` nanoseconds and `checked_add` of that always succeeds on the
+  first attempt. Clamping the result forward to `now + 1ns` to make the
+  property structural is recorded at the function as a **rejected**
+  alternative: it would reintroduce exactly the livelock the fallback
+  replaced, because `poll_sleep` re-checks the stored *integer* deadline and
+  would re-stage on every 1ns wake. Consequence worth naming: a sleep or
+  timeout's deadline now runs from **construction**, not first poll — invisible for
   `sleep(d).await` written inline, observable for a future built and held
   before being awaited.
 - **`timeout<T>`, previously recorded here as deliberately not delivered,

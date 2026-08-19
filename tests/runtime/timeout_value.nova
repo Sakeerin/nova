@@ -16,13 +16,24 @@
 // it does not run and print `0`.
 //
 // This fixture's discriminating power is one layer down from there, at the
-// runtime/lowering boundary the type system cannot see into: a bug in
-// `nova-mir`'s lowering of `Builtin::TaskOutput`, a wrong slot layout in the
-// runtime's future-state object, or `task_timeout_future`'s own Rust-side
-// signature mistakenly widened to return `Future<Param(0)>` instead of the
-// concrete `Future<Int>` it actually produces -- any of those would compile
-// clean and still print the status code, `0`, here instead of `42`. Nothing
-// else in this suite would catch it.
+// runtime/lowering boundary the type system cannot see into -- and it is
+// narrower than two earlier versions of this comment claimed. Measured, by
+// running each mutation rather than reasoning about it:
+//
+//   - A wrong slot layout in `poll_timeout` -- writing the combinator's status
+//     into the *inner's* output slot as well as its own -- compiles clean,
+//     prints `0` here instead of `42`, and is caught by **this fixture and
+//     nothing else in the workspace**. That is what this fixture is for.
+//   - A `nova-mir` lowering bug in `Builtin::TaskOutput` -- loading
+//     `STATE_SLOT_TAG` instead of `STATE_SLOT_OUTPUT` -- also compiles clean
+//     and also prints `0` here, but 18 tests in `nova-cli::run_tests` fail
+//     under it. `block_on` and `join` read every value through that lowering,
+//     so a bug in it is caught everywhere; this fixture is not what stands
+//     between the project and it.
+//   - A third claim once stood here: `task_timeout_future`'s Rust-side
+//     signature widened to return `Future<Param(0)>`. It does not compile
+//     either, blocked by the same rigid-`Param` rule described above.
+//     Removed rather than left as a fourth guess.
 async fn answer() -> Int {
     42
 }
