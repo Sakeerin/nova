@@ -398,6 +398,9 @@ rt_funcs! {
     BytesEq,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
+    /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
+    /// `TimeNowNanos`, which is process-relative.
+    TimeNowEpochNanos,
 }
 
 impl RtFunc {
@@ -476,6 +479,7 @@ impl RtFunc {
             RtFunc::BytesFromInts => "nova_rt_bytes_from_ints",
             RtFunc::BytesEq => "nova_rt_bytes_eq",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
+            RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
         }
     }
 
@@ -565,6 +569,7 @@ impl RtFunc {
             RtFunc::BytesFromInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
+            RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
         }
     }
 }

@@ -213,12 +213,13 @@ fn civil_from_days(days: Int) -> [Int] {
     let m = if mp < 10 { mp + 3 } else { mp - 9 }
     let year = if m <= 2 { y + 1 } else { y }
     // Bound to `ymd` and returned on its own line, not written as a bare
-    // `[year, m, d]` right after the `let year = ...` above: Nova statements
-    // have no separating token, so a line starting with `[` immediately
-    // after a `}`-closed expression parses as indexing that expression
-    // (`{ y }[year, ...]`) rather than as a new array-literal statement --
-    // measured as `error[P0001]: expected ']' (in index expression), found
-    // ','`.
+    // `[year, m, d]` right after the `let year = ...` above: Nova has no
+    // statement separator at all, so a postfix operator continues onto
+    // whatever precedes it regardless of that statement's terminal token --
+    // a bare integer literal, a bare identifier and a call ending in `)` all
+    // fail the same way a `}`-closed expression does. Only a `let`/`return`
+    // prefix breaks the continuation. Measured here as
+    // `error[P0001]: expected ']' (in index expression), found ','`.
     let ymd = [year, m, d]
     ymd
 }
@@ -251,4 +252,8 @@ impl SystemTime {
         let milli = rem / 1_000_000 % 1_000
         "${ymd[0]}-${pad2(ymd[1])}-${pad2(ymd[2])}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}.${pad3(milli)}Z"
     }
+
+    // The live wall clock: nanoseconds since the Unix epoch, read from the
+    // OS at call time.
+    pub fn now() -> SystemTime { SystemTime { nanos: time_now_epoch_nanos() } }
 }

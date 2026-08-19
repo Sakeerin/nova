@@ -562,6 +562,11 @@ builtins! {
     /// into Rust. Saturates at `i64::MAX` rather than wrapping; see
     /// `nova_rt_time_now_nanos`. Std-only.
     TimeNowNanos,
+    /// `time_now_epoch_nanos() -> Int` — nanoseconds since the **Unix**
+    /// epoch, as read by `nova_rt_time_now_epoch_nanos`. Distinct from
+    /// `TimeNowNanos`, which is relative to this process's own start, not
+    /// to 1970. Std-only.
+    TimeNowEpochNanos,
 }
 
 impl Builtin {
@@ -639,6 +644,7 @@ impl Builtin {
             Builtin::BytesFromInts => "bytes_from_ints_intrinsic",
             Builtin::BytesEq => "bytes_eq",
             Builtin::TimeNowNanos => "time_now_nanos",
+            Builtin::TimeNowEpochNanos => "time_now_epoch_nanos",
         }
     }
 
@@ -666,7 +672,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 60] = [
+    pub const STD_ONLY: [Builtin; 61] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -727,6 +733,7 @@ impl Builtin {
         Builtin::BytesFromInts,
         Builtin::BytesEq,
         Builtin::TimeNowNanos,
+        Builtin::TimeNowEpochNanos,
     ];
 }
 

@@ -1,0 +1,10 @@
+// The live clock, asserted on shape rather than value: the year must be a
+// plausible four digits and the rendering must be exactly 24 characters
+// ending in `Z`. A process-relative reading would render as 1970 and fail
+// the first check.
+fn main() {
+    let s = SystemTime::now().to_iso8601()
+    println("${s.len()}")
+    println("${s.ends_with("Z")}")
+    println("${s.starts_with("20")}")
+}

@@ -608,6 +608,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_time_now_nanos",
             time::nova_rt_time_now_nanos as *const u8,
         ),
+        (
+            "nova_rt_time_now_epoch_nanos",
+            time::nova_rt_time_now_epoch_nanos as *const u8,
+        ),
     ]
 }
 
