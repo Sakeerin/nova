@@ -7704,3 +7704,119 @@ fn timeout_elapsed_twice_run() {
         .success()
         .stdout(expected);
 }
+
+/// No `init` call anywhere: the default threshold is `Info`, so `Trace` and
+/// `Debug` are dropped while `Info`, `Warn` and `Error` reach stderr.
+/// `Info` at threshold `Info` is what fails if `<` becomes `<=`.
+#[test]
+fn log_default_level_run() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_default_level.nova"))
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).replace("\r\n", "\n");
+    let levels: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
+        .collect();
+    assert_eq!(
+        levels,
+        vec!["INFO yes-info", "WARN yes-warn", "ERROR yes-error"]
+    );
+}
+
+/// `init_with` at `Warn` raises the threshold above the default `Info`:
+/// `info` is silenced while `warn` and `error` still reach stderr.
+#[test]
+fn log_init_with_threshold_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/log_init_with_threshold.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_init_with_threshold.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).replace("\r\n", "\n");
+    let levels: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
+        .collect();
+    assert_eq!(levels, vec!["WARN kept-warn", "ERROR kept-error"]);
+}
+
+/// Logging once at the default threshold and then calling `init_with` to
+/// raise it: the last write wins, so the first stderr line is at `Info`
+/// (before the reconfigure) and the second is at `Error` (after). This is
+/// the fixture that fails if a getter reads a hardcoded default instead of
+/// the runtime's cell.
+#[test]
+fn log_reconfigure_after_logging_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/log_reconfigure_after_logging.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_reconfigure_after_logging.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).replace("\r\n", "\n");
+    let levels: Vec<&str> = stderr
+        .lines()
+        .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
+        .collect();
+    assert_eq!(levels, vec!["INFO before", "ERROR after-kept"]);
+}
+
+/// `output: Stdout` moves the line off stderr entirely: this is the fixture
+/// that fails if `eprintln` and `println` are swapped inside `emit`.
+#[test]
+fn log_stdout_output_run() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_stdout_output.nova"))
+        .assert()
+        .success();
+    let output = out.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    assert_eq!(stderr, "", "stderr should be empty: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout: {stdout}");
+    let (_, rest) = lines[0]
+        .split_once(' ')
+        .expect("line starts with a timestamp");
+    assert_eq!(rest, "INFO on-stdout");
+}
+
+/// All five labels, at threshold `Trace` so every one emits, routed to
+/// stdout so a live clock doesn't need stderr capture too. This is the
+/// fixture that fails if `Warn` and `Error` swap in `LogLevel::to_int`,
+/// because the threshold ordering changes which lines appear -- and it pins
+/// every label string.
+#[test]
+fn log_level_labels_run() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/log_level_labels.nova"))
+        .assert()
+        .success();
+    let output = out.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n");
+    assert_eq!(stderr, "", "stderr should be empty: {stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+    let levels: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.split_once(' ').expect("line starts with a timestamp").1)
+        .collect();
+    assert_eq!(
+        levels,
+        vec!["TRACE a", "DEBUG b", "INFO c", "WARN d", "ERROR e"]
+    );
+}

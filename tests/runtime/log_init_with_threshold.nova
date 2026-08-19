@@ -1,0 +1,7 @@
+fn main() {
+    Log::init_with(LogConfig { level: Warn, format: Human, output: Stderr })
+    Log::info("silenced")
+    Log::warn("kept-warn")
+    Log::error("kept-error")
+    println("done")
+}

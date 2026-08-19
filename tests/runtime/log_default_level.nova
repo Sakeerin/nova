@@ -1,0 +1,14 @@
+// No `init` call: the runtime getter installs the default on first read, so
+// `Info` and above emit and `Debug`/`Trace` do not. `Info` at threshold
+// `Info` is the case that catches `<` becoming `<=`.
+//
+// The fixture prints nothing but `done` on stdout; the level lines go to
+// stderr, and the harness splits the live timestamp off each one.
+fn main() {
+    Log::trace("no")
+    Log::debug("no")
+    Log::info("yes-info")
+    Log::warn("yes-warn")
+    Log::error("yes-error")
+    println("done")
+}
