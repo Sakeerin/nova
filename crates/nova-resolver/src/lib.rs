@@ -131,6 +131,12 @@ builtins! {
     /// `str_to_lower(s: String) -> String` — full Unicode lowercase, for the
     /// same reason as [`Builtin::StrToUpper`]. Std-only.
     StrToLower,
+    /// `float_fixed(v: Float, places: Int) -> String` — render `v` to a fixed
+    /// number of decimal places. Backs `std/fmt`'s `Float::fixed`, its only
+    /// caller. Nova cannot implement this itself: decimal rendering of a
+    /// binary float is a solved problem with sharp edges, and Nova has no
+    /// `Float` to `Int` conversion at all to begin one with. Std-only.
+    FloatFixed,
     /// `test_selector() -> Int` — which `@test` to run in this process, or a
     /// negative value meaning "print the inventory instead".
     ///
@@ -596,6 +602,7 @@ impl Builtin {
             Builtin::StrFromChars => "str_from_chars",
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
+            Builtin::FloatFixed => "float_fixed",
             Builtin::TestSelector => "test_selector",
             Builtin::TaskSpawn => "task_spawn",
             Builtin::TaskIsDone => "task_is_done",
@@ -685,7 +692,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 64] = [
+    pub const STD_ONLY: [Builtin; 65] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -694,6 +701,7 @@ impl Builtin {
         Builtin::StrFromChars,
         Builtin::StrToUpper,
         Builtin::StrToLower,
+        Builtin::FloatFixed,
         Builtin::TestSelector,
         Builtin::TaskSpawn,
         Builtin::TaskIsDone,

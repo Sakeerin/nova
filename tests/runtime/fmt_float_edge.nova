@@ -1,0 +1,10 @@
+// The values a Float can hold that a naive formatter mishandles, and the
+// clamps at both ends of `places`. `0.0 / 0.0` is NaN and `1.0 / 0.0` is
+// infinity; a formatter that errored on them would be worse than one that
+// shows them.
+fn main() {
+    println((0.0 / 0.0).fixed(2))
+    println((1.0 / 0.0).fixed(2))
+    println((-1.0 / 0.0).fixed(2))
+    println((1.75).fixed(-1))
+}

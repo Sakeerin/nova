@@ -7908,3 +7908,35 @@ fn fmt_string_pad_run() {
         .success()
         .stdout(expected);
 }
+
+/// Fixed-place decimal rendering: two values whose default rendering is long
+/// and imprecise, a zero-places truncation, and a trailing zero the value
+/// does not itself carry.
+#[test]
+fn fmt_float_fixed_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/fmt_float_fixed.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fmt_float_fixed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Non-finite `Float` values (NaN, +/- infinity) rendering as Rust renders
+/// them, and a negative `places` clamped to zero rather than panicking.
+#[test]
+fn fmt_float_edge_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fmt_float_edge.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fmt_float_edge.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
