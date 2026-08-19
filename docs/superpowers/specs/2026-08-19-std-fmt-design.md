@@ -48,16 +48,22 @@ Against that, **padding is expressible** — the `std/log` increment proved it t
 
 ---
 
-## 3. Where it lives, and the load-order constraint
+## 3. Where it lives
 
-`std/fmt` is a new `STD_MODULES` entry, and **its position in that list is forced from both sides**:
+`std/fmt` is a new `STD_MODULES` entry, placed immediately after `$std.strings`, giving `core, bytes, io, fs, collections, strings, fmt, task, net, time, log`.
 
-- It must come **after `$std.strings`**, because padding uses `String::repeat` (`std/strings/lib.nova:300`).
-- It must come **before `$std.time`**, so `std/time` can call `Int::pad`.
+**CORRECTED 2026-08-19, after Task 1's review disproved this section's original claim.** The first draft said the position was "forced from both sides" — after `$std.strings` because padding calls `String::repeat`, and before `$std.time` so `std/time` could call `Int::pad` — and that getting it wrong would fail to compile. **That is false, and it was measured false:** the reviewer moved the entry ahead of `$std.strings` in a throwaway worktree, rebuilt from scratch, and both fixtures still produced byte-correct output.
 
-`resolve_program` compiles each entry in list order — *"Compile each implicit std module (in `std_entries` order) so their public types/traits/values get real DefIds and layouts"* (`crates/nova-resolver/src/lib.rs:1118`) — so a module sees only entries before it. The current order is `core, bytes, io, fs, collections, strings, task, net, time, log`; `$std.fmt` goes **immediately after `$std.strings`**.
+Two mechanisms make the order irrelevant here, and **both were documented in the tree before this spec was written**:
 
-**Worth stating because it invites a wrong assumption: `STD_MODULES` order is a load order, and `00-MASTER-SPEC.md` §3's numbering is a schedule.** They do not have to agree, and after this increment they visibly do not — `std/fmt` is spec-position 2 and load-position 7. Nothing is wrong; they answer different questions.
+- **Method resolution is order-independent.** `collect_impls` (`crates/nova-typeck/src/check.rs:1015`) builds its table from a global `self.defs.methods()` filtered by owner — a single pass over the already-merged item list, not a per-module ordered walk. So an `impl Int` in any module is visible to every other module regardless of position.
+- **The glob import is omnidirectional.** `import_std_module` binds one std module's names into *every other* module's scope, not only into later ones.
+
+And `STD_MODULES`' **own doc comment**, twelve lines above the constant, says it outright: *"Order is significant only in that it fixes module indices; user modules always come first, then these in the order listed here — `std/core` stays first so its module index is unchanged from when it was the only embedded module."*
+
+**The error is worth recording rather than quietly deleting, because of its shape.** The original claim cited a real comment — `resolve_program`'s *"Compile each implicit std module (in `std_entries` order)"* — and inferred a **visibility** constraint from a statement about **mechanism**. The comment that spoke to consequence was adjacent to the very line the plan directs an implementer to edit, and went unread. Citing a true sentence is not the same as citing the relevant one.
+
+**So the only real ordering rule is: `$std.core` stays first**, to keep its module index stable. Everything after that is free, and this increment's placement after `$std.strings` is a readability choice — formatting sits near the string library — not a requirement. `00-MASTER-SPEC.md` §3's numbering is a schedule and this list is neither a dependency order nor a visibility order, which is why the two diverging (`std/fmt` at spec-position 2, list-position 7) means nothing at all.
 
 **Methods on builtin types are legal from a module that does not define them, and additive.** Both measured: an inherent `impl Int { pub fn doubled(self) -> Int }` in an ordinary program compiles and runs; and a second inherent `impl String` alongside `std/strings`' existing one (`:113`) also works, with methods from both visible. `std/strings` is currently the **only** place in `std` with an inherent impl on a builtin — this adds the second, deliberately, because a formatting method belongs with formatting rather than with string manipulation.
 
