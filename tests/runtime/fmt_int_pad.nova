@@ -1,0 +1,11 @@
+// Zero-padding an Int. The rows pin, in order: a single digit padded; zero
+// padded; a negative value where the sign counts toward the width; a value
+// already wider than the width, returned unpadded rather than truncated; and
+// a negative width, which the early return clamps.
+fn main() {
+    println((7).pad(2))
+    println((0).pad(2))
+    println((-5).pad(3))
+    println((123).pad(2))
+    println((7).pad(-1))
+}

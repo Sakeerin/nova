@@ -1,0 +1,54 @@
+// Nova standard library -- formatting.
+//
+// Methods rather than top-level `pub fn`s, and that is not a style choice.
+// Nova has no imports and no qualified paths: every std module's public names
+// are glob-imported into every other module, and a collision resolves
+// *silently in the user's favour*, so a top-level `pub fn pad` would take
+// `pad` from every Nova program ever written and a program with its own `pad`
+// would lose access to this one with no diagnostic. `std/strings` refused the
+// same trade for `join`; `std/log` refused it for five level names.
+
+impl Int {
+    // Zero-pad to `width`, with the sign counted toward it: `(7).pad(2)` is
+    // "07" and `(-5).pad(3)` is "-05", matching Rust's `{:03}`. A value
+    // already at or beyond `width` is returned unpadded, never truncated --
+    // a formatter that drops digits turns a display concern into a
+    // correctness one.
+    //
+    // The early return is also the negative-width clamp: `len` is at least 1
+    // for every Int, so a negative `width` takes that branch and
+    // `String::repeat` -- which *panics* on a negative count -- is never
+    // reached with one.
+    pub fn pad(self, width: Int) -> String {
+        let s = "${self}"
+        let len = s.len()
+        if len >= width { return s }
+        let zeros = "0".repeat(width - len)
+        if self < 0 {
+            let digits = s.slice(1, len)
+            "-${zeros}${digits}"
+        } else {
+            "${zeros}${s}"
+        }
+    }
+}
+
+impl String {
+    // Right-align within `width` by padding with spaces on the left. At or
+    // beyond `width`, returned unchanged. The early return clamps a negative
+    // `width` before `repeat` can see it.
+    pub fn pad_left(self, width: Int) -> String {
+        let len = self.len()
+        if len >= width { return self }
+        let fill = " ".repeat(width - len)
+        "${fill}${self}"
+    }
+
+    // Left-align within `width` by padding with spaces on the right.
+    pub fn pad_right(self, width: Int) -> String {
+        let len = self.len()
+        if len >= width { return self }
+        let fill = " ".repeat(width - len)
+        "${self}${fill}"
+    }
+}

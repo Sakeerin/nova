@@ -1,0 +1,10 @@
+// Space-padding a String, at a width above, equal to, and below the length.
+// Brackets make the padding visible in the golden -- without them a trailing
+// space would be invisible to a reader and stripped by a careless editor.
+fn main() {
+    println("[${"ab".pad_left(5)}]")
+    println("[${"ab".pad_right(5)}]")
+    println("[${"ab".pad_left(2)}]")
+    println("[${"abcdef".pad_left(3)}]")
+    println("[${"ab".pad_right(-4)}]")
+}
