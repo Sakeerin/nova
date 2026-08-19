@@ -677,6 +677,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrFromChars => Lowering::Runtime(RtFunc::StrFromChars),
                     Builtin::StrToUpper => Lowering::Runtime(RtFunc::StrToUpper),
                     Builtin::StrToLower => Lowering::Runtime(RtFunc::StrToLower),
+                    Builtin::FloatFixed => Lowering::Runtime(RtFunc::FloatFixed),
                     Builtin::TestSelector => Lowering::Runtime(RtFunc::TestSelector),
                     Builtin::TaskSpawn => Lowering::Runtime(RtFunc::TaskSpawn),
                     Builtin::TaskIsDone => Lowering::Runtime(RtFunc::TaskIsDone),

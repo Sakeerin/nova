@@ -176,6 +176,8 @@ rt_funcs! {
     IntToStr,
     /// `(f64) -> str`
     FloatToStr,
+    /// `(f64, i64) -> str` — a `Float` at a fixed number of decimal places.
+    FloatFixed,
     /// `(i8) -> str`
     BoolToStr,
     /// `(i64 codepoint) -> str`
@@ -422,6 +424,7 @@ impl RtFunc {
             RtFunc::StrConcat => "nova_rt_str_concat",
             RtFunc::IntToStr => "nova_rt_int_to_str",
             RtFunc::FloatToStr => "nova_rt_float_to_str",
+            RtFunc::FloatFixed => "nova_rt_float_fixed",
             RtFunc::BoolToStr => "nova_rt_bool_to_str",
             RtFunc::CharToStr => "nova_rt_char_to_str",
             RtFunc::StrEq => "nova_rt_str_eq",
@@ -503,6 +506,7 @@ impl RtFunc {
             RtFunc::StrConcat => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
             RtFunc::IntToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::FloatToStr => (vec![MirTy::F64], MirTy::Ptr),
+            RtFunc::FloatFixed => (vec![MirTy::F64, MirTy::I64], MirTy::Ptr),
             RtFunc::BoolToStr => (vec![MirTy::I8], MirTy::Ptr),
             RtFunc::CharToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::StrEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),

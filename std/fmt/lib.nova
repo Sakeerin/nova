@@ -52,3 +52,17 @@ impl String {
         "${self}${fill}"
     }
 }
+
+impl Float {
+    // Fixed-place decimal: `(100.0 / 3.0).fixed(2)` is "33.33".
+    //
+    // The rendering is done by the runtime, deliberately breaking this
+    // project's habit of keeping policy in Nova. Decimal rendering of a
+    // binary float is a solved problem with sharp edges -- shortest
+    // round-trip, ties at the cut -- and Nova cannot begin on it, having no
+    // `Float` to `Int` conversion at all. This is the case where the Rust
+    // side is the correct implementation rather than the convenient one.
+    //
+    // `places` is clamped to 0..=17 by the intrinsic.
+    pub fn fixed(self, places: Int) -> String { float_fixed(self, places) }
+}

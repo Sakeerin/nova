@@ -1,0 +1,10 @@
+// Fixed-place rendering. Rows one and two are the two values that motivated
+// this increment: without `fixed` they print 33.333333333333336 and
+// 0.30000000000000004. Row four pins a trailing zero the value does not
+// carry.
+fn main() {
+    println((100.0 / 3.0).fixed(2))
+    println((0.1 + 0.2).fixed(2))
+    println((33.333).fixed(0))
+    println((1.5).fixed(3))
+}

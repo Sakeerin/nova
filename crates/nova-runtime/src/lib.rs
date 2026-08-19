@@ -366,6 +366,24 @@ pub extern "C" fn nova_rt_float_to_str(v: f64) -> *mut NovaStr {
     gc_str(&v.to_string())
 }
 
+/// Format a `Float` to a fixed number of decimal places.
+///
+/// `extern "C"` with no `unsafe` and no `-unwind`, matching
+/// [`nova_rt_float_to_str`] directly above: this takes no pointer, and
+/// `format!` on an `f64` cannot panic once `places` is clamped. Do not reach
+/// for `extern "C-unwind"` here because the async intrinsics use it -- the two
+/// families differ, and an earlier draft of this increment's spec got it wrong
+/// by pattern-matching the wrong neighbour.
+///
+/// `places` is clamped to `0..=17`. Zero is the floor because a negative
+/// precision has no meaning and would panic inside `format!`; 17 is the
+/// ceiling because an `f64` carries no information beyond it.
+#[no_mangle]
+pub extern "C" fn nova_rt_float_fixed(v: f64, places: i64) -> *mut NovaStr {
+    let places = places.clamp(0, 17) as usize;
+    gc_str(&format!("{:.*}", places, v))
+}
+
 /// Format a `Bool` as `true` / `false`.
 #[no_mangle]
 pub extern "C" fn nova_rt_bool_to_str(v: i8) -> *mut NovaStr {
@@ -451,6 +469,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_to_lower", nova_rt_str_to_lower as *const u8),
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
+        ("nova_rt_float_fixed", nova_rt_float_fixed as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
@@ -644,6 +663,13 @@ mod tests {
         nova_rt_str_new(s.as_ptr(), s.len() as u64)
     }
 
+    /// Read a `NovaStr` the intrinsics return, for assertions.
+    #[cfg(test)]
+    fn as_str_for_test(p: *mut NovaStr) -> String {
+        // SAFETY: `p` is a `gc_str` result, so it points at a live `NovaStr`.
+        unsafe { as_str(p).to_string() }
+    }
+
     #[test]
     fn int_to_str_formats() {
         unsafe {
@@ -826,5 +852,49 @@ mod tests {
                 "123 456!"
             );
         }
+    }
+
+    /// The requested number of places, including a trailing zero the value does
+    /// not itself carry.
+    #[test]
+    fn float_fixed_renders_the_requested_places() {
+        assert_eq!(
+            as_str_for_test(nova_rt_float_fixed(100.0 / 3.0, 2)),
+            "33.33"
+        );
+        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.5, 3)), "1.500");
+        assert_eq!(as_str_for_test(nova_rt_float_fixed(33.333, 0)), "33");
+    }
+
+    /// A negative `places` has no meaning and must never reach `format!`'s
+    /// precision argument, which would panic.
+    #[test]
+    fn negative_places_clamps_to_zero() {
+        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.75, -1)), "2");
+        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.75, -1000)), "2");
+    }
+
+    /// Beyond 17 digits an `f64` carries no further information.
+    #[test]
+    fn places_above_seventeen_clamps() {
+        let at_limit = as_str_for_test(nova_rt_float_fixed(1.0 / 3.0, 17));
+        let beyond = as_str_for_test(nova_rt_float_fixed(1.0 / 3.0, 40));
+        assert_eq!(at_limit, beyond, "places above 17 must clamp to 17");
+        assert_eq!(at_limit.len(), 19, "0. plus 17 digits");
+    }
+
+    /// A formatter that fails on a value its type permits is worse than one that
+    /// shows it, so the non-finite values render as Rust renders them.
+    #[test]
+    fn non_finite_values_render_like_rust() {
+        assert_eq!(as_str_for_test(nova_rt_float_fixed(f64::NAN, 2)), "NaN");
+        assert_eq!(
+            as_str_for_test(nova_rt_float_fixed(f64::INFINITY, 2)),
+            "inf"
+        );
+        assert_eq!(
+            as_str_for_test(nova_rt_float_fixed(f64::NEG_INFINITY, 2)),
+            "-inf"
+        );
     }
 }
