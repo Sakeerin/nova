@@ -1446,7 +1446,7 @@ fn run_succeeds_when_async_fn_is_never_called() {
 /// Build `source` to a standalone executable named `exe_name`, run it, and
 /// return its stdout.
 ///
-/// **The directory carries this process's id.** The 27 `exe_name`s are unique
+/// **The directory carries this process's id.** The 26 `exe_name`s are unique
 /// *within* this binary, so there was never an intra-run collision — but
 /// without a per-process component every `run_tests` invocation on the machine
 /// wrote, executed and then deleted the *same absolute paths*. Two runs
@@ -1465,7 +1465,7 @@ fn run_succeeds_when_async_fn_is_never_called() {
 /// eliminating it either fixes the flake or narrows it.
 ///
 /// **The per-test `remove_file` stays, and the directory itself is never
-/// removed -- not recursively, and not even best-effort.** All 27 `exe_name`s
+/// removed -- not recursively, and not even best-effort.** All 26 `exe_name`s
 /// share this one directory inside a single process, and these tests run on
 /// parallel threads. A per-test `remove_dir_all` would have tests deleting each
 /// other's executables mid-execution, manufacturing the exact flake this change
@@ -7577,9 +7577,11 @@ fn timeout_elapsed_run() {
 /// slot-layout bug in `poll_timeout` (writing the combinator's status into the
 /// *inner's* output slot too) fails **this test and nothing else in the
 /// workspace**. A `nova-mir` `Builtin::TaskOutput` lowering bug also makes this
-/// fixture print `0` instead of `42`, but 18 tests in this file fail under it,
-/// so this fixture is not what guards that -- an earlier version of the header
-/// claimed otherwise for both.
+/// fixture print `0` instead of `42`, but so does every other test that reads a
+/// value through that lowering -- eight failures in this file when measured, and
+/// not a stable number to quote (three measurements gave 18, 7 and 8) -- so this
+/// fixture is not what guards that; an earlier version of the header claimed
+/// otherwise for both.
 #[test]
 fn timeout_value_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/timeout_value.stdout"))
