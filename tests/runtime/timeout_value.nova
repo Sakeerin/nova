@@ -26,10 +26,12 @@
 //     nothing else in the workspace**. That is what this fixture is for.
 //   - A `nova-mir` lowering bug in `Builtin::TaskOutput` -- loading
 //     `STATE_SLOT_TAG` instead of `STATE_SLOT_OUTPUT` -- also compiles clean
-//     and also prints `0` here, but 18 tests in `nova-cli::run_tests` fail
-//     under it. `block_on` and `join` read every value through that lowering,
-//     so a bug in it is caught everywhere; this fixture is not what stands
-//     between the project and it.
+//     and also prints `0` here -- but so does the whole async path, measured
+//     at eight failures in `nova-cli::run_tests`. Do not quote a precise
+//     count: three measurements gave 18, 7 and 8, the first contaminated by
+//     an unrelated defect then live in the tree. `block_on` and `join` read
+//     every value through that lowering, so a bug in it is caught everywhere;
+//     this fixture is not what stands between the project and it.
 //   - A third claim once stood here: `task_timeout_future`'s Rust-side
 //     signature widened to return `Future<Param(0)>`. It does not compile
 //     either, blocked by the same rigid-`Param` rule described above.
