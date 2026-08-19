@@ -3966,7 +3966,10 @@ impl<'a> Checker<'a> {
             | Builtin::BytesFromInts
             | Builtin::BytesEq
             | Builtin::TimeNowNanos
-            | Builtin::TimeNowEpochNanos => "",
+            | Builtin::TimeNowEpochNanos
+            | Builtin::LogConfigLevel
+            | Builtin::LogConfigToStderr
+            | Builtin::LogSetConfig => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7230,6 +7233,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::BytesEq => (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
         Builtin::TimeNowNanos => (vec![], Ty::Int),
         Builtin::TimeNowEpochNanos => (vec![], Ty::Int),
+        Builtin::LogConfigLevel => (vec![], Ty::Int),
+        Builtin::LogConfigToStderr => (vec![], Ty::Int),
+        Builtin::LogSetConfig => (vec![Ty::Int, Ty::Int], Ty::Unit),
     }
 }
 
@@ -15318,6 +15324,18 @@ mod tests {
                 Builtin::TimeNowEpochNanos => (
                     (vec![], Ty::Int),
                     "`time_now_epoch_nanos()` in `std/time`'s `SystemTime::now`",
+                ),
+                Builtin::LogConfigLevel => (
+                    (vec![], Ty::Int),
+                    "`log_config_level()` in the free function `emit`",
+                ),
+                Builtin::LogConfigToStderr => (
+                    (vec![], Ty::Int),
+                    "`log_config_to_stderr()` in the free function `emit`",
+                ),
+                Builtin::LogSetConfig => (
+                    (vec![Ty::Int, Ty::Int], Ty::Unit),
+                    "`log_set_config(level, to_stderr)` in `std/log`'s `Log::init_with`",
                 ),
             }
         }
