@@ -119,6 +119,8 @@ year   = if month <= 2 { y + 1 } else { y }
 
 Zero-padding uses `String::repeat` (`std/strings/lib.nova:300`) over the digit count, as two small helpers, `pad2` and `pad3`. **Padding is where a plausible-looking implementation silently produces `2026-8-9T2:40:13.7Z`**, so §10's fixtures pin single-digit months, days, hours, minutes, seconds and a sub-100 millisecond value explicitly.
 
+**Shipped form deviates from the above, and the deviation is an improvement:** `pad2`/`pad3` (`std/time/lib.nova`) pad by string interpolation with literal `"0"`/`"00"` prefixes, not by `String::repeat`. `String::repeat` panics on a negative count (`std/strings/lib.nova:301`) and is the only panicking function anywhere near this path; substituting interpolation removed the sole reachable panic source from a chain that must never abort. Recorded here rather than left silent, mirroring the correction style the status block above already uses for line-number drift.
+
 **Range assumption, stated because the formatter depends on it:** `year` is rendered unpadded, so a four-digit year is assumed. Given the clock's clamp at 0 and its saturation in 2262, every value this can be handed renders as four digits.
 
 ---

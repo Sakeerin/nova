@@ -231,6 +231,16 @@ fn civil_from_days(days: Int) -> [Int] {
 // subtraction within one process; a wall clock is neither, and can jump
 // backwards when NTP corrects it. Two types that cannot be mistaken for
 // one another is the point.
+//
+// `nanos` is not privacy-enforced either, so `SystemTime { nanos: -1 }`
+// compiles and walks straight past the clamp at zero that `now()`'s
+// intrinsic applies (`crates/nova-runtime/src/time.rs`). `now()` is the
+// intended and only supported way to obtain one. A negative `nanos` does
+// not just mean the wrong instant, it renders wrong: Nova's `/` truncates
+// toward zero and `%` follows the dividend's sign (measured: `-7 / 2 = -3`,
+// `-7 % 2 = -1`), so a negative `nanos` leaves `rem` in `to_iso8601` negative,
+// and `pad2`/`pad3` then zero-pad a signed number -- producing malformed,
+// non-24-character output such as `1970-01-01T0-1:00:00.000Z`.
 pub record SystemTime { nanos: Int }
 
 impl SystemTime {
