@@ -184,3 +184,71 @@ pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError> 
         Err(TimeoutError {})
     }
 }
+
+// Two-digit zero pad. Private: a top-level `pub fn` is glob-imported into
+// every module (see `std/strings`' `join` for the same reasoning).
+fn pad2(n: Int) -> String {
+    if n < 10 { "0${n}" } else { "${n}" }
+}
+
+// Three-digit zero pad, for the millisecond field.
+fn pad3(n: Int) -> String {
+    if n < 10 { "00${n}" } else if n < 100 { "0${n}" } else { "${n}" }
+}
+
+// Days since 1970-01-01 to [year, month, day], by Howard Hinnant's
+// civil_from_days. Shifting the era to start in March makes leap-day
+// handling fall out of integer arithmetic with no conditionals and no
+// table: February becomes the last month of the previous shifted year, so
+// its variable length never lands mid-sequence.
+fn civil_from_days(days: Int) -> [Int] {
+    let z = days + 719_468
+    let era = z / 146_097
+    let doe = z - era * 146_097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }
+    let year = if m <= 2 { y + 1 } else { y }
+    // Bound to `ymd` and returned on its own line, not written as a bare
+    // `[year, m, d]` right after the `let year = ...` above: Nova statements
+    // have no separating token, so a line starting with `[` immediately
+    // after a `}`-closed expression parses as indexing that expression
+    // (`{ y }[year, ...]`) rather than as a new array-literal statement --
+    // measured as `error[P0001]: expected ']' (in index expression), found
+    // ','`.
+    let ymd = [year, m, d]
+    ymd
+}
+
+// A wall-clock reading: nanoseconds since the Unix epoch.
+//
+// Deliberately a separate type from `Instant`, not a method on it.
+// `Instant`'s whole contract is that it is monotonic and comparable by
+// subtraction within one process; a wall clock is neither, and can jump
+// backwards when NTP corrects it. Two types that cannot be mistaken for
+// one another is the point.
+pub record SystemTime { nanos: Int }
+
+impl SystemTime {
+    // ISO-8601 UTC to milliseconds: `2026-08-19T02:40:13.123Z`. Fixed
+    // width, so log lines align with no padding logic in the caller.
+    //
+    // UTC only, permanently: `00-MASTER-SPEC.md` §6's crate list is FINAL
+    // and has no date/time crate, so there is no timezone database to
+    // consult and a local-time offset would be a guess that is wrong twice
+    // a year in every DST zone.
+    pub fn to_iso8601(self) -> String {
+        let nanos_per_day = 86_400_000_000_000
+        let days = self.nanos / nanos_per_day
+        let rem = self.nanos % nanos_per_day
+        let ymd = civil_from_days(days)
+        let hour = rem / 3_600_000_000_000
+        let minute = rem / 60_000_000_000 % 60
+        let second = rem / 1_000_000_000 % 60
+        let milli = rem / 1_000_000 % 1_000
+        "${ymd[0]}-${pad2(ymd[1])}-${pad2(ymd[2])}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}.${pad3(milli)}Z"
+    }
+}

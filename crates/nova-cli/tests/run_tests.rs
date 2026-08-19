@@ -7535,6 +7535,23 @@ fn time_elapsed_run() {
         .stdout(expected);
 }
 
+/// ISO-8601 rendering over fixed nanosecond inputs, so the assertion is on
+/// known values rather than on a live clock. The six rows pin the epoch, two
+/// leap days, the 2100 non-leap-year, a year boundary, and zero-padding.
+#[test]
+fn system_time_iso8601_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/system_time_iso8601.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/system_time_iso8601.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `timeout` when the inner future completes well inside the deadline:
 /// `Ok`'s branch runs, not `Err`'s. Prints which branch ran, not an
 /// ordering, so a unit error in the comparison cannot pass by accident.
