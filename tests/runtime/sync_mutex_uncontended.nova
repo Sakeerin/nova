@@ -1,0 +1,16 @@
+// One task, no contention: take the lock, read through the guard, release,
+// and confirm the mutex is free again. `let mut` is required on both
+// bindings -- `try_lock`/`lock` mutate the mutex and `release` mutates the
+// guard, so an immutable binding is an E0060 at the call site.
+async fn main() {
+    let mut m = Mutex::new(41)
+    match m.try_lock() {
+        Some(g) => {
+            let mut held = g
+            println("value=${held.get() + 1}")
+            held.release()
+        }
+        None => println("unexpected: a fresh mutex refused try_lock")
+    }
+    println("free_again=${m.try_lock().is_some()}")
+}
