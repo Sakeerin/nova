@@ -159,6 +159,54 @@ pub fn format(parts: [FormatPart]) -> String { ... }
 pub type FormatPart = | Lit(String) | Val(String)
 ```
 
+**AMENDED 2026-08-19 (branch `std-fmt`): this section's four print functions
+and `Formatter` remain unshipped as declared, but position 2 in
+`00-MASTER-SPEC.md` §3's build order is now closed rather than skipped a
+third time** (see `docs/adr/0014-stdlib-build-order-deviations.md` and
+`docs/adr/0015-std-fmt-scope.md`). `std/fmt` shipped as an eleventh
+`STD_MODULES` entry (`STD_MODULES` 10 → 11) carrying four methods the code
+block above never named: `Int::pad(width)`, `String::pad_left(width)`,
+`String::pad_right(width)`, and `Float::fixed(places)`, backed by one new
+runtime intrinsic, `float_fixed` (`Builtin::STD_ONLY` 64 → 65). These close
+the module's one genuinely missing capability — Nova has no `Float`→`Int`
+conversion at all, so fixed-place decimal rendering was inexpressible in the
+language, not merely absent from the stdlib — while padding had already been
+proven expressible and hand-rolled once, in `std/time`'s now-deleted
+`pad2`/`pad3`. The four print functions above (`print`/`println`/`eprint`/
+`eprintln`) remain what ADR 0014 already recorded them as: compiler builtins
+(`Builtin::Print`/`Println`/`EPrint`/`EPrintln`), untouched by this
+increment.
+
+**`format(parts: [FormatPart]) -> String` and `Formatter` are not shipping,
+and neither is pending work — both are specifications the compiler has
+overtaken, not gaps still to fill.** `FormatPart`'s `Val(String)` arm means
+`format`'s parts arrive **already stringified**, so `format` is
+concatenation; the compiler already lowers string interpolation to
+concatenation directly, and routing it through this Nova function instead
+would allocate an array to do the identical work, via a compiler change,
+with nothing visible to any user — a pessimization, not a feature.
+`Formatter`'s body is elided above and described only as a "Format builder
+for Display impls"; `Display` is `fn fmt(self) -> String`
+(`std/core/lib.nova:98`) and returns a whole string in one call, so an
+*incremental* builder needs a different trait shape than `Display` has, and
+Nova has no `&mut` to build one with regardless. Neither item is deferred;
+both would need a redesign, not an implementation, before either could ship
+as written.
+
+**Separately, and not a `std/fmt` deviation:** the `module std.fmt` line
+that opens the code block above does not parse, and this is true of every
+section in this document — no std module source declares a `module` line at
+all, measured across `grep -n "^module " std/*/lib.nova`, now twelve
+`lib.nova` files (the eleven `STD_MODULES` entries plus `std/test`, held out
+of that array and seeded only under `nova test`), all returning zero hits.
+§10's own 2026-08-19 amendment already recorded this same fact at ten
+`STD_MODULES` entries plus `std/test` (eleven total); `std/fmt` joining
+`STD_MODULES` this increment moves that count to twelve — a shift in the
+count, not in the underlying fact, and §10's paragraph is not itself wrong,
+only now one behind. A reader checking only this section would otherwise
+conclude `std/fmt` alone fails to conform; it does not stand out, and no
+section here does.
+
 ---
 
 ## 4. `std/io`

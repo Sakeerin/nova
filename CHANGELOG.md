@@ -168,6 +168,31 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   between `Human` and `Json` automatically. `RESERVED_TYPE_NAMES` stays at
   7 — `Log` and `LogConfig` are ordinary, glob-imported `std/log` records
   and sum types, not builtin types.
+- **`std/fmt`, an eleventh `STD_MODULES` entry** (`"$std.fmt"`, `STD_MODULES`
+  10 → 11, placed immediately after `$std.strings`): `Int::pad(width: Int)
+  -> String`, `String::pad_left(width: Int) -> String`,
+  `String::pad_right(width: Int) -> String`, and `Float::fixed(places: Int)
+  -> String`. All four ship as **methods on the primitive types they
+  format, not top-level `pub fn`s**, because Nova has no imports or
+  qualified paths — every std module's public names glob-import into every
+  other module, and a top-level name would take `pad`/`pad_left`/
+  `pad_right`/`fixed` away from any program defining its own, the same
+  trade `std/strings`'s `join` and `std/log`'s five level functions already
+  declined. `Int::pad` zero-pads with the sign counted toward the
+  requested width (`(-5).pad(3)` is `"-05"`); `String::pad_left`/
+  `pad_right` space-pad on the left/right. All three return the value
+  **unpadded, never truncated**, when it is already at or beyond `width`
+  — the same early return doubles as the negative-width clamp, since
+  `String::repeat` panics on a negative count. `Float::fixed` renders a
+  fixed number of decimal places (`(100.0 / 3.0).fixed(2)` is `"33.33"`)
+  over one new runtime intrinsic, `float_fixed` (`Builtin::STD_ONLY` 64 →
+  65; `nova_rt_float_fixed`, `extern "C"`), clamping `places` to `0..=17`
+  — Nova has no `Float`→`Int` conversion at all, so fixed-place decimal
+  rendering was inexpressible in the language before this.
+  `RESERVED_TYPE_NAMES` stays at 7 — nothing here is a new type. See
+  `nova-spec/20-STDLIB.md` §3's amendment and
+  `docs/adr/0015-std-fmt-scope.md` for what §3 specifies that this does
+  not ship, and why.
 
 ### Changed
 
@@ -237,6 +262,18 @@ that already compiled.
   leak (`connect`). Also recorded in `nova-spec/20-STDLIB.md` §9's own
   amendment and
   `docs/superpowers/specs/2026-08-18-timeout-combinator-design.md`.
+- **`std/time`'s private `pad2`/`pad3` helpers are gone, replaced by
+  `.pad(2)`/`.pad(3)` calls on the values themselves**, inside
+  `SystemTime::to_iso8601`'s single interpolation line. **Internal only,
+  with no surface effect** — `pad2`/`pad3` were never `pub`, so no caller
+  outside `std/time` could reach them, and the six ISO-8601 golden outputs
+  (`1970-01-01T00:00:00.000Z`, `2000-02-29T00:00:00.000Z`,
+  `2024-02-29T00:00:00.000Z`, `2100-03-01T00:00:00.000Z`,
+  `2025-12-31T23:59:59.999Z`, `2025-08-31T00:01:03.007Z`) are unchanged
+  byte-for-byte — a reader diffing this branch should not go looking for a
+  breaking change here. Verified beyond the goldens: a review compared the
+  deleted hand-rolled padding against `Int::pad` across every integer
+  0–1000, with zero mismatches.
 
 ## [0.2.0-alpha.1] - 2026-08-16
 
