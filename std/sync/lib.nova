@@ -1,0 +1,84 @@
+// Nova standard library -- synchronisation.
+//
+// An *async* mutex, which is the primitive a cooperative executor needs. A
+// thread mutex would be pointless here: `crates/nova-runtime/src/task.rs`'s
+// first line is "A single-threaded cooperative executor". But a task can be
+// suspended in the middle of a critical section at any `.await`, and while it
+// is suspended another task runs -- so anything whose invariant spans a
+// suspension point needs exactly this.
+//
+// Contention is handled by yielding and retrying rather than by parking. That
+// keeps the whole module in Nova with no runtime change, and the cost is
+// stated rather than hidden: a waiter stays *runnable*, so `report_deadlock`
+// cannot see it and a never-released lock spins instead of being diagnosed.
+// See the design doc's §5 for the condition that would justify revisiting.
+
+pub record Mutex<T> { locked: Bool, value: T }
+
+// The right to touch a `Mutex`'s value, and the obligation to release it.
+//
+// NOT RAII, and not by choice: `Drop` is described in three spec files and
+// implemented in none, and ADR 0012 foreclosed the mechanism it would need,
+// since the collector's sweep names only the dying object's own address and
+// offers no per-object hook. So release is explicit and idempotent, exactly
+// as `std/fs`'s `File` requires an explicit `close`, and a guard that is
+// never released leaves the mutex locked for the life of the process -- a
+// documented leak, the same trade ADR 0012 already accepted for descriptors.
+pub record MutexGuard<T> { owner: Mutex<T> }
+
+impl<T> Mutex<T> {
+    pub fn new(value: T) -> Mutex<T> {
+        Mutex { locked: false, value: value }
+    }
+
+    // Take the flag if it is free. Private: the two public entry points differ
+    // only in what they do when it is not, and returning a `Bool` rather than
+    // an `Option` is what lets `lock`'s loop retry without unwrapping --
+    // `Option` has `is_some`, `map` and `unwrap_or` but no `unwrap`.
+    fn take(mut self) -> Bool {
+        if self.locked { return false }
+        self.locked = true
+        true
+    }
+
+    // Take the lock, or report that it is held. The caller that gets `Some`
+    // receives the guard it needs; the caller that gets `None` has nothing it
+    // could mistake for one.
+    pub fn try_lock(mut self) -> Option<MutexGuard<T>> {
+        if self.take() {
+            Some(MutexGuard { owner: self })
+        } else {
+            None
+        }
+    }
+
+    // Take the lock, yielding to every other runnable task until it is free.
+    //
+    // `while`, not `loop`: Nova has no `loop` keyword -- `loop {` parses as a
+    // record literal with `loop` as the type name. `yield_now` re-queues this
+    // task behind everything currently runnable, so the holder always gets a
+    // turn and can always release; which *waiter* wins afterwards is
+    // unspecified, and this mutex makes no fairness guarantee.
+    pub async fn lock(mut self) -> MutexGuard<T> {
+        while !self.take() {
+            yield_now().await
+        }
+        MutexGuard { owner: self }
+    }
+}
+
+impl<T> MutexGuard<T> {
+    // The guarded value. Records are reference types, so mutating the returned
+    // value's fields mutates what the mutex holds -- which is the point.
+    //
+    // Callable after `release`, and the language cannot prevent that: the guard
+    // holds a reference to a heap object either way. Documented, not enforced.
+    pub fn get(self) -> T {
+        self.owner.value
+    }
+
+    // Release the lock. Idempotent -- a second call is a no-op.
+    pub fn release(mut self) {
+        self.owner.locked = false
+    }
+}

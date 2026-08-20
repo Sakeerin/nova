@@ -1,0 +1,15 @@
+// Releasing twice is a no-op, matching `File::close`. There is no `Drop` in
+// this language, so release is explicit, and an explicit operation that
+// punishes being called twice is a trap rather than a safeguard.
+async fn main() {
+    let mut m = Mutex::new(1)
+    match m.try_lock() {
+        Some(g) => {
+            let mut held = g
+            held.release()
+            held.release()
+        }
+        None => println("unexpected: a fresh mutex refused try_lock")
+    }
+    println("free=${m.try_lock().is_some()}")
+}

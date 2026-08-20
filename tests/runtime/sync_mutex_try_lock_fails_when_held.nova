@@ -1,0 +1,17 @@
+// A second `try_lock` must fail while the first guard is live, and succeed
+// once it is released. This is contention without suspension -- the
+// two-task fixture covers contention across an `.await`.
+async fn main() {
+    let mut m = Mutex::new(7)
+    let first = m.try_lock()
+    println("first=${first.is_some()}")
+    println("second=${m.try_lock().is_some()}")
+    match first {
+        Some(g) => {
+            let mut held = g
+            held.release()
+        }
+        None => println("unexpected: a fresh mutex refused try_lock")
+    }
+    println("after_release=${m.try_lock().is_some()}")
+}

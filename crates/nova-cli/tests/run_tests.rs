@@ -7940,3 +7940,52 @@ fn fmt_float_edge_run() {
         .success()
         .stdout(expected);
 }
+
+/// One task, no contention: lock, read through the guard, release, and the
+/// mutex is free again.
+#[test]
+fn sync_mutex_uncontended_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/sync_mutex_uncontended.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_uncontended.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// A second `try_lock` fails while the first guard is live and succeeds after
+/// it is released.
+#[test]
+fn sync_mutex_try_lock_fails_when_held_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_try_lock_fails_when_held.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_try_lock_fails_when_held.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `release` twice is a no-op, matching `File::close`.
+#[test]
+fn sync_mutex_release_is_idempotent_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_release_is_idempotent.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_release_is_idempotent.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
