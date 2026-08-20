@@ -897,6 +897,91 @@ impl<T> JoinHandle<T> {
 }
 ```
 
+**AMENDED 2026-08-20 (branch `std-sync-mutex`): position 8 above is now
+partially closed.** `Mutex<T> { locked: Bool, value: T }` and
+`MutexGuard<T> { owner: Mutex<T> }` shipped as part of `std/sync`
+(`STD_MODULES` 11 → 12): `Mutex::new`, private `Mutex::take`,
+`Mutex::try_lock -> Option<MutexGuard<T>>`, `async fn Mutex::lock ->
+MutexGuard<T>`, `MutexGuard::get`, `MutexGuard::release` — see
+`docs/adr/0016-std-sync-partial-close.md` for the decision and its
+consequences. `channel<T>`, `spawn_blocking`, and `JoinHandle::cancel`, the
+other three items in the code block above, did not ship.
+
+**Release is explicit, and this is not a shortcut a future increment should
+undo.** `Drop` appears in three spec files —
+`12-TYPESYSTEM.md:192`, `13-RUNTIME.md:96`, `14-CODEGEN.md:24` — and is
+implemented in none of them: no handling in `nova-typeck`, `nova-resolver`
+or `nova-mir`, and no `trait Drop` in `std/core`. Releasing a guard is pure
+Nova (`self.owner.locked = false`), so RAII here would need the *language*
+feature, and no runtime mechanism substitutes for it. **ADR 0012 is cited
+only as precedent for the response, not as the reason.** An earlier
+version of this project's own design doc for this increment claimed ADR
+0012 shows the collector "offers no per-object hook" — **ADR 0012 says the
+opposite**, in bold: "The collector has a per-object notification hook,"
+and goes on to warn that a reader who finds it will reasonably ask why
+`File` does not register with it. ADR 0012's actual argument is that the
+hook reports the *freed object's own address*, never a field value read out
+of it, which tells an `fd`-keyed table nothing — an argument about a
+runtime-managed handle, and it does not transfer to a `MutexGuard`, whose
+release never touches the collector at all. What does transfer is the
+*shape* of the decision: explicit, idempotent release (`release` is a
+no-op on a second call) over a collector-based backstop, accepting a
+uniform documented leak — a guard never released leaves its mutex locked
+for the life of the process, the same trade ADR 0012 made for an unclosed
+`File`.
+
+**The other three items are deferrals with named blockers, not
+oversights**, and none is a matter of merely not having gotten to it yet.
+`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)` returns a tuple type,
+and Nova's type system does not have those yet — measured as
+`error[E0900]: tuple types are not supported yet`. Of the three, this is
+the one this project actually wants: a bounded channel is broadly useful
+and the blocker is purely that Nova cannot yet express its own specified
+signature, not a design objection. `spawn_blocking<T>(f: fn() -> T) ->
+JoinHandle<T>` needs a thread pool to run `f` on — `nova-runtime`'s
+`task.rs` opens with "A single-threaded cooperative executor," and the only
+`std::thread::spawn` anywhere in the runtime is a test helper in `poll.rs`,
+not a pool a std module could dispatch onto. `JoinHandle::cancel(self)`
+would contradict the **abandonment, not cancellation** contract that ADR
+0009 already settled for this runtime and that the `timeout<T>` increment
+relied on and reaffirmed: adding real cancellation now would need its own
+design, not a one-method stub bolted onto `JoinHandle`.
+
+**Separately, and not a `std/sync` deviation:** the `module std.sync` line
+that opens the code block above does not parse, and this is true of every
+section in this document — no std module source declares a `module` line
+at all. `std/sync` also introduces a second, related fact worth recording
+here for the first time: `$std.test` is not simply another entry held out
+of `STD_MODULES`, the way this note has described it before — it has its
+own named constant, `STD_TEST_MODULE`
+(`crates/nova-resolver/src/lib.rs:1293`), separate from the `STD_MODULES`
+array precisely so that array's length does not depend on whether `nova
+test` is the subcommand running. Counting both: 12 `STD_MODULES` entries
+plus `STD_TEST_MODULE` is **thirteen** `lib.nova` files on disk, up from
+twelve before this increment. §3's and §10's amendments already recorded
+this same fact at twelve total (eleven `STD_MODULES` entries plus
+`std/test`); `std/sync` joining `STD_MODULES` this increment moves the
+count to thirteen — a shift in the count, not in the underlying fact, and
+neither earlier paragraph is wrong, only one behind, exactly as §10's own
+paragraph was when `std/fmt` landed. A reader checking only this section
+would otherwise conclude `std/sync` alone fails to conform; it does not
+stand out, and no section here does.
+
+**The concurrency control this module buys is real, and so is its cost.**
+Contention is handled by yielding and retrying
+(`while !self.take() { yield_now().await }`) rather than by parking on a
+dedicated wait condition: no executor change, no fourth `Wait` variant
+alongside `Deadline`/`Task`/`Io` (`crates/nova-runtime/src/task.rs:162`),
+no arm added to `wake_due`'s `retain` match, whose existing arms end in a
+wildcard rather than an exhaustive list. The cost is that a waiter spinning
+on `try_lock` stays *runnable* the whole time it waits, so `report_deadlock`
+— which only ever sees tasks that are parked — cannot see it: a mutex that
+is locked and never released does not deadlock visibly, it spins forever
+instead. This `Mutex` is also **not re-entrant** (a task that calls `lock`
+while already holding the same mutex spins against itself, forever) and
+makes **no fairness guarantee** (which waiter acquires the lock next, when
+several are spinning, is unspecified).
+
 ---
 
 ## 14. Implementation Strategy
