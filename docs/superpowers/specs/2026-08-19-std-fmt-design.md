@@ -142,7 +142,9 @@ That substitution is **the increment's own acceptance test for the API's shape**
 
 **The six ISO-8601 goldens must not move.** They are the regression test for the substitution: `1970-01-01T00:00:00.000Z`, `2000-02-29T00:00:00.000Z`, `2024-02-29T00:00:00.000Z`, `2100-03-01T00:00:00.000Z`, `2025-12-31T23:59:59.999Z`, `2025-08-31T00:01:03.007Z`. The last of those is the one that pins padding specifically — single-digit minute and second, sub-100 millisecond value — so if `Int::pad` disagrees with the hand-rolled `pad2`/`pad3` in any way, that row fails.
 
-Note the direction of dependency this creates: `std/time` will now depend on `std/fmt`, which is why §3 places `$std.fmt` before `$std.time`.
+Note the direction of dependency this creates: `std/time` now depends on `std/fmt`. **That dependency is real but carries no ordering requirement** — §3's retracted claim said otherwise, and this sentence originally ended "…which is why §3 places `$std.fmt` before `$std.time`". Method resolution is order-independent, so the placement is a readability choice and this dependency would resolve at any position.
+
+Recording why the sentence survived its own retraction: §3 was corrected in place and **this dependent clause in §7 was left standing**, which is the third partial fix on this project — a claim corrected at one site while a second site repeating it was missed. The pattern is consistent enough to state as a rule: **after retracting a claim, grep the document for the claim's *consequences*, not just its wording.** A retraction that leaves its own corollaries in place has not been made.
 
 ---
 
