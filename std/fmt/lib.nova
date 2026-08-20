@@ -18,7 +18,12 @@ impl Int {
     // The early return is also the negative-width clamp: `len` is at least 1
     // for every Int, so a negative `width` takes that branch and
     // `String::repeat` -- which *panics* on a negative count -- is never
-    // reached with one.
+    // reached with one. The upper end of `width` is not clamped at all --
+    // an absurdly large one (e.g. `i64::MAX`) reaches `String::repeat` and
+    // aborts cleanly with `array length is too large` (measured), guarded
+    // by the array-length check at `crates/nova-mir/src/lower.rs:1080-1101`
+    // rather than by anything in this function. A documented outcome, not
+    // a silent one.
     pub fn pad(self, width: Int) -> String {
         let s = "${self}"
         let len = s.len()
@@ -37,6 +42,11 @@ impl String {
     // Right-align within `width` by padding with spaces on the left. At or
     // beyond `width`, returned unchanged. The early return clamps a negative
     // `width` before `repeat` can see it.
+    //
+    // `width` is counted in codepoints, as `String::len` counts them, not
+    // in display columns: a wide or combining character will not align by
+    // column. Measured: `"日本".pad_right(4)` is `"日本  "` (two spaces),
+    // four codepoints wide but six columns in a monospace terminal.
     pub fn pad_left(self, width: Int) -> String {
         let len = self.len()
         if len >= width { return self }
@@ -44,7 +54,8 @@ impl String {
         "${fill}${self}"
     }
 
-    // Left-align within `width` by padding with spaces on the right.
+    // Left-align within `width` by padding with spaces on the right. Same
+    // codepoint-counted `width` as `pad_left` above.
     pub fn pad_right(self, width: Int) -> String {
         let len = self.len()
         if len >= width { return self }

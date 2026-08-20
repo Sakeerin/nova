@@ -225,12 +225,16 @@ fn civil_from_days(days: Int) -> [Int] {
 // compiles and walks straight past the clamp at zero that `now()`'s
 // intrinsic applies (`crates/nova-runtime/src/time.rs`). `now()` is the
 // intended and only supported way to obtain one. A negative `nanos` does
-// not just mean the wrong instant, it renders wrong: Nova's `/` truncates
-// toward zero and `%` follows the dividend's sign (measured: `-7 / 2 = -3`,
-// `-7 % 2 = -1`), so a negative `nanos` leaves `rem` in `to_iso8601` negative,
-// and `Int::pad`'s sign digit eats the padding budget on a negative field --
-// producing malformed, non-24-character output such as
-// `1970-01-01T-1:00:00.000Z`.
+// not mean the wrong instant so much as a nonsensical one: Nova's `/`
+// truncates toward zero and `%` follows the dividend's sign (measured:
+// `-7 / 2 = -3`, `-7 % 2 = -1`), so a negative `nanos` leaves `rem` in
+// `to_iso8601` negative and every field derived from it with it. A small
+// negative `nanos` (e.g. `-1`) still renders a well-formed 24-character
+// string, `1970-01-01T00:00:00.000Z` -- byte-identical to `nanos: 0`, the
+// sign silently lost. Only once a field's magnitude is large enough that
+// `Int::pad`'s sign digit eats the padding budget does the width itself
+// break: `nanos: -43_200_000_000_000` (a half day) renders
+// `1970-01-01T-12:00:00.000Z`, 25 characters, not 24.
 pub record SystemTime { nanos: Int }
 
 impl SystemTime {
