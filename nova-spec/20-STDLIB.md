@@ -731,14 +731,24 @@ which declares a `module` line at all. This is not a
 `std/log` deviation; it is a pre-existing gap in this document that
 predates this increment and reaches every one of `nova-spec`'s dotted
 `module std.x` headers — `module std.core` (§2, :47), `std.fmt` (§3,
-:146), `std.io` (§4, :167), `std.fs` (§5, :280), `std.http` (§6, :378),
-`std.json` (§7, :436), `std.crypto` (§8), `std.time` (§9), `std.log`
+:146), `std.io` (§4, :219), `std.fs` (§5, :332), `std.http` (§6, :430),
+`std.json` (§7, :488), `std.crypto` (§8), `std.time` (§9), `std.log`
 (§10, above), `std.test` (§11), `std.collections` (§12), `std.sync` and
 `std.task` (§13), and `std.net` (§16) — thirteen numbered sections in
 all. A reader who checks only this section would otherwise conclude
 `std/log` alone fails to conform; it does not stand out, and no section
 here does. Recorded rather than fixed: correcting thirteen headers is a
 documentation pass of its own and out of scope for a records-only task.
+
+(The four line numbers above for `std.io`, `std.fs`, `std.http` and
+`std.json` were re-measured and corrected as part of the `std-fmt`
+branch's own edits, which inserted new text into §3 above them. This is
+not the same case as the thirteen `module` headers just above, or as the
+cross-file `.rs` citations elsewhere in this document that this project's
+convention treats as a grep hint rather than a promise: these four are
+intra-file pointers, in the very file the branch edited, that were exact
+before the edit, so keeping them exact after it is the editor's job and
+mechanically checkable, not a matter of judgment.)
 
 ---
 
