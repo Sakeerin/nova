@@ -193,6 +193,30 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nova-spec/20-STDLIB.md` §3's amendment and
   `docs/adr/0015-std-fmt-scope.md` for what §3 specifies that this does
   not ship, and why.
+- **`std/sync`, a twelfth `STD_MODULES` entry** (`"$std.sync"`, `STD_MODULES`
+  11 → 12, placed immediately after `$std.task`): an *async* `Mutex<T> {
+  locked: Bool, value: T }` with `new(value: T) -> Mutex<T>`, `try_lock(mut
+  self) -> Option<MutexGuard<T>>`, and `async fn lock(mut self) ->
+  MutexGuard<T>`, plus `MutexGuard<T> { owner: Mutex<T> }` with `get(self)
+  -> T` and `release(mut self)`. Contention is handled by yielding and
+  retrying (`while !self.take() { yield_now().await }`), not by parking, so
+  neither the executor nor the poll ABI changes; the cost is that a waiter
+  stays *runnable*, so `report_deadlock` cannot see it and a never-released
+  lock spins instead of being diagnosed. Release is explicit, not RAII,
+  for one reason and one only: `Drop` is described in three spec files
+  (`12-TYPESYSTEM.md:192`, `13-RUNTIME.md:96`, `14-CODEGEN.md:24`) and
+  implemented in none of them, so a guard's release
+  (`self.owner.locked = false`) is pure Nova with no language mechanism to
+  hook a scope exit to. This closes position 8 of `00-MASTER-SPEC.md` §3's
+  build order **partially** — `std/sync` also specifies `channel<T>`,
+  `spawn_blocking`, and `JoinHandle::cancel`, none of which ship this
+  increment. Zero new runtime intrinsics — `Builtin::STD_ONLY` stays at 65
+  — and `RESERVED_TYPE_NAMES` stays at 7; `Mutex`/`MutexGuard` are
+  ordinary, glob-imported `std/sync` records. See
+  `nova-spec/20-STDLIB.md` §13's amendment and
+  `docs/adr/0016-std-sync-partial-close.md` for what §13 specifies that
+  this does not ship, why, and why release being explicit is not itself a
+  shortcut.
 
 ### Changed
 
