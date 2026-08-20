@@ -17,13 +17,26 @@ pub record Mutex<T> { locked: Bool, value: T }
 
 // The right to touch a `Mutex`'s value, and the obligation to release it.
 //
-// NOT RAII, and not by choice: `Drop` is described in three spec files and
-// implemented in none, and ADR 0012 foreclosed the mechanism it would need,
-// since the collector's sweep names only the dying object's own address and
-// offers no per-object hook. So release is explicit and idempotent, exactly
-// as `std/fs`'s `File` requires an explicit `close`, and a guard that is
-// never released leaves the mutex locked for the life of the process -- a
-// documented leak, the same trade ADR 0012 already accepted for descriptors.
+// NOT RAII, and not by choice: `Drop` is described in three spec files
+// (`12-TYPESYSTEM.md`, `13-RUNTIME.md`, `14-CODEGEN.md`) and implemented in
+// none of them -- no handling in nova-typeck, nova-resolver or nova-mir, and
+// no `trait Drop` in std/core. Releasing this guard is pure Nova
+// (`self.owner.locked = false`), so RAII here would need that *language*
+// feature; nothing in the runtime substitutes for it.
+//
+// ADR 0012 is the precedent for what to do instead, not the reason there is
+// no RAII: it chose explicit, idempotent `close` for `File` over a
+// collector-based backstop, and accepted a uniform documented leak. So
+// release is explicit and idempotent here too, and a guard that is never
+// released leaves the mutex locked for the life of the process -- the same
+// trade, accepted for the same reason.
+//
+// (An earlier version of this comment claimed ADR 0012 shows the collector
+// "offers no per-object hook". It shows the opposite -- the hook exists, and
+// the ADR names it. Its actual argument is that the hook reports *the dying
+// object's own address*, which tells an `fd`-keyed table nothing. That
+// argument is about `File`, not about a pure-Nova guard, and does not
+// transfer here.)
 pub record MutexGuard<T> { owner: Mutex<T> }
 
 impl<T> Mutex<T> {
