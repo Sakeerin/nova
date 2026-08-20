@@ -186,12 +186,16 @@ concatenation directly, and routing it through this Nova function instead
 would allocate an array to do the identical work, via a compiler change,
 with nothing visible to any user — a pessimization, not a feature.
 `Formatter`'s body is elided above and described only as a "Format builder
-for Display impls"; `Display` is `fn fmt(self) -> String`
-(`std/core/lib.nova:98`) and returns a whole string in one call, so an
-*incremental* builder needs a different trait shape than `Display` has, and
-Nova has no `&mut` to build one with regardless. Neither item is deferred;
-both would need a redesign, not an implementation, before either could ship
-as written.
+for Display impls" — there is no specified behaviour there to implement.
+`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:98`) and returns
+a whole string in one call regardless, so any builder reachable from it is
+a longer, slower spelling of interpolation: a `mut self` accumulator (ADR
+0005 §1 — ten uses in shipped `std/collections`) is buildable inside `fmt`
+without changing `Display`'s shape at all, but each append copies the
+string accumulated so far, so it is quadratic where interpolation is a
+single compiler lowering. Neither item is deferred: `format` is a
+pessimization of work the compiler already does, and `Formatter` has no
+specification to implement in the first place.
 
 **Separately, and not a `std/fmt` deviation:** the `module std.fmt` line
 that opens the code block above does not parse, and this is true of every

@@ -60,10 +60,14 @@ the compiler already lowers string interpolation to concatenation directly,
 so routing it through this Nova function would allocate an array to do
 identical work, via a compiler change, with nothing visible to any user. A
 pessimization, not a feature. `Formatter`'s body is elided in §3, described
-only as a "Format builder for Display impls"; `Display` is `fn fmt(self) ->
-String` (`std/core/lib.nova:98`) and returns a whole string in one call, so
-an incremental builder needs a different trait shape than `Display` has,
-and Nova has no `&mut` to build one with regardless. Both are recorded in
+only as a "Format builder for Display impls" — there is no specified
+behaviour there to implement. And because `Display::fmt` must return a
+whole `String` in one call regardless (`std/core/lib.nova:98`), any builder
+reachable from it is a longer, slower spelling of interpolation: a `mut
+self` accumulator (ADR 0005 §1 — ten uses in shipped `std/collections`) is
+buildable inside `fmt` without changing `Display`'s shape at all, but each
+append copies the string accumulated so far, so it is quadratic where
+interpolation is a single compiler lowering. Both are recorded in
 `nova-spec/20-STDLIB.md` §3's own 2026-08-19 amendment as specifications
 the compiler has overtaken, not gaps still to fill.
 
