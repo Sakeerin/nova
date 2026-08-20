@@ -82,7 +82,8 @@ unshipped reclassified as obsolete rather than deferred, so nothing about
 position 2 remains outstanding.
 
 `STD_MODULES`'s own doc comment states that array's only real ordering
-constraint: "`std/core` stays first so its module index is unchanged."
+constraint: "`std/core` stays first so its module index is unchanged from
+when it was the only embedded module."
 Nothing else about an entry's position is enforced by anything in the
 compiler — `collect_impls` (`crates/nova-typeck/src/check.rs:1015`)
 resolves methods from a single global table filtered by owner, not a
@@ -105,10 +106,14 @@ straight into the token stream (`crates/nova-lexer/src/lib.rs:7`), and a
 colon is **already legal inside a hole** — `"${P { x: 3 }}"` compiles and
 prints `P(3)`, measured. So `:` cannot simply be redefined to mean "begin a
 format spec" the moment it appears inside `${...}`; the lexer would need a
-brace-depth rule to tell a record literal's field colon from a would-be
-format spec's colon. Tractable, and not justified yet: nothing in this tree
-wants aligned interpolation output badly enough to pay for a grammar
-change, and no fixture or caller depends on it.
+rule, applied at `:`, that consults the per-hole brace counter it already
+has (`crates/nova-lexer/src/lib.rs:9-11`) to tell a record literal's field
+colon — reached through a nested `{` — from a would-be format spec's colon
+at the hole's own brace depth. The counter exists; only the rule that reads
+it at `:` does not, which makes this a smaller gap than a from-scratch
+brace-depth mechanism would be. Tractable, and not justified yet: nothing
+in this tree wants aligned interpolation output badly enough to pay for a
+grammar change, and no fixture or caller depends on it.
 
 **No other ADR is needed for this increment.** Nothing here changes the
 execution model, the resource model, or the GC — only the standard
