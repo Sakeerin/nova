@@ -674,13 +674,6 @@ mod tests {
         nova_rt_str_new(s.as_ptr(), s.len() as u64)
     }
 
-    /// Read a `NovaStr` the intrinsics return, for assertions.
-    #[cfg(test)]
-    fn as_str_for_test(p: *mut NovaStr) -> String {
-        // SAFETY: `p` is a `gc_str` result, so it points at a live `NovaStr`.
-        unsafe { as_str(p).to_string() }
-    }
-
     #[test]
     fn int_to_str_formats() {
         unsafe {
@@ -869,43 +862,42 @@ mod tests {
     /// not itself carry.
     #[test]
     fn float_fixed_renders_the_requested_places() {
-        assert_eq!(
-            as_str_for_test(nova_rt_float_fixed(100.0 / 3.0, 2)),
-            "33.33"
-        );
-        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.5, 3)), "1.500");
-        assert_eq!(as_str_for_test(nova_rt_float_fixed(33.333, 0)), "33");
+        unsafe {
+            assert_eq!(to_string(nova_rt_float_fixed(100.0 / 3.0, 2)), "33.33");
+            assert_eq!(to_string(nova_rt_float_fixed(1.5, 3)), "1.500");
+            assert_eq!(to_string(nova_rt_float_fixed(33.333, 0)), "33");
+        }
     }
 
     /// A negative `places` has no meaning and must never reach `format!`'s
     /// precision argument, which would panic.
     #[test]
     fn negative_places_clamps_to_zero() {
-        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.75, -1)), "2");
-        assert_eq!(as_str_for_test(nova_rt_float_fixed(1.75, -1000)), "2");
+        unsafe {
+            assert_eq!(to_string(nova_rt_float_fixed(1.75, -1)), "2");
+            assert_eq!(to_string(nova_rt_float_fixed(1.75, -1000)), "2");
+        }
     }
 
     /// Beyond 17 digits an `f64` carries no further information.
     #[test]
     fn places_above_seventeen_clamps() {
-        let at_limit = as_str_for_test(nova_rt_float_fixed(1.0 / 3.0, 17));
-        let beyond = as_str_for_test(nova_rt_float_fixed(1.0 / 3.0, 40));
-        assert_eq!(at_limit, beyond, "places above 17 must clamp to 17");
-        assert_eq!(at_limit.len(), 19, "0. plus 17 digits");
+        unsafe {
+            let at_limit = to_string(nova_rt_float_fixed(1.0 / 3.0, 17));
+            let beyond = to_string(nova_rt_float_fixed(1.0 / 3.0, 40));
+            assert_eq!(at_limit, beyond, "places above 17 must clamp to 17");
+            assert_eq!(at_limit.len(), 19, "0. plus 17 digits");
+        }
     }
 
     /// A formatter that fails on a value its type permits is worse than one that
     /// shows it, so the non-finite values render as Rust renders them.
     #[test]
     fn non_finite_values_render_like_rust() {
-        assert_eq!(as_str_for_test(nova_rt_float_fixed(f64::NAN, 2)), "NaN");
-        assert_eq!(
-            as_str_for_test(nova_rt_float_fixed(f64::INFINITY, 2)),
-            "inf"
-        );
-        assert_eq!(
-            as_str_for_test(nova_rt_float_fixed(f64::NEG_INFINITY, 2)),
-            "-inf"
-        );
+        unsafe {
+            assert_eq!(to_string(nova_rt_float_fixed(f64::NAN, 2)), "NaN");
+            assert_eq!(to_string(nova_rt_float_fixed(f64::INFINITY, 2)), "inf");
+            assert_eq!(to_string(nova_rt_float_fixed(f64::NEG_INFINITY, 2)), "-inf");
+        }
     }
 }
