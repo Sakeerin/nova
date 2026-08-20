@@ -185,17 +185,6 @@ pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError> 
     }
 }
 
-// Two-digit zero pad. Private: a top-level `pub fn` is glob-imported into
-// every module (see `std/strings`' `join` for the same reasoning).
-fn pad2(n: Int) -> String {
-    if n < 10 { "0${n}" } else { "${n}" }
-}
-
-// Three-digit zero pad, for the millisecond field.
-fn pad3(n: Int) -> String {
-    if n < 10 { "00${n}" } else if n < 100 { "0${n}" } else { "${n}" }
-}
-
 // Days since 1970-01-01 to [year, month, day], by Howard Hinnant's
 // civil_from_days. Shifting the era to start in March makes leap-day
 // handling fall out of integer arithmetic with no conditionals and no
@@ -239,8 +228,9 @@ fn civil_from_days(days: Int) -> [Int] {
 // not just mean the wrong instant, it renders wrong: Nova's `/` truncates
 // toward zero and `%` follows the dividend's sign (measured: `-7 / 2 = -3`,
 // `-7 % 2 = -1`), so a negative `nanos` leaves `rem` in `to_iso8601` negative,
-// and `pad2`/`pad3` then zero-pad a signed number -- producing malformed,
-// non-24-character output such as `1970-01-01T0-1:00:00.000Z`.
+// and `Int::pad`'s sign digit eats the padding budget on a negative field --
+// producing malformed, non-24-character output such as
+// `1970-01-01T-1:00:00.000Z`.
 pub record SystemTime { nanos: Int }
 
 impl SystemTime {
@@ -260,7 +250,7 @@ impl SystemTime {
         let minute = rem / 60_000_000_000 % 60
         let second = rem / 1_000_000_000 % 60
         let milli = rem / 1_000_000 % 1_000
-        "${ymd[0]}-${pad2(ymd[1])}-${pad2(ymd[2])}T${pad2(hour)}:${pad2(minute)}:${pad2(second)}.${pad3(milli)}Z"
+        "${ymd[0]}-${ymd[1].pad(2)}-${ymd[2].pad(2)}T${hour.pad(2)}:${minute.pad(2)}:${second.pad(2)}.${milli.pad(3)}Z"
     }
 
     // The live wall clock: nanoseconds since the Unix epoch, read from the
