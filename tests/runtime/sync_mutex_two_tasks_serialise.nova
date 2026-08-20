@@ -1,0 +1,27 @@
+// Two tasks incrementing a shared counter, each reading it, suspending, then
+// writing back. Without a mutex both read 0 and the second write clobbers the
+// first, giving 1 -- a lost update. Under the mutex the sections serialise and
+// the answer is 2.
+//
+// The `yield_now` INSIDE the critical section is the entire test. Remove it
+// and the fixture passes with no mutex at all, because a section containing
+// no suspension point is already protected by cooperative scheduling.
+pub record Counter { n: Int }
+
+async fn bump(mut m: Mutex<Counter>) {
+    let mut g = m.lock().await
+    let mut c = g.get()
+    let seen = c.n
+    yield_now().await
+    c.n = seen + 1
+    g.release()
+}
+
+async fn main() {
+    let mut m = Mutex::new(Counter { n: 0 })
+    let a = spawn(bump(m))
+    let b = spawn(bump(m))
+    a.join().await
+    b.join().await
+    println("n=${m.value.n}")
+}

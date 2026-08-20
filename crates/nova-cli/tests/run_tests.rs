@@ -7989,3 +7989,23 @@ fn sync_mutex_release_is_idempotent_run() {
         .success()
         .stdout(expected);
 }
+
+/// Two tasks each read a shared counter, suspend, then write it back, under
+/// the mutex. Serialised the answer is 2; interleaved it is 1, because both
+/// read 0 and the second write clobbers the first. The `yield_now` inside the
+/// critical section is what makes this test able to fail -- a section with no
+/// suspension point is already protected by cooperative scheduling.
+#[test]
+fn sync_mutex_two_tasks_serialise_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_two_tasks_serialise.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_two_tasks_serialise.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
