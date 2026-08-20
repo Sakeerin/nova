@@ -375,9 +375,20 @@ pub extern "C" fn nova_rt_float_to_str(v: f64) -> *mut NovaStr {
 /// families differ, and an earlier draft of this increment's spec got it wrong
 /// by pattern-matching the wrong neighbour.
 ///
-/// `places` is clamped to `0..=17`. Zero is the floor because a negative
-/// precision has no meaning and would panic inside `format!`; 17 is the
-/// ceiling because an `f64` carries no information beyond it.
+/// `places` is clamped to `0..=17`. The ceiling is where an `f64` stops
+/// carrying information. **The floor is load-bearing in a stronger way than
+/// "it would panic":** a negative precision reaches `format!` and panics
+/// `Formatting argument out of range`, and because this function is
+/// `extern "C"` with no `-unwind` that panic cannot unwind — it escalates to
+/// `panic in a function that cannot unwind` and **aborts the process**
+/// (measured: `STATUS_STACK_BUFFER_OVERRUN`, on both the direct Rust path and
+/// the JIT-compiled path, where the backtrace truncates at this frame because
+/// generated code carries no unwind tables).
+///
+/// That escalation is the argument *for* `extern "C"` here rather than against
+/// it. [`crate::task`]'s module docs already set the rule this follows:
+/// anything reachable from a generated call site must abort rather than
+/// attempt to unwind. The clamp is what keeps this function inside that rule.
 #[no_mangle]
 pub extern "C" fn nova_rt_float_fixed(v: f64, places: i64) -> *mut NovaStr {
     let places = places.clamp(0, 17) as usize;

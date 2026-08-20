@@ -112,7 +112,11 @@ pub extern "C" fn nova_rt_float_fixed(v: f64, places: i64) -> *mut NovaStr
 
 **This deliberately breaks the policy-in-Nova habit that made the last two increments cheap to test, and the reason is specific rather than convenient.** Both `std/time` and `std/log` put every arithmetic and formatting decision in Nova so a fixture could reach it, and that was right because the computations were exact integer arithmetic. Decimal rendering of a binary float is not that: it is a solved problem with sharp edges — shortest-round-trip representation, ties-to-even at the cut, the difference between `0.005` as written and `0.005` as stored — and Nova cannot even begin, having no `Float`→`Int`. Reimplementing it in Nova would be slower, longer, and wrong in ways only a fuzz test would find. **Where the Rust side is the correct implementation rather than the convenient one, use it and say so.**
 
-The upper clamp of 17 is the point past which more digits carry no information for `f64`. The lower clamp of 0 exists because a negative `places` has no meaning and must not reach `format!`'s precision argument.
+The upper clamp of 17 is the point past which more digits carry no information for `f64`.
+
+**The lower clamp of 0 is load-bearing in a stronger way than this section first stated.** The original wording said a negative `places` "must not reach `format!`'s precision argument", which is true and understates the consequence. Measured during Task 2 and again in its review: an unclamped negative precision panics `Formatting argument out of range`, and because this function is `extern "C"` with **no `-unwind`** that panic cannot unwind — it escalates to `panic in a function that cannot unwind` and **aborts the process** (`STATUS_STACK_BUFFER_OVERRUN`), on the direct Rust path *and* on the JIT-compiled path, where the backtrace truncates at the intrinsic frame because generated code carries no unwind tables.
+
+**That escalation is the argument for `extern "C"` here, not against it.** `crates/nova-runtime/src/task.rs`'s module docs already establish the rule: anything reachable from a generated call site must abort rather than attempt to unwind. So the calling convention is not a judgement made for this function — it is the family's existing policy, and the clamp is what keeps this function inside it.
 
 ---
 
@@ -161,7 +165,7 @@ Note the direction of dependency this creates: `std/time` will now depend on `st
 |---|---|
 | `pad`'s width comparison `<` → `<=` | `fmt_int_pad`'s equal-width row |
 | `pad` counts digits without the sign | `fmt_int_pad`'s `(-5).pad(3)` row |
-| the negative-`places` clamp removed | `fmt_float_edge` — and it should *panic* rather than fail, which is the point of the clamp |
+| the negative-`places` clamp removed | **the in-process unit test** `negative_places_clamps_to_zero`, which does not merely fail — it panics `Formatting argument out of range` and then **aborts the whole test binary**, because the intrinsic is `extern "C"` with no `-unwind`. **Measured, and the context matters:** at the *fixture* level (`fmt_float_edge`, a subprocess) the same mutation surfaces as an ordinary `FAILED`, because the abort happens in the child and the harness reports a non-zero exit. An earlier draft of this row named the fixture and predicted a panic, conflating the two contexts. |
 | `pad_left` and `pad_right` swapped | `fmt_string_pad` |
 | `Int::pad` returns the number unpadded always | `system_time_iso8601`'s single-digit row, via §7's substitution |
 
