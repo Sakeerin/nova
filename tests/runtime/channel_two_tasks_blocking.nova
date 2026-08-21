@@ -1,0 +1,42 @@
+// ORDER DEPENDENCE -- read this before editing.
+//
+// This fixture depends on the executor's ready queue being FIFO round-robin
+// (`crates/nova-runtime/src/task.rs:184`): a task re-queued by `yield_now`
+// waits behind every task already waiting. That is a documented runtime
+// invariant, not an observed coincidence, but it is what makes the
+// interleaving below deterministic.
+//
+// The capacity is 2 and the producer sends 5, and BOTH numbers are load
+// bearing. N > cap forces `send` to suspend, so a `send` that never blocks
+// loses values. N > cap also forces `head` to wrap twice, so a missing
+// modulo corrupts the output -- a fixture with N <= cap never reaches that
+// path at all.
+async fn produce(mut tx: Sender<Int>) {
+    let mut next = 1
+    while next <= 5 {
+        let sent = tx.send(next).await
+        if !sent { println("unexpected: send refused ${next}") }
+        next = next + 1
+    }
+    tx.close()
+}
+
+async fn consume(mut rx: Receiver<Int>) {
+    let mut out = ""
+    let mut more = true
+    while more {
+        match rx.recv().await {
+            Some(v) => out = "${out}${v} "
+            None => more = false
+        }
+    }
+    println("${out}done")
+}
+
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let a = spawn(produce(ch.sender()))
+    let b = spawn(consume(ch.receiver()))
+    a.join().await
+    b.join().await
+}

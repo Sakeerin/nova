@@ -259,6 +259,23 @@ impl<T> Sender<T> {
     pub fn close(mut self) {
         self.ch.closed = true
     }
+
+    // Send, waiting while the channel is full. Returns false only when the
+    // channel is closed -- unlike `try_send`, which also returns false when
+    // merely full.
+    //
+    // Waiting is `yield_now`, not parking, which keeps this module in Nova
+    // with no executor change (ADR 0016 made the same call for `Mutex`). The
+    // cost is stated rather than hidden: a waiter stays *runnable*, so
+    // `report_deadlock` cannot see it, and a producer blocked on a channel
+    // nobody drains spins instead of being diagnosed.
+    pub async fn send(mut self, v: T) -> Bool {
+        while !self.ch.push(v) {
+            if self.ch.closed { return false }
+            yield_now().await
+        }
+        true
+    }
 }
 
 impl<T> Receiver<T> {
@@ -266,5 +283,25 @@ impl<T> Receiver<T> {
     // about whether more will arrive -- `recv` is what distinguishes those.
     pub fn try_recv(mut self) -> Option<T> {
         self.ch.pop()
+    }
+
+    // Take the next value, waiting while the channel is empty and open.
+    //
+    // None means closed AND drained, never merely empty. That is the whole
+    // reason `close` is explicit: `Drop` is specified in three spec files and
+    // implemented in none, so nothing closes a channel on the producer's
+    // behalf, and without this distinction a consumer loop could not
+    // terminate.
+    //
+    // Buffered values are drained before the close is reported, because `pop`
+    // is tried before `closed` is read on every iteration.
+    pub async fn recv(mut self) -> Option<T> {
+        let mut out = self.ch.pop()
+        while out.is_none() {
+            if self.ch.closed { return None }
+            yield_now().await
+            out = self.ch.pop()
+        }
+        out
     }
 }
