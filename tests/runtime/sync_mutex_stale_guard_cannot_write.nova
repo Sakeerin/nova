@@ -1,0 +1,55 @@
+// A stale guard's `set` must not write into a live critical section. This is
+// `set`'s half of what `MutexGuard`'s `released` flag closes, and it is the
+// half that shipped uncovered: deleting `if self.released { return }` from
+// `set` failed no test in the whole suite until this fixture existed, while
+// `sync_mutex_stale_guard_cannot_steal` covered only `release`'s use of the
+// very same flag.
+//
+// It is also the worse half. A stale `release` frees a flag another task owns;
+// a stale `set` reaches past the lock and rewrites the protected value while
+// that task is inside its critical section -- the exact corruption a mutex
+// exists to prevent.
+//
+// `holder` takes the lock, writes 1, and suspends twice inside its critical
+// section. `stale` carries the guard `main` already released and calls
+// `set(99)` in between, so that write lands while `holder` owns the mutex.
+// With the flag it is inert and `holder` still reads its own 1. Without it,
+// `under_lock` and `at_end` both become 99.
+//
+// ORDER DEPENDENCE -- read this before editing. The fixture proves nothing
+// unless the stale `set` lands *between* `holder`'s two `yield_now`s, and what
+// puts it there is the executor's FIFO ready queue: `yield_now` re-queues a
+// task at the back and the executor pops from the front
+// (`crates/nova-runtime/src/task.rs:184`, "Ids ready for another turn, FIFO:
+// pushed at the back, popped from the front"). That is a documented and
+// separately tested runtime invariant rather than a timing accident, so this
+// test is not flaky -- but the dependency is invisible in the code below.
+// Adding or removing a `yield_now` in either task, or swapping the two `spawn`
+// calls, moves the stale `set` outside the critical section and leaves a
+// fixture that still passes, for the wrong reason.
+// `sync_mutex_stale_guard_cannot_steal` rests on the same invariant, and the
+// same warning applies to it.
+async fn holder(mut m: Mutex<Int>) {
+    let mut g = m.lock().await
+    g.set(1)
+    yield_now().await
+    yield_now().await
+    println("under_lock=${g.get()}")
+    g.release()
+}
+
+async fn stale(mut g: MutexGuard<Int>) {
+    yield_now().await
+    g.set(99)
+}
+
+async fn main() {
+    let mut m = Mutex::new(0)
+    let mut first = m.lock().await
+    first.release()
+    let h = spawn(holder(m))
+    let s = spawn(stale(first))
+    h.join().await
+    s.join().await
+    println("at_end=${m.value}")
+}
