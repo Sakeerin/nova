@@ -8168,3 +8168,50 @@ fn channel_two_tasks_blocking_run() {
         .success()
         .stdout(expected);
 }
+
+/// Pins that `recv` does not suspend when a value is already buffered, i.e.
+/// that its `yield_now().await` lives in the retry path and nowhere else. The
+/// channel is loaded and closed before either task is spawned, so `consume`'s
+/// first `pop` succeeds and the retry loop is never entered; a `recv` that
+/// yielded on entry would let `marker` print first, which the golden forbids.
+/// `channel_two_tasks_blocking` is blind to this -- moving that `yield_now`
+/// out of the retry loop leaves all 44 targets green, because its
+/// interleaving never runs the retry-loop body twice in a row. Asserting the
+/// invariant directly is not possible: a retry loop with no suspension point
+/// livelocks rather than answering wrongly, so a fixture built that way would
+/// hang CI instead of reporting. Same FIFO ready-queue dependency as the
+/// fixtures above, recorded in the fixture's own comment.
+#[test]
+fn channel_recv_suspends_only_to_retry_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_recv_suspends_only_to_retry.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_recv_suspends_only_to_retry.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `send`'s half of what the fixture above pins for `recv`: a `send` with room
+/// in the channel must enqueue without yielding. Moving `send`'s
+/// `yield_now().await` out of the retry loop to before the first `push` leaves
+/// both `channel_two_tasks_blocking` and the `recv` fixture green, so this is
+/// the only test that fails for it. Same FIFO ready-queue dependency.
+#[test]
+fn channel_send_suspends_only_to_retry_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_send_suspends_only_to_retry.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_send_suspends_only_to_retry.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

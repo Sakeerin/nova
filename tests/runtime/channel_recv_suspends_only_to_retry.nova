@@ -1,0 +1,59 @@
+// ORDER DEPENDENCE -- read this before editing.
+//
+// This fixture depends on the executor's ready queue being FIFO round-robin
+// (`crates/nova-runtime/src/task.rs:184`): a task re-queued by `yield_now`
+// waits behind every task already waiting. That is a documented runtime
+// invariant, not an observed coincidence, but it is what makes the
+// interleaving below deterministic. The output order IS the assertion here,
+// so an edit that reorders the two `spawn`s, or adds a suspension point to
+// either task, changes what this pins.
+//
+// WHAT THIS PINS: `recv` does not suspend when a value is already buffered.
+// Its `yield_now().await` belongs in the retry path and nowhere else, so a
+// `recv` that can answer immediately must answer without yielding. The
+// channel is loaded and closed before either task is spawned, so `consume`'s
+// first `pop` succeeds and its retry loop is never entered at all.
+//
+// WHY IT IS NEEDED: `channel_two_tasks_blocking` is BLIND to this. Moving
+// that one `yield_now().await` out of the retry loop to before the first
+// `pop` leaves all 44 targets green while making the code livelock-prone,
+// because that fixture's interleaving never runs the retry-loop body twice
+// in a row -- after its entry yield the producer has always either pushed or
+// closed, so `pop` succeeds or `closed` is set on the first look and the
+// missing in-loop suspension is never needed. Measured, not assumed.
+//
+// WHY IT PINS PLACEMENT FROM THIS SIDE: the direct failure mode of a retry
+// loop with no suspension point is a livelock, not a wrong answer -- the
+// consumer spins forever and, under cooperative scheduling, starves the
+// producer that would have refilled the channel. A fixture asserting that
+// directly could only ever hang, which would wedge CI instead of reporting.
+// So this attacks the same mutation from the terminating side. Two facts
+// together pin the placement: `channel_two_tasks_blocking` pins that `recv`
+// waits at all (deleting the wait truncates its output and then hangs), and
+// this pins that the wait is not before the first `pop`. A `recv` that waits
+// somewhere, but not on entry, waits in the retry path.
+async fn consume(mut rx: Receiver<Int>) {
+    match rx.recv().await {
+        Some(v) => println("recv ${v}")
+        None => println("recv none")
+    }
+}
+
+// A second runnable task, so that a suspension inside `consume` is
+// observable as output order rather than as a timing difference nothing can
+// assert on.
+async fn marker() {
+    println("marker")
+}
+
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    let sent = tx.try_send(7)
+    if !sent { println("unexpected: refused") }
+    tx.close()
+    let a = spawn(consume(ch.receiver()))
+    let b = spawn(marker())
+    a.join().await
+    b.join().await
+}
