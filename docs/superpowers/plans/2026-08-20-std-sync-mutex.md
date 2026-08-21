@@ -501,3 +501,57 @@ Subject: `docs: record std/sync's Mutex and position 8's partial close`.
 **Every value in Task 2 was measured before being written.** `n=2` under the mutex and `n=1` without it were both run. That matters more than usual here: three of this increment's four fixtures would pass with the mutex deleted, so Task 2 is the increment's only real test, and a plan that guessed its numbers would be guessing about the only thing that proves the feature works.
 
 **One deliberate omission.** The spec's §7 lists a mutation "`take` never sets `locked`" *and* "`take` returns true unconditionally" as separate rows catching the same test. Both are kept in Task 1 Step 7 because they fail for different reasons — the first never acquires, the second always acquires — and a reader who sees only one might conclude the other is untested.
+
+---
+
+## Corrected 2026-08-21 (fix wave)
+
+This plan executed as written; the text above stays as the record of what was
+done. Five of its claims were falsified by the two review passes and this fix
+wave, and are corrected here rather than retro-edited in place — the same
+convention as `docs/adr/0011-io-error-kinds.md:82` and as `0f242a4`, which
+corrected a *pending* instruction (Task 3 Step 2, line 471) while leaving
+already-executed text alone.
+
+1. **"Three of four fixtures would pass with the `Mutex` deleted"** (line 345,
+   Task 2's opening; restated at line 501) is wrong. Measured against a
+   never-excluding `take`: of the then-four fixtures, **two** passed and two
+   failed — `sync_mutex_try_lock_fails_when_held` also detects it
+   (`second=false` becomes `second=true`), not only
+   `sync_mutex_two_tasks_serialise`. Task 2 was, at the time, the only fixture
+   testing exclusion *across a suspension point*, which is the claim that
+   survives — the fix wave has since added a second, `sync_mutex_int_set_serialises`.
+   Step 7's row 2 should also have named `sync_mutex_two_tasks_serialise_run`
+   alongside `sync_mutex_try_lock_fails_when_held_run`, as the design doc's §7
+   table already did. There are now six fixtures and four of them detect that
+   mutation; ADR 0016's Consequences carries the per-fixture breakdown.
+   *(Line 328 of this plan is a sentence written to catch exactly this class of
+   error. It was walked past four times.)*
+
+2. **`Option` "has no `unwrap`"** (line 259, inside Task 1 Step 5's embedded
+   module source) is false.
+   `Option::unwrap` is at `std/core/lib.nova:26`, and std/core calls it at 255,
+   280, 297, 354 and 386; `Result::unwrap` is at `:58`. The shipped module's
+   comment now gives the true reason `take` returns `Bool` — a `Bool` reads
+   straight into `lock`'s `while` condition.
+
+3. **The `0fe3d94` whitelist** (line 25) contradicts its own sentence.
+   `git merge-base --is-ancestor 0fe3d94 main` is false: `0fe3d94` is this
+   branch's own first commit. Only `8a72243` is an ancestor of `main`; this
+   branch's commits, `0fe3d94` included, must not be cited as precedent.
+   Nothing consumed the false whitelist — no commit body and no tracked
+   document cites it.
+
+4. **`JoinHandle::join` cited at `std/task/lib.nova:65`** (line 352) is the
+   `impl<T> JoinHandle<T> {` line. `join` itself is at `:86`.
+
+5. **The module surface in Task 1 Step 5** (lines 243–288, and the Interfaces
+   block at line 60) is superseded. `MutexGuard` is now
+   `{ owner: Mutex<T>, released: Bool }`, `release` returns early when
+   `released` is set, and `MutexGuard::set(mut self, v: T)` was added. The
+   plan's copy is left as history; `std/sync/lib.nova`,
+   `nova-spec/20-STDLIB.md` §13 and `docs/adr/0016-std-sync-partial-close.md`
+   carry the shipped shape. Note that lines 243–245's ADR-0012 sentence is
+   *also* debunked (`0f242a4` corrected it in the shipped module and in the
+   pending Task 3 step, deliberately leaving this executed copy); that
+   asymmetry was reviewed and upheld, so it stays.

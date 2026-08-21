@@ -197,8 +197,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   11 → 12, placed immediately after `$std.task`): an *async* `Mutex<T> {
   locked: Bool, value: T }` with `new(value: T) -> Mutex<T>`, `try_lock(mut
   self) -> Option<MutexGuard<T>>`, and `async fn lock(mut self) ->
-  MutexGuard<T>`, plus `MutexGuard<T> { owner: Mutex<T> }` with `get(self)
-  -> T` and `release(mut self)`. Contention is handled by yielding and
+  MutexGuard<T>`, plus `MutexGuard<T> { owner: Mutex<T>, released: Bool }`
+  with `get(self) -> T`, `set(mut self, v: T)` and an idempotent
+  `release(mut self)`. `released` is what makes that idempotence true and
+  not merely stated — without it `release` was an unconditional
+  `self.owner.locked = false`, so a second `release` on a guard whose mutex
+  had since been reacquired freed a lock another task was holding — and
+  `set` is the write half of the pair `Vec` already ships
+  (`std/collections/lib.nova:49`, `:53`), because `get` returns the value
+  and a `T` with no assignable interior (`Int`, `Bool`, `Float`, `Char`,
+  `String`) is therefore read-only through the guard. `set` is a no-op on a
+  released guard, for the same reason `release` is. Contention is handled by yielding and
   retrying (`while !self.take() { yield_now().await }`), not by parking, so
   neither the executor nor the poll ABI changes; the cost is that a waiter
   stays *runnable*, so `report_deadlock` cannot see it and a never-released
@@ -208,9 +217,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   implemented in none of them, so a guard's release
   (`self.owner.locked = false`) is pure Nova with no language mechanism to
   hook a scope exit to. This closes position 8 of `00-MASTER-SPEC.md` §3's
-  build order **partially** — `std/sync` also specifies `channel<T>`,
-  `spawn_blocking`, and `JoinHandle::cancel`, none of which ship this
-  increment. Zero new runtime intrinsics — `Builtin::STD_ONLY` stays at 65
+  build order **partially** — `std/sync` also specifies `channel<T>`, and
+  `20-STDLIB.md` §13's neighbouring `std/task` entry (position 7) specifies
+  `spawn_blocking` and `JoinHandle::cancel`; none of the three ship this
+  increment. `00-MASTER-SPEC.md:238` names a third position-8 item,
+  `atomic`, which this increment does not touch either. Zero new runtime intrinsics — `Builtin::STD_ONLY` stays at 65
   — and `RESERVED_TYPE_NAMES` stays at 7; `Mutex`/`MutexGuard` are
   ordinary, glob-imported `std/sync` records. See
   `nova-spec/20-STDLIB.md` §13's amendment and

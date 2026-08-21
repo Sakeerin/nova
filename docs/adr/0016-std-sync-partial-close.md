@@ -67,8 +67,40 @@ locked: Bool, value: T }` with `new(value: T) -> Mutex<T>` and a private
 `take`; `try_lock(mut self) -> Option<MutexGuard<T>>` for the
 non-suspending case; `async fn lock(mut self) -> MutexGuard<T>`, which
 retries by yielding rather than parking; and `MutexGuard<T> { owner:
-Mutex<T> }` with `get(self) -> T` and an explicit, idempotent
-`release(mut self)`. Release is explicit rather than RAII for one
+Mutex<T>, released: Bool }` with `get(self) -> T`, `set(mut self, v: T)`
+and an explicit, idempotent `release(mut self)`.
+
+**`released` and `set` were added by this increment's fix wave
+(2026-08-21), after review; the paragraph above records the shipped
+shape, not the first-drafted one.** `release` was an unconditional
+`self.owner.locked = false` on a guard that carried no released-state, so
+a second `release` on a guard whose mutex had since been reacquired freed
+a lock another task was holding — the documented idempotence was false in
+exactly the case that matters. `released` supplies the state that claim
+needs, and it is precisely the precondition the `File::close` precedent
+below does **not** transfer: `File`'s second `close` is safe because an
+`fd` is a key into a runtime table where absence *is* closedness, and a
+guard has no table to be absent from. `set` was added because `get`
+returns the value, so for a `T` with no assignable interior (`Int`,
+`Bool`, `Float`, `Char`, `String`) the guard was a read-only view while
+`Mutex<T>`'s generic signature promised otherwise; `std/collections`
+pairs `Vec::get` (`std/collections/lib.nova:49`) with `Vec::set` (`:53`)
+for the same reason. `set` is a no-op on a released guard for the same
+reason `release` is — a stale `set` would write into the protected value
+while another task was inside its critical section. Neither addition
+touches the runtime: still zero new intrinsics, `STD_ONLY` still 65.
+
+What neither flag can reach is **forgery**. Nova enforces no field
+privacy, so any code holding a `Mutex<T>` can write
+`MutexGuard { owner: m, released: false }` and `release` it without ever
+acquiring the lock — measured, and it frees a lock a real guard is
+holding. That is the same unenforceable shape ADR 0012 records for
+`File { fd: 9999 }`, with one difference worth stating: a forged `fd`
+safely misses a table lookup, whereas a forged guard writes straight to
+the live mutex. Documented, not enforced, exactly as `get`-after-release
+is.
+
+Release is explicit rather than RAII for one
 measured reason: `Drop` is described in three spec files
 (`12-TYPESYSTEM.md:192`, `13-RUNTIME.md:96`, `14-CODEGEN.md:24`) and
 implemented in none of them — no handling in `nova-typeck`, `nova-resolver`
@@ -106,25 +138,41 @@ What did not ship, and why each is a deferral rather than an oversight:
   `poll.rs`, not infrastructure a std module could dispatch blocking work
   onto. Building this means introducing real OS threads to a runtime that
   currently has none — a decision considerably larger than a stdlib
-  function, and not one this increment makes.
-- **`JoinHandle::cancel(self)`.** Contradicts a contract this project has
-  already settled twice: `docs/adr/0009-async-execution-model.md` and the
-  `timeout<T>` increment both established **abandonment, not
-  cancellation** — an abandoned future is simply never polled again,
-  nothing unwinds, and the poll ABI has no interrupt hook. `cancel` as §13
-  writes it would need exactly the mechanism that contract rejects, so
-  shipping it now would either be a silent no-op or a reversal of a
-  settled decision, and this increment does neither.
+  function, and not one this increment makes. This argument was already
+  made and settled: `docs/adr/0009-async-execution-model.md:107`, under
+  its "What is given up" heading, records that **`spawn_blocking` cannot
+  be honoured** and that it is not provided, rather than provided as a
+  synonym for `spawn`. This increment restates that conclusion, it does
+  not reach it.
+- **`JoinHandle::cancel(self)`.** ADR 0009 leaves cancellation an **open
+  residual gap, not a settled rejection**. It lists "No cancellation"
+  among its residual gaps (`docs/adr/0009-async-execution-model.md:365`)
+  and names "a future `JoinHandle` drop or cancellation" as the natural
+  fix point for the task-leak footgun it documents (`:405`) — the opposite
+  of a foreclosure. What *is* settled is narrower: the poll ABI has no
+  interrupt hook, which is why the `timeout<T>` combinator abandons rather
+  than cancels (`:328-329`). So `cancel` as §13 writes it needs a
+  mechanism that does not exist yet, and building that hook is a decision
+  this increment does not make. It is deferred for want of the primitive,
+  not because ADR 0009 rules it out.
 
 ## Consequences
 
-**Position 8 is partially closed — the buildable quarter of it, not all
-of it — which is what distinguishes this ADR from both of its
+**Position 8 is partially closed — the buildable part of it, not all of
+it — which is what distinguishes this ADR from both of its
 predecessors.** ADR 0014's subject is position 2 skipped twice with
 nothing shipped at that position either time; ADR 0015's subject is
-position 2 fully closed. This ADR's position is neither: one of its four
-specified items ships, three remain open with named blockers, none of
-which this increment removes.
+position 2 fully closed. This ADR's position is neither. Of position 8's
+own items (`00-MASTER-SPEC.md:238`: `Mutex`, `channel`, `atomic`), one
+ships — `Mutex` — and two remain open: `channel`, blocked on tuple types
+(above), and `atomic`, which this increment does not touch at all and
+which §13 never specifies with a signature. Separately, of the two
+`std/task`/position-7 items §13 still lists after `spawn` and `join`
+shipped — `spawn_blocking` and `JoinHandle::cancel` — both also remain
+open, for the reasons above. The two positions are kept apart here
+deliberately: an earlier draft of this paragraph counted all four
+deferrals against position 8, which contradicts this ADR's own Context
+section.
 
 **The yield-and-retry trade is accepted explicitly, including its cost.**
 `lock` retries by yielding (`while !self.take() { yield_now().await }`)
@@ -133,8 +181,9 @@ rather than by parking on a dedicated wait condition. That choice adds
 existing `Deadline`/`Task`/`Io` (`crates/nova-runtime/src/task.rs:162`),
 and no new arm in `wake_due`'s `retain` match, whose existing arms already
 end in a wildcard rather than an exhaustive list over `Wait`'s variants —
-the same non-exhaustive match this project has previously found to
-conceal a reachable process abort for an entire increment. The cost is
+the same non-exhaustive match whose omitted arm this project has
+previously found to park a task forever with no compile error, panic or
+diagnostic. The cost is
 diagnosability: a task waiting on a lock stays **runnable**, not parked,
 so `report_deadlock` — which only ever inspects parked tasks — cannot see
 it. A lock that is taken and never released does not produce a deadlock
@@ -154,23 +203,39 @@ re-queues the caller behind everything currently runnable, which
 guarantees the current holder always gets a turn and can always release,
 but says nothing about which of several waiters acquires the lock next.
 
-**This increment's only fixture that actually depends on the mutex derives
-its entire power from where one line sits, and that is a fragility worth
-naming here rather than only in the fixture's own comment.**
+**The two fixtures that turn on the mutex holding a value across a
+suspension point each derive their entire power from where one line sits,
+and that is a fragility worth naming here rather than only in the
+fixtures' own comments.**
 `tests/runtime/sync_mutex_two_tasks_serialise.nova` spawns two tasks that
 each read a shared counter, suspend at a `yield_now().await` placed
 **inside** the locked critical section, then write back. Task 2 reaching
 `lock()` and spinning while task 1 is still suspended mid-section was
 confirmed by instrumented trace, not inferred, in this increment's review.
 With the mutex present the tasks serialise and the result is `n=2`;
-verified by mutation, removing the mutex (or moving that `yield_now` back
-outside the critical section) still passes every other fixture in this
-increment and produces `n=1` here — the lost update the mutex exists to
-prevent. Three of this increment's four fixtures would pass unchanged with
-`Mutex` deleted entirely; this is the one that would not, and only because
-of that single line's placement. A future edit that moves or removes it
-without noticing would silently turn this fixture into a shape test that
-no longer proves mutual exclusion at all.
+verified by mutation, a never-excluding `take` produces `n=1` here — the
+lost update the mutex exists to prevent. **Four** of this increment's six
+fixtures detect that mutation, all four measured rather than predicted:
+this one and `sync_mutex_int_set_serialises` (both `n=2` becomes `n=1`),
+`sync_mutex_try_lock_fails_when_held` (`second=false` becomes
+`second=true`), and `sync_mutex_stale_guard_cannot_steal`
+(`still_held=true` becomes `still_held=false`). The other two —
+`sync_mutex_uncontended` and `sync_mutex_release_is_idempotent` — pass
+unchanged, because a critical section containing no suspension point is
+already serialised by cooperative scheduling. This fixture and
+`sync_mutex_int_set_serialises` are the two that detect a *lost update*
+across a suspension point, and each only because of that single line's
+placement. A future edit that moves or removes one without noticing would
+silently turn that fixture into a shape test that no longer proves mutual
+exclusion at all.
+
+Two numbers here were wrong before this increment's fix wave and are
+recorded so the correction is not silent. The count was "three of four
+would pass with `Mutex` deleted"; measured, two of the then-four passed.
+And the parenthetical claimed that *moving* the `yield_now` outside the
+critical section also produces `n=1`; measured, it produces `n=2` — which
+is the point the paragraph's closing warning depends on, so the
+parenthetical inverted it.
 
 ## References
 
@@ -192,5 +257,12 @@ no longer proves mutual exclusion at all.
   unchanged by this increment
 - `crates/nova-resolver/src/lib.rs:1267`: `STD_MODULES`, 12 entries after
   this increment; `:1293`: `STD_TEST_MODULE`, `std/test`'s separate constant
-- `tests/runtime/sync_mutex_two_tasks_serialise.nova`: the one fixture this
-  increment's `Mutex` cannot be deleted without failing
+- `tests/runtime/sync_mutex_two_tasks_serialise.nova` and
+  `tests/runtime/sync_mutex_int_set_serialises.nova`: the two fixtures that
+  detect a lost update across a suspension point.
+  `sync_mutex_try_lock_fails_when_held` and
+  `sync_mutex_stale_guard_cannot_steal` also detect a never-excluding
+  `take`, without needing one — four detectors of six fixtures, measured
+- `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova`: the only
+  fixture that fails if `MutexGuard`'s `released` flag is removed, which is
+  why the defect it pins shipped in the first place
