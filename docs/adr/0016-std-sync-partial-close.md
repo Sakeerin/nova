@@ -332,8 +332,11 @@ parenthetical inverted it.
   why the defect it pins shipped in the first place.
   `tests/runtime/sync_mutex_stale_guard_cannot_write.nova`: pins `set`'s use
   the same way. **An earlier version of this entry named only the first and
-  called it "the only fixture that fails if `released` is removed."** That is
-  true of removing the *field* — which breaks both uses at once — and it read
-  as though the flag were covered, when only `release`'s use was; corrected
+  called it "the only fixture that fails if `released` is removed."** That was
+  true only of deleting `release`'s early return, and only while
+  `sync_mutex_stale_guard_cannot_write` did not yet exist. Removing the
+  *field* breaks both uses at once and so fails **both** stale-guard
+  fixtures — measured, two of 1036, not one. Either way the claim read as
+  though the flag were covered when only `release`'s use was; corrected
   2026-08-21. Both fixtures depend on the executor's FIFO ready queue: see
   their own comments and the Consequences note above
