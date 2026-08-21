@@ -1,0 +1,24 @@
+// Two tasks incrementing a bare `Mutex<Int>` -- the fixture that does not
+// compile without `MutexGuard::set`. `get` copies an `Int` out, so mutating
+// that copy cannot reach the mutex; `sync_mutex_two_tasks_serialise` wraps its
+// counter in a `Counter { n: Int }` record to get around exactly this.
+//
+// As in that fixture, the `yield_now` INSIDE the critical section is the whole
+// test: without the mutex both tasks read 0 and the second write clobbers the
+// first, giving n=1 instead of 2.
+async fn bump(mut m: Mutex<Int>) {
+    let mut g = m.lock().await
+    let seen = g.get()
+    yield_now().await
+    g.set(seen + 1)
+    g.release()
+}
+
+async fn main() {
+    let mut m = Mutex::new(0)
+    let a = spawn(bump(m))
+    let b = spawn(bump(m))
+    a.join().await
+    b.join().await
+    println("n=${m.value}")
+}
