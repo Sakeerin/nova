@@ -9,18 +9,26 @@
 // either task, changes what this pins.
 //
 // WHAT THIS PINS: `recv` does not suspend when a value is already buffered.
-// Its `yield_now().await` belongs in the retry path and nowhere else, so a
-// `recv` that can answer immediately must answer without yielding. The
-// channel is loaded and closed before either task is spawned, so `consume`'s
-// first `pop` succeeds and its retry loop is never entered at all.
+// Its `yield_now().await` belongs on the retry path and nowhere else, so a
+// `recv` that can answer immediately must answer without yielding. Loading the
+// channel before either task is spawned -- the `try_send` in `main`, NOT the
+// `close` after it -- is what makes `consume`'s first `pop` succeed so that its
+// retry loop is never entered at all.
 //
-// WHY IT IS NEEDED: `channel_two_tasks_blocking` is BLIND to this. Moving
-// that one `yield_now().await` out of the retry loop to before the first
-// `pop` leaves all 44 targets green while making the code livelock-prone,
-// because that fixture's interleaving never runs the retry-loop body twice
-// in a row -- after its entry yield the producer has always either pushed or
-// closed, so `pop` succeeds or `closed` is set on the first look and the
-// missing in-loop suspension is never needed. Measured, not assumed.
+// Measured to catch that yield moved to EITHER side of the loop: to before the
+// first `pop`, and to after the loop. Both make `marker` print first, so what
+// this actually pins is that there is no suspension point anywhere on the
+// immediate-answer path, which is a little stronger than "in the retry path".
+//
+// WHY IT IS NEEDED: `channel_two_tasks_blocking` is BLIND to this. Moving that
+// one `yield_now().await` out of the retry loop to before the first `pop`
+// leaves it -- and every other test in the suite except this one -- green
+// while making the code livelock-prone, because that fixture's interleaving
+// never runs the retry-loop body twice in a row: after its entry yield the
+// producer has always either pushed or closed, so `pop` succeeds or `closed`
+// is set on the first look and the missing in-loop suspension is never needed.
+// Measured, not assumed. Before this fixture existed that move left all 44
+// targets green, which is why it was written.
 //
 // WHY IT PINS PLACEMENT FROM THIS SIDE: the direct failure mode of a retry
 // loop with no suspension point is a livelock, not a wrong answer -- the
@@ -30,8 +38,9 @@
 // So this attacks the same mutation from the terminating side. Two facts
 // together pin the placement: `channel_two_tasks_blocking` pins that `recv`
 // waits at all (deleting the wait truncates its output and then hangs), and
-// this pins that the wait is not before the first `pop`. A `recv` that waits
-// somewhere, but not on entry, waits in the retry path.
+// this pins that the wait is not anywhere on the immediate-answer path. A
+// `recv` that waits somewhere, but not where an immediate answer would reach
+// it, waits on the retry path.
 async fn consume(mut rx: Receiver<Int>) {
     match rx.recv().await {
         Some(v) => println("recv ${v}")
@@ -51,6 +60,24 @@ async fn main() {
     let mut tx = ch.sender()
     let sent = tx.try_send(7)
     if !sent { println("unexpected: refused") }
+    // NOT dead code, and NOT what makes the first `pop` succeed -- the
+    // `try_send` above does that. This `close` is the fixture's TERMINATION
+    // guard and the most load-bearing line in it. Should `pop` ever regress to
+    // returning `None`, `recv` reads `closed`, returns `None` and prints
+    // `recv none`: a bounded diff against the golden, so this fixture FAILS.
+    // Delete the `close` and the same regression makes `recv` yield forever
+    // and the fixture HANGS instead. Measured both ways: `recv none` and exit
+    // 0 with it, no output and a timeout kill without. For a fixture whose
+    // entire justification is reporting rather than hanging, that is the point
+    // of the line.
+    //
+    // `channel_send_suspends_only_to_retry` has NO equivalent guard and so can
+    // hang: with `push` regressed to refuse everything its `send` spins
+    // forever (measured, timeout kill). Closing there would not fix it -- a
+    // closed channel makes `send` return false immediately and the fixture
+    // would pin nothing -- and a third task to close it would add the very
+    // suspension point this family of fixtures depends on the absence of.
+    // Documented, not fixed.
     tx.close()
     let a = spawn(consume(ch.receiver()))
     let b = spawn(marker())

@@ -8148,12 +8148,15 @@ fn channel_close_then_drain_run() {
 }
 
 /// A producer sending 5 values through a channel of capacity 2, and a consumer
-/// draining it, each in its own task. The only fixture that exercises the async
-/// `send`/`recv`; the five synchronous channel fixtures all use
-/// `try_send`/`try_recv`, which never suspend. Capacity below the send count is
-/// what forces `send` to suspend, and it also makes `head` wrap twice. Depends
-/// on the executor's FIFO ready queue (`crates/nova-runtime/src/task.rs:184`)
-/// for a deterministic interleaving; the fixture's own comment says so and why.
+/// draining it, each in its own task. The only fixture in which `send` and
+/// `recv` actually suspend and resume: the two `*_suspends_only_to_retry`
+/// fixtures drive the same async pair but deliberately never enter either
+/// retry path, and the five synchronous channel fixtures never call the async
+/// pair at all, using `try_send`/`try_recv`, which cannot suspend. Capacity
+/// below the send count is what forces `send` to suspend, and it also makes
+/// `head` wrap twice. Depends on the executor's FIFO ready queue
+/// (`crates/nova-runtime/src/task.rs:184`) for a deterministic interleaving;
+/// the fixture's own comment says so and why.
 #[test]
 fn channel_two_tasks_blocking_run() {
     let expected = std::fs::read_to_string(
@@ -8170,12 +8173,17 @@ fn channel_two_tasks_blocking_run() {
 }
 
 /// Pins that `recv` does not suspend when a value is already buffered, i.e.
-/// that its `yield_now().await` lives in the retry path and nowhere else. The
-/// channel is loaded and closed before either task is spawned, so `consume`'s
-/// first `pop` succeeds and the retry loop is never entered; a `recv` that
-/// yielded on entry would let `marker` print first, which the golden forbids.
-/// `channel_two_tasks_blocking` is blind to this -- moving that `yield_now`
-/// out of the retry loop leaves all 44 targets green, because its
+/// that its `yield_now().await` lives on the retry path and nowhere else --
+/// measured against that yield moved to either side of the loop, before the
+/// first `pop` and after the loop, both of which this catches. Loading the
+/// channel before either task is spawned is what makes `consume`'s first `pop`
+/// succeed so the retry loop is never entered; the fixture's `close` is a
+/// termination guard rather than part of that, and its comment records why
+/// deleting it would turn this failure into a hang.
+///
+/// `channel_two_tasks_blocking` is blind to the placement -- moving that
+/// `yield_now` out of its retry loop leaves it and every other test in the
+/// suite green, so this is the only test that fails for it, because its
 /// interleaving never runs the retry-loop body twice in a row. Asserting the
 /// invariant directly is not possible: a retry loop with no suspension point
 /// livelocks rather than answering wrongly, so a fixture built that way would
@@ -8200,7 +8208,10 @@ fn channel_recv_suspends_only_to_retry_run() {
 /// in the channel must enqueue without yielding. Moving `send`'s
 /// `yield_now().await` out of the retry loop to before the first `push` leaves
 /// both `channel_two_tasks_blocking` and the `recv` fixture green, so this is
-/// the only test that fails for it. Same FIFO ready-queue dependency.
+/// the only test that fails for it. Unlike the `recv` twin this fixture has no
+/// termination guard and so can HANG rather than fail if `push` regresses; its
+/// own comment says why that is documented instead of fixed. Same FIFO
+/// ready-queue dependency.
 #[test]
 fn channel_send_suspends_only_to_retry_run() {
     let expected = std::fs::read_to_string(

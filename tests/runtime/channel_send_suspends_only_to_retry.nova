@@ -22,6 +22,16 @@
 // pinned from the terminating side rather than asserted directly -- a retry
 // loop with no suspension point livelocks rather than answering wrongly, and
 // a fixture that hangs on regression is worse than none.
+//
+// NO TERMINATION GUARD HERE, unlike the `recv` twin, which closes its channel
+// so that a regressed `pop` produces a bounded diff. This fixture never closes
+// anything, so if `push` ever regressed to refusing every value its `send`
+// would spin forever and this fixture would HANG rather than fail -- measured,
+// a timeout kill with no output. Closing would not fix it: a closed channel
+// makes `send` return false immediately and the fixture would pin nothing, and
+// a third task to close it would add the very suspension point this
+// interleaving depends on the absence of. Documented, not fixed; see the
+// `close` comment in `channel_recv_suspends_only_to_retry.nova`.
 async fn produce(mut tx: Sender<Int>) {
     let sent = tx.send(7).await
     println("send ${sent}")
