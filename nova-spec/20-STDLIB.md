@@ -970,14 +970,21 @@ uniform documented leak — a guard never released leaves its mutex locked
 for the life of the process, the same trade ADR 0012 made for an unclosed
 `File`.
 
-**The other three items are deferrals with named blockers, not
-oversights**, and none is a matter of merely not having gotten to it yet.
-`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)` returns a tuple type,
-and Nova's type system does not have those yet — measured as
-`error[E0900]: tuple types are not supported yet`. Of the three, this is
-the one this project actually wants: a bounded channel is broadly useful
-and the blocker is purely that Nova cannot yet express its own specified
-signature, not a design objection. `spawn_blocking<T>(f: fn() -> T) ->
+**Of those other three items, two remain deferrals with named blockers,
+not oversights**, and neither is a matter of merely not having gotten to
+it yet. **The third, `channel<T>`, shipped on 2026-08-21 (branch
+`std-sync-channel`) — see this section's own amendment of that date below,
+and `docs/adr/0017-std-sync-channel-shape.md`.** What this paragraph said
+about it was correct when written and is false now: that
+`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)` returns a tuple type
+Nova's type system does not have — measured then, and still measured now,
+as `error[E0900]: tuple types are not supported yet`. **That diagnostic is
+unchanged; what changed is the signature**, which now returns
+`Channel<T>`, the record this section declares immediately above the
+function and never returns. Nothing in this paragraph should be read as
+saying `channel` is unbuilt. The two that do remain are unchanged by that
+increment, and both are `std/task` items rather than `std/sync` ones.
+`spawn_blocking<T>(f: fn() -> T) ->
 JoinHandle<T>` needs a thread pool to run `f` on — `nova-runtime`'s
 `task.rs` opens with "A single-threaded cooperative executor," and the only
 `std::thread::spawn` anywhere in the runtime is a test helper in `poll.rs`,
@@ -1034,6 +1041,104 @@ instead. This `Mutex` is also **not re-entrant** (a task that calls `lock`
 while already holding the same mutex spins against itself, forever) and
 makes **no fairness guarantee** (which waiter acquires the lock next, when
 several are spinning, is unspecified).
+
+**AMENDED 2026-08-21 (branch `std-sync-channel`): the bounded channel
+shipped, and it does not have the signature this section writes.** The
+paragraph above listing it among the deferrals is corrected in place at
+its own location; this is the record of what was actually built. Shipped
+in `std/sync/lib.nova`, pure Nova, **zero new intrinsics**
+(`Builtin::STD_ONLY` stays at 65) and no `STD_MODULES` change (still 12 —
+`std/sync` joined the array last increment):
+
+```nova
+pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
+pub record Sender<T> { ch: Channel<T> }
+pub record Receiver<T> { ch: Channel<T> }
+
+pub fn channel<T>(buffer: Int) -> Channel<T>
+
+impl<T> Channel<T> { pub fn sender(...) -> Sender<T>
+                     pub fn receiver(...) -> Receiver<T> }
+impl<T> Sender<T> { pub fn try_send(v: T) -> Bool
+                    pub async fn send(v: T) -> Bool
+                    pub fn close() }
+impl<T> Receiver<T> { pub fn try_recv() -> Option<T>
+                      pub async fn recv() -> Option<T> }
+```
+
+**The deviation is confined to the return type, and it moved *to* a type
+this section already declares.** The specified
+`-> (Sender<T>, Receiver<T>)` cannot be compiled: tuples are
+`error[E0900]: tuple types are not supported yet`
+(`crates/nova-typeck/src/check.rs:2505`), whose own note says the feature
+"arrives in a later milestone". So `channel` returns `Channel<T>` — the
+record declared on the line above it in the code block at the top of this
+section, which that block then never returns, never gives an `impl`, and
+never mentions again — and the pair is reached through `ch.sender()` and
+`ch.receiver()`. `Sender<T>` and `Receiver<T>`, named in the specified
+signature but declared nowhere in this document, are now declared. All
+three of this section's channel type names are therefore built; `Ring<T>`
+(private) is the only name added that this section does not have.
+**Reverting to the tuple when Nova gains tuples is optional, not owed** —
+the accessor form gives the pair an identity that can carry future
+accessors without changing `channel`'s signature, which a tuple return
+cannot. See `docs/adr/0017-std-sync-channel-shape.md`.
+
+**Semantics, each pinned by its own fixture.** `try_send` returns `false`
+when the channel is **full or closed**; the async `send` returns `false`
+**only** when closed, waiting out a full channel. `try_recv` returns
+`None` when **empty**; the async `recv` returns `None` **only when closed
+and drained**, never merely empty — every iteration tries the dequeue
+before reading `closed`, so buffered values drain before a close is
+reported, and a consumer loop therefore has a termination condition at
+all. `close` is idempotent and leaves buffered values readable, so a
+producer may close the instant it stops producing. `buffer < 1` **clamps
+to 1** rather than panicking: a zero-capacity rendezvous channel needs a
+handoff protocol yield-and-retry cannot express without a second wait
+state, and clamping follows `Int::pad`'s precedent
+(`std/fmt/lib.nova:27`) of an early return over a panic.
+
+**Every call site must annotate, and this is forced rather than chosen.**
+`let ch: Channel<Int> = channel(2)` is the only available call form: `T`
+appears only in the return type, so no argument infers it, and Nova has
+no turbofish — `channel<Int>(2)` is not a call but
+`error[P0001]: chained comparison operators are not allowed (use
+parentheses)`, the parser reading `channel < Int > (2)`. Both obvious
+escapes were refused and the reasons are recorded in ADR 0017: a seed
+parameter would make `T` inferable but promotes an implementation detail
+(`[fill; n]` needs a value of `T`) to permanent API, and `Channel::new`
+has the identical inference problem while moving further from this
+section's `channel` free function.
+
+**Two hazards are documented, not prevented, and both follow from Nova
+enforcing no field privacy** — the same standing `MutexGuard` has above
+and `File { fd: 9999 }` has under ADR 0012. *Forgeable handles:*
+`Sender { ch: c }` is ordinary legal code, so the producer/consumer split
+carries intent and not enforcement — a forged `Sender` can send or close
+on a channel it was never given. *Invisible spin:* contention is handled
+by yielding and retrying, exactly as `Mutex` above, with the same
+consequence — a waiter stays **runnable**, and `report_deadlock`
+(`crates/nova-runtime/src/task.rs:1243`) is reached from one place only
+(`:1007`) and only when the ready queue is empty, so it cannot see a
+channel nobody drains. Such a channel does not deadlock visibly; it spins
+forever. This was not merely predicted but **observed**: a mutation making
+`recv` answer `None` on an empty-but-open channel truncated its fixture's
+output and then hung indefinitely, costing a suite timeout. No fairness
+guarantee is made either.
+
+**`RwLock` and `atomic` remain, and three documents disagree about
+whether they were ever specified.** §1's module index (`:27`) names four
+things for `std/sync` — `Mutex, RwLock, channel, atomic`;
+`00-MASTER-SPEC.md:238`'s position 8 names three, omitting `RwLock`; and
+**this section specifies two**, `Mutex` and `Channel`, and is the only one
+of the three that gives any signature at all. So the accurate claim is
+that `channel` **completes this section's own specification of
+`std/sync`** — not that it closes position 8, which stays partial.
+`RwLock` and `atomic` are named only in index lines that no section
+specifies: neither has a signature, a semantic, or a section anywhere in
+`nova-spec/`, so neither is a matter of not having gotten to it. The two
+`std/task`/position-7 items above, `spawn_blocking` and
+`JoinHandle::cancel`, are unaffected by this increment and unchanged.
 
 ---
 
