@@ -1,0 +1,43 @@
+// ORDER DEPENDENCE -- read this before editing.
+//
+// This fixture depends on the executor's ready queue being FIFO round-robin
+// (`crates/nova-runtime/src/task.rs:184`): a task re-queued by `yield_now`
+// waits behind every task already waiting. That is a documented runtime
+// invariant, not an observed coincidence, but it is what makes the
+// interleaving below deterministic. The output order IS the assertion here,
+// so an edit that reorders the two `spawn`s, or adds a suspension point to
+// either task, changes what this pins.
+//
+// WHAT THIS PINS: `send` does not suspend when the channel has room. Its
+// `yield_now().await` belongs in the retry path and nowhere else, so a `send`
+// that can enqueue immediately must do so without yielding. The channel is
+// fresh and has capacity 2, so `produce`'s first `push` succeeds and its
+// retry loop is never entered at all.
+//
+// This is `send`'s half of what `channel_recv_suspends_only_to_retry` pins
+// for `recv`, and it exists because neither `channel_two_tasks_blocking` nor
+// that fixture can see it: moving `send`'s `yield_now().await` out of the
+// retry loop to before the first `push` leaves both of them green. Measured,
+// not assumed. Same reasoning as the `recv` fixture for why the placement is
+// pinned from the terminating side rather than asserted directly -- a retry
+// loop with no suspension point livelocks rather than answering wrongly, and
+// a fixture that hangs on regression is worse than none.
+async fn produce(mut tx: Sender<Int>) {
+    let sent = tx.send(7).await
+    println("send ${sent}")
+}
+
+// A second runnable task, so that a suspension inside `produce` is
+// observable as output order rather than as a timing difference nothing can
+// assert on.
+async fn marker() {
+    println("marker")
+}
+
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let a = spawn(produce(ch.sender()))
+    let b = spawn(marker())
+    a.join().await
+    b.join().await
+}
