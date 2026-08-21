@@ -1,0 +1,6 @@
+zero_first=true
+zero_full=false
+zero_drained=1
+neg_first=true
+neg_full=false
+neg_drained=9

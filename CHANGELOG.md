@@ -234,18 +234,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   private fixed-capacity ring, plus `Sender<T>` and `Receiver<T>` as two
   views onto it. `channel<T>(buffer: Int) -> Channel<T>` constructs one and
   `ch.sender()`/`ch.receiver()` reach the pair; `Sender` has
-  `try_send(v) -> Bool`, `async send(v) -> Bool` and an idempotent
-  `close()`, `Receiver` has `try_recv() -> Option<T>` and
-  `async recv() -> Option<T>`. **The signature deviates from
-  `20-STDLIB.md` §13**, which writes
+  `try_send(mut self, v) -> Bool`, `async send(mut self, v) -> Bool` and an
+  idempotent `close(mut self)`, `Receiver` has
+  `try_recv(mut self) -> Option<T>` and
+  `async recv(mut self) -> Option<T>`. Those `mut` receivers are
+  load-bearing at the call site: per ADR 0005 `mut` is a permission on the
+  binding, so handles must be bound as `let mut tx = ch.sender()` —
+  ``error[E0060]: `Sender_T.try_send` mutates its receiver, but `tx` is
+  immutable`` otherwise. The channel itself needs no `mut`.
+  **The signature deviates from `20-STDLIB.md` §13**, which writes
   `channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)`: that return type
   is a tuple and Nova has none — `error[E0900]: tuple types are not
   supported yet` — so `channel` returns `Channel<T>` instead, the record
-  §13 declares immediately above the function and never returns. The
-  deviation is confined to the return type and the type it moved to is one
-  §13 already declares; all three of §13's channel type names are now
-  built. The two `try_`/`async` pairs differ on purpose: `try_send` returns
-  `false` when the channel is **full or closed** while `send` returns
+  §13's original code block declares immediately above the function and
+  never returns. The deviation is confined to the return type and the type
+  it moved to is one that block already declares; all three of the channel
+  type names it uses are now built. (Scoped to that block because §13 now
+  also carries this increment's amendment, which does return `Channel<T>`.)
+  The blocker was not lifted but routed around: Nova still has no tuples,
+  and §13's literal signature still produces `E0900` today. The two
+  `try_`/`async` pairs differ on purpose: `try_send` returns `false` when
+  the channel is **full or closed** while `send` returns
   `false` **only** when closed, and `try_recv` returns `None` when
   **empty** while `recv` returns `None` **only when closed and drained** —
   every iteration dequeues before reading `closed`, so buffered values
@@ -270,8 +279,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   given, the standing `MutexGuard` already has. Zero new runtime
   intrinsics — `Builtin::STD_ONLY` stays at 65 — `RESERVED_TYPE_NAMES`
   stays at 7, and `STD_MODULES` stays at 12; `std/sync/lib.nova` grows
-  from 166 to 307 lines and the only non-Nova change is the registration
-  of eight new fixtures in `crates/nova-cli/tests/run_tests.rs`. **This
+  from 166 to 307 lines and the only *Rust* change is the registration of
+  ten new fixtures in `crates/nova-cli/tests/run_tests.rs` — no runtime,
+  compiler or codegen crate is touched. Two of those ten close coverage
+  gaps found while writing these records rather than while writing the
+  code: `channel_clamps_buffer_below_one` pins the `buffer < 1` clamp,
+  which no test had exercised, and `channel_send_refuses_when_closed` pins
+  the async `send`'s refusal on a closed channel, the one point where
+  `send` and `try_send` are specified to differ and which no test had
+  called. **This
   supersedes the `std/sync` entry above where it says `channel<T>` does
   not ship** — true of that increment, no longer true of the tree — but it
   does **not** close position 8, which stays partial: §13 specifies

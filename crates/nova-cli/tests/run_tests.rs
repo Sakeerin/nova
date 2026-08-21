@@ -8226,3 +8226,56 @@ fn channel_send_suspends_only_to_retry_run() {
         .success()
         .stdout(expected);
 }
+
+/// Pins `channel`'s `buffer < 1` clamp, which until this fixture existed was
+/// executed by no test in the suite: every other channel fixture passes 1, 2
+/// or 3, and no `channel(0)` or negative argument appeared anywhere in the
+/// repo. Synchronous, so no regression of the clamp can hang. Both the zero
+/// and the negative case are asserted because they fail differently without
+/// the clamp -- capacity 0 refuses the first send, capacity -4 reaches
+/// `[v; cap]` with a negative length -- and the clamp is what keeps a
+/// negative modulus away from the ring's `%` arithmetic entirely.
+#[test]
+fn channel_clamps_buffer_below_one_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_clamps_buffer_below_one.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_clamps_buffer_below_one.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Pins that the async `send` returns false on a closed channel -- the one
+/// place `send` and `try_send` are specified to differ, and, until this
+/// fixture, pinned by neither. No other test calls `send` on a closed
+/// channel: `channel_close_refuses_send` uses `try_send`, and
+/// `channel_two_tasks_blocking`'s producer closes only after every send has
+/// returned. Asserts the open case on the same channel first, so a `false`
+/// is attributable to the `close` rather than to a broken `send`.
+///
+/// Bounded on the shipped code because the `closed` check precedes the
+/// `yield_now().await`. It is NOT bounded under every regression: deleting
+/// that check makes this fixture hang rather than fail, since `push` refuses
+/// every value on a closed channel and `main` is the only task, so the retry
+/// loop spins unpreemptably. Its own comment records why no fixture can fix
+/// that. What it catches as a bounded diff is `push` losing its `closed`
+/// guard, which flips the second line to true.
+#[test]
+fn channel_send_refuses_when_closed_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_send_refuses_when_closed.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_send_refuses_when_closed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

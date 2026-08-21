@@ -35,10 +35,14 @@ belongs to its own increment." This is that increment.
 Three of §13's own oddities shaped the redesign rather than a free choice
 of API:
 
-- §13 **declares** `pub record Channel<T>` on the line immediately above
-  the function and then never returns it, never gives it an `impl`, and
-  never mentions it again. It also never declares `Sender<T>` or
-  `Receiver<T>` at all, though the signature names both.
+- §13's **original code block** declares `pub record Channel<T>` on the
+  line immediately above the function and then never returns it, never
+  gives it an `impl`, and never mentions it again; it declares neither
+  `Sender<T>` nor `Receiver<T>` at all, though the signature names both.
+  Scoped to that block deliberately: §13 now also carries this
+  increment's amendment, which returns `Channel<T>` and declares all
+  three, so the unqualified claim would be falsified by the same commit
+  that makes it.
 - The two named-but-undeclared types are the pair the tuple was carrying,
   so any shape that keeps the producer/consumer split has to invent their
   declarations regardless.
@@ -77,7 +81,14 @@ reference types in Nova, so both observe every mutation; the split carries
 intent — hand `tx` to producers and `rx` to consumers — and not
 enforcement.
 
-Semantics, all measured by fixture:
+Semantics. Every clause below is pinned by a fixture — but two of them
+were **not** until this increment added them, and an earlier draft of this
+ADR claimed otherwise. The `buffer < 1` clamp was executed by no test in
+the suite (no `channel(0)` or negative argument existed anywhere in the
+repo), and no test called the async `send` on a closed channel at all.
+`channel_clamps_buffer_below_one` and `channel_send_refuses_when_closed`
+close both; the coverage table under "What is not testable" gives the
+measured detectors:
 
 - `try_send` returns `false` when the channel is **full or closed**; the
   async `send` returns `false` **only** when closed, waiting out a full
@@ -93,7 +104,8 @@ Semantics, all measured by fixture:
   rendezvous channel needs a handoff protocol yield-and-retry cannot
   express without a second wait state; clamping follows `Int::pad`'s
   precedent of an early return over a panic
-  (`std/fmt/lib.nova:27`, `if len >= width { return s }`).
+  (`std/fmt/lib.nova:30`, `if len >= width { return s }`; `:27` is the
+  function's signature).
 
 ### 2. Reverting to the tuple when tuples land is optional, not owed
 
@@ -230,11 +242,18 @@ spec as it stands and neither is merely un-got-to. Against the
 four-item index, two of four ship; against the three-item build order, two
 of three; against §13, two of two.
 
-The distinction matters because ADR 0016's own Consequences section mixed
-position-7 items (`spawn_blocking`, `JoinHandle::cancel`, both `std/task`)
-into the same discussion as position-8 items, and a later reader
-summarising loosely can produce a denominator that belongs to neither
-position. Position 7 is not in scope here at all: `spawn_blocking` still
+The distinction matters because ADR 0016's own Consequences section
+discusses position-7 items (`spawn_blocking`, `JoinHandle::cancel`, both
+`std/task`) alongside position-8 items, and a later reader summarising
+loosely can produce a denominator that belongs to neither position. **ADR
+0016 itself does not conflate them** — it separates the two explicitly
+(`:197`, and `:200-202` says the positions "are kept apart here
+deliberately", recording that an earlier draft of its own had counted all
+four against position 8). The hazard is in the summarising, not in that
+ADR; an earlier version of this paragraph said ADR 0016 "mixed" them,
+which overstates it and is corrected here.
+
+Position 7 is not in scope here at all: `spawn_blocking` still
 needs a thread pool in a runtime whose own first line calls itself "A
 single-threaded cooperative executor", and `JoinHandle::cancel` still
 needs an interrupt hook the poll ABI does not have. Neither is touched by
@@ -249,8 +268,9 @@ way again:
 let (tx, rx) = sync.channel::<Int>(buffer: 100)
 ```
 
-Four separate impossibilities in two lines — tuple destructuring, a
-turbofish, a named argument, and `sync.` as a module path — plus "Backed
+Four separate impossibilities on a single line (`13-RUNTIME.md:131`) —
+tuple destructuring, a turbofish, a named argument, and `sync.` as a
+module path — plus, on `:136`, "Backed
 by Tokio's `mpsc::channel`", where **the workspace depends on no Tokio at
 all** (`grep -i tokio` over every `Cargo.toml` returns nothing; the
 runtime is a hand-written single-threaded executor). This is not a
@@ -274,9 +294,55 @@ reader does not have to rediscover it.
 
 ### What is not testable, and why that is load-bearing
 
-The eight `channel_*` fixtures pin every semantic above except one, and
-the exception is not an oversight — it is unreachable by construction, so
-recording it is the only available mitigation.
+The ten `channel_*` fixtures pin every semantic in Decision 1. What they
+cannot pin is one *implementation property* — where a retry loop's
+suspension sits — and the reason is worth recording, because it is a
+property of the executor rather than an omission.
+
+An earlier draft of this section said the fixtures pinned "every semantic
+except one" and called that exception "unreachable by construction". Both
+halves were wrong. There were **two** unpinned semantics, not one — the
+`buffer < 1` clamp and `send`'s refusal on a closed channel — and neither
+was unreachable: both were pinned by four straightforward lines each, in
+this same increment. The phrase is dropped rather than reworded, because
+nothing in Decision 1 is unreachable now. What follows is about the
+livelock only.
+
+Measured detectors, whole-suite counts, each the complete set across all
+44 targets:
+
+| Mutation | Fails | Detected by | Mode |
+|---|---|---|---|
+| clamp deleted (`cap = buffer`) | **1** | `channel_clamps_buffer_below_one` | bounded: panic, exit 127 |
+| `push` loses its `closed` guard | **2** | `channel_close_refuses_send`, `channel_send_refuses_when_closed` | bounded: stdout diff |
+| `send` loses its own `closed` check | **1** | `channel_send_refuses_when_closed` | **hang**, exit 124 |
+
+The middle row is the evidence that the new `send` fixture adds real
+coverage rather than restating the old one: that mutation had **one**
+detector before it and has two now.
+
+**The third row was predicted to fail and in fact hangs, and the
+difference is the whole point of this subsection.** The instruction that
+produced `channel_send_refuses_when_closed` reasoned that because the
+`closed` check precedes the `yield_now().await`, a fixture built on it is
+"bounded by construction", and asked for confirmation that deleting the
+check makes the fixture fail. Measured: it prints `open=true` and then
+spins until killed (exit 124 at a 30-second cap; no orphaned process, and
+the rest of the suite stays green with that one test skipped — 1045 passed
+/ 0 failed / 44 targets, so this fixture is its sole detector). The
+reasoning was right about the *shipped* ordering and wrong about the
+*mutant*: once the check is gone, `push` still refuses every value on a
+closed channel, so the retry loop has no suspension that can ever succeed
+and `main` is the only task. Boundedness was a property of the code under
+test, not of the fixture. This is the third time on this branch that a
+channel regression turned out to manifest as a hang rather than a
+failure — the others being `recv` returning `None` on an empty-but-open
+channel, and `push` refusing everything under
+`channel_send_suspends_only_to_retry` — and the pattern is now clear
+enough to state as a rule: **on this module, any mutation that leaves a
+retry loop unsatisfiable hangs, and only mutations that produce a wrong
+*answer* fail.** Mutation testing here wants a per-test cap or a `--skip`
+prepared in advance.
 
 **The livelock cannot be asserted directly.** "The retry loop suspends"
 can only be tested by driving the code into the retry loop with the
@@ -284,8 +350,14 @@ suspension removed, and that state is a *livelock*, not a wrong answer: a
 task spinning with no suspension point is unpreemptable on a
 single-threaded cooperative executor, so the executor never regains
 control, no watchdog can fire, and nothing observes anything. Any fixture
-asserting it directly **must hang rather than fail.** There is no bounded
-version of that test.
+asserting it directly **must hang rather than fail** under this harness,
+which runs each fixture as `nova run` to completion and asserts on its
+stdout: there is no per-test time budget a fixture can declare, and no way
+for it to report "still spinning" as a failure. That is a statement about
+this harness and this executor, not a theorem — a runtime with preemption,
+or a harness with a per-test cap, would make the livelock observable. Both
+are larger changes than a fixture, which is why the mitigation here is a
+record rather than a test.
 
 What is bounded is the mutation's **first** consequence rather than its
 eventual one. Moving a yield to the front of the method makes it fire even
@@ -332,10 +404,13 @@ it, and this ADR does not claim otherwise.
 - **`STD_MODULES` stays at 12.** `std/sync` joined the array last
   increment; this one only grows its `lib.nova` (166 → 307 lines).
 - **The poll ABI, the executor, and `nova-runtime` are untouched.** The
-  only non-Nova change in the entire branch is fixture registration in
-  `crates/nova-cli/tests/run_tests.rs`.
-- **Suite: 44 targets / 1044 passed / 0 failed / 8 ignored.** The eight
-  ignored are ADR-0010's GC tests, untouched.
+  only *Rust* change in the entire branch is fixture registration in
+  `crates/nova-cli/tests/run_tests.rs` — no runtime, compiler or codegen
+  crate is modified. Non-Nova files that do change: that registration, the
+  `.stdout` goldens, and these records.
+- **Suite: 44 targets / 1046 passed / 0 failed / 8 ignored.** The two
+  added tests are the coverage fixtures above; the eight ignored are
+  ADR-0010's GC tests, untouched.
 
 ## References
 
@@ -353,7 +428,12 @@ it, and this ADR does not claim otherwise.
   explicit release over a collector backstop. Cited for the *shape* of the
   response only — its argument about the collector's per-object hook
   reporting a freed address is specific to a runtime-managed handle and
-  does not transfer to a channel, which never reaches the collector
+  does not transfer to a channel. Precisely: a `Channel<T>` is an ordinary
+  heap record that the sweep does visit; what does not exist is any
+  runtime registration keyed on it, so there is nothing for a per-object
+  notification to look up. An earlier version of this entry said a channel
+  "never reaches the collector", which is wrong about the object and right
+  only about the registration
 - `docs/adr/0009-async-execution-model.md`: the single-threaded
   cooperative executor these two async methods live on; `spawn_blocking`
   recorded as un-honourable (`:107`) and cancellation as an **open
@@ -378,12 +458,23 @@ it, and this ADR does not claim otherwise.
   `STD_MODULES`, 12, unchanged
 - `tests/runtime/channel_uncontended.nova`, `channel_full_refuses.nova`,
   `channel_fifo_order.nova`, `channel_close_refuses_send.nova`,
-  `channel_close_then_drain.nova`: the five synchronous fixtures, all
-  `try_send`/`try_recv`
+  `channel_close_then_drain.nova`, `channel_clamps_buffer_below_one.nova`:
+  the six synchronous fixtures, all `try_send`/`try_recv` except the last,
+  which calls neither async method and exists to pin the `buffer < 1`
+  clamp — the sole detector of that mutation, bounded because nothing in
+  it awaits
 - `tests/runtime/channel_two_tasks_blocking.nova`: the only fixture in
   which `send` and `recv` genuinely suspend and resume; the sole detector
   of both "`send` never blocks" and "`recv` returns `None` when
   empty-but-open", the latter as a **hang**
+- `tests/runtime/channel_send_refuses_when_closed.nova`: the only fixture
+  that calls the async `send` on a closed channel, and so the only one
+  pinning the single point where `send` and `try_send` are specified to
+  differ. Asserts the open case on the same channel first, so a `false` is
+  attributable to the `close`. Bounded on the shipped code because the
+  `closed` check precedes the yield; **not** bounded under every
+  regression — deleting that check makes it hang, measured, and no fixture
+  can fix that for the reason given above
 - `tests/runtime/channel_recv_suspends_only_to_retry.nova` and
   `channel_send_suspends_only_to_retry.nova`: the two placement fixtures.
   Each is the sole detector of its own mutation, and each mutation left
