@@ -1,0 +1,40 @@
+// WHAT THIS PINS: the async `send` returns `false` on a closed channel, and
+// returns it *immediately* -- the `closed` check sits before the
+// `yield_now().await`, so a closed channel with room is answered without a
+// suspension. Before this fixture no test called `send` on a closed channel
+// at all: `channel_close_refuses_send` uses the synchronous `try_send`, and
+// `channel_two_tasks_blocking`'s producer closes only after every one of its
+// sends has already returned. So the difference between `try_send` (false
+// when full OR closed) and `send` (false ONLY when closed) was documented in
+// three records and pinned by none of them.
+//
+// Both halves are asserted, and the first is what makes the second
+// attributable: the same `send`, on the same channel, returns true while the
+// channel is open and false once it is closed. A regression that broke
+// `send` outright would move the first line too, so a lone `false` cannot be
+// mistaken for correct behaviour.
+//
+// TERMINATION, and one honest limit. On the shipped code this fixture is
+// bounded: `send` on a closed channel returns without ever yielding, so
+// there is nothing to spin on. That is a property of the shipped ordering,
+// not of the fixture. Deleting `send`'s own `if self.ch.closed { return
+// false }` makes this fixture HANG rather than fail -- `push` still refuses
+// every value on a closed channel, so the retry loop spins with no
+// suspension point that can ever succeed, and `main` is the only task. That
+// is the same unpreemptable-livelock shape `channel_recv_suspends_only_to_
+// retry`'s comment describes, and it is not fixable from inside a fixture:
+// any test that drives a send into an unsatisfiable retry loop must hang,
+// because nothing else can run to satisfy it. What this fixture does catch
+// as an ordinary bounded diff is the mutation that makes `close` stop
+// refusing (`push` losing its `closed` guard), which flips the second line
+// from false to true. Measured both ways; see ADR 0017.
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    // Open, with room: true, and no suspension is needed to say so.
+    println("open=${tx.send(1).await}")
+    tx.close()
+    // Closed, still with room: false. `try_send` would also say false here,
+    // but for the other reason, which is exactly why this line needs `send`.
+    println("closed=${tx.send(2).await}")
+}

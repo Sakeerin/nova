@@ -1,0 +1,38 @@
+// WHAT THIS PINS: `channel`'s `buffer < 1` clamp (`std/sync/lib.nova:207`,
+// `let cap = if buffer < 1 { 1 } else { buffer }`). Before this fixture the
+// clamp was executed by no test in the suite -- every other channel fixture
+// calls `channel(1)`, `channel(2)` or `channel(3)`, and no `channel(0)` or
+// negative argument appeared anywhere in the repo. The spec amendment and
+// ADR 0017 both claimed the clamp was pinned; it was not, and this closes
+// that rather than rewording the claim.
+//
+// Synchronous and bounded by construction: nothing here awaits, so no
+// regression of the clamp can hang. Dropping the clamp gives capacity 0,
+// and a capacity-0 ring refuses its first send (`push`'s
+// `len == cap` is `0 == 0`), so the very first line of output moves from
+// true to false.
+//
+// The negative case is not redundant with the zero case. Both take the same
+// branch, but they fail differently without it: capacity 0 refuses quietly,
+// while capacity -4 reaches `[v; cap]` with a negative length and aborts.
+// The clamp is what keeps a negative `buffer` away from the ring's `%`
+// arithmetic entirely -- `std/sync/lib.nova`'s ring invariant requires
+// `cap >= 1` precisely because Nova's `%` truncates toward zero, so a
+// negative modulus would index outside the array rather than wrap.
+fn main() {
+    // `buffer` of 0 clamps to 1, so there is room for exactly one value.
+    let zero: Channel<Int> = channel(0)
+    let mut ztx = zero.sender()
+    let mut zrx = zero.receiver()
+    println("zero_first=${ztx.try_send(1)}")
+    println("zero_full=${ztx.try_send(2)}")
+    println("zero_drained=${zrx.try_recv().unwrap_or(0)}")
+    // A negative `buffer` takes the same branch and lands on the same
+    // capacity of 1, not on a capacity of -4.
+    let neg: Channel<Int> = channel(-4)
+    let mut ntx = neg.sender()
+    let mut nrx = neg.receiver()
+    println("neg_first=${ntx.try_send(9)}")
+    println("neg_full=${ntx.try_send(10)}")
+    println("neg_drained=${nrx.try_recv().unwrap_or(0)}")
+}

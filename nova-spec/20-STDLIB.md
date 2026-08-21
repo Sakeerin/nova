@@ -974,15 +974,17 @@ for the life of the process, the same trade ADR 0012 made for an unclosed
 not oversights**, and neither is a matter of merely not having gotten to
 it yet. **The third, `channel<T>`, shipped on 2026-08-21 (branch
 `std-sync-channel`) — see this section's own amendment of that date below,
-and `docs/adr/0017-std-sync-channel-shape.md`.** What this paragraph said
-about it was correct when written and is false now: that
-`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)` returns a tuple type
-Nova's type system does not have — measured then, and still measured now,
-as `error[E0900]: tuple types are not supported yet`. **That diagnostic is
-unchanged; what changed is the signature**, which now returns
-`Channel<T>`, the record this section declares immediately above the
-function and never returns. Nothing in this paragraph should be read as
-saying `channel` is unbuilt. The two that do remain are unchanged by that
+and `docs/adr/0017-std-sync-channel-shape.md`.** Be precise about which
+half of this paragraph went stale. Its *premise* is still true:
+`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)` does name a tuple,
+Nova still has no tuple types, and that signature still produces
+`error[E0900]: tuple types are not supported yet` today. What is false is
+the *conclusion* drawn from it — that the channel is therefore a deferral.
+The signature moved instead: `channel` now returns `Channel<T>`, the
+record this section's original code block declares immediately above the
+function and never returns. **The blocker was not lifted; it was routed
+around.** Nothing in this paragraph should be read as saying `channel` is
+unbuilt. The two that do remain are unchanged by that
 increment, and both are `std/task` items rather than `std/sync` ones.
 `spawn_blocking<T>(f: fn() -> T) ->
 JoinHandle<T>` needs a thread pool to run `f` on — `nova-runtime`'s
@@ -1057,14 +1059,35 @@ pub record Receiver<T> { ch: Channel<T> }
 
 pub fn channel<T>(buffer: Int) -> Channel<T>
 
-impl<T> Channel<T> { pub fn sender(...) -> Sender<T>
-                     pub fn receiver(...) -> Receiver<T> }
-impl<T> Sender<T> { pub fn try_send(v: T) -> Bool
-                    pub async fn send(v: T) -> Bool
-                    pub fn close() }
-impl<T> Receiver<T> { pub fn try_recv() -> Option<T>
-                      pub async fn recv() -> Option<T> }
+impl<T> Channel<T> {
+    pub fn sender(self) -> Sender<T>
+    pub fn receiver(self) -> Receiver<T>
+}
+impl<T> Sender<T> {
+    pub fn try_send(mut self, v: T) -> Bool
+    pub async fn send(mut self, v: T) -> Bool
+    pub fn close(mut self)
+}
+impl<T> Receiver<T> {
+    pub fn try_recv(mut self) -> Option<T>
+    pub async fn recv(mut self) -> Option<T>
+}
 ```
+
+**The `mut self` receivers are part of the surface, not decoration.** Per
+`docs/adr/0005-mutable-receivers-and-one-shot-hash.md`, `mut` is a
+permission on the *binding*, so a `mut self` method can only be called
+through a binding that is itself `mut`. Every call site therefore reads
+`let mut tx = ch.sender()`, and `let tx = ch.sender()` followed by
+`tx.try_send(1)` does not compile — measured:
+``error[E0060]: `Sender_T.try_send` mutates its receiver, but `tx` is
+immutable``. `sender()` and `receiver()` take a
+plain `self` and `channel` is a free function, so the annotated `let ch:
+Channel<Int> = channel(2)` needs no `mut` — only the two handles do. An
+earlier version of this amendment omitted every receiver, which made the
+block read as though `let tx = ch.sender()` were enough; §13's own style
+carries receivers (`pub async fn lock(self) -> MutexGuard<T>`) and this
+now matches it.
 
 **The deviation is confined to the return type, and it moved *to* a type
 this section already declares.** The specified
@@ -1075,16 +1098,29 @@ this section already declares.** The specified
 record declared on the line above it in the code block at the top of this
 section, which that block then never returns, never gives an `impl`, and
 never mentions again — and the pair is reached through `ch.sender()` and
-`ch.receiver()`. `Sender<T>` and `Receiver<T>`, named in the specified
-signature but declared nowhere in this document, are now declared. All
-three of this section's channel type names are therefore built; `Ring<T>`
-(private) is the only name added that this section does not have.
+`ch.receiver()`. `Sender<T>` and `Receiver<T>` are named in the specified
+signature but declared nowhere in that block, and are declared here for
+the first time. All three of the channel type names that block uses are
+therefore built; `Ring<T>` (private) is the only name in the shipped
+module that the block does not have. **Every claim in this paragraph about
+what §13 "never" does is scoped to that original code block, not to §13
+as a whole** — this amendment is itself part of §13 now, and it returns
+`Channel<T>`, declares all three types, and names `Ring<T>`.
 **Reverting to the tuple when Nova gains tuples is optional, not owed** —
 the accessor form gives the pair an identity that can carry future
 accessors without changing `channel`'s signature, which a tuple return
 cannot. See `docs/adr/0017-std-sync-channel-shape.md`.
 
-**Semantics, each pinned by its own fixture.** `try_send` returns `false`
+**Semantics, and what pins each.** Ten `channel_*` fixtures in
+`tests/runtime/` cover the clauses below. Two of them were added only
+after this amendment was first written, because an earlier version of this
+sentence claimed each clause was "pinned by its own fixture" when two were
+pinned by nothing: the `buffer < 1` clamp, which no test exercised (no
+`channel(0)` or negative argument existed in the repo at all), and the
+async `send`'s refusal on a closed channel, which no test called.
+`channel_clamps_buffer_below_one` and `channel_send_refuses_when_closed`
+close both, and `docs/adr/0017-std-sync-channel-shape.md` carries the
+measured detector counts. `try_send` returns `false`
 when the channel is **full or closed**; the async `send` returns `false`
 **only** when closed, waiting out a full channel. `try_recv` returns
 `None` when **empty**; the async `recv` returns `None` **only when closed
