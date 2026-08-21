@@ -8075,3 +8075,74 @@ fn sync_mutex_stale_guard_cannot_write_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn channel_uncontended_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/channel_uncontended.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_uncontended.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn channel_full_refuses_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/channel_full_refuses.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_full_refuses.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn channel_fifo_order_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/channel_fifo_order.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_fifo_order.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn channel_close_refuses_send_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_close_refuses_send.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_close_refuses_send.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn channel_close_then_drain_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/channel_close_then_drain.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_close_then_drain.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

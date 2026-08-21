@@ -1,0 +1,9 @@
+fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    println("before=${tx.try_send(1)}")
+    tx.close()
+    println("after=${tx.try_send(2)}")
+    tx.close()
+    println("after_second_close=${tx.try_send(3)}")
+}

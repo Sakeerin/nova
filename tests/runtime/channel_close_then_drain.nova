@@ -1,0 +1,11 @@
+fn main() {
+    let ch: Channel<Int> = channel(3)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+    println("s1=${tx.try_send(7)}")
+    println("s2=${tx.try_send(8)}")
+    tx.close()
+    println("d1=${rx.try_recv().unwrap_or(0)}")
+    println("d2=${rx.try_recv().unwrap_or(0)}")
+    println("then_empty=${rx.try_recv().is_none()}")
+}
