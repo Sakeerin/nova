@@ -37,7 +37,21 @@ pub record Mutex<T> { locked: Bool, value: T }
 // object's own address*, which tells an `fd`-keyed table nothing. That
 // argument is about `File`, not about a pure-Nova guard, and does not
 // transfer here.)
-pub record MutexGuard<T> { owner: Mutex<T> }
+//
+// `released` is what makes that idempotence true rather than merely claimed,
+// and `File`'s precedent does not supply it. `File`'s second `close` is safe
+// because an `fd` is a key into a runtime table and absence from that table
+// *is* closedness (ADR 0012). A guard has no table and no key: `owner` is the
+// live mutex itself, because records are reference types
+// (`docs/adr/0005-mutable-receivers-and-one-shot-hash.md`), and this compiler
+// has no move or linear checking, so a guard stays usable after `release`
+// (`crates/nova-cli/tests/run_tests.rs:3916-3919` records the grep behind
+// that). An unconditional `self.owner.locked = false` would therefore let a
+// stale guard clear `locked` while a *different* task is inside its critical
+// section. The flag supplies the missing state directly, so a released guard
+// is inert -- see `release` and `set` below, and
+// `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova`.
+pub record MutexGuard<T> { owner: Mutex<T>, released: Bool }
 
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T> {
@@ -45,9 +59,13 @@ impl<T> Mutex<T> {
     }
 
     // Take the flag if it is free. Private: the two public entry points differ
-    // only in what they do when it is not, and returning a `Bool` rather than
-    // an `Option` is what lets `lock`'s loop retry without unwrapping --
-    // `Option` has `is_some`, `map` and `unwrap_or` but no `unwrap`.
+    // only in what they do when it is not, and returning a `Bool` is what lets
+    // `lock`'s `while` condition read the result directly -- `!self.take()`
+    // rather than an `Option` the loop would have to inspect and discard.
+    //
+    // (An earlier version of this comment gave the reason as `Option` having
+    // "no `unwrap`". That is false: `Option::unwrap` is at
+    // `std/core/lib.nova:26` and std/core calls it five times.)
     fn take(mut self) -> Bool {
         if self.locked { return false }
         self.locked = true
@@ -59,7 +77,7 @@ impl<T> Mutex<T> {
     // could mistake for one.
     pub fn try_lock(mut self) -> Option<MutexGuard<T>> {
         if self.take() {
-            Some(MutexGuard { owner: self })
+            Some(MutexGuard { owner: self, released: false })
         } else {
             None
         }
@@ -76,13 +94,18 @@ impl<T> Mutex<T> {
         while !self.take() {
             yield_now().await
         }
-        MutexGuard { owner: self }
+        MutexGuard { owner: self, released: false }
     }
 }
 
 impl<T> MutexGuard<T> {
-    // The guarded value. Records are reference types, so mutating the returned
-    // value's fields mutates what the mutex holds -- which is the point.
+    // The guarded value. Records and arrays are reference types, so mutating
+    // the returned value's fields or elements mutates what the mutex holds --
+    // which is the point. But a `T` with no assignable interior is *copied*
+    // out, and mutating that copy cannot reach the mutex: `Int`, `Bool`,
+    // `Float` and `Char` have no fields to assign, and `std/strings` has no
+    // in-place mutation at all (zero `mut self` methods in its nineteen
+    // `pub fn`s). Use `set` for those.
     //
     // Callable after `release`, and the language cannot prevent that: the guard
     // holds a reference to a heap object either way. Documented, not enforced.
@@ -90,8 +113,25 @@ impl<T> MutexGuard<T> {
         self.owner.value
     }
 
-    // Release the lock. Idempotent -- a second call is a no-op.
+    // Replace the guarded value -- the other half of the pair `Vec<T>` already
+    // ships, `get` at `std/collections/lib.nova:49` with `set` at `:53`, and
+    // for the same reason: without it a `Mutex<Int>` is a read-only view.
+    //
+    // A no-op on a released guard, exactly as `release` is. A stale `set` is
+    // the worse of the two hazards `released` closes: a stale `release` frees
+    // a flag another task owns, but a stale `set` writes into the protected
+    // value while that task is inside its critical section.
+    pub fn set(mut self, v: T) {
+        if self.released { return }
+        self.owner.value = v
+    }
+
+    // Release the lock. Idempotent -- a second call is a no-op, and `released`
+    // makes that true rather than only stated: without it this body is an
+    // unconditional write that would free a lock the caller no longer owns.
     pub fn release(mut self) {
+        if self.released { return }
+        self.released = true
         self.owner.locked = false
     }
 }

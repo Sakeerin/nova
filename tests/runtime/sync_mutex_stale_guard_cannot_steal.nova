@@ -1,0 +1,33 @@
+// A stale guard must not steal a lock that has since been reacquired. This is
+// the one shape none of the other fixtures reaches: each of them releases a
+// guard and then stops, so an unconditional `release` looks idempotent.
+//
+// `holder` takes the lock and suspends twice inside its critical section.
+// `stale` carries the guard `main` already released and releases it a second
+// time in between, so that release lands while `holder` owns the mutex. With
+// `MutexGuard`'s `released` flag the stale release is inert. Without it, it
+// clears `locked`, and `holder`'s own `try_lock` then succeeds -- a second live
+// guard on a mutex somebody else is holding.
+async fn holder(mut m: Mutex<Int>) {
+    let mut g = m.lock().await
+    yield_now().await
+    yield_now().await
+    println("still_held=${m.try_lock().is_none()}")
+    g.release()
+}
+
+async fn stale(mut g: MutexGuard<Int>) {
+    yield_now().await
+    g.release()
+}
+
+async fn main() {
+    let mut m = Mutex::new(0)
+    let mut first = m.lock().await
+    first.release()
+    let h = spawn(holder(m))
+    let s = spawn(stale(first))
+    h.join().await
+    s.join().await
+    println("free_at_end=${m.try_lock().is_some()}")
+}

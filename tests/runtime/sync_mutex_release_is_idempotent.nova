@@ -1,6 +1,11 @@
-// Releasing twice is a no-op, matching `File::close`. There is no `Drop` in
-// this language, so release is explicit, and an explicit operation that
-// punishes being called twice is a trap rather than a safeguard.
+// Releasing twice is a no-op. There is no `Drop` in this language, so release
+// is explicit, and an explicit operation that punishes being called twice is a
+// trap rather than a safeguard.
+//
+// Both releases here happen with no intervening acquire, so this fixture
+// passes even if `MutexGuard`'s `released` flag is removed. The case it cannot
+// see -- a stale release landing after another task has taken the lock -- is
+// `sync_mutex_stale_guard_cannot_steal.nova`.
 async fn main() {
     let mut m = Mutex::new(1)
     match m.try_lock() {

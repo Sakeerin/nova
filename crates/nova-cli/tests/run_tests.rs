@@ -7974,7 +7974,10 @@ fn sync_mutex_try_lock_fails_when_held_run() {
         .stdout(expected);
 }
 
-/// `release` twice is a no-op, matching `File::close`.
+/// `release` twice on the same guard is a no-op. Note what this fixture
+/// cannot see: it releases twice with no intervening acquire, so it passes
+/// even with `MutexGuard`'s `released` flag removed.
+/// `sync_mutex_stale_guard_cannot_steal_run` is the one that covers that.
 #[test]
 fn sync_mutex_release_is_idempotent_run() {
     let expected = std::fs::read_to_string(
@@ -8005,6 +8008,45 @@ fn sync_mutex_two_tasks_serialise_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/sync_mutex_two_tasks_serialise.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same lost-update test over a bare `Mutex<Int>` rather than a record
+/// wrapper, which is what `MutexGuard::set` is for: `get` copies an `Int` out,
+/// so mutating the copy cannot reach the mutex. This fixture does not compile
+/// without `set`.
+#[test]
+fn sync_mutex_int_set_serialises_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_int_set_serialises.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_int_set_serialises.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// A guard released once, then released again after another task has taken the
+/// lock, must not free it. This is the case `sync_mutex_release_is_idempotent`
+/// cannot see: it releases twice with no intervening acquire, so an
+/// unconditional `self.owner.locked = false` passes it. `MutexGuard`'s
+/// `released` flag is what makes the documented idempotence true here.
+#[test]
+fn sync_mutex_stale_guard_cannot_steal_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_stale_guard_cannot_steal.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_stale_guard_cannot_steal.nova"))
         .assert()
         .success()
         .stdout(expected);
