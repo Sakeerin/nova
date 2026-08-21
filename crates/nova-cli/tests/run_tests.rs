@@ -8036,7 +8036,11 @@ fn sync_mutex_int_set_serialises_run() {
 /// lock, must not free it. This is the case `sync_mutex_release_is_idempotent`
 /// cannot see: it releases twice with no intervening acquire, so an
 /// unconditional `self.owner.locked = false` passes it. `MutexGuard`'s
-/// `released` flag is what makes the documented idempotence true here.
+/// `released` flag is what makes the documented idempotence true here. Pins
+/// `release`'s use of that flag only -- `set`'s use is pinned by
+/// `sync_mutex_stale_guard_cannot_write_run` below. Depends on the executor's
+/// FIFO ready queue to place the stale release inside the holder's critical
+/// section; the fixture's own comment says so and why it matters.
 #[test]
 fn sync_mutex_stale_guard_cannot_steal_run() {
     let expected = std::fs::read_to_string(
@@ -8047,6 +8051,26 @@ fn sync_mutex_stale_guard_cannot_steal_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/sync_mutex_stale_guard_cannot_steal.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// A stale guard's `set` must not reach the protected value while another task
+/// is inside its critical section. This is `set`'s half of what `released`
+/// closes, and the half that shipped uncovered: deleting `set`'s early return
+/// failed no test in the suite until this fixture existed. Same FIFO ready-queue
+/// dependency as the fixture above, and the same warning in its comment.
+#[test]
+fn sync_mutex_stale_guard_cannot_write_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/sync_mutex_stale_guard_cannot_write.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/sync_mutex_stale_guard_cannot_write.nova"))
         .assert()
         .success()
         .stdout(expected);

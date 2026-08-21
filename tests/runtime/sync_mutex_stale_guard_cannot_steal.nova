@@ -8,6 +8,24 @@
 // `MutexGuard`'s `released` flag the stale release is inert. Without it, it
 // clears `locked`, and `holder`'s own `try_lock` then succeeds -- a second live
 // guard on a mutex somebody else is holding.
+//
+// This pins `release`'s use of the `released` flag only. `set`'s use is pinned
+// by `sync_mutex_stale_guard_cannot_write.nova`, which is the same shape with
+// the same order dependence.
+//
+// ORDER DEPENDENCE -- read this before editing. The fixture proves nothing
+// unless the stale `release` lands *between* `holder`'s two `yield_now`s, and
+// what puts it there is the executor's FIFO ready queue: `yield_now` re-queues
+// a task at the back and the executor pops from the front
+// (`crates/nova-runtime/src/task.rs:184`, "Ids ready for another turn, FIFO:
+// pushed at the back, popped from the front"). That is a documented and
+// separately tested runtime invariant rather than a timing accident, so this
+// test is not flaky -- but the dependency is invisible in the code below.
+// Adding or removing a `yield_now` in either task, or swapping the two `spawn`
+// calls, moves the stale `release` outside the critical section and leaves a
+// fixture that still passes, for the wrong reason. Note this depends on the
+// *executor's* queue discipline, not on any ordering `Mutex` promises among
+// waiters -- it promises none, deliberately (the design doc's §1).
 async fn holder(mut m: Mutex<Int>) {
     let mut g = m.lock().await
     yield_now().await
