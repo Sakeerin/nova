@@ -90,15 +90,43 @@ reason `release` is — a stale `set` would write into the protected value
 while another task was inside its critical section. Neither addition
 touches the runtime: still zero new intrinsics, `STD_ONLY` still 65.
 
-What neither flag can reach is **forgery**. Nova enforces no field
-privacy, so any code holding a `Mutex<T>` can write
+**Each of the flag's two uses has its own fixture, and that is a
+correction.** The 2026-08-21 fix wave that added `released` covered only
+`release`'s use of it (`sync_mutex_stale_guard_cannot_steal`); deleting
+the guard from `set` failed no test at all, measured, while this ADR's
+References described the flag as pinned. A second wave the same day added
+`sync_mutex_stale_guard_cannot_write`, which fails when `set`'s guard is
+deleted. The gap was in the *worse* of the two hazards: a stale `release`
+frees a flag, a stale `set` corrupts the value.
+
+What neither flag can reach is **tampering, and the root of that is a
+single fact: Nova enforces no field privacy.** `released` is an ordinary
+readable and writable field, so it closes mistakes rather than attacks,
+and there are two measured ways past it whose reach is *not* equal.
+**Forgery:** any code holding a `Mutex<T>` can write
 `MutexGuard { owner: m, released: false }` and `release` it without ever
 acquiring the lock — measured, and it frees a lock a real guard is
-holding. That is the same unenforceable shape ADR 0012 records for
+holding. **Resurrection:** writing `g.released = false` on a guard that
+was *genuinely obtained and genuinely released* makes its next `release`
+free a lock a different task now holds — also measured, and its
+precondition is **strictly weaker than forgery's**, because it needs
+nothing but the stale guard itself, not a `Mutex<T>` to name. Earlier
+drafts of this ADR, of `nova-spec/20-STDLIB.md` §13 and of the design doc
+all framed the hole as forgery alone, i.e. as requiring a `Mutex<T>`;
+that understated it, and the correction was measured on 2026-08-21. The
+understatement is pointed, because passing a stale guard to another task
+is precisely what `sync_mutex_stale_guard_cannot_steal` does — the object
+the weaker route needs is one this increment's own fixtures hand around.
+Both routes are the same unenforceable shape ADR 0012 records for
 `File { fd: 9999 }`, with one difference worth stating: a forged `fd`
-safely misses a table lookup, whereas a forged guard writes straight to
-the live mutex. Documented, not enforced, exactly as `get`-after-release
-is.
+safely misses a table lookup, whereas a forged or resurrected guard
+writes straight to the live mutex. Documented, not enforced, exactly as
+`get`-after-release is — and `get` is unguarded for a reason of its own,
+not for want of the state: it returns a `T`, `T` is generic, so an early
+return has no value to hand back, `Option<T>` would change the signature,
+and a Nova panic aborts rather than unwinds across a poll boundary. A
+stale read also cannot corrupt the mutex, where a stale `set` or
+`release` writes to it.
 
 Release is explicit rather than RAII for one
 measured reason: `Drop` is described in three spec files
@@ -214,20 +242,50 @@ each read a shared counter, suspend at a `yield_now().await` placed
 confirmed by instrumented trace, not inferred, in this increment's review.
 With the mutex present the tasks serialise and the result is `n=2`;
 verified by mutation, a never-excluding `take` produces `n=1` here — the
-lost update the mutex exists to prevent. **Four** of this increment's six
-fixtures detect that mutation, all four measured rather than predicted:
-this one and `sync_mutex_int_set_serialises` (both `n=2` becomes `n=1`),
-`sync_mutex_try_lock_fails_when_held` (`second=false` becomes
-`second=true`), and `sync_mutex_stale_guard_cannot_steal`
-(`still_held=true` becomes `still_held=false`). The other two —
-`sync_mutex_uncontended` and `sync_mutex_release_is_idempotent` — pass
-unchanged, because a critical section containing no suspension point is
-already serialised by cooperative scheduling. This fixture and
+lost update the mutex exists to prevent. **Four** of this increment's
+seven fixtures detect that mutation, all four measured rather than
+predicted: this one and `sync_mutex_int_set_serialises` (both `n=2`
+becomes `n=1`), `sync_mutex_try_lock_fails_when_held` (`second=false`
+becomes `second=true`), and `sync_mutex_stale_guard_cannot_steal`
+(`still_held=true` becomes `still_held=false`). No test outside those four
+detects it either — 4 failures of 1036, measured across the whole suite.
+The other three — `sync_mutex_uncontended`,
+`sync_mutex_release_is_idempotent` and
+`sync_mutex_stale_guard_cannot_write` — pass unchanged: the first two
+because a critical section containing no suspension point is already
+serialised by cooperative scheduling, and the third because a stale `set`
+is inert on the `released` flag no matter what `take` does. (Recorded as
+four of *six* before 2026-08-21's second fix wave, which added the seventh
+fixture and re-measured; the four and their symptoms are unchanged.) This fixture and
 `sync_mutex_int_set_serialises` are the two that detect a *lost update*
 across a suspension point, and each only because of that single line's
 placement. A future edit that moves or removes one without noticing would
 silently turn that fixture into a shape test that no longer proves mutual
 exclusion at all.
+
+**The two stale-guard fixtures rest on a different and sharper
+dependency, named here because the paragraph above named only the lost-update
+pair and a reader could reasonably read the omission as absence.**
+`sync_mutex_stale_guard_cannot_steal` and
+`sync_mutex_stale_guard_cannot_write` each depend on the stale `release` or
+`set` landing **while the holder task is inside its critical section**, and
+what puts it there is the executor's **FIFO** ready queue: `yield_now`
+re-queues a task at the back and the executor pops from the front
+(`crates/nova-runtime/src/task.rs:184`, "Ids ready for another turn, FIFO:
+pushed at the back, popped from the front"), so the holder's two `yield_now`s
+and the stale task's one interleave in exactly one order. That is a real,
+documented and separately tested runtime invariant, not an observed
+coincidence — 30 consecutive runs produced one output with no variants — so
+these are not timing-dependent tests. But the dependency is on scheduling
+*order*, which no line in either fixture states, and a future edit that adds
+or removes a `yield_now` in either task, or that reorders the two `spawn`
+calls, moves the stale operation outside the critical section and leaves a
+fixture that passes for the wrong reason. Each fixture's own comment now says
+so. Note the tension worth keeping visible: the design doc's §1 declines to
+promise fairness precisely because "a reader who assumes FIFO will write code
+that depends on it," and these two fixtures are that code — legitimately,
+because they depend on the *executor's* documented queue discipline and not on
+any ordering `Mutex` itself promises among waiters.
 
 Two numbers here were wrong before this increment's fix wave and are
 recorded so the correction is not silent. The count was "three of four
@@ -243,8 +301,13 @@ parenthetical inverted it.
 - `docs/adr/0014-stdlib-build-order-deviations.md`: position 2's two skips
 - `docs/adr/0015-std-fmt-scope.md`: position 2 closed; this ADR's
   structural precedent
-- `docs/adr/0009-async-execution-model.md`: the abandonment-not-cancellation
-  contract `JoinHandle::cancel` would violate
+- `docs/adr/0009-async-execution-model.md`: cancellation filed as an **open
+  residual gap** (`:365`), with "a future `JoinHandle` drop or cancellation"
+  named as the natural fix point (`:405`). What it settles is narrower — the
+  poll ABI has no interrupt hook, so `timeout<T>` abandons rather than cancels
+  (`:328-329`). **It does not state a contract `JoinHandle::cancel` would
+  violate**; an earlier version of this line said it did, contradicting this
+  ADR's own Decision above, and is corrected here (2026-08-21)
 - `docs/adr/0012-file-descriptor-lifecycle.md`: the explicit-release
   precedent this decision follows for the same reason, not the mechanism
   it forecloses
@@ -262,7 +325,15 @@ parenthetical inverted it.
   detect a lost update across a suspension point.
   `sync_mutex_try_lock_fails_when_held` and
   `sync_mutex_stale_guard_cannot_steal` also detect a never-excluding
-  `take`, without needing one — four detectors of six fixtures, measured
-- `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova`: the only
-  fixture that fails if `MutexGuard`'s `released` flag is removed, which is
-  why the defect it pins shipped in the first place
+  `take`, without needing one — four detectors of seven fixtures, measured
+- `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova`: pins `release`'s
+  use of `MutexGuard`'s `released` flag — deleting `release`'s early return
+  fails this fixture and no other, measured across the whole suite, which is
+  why the defect it pins shipped in the first place.
+  `tests/runtime/sync_mutex_stale_guard_cannot_write.nova`: pins `set`'s use
+  the same way. **An earlier version of this entry named only the first and
+  called it "the only fixture that fails if `released` is removed."** That is
+  true of removing the *field* — which breaks both uses at once — and it read
+  as though the flag were covered, when only `release`'s use was; corrected
+  2026-08-21. Both fixtures depend on the executor's FIFO ready queue: see
+  their own comments and the Consequences note above
