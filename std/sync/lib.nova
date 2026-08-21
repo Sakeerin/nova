@@ -48,9 +48,25 @@ pub record Mutex<T> { locked: Bool, value: T }
 // (`crates/nova-cli/tests/run_tests.rs:3916-3919` records the grep behind
 // that). An unconditional `self.owner.locked = false` would therefore let a
 // stale guard clear `locked` while a *different* task is inside its critical
-// section. The flag supplies the missing state directly, so a released guard
-// is inert -- see `release` and `set` below, and
-// `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova`.
+// section. The flag supplies the missing state directly, so `release` and
+// `set` are both no-ops on a released guard -- see both below, and
+// `tests/runtime/sync_mutex_stale_guard_cannot_steal.nova` and
+// `sync_mutex_stale_guard_cannot_write.nova`, one fixture per use.
+//
+// Inert against mistakes, not against tampering, and the reason is one fact:
+// **Nova enforces no field privacy.** Every hole below follows from it.
+// `released` is an ordinary readable, writable field, so `g.released = false`
+// on a guard that was genuinely obtained and genuinely released resurrects it,
+// and its next `release` frees a lock a different task now holds -- measured.
+// That needs nothing but the stale guard itself, which is a *strictly weaker*
+// precondition than building `MutexGuard { owner: m, released: false }` from
+// scratch (also legal, also measured, and it needs a `Mutex<T>` to name). The
+// same fact is why `File { fd: 9999 }` is constructible
+// (`docs/adr/0012-file-descriptor-lifecycle.md`), with one difference worth
+// stating: a forged `fd` safely misses a table lookup, whereas a forged or
+// resurrected guard writes straight to the live mutex. Documented, not
+// enforced. `get` is not guarded by the flag at all, deliberately, and gives
+// its own reason below.
 pub record MutexGuard<T> { owner: Mutex<T>, released: Bool }
 
 impl<T> Mutex<T> {
@@ -65,7 +81,8 @@ impl<T> Mutex<T> {
     //
     // (An earlier version of this comment gave the reason as `Option` having
     // "no `unwrap`". That is false: `Option::unwrap` is at
-    // `std/core/lib.nova:26` and std/core calls it five times.)
+    // `std/core/lib.nova:26` and std/core calls it six times, on five lines
+    // -- 255, 280, 297, 354 and 386, the last of which calls it twice.)
     fn take(mut self) -> Bool {
         if self.locked { return false }
         self.locked = true
@@ -107,8 +124,18 @@ impl<T> MutexGuard<T> {
     // in-place mutation at all (zero `mut self` methods in its nineteen
     // `pub fn`s). Use `set` for those.
     //
-    // Callable after `release`, and the language cannot prevent that: the guard
-    // holds a reference to a heap object either way. Documented, not enforced.
+    // Callable after `release`, and unlike `release` and `set` this
+    // deliberately does *not* return early on `released`. The guard now
+    // carries the state to detect the case, so the earlier reason -- that the
+    // language cannot prevent it -- is no longer the reason: the library could
+    // prevent it and chooses not to. There is nothing to return instead. `get`
+    // yields a `T`, `T` is generic, and no default exists to invent for it, so
+    // an early return has no value to hand back. The two alternatives are a
+    // signature change to `Option<T>`, which every caller would then unwrap,
+    // and a panic -- and a Nova panic aborts the process rather than unwinding,
+    // because nothing unwinds across a poll boundary. A stale read is also the
+    // harmless one of the three: it cannot corrupt the mutex, where a stale
+    // `set` or `release` writes to it. Documented, not enforced.
     pub fn get(self) -> T {
         self.owner.value
     }
@@ -120,7 +147,9 @@ impl<T> MutexGuard<T> {
     // A no-op on a released guard, exactly as `release` is. A stale `set` is
     // the worse of the two hazards `released` closes: a stale `release` frees
     // a flag another task owns, but a stale `set` writes into the protected
-    // value while that task is inside its critical section.
+    // value while that task is inside its critical section. Pinned by
+    // `tests/runtime/sync_mutex_stale_guard_cannot_write.nova`; deleting the
+    // line below fails that fixture and no other.
     pub fn set(mut self, v: T) {
         if self.released { return }
         self.owner.value = v

@@ -555,3 +555,74 @@ already-executed text alone.
    *also* debunked (`0f242a4` corrected it in the shipped module and in the
    pending Task 3 step, deliberately leaving this executed copy); that
    asymmetry was reviewed and upheld, so it stays.
+
+---
+
+## Corrected 2026-08-21 (second fix wave)
+
+This continues the section above rather than editing it — both were written on
+2026-08-21, in two separate waves, and the earlier one stands as written. Each
+item below is executed plan text and therefore history under the same ruling;
+what was wrong is the *enumeration*, which is the one place that was supposed
+to be complete.
+
+6. **Item 5's cited range, "lines 243–288", understates the block it
+   supersedes.** The fenced module source in Task 1 Step 5 runs from line 222
+   to line 307, and two of the lines the fix wave actually changed sit outside
+   243–288: `get`'s doc comment at **296–297** and `release`'s unconditional
+   `self.owner.locked = false` with its bare "Idempotent — a second call is a
+   no-op" comment at **302–305**. Read item 5 as superseding lines **222–307**
+   plus the Interfaces block at line 60.
+
+7. **The debunked ADR-0012 sentence has a second occurrence at line 339**,
+   not only at 243–245: *"The body must record why release is explicit (no
+   `Drop`, mechanism foreclosed by ADR 0012)"*. Item 5 enumerated 243–245 and
+   explained why that copy stays; the same reasoning covers 339, but the
+   enumeration did not name it. Nothing shipped wrong — no commit body and no
+   tracked document repeats the claim, and `std/sync/lib.nova`, ADR 0016 and
+   `nova-spec/20-STDLIB.md` §13 all state the corrected version.
+
+8. **Line 472's cancellation claim is debunked too**, and was missed for the
+   same reason: *"`JoinHandle::cancel` contradicts the
+   **abandonment-not-cancellation** contract that ADR 0009 and the `timeout<T>`
+   increment settled."* ADR 0009 does not settle that. It files "No
+   cancellation" under *Residual gaps*
+   (`docs/adr/0009-async-execution-model.md:365`) and names "a future
+   `JoinHandle` drop or cancellation" as the natural fix point (`:405`); and
+   `nova-spec/13-RUNTIME.md` §4.4 *specifies* structured cancellation, so the
+   project's own spec asks for it. What ADR 0009 settles is narrower and is
+   about `timeout<T>`: the poll ABI has no cancellation hook, so `timeout`
+   **abandons** rather than cancels (`:328-329`). The correct framing is a
+   deferral with a named blocker. This wave corrected the four *shipped* sites
+   repeating the claim — ADR 0016's References, `nova-spec/20-STDLIB.md` §13's
+   amendment, and the design doc's §1 and §8 — after the first wave corrected
+   only ADR 0016's Decision and left its own file self-contradicting. **The
+   lesson, recorded because it is now the sixth instance on this project:
+   after correcting a claim, grep for what it *implied*, not for the words
+   just replaced. Searching the retracted phrase finds only the sentence
+   already fixed.**
+
+9. **`get`-after-release's stated reason is a retracted premise**, at lines
+   296–297 and again in the Plan Self-Review at line 495 ("both are behaviours
+   the language cannot prevent"). Adding `released` gave the guard exactly the
+   state needed to detect the case, so the library *can* prevent it and
+   chooses not to: `get` returns a `T`, so an early return has no value to
+   hand back, `T` is generic so there is no default to invent, `Option<T>`
+   would change the signature, and a Nova panic aborts rather than unwinding
+   across a poll boundary. Corrected at both shipped sites.
+
+10. **Item 3's closing sentence is loose.** "Nothing consumed the false
+    whitelist — no commit body and no tracked document cites it" is
+    contradicted by this plan's own line 25, which *is* the whitelist, and
+    this plan is tracked. The substance holds and was re-verified: **zero**
+    commit bodies on this branch cite any SHA at all.
+
+11. **`set`'s guard shipped untested, and Step 7's mutation table is why it
+    was not noticed.** The 2026-08-21 wave guarded `set` on `released` and
+    added a fixture for `release`'s use of the flag only; deleting `set`'s
+    `if self.released { return }` failed zero tests across the whole suite.
+    `tests/runtime/sync_mutex_stale_guard_cannot_write.nova` closes that —
+    one fixture per use of the flag, seven fixtures in total. Line 328's
+    warning applies exactly: a guard whose mutation fails no test is the most
+    valuable thing to find, and it was found by a reviewer rather than by the
+    wave that wrote it.

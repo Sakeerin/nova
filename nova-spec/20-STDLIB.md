@@ -923,11 +923,29 @@ so for a `T` with no assignable interior — `Int`, `Bool`, `Float`, `Char`,
 `sync_mutex_two_tasks_serialise.nova` wraps its counter in a
 `Counter { n: Int }` record. `set` is a no-op on a released guard, for the
 same reason `release` is. Both are pure Nova: zero new intrinsics,
-`Builtin::STD_ONLY` still 65. Neither flag reaches **forgery** — Nova
-enforces no field privacy, so `MutexGuard { owner: m, released: false }`
-is ordinary legal code and its `release` frees a lock a real guard holds
-(measured), the same unenforceable shape ADR 0012 records for
-`File { fd: 9999 }`.
+`Builtin::STD_ONLY` still 65. Each use of the flag has its own fixture:
+`tests/runtime/sync_mutex_stale_guard_cannot_steal.nova` for `release`,
+`sync_mutex_stale_guard_cannot_write.nova` for `set`.
+
+**Neither flag reaches tampering, and the root of that is one fact: Nova
+enforces no field privacy.** `released` is an ordinary readable and
+writable field, so it closes mistakes rather than attacks, by two measured
+routes of unequal reach. *Forgery:* `MutexGuard { owner: m, released:
+false }` is ordinary legal code and its `release` frees a lock a real
+guard holds — measured; it needs a `Mutex<T>` to name. *Resurrection:*
+writing `g.released = false` on a guard that was genuinely obtained and
+genuinely released makes its next `release` free a lock a different task
+now holds — also measured, and **strictly weaker**, because it needs
+nothing but the stale guard. An earlier version of this amendment named
+forgery alone, which understated the reach; corrected 2026-08-21. Both are
+the unenforceable shape ADR 0012 records for `File { fd: 9999 }`, with one
+difference: a forged `fd` safely misses a table lookup, whereas a forged
+or resurrected guard writes straight to the live mutex. `get` is
+deliberately *not* guarded, and not for want of the state — it returns a
+`T`, `T` is generic, so an early return has no value to hand back;
+`Option<T>` would change the signature; and a Nova panic aborts rather
+than unwinds across a poll boundary. A stale read also cannot corrupt the
+mutex, where a stale `set` or `release` writes to it.
 
 **Release is explicit, and this is not a shortcut a future increment should
 undo.** `Drop` appears in three spec files —
@@ -964,10 +982,19 @@ JoinHandle<T>` needs a thread pool to run `f` on — `nova-runtime`'s
 `task.rs` opens with "A single-threaded cooperative executor," and the only
 `std::thread::spawn` anywhere in the runtime is a test helper in `poll.rs`,
 not a pool a std module could dispatch onto. `JoinHandle::cancel(self)`
-would contradict the **abandonment, not cancellation** contract that ADR
-0009 already settled for this runtime and that the `timeout<T>` increment
-relied on and reaffirmed: adding real cancellation now would need its own
-design, not a one-method stub bolted onto `JoinHandle`.
+needs a mechanism this runtime does not have: nothing unwinds and the poll
+ABI has no interrupt hook, so there is no way to stop a task mid-flight.
+**That is a deferral with a named blocker, not a decision against
+cancellation** — `13-RUNTIME.md` §4.4 specifies structured cancellation and
+`docs/adr/0009-async-execution-model.md` files "No cancellation" as an
+**open residual gap** (`:365`), naming "a future `JoinHandle` drop or
+cancellation" as the natural fix point (`:405`). What ADR 0009 settles is
+narrower: because the poll ABI has no cancellation hook, `timeout<T>`
+**abandons** its inner future rather than cancelling it (`:328-329`).
+Building the hook is its own increment. **An earlier version of this
+sentence said `cancel` "would contradict the abandonment, not cancellation
+contract that ADR 0009 already settled"; ADR 0009 settles no such thing
+about `cancel`, and this is corrected here (2026-08-21).**
 
 **Separately, and not a `std/sync` deviation:** the `module std.sync` line
 that opens the code block above does not parse, and this is true of every

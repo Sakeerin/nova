@@ -207,11 +207,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`std/collections/lib.nova:49`, `:53`), because `get` returns the value
   and a `T` with no assignable interior (`Int`, `Bool`, `Float`, `Char`,
   `String`) is therefore read-only through the guard. `set` is a no-op on a
-  released guard, for the same reason `release` is. Contention is handled by yielding and
-  retrying (`while !self.take() { yield_now().await }`), not by parking, so
-  neither the executor nor the poll ABI changes; the cost is that a waiter
-  stays *runnable*, so `report_deadlock` cannot see it and a never-released
-  lock spins instead of being diagnosed. Release is explicit, not RAII,
+  released guard, for the same reason `release` is. Contention is handled
+  by yielding and retrying (`while !self.take() { yield_now().await }`),
+  not by parking, so neither the executor nor the poll ABI changes; the
+  cost is that a waiter stays *runnable*, so `report_deadlock` cannot see
+  it and a never-released lock spins instead of being diagnosed. Release
+  is explicit, not RAII,
   for one reason and one only: `Drop` is described in three spec files
   (`12-TYPESYSTEM.md:192`, `13-RUNTIME.md:96`, `14-CODEGEN.md:24`) and
   implemented in none of them, so a guard's release
@@ -221,8 +222,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `20-STDLIB.md` §13's neighbouring `std/task` entry (position 7) specifies
   `spawn_blocking` and `JoinHandle::cancel`; none of the three ship this
   increment. `00-MASTER-SPEC.md:238` names a third position-8 item,
-  `atomic`, which this increment does not touch either. Zero new runtime intrinsics — `Builtin::STD_ONLY` stays at 65
-  — and `RESERVED_TYPE_NAMES` stays at 7; `Mutex`/`MutexGuard` are
+  `atomic`, which this increment does not touch either. Zero new runtime
+  intrinsics — `Builtin::STD_ONLY` stays at 65 — and
+  `RESERVED_TYPE_NAMES` stays at 7; `Mutex`/`MutexGuard` are
   ordinary, glob-imported `std/sync` records. See
   `nova-spec/20-STDLIB.md` §13's amendment and
   `docs/adr/0016-std-sync-partial-close.md` for what §13 specifies that
