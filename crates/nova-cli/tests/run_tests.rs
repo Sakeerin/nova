@@ -8146,3 +8146,25 @@ fn channel_close_then_drain_run() {
         .success()
         .stdout(expected);
 }
+
+/// A producer sending 5 values through a channel of capacity 2, and a consumer
+/// draining it, each in its own task. The only fixture that exercises the async
+/// `send`/`recv`; the five synchronous channel fixtures all use
+/// `try_send`/`try_recv`, which never suspend. Capacity below the send count is
+/// what forces `send` to suspend, and it also makes `head` wrap twice. Depends
+/// on the executor's FIFO ready queue (`crates/nova-runtime/src/task.rs:184`)
+/// for a deterministic interleaving; the fixture's own comment says so and why.
+#[test]
+fn channel_two_tasks_blocking_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_two_tasks_blocking.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_two_tasks_blocking.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
