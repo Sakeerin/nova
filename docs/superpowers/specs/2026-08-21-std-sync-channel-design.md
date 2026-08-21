@@ -89,6 +89,31 @@ look like itself.
 both observe every mutation; the split carries intent (hand `tx` to producers, `rx` to
 consumers), not enforcement.
 
+### 3.1 Call sites need a type annotation, and this is forced
+
+`T` appears only in `channel`'s **return** type, so nothing infers it from the
+argument. **Measured at `6e834c5`: Nova has no turbofish.** `make<Int>(3)` does not
+parse -- the parser reads `make < Int > (3)` and reports
+`error[P0001]: chained comparison operators are not allowed (use parentheses)`. An
+annotated `let` does supply the parameter:
+
+```nova
+let ch: Channel<Int> = channel(2)      // works
+let ch = channel(2)                    // no way to name T
+```
+
+So **every call site must annotate**, and every fixture and doc example must show the
+annotated form. This is a real ergonomic cost, and it is worth naming why the obvious
+escape was refused: a seed parameter (`channel(2, 0)`) would make `T` inferable *and*
+delete the lazy-allocation branch in §4 outright, but it puts a parameter in the public
+signature that exists only because `[fill; n]` needs a value -- an implementation detail
+promoted to API. The annotation is the smaller price, and Rust's own `mpsc` often needs
+the same annotation when the element type is otherwise unconstrained.
+
+`Channel::new(buffer)` as an associated function was also considered and is no better:
+the inference problem is identical, so it would need the same annotation while moving
+further from §13's `channel` free function.
+
 ## 4. The ring buffer
 
 ```
