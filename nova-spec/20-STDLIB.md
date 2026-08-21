@@ -899,13 +899,35 @@ impl<T> JoinHandle<T> {
 
 **AMENDED 2026-08-20 (branch `std-sync-mutex`): position 8 above is now
 partially closed.** `Mutex<T> { locked: Bool, value: T }` and
-`MutexGuard<T> { owner: Mutex<T> }` shipped as part of `std/sync`
-(`STD_MODULES` 11 → 12): `Mutex::new`, private `Mutex::take`,
+`MutexGuard<T> { owner: Mutex<T>, released: Bool }` shipped as part of
+`std/sync` (`STD_MODULES` 11 → 12): `Mutex::new`, private `Mutex::take`,
 `Mutex::try_lock -> Option<MutexGuard<T>>`, `async fn Mutex::lock ->
-MutexGuard<T>`, `MutexGuard::get`, `MutexGuard::release` — see
-`docs/adr/0016-std-sync-partial-close.md` for the decision and its
-consequences. `channel<T>`, `spawn_blocking`, and `JoinHandle::cancel`, the
-other three items in the code block above, did not ship.
+MutexGuard<T>`, `MutexGuard::get`, `MutexGuard::set`,
+`MutexGuard::release` — see `docs/adr/0016-std-sync-partial-close.md` for
+the decision and its consequences. `channel<T>`, `spawn_blocking`, and
+`JoinHandle::cancel`, the other three items in the code block above, did
+not ship.
+
+**Two members of that surface were added on 2026-08-21, after this
+increment's own review, and are recorded here because a reader has no
+other way to tell them from the original draft.** `MutexGuard`'s
+`released: Bool` is what makes `release`'s documented idempotence true
+rather than merely stated: `release` was an unconditional
+`self.owner.locked = false` on a guard that carried no released-state, so
+a second `release` on a guard whose mutex had since been reacquired freed
+a lock another task was holding. `MutexGuard::set(mut self, v: T)` is the
+write half of the pair `std/collections`' `Vec` already ships (`get` at
+`std/collections/lib.nova:49`, `set` at `:53`): `get` returns the value,
+so for a `T` with no assignable interior — `Int`, `Bool`, `Float`, `Char`,
+`String` — the guard was a read-only view, which is why
+`sync_mutex_two_tasks_serialise.nova` wraps its counter in a
+`Counter { n: Int }` record. `set` is a no-op on a released guard, for the
+same reason `release` is. Both are pure Nova: zero new intrinsics,
+`Builtin::STD_ONLY` still 65. Neither flag reaches **forgery** — Nova
+enforces no field privacy, so `MutexGuard { owner: m, released: false }`
+is ordinary legal code and its `release` frees a lock a real guard holds
+(measured), the same unenforceable shape ADR 0012 records for
+`File { fd: 9999 }`.
 
 **Release is explicit, and this is not a shortcut a future increment should
 undo.** `Drop` appears in three spec files —
@@ -958,12 +980,16 @@ own named constant, `STD_TEST_MODULE`
 array precisely so that array's length does not depend on whether `nova
 test` is the subcommand running. Counting both: 12 `STD_MODULES` entries
 plus `STD_TEST_MODULE` is **thirteen** `lib.nova` files on disk, up from
-twelve before this increment. §3's and §10's amendments already recorded
-this same fact at twelve total (eleven `STD_MODULES` entries plus
-`std/test`); `std/sync` joining `STD_MODULES` this increment moves the
-count to thirteen — a shift in the count, not in the underlying fact, and
-neither earlier paragraph is wrong, only one behind, exactly as §10's own
-paragraph was when `std/fmt` landed. A reader checking only this section
+twelve before this increment. Two earlier amendments record the same fact
+at their own dates, and they do **not** record the same number: §3's
+2026-08-19 amendment records **twelve** total (eleven `STD_MODULES`
+entries plus `std/test`), and §10's earlier 2026-08-19 amendment records
+**eleven** (ten plus `std/test`), correct as of its own date and written
+before `std/fmt` joined the array — §3's own text says so explicitly.
+`std/sync` joining `STD_MODULES` this increment moves the count to
+thirteen. That is a shift in the count, not in the underlying fact:
+neither earlier paragraph is wrong, each is simply one or two behind,
+exactly as §10's was when `std/fmt` landed. A reader checking only this section
 would otherwise conclude `std/sync` alone fails to conform; it does not
 stand out, and no section here does.
 

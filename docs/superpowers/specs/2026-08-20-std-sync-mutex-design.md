@@ -65,7 +65,7 @@ So "single-threaded" makes a *thread* mutex meaningless and an *async* mutex nec
 
 ```nova
 pub record Mutex<T> { locked: Bool, value: T }
-pub record MutexGuard<T> { owner: Mutex<T> }
+pub record MutexGuard<T> { owner: Mutex<T>, released: Bool }
 
 impl<T> Mutex<T> {
     pub fn new(value: T) -> Mutex<T>
@@ -76,11 +76,16 @@ impl<T> Mutex<T> {
 
 impl<T> MutexGuard<T> {
     pub fn get(self) -> T
+    pub fn set(mut self, v: T)
     pub fn release(mut self)
 }
 ```
 
-**A private `take(mut self) -> Bool` sits under both entry points**, and it is not decoration — it is what lets the retry loop in §5 avoid an `Option` it would then have to unwrap, and `Option` has no `unwrap`, only `unwrap_or` (`std/core/lib.nova:30`). `try_lock` is `if self.take() { Some(…) } else { None }`; `lock` retries on the `Bool`.
+**AMENDED 2026-08-21 (fix wave):** `released` and `set` are not in the surface this section originally approved; both were added after review, and the block above is the shipped shape. `released` makes `release`'s documented idempotence true — without it `release` was an unconditional `self.owner.locked = false`, so a second `release` on a guard whose mutex had since been reacquired freed a lock another task held (§6's first row has the detail). `set` exists because `get` returns the value, so for a `T` with no assignable interior — `Int`, `Bool`, `Float`, `Char`, `String` — the guard was read-only while `Mutex<T>`'s generic signature promised otherwise; `std/collections` pairs `Vec::get` (`std/collections/lib.nova:49`) with `Vec::set` (`:53`) for the same reason, and this spec shipped only half that pair. Both are pure Nova: `STD_ONLY` is still 65 and no intrinsic was added.
+
+**A private `take(mut self) -> Bool` sits under both entry points**, and it is not decoration — returning a `Bool` is what lets §5's retry loop read the result straight into its `while` condition (`!self.take()`) rather than inspect and discard an `Option` on every turn. `try_lock` is `if self.take() { Some(…) } else { None }`; `lock` retries on the `Bool`.
+
+**Corrected 2026-08-21.** This paragraph originally justified the `Bool` by asserting *"`Option` has no `unwrap`, only `unwrap_or` (`std/core/lib.nova:30`)"*. **That is false.** `Option::unwrap` is defined at `std/core/lib.nova:26` — four lines *above* the `unwrap_or` this spec cited as evidence for its absence, inside the same `impl<T> Option<T>` block — and std/core calls it on `Option`s itself at lines 255, 280, 297, 354 and 386; `Result::unwrap` is at `:58`. The claim was asserted as a measured fact across four increments and reached `std/sync/lib.nova`'s shipped doc comment as the stated reason `take` returns `Bool`. The `Bool` is still the right choice, for the reason now given above.
 
 **Every holder must bind the mutex `mut`, and callers will see this.** Both `lock` and `try_lock` mutate the receiver, so `let m = Mutex::new(0)` followed by `m.lock().await` is `error[E0060]: 'Mutex_T.lock' mutates its receiver, but 'm' is immutable`, with the compiler suggesting `let mut m`. That is a genuine ergonomic cost of holding the flag in a record field rather than in a runtime table, and it is accepted deliberately: the alternative buys nicer bindings with three new intrinsics and a second table to keep coherent, and this module's whole point is that it needs none.
 
@@ -103,7 +108,7 @@ impl<T> MutexGuard<T> {
         while !self.take() {
             yield_now().await
         }
-        MutexGuard { owner: self }
+        MutexGuard { owner: self, released: false }
     }
 ```
 
@@ -111,7 +116,7 @@ impl<T> MutexGuard<T> {
 
 The forced rewrite is better than what it replaced. Retrying on `take`'s `Bool` rather than on `try_lock`'s `Option` means the loop body needs no unwrapping, the guard is constructed once after the loop, and there is no unreachable tail expression to satisfy — all three of which the `loop`-plus-`match` version would have needed.
 
-**This is chosen for what it does not touch.** The alternative — a fourth `Wait` variant so a blocked task genuinely parks — would widen the staging rule a second time and require an arm in `wake_due`, whose `retain` closure ends in `_ => true`. That non-exhaustive match is precisely the hazard that concealed a reachable process abort for an entire increment: eleven sites were compiler-forced to handle a new `Wait` shape and that one was not. Yield-and-retry adds **no runtime surface at all** — no `Wait` variant, no staging change, no wake plumbing, no intrinsic.
+**This is chosen for what it does not touch.** The alternative — a fourth `Wait` variant so a blocked task genuinely parks — would widen the staging rule a second time and require an arm in `wake_due`, whose `retain` closure ends in `_ => true`. That non-exhaustive match is the hazard the `timeout` increment had to handle by hand. Counted at this baseline: of the **seven** matches on `Wait` in non-test `crates/nova-runtime/src/task.rs`, **four** are exhaustive with no wildcard and would be compiler-forced onto a fourth variant — `try_stage` (`:546`), `earliest_deadline` (`:1040`), `io_parks` (`:1065`) and `deadlock_report` (`:1209`) — while **three** end in `_ => true`: `wake_tasks_waiting_on` (`:771`), `wake_ready` (`:1097`) and `wake_due` (`:1153`). Omitting `wake_due`'s arm produces no compile error, no panic and no diagnostic — only a task parked forever, as its own doc comment at `:1137-1142` says in as many words ("park forever, and fail nothing at compile time"), and as ADR 0009's 2026-08-18 amendment records. Yield-and-retry adds **no runtime surface at all** — no `Wait` variant, no staging change, no wake plumbing, no intrinsic.
 
 **The cost, stated plainly because it is a real regression in diagnosability.** A task waiting on a lock stays **runnable**, not parked. So:
 
@@ -128,9 +133,9 @@ That is the honest trade: the version that diagnoses better is the version that 
 
 | Case | Answer |
 |---|---|
-| `release` called twice | Idempotent — the second is a no-op, matching `File::close`. |
+| `release` called twice | A no-op — and **enforced** as of 2026-08-21 rather than only asserted: `MutexGuard` carries a `released: Bool` and `release` returns early on it. `File::close` was cited here as the precedent, and it is one, but it does **not** supply the precondition that makes it safe: `File`'s idempotence rests on an `fd` being a key into a runtime table where absence *is* closedness (ADR 0012), and a guard has no table and no key — `owner` is a direct reference to the live mutex. Without the flag, a second `release` on a guard whose mutex had since been reacquired cleared `locked` while another task held it. What the flag cannot cover is **forgery**: Nova enforces no field privacy, so any code holding a `Mutex<T>` can write `MutexGuard { owner: m, released: false }` and `release` it without ever acquiring the lock — measured, and it does free a lock a real guard is holding. Unenforceable in this language, exactly as `File { fd: 9999 }` is, with one difference worth stating: a forged `fd` safely misses a table lookup, whereas a forged guard writes straight to the live mutex. |
 | Guard never released | The mutex stays locked for the process's life. A documented leak, exactly as ADR 0012 accepted for descriptors. |
-| `lock` while already holding it (same task) | **Deadlocks by spinning.** Not re-entrant, and re-entrancy is not added: it would require task identity in the mutex and it hides bugs. |
+| `lock` while already holding it (same task) | **Livelocks by spinning — it never parks, so `report_deadlock` cannot see it.** This project reserves the two words: `crates/nova-runtime/src/task.rs:927-929` calls a task that keeps re-queueing itself a livelock, "not a deadlock, and this loop still cannot see it", citing ADR 0009 §1's 2026-08-10 amendment. `lock`'s `while !take() { yield_now().await }` is exactly that shape. Not re-entrant, and re-entrancy is not added: it would require task identity in the mutex and it hides bugs. |
 | `try_lock` on a free mutex | `Some(guard)`, and the mutex is now locked. |
 | `get` after `release` | Returns the value regardless — the guard holds a reference to a heap object and the language cannot prevent this. Documented, not enforced. |
 | A panic inside a critical section | Aborts the process; no unwinding crosses a poll boundary, so there is no poisoned state to observe (§1). |
@@ -160,6 +165,8 @@ That is the honest trade: the version that diagnoses better is the version that 
 | `lock`'s loop returns without acquiring | `sync_mutex_two_tasks_serialise` |
 | the whole `Mutex` removed from the third fixture | that fixture — **and if it still passes, the fixture is wrong**, not the mutex |
 
+**AMENDED 2026-08-21 (fix wave): six fixtures, not four.** Two were added with the `released`/`set` fixes above: `sync_mutex_stale_guard_cannot_steal` pins that a guard released once, then released again after another task has taken the lock, does not free it — and it is the **only** one of the six that fails when `released` is removed, measured, which is why the defect shipped past the original four. `sync_mutex_int_set_serialises` is the two-task lost-update test over a bare `Mutex<Int>`, which does not compile without `set`; golden `n=2`, and with the mutex stripped out of the fixture it gives `n=1`, measured. Against a never-excluding `take`, four of the six fail and two pass — see ADR 0016's Consequences for the per-fixture breakdown.
+
 **No uniqueness claim appears in that table.** Four such claims were measured false across the last three increments — a count reported as 18 that was 7, one row predicted where five failed, one fixture named where all five caught it. The table says which test *must* fail; if uniqueness matters, run the mutation against the whole suite and count, in a clean tree.
 
 ---
@@ -167,7 +174,7 @@ That is the honest trade: the version that diagnoses better is the version that 
 ## 8. Records
 
 - **CHANGELOG** `[Unreleased]`: Added for the module, the two records and their methods, and `STD_MODULES` 11 → 12 with `STD_ONLY` unchanged at 65.
-- **`nova-spec/20-STDLIB.md` §13**: a dated amendment in the file's house style (`**AMENDED <date> (branch \`<branch>\`):**`, as at lines 31, 36, 169, 184, 199, 214). It must record what shipped, that release is explicit because `Drop` is unimplemented and its mechanism foreclosed by ADR 0012, and **why each of the three unbuilt items is unbuilt** — a tuple-returning signature the language cannot express, a thread pool the runtime does not have, and a cancellation model the project already rejected. Also that §13's `module std.sync` header line is implemented in **no** std module, which §3's and §10's amendments already record for their own sections.
+- **`nova-spec/20-STDLIB.md` §13**: a dated amendment in the file's house style (`**AMENDED <date> (branch \`<branch>\`):**`). **Corrected 2026-08-21:** the line list originally given here — 31, 36, 169, 184, 199, 214 — was inherited verbatim from `2026-08-19-std-fmt-design.md:181` and four of the six numbers do not open a marker in the current file (169 and 184 land mid-paragraph, 199 is blank, 214 is a `---` divider). Regrep rather than trusting a copied list: `grep -n AMENDED nova-spec/20-STDLIB.md` gives the live set, currently including 31, 36, 162 and 578. It must record what shipped, that release is explicit because `Drop` is unimplemented — **full stop**, per §3 above; ADR 0012 is cited only as precedent for explicit idempotent release, not as a mechanism that forecloses anything — and **why each of the three unbuilt items is unbuilt** — a tuple-returning signature the language cannot express, a thread pool the runtime does not have, and a cancellation model the project already rejected. Also that §13's `module std.sync` header line is implemented in **no** std module, which §3's and §10's amendments already record for their own sections.
 - **ADR 0016.** `00-MASTER-SPEC.md` **§7 item 5** requires an ADR for any decision deviating from the spec — **not §0**, which is "Project Identity"; an earlier spec on this project cited §0 and the correction had to be made twice. Verify `0016` is unused with `ls docs/adr/` before creating it; `0001`–`0015` are in use and a previous increment guessed a number that already existed.
   Its subject is the **partial close of position 8**: what shipped, the three deferrals with their reasons, and the yield-and-retry trade including the condition that would justify revisiting it. It should distinguish itself from ADR 0014 (position 2 skipped twice) and ADR 0015 (position 2 closed).
 
@@ -190,5 +197,5 @@ Each checked against the tree at `8a72243` rather than recalled:
 - **`impl<T>` on a generic record works**, probed together with the above.
 - **`Option<T>` carries `is_some`, `map`, `unwrap_or`** (`std/core/lib.nova:12`, `:18`, `:30`), so `try_lock`'s return type needs nothing new.
 - **`yield_now` is an existing glob-imported `pub async fn`**, so the retry loop needs no new surface.
-- **`wake_due`'s `retain` closure ends in `_ => true`** — the non-exhaustive match that concealed a reachable abort for an entire increment, and the reason §5 avoids adding a `Wait` variant.
+- **`wake_due`'s `retain` closure ends in `_ => true`** — the non-exhaustive match whose omitted arm parks a task forever with no compile error, panic or diagnostic, and the reason §5 avoids adding a `Wait` variant. Three of the seven `Wait` matches in non-test `task.rs` end in a wildcard (`wake_tasks_waiting_on`, `wake_ready`, `wake_due`); the other four are exhaustive and would be compiler-forced. Counted, per §5.
 - **No std module has a `module` header**, in any of the twelve `lib.nova` files, despite `nova-spec` writing one for every section.
