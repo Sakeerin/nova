@@ -230,6 +230,59 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/adr/0016-std-sync-partial-close.md` for what §13 specifies that
   this does not ship, why, and why release being explicit is not itself a
   shortcut.
+- **A bounded async channel in `std/sync`**, pure Nova: `Channel<T>` over a
+  private fixed-capacity ring, plus `Sender<T>` and `Receiver<T>` as two
+  views onto it. `channel<T>(buffer: Int) -> Channel<T>` constructs one and
+  `ch.sender()`/`ch.receiver()` reach the pair; `Sender` has
+  `try_send(v) -> Bool`, `async send(v) -> Bool` and an idempotent
+  `close()`, `Receiver` has `try_recv() -> Option<T>` and
+  `async recv() -> Option<T>`. **The signature deviates from
+  `20-STDLIB.md` §13**, which writes
+  `channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)`: that return type
+  is a tuple and Nova has none — `error[E0900]: tuple types are not
+  supported yet` — so `channel` returns `Channel<T>` instead, the record
+  §13 declares immediately above the function and never returns. The
+  deviation is confined to the return type and the type it moved to is one
+  §13 already declares; all three of §13's channel type names are now
+  built. The two `try_`/`async` pairs differ on purpose: `try_send` returns
+  `false` when the channel is **full or closed** while `send` returns
+  `false` **only** when closed, and `try_recv` returns `None` when
+  **empty** while `recv` returns `None` **only when closed and drained** —
+  every iteration dequeues before reading `closed`, so buffered values
+  drain before a close is reported and a consumer loop has a termination
+  condition at all. `buffer < 1` **clamps to 1** rather than panicking,
+  following `Int::pad`'s early-return precedent; a zero-capacity
+  rendezvous channel would need a second wait state. **Call sites must
+  annotate** — `let ch: Channel<Int> = channel(2)` is the only available
+  form, because `T` appears only in the return type and Nova has no
+  turbofish (`channel<Int>(2)` parses as two chained comparisons, not a
+  call). Contention is handled by yielding and retrying, as `Mutex`
+  already does, so neither the executor nor the poll ABI changes: no
+  fourth `Wait` variant and no arm added to any of `task.rs`'s three
+  non-exhaustive `retain` matches. The cost is the same one `Mutex`
+  carries — a waiter stays *runnable*, so `report_deadlock` cannot see a
+  channel nobody drains, which spins forever instead of being diagnosed.
+  That cost was **observed**, not just predicted: a mutation making `recv`
+  answer `None` on an empty-but-open channel truncated its fixture's
+  output and then hung indefinitely. Forged handles are likewise
+  documented and not prevented, since Nova enforces no field privacy — a
+  `Sender { ch: c }` literal can send or close on a channel it was never
+  given, the standing `MutexGuard` already has. Zero new runtime
+  intrinsics — `Builtin::STD_ONLY` stays at 65 — `RESERVED_TYPE_NAMES`
+  stays at 7, and `STD_MODULES` stays at 12; `std/sync/lib.nova` grows
+  from 166 to 307 lines and the only non-Nova change is the registration
+  of eight new fixtures in `crates/nova-cli/tests/run_tests.rs`. **This
+  supersedes the `std/sync` entry above where it says `channel<T>` does
+  not ship** — true of that increment, no longer true of the tree — but it
+  does **not** close position 8, which stays partial: §13 specifies
+  `Mutex` and `Channel` and both now ship, while `RwLock` (named at
+  `20-STDLIB.md:27` only) and `atomic` (named there and at
+  `00-MASTER-SPEC.md:238`) have no signature or section anywhere in
+  `nova-spec/`, and the two position-7 `std/task` items, `spawn_blocking`
+  and `JoinHandle::cancel`, are untouched. See
+  `docs/adr/0017-std-sync-channel-shape.md` and `20-STDLIB.md` §13's
+  2026-08-21 amendment for the shape decision, the two rejected inference
+  escapes, and why the livelock is untestable by construction.
 
 ### Changed
 
