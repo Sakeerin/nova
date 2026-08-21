@@ -1,0 +1,20 @@
+// One task, no contention: fill a capacity-2 channel, drain it in order, and
+// confirm it reports empty afterwards. The annotation on `ch` is REQUIRED --
+// `channel`'s type parameter appears only in its return type and Nova has no
+// turbofish, so `channel(2)` alone gives the checker no way to name `T`.
+fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+    println("send1=${tx.try_send(10)}")
+    println("send2=${tx.try_send(20)}")
+    match rx.try_recv() {
+        Some(v) => println("recv1=${v}")
+        None => println("unexpected: empty after two sends")
+    }
+    match rx.try_recv() {
+        Some(v) => println("recv2=${v}")
+        None => println("unexpected: empty with one value left")
+    }
+    println("empty=${rx.try_recv().is_none()}")
+}

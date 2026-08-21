@@ -1,0 +1,17 @@
+fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+    let mut out = ""
+    let mut next = 1
+    while next <= 6 {
+        let sent = tx.try_send(next)
+        if !sent { println("unexpected: refused ${next}") }
+        if next % 2 == 0 {
+            out = "${out}${rx.try_recv().unwrap_or(0)} ${rx.try_recv().unwrap_or(0)} "
+        }
+        next = next + 1
+    }
+    println("order=${out}")
+    println("empty=${rx.try_recv().is_none()}")
+}

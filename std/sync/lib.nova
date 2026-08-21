@@ -164,3 +164,107 @@ impl<T> MutexGuard<T> {
         self.owner.locked = false
     }
 }
+
+// ------------------------------------------------------------------ channel
+
+// A fixed-capacity FIFO over a flat array. Private: it exists only to give
+// `Channel` its buffer, and `std/collections` has no `Queue` to borrow --
+// `Vec::pop` takes from the end, which is LIFO.
+//
+// `head` is the index of the next value out; `len` is how many are live.
+// Capacity lives on `Channel` rather than here, because `data` starts empty
+// and so cannot report it until the first send allocates.
+//
+// INVARIANT: `head >= 0`, `len >= 0`, `cap >= 1`. Every `%` below therefore
+// has non-negative operands, which matters because Nova's `%` is a
+// TRUNCATING remainder -- `-7 % 3` is `-1`, not `2`. Any operation added
+// later that seeks backwards must re-establish this, or the wrap arithmetic
+// lands outside the array. `std/core/lib.nova:125` and
+// `std/collections/lib.nova:119` carry the same warning for hash bucketing.
+record Ring<T> { data: [T], head: Int, len: Int }
+
+pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
+
+// Two views onto one channel. Records are reference types, so both observe
+// every mutation; the split carries intent -- hand `tx` to producers and `rx`
+// to consumers -- and not enforcement. Nova has no field privacy, so a forged
+// `Sender { ch: c }` compiles and can send or close on a channel it was never
+// given. Documented, not prevented; the same hazard `MutexGuard` carries.
+pub record Sender<T> { ch: Channel<T> }
+pub record Receiver<T> { ch: Channel<T> }
+
+// A bounded channel holding at most `buffer` values.
+//
+// `buffer < 1` clamps to 1. A zero-capacity rendezvous channel needs a
+// handoff protocol that yield-and-retry cannot express without a second wait
+// state, and clamping follows `Int::pad`'s precedent of an early return over
+// a panic.
+//
+// The call site must annotate: `let ch: Channel<Int> = channel(2)`. The type
+// parameter appears only in the return type, and Nova has no turbofish --
+// `channel<Int>(2)` is a parse error, read as two comparisons.
+pub fn channel<T>(buffer: Int) -> Channel<T> {
+    let cap = if buffer < 1 { 1 } else { buffer }
+    Channel { ring: Ring { data: [], head: 0, len: 0 }, cap: cap, closed: false }
+}
+
+impl<T> Channel<T> {
+    pub fn sender(self) -> Sender<T> { Sender { ch: self } }
+
+    pub fn receiver(self) -> Receiver<T> { Receiver { ch: self } }
+
+    // Enqueue, or report refusal. Private: `Sender::try_send` is the public
+    // door. Returns false when closed and when full, which is why the async
+    // `send` must re-check `closed` itself to tell the two apart.
+    fn push(mut self, v: T) -> Bool {
+        if self.closed { return false }
+        if self.ring.len == self.cap { return false }
+        if self.ring.data.len() == 0 {
+            // First send. `[fill; n]` needs a value of `T` and a fresh
+            // channel has none, so allocation waits for one -- the same trick
+            // `Vec::push` uses to grow. Every slot holds `v` until
+            // overwritten, so the channel briefly retains up to `cap`
+            // references to the first value sent.
+            self.ring.data = [v; self.cap]
+            self.ring.len = 1
+            return true
+        }
+        self.ring.data[(self.ring.head + self.ring.len) % self.cap] = v
+        self.ring.len = self.ring.len + 1
+        true
+    }
+
+    // Dequeue, or None when empty. Says nothing about `closed` -- that
+    // distinction belongs to `Receiver::recv`.
+    fn pop(mut self) -> Option<T> {
+        if self.ring.len == 0 { return None }
+        let v = self.ring.data[self.ring.head]
+        self.ring.head = (self.ring.head + 1) % self.cap
+        self.ring.len = self.ring.len - 1
+        Some(v)
+    }
+}
+
+impl<T> Sender<T> {
+    // Send if there is room. False when the channel is full OR closed; a
+    // caller that needs to distinguish them should use `send`, which returns
+    // false only for closed.
+    pub fn try_send(mut self, v: T) -> Bool {
+        self.ch.push(v)
+    }
+
+    // Refuse all further sends. Buffered values stay readable, so a producer
+    // may close the instant it stops producing and the consumer still drains.
+    // Idempotent: a second call sets an already-set flag.
+    pub fn close(mut self) {
+        self.ch.closed = true
+    }
+}
+
+impl<T> Receiver<T> {
+    // Take a value if one is buffered. None means empty, and says nothing
+    // about whether more will arrive -- `recv` is what distinguishes those.
+    pub fn try_recv(mut self) -> Option<T> {
+        self.ch.pop()
+    }
+}

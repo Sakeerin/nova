@@ -1,0 +1,9 @@
+fn main() {
+    let ch: Channel<Int> = channel(1)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+    println("first=${tx.try_send(1)}")
+    println("second_full=${tx.try_send(2)}")
+    println("drained=${rx.try_recv().unwrap_or(0)}")
+    println("after_drain=${tx.try_send(3)}")
+}
