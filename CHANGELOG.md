@@ -448,6 +448,31 @@ that already compiled.
   were updated for both, since "No bdwgc" implied bdwgc elsewhere exactly as
   "No Tokio" did.
 
+- **`nova-spec/13-RUNTIME.md` sections 5 through 10 audited, completing the
+  file.** Section 5 contradicted itself: it said a panic aborts the current
+  task "not whole process by default" and propagates to an `await` site as
+  `Err`, three lines above a block calling `std::process::abort()`. A panic
+  ends the process; there is no unwinding and no per-task recovery, the entry
+  point is `nova_rt_panic_str(s: *const NovaStr) -> !` rather than
+  `nova_panic(msg, len)`, and the `Err` claim is precluded by 4.2 rather than
+  merely unimplemented — a generated poll frame has no landing pads. No
+  `--panic=abort` flag exists and none is needed. Section 7 was worse, because
+  it is what a contributor reads to add a runtime hook: it described reaching
+  the runtime via `extern "nova-rt"` declarations, which exist in no `.nova`
+  file and which `std/core/lib.nova` records as **deliberately rejected** —
+  `nova_`-prefixed extern symbols are compiler-reserved, "so a user-visible
+  `extern` was not an option either." Rewritten to describe the real route (a
+  compiler-known `Builtin`, a `nova_rt_*` function, and a line in `symbols()`)
+  and to name the one seam the compiler cannot enforce, `symbols()`, where an
+  omission compiles clean and fails at JIT link time — with
+  `every_rt_func_symbol_is_registered_with_the_jit` as its guard. It gives no
+  count of forced seams on purpose: that number has moved as the compiler grew.
+  Four of section 7's six example functions did not exist at all. Sections 6
+  and 10 get labels rather than rewrites, since they are unmarked intent rather
+  than a misdescribed mechanism: 6.1/6.2 need a `nova.toml`, `@c_import`,
+  `unsafe` blocks and a `--crate-type` flag that do not exist, and section 10's
+  stress and benchmark bullets have no harness behind them.
+
 ## [0.2.0-alpha.1] - 2026-08-16
 
 Standard-library-core progress milestone, and a **pre-release on purpose**.
