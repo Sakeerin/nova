@@ -25,7 +25,7 @@ not a wrapped Tokio.
 |    calls into ↓                         |
 +-----------------------------------------+
 |  nova-runtime (Rust)                    |
-|    - GC (mmtk or bdwgc)                 |
+|    - GC: conservative mark-sweep (3.1)  |
 |    - Cooperative executor (4.1)         |
 |    - Hyper HTTP                         |
 |    - Ring crypto                        |
@@ -38,24 +38,42 @@ not a wrapped Tokio.
 
 Of the components above, the executor, allocator, GC and panic infrastructure are
 built. **Hyper HTTP and Ring crypto are not** — `std/http` and `std/crypto` are
-unstarted, and the workspace depends on neither crate. The GC line naming mmtk or
-bdwgc is also stale: the collector is hand-written (see 3.1-3.2, not yet corrected).
+unstarted, and the workspace depends on neither crate. No third-party collector is
+used either — the GC is hand-written (3.1).
 
 ---
 
 ## 2. Memory Layout
 
-### 2.1 Object Header
-Every heap-allocated Nova object has a header:
+### 2.1 Object metadata — a side table, not a header
+
+**AMENDED 2026-08-22 (branch `spec-runtime-async-truth`): this section specified an
+in-band `ObjectHeader { type_id: u32, flags: u32 }` preceding every object's fields.
+There is no header.** Corrected here because leaving it would contradict 3.3 below,
+which records that the allocator is given no type identity — the two claims cannot both
+stand.
+
+`alloc` returns a bare pointer to the requested bytes, with **nothing in front of them**.
+The collector keeps its metadata out of band, in a side table
+(`crates/nova-runtime/src/gc.rs`):
 
 ```rust
-#[repr(C)]
-pub struct ObjectHeader {
-    pub type_id: u32,       // index into type metadata table
-    pub flags: u32,         // GC flags (mark, generation, etc.)
-    // followed by fields
+struct Obj {
+    addr: usize,    // address returned to the mutator
+    size: usize,    // allocation size in bytes
+    scan: bool,     // trace this object's words, or treat it as a leaf
+    marked: bool,   // set during the mark phase
 }
 ```
+
+So there is **no `type_id` anywhere**, in the header sense or any other: a conservative
+collector (3.1) has no use for type identity, which is why `alloc` takes `scan: bool`
+instead. And there is no in-band mark word — `marked` lives in the side table beside the
+address.
+
+One consequence worth stating, since an in-band header would have implied otherwise: an
+object's address is the *whole* of its identity to the collector, and 3.1 records that a
+sweep really frees, so addresses are reused. Nothing may key a persistent table on one.
 
 ### 2.2 Primitive Layout
 - `Int` (default) = `i64`, stack-allocated when possible
@@ -76,32 +94,96 @@ pub struct ObjectHeader {
 
 ## 3. Garbage Collector
 
-### 3.1 Phase 1 (MVP): bdwgc (Boehm)
-- Conservative, mark-and-sweep
-- Easy integration: just call `GC_malloc` instead of `malloc`
-- Trade-off: false retention (conservative scanning), pause times not great
-- Pro: works immediately, well-tested
+**AMENDED 2026-08-22 (branch `spec-runtime-async-truth`): this section named two
+third-party collectors, neither of which is used, and declared a compiler-facing
+interface of four functions, none of which exists in any form.** The collector is
+hand-written. Rewritten below against `crates/nova-runtime/src/gc.rs`, with 3.2 kept as
+intent and relabelled. Same convention and same reasoning as section 4's amendment.
 
-### 3.2 Phase 2+: MMTk
-- Modular, precise, generational
-- Enables better latency, throughput
-- More work to integrate (need precise stack maps from codegen)
+### 3.1 The collector that exists
+**A conservative, non-moving, mark-and-sweep collector, hand-written** in
+`crates/nova-runtime/src/gc.rs`. Not bdwgc: the workspace depends on no Boehm crate, and
+no third-party collector of any kind.
 
-### 3.3 GC Interface (compiler-facing)
+It is conservative **because it has to be**. Neither Nova codegen backend emits stack
+maps or per-slot type information, so the collector cannot know where roots or heap
+pointers precisely live. Any machine word whose value falls inside a live allocation
+keeps that allocation alive. That retains a little garbage — an integer that happens to
+look like a pointer — but never frees a reachable object.
+
+Roots come from exactly three places:
+
+- **Callee-saved registers**, flushed onto the stack by a `setjmp` shim in `gc_stack.c`.
+  Caller-saved registers hold no live root at a call boundary, so they need no handling.
+- **The stack**, scanned from the current frame to the thread's base.
+- **Explicitly registered roots**, for objects reachable from neither. A suspended async
+  task's state is owned by the Rust executor while parked — on no Nova stack and in no
+  register — so it is pinned by address instead.
+
+Marking is **range-based**, so an interior pointer (an array-element address held
+transiently, say) keeps its containing object alive. Objects allocated with `scan =
+false` — string byte buffers — are leaves and are never traced.
+
+**A sweep really frees, so an address is not a durable identity for an object.** Unmarked
+memory goes back to the system allocator rather than into an arena this module keeps, so
+a later allocation can hand the same address out for something wholly unrelated. Nothing
+may key a persistent table on an object's address.
+
+### 3.2 MMTk — NOT BUILT, an aspiration
+Modular, precise, generational; better latency and throughput. It is recorded here as
+intent, not as specification.
+
+Its blocker was stated correctly when this section was first written and is now confirmed
+from the other side: MMTk needs precise stack maps from codegen, and 3.1 is conservative
+*precisely because* neither backend emits them. So this is one change, not two — the
+collector cannot become precise before codegen does.
+
+### 3.3 GC interface (compiler-facing)
+This section previously declared `nova_gc_alloc(size, type_id)`,
+`nova_gc_register_root(slot)`, `nova_gc_safepoint()` and `nova_gc_init()`. **None of the
+four exists.** What exists:
+
 ```rust
-extern "C" {
-    pub fn nova_gc_alloc(size: usize, type_id: u32) -> *mut ObjectHeader;
-    pub fn nova_gc_register_root(slot: *mut *mut ObjectHeader);
-    pub fn nova_gc_safepoint();
-    pub fn nova_gc_init();
-}
+// Rust-facing, in crates/nova-runtime/src/gc.rs
+pub fn alloc(size: usize, scan: bool) -> *mut u8;
+pub fn add_root(ptr: *mut u8);
+pub fn remove_root(ptr: *mut u8);
+
+// C-facing, for the root-scanning shim
+pub extern "C" fn nova_gc_scan_range(lo: *const c_void, hi: *const c_void);
+extern "C" { fn nova_gc_collect_roots(stack_base: *mut c_void); }  // gc_stack.c
 ```
 
-Compiler emits `nova_gc_safepoint()` at loop back-edges and function entries.
+Three differences are substantive rather than cosmetic:
+
+- **`scan: bool`, not `type_id: u32`.** The allocator is told whether an object must be
+  traced or is a leaf. It is given no type identity, and a conservative collector has no
+  use for one.
+- **Roots are pinned by address, not by slot.** `add_root` takes the object pointer, not
+  the address of a variable holding it.
+- **There is no safepoint, and the compiler emits no safepoint calls.** This section
+  previously stated that the compiler emits `nova_gc_safepoint()` at loop back-edges and
+  function entries. It does not, and no such function exists. **Collection is triggered
+  from `alloc`**, once allocation since the last cycle crosses a growth threshold — or on
+  every allocation under `NOVA_GC_STRESS`, which exists to shake out root-scanning bugs.
+  A program that allocates nothing never collects.
 
 ### 3.4 Finalizers
-- `Drop` trait → finalizer registered at allocation
-- Best-effort, not guaranteed (matches typical GC semantics)
+`Drop` → finalizer at allocation is **NOT BUILT**, and cannot be while `Drop` is
+unimplemented — it is described in `12-TYPESYSTEM.md`, `14-CODEGEN.md` and here, and
+implemented nowhere, with no `trait Drop` in `std/core`.
+
+There *is* a per-object notification hook, and it is worth naming precisely because its
+shape is the reason it cannot stand in for one. The sweep calls
+`task::forget_freed_state(addr)` for **every** object it frees. That hook receives the
+freed object's **own address and nothing else** — never a field value read out of it. So
+a dying handle notifies with an address, which tells a table keyed on anything else
+(a file descriptor, say) nothing at all.
+
+This is exactly why `docs/adr/0012-file-descriptor-lifecycle.md` chose an explicit,
+idempotent `close` for `File` over a collector-based backstop, and why
+`docs/adr/0017-std-sync-channel-shape.md` chose explicit `close` for a channel. Any
+future finalizer design needs the *language* feature, not this hook.
 
 ---
 
@@ -291,7 +373,7 @@ Each runtime function:
 
 For browser target:
 - No host executor (use the browser event loop via wasm-bindgen)
-- No bdwgc (use a simple GC OR integrate WASM GC proposal when stable)
+- No host collector (use a simple GC OR integrate the WASM GC proposal when stable)
 - Phase 4 decision: **start with reference counting** for WASM target (simpler, smaller); revisit later
 - DOM access via auto-generated bindings from web-sys
 
