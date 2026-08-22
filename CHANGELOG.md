@@ -419,10 +419,34 @@ that already compiled.
   Rust+Tokio hello world stays — that is a claim about Rust, not about Nova.
   This is the first dated amendment in `13-RUNTIME.md`; `20-STDLIB.md` had
   been the only file under `nova-spec/` carrying the convention. Routed here
-  by `docs/adr/0017-std-sync-channel-shape.md`. Sections 3.1-3.4 (bdwgc,
-  MMTk, a four-function GC interface that exists in no form, and finalizers
-  hung off an unimplemented `Drop`) are **knowingly left stale** and want
-  their own pass.
+  by `docs/adr/0017-std-sync-channel-shape.md`.
+- **`nova-spec/13-RUNTIME.md` sections 2.1 and 3 corrected in the same pass.**
+  Section 3 named bdwgc then MMTk; the collector is hand-written, and the
+  workspace depends on no third-party collector at all. Its declared
+  compiler-facing interface — `nova_gc_alloc(size, type_id)`,
+  `nova_gc_register_root(slot)`, `nova_gc_safepoint()`, `nova_gc_init()` —
+  exists in **no** form; the real API is `alloc(size, scan: bool)` plus
+  `add_root`/`remove_root` taking an object pointer rather than a slot, with
+  `nova_gc_scan_range` and a `nova_gc_collect_roots` shim in `gc_stack.c`.
+  Three differences are substantive, not cosmetic: `scan: bool` replaces
+  `type_id` because a conservative collector has no use for type identity;
+  roots pin by address, not by slot; and **there is no safepoint** — the
+  claim that the compiler emits `nova_gc_safepoint()` at loop back-edges was
+  false, and collection triggers from `alloc` on a growth threshold, so a
+  program that allocates nothing never collects. 3.2 (MMTk) is relabelled an
+  aspiration, with the note that its blocker is the same fact that forces 3.1
+  to be conservative: neither codegen backend emits stack maps. 3.4's
+  `Drop`-based finalizer is relabelled NOT BUILT, and the per-object hook
+  that *does* exist is named — the sweep calls `task::forget_freed_state(addr)`
+  for every freed object, receiving the address and nothing else, which is
+  precisely why ADRs 0012 and 0017 both chose an explicit `close`.
+  Section 2.1 followed because it could not be left standing: it specified an
+  in-band `ObjectHeader { type_id, flags }` before every object's fields, and
+  there is **no header** — metadata lives in a side table
+  (`struct Obj { addr, size, scan, marked }`), which is the same fact that
+  makes 3.3's `type_id` wrong. Section 1's diagram and section 8's WASM notes
+  were updated for both, since "No bdwgc" implied bdwgc elsewhere exactly as
+  "No Tokio" did.
 
 ## [0.2.0-alpha.1] - 2026-08-16
 
