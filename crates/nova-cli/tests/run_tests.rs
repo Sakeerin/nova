@@ -8159,7 +8159,7 @@ fn channel_close_then_drain_run() {
 /// `send`'s own `closed` check, which precedes the yield. That partition is
 /// stated as a property over the whole population rather than as a count on
 /// purpose: a count over that population falsified this sentence twice
-/// before, and the fixture registered above would have falsified it a third
+/// before, and the fixture registered below would have falsified it a third
 /// time. Capacity
 /// below the send count is what forces `send` to suspend, and it also makes
 /// `head` wrap twice. Depends on the executor's FIFO ready queue

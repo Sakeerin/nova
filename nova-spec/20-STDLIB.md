@@ -1166,7 +1166,7 @@ handles legitimately. *Reopening is the strongest route:*
 `ch.closed = false`, reachable from any legitimately-held handle, destroys
 the one property that gives a consumer loop a termination condition — that
 `recv`'s `None` means closed **and** drained — and `close` only ever sets
-the flag true, so no API path reaches it. *Writes through the `pub` ring:*
+the flag true, so no API path reaches it. *Writes through the ring:*
 `ch.ring.head` and `ch.ring.len` break the `head >= 0`, `len >= 0`,
 `cap >= 1` invariant the truncating `%` depends on, without ever naming the
 non-`pub` `Ring<T>`. An earlier version of this amendment named forgery
