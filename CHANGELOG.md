@@ -279,7 +279,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Channel<T>` to name and `sender()`/`receiver()` are `pub`; what does
   escalate is `ch.closed = false`, which reopens a closed channel from any
   legitimately-held handle and destroys the terminal-`None` property a
-  consumer loop terminates on, and writes through the `pub` ring
+  consumer loop terminates on, and writes through the ring
   (`ch.ring.head`, `ch.ring.len`), which break the invariant the
   truncating `%` depends on. Unenforceable rather than unenforced: a
   field's `vis` is dropped at AST→HIR lowering

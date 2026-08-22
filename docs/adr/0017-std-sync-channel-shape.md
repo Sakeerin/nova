@@ -246,7 +246,7 @@ identical mistake here:
   flag true, so no API path reaches this — the field is simply ordinary.
   **This is the strongest of the three** and went unmentioned in all four
   records until 2026-08-22.
-- **Writes through the `pub` ring** — `ch.ring.head`, `ch.ring.len` —
+- **Writes through the ring** — `ch.ring.head`, `ch.ring.len` —
   break the `head >= 0`, `len >= 0`, `cap >= 1` invariant that
   `std/sync/lib.nova` states on `Ring` and that the truncating `%` depends
   on, and reach it without ever naming the non-`pub` `Ring<T>`.
