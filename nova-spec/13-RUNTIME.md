@@ -300,24 +300,48 @@ async fn main() {
 
 ## 5. Panic Handling
 
-- `panic!("message")` aborts the current task (not whole process by default)
-- For async tasks: panic propagates to `await` site as `Err`
-- For sync: unwind stack (use Rust's panic infrastructure)
-- Build flag `--panic=abort` available for smaller binaries
+**AMENDED 2026-08-22 (branch `spec-runtime-async-truth`): this section contradicted both
+the tree and itself.** It said a panic aborts the current task "not whole process by
+default" and propagates to an `await` site as `Err`, three lines above a code block
+calling `std::process::abort()`. Corrected against `crates/nova-runtime/src/lib.rs` and
+`task.rs`.
+
+**A panic ends the process. There is no unwinding, and no per-task recovery.**
 
 ```rust
-#[no_mangle]
-pub extern "C" fn nova_panic(msg: *const u8, len: usize) -> ! {
-    let msg = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(msg, len)) };
-    eprintln!("nova: panic: {}", msg);
-    print_backtrace();
+// crates/nova-runtime/src/lib.rs
+pub unsafe extern "C" fn nova_rt_panic_str(s: *const NovaStr) -> ! {
+    let msg = if s.is_null() { "" } else { as_str(s) };
+    eprintln!("nova: panic: {msg}");
     std::process::abort();
 }
 ```
 
----
+- **No `Err` at the `await` site.** A panic does not propagate anywhere; the process is
+  gone. This is not a temporary simplification — it follows from 4.2: a generated poll
+  frame has no landing pads, so nothing reachable from one may unwind.
+- **No stack unwinding on the synchronous path either.** `abort`, not Rust's unwinding
+  panic infrastructure.
+- **There is no `--panic=abort` build flag**, and the workspace sets no `panic` profile
+  key. The flag would be moot regardless: aborting is already the only behaviour.
+- The internal counterpart is `task::abort_with(msg)`, used by runtime intrinsics that
+  must reject an argument — negative indices, out-of-range bytes, a doubly-borrowed
+  handle table. It shares the `nova: panic:` prefix and, like `nova_rt_panic_str`, does
+  not unwind.
+
+The one thing this section had right is the observable output: `nova: panic: <message>` on
+stderr, then an abort exit.
 
 ## 6. FFI
+
+**NOT BUILT — this section is a design, not a description (noted 2026-08-22, branch
+`spec-runtime-async-truth`).** 6.3 labels its own phase; 6.1 and 6.2 did not, so a reader
+could not tell. Measured: there is no `nova.toml` anywhere in the repo, no `@`-attribute
+syntax (`@c_import`/`@c_export`) in any `.nova` file, no `unsafe` block and no `extern fn`
+in any `.nova` file, and `nova build` has no `--crate-type` flag. Nothing below is
+reachable today. It is left as written because it is intent, and unlike 3.3 and 7 it does
+not misdescribe a mechanism that exists.
+
 
 ### 6.1 C FFI (calling C from Nova)
 ```nova
@@ -350,24 +374,49 @@ A separate crate `nova-embed` (Phase 6) lets Rust apps embed the Nova runtime + 
 
 ## 7. Stdlib Runtime Hooks
 
-These functions are implemented in Rust runtime, called by std/* Nova code via `extern "nova-rt"`:
+**AMENDED 2026-08-22 (branch `spec-runtime-async-truth`): the mechanism this section
+described does not exist and was deliberately rejected, and four of its six example
+functions do not exist either.** This is the section a contributor reads to add a runtime
+hook, so being wrong here misdirects the exact task it exists to guide — which is why it
+is corrected rather than labelled.
 
-```
-nova_rt_println(s: *str)
-nova_rt_eprintln(s: *str)
-nova_rt_read_file(path: *str, out: *Result<Vec<u8>, IoError>)
-nova_rt_tcp_connect(addr: *str) -> *TcpStream
-nova_rt_http_serve(handler_fn: *fn, addr: *str)
-nova_rt_json_parse(s: *str) -> *JsonValue
-... etc
-```
+**There is no `extern "nova-rt"`.** No `.nova` file in the repo contains such a
+declaration, and `std/core/lib.nova` records why in its own words: `nova_`-prefixed extern
+symbols are reserved by the compiler, "so a user-visible `extern` was not an option
+either."
 
-Each runtime function:
-- Has a stable C ABI signature
-- Documented in `crates/nova-runtime/src/lib.rs`
-- Has corresponding `extern "nova-rt"` declaration in `std/`
+### How a runtime hook actually works
+A runtime-backed operation is a **compiler-known builtin**, not a declared external
+symbol. Adding one means, at minimum:
 
----
+1. A variant on the `Builtin` enum in `crates/nova-resolver/src/lib.rs`, plus its entry in
+   the name table that makes it resolvable from Nova source (`STD_ONLY` for the
+   std-only ones).
+2. A signature in `crates/nova-typeck/src/check.rs`.
+3. Lowering, so MIR and each codegen backend emit a call.
+4. The Rust implementation, `#[no_mangle] pub unsafe extern "C" fn nova_rt_*`, in
+   `crates/nova-runtime/src/`.
+5. **A line in `symbols()`** (`crates/nova-runtime/src/lib.rs`), which maps the name to
+   the function pointer for the JIT.
+
+Most of those sites are compiler-forced: an omission fails to build, because the
+`match`es over `Builtin` are exhaustive. **`symbols()` is the exception** — leaving a
+function out of it compiles cleanly and fails at JIT link time instead. That is why
+`every_rt_func_symbol_is_registered_with_the_jit`
+(`crates/nova-codegen-cranelift/src/lib.rs`) exists: it is the guard for the one seam the
+compiler cannot enforce. Count the forced sites yourself when you touch this — the number
+has changed as the compiler has grown, and a stale count here would be worse than none.
+
+### The examples this section used to give
+`nova_rt_println` and `nova_rt_eprintln` exist, though their parameter is a
+`*const NovaStr` rather than the `*str` written here. **`nova_rt_read_file`,
+`nova_rt_tcp_connect`, `nova_rt_http_serve` and `nova_rt_json_parse` do not exist in any
+form** — `std/fs` and `std/net` reach the runtime under different names and shapes, and
+`std/http` and `std/json` are unstarted (see `00-MASTER-SPEC.md` section 3, positions
+10-11). Read `symbols()` for the live list rather than trusting an example here.
+
+Each runtime function does have a stable C ABI signature and is documented at its
+definition, as this section originally said.
 
 ## 8. WASM Runtime (Phase 4)
 
@@ -398,3 +447,8 @@ Target binary sizes:
 - Integration tests via running compiled Nova programs
 - Stress tests: spawn 10k tasks, verify no leaks
 - Benchmark: HTTP server req/sec, JSON parse speed, allocation throughput
+
+The first two exist. **The last two do not** (noted 2026-08-22, branch
+`spec-runtime-async-truth`): there is no stress or benchmark harness in the repo, and two
+of the three benchmark subjects are unstarted modules. `NOVA_GC_STRESS` (3.3) is the one
+stress mechanism that does exist, and it targets root scanning rather than task counts.
