@@ -1,0 +1,4 @@
+len=3 keys=3
+removed_some=true len=2 keys=2
+a=true b_tombstoned=false c=true
+empty_keys=0
