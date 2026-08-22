@@ -289,6 +289,38 @@ impl<K: Hash + Eq, V> Map<K, V> {
         }
     }
 
+    // The live keys, in table order. `state[j]` is 1 for occupied, 2 for a
+    // tombstone and 0 for empty, so this is the same walk `grow` already does
+    // to find the entries worth reinserting.
+    //
+    // The `[fill; n]` seed is forced rather than stylistic: allocating a `[K]`
+    // needs a `K` in hand and Nova has no null, so the first live key seeds the
+    // array and the collecting walk then overwrites every slot. `Vec::push`
+    // grows by the same manoeuvre.
+    //
+    // Table order is deliberately NOT insertion order, and no caller should
+    // assume it is: a `grow` reinserts every entry and can reorder them.
+    pub fn keys(self) -> [K] {
+        if self.len == 0 { return [] }
+        let cap = self.state.len()
+        let mut seed = 0
+        let mut i = 0
+        while i < cap {
+            if self.state[i] == 1 { seed = i; i = cap } else { i = i + 1 }
+        }
+        let mut out = [self.keys[seed]; self.len]
+        let mut w = 0
+        let mut j = 0
+        while j < cap {
+            if self.state[j] == 1 {
+                out[w] = self.keys[j]
+                w = w + 1
+            }
+            j = j + 1
+        }
+        out
+    }
+
     // Double the capacity and reinsert the live entries, which is also what
     // clears the tombstones. `fk`/`fv` are fillers for the fresh arrays, so no
     // slot is uninitialized; `state`'s 0 filler makes the new table empty.

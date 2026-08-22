@@ -1,0 +1,25 @@
+// `keys` returns every live key and no tombstone. The sort makes the assertion
+// independent of table order, which is a hash-order detail no test should pin.
+fn main() {
+    let mut m: Map<String, Int> = Map::new()
+    m.insert("b", 2)
+    m.insert("a", 1)
+    m.insert("c", 3)
+    println("len=${m.len()} keys=${m.keys().len()}")
+    let removed = m.remove("b")
+    println("removed_some=${removed.is_some()} len=${m.len()} keys=${m.keys().len()}")
+    let ks = m.keys()
+    let mut has_a = false
+    let mut has_c = false
+    let mut has_b = false
+    let mut i = 0
+    while i < ks.len() {
+        if ks[i] == "a" { has_a = true }
+        if ks[i] == "b" { has_b = true }
+        if ks[i] == "c" { has_c = true }
+        i = i + 1
+    }
+    println("a=${has_a} b_tombstoned=${has_b} c=${has_c}")
+    let empty: Map<String, Int> = Map::new()
+    println("empty_keys=${empty.keys().len()}")
+}

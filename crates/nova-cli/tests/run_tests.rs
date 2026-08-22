@@ -8342,3 +8342,16 @@ fn channel_send_refuses_when_closed_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn map_keys_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/map_keys.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/map_keys.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
