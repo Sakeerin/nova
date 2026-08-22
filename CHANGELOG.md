@@ -273,21 +273,34 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   channel nobody drains, which spins forever instead of being diagnosed.
   That cost was **observed**, not just predicted: a mutation making `recv`
   answer `None` on an empty-but-open channel truncated its fixture's
-  output and then hung indefinitely. Forged handles are likewise
-  documented and not prevented, since Nova enforces no field privacy — a
-  `Sender { ch: c }` literal can send or close on a channel it was never
-  given, the standing `MutexGuard` already has. Zero new runtime
+  output and then hung indefinitely. The field-privacy hazards are
+  likewise documented and not prevented, and **ranked by reach**: forging
+  a `Sender { ch: c }` grants *nothing*, because the literal needs a
+  `Channel<T>` to name and `sender()`/`receiver()` are `pub`; what does
+  escalate is `ch.closed = false`, which reopens a closed channel from any
+  legitimately-held handle and destroys the terminal-`None` property a
+  consumer loop terminates on, and writes through the `pub` ring
+  (`ch.ring.head`, `ch.ring.len`), which break the invariant the
+  truncating `%` depends on. Unenforceable rather than unenforced: a
+  field's `vis` is dropped at AST→HIR lowering
+  (`crates/nova-hir/src/lib.rs:918-923`), so `check_field_set` has no
+  visibility left to check. An earlier version of this entry named forgery
+  alone — the same understatement corrected for `MutexGuard` above.
+  Zero new runtime
   intrinsics — `Builtin::STD_ONLY` stays at 65 — `RESERVED_TYPE_NAMES`
   stays at 7, and `STD_MODULES` stays at 12; `std/sync/lib.nova` grows
-  from 166 to 307 lines and the only *Rust* change is the registration of
-  ten new fixtures in `crates/nova-cli/tests/run_tests.rs` — no runtime,
-  compiler or codegen crate is touched. Two of those ten close coverage
-  gaps found while writing these records rather than while writing the
-  code: `channel_clamps_buffer_below_one` pins the `buffer < 1` clamp,
-  which no test had exercised, and `channel_send_refuses_when_closed` pins
-  the async `send`'s refusal on a closed channel, the one point where
-  `send` and `try_send` are specified to differ and which no test had
-  called. **This
+  from 166 to 329 lines and the only *Rust* change is the registration of
+  the new `channel_*` fixtures in `crates/nova-cli/tests/run_tests.rs` —
+  no runtime, compiler or codegen crate is touched. Three of those
+  fixtures exist because a record or a claim was checked against the code
+  rather than because the code was written:
+  `channel_clamps_buffer_below_one` pins the `buffer < 1` clamp, which no
+  test had exercised; `channel_send_refuses_when_closed` pins the async
+  `send`'s refusal on a closed channel, the one point where `send` and
+  `try_send` are specified to differ and which no test had called; and
+  `channel_enqueue_wraps_after_dequeue` pins the ring's *enqueue* modulo,
+  `(head + len) % cap`, which no test executed in a state where it wraps
+  and which no record had named as either covered or missing. **This
   supersedes the `std/sync` entry above where it says `channel<T>` does
   not ship** — true of that increment, no longer true of the tree — but it
   does **not** close position 8, which stays partial: §13 specifies

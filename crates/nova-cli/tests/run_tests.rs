@@ -8149,10 +8149,18 @@ fn channel_close_then_drain_run() {
 
 /// A producer sending 5 values through a channel of capacity 2, and a consumer
 /// draining it, each in its own task. The only fixture in which `send` and
-/// `recv` actually suspend and resume: the two `*_suspends_only_to_retry`
-/// fixtures drive the same async pair but deliberately never enter either
-/// retry path, and the five synchronous channel fixtures never call the async
-/// pair at all, using `try_send`/`try_recv`, which cannot suspend. Capacity
+/// `recv` actually suspend and resume. Every other `channel_*` fixture either
+/// never calls the async pair at all -- the synchronous ones, which use
+/// `try_send`/`try_recv` and so cannot suspend -- or calls it and answers
+/// without ever reaching a yield: the two `*_suspends_only_to_retry` fixtures
+/// deliberately never enter either retry path, and
+/// `channel_send_refuses_when_closed` calls the async `send` twice, the first
+/// succeeding on an empty capacity-2 channel and the second refused by
+/// `send`'s own `closed` check, which precedes the yield. That partition is
+/// stated as a property over the whole population rather than as a count on
+/// purpose: a count over that population falsified this sentence twice
+/// before, and the fixture registered above would have falsified it a third
+/// time. Capacity
 /// below the send count is what forces `send` to suspend, and it also makes
 /// `head` wrap twice. Depends on the executor's FIFO ready queue
 /// (`crates/nova-runtime/src/task.rs:184`) for a deterministic interleaving;
@@ -8245,6 +8253,34 @@ fn channel_clamps_buffer_below_one_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/channel_clamps_buffer_below_one.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Pins the ENQUEUE modulo in `Channel::push`, `(head + len) % cap`, which
+/// until this fixture was executed by no test in a state where it wraps: no
+/// other fixture pushes while `head != 0`, so deleting `% self.cap` from that
+/// line left all 44 targets green. Only the dequeue modulo in `pop` was
+/// pinned. Found by the whole-branch review rather than by a record -- no
+/// record claimed the line was covered, and none recorded it as a gap either,
+/// which is the worse of the two.
+///
+/// Capacity 2, two sends, one receive so `head` advances to 1 with one value
+/// still live, then a third send that must land at `(1 + 1) % 2 == 0`. The
+/// drain asserts the order, `2 3`, not merely the count, so a wrapped write
+/// that landed in the wrong slot fails rather than passes. Synchronous, so no
+/// regression of the ring arithmetic can turn it into a hang.
+#[test]
+fn channel_enqueue_wraps_after_dequeue_run() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/channel_enqueue_wraps_after_dequeue.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/channel_enqueue_wraps_after_dequeue.nova"))
         .assert()
         .success()
         .stdout(expected);

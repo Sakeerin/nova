@@ -1,0 +1,47 @@
+// WHAT THIS PINS: the ENQUEUE modulo in `Channel::push`,
+// `self.ring.data[(self.ring.head + self.ring.len) % self.cap] = v`. Until
+// this fixture existed no test in the suite performed a push while
+// `head != 0`, so deleting `% self.cap` from that line left all 44 targets
+// green -- only the DEQUEUE modulo in `pop` was pinned. The whole-branch
+// review found that gap; no record had claimed the line was covered, but no
+// record had recorded it as a gap either, which is the worse of the two.
+//
+// The state that reaches the wrap is the whole fixture. Fill a capacity-2
+// channel, take one value out so `head` advances to 1 with one value still
+// live and one slot free, then send a third. That third value must land at
+// `(1 + 1) % 2 == 0` -- the slot the dequeue just freed. Without the modulo
+// the index is `1 + 1 == 2`, one past the end of a two-element array.
+//
+// The assertion is the ORDER of the drain, not merely its length: `2 3` is
+// the only reading under which the wrapped write landed in the freed slot
+// and the dequeue then found it there. A fixture that checked only "two more
+// values come back" would pass on a ring that wrote to the wrong slot and
+// handed back a stale one.
+//
+// Synchronous by construction: `try_send`/`try_recv` only, with no await
+// expression and no spawned task -- so no regression of the ring arithmetic
+// can turn this fixture into a hang, which is the failure mode this module's
+// async fixtures carry (see `channel_send_suspends_only_to_retry.nova` and
+// ADR 0017's "What is not testable").
+//
+// The dotted await spelling is deliberately absent from this comment as well
+// as from the code below. Fixtures on this branch have twice been classified
+// synchronous-or-not by grepping for that substring, and every synchronous
+// channel fixture written before this one contains zero occurrences of it --
+// a comment merely mentioning it would make this file read as async to the
+// next such grep.
+fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+    println("send1=${tx.try_send(1)}")
+    println("send2=${tx.try_send(2)}")
+    // `head` advances to 1; one value live, one slot free.
+    println("first=${rx.try_recv().unwrap_or(0)}")
+    // The wrapping write: slot `(1 + 1) % 2 == 0`.
+    println("send3=${tx.try_send(3)}")
+    let a = rx.try_recv().unwrap_or(0)
+    let b = rx.try_recv().unwrap_or(0)
+    println("drained=${a} ${b}")
+    println("empty=${rx.try_recv().is_none()}")
+}

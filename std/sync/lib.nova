@@ -187,9 +187,31 @@ pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 
 // Two views onto one channel. Records are reference types, so both observe
 // every mutation; the split carries intent -- hand `tx` to producers and `rx`
-// to consumers -- and not enforcement. Nova has no field privacy, so a forged
-// `Sender { ch: c }` compiles and can send or close on a channel it was never
-// given. Documented, not prevented; the same hazard `MutexGuard` carries.
+// to consumers -- and not enforcement. Nova enforces no field privacy, and
+// that is unenforceable rather than merely unenforced: a field's `vis`
+// survives the AST (`crates/nova-ast/src/item.rs:71`) and is dropped at
+// AST->HIR lowering (`crates/nova-hir/src/lib.rs:918-923`), so
+// `check_field_set` (`crates/nova-typeck/src/check.rs:6214-6272`) has no
+// visibility left to check. Three routes, of very unequal reach:
+//
+// - Forging `Sender { ch: c }` grants NOTHING. The literal needs a
+//   `Channel<T>` to name, and `sender()`/`receiver()` below are `pub` and
+//   take a plain `self`, so whoever can name the channel can already obtain
+//   both handles legitimately.
+// - `ch.closed = false` REOPENS a closed channel, from any legitimately-held
+//   handle, and destroys the one property that gives a consumer loop a
+//   termination condition: that `recv`'s `None` means closed AND drained.
+//   `close` only ever sets the flag true, so no API path reaches this -- the
+//   field is simply ordinary. This is the strongest of the three.
+// - Writing `ch.ring.head` or `ch.ring.len` breaks the INVARIANT above that
+//   the truncating `%` depends on, and reaches it without ever naming the
+//   non-`pub` `Ring<T>`.
+//
+// Documented, not prevented, as the standing `MutexGuard` is -- and ranked
+// the same way, at `nova-spec/20-STDLIB.md:931-938`, where naming forgery
+// alone was corrected on 2026-08-21 for understating the reach. An earlier
+// version of this comment made exactly that mistake here; corrected
+// 2026-08-22.
 pub record Sender<T> { ch: Channel<T> }
 pub record Receiver<T> { ch: Channel<T> }
 
