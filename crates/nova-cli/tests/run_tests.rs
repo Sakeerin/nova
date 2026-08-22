@@ -1221,6 +1221,33 @@ fn gate_task_sleep_order_runs() {
         .stdout(expected);
 }
 
+/// Phase 2 gate 2.3: a concurrent producer/consumer over a bounded channel,
+/// with timers, producing deterministic output.
+///
+/// Only the consumer prints, and that is what makes the output deterministic
+/// while a timer is genuinely in play: the channel is FIFO, so the order of
+/// the `got` lines is fixed by the order of sends however the two tasks
+/// interleave, and the `sleep` changes only *when* each value moves. No
+/// duration is asserted anywhere, per this suite's standing rule against
+/// timing-flaky assertions -- the same rule `gate_task_sleep_order_runs`
+/// above follows. The sleep demonstrates that channels and timers compose;
+/// it is not what the assertion rests on.
+///
+/// Capacity 2 against 5 sends is deliberate: the producer fills the buffer
+/// and blocks in `send` twice, so this covers the bounded path rather than
+/// the case where a channel never fills. `tx.close()` is what ends the
+/// consumer loop, since `recv` yields `None` only once the channel is closed
+/// *and* drained -- without it the consumer waits forever.
+#[test]
+fn gate_producer_consumer_channel_runs() {
+    nova()
+        .arg("run")
+        .arg(repo_root().join("examples/03-producer-consumer/src/main.nova"))
+        .assert()
+        .success()
+        .stdout("got 1\ngot 2\ngot 3\ngot 4\ngot 5\ndone\n");
+}
+
 /// `block_on` called from inside an `async fn` ends the process with a
 /// diagnostic, rather than unwinding out of the runtime through a generated
 /// frame.

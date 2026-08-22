@@ -1,0 +1,53 @@
+// Phase 2 gate 2.3: a concurrent producer/consumer over a bounded channel,
+// with timers, producing deterministic output.
+//
+// Determinism comes from one decision: only the consumer prints. The channel
+// is FIFO, so the order of `got` lines is fixed by the order of sends no
+// matter how the two tasks interleave, and the sleep changes only *when* each
+// value moves -- never which. If both tasks printed, the interleaving would
+// vary with timing and this example would falsify the very property the gate
+// asks it to demonstrate.
+//
+// So the sleep here *demonstrates* that channels and timers compose; it is not
+// what the assertion rests on. This suite has a standing rule against
+// timing-flaky assertions -- see `gate_task_sleep_order_runs` -- and nothing
+// below asserts a duration.
+//
+// Capacity 2 against 5 sends is deliberate: the producer fills the buffer and
+// blocks in `send` twice, so this exercises the bounded path rather than the
+// case where a channel never fills. `tx.close()` is what ends the consumer's
+// loop -- `recv` returns `None` only once the channel is closed *and* drained,
+// so without that call the consumer would wait forever.
+//
+// `let ch: Channel<Int>` needs its annotation: `channel`'s type parameter
+// appears only in the return type, and Nova has no turbofish, so `channel(2)`
+// alone gives the checker no way to name `T`.
+
+async fn produce(mut tx: Sender<Int>) {
+    let mut n = 1
+    while n <= 5 {
+        tx.send(n).await
+        sleep(Duration::from_millis(1)).await
+        n = n + 1
+    }
+    tx.close()
+}
+
+async fn consume(mut rx: Receiver<Int>) {
+    let mut more = true
+    while more {
+        match rx.recv().await {
+            Some(v) => println("got ${v}")
+            None => more = false
+        }
+    }
+    println("done")
+}
+
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let a = spawn(produce(ch.sender()))
+    let b = spawn(consume(ch.receiver()))
+    a.join().await
+    b.join().await
+}
