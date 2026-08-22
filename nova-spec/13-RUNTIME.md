@@ -15,7 +15,9 @@ The runtime is a **Rust crate** that gets statically linked into every Nova bina
 - I/O primitives
 - FFI marshalling
 
-This avoids re-implementing Tokio, Hyper, etc. — leverage the Rust ecosystem.
+This leverages the Rust ecosystem rather than re-implementing it — with one
+deliberate exception: the async executor is hand-written and single-threaded (4.1),
+not a wrapped Tokio.
 
 ```
 +-----------------------------------------+
@@ -24,7 +26,7 @@ This avoids re-implementing Tokio, Hyper, etc. — leverage the Rust ecosystem.
 +-----------------------------------------+
 |  nova-runtime (Rust)                    |
 |    - GC (mmtk or bdwgc)                 |
-|    - Tokio executor                     |
+|    - Cooperative executor (4.1)         |
 |    - Hyper HTTP                         |
 |    - Ring crypto                        |
 |    - Allocator                          |
@@ -33,6 +35,11 @@ This avoids re-implementing Tokio, Hyper, etc. — leverage the Rust ecosystem.
 |  OS (libc)                              |
 +-----------------------------------------+
 ```
+
+Of the components above, the executor, allocator, GC and panic infrastructure are
+built. **Hyper HTTP and Ring crypto are not** — `std/http` and `std/crypto` are
+unstarted, and the workspace depends on neither crate. The GC line naming mmtk or
+bdwgc is also stale: the collector is hand-written (see 3.1-3.2, not yet corrected).
 
 ---
 
@@ -100,40 +107,112 @@ Compiler emits `nova_gc_safepoint()` at loop back-edges and function entries.
 
 ## 4. Async Runtime
 
+**AMENDED 2026-08-22 (branch `spec-runtime-async-truth`): this section previously
+specified a Tokio-backed, work-stealing, multi-threaded runtime with structured
+cancellation, and every subsection of it was false.** Nothing here was ever built that
+way. It is rewritten below to describe the runtime that exists, with the one genuinely
+unbuilt item (§4.4) relabelled as an open gap rather than deleted, since it remains
+intent. `20-STDLIB.md` is the only other file under `nova-spec/` carrying dated
+amendments; this is the first in this file, and the convention is borrowed deliberately
+— silently rewriting what a specification specified is worse than recording that it
+changed. See `docs/adr/0017-std-sync-channel-shape.md`, which routed this correction
+here.
+
 ### 4.1 Executor
-- Wrap **Tokio** as the runtime
-- `nova_runtime_block_on(future)` for `main` if async
-- Standard work-stealing thread pool, sized to CPU count
+A **single-threaded cooperative executor**, hand-written in
+`crates/nova-runtime/src/task.rs` — whose own first line reads "A single-threaded
+cooperative executor." There is no Tokio anywhere in the workspace and no thread pool:
+tasks run to their next suspension point on the calling thread, and the ready queue is
+FIFO round-robin (`task.rs`, the `QUEUE` doc comment), so a task re-queued by
+`yield_now` waits behind every task already waiting.
+
+- `block_on<T>(fut: Future<T>) -> T` is the entry point from a synchronous `main`.
+- Calling `block_on` from inside an `async fn` **ends the process with a diagnostic**
+  rather than unwinding out of the runtime through a generated frame.
+- Cooperation is real rather than nominal: a task that never reaches a suspension point
+  is unpreemptable, and no watchdog can fire while it spins.
 
 ### 4.2 Future Type
-A Nova `Future<T>` compiles to a state machine struct (like Rust's async). At runtime:
+A Nova `Future<T>` compiles to a state machine reached through one **frozen** C ABI:
+
 ```rust
-trait NovaFuture {
-    fn poll(&mut self, cx: &mut Context) -> Poll<NovaValue>;
+pub type PollFn = unsafe extern "C-unwind" fn(state: *mut u8, task_ctx: *mut u8) -> i64;
+pub const POLL_PENDING: i64 = 0;
+pub const POLL_READY: i64 = 1;
+```
+
+- `task_ctx` is **always null** at every call site in the runtime. It exists for a waker
+  that has never been needed: readiness is discovered by re-polling, not by notification.
+- **No panic may cross a poll boundary.** The `-unwind` in the ABI is what makes an
+  escaping panic an abort rather than undefined behaviour — it is not permission to
+  unwind. A Cranelift- or LLVM-emitted frame has no landing pads, so anything reachable
+  from a generated call site must abort instead.
+- This ABI is frozen. Changing the signature, the two status codes, or the null `task_ctx`
+  breaks every generated poll function at once.
+
+### 4.3 Task Spawning
+`spawn`, `join` and `yield_now` are **free functions and methods**, not a `task.` module
+path — Nova has no module-qualified call syntax.
+
+```nova
+async fn work() -> Int { 42 }
+
+async fn main() {
+    let handle = spawn(work())
+    let result = handle.join().await
+    println("got ${result}")
 }
 ```
 
-### 4.3 Task Spawning
-```nova
-let handle = task.spawn(async {
-    // ...
-})
-let result = handle.await
-```
+- `spawn<T>(fut: Future<T>) -> JoinHandle<T>` (`std/task/lib.nova`).
+- `JoinHandle::join(self) -> T` is `async`; the handle is not itself awaitable.
+- `yield_now()` re-queues the current task behind everything already runnable.
 
-### 4.4 Cancellation
-- Structured concurrency: dropping handle cancels child task
-- Cooperative cancellation: tasks must hit `.await` for cancel to fire
-- `task.cancel()` explicit method
+### 4.4 Cancellation — NOT BUILT, an open gap
+This subsection previously specified drop-cancels-child, cooperative cancellation and a
+`task.cancel()` method. **None of it exists**, and it is recorded here as intent rather
+than as specification.
+
+`docs/adr/0009-async-execution-model.md` files "No cancellation" under its *residual
+gaps* and names a future `JoinHandle` drop or cancellation as the natural fix point — an
+open gap, not a foreclosed decision. What ADR 0009 does settle is narrower and concerns
+`timeout<T>`: because the poll ABI has no cancellation hook, `timeout` **abandons** its
+inner future rather than cancelling it. An abandoned future is simply never polled again.
+
+Two things block the design as written, and both are structural rather than incidental:
+
+- **`Drop` is unimplemented.** It is described in `12-TYPESYSTEM.md`, this file's §3.4 and
+  `14-CODEGEN.md`, and implemented nowhere, so "dropping a handle" is not an event the
+  language can observe.
+- **The frozen poll ABI has no interrupt hook** (§4.2). There is no way to stop a task
+  mid-flight, only to stop polling it.
 
 ### 4.5 Channels
+A **bounded** channel, written entirely in Nova over a private ring buffer, with no
+runtime support and no Tokio (`std/sync/lib.nova`; see
+`docs/adr/0017-std-sync-channel-shape.md`).
+
 ```nova
-let (tx, rx) = sync.channel::<Int>(buffer: 100)
-task.spawn(async { tx.send(42).await })
-let v = rx.recv().await
+async fn main() {
+    let ch: Channel<Int> = channel(2)
+    let mut tx = ch.sender()
+    let mut rx = ch.receiver()
+
+    spawn(produce(tx))
+    let first = rx.recv().await
+}
 ```
 
-Backed by Tokio's `mpsc::channel`.
+- `channel<T>(buffer: Int) -> Channel<T>`, then `ch.sender()` and `ch.receiver()`. The
+  annotation on `ch` is **required**: `T` appears only in the return type and Nova has no
+  turbofish, so `channel(2)` alone gives the checker no way to name it.
+- `Sender::send(v) -> Bool` is `async` and returns `false` only when the channel is
+  closed; `try_send` returns `false` when it is full **or** closed.
+- `Receiver::recv() -> Option<T>` is `async`. `None` means closed **and** drained, never
+  merely empty — it is the only signal a consumer loop can terminate on, which is why
+  `close` must be explicit, `Drop` being unimplemented.
+- Contention is yield-and-retry rather than parking, so a waiter stays *runnable* and
+  `report_deadlock` cannot see it.
 
 ---
 
@@ -211,7 +290,7 @@ Each runtime function:
 ## 8. WASM Runtime (Phase 4)
 
 For browser target:
-- No Tokio (use browser event loop via wasm-bindgen)
+- No host executor (use the browser event loop via wasm-bindgen)
 - No bdwgc (use a simple GC OR integrate WASM GC proposal when stable)
 - Phase 4 decision: **start with reference counting** for WASM target (simpler, smaller); revisit later
 - DOM access via auto-generated bindings from web-sys
@@ -223,7 +302,7 @@ For browser target:
 The runtime is large. Minimize:
 - `--release` builds with LTO, strip symbols
 - Tree-shake unused std features (link-time + dead-code elim)
-- `nova build --minimal` excludes Tokio if no async used
+- `nova build --minimal` excludes the executor and async runtime hooks if no async used
 
 Target binary sizes:
 - Hello world: < 5 MB (current Rust+Tokio is ~3 MB; Nova adds GC overhead)
