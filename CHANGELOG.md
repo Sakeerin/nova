@@ -394,6 +394,36 @@ that already compiled.
   deleted hand-rolled padding against `Int::pad` across every integer
   0–1000, with zero mismatches.
 
+- **`nova-spec/13-RUNTIME.md` section 4 corrected**, and it was false in every
+  subsection. It specified a Tokio-backed, work-stealing, multi-threaded
+  executor; a `trait NovaFuture` with a `Context` and a `Poll<NovaValue>`;
+  `task.spawn(async { ... })` module-path syntax with an awaitable handle;
+  structured cancellation via drop-cancels-child and `task.cancel()`; and a
+  channel destructured from a tuple, backed by Tokio's `mpsc::channel`.
+  Measured against the tree: the workspace depends on **no Tokio at all**
+  (zero hits across every `Cargo.toml` and `Cargo.lock`), `task.rs` opens
+  "A single-threaded cooperative executor", the real poll ABI is a frozen
+  `unsafe extern "C-unwind" fn(*mut u8, *mut u8) -> i64` whose `task_ctx` is
+  always null, `spawn`/`block_on`/`yield_now` are free functions with
+  `handle.join().await` rather than `handle.await`, cancellation is filed by
+  ADR 0009 as an open residual gap, and the channel is pure Nova over a
+  private ring. Section 4.4 is relabelled **NOT BUILT** rather than deleted,
+  since cancellation remains intent; its two blockers are now named (`Drop`
+  unimplemented, and no interrupt hook in a frozen ABI). The correction also
+  reaches outside section 4, because fixing the wording alone would have left
+  the file contradicting itself: section 1's premise no longer cites Tokio as
+  the thing being leveraged, its architecture diagram no longer lists a
+  "Tokio executor" component, section 8's "No Tokio" for WASM no longer
+  implies Tokio elsewhere, and section 9's `--minimal` no longer excludes a
+  dependency that does not exist. Section 9's comparison to a ~3 MB
+  Rust+Tokio hello world stays — that is a claim about Rust, not about Nova.
+  This is the first dated amendment in `13-RUNTIME.md`; `20-STDLIB.md` had
+  been the only file under `nova-spec/` carrying the convention. Routed here
+  by `docs/adr/0017-std-sync-channel-shape.md`. Sections 3.1-3.4 (bdwgc,
+  MMTk, a four-function GC interface that exists in no form, and finalizers
+  hung off an unimplemented `Drop`) are **knowingly left stale** and want
+  their own pass.
+
 ## [0.2.0-alpha.1] - 2026-08-16
 
 Standard-library-core progress milestone, and a **pre-release on purpose**.
