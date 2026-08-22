@@ -66,7 +66,38 @@ impl<T> Channel<T> {
     pub fn sender(self) -> Sender<T>
     pub fn receiver(self) -> Receiver<T>
 }
+impl<T> Sender<T> {
+    pub fn try_send(mut self, v: T) -> Bool
+    pub async fn send(mut self, v: T) -> Bool
+    pub fn close(mut self)
+}
+impl<T> Receiver<T> {
+    pub fn try_recv(mut self) -> Option<T>
+    pub async fn recv(mut self) -> Option<T>
+}
 ```
+
+**The `mut self` receivers are part of the recorded surface, not
+decoration.** Per `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`,
+`mut` is a permission on the *binding*, so a `mut self` method is callable
+only through a binding that is itself `mut`. Every call site therefore
+reads `let mut tx = ch.sender()`, and `let tx = ch.sender()` followed by
+`tx.try_send(1)` does not compile — measured:
+``error[E0060]: `Sender_T.try_send` mutates its receiver, but `tx` is
+immutable``. `sender()` and `receiver()` take a plain `self` and `channel`
+is a free function, so the annotated `let ch: Channel<Int> = channel(2)`
+needs no `mut` — only the two handles do.
+
+**An earlier version of this ADR showed neither `impl` block at all**, so
+the one document specifically about this API's *shape* recorded none of the
+five mutating methods in any form, and a reader following it alone copied
+the block, wrote `let tx = ch.sender()`, and hit an undocumented `E0060`.
+`CHANGELOG.md` and `nova-spec/20-STDLIB.md` were corrected for exactly this
+on 2026-08-21 and this file was not — while the commit that corrected them
+claimed in its own message that "the recorded surface gains its `mut`
+receivers", which was false of its own diff here. A commit message is
+history and cannot be rewritten; this paragraph is the correction. Fixed
+2026-08-22.
 
 `channel` returns `Channel<T>` — the record §13 declares and never uses —
 and the pair is reached through `ch.sender()` and `ch.receiver()`. All
@@ -184,20 +215,45 @@ implemented in none, so nothing closes a channel on a producer's behalf.
 Without an explicit `close`, `recv`'s "closed and drained" answer would
 have no source and a consumer loop could not terminate.
 
-### 5. Two hazards are documented, not prevented
+### 5. The field-privacy hazards, ranked by reach, plus the spin
 
-Both are the shape ADR 0012 records for `File { fd: 9999 }` and ADR 0016
-for a forged `MutexGuard`, and both follow from one fact: **Nova enforces
-no field privacy.**
+The first group is the shape ADR 0012 records for `File { fd: 9999 }` and
+ADR 0016 for a forged `MutexGuard`, and follows from one fact: **Nova
+enforces no field privacy.** That is *unenforceable* here and not merely
+unenforced. A record field's `vis` survives the AST
+(`crates/nova-ast/src/item.rs:71`) and is dropped at AST→HIR lowering
+(`crates/nova-hir/src/lib.rs:918-923`), so by the time `check_field_set`
+(`crates/nova-typeck/src/check.rs:6214-6272`) runs there is no visibility
+left to check — that function checks binding mutability, field resolution
+by name, and unification, and nothing else. Settled by reading the
+compiler, not by execution.
 
-- **Forgeable handles.** `Sender { ch: c }` is ordinary legal code, so the
-  producer/consumer split is intent and not enforcement — a forged
-  `Sender` can send or close on a channel it was never given. It needs a
-  `Channel<T>` to name, which is the same limit the forged-guard hazard
-  has.
-- **Invisible spin.** A waiter is runnable, so §4's `report_deadlock`
-  blind spot is reachable from ordinary correct-looking code: forget to
-  drain, and the process neither aborts nor progresses.
+The three routes are of very unequal reach, and `20-STDLIB.md:931-938`
+ranks `MutexGuard`'s the same way — it had to be corrected on 2026-08-21
+for naming forgery alone, and an earlier version of this section made that
+identical mistake here:
+
+- **Forgery grants nothing.** `Sender { ch: c }` is ordinary legal code,
+  so the producer/consumer split is intent and not enforcement — but the
+  literal needs a `Channel<T>` to name, and `sender()` / `receiver()` are
+  `pub` and take a plain `self`, so whoever can name the channel can
+  already obtain both handles legitimately. The forged literal is not what
+  makes the split unenforced; the plain accessors are.
+- **`ch.closed = false` reopens a closed channel**, from any
+  legitimately-held handle and with no forgery at all, and destroys the one
+  property that gives a consumer loop a termination condition: that
+  `recv`'s `None` means closed **and** drained. `close` only ever sets the
+  flag true, so no API path reaches this — the field is simply ordinary.
+  **This is the strongest of the three** and went unmentioned in all four
+  records until 2026-08-22.
+- **Writes through the `pub` ring** — `ch.ring.head`, `ch.ring.len` —
+  break the `head >= 0`, `len >= 0`, `cap >= 1` invariant that
+  `std/sync/lib.nova` states on `Ring` and that the truncating `%` depends
+  on, and reach it without ever naming the non-`pub` `Ring<T>`.
+- **Invisible spin**, which is not a field-privacy hazard at all. A waiter
+  is runnable, so §4's `report_deadlock` blind spot is reachable from
+  ordinary correct-looking code: forget to drain, and the process neither
+  aborts nor progresses.
 
 ### 6. ADR 0016's blocker is superseded here by cross-reference, not edited
 
@@ -294,7 +350,7 @@ reader does not have to rediscover it.
 
 ### What is not testable, and why that is load-bearing
 
-The ten `channel_*` fixtures pin every semantic in Decision 1. What they
+The `channel_*` fixtures pin every semantic in Decision 1. What they
 cannot pin is one *implementation property* — where a retry loop's
 suspension sits — and the reason is worth recording, because it is a
 property of the executor rather than an omission.
@@ -308,6 +364,19 @@ this same increment. The phrase is dropped rather than reworded, because
 nothing in Decision 1 is unreachable now. What follows is about the
 livelock only.
 
+A **third** gap was found afterwards, by the whole-branch review rather
+than by writing either the code or the records, and it was of a different
+kind. The *enqueue* modulo in `Channel::push`, `(head + len) % cap`, was
+never executed in a state where it wraps: no fixture performed a push while
+`head != 0`, and `channel_two_tasks_blocking` — the fixture built to force a
+wrap — wraps only on the *dequeue* side, because its producer refills only
+after the consumer has drained both slots back to `head == 0`. Deleting
+`% self.cap` from that line therefore left all 44 targets green. No record
+claimed the line was covered, but none recorded it as a gap either, and
+that is the worse of the two failures: an unclaimed gap cannot be checked
+against anything. `channel_enqueue_wraps_after_dequeue` closes it and is
+its sole detector. Added 2026-08-22.
+
 Measured detectors, whole-suite counts, each the complete set across all
 44 targets:
 
@@ -316,13 +385,22 @@ Measured detectors, whole-suite counts, each the complete set across all
 | clamp deleted (`cap = buffer`) | **1** | `channel_clamps_buffer_below_one` | bounded: panic, exit 127 |
 | `push` loses its `closed` guard | **2** | `channel_close_refuses_send`, `channel_send_refuses_when_closed` | bounded: stdout diff |
 | `send` loses its own `closed` check | **1** | `channel_send_refuses_when_closed` | **hang**, exit 124 |
+| enqueue modulo deleted (`data[head + len] = v`) | **1** | `channel_enqueue_wraps_after_dequeue` | bounded: panic, exit 127 |
 
-The middle row is the evidence that the new `send` fixture adds real
-coverage rather than restating the old one: that mutation had **one**
-detector before it and has two now.
+The `push`-loses-its-`closed`-guard row is the evidence that the `send`
+fixture adds real coverage rather than restating the old one: that mutation
+had **one** detector before it and has two now. The enqueue-modulo row is
+the review gap above — before its fixture existed that mutation failed
+**nothing at all** across the whole suite. Its diagnostic is
+`nova: panic: array index 2 out of bounds for length 2`, printed after
+three correct lines of output, so the mutant is caught by the fixture's own
+assertion and not only by the exit code. Rows are referred to by name
+rather than by position here because adding one to this table is what
+falsified the previous wording.
 
-**The third row was predicted to fail and in fact hangs, and the
-difference is the whole point of this subsection.** The instruction that
+**The `send`-loses-its-own-`closed`-check row was predicted to fail and in
+fact hangs, and the difference is the whole point of this subsection.**
+The instruction that
 produced `channel_send_refuses_when_closed` reasoned that because the
 `closed` check precedes the `yield_now().await`, a fixture built on it is
 "bounded by construction", and asked for confirmation that deleting the
@@ -402,15 +480,18 @@ it, and this ADR does not claim otherwise.
   glob-imported, shadowable `std/sync` records, the standing `Mutex`,
   `TcpStream` and `File` already have.
 - **`STD_MODULES` stays at 12.** `std/sync` joined the array last
-  increment; this one only grows its `lib.nova` (166 → 307 lines).
+  increment; this one only grows its `lib.nova` (166 → 329 lines).
 - **The poll ABI, the executor, and `nova-runtime` are untouched.** The
   only *Rust* change in the entire branch is fixture registration in
   `crates/nova-cli/tests/run_tests.rs` — no runtime, compiler or codegen
   crate is modified. Non-Nova files that do change: that registration, the
   `.stdout` goldens, and these records.
-- **Suite: 44 targets / 1046 passed / 0 failed / 8 ignored.** The two
-  added tests are the coverage fixtures above; the eight ignored are
-  ADR-0010's GC tests, untouched.
+- **Suite: 44 targets / 1047 passed / 0 failed / 8 ignored**, measured
+  2026-08-22. The added tests that close a gap rather than covering
+  Decision 1 directly are `channel_clamps_buffer_below_one`,
+  `channel_send_refuses_when_closed` and
+  `channel_enqueue_wraps_after_dequeue`, named rather than counted; the
+  eight ignored are ADR-0010's GC tests, untouched.
 
 ## References
 
@@ -423,6 +504,12 @@ it, and this ADR does not claim otherwise.
   yield-and-retry decision and its `report_deadlock` blind spot
   (`:205-231`) are followed here rather than re-derived, and the blind
   spot is still filed there as accepted-not-fixed
+- `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`: why every
+  mutating method here takes `mut self` and why that reaches the call site.
+  `mut` is a permission on the **binding**, not on a field and not a borrow
+  (`:26-27`), and `mut self` copies nothing, so mutation is alias-visible
+  (`:219`) — which is exactly what makes `Sender` and `Receiver` two views
+  onto one channel rather than two channels
 - `docs/adr/0012-file-descriptor-lifecycle.md`: the precedent for
   documenting a forgeable handle rather than preventing it, and for
   explicit release over a collector backstop. Cited for the *shape* of the
@@ -448,7 +535,7 @@ it, and this ADR does not claim otherwise.
 - `nova-spec/13-RUNTIME.md:129-136`: §4.5's third and also-uncompilable
   spelling of the channel, plus its Tokio claim — recorded above as known
   and out of scope
-- `std/sync/lib.nova`: the shipped module, 307 lines, pure Nova
+- `std/sync/lib.nova`: the shipped module, pure Nova, zero intrinsics
 - `crates/nova-runtime/src/task.rs:162`: `enum Wait`, three variants,
   unchanged; `:771`, `:1097`, `:1153`: the three non-exhaustive
   `parked.retain` matches no arm was added to; `:1007`: the sole
@@ -458,11 +545,16 @@ it, and this ADR does not claim otherwise.
   `STD_MODULES`, 12, unchanged
 - `tests/runtime/channel_uncontended.nova`, `channel_full_refuses.nova`,
   `channel_fifo_order.nova`, `channel_close_refuses_send.nova`,
-  `channel_close_then_drain.nova`, `channel_clamps_buffer_below_one.nova`:
-  the six synchronous fixtures, all `try_send`/`try_recv` except the last,
-  which calls neither async method and exists to pin the `buffer < 1`
-  clamp — the sole detector of that mutation, bounded because nothing in
-  it awaits
+  `channel_close_then_drain.nova`, `channel_clamps_buffer_below_one.nova`,
+  `channel_enqueue_wraps_after_dequeue.nova`: the synchronous fixtures.
+  Every one of them calls `try_send`/`try_recv` only and awaits nothing, so
+  none of them can hang — that is the property the group is named for, and
+  no member is an exception to it. `channel_clamps_buffer_below_one` is the
+  sole detector of the `buffer < 1` clamp mutation and
+  `channel_enqueue_wraps_after_dequeue` the sole detector of the
+  enqueue-modulo mutation, both measured across all 44 targets. An earlier
+  version of this bullet gave a count and an exception clause that was true
+  of every fixture in the list; corrected 2026-08-22
 - `tests/runtime/channel_two_tasks_blocking.nova`: the only fixture in
   which `send` and `recv` genuinely suspend and resume; the sole detector
   of both "`send` never blocks" and "`recv` returns `None` when

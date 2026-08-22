@@ -1111,7 +1111,7 @@ the accessor form gives the pair an identity that can carry future
 accessors without changing `channel`'s signature, which a tuple return
 cannot. See `docs/adr/0017-std-sync-channel-shape.md`.
 
-**Semantics, and what pins each.** Ten `channel_*` fixtures in
+**Semantics, and what pins each.** The `channel_*` fixtures in
 `tests/runtime/` cover the clauses below. Two of them were added only
 after this amendment was first written, because an earlier version of this
 sentence claimed each clause was "pinned by its own fixture" when two were
@@ -1119,8 +1119,12 @@ pinned by nothing: the `buffer < 1` clamp, which no test exercised (no
 `channel(0)` or negative argument existed in the repo at all), and the
 async `send`'s refusal on a closed channel, which no test called.
 `channel_clamps_buffer_below_one` and `channel_send_refuses_when_closed`
-close both, and `docs/adr/0017-std-sync-channel-shape.md` carries the
-measured detector counts. `try_send` returns `false`
+close both. A third fixture, `channel_enqueue_wraps_after_dequeue`, was
+added on 2026-08-22 for a gap of a different kind, found by review rather
+than by writing a record: the ring's *enqueue* modulo was executed by no
+test in a state where it wraps, and no record had claimed it covered **or**
+recorded it as missing. `docs/adr/0017-std-sync-channel-shape.md` carries
+the measured detector counts. `try_send` returns `false`
 when the channel is **full or closed**; the async `send` returns `false`
 **only** when closed, waiting out a full channel. `try_recv` returns
 `None` when **empty**; the async `recv` returns `None` **only when closed
@@ -1132,7 +1136,8 @@ producer may close the instant it stops producing. `buffer < 1` **clamps
 to 1** rather than panicking: a zero-capacity rendezvous channel needs a
 handoff protocol yield-and-retry cannot express without a second wait
 state, and clamping follows `Int::pad`'s precedent
-(`std/fmt/lib.nova:27`) of an early return over a panic.
+(`std/fmt/lib.nova:30`, `if len >= width { return s }`; `:27` is that
+function's signature) of an early return over a panic.
 
 **Every call site must annotate, and this is forced rather than chosen.**
 `let ch: Channel<Int> = channel(2)` is the only available call form: `T`
@@ -1146,13 +1151,28 @@ parameter would make `T` inferable but promotes an implementation detail
 has the identical inference problem while moving further from this
 section's `channel` free function.
 
-**Two hazards are documented, not prevented, and both follow from Nova
-enforcing no field privacy** — the same standing `MutexGuard` has above
-and `File { fd: 9999 }` has under ADR 0012. *Forgeable handles:*
-`Sender { ch: c }` is ordinary legal code, so the producer/consumer split
-carries intent and not enforcement — a forged `Sender` can send or close
-on a channel it was never given. *Invisible spin:* contention is handled
-by yielding and retrying, exactly as `Mutex` above, with the same
+**The field-privacy hazards are documented, not prevented, and ranked by
+reach the way `MutexGuard`'s are above** — the same standing that guard has
+and `File { fd: 9999 }` has under ADR 0012, except that here the
+enforcement is *unavailable* rather than merely absent: a record field's
+`vis` is dropped at AST→HIR lowering
+(`crates/nova-hir/src/lib.rs:918-923`), so `check_field_set`
+(`crates/nova-typeck/src/check.rs:6214-6272`) has no visibility left to
+check. *Forgery grants nothing:* `Sender { ch: c }` is ordinary legal code,
+so the producer/consumer split carries intent and not enforcement — but the
+literal needs a `Channel<T>` to name and `sender()`/`receiver()` are `pub`
+and take a plain `self`, so whoever can name the channel already holds both
+handles legitimately. *Reopening is the strongest route:*
+`ch.closed = false`, reachable from any legitimately-held handle, destroys
+the one property that gives a consumer loop a termination condition — that
+`recv`'s `None` means closed **and** drained — and `close` only ever sets
+the flag true, so no API path reaches it. *Writes through the `pub` ring:*
+`ch.ring.head` and `ch.ring.len` break the `head >= 0`, `len >= 0`,
+`cap >= 1` invariant the truncating `%` depends on, without ever naming the
+non-`pub` `Ring<T>`. An earlier version of this amendment named forgery
+alone — the identical understatement corrected for `MutexGuard` above on
+2026-08-21; corrected here 2026-08-22. *Invisible spin:* contention is
+handled by yielding and retrying, exactly as `Mutex` above, with the same
 consequence — a waiter stays **runnable**, and `report_deadlock`
 (`crates/nova-runtime/src/task.rs:1243`) is reached from one place only
 (`:1007`) and only when the ready queue is empty, so it cannot see a

@@ -1,4 +1,4 @@
-// WHAT THIS PINS: `channel`'s `buffer < 1` clamp (`std/sync/lib.nova:207`,
+// WHAT THIS PINS: `channel`'s `buffer < 1` clamp (`std/sync/lib.nova:229`,
 // `let cap = if buffer < 1 { 1 } else { buffer }`). Before this fixture the
 // clamp was executed by no test in the suite -- every other channel fixture
 // calls `channel(1)`, `channel(2)` or `channel(3)`, and no `channel(0)` or
