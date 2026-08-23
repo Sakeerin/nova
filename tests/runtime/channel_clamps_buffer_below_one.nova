@@ -1,7 +1,10 @@
-// WHAT THIS PINS: `channel`'s `buffer < 1` clamp (`std/sync/lib.nova:229`,
-// `let cap = if buffer < 1 { 1 } else { buffer }`). Before this fixture the
-// clamp was executed by no test in the suite -- every other channel fixture
-// calls `channel(1)`, `channel(2)` or `channel(3)`, and no `channel(0)` or
+// WHAT THIS PINS: `channel`'s `buffer < 1` clamp in `std/sync/lib.nova` --
+// the line `let cap = if buffer < 1 { 1 } else { buffer }`. Cited by
+// content rather than by line: it was `:229` when this fixture was
+// written, and the 2026-08-23 `std/json` commit added two comment lines
+// above it, moving it to `:231`. Before this fixture the clamp was
+// executed by no test in the suite -- every other channel fixture calls
+// `channel(1)`, `channel(2)` or `channel(3)`, and no `channel(0)` or
 // negative argument appeared anywhere in the repo. The spec amendment and
 // ADR 0017 both claimed the clamp was pinned; it was not, and this closes
 // that rather than rewording the claim.

@@ -324,12 +324,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compiles **verbatim**, shadowing variant names included — measured, not
   assumed. Shipped with it: `pub record JsonError { msg: String, at: Int }`
   (which §7 names in the trait signatures but never declares),
-  `stringify`, total; `parse`, full RFC 8259 including `\uXXXX` with
-  surrogate-pair combining; and `ToJson`/`FromJson` with impls for `Int`,
-  `Float`, `Bool` and `String` and **nothing else** — no container impl and
-  no blanket impl, each rejected as untested public API rather than
-  overlooked. `stringify_pretty` and `@derive` do **not** ship, so §7 is
-  not closed. One new intrinsic, `str_to_float(s: String) -> Float`
+  `stringify`, total; `parse`, accepting all six `JsonValue` forms, one
+  value per document with trailing content rejected, RFC 8259 section 7's
+  eight one-character escapes and its six-character Unicode escape with
+  high/low surrogate pairs combined, JSON's number grammar (no leading `+`,
+  no leading zero before another digit, no bare fraction point, no exponent
+  without digits), and UTF-8 validation of decoded code points through
+  `Bytes::to_string`'s `Option` — a list of what is built and pinned, not a
+  conformance claim against the whole RFC; and `ToJson`/`FromJson` with
+  impls for `Int`, `Float`, `Bool` and `String` and **nothing else** — no
+  container impl and no blanket impl, each rejected as untested public API
+  rather than overlooked. `stringify_pretty` and `@derive` do **not** ship,
+  so §7 is not closed. One new intrinsic, `str_to_float(s: String) -> Float`
   (`Builtin::STD_ONLY` 65 → 66), the inverse of `float_fixed` and a builtin
   for the same reason: correct decimal-to-binary rounding is research-grade
   (a `digits × 10^exp` accumulation double-rounds, and a codec whose
