@@ -63,6 +63,27 @@ pub fn stringify(v: JsonValue) -> String {
             let mut i = 0
             while i < ks.len() {
                 if i > 0 { out = "${out}," }
+                // The `None` arm is UNREACHABLE: `ks` is `m.keys()`, which
+                // returns exactly the occupied slots, and nothing mutates
+                // `m` between that call and this lookup, so every key here
+                // is live and `get` answers `Some`.
+                //
+                // It is written out because it is the one fallback in this
+                // file that would fail UNSAFE rather than safe. The
+                // separator above is appended BEFORE the lookup, so a
+                // `None` would leave a comma with no member after it --
+                // `{"a":1,}` if it fired on the last key, `{"a":1,,"c":3}`
+                // in the middle -- and neither is JSON, contradicting
+                // `number_to_json`'s "output always valid JSON" directly.
+                // Every other fallback in this file degrades safely
+                // instead: `bump` refuses to advance, `span` returns the
+                // empty string, and `utf8_bytes` returns `0xFF` precisely
+                // to force a downstream rejection.
+                //
+                // `out = out` keeps the arm total without inventing a
+                // member. Making the OUTPUT safe as well would mean moving
+                // the separator below the lookup -- a change to live code
+                // for an input that cannot occur, so it was not made.
                 match m.get(ks[i]) {
                     Some(val) => out = "${out}${quote(ks[i])}:${stringify(val)}"
                     None => out = out
@@ -211,7 +232,14 @@ impl P {
     // golden lines across the three parse fixtures -- 4 in
     // `json_parse_numbers.stdout`, 9 in `json_parse_strings.stdout`, 11 in
     // `json_parse_values.stdout` -- which is every rejection whose cursor stops
-    // short of the end of the input.
+    // short of the end of the input AND whose value walk already failed.
+    //
+    // Both halves of that predicate are load-bearing. Four more goldens in
+    // `json_parse_values.stdout` also stop short of the end -- the
+    // trailing-content cases -- and are UNCHANGED, because for them the
+    // trailing-content error IS the first failure, so there is nothing for the
+    // guard to keep. Reading the clause without its second half predicts 28
+    // rewritten lines rather than 24.
     fn fail(mut self, m: String) {
         if self.err.is_none() {
             self.err = Some(JsonError { msg: m, at: self.pos })
@@ -944,9 +972,14 @@ impl ToJson for Int {
 // nearest `Float` to it is `9223372036854775808.0`, the same value used
 // as the rejected upper bound), so this never has to ask whether an
 // inexact `Float` equals an exact `Int` edge. `NaN` fails both `<` and
-// `>=` here -- a `Float` comparison against `NaN` is always `false`, per
-// `std/core`'s own note on `impl Ord for Float` -- so it is not rejected
-// by this check; it is caught immediately after, by the fraction check,
+// `>=` here -- `==` and all four ORDERING comparisons are `false` whenever
+// either operand is `NaN`, which is the narrow form of the claim and the
+// one `std/core`'s own note on `impl Ord for Float` makes. `!=` is the
+// exception and is `true`, which is exactly what `number_to_json`'s
+// `n - n != 0.0` finiteness test above depends on, so "a comparison
+// against `NaN` is always false" would contradict this file's own
+// machinery. So `NaN` is not rejected by the range check; it is caught
+// immediately after, by the fraction check,
 // since `"NaN"` is not digit-shaped either. Measured against this
 // compiler, not assumed: a throwaway `out_of_range(n)` returned `false`
 // for `0.0 / 0.0`, and `true` for both `1.0 / 0.0` and its negation.
