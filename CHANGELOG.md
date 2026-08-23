@@ -312,6 +312,74 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/adr/0017-std-sync-channel-shape.md` and `20-STDLIB.md` §13's
   2026-08-21 amendment for the shape decision, the two rejected inference
   escapes, and why the livelock is untestable by construction.
+- **`std/json`, a thirteenth `STD_MODULES` entry** (`"$std.json"`,
+  `STD_MODULES` 12 → 13), built at `00-MASTER-SPEC.md` §3's position **11
+  ahead of position 10**: position 10 `std/http` is specified as "use hyper
+  internals at runtime layer" — a Rust dependency and runtime surface this
+  workspace does not have — while position 11 is a "custom parser" that
+  `20-STDLIB.md` §7 writes entirely in Nova. **Position 10 stays unstarted
+  and unblocked**; nothing here makes it harder. `20-STDLIB.md` §7's
+  `pub type JsonValue = | Null | Bool(Bool) | Number(Float) |
+  String(String) | Array([JsonValue]) | Object(Map<String, JsonValue>)`
+  compiles **verbatim**, shadowing variant names included — measured, not
+  assumed. Shipped with it: `pub record JsonError { msg: String, at: Int }`
+  (which §7 names in the trait signatures but never declares),
+  `stringify`, total; `parse`, full RFC 8259 including `\uXXXX` with
+  surrogate-pair combining; and `ToJson`/`FromJson` with impls for `Int`,
+  `Float`, `Bool` and `String` and **nothing else** — no container impl and
+  no blanket impl, each rejected as untested public API rather than
+  overlooked. `stringify_pretty` and `@derive` do **not** ship, so §7 is
+  not closed. One new intrinsic, `str_to_float(s: String) -> Float`
+  (`Builtin::STD_ONLY` 65 → 66), the inverse of `float_fixed` and a builtin
+  for the same reason: correct decimal-to-binary rounding is research-grade
+  (a `digits × 10^exp` accumulation double-rounds, and a codec whose
+  numbers do not round-trip is a bad property to choose deliberately), and
+  Nova could not begin such a parser anyway — there is no `Int`-to-`Float`
+  conversion in the language, so accumulated digits could never become a
+  `Float`. `RESERVED_TYPE_NAMES` stays at 7. Adding one intrinsic touches
+  **13 sites**, of which **7 are compiler-forced** (measured by adding only
+  the two enum variants and letting the compiler name the rest); reaching 7
+  needs `--all-targets`, because one forced site is a description table
+  under `#[cfg(test)]` and a plain `cargo check --workspace` finds **6 and
+  reports success**. Three deliberate data-integrity rules, each documented
+  at the code: a non-finite `Number` renders as `null`, since JSON has no
+  `NaN` and no `Infinity` — deliberately lossy, and a live path rather than
+  a theoretical one, because Nova can produce both (`0.0 / 0.0`,
+  `1.0 / 0.0`, measured); `Int::to_json` rounds **silently** beyond ±2^53,
+  because the trait returns `JsonValue` and has no error channel; and
+  `Int::from_json` **rejects** a fractional `Number` and a magnitude
+  outside `i64::MIN..=i64::MAX` rather than truncating or wrapping either.
+  That decode path first used `Float`'s `Display`, which is
+  shortest-round-trip rather than exact, so `i64::MIN` rendered as
+  `-9223372036854776000` — off by 192 and out of range — and it now takes
+  its digits from `float_fixed(n, 0)`; `Display` is still read, but only
+  for the fraction check, since `float_fixed` rounds a fraction away. The
+  range check is exact rather than merely plausible because `i64::MAX` is
+  **not** representable as an `f64` and its nearest `f64` is 2^63, the very
+  bound the check rejects. `\uXXXX` needed no second intrinsic: there is no
+  `Int`-to-`Char` conversion anywhere, so a code point becomes UTF-8 bytes
+  encoded in Nova, then `bytes_from_ints`, then `Bytes::to_string() ->
+  Option<String>`, **whose `Option` is the validation** — where an
+  `Int`-to-`Char` primitive would have been strictly worse, the runtime's
+  own `nova_rt_char_to_str` being
+  `char::from_u32(v).unwrap_or(REPLACEMENT_CHARACTER)`, which silently
+  substitutes U+FFFD for exactly the inputs that must be rejected. Nine new
+  tests, 1048 → 1057: seven `json_*` `nova run` fixtures, one for
+  `Map::keys`, and one Rust unit test on the intrinsic. See
+  `docs/adr/0018-std-json-scope-and-build-order.md` and `20-STDLIB.md` §7's
+  2026-08-23 amendment. **This does not close Phase 2**: position 10
+  `std/http` and position 12 `std/crypto` are both unstarted, and the Phase
+  2 gate still needs `examples/05-json-api` and `docs/benchmarks/`, neither
+  of which exists.
+- `Map::keys(self) -> [K]`, in `std/collections` — position 3's public API,
+  changed from a position-11 increment, because `Object(Map<String,
+  JsonValue>)` cannot be serialised without enumerating its keys and `Map`
+  had every operation except the one that visits what is there. Taken as a
+  `std/collections` change rather than a private `std/json` helper because
+  a map that cannot be enumerated is arguably incomplete regardless of
+  json. Returns **table order, not insertion order** — a `grow` reinserts
+  every entry and may reorder them — which is documented at the method as
+  explicitly not a guarantee.
 
 ### Changed
 

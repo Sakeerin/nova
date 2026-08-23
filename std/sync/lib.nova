@@ -208,10 +208,12 @@ pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 //   non-`pub` `Ring<T>`.
 //
 // Documented, not prevented, as the standing `MutexGuard` is -- and ranked
-// the same way, at `nova-spec/20-STDLIB.md:931-938`, where naming forgery
-// alone was corrected on 2026-08-21 for understating the reach. An earlier
+// the same way, in `nova-spec/20-STDLIB.md` section 13, under the paragraph
+// beginning "Neither flag reaches tampering", where naming forgery alone
+// was corrected on 2026-08-21 for understating the reach. An earlier
 // version of this comment made exactly that mistake here; corrected
-// 2026-08-22.
+// 2026-08-22. Cited by content rather than by line: it was `:931-938`
+// until the 2026-08-23 `std/json` amendments moved it to `:1065-1072`.
 pub record Sender<T> { ch: Channel<T> }
 pub record Receiver<T> { ch: Channel<T> }
 

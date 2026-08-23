@@ -407,6 +407,28 @@ function out of it compiles cleanly and fails at JIT link time instead. That is 
 compiler cannot enforce. Count the forced sites yourself when you touch this — the number
 has changed as the compiler has grown, and a stale count here would be worse than none.
 
+**AMENDED 2026-08-23 (branch `std-json`): `symbols()` is not the only unforced site, and
+counting the forced ones needs `--all-targets`.** Both measured while adding
+`str_to_float`, that increment's one intrinsic, which touched 13 sites of which 7 were
+compiler-forced.
+
+1. **`STD_ONLY` membership is unforced too.** Omitting the array element *and* its length
+   together compiles the whole workspace clean, test targets included; only a
+   length/element mismatch is checked. Its consequence is loud rather than latent, though
+   — every `nova` invocation then fails with a Nova-level `error[E0001]: cannot find
+   function` as soon as a std module calls the builtin — so `symbols()` remains the only
+   site whose omission survives *every* compiler in the pipeline, Rust's and Nova's, all
+   the way to JIT link time. That is the accurate form of the claim above, which the
+   paragraph overstated by saying "the exception".
+2. **A plain `cargo check --workspace` undercounts the forced sites.** One of them is a
+   description table inside `nova-typeck`'s `#[cfg(test)] mod tests`, so without
+   `--all-targets` the count comes out one short *and the build reports success*. Nor do
+   they all surface in one pass: the resolver's own name table fires alone first, because
+   cargo cannot compile the downstream crates until the resolver builds.
+
+See `docs/adr/0018-std-json-scope-and-build-order.md` §3. The advice above still stands —
+count them yourself; these two facts are about *how* to count, not a number to reuse.
+
 ### The examples this section used to give
 `nova_rt_println` and `nova_rt_eprintln` exist, though their parameter is a
 `*const NovaStr` rather than the `*str` written here. **`nova_rt_read_file`,
@@ -414,6 +436,16 @@ has changed as the compiler has grown, and a stale count here would be worse tha
 form** — `std/fs` and `std/net` reach the runtime under different names and shapes, and
 `std/http` and `std/json` are unstarted (see `00-MASTER-SPEC.md` section 3, positions
 10-11). Read `symbols()` for the live list rather than trusting an example here.
+
+**AMENDED 2026-08-23 (branch `std-json`): `std/json` is no longer unstarted; `std/http`
+still is.** `std/json` shipped at position 11, ahead of position 10, which remains
+unstarted and unblocked (see `docs/adr/0018-std-json-scope-and-build-order.md`). The
+paragraph's point survives intact for the symbol it names: **`nova_rt_json_parse` still
+does not exist in any form** — grepped, along with `nova_rt_http_serve`,
+`nova_rt_read_file` and `nova_rt_tcp_connect`, none of which appear anywhere in `crates/`
+or `std/`. `std/json` is Nova source over exactly one new runtime entry point,
+`nova_rt_str_to_float`, and adds no JSON-specific one. So this section's advice is
+unchanged: read `symbols()`.
 
 Each runtime function does have a stable C ABI signature and is documented at its
 definition, as this section originally said.
