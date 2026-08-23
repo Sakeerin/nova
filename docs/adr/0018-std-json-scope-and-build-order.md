@@ -344,13 +344,13 @@ and both are easy to get wrong:
   its own date, in the same convention this project already applies to
   dated amendments; this is its successor.
 - **The `lib.nova` file count moves 13 → 14**, and the running count in
-  `20-STDLIB.md` §13's 2026-08-21 amendment is now one behind. That
-  amendment records "12 `STD_MODULES` entries plus `STD_TEST_MODULE` is
-  **thirteen** `lib.nova` files on disk"; with `$std.json` it is 13 plus
-  `STD_TEST_MODULE`, **fourteen**. Two amendments before it (§3's and
-  §10's, both 2026-08-19) record twelve and eleven, each correct at its
-  own date. The §7 amendment written this increment continues that chain
-  rather than editing the earlier ones.
+  `20-STDLIB.md` §13's 2026-08-20 (`std-sync-mutex`) amendment is now one
+  behind. That amendment records "12 `STD_MODULES` entries plus
+  `STD_TEST_MODULE` is **thirteen** `lib.nova` files on disk"; with
+  `$std.json` it is 13 plus `STD_TEST_MODULE`, **fourteen**. Two amendments
+  before it (§3's and §10's, both 2026-08-19) record twelve and eleven,
+  each correct at its own date. The §7 amendment written this increment
+  continues that chain rather than editing the earlier ones.
 - **`std/collections`' public API grew from outside its own position**, and
   that is now a precedent as well as a fix. A later increment that finds
   another position-3 gap should expect to be pointed here.

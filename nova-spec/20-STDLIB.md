@@ -531,9 +531,16 @@ assumed: they are accepted, and `match` arms bind them unqualified. So are
 `pub fn stringify(v: JsonValue) -> String`, `pub fn parse(s: String) ->
 Result<JsonValue, JsonError>`, and both traits, with the signatures above.
 `JsonError` — which this section names in the trait signatures without ever
-declaring — is `pub record JsonError { msg: String, at: Int }`. `parse` is
-full RFC 8259, `\uXXXX` escapes and surrogate pairing included; `stringify`
-is total.
+declaring — is `pub record JsonError { msg: String, at: Int }`. `stringify`
+is total. What `parse` implements, and what the fixtures execute: all six
+`JsonValue` forms; one value per document, with trailing content rejected;
+RFC 8259 section 7's eight one-character escapes and its six-character
+Unicode escape, combining a high surrogate with the low one that must
+follow it; JSON's number grammar, rejecting a leading `+`, a leading zero
+before another digit, a bare fraction point and an exponent with no digits;
+and UTF-8 validation of every decoded code point through
+`Bytes::to_string`'s `Option`. That is a list of what is built, not a
+conformance claim against the whole RFC.
 
 **NOT shipped, so this section is not closed.** `stringify_pretty(v:
 JsonValue, indent: Int)` has no implementation. `@derive(ToJson, FromJson)`
@@ -568,13 +575,14 @@ should assume otherwise.
 
 **The example block above does not compile, and only part of that is
 specific to this section.** The opening `module std.json` line does not
-parse, which §13's 2026-08-21 amendment records as true of every section in
-this document — no std module source declares a `module` line. Two things
-are specific here: the `?` operator does not exist yet (measured this
-increment, `error[E0900]`, whose own note says the feature "arrives in a
-later milestone"), and `@derive` is unimplemented, as above. Shipped call
-style is unqualified — `stringify(v)`, `Bool::from_json(v)` — since every
-`STD_MODULES` entry is glob-imported into every module.
+parse, which §13's 2026-08-20 (`std-sync-mutex`) amendment records as true
+of every section in this document — no std module source declares a
+`module` line. Two things are specific here: the `?` operator does not exist
+yet (measured this increment, `error[E0900]`, whose own note says the
+feature "arrives in a later milestone"), and `@derive` is unimplemented, as
+above. Shipped call style is unqualified — `stringify(v)`,
+`Bool::from_json(v)` — since every `STD_MODULES` entry is glob-imported into
+every module.
 
 **The amendment-marker set in this file, regrepped rather than copied
 forward.** Before this increment there were **16**; this increment adds
@@ -597,12 +605,13 @@ citing any of these numbers from here; all are facts about the file at one
 date, and the plain count in particular moves whenever anyone writes
 *about* the markers rather than adding one.
 
-**The `lib.nova` count moves 13 → 14.** §13's 2026-08-21 amendment records
-"12 `STD_MODULES` entries plus `STD_TEST_MODULE`" as **thirteen** files on
-disk; with `$std.json` it is 13 plus `STD_TEST_MODULE`, **fourteen**. That
-amendment is one behind rather than wrong, exactly as it predicted of
-itself and as §3's and §10's 2026-08-19 amendments (twelve and eleven) were
-before it. This continues that chain rather than editing them.
+**The `lib.nova` count moves 13 → 14.** §13's 2026-08-20
+(`std-sync-mutex`) amendment records "12 `STD_MODULES` entries plus
+`STD_TEST_MODULE`" as **thirteen** files on disk; with `$std.json` it is 13
+plus `STD_TEST_MODULE`, **fourteen**. That amendment is one behind rather
+than wrong, exactly as it predicted of itself and as §3's and §10's
+2026-08-19 amendments (twelve and eleven) were before it. This continues
+that chain rather than editing them.
 
 **Not closed by this increment, and not made any harder by it.** Position
 **10 `std/http`** is unstarted (no `hyper` in `Cargo.lock`, no `std/http/`)
