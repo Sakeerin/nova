@@ -326,12 +326,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (which §7 names in the trait signatures but never declares),
   `stringify`, total; `parse`, accepting all six `JsonValue` forms, one
   value per document with trailing content rejected, RFC 8259 section 7's
-  eight one-character escapes and its six-character Unicode escape with
-  high/low surrogate pairs combined, JSON's number grammar (no leading `+`,
-  no leading zero before another digit, no bare fraction point, no exponent
-  without digits), and UTF-8 validation of decoded code points through
-  `Bytes::to_string`'s `Option` — a list of what is built and pinned, not a
-  conformance claim against the whole RFC; and `ToJson`/`FromJson` with
+  nine escape forms (its eight one-character escapes, and `u` followed by
+  four hexadecimal digits — both counted after the backslash, where the RFC
+  counts the backslash too and calls them two-character and six-character
+  sequences), a high surrogate combined with a following low surrogate
+  (though *requiring* that low surrogate is this parser's decision rather
+  than conformance: RFC 8259 section 8.2 notes its own ABNF admits a lone
+  unpaired surrogate and calls the behaviour of software that receives one
+  unpredictable), and JSON's number grammar, whose six rejections belong to
+  two mechanisms — `parse_value`'s dispatch refuses a leading `+` and a
+  bare leading `.` as `expected a value` before the number scanner is
+  reached, while the scanner itself rejects a leading zero before another
+  digit, a lone `-`, a fraction point with no digit after it and an
+  exponent with no digits — a list of what is built and pinned by
+  `tests/runtime/json_parse_values.nova`, `json_parse_strings.nova` and
+  `json_parse_numbers.nova`, not a conformance claim against the whole RFC;
+  and `ToJson`/`FromJson` with
   impls for `Int`, `Float`, `Bool` and `String` and **nothing else** — no
   container impl and no blanket impl, each rejected as untested public API
   rather than overlooked. `stringify_pretty` and `@derive` do **not** ship,
@@ -369,8 +379,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Int`-to-`Char` primitive would have been strictly worse, the runtime's
   own `nova_rt_char_to_str` being
   `char::from_u32(v).unwrap_or(REPLACEMENT_CHARACTER)`, which silently
-  substitutes U+FFFD for exactly the inputs that must be rejected. Nine new
-  tests, 1048 → 1057: seven `json_*` `nova run` fixtures, one for
+  substitutes U+FFFD for exactly the inputs that must be rejected. **No
+  fixture reaches that `None` arm**, though: the surrogate checks ahead of
+  it leave every code point that gets to the encoder a scalar value, so it
+  cannot fire as written — a second line of defence, recorded at the code
+  and unexercised by construction. One-character escapes and raw characters
+  never pass through that `Option` at all. Nine new tests,
+  1048 → 1057: seven `json_*` `nova run` fixtures, one for
   `Map::keys`, and one Rust unit test on the intrinsic. See
   `docs/adr/0018-std-json-scope-and-build-order.md` and `20-STDLIB.md` §7's
   2026-08-23 amendment. **This does not close Phase 2**: position 10
