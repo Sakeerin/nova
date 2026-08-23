@@ -549,8 +549,11 @@ outside the BMP; and JSON's number grammar, whose six rejections belong to
 two mechanisms — `parse_value`'s dispatch refuses a leading `+` and a bare
 leading `.` as `expected a value`, neither of which can begin a value, so
 neither reaches the number scanner at all, while the scanner itself rejects
-a leading zero before another digit, a lone `-`, a fraction point with no
-digit after it and an exponent with no digits.
+a leading zero before another digit, a `-` with no digit after it, a
+fraction point with no digit after it and an exponent with no digits. The
+`-` rejection is wider than "a lone `-`", which is how this read before:
+`-a`, `-.5`, `-+1` and `-]` all land on it, since only a digit after the
+sign gets past it.
 
 **Two of those clauses are narrower than they sound.** *Requiring* the low
 surrogate is this parser's decision rather than conformance: RFC 8259
@@ -1073,16 +1076,20 @@ a further reordering on top of that, not the only one. Stating only the
 `grow` case would let a reader infer that a map which never grows preserves
 insertion order; that inference is false.
 
-**This is not §12's only deviation, and the other one is older than this
-increment**: `Vec::get` and `Map::get` return `Option<T>`/`Option<V>` **by
-value** rather than the `Option<&T>`/`Option<&V>` written above, for the
-same permanent no-references reason, recorded in `CHANGELOG.md` at the
-Phase 2.2a `std/collections` entry rather than here. `Vec::iter` did ship,
-but as a concrete `VecIter<T>` rather than the `impl Iterator<Item = &T>`
-above. And `with_capacity`, `Queue` and `Deque` have no implementation at
-all — grepped, not assumed, and corroborated independently by
-`std/sync/lib.nova`'s ring buffer, whose comment explains that it built its
-own because this module "has no `Queue` to borrow".
+**This is not §12's only deviation, and every other one is older than this
+increment** — the list is what follows, not a single item: `Vec::get` and
+`Map::get` return `Option<T>`/`Option<V>` **by value** rather than the
+`Option<&T>`/`Option<&V>` written above, for the same permanent
+no-references reason. `CHANGELOG.md`'s Phase 2.2a `std/collections` entry
+records that for **`Vec::get` only** — its `Map` bullet describes the
+probing, the tombstones and the growth and never mentions the return shape
+— so this paragraph is the only place `Map::get`'s half is written down,
+and neither method carries a note at its own definition. `Vec::iter` did
+ship, but as a concrete `VecIter<T>` rather than the `impl
+Iterator<Item = &T>` above. And `with_capacity`, `Queue` and `Deque` have
+no implementation at all — grepped, not assumed, and corroborated
+independently by `std/sync/lib.nova`'s ring buffer, whose comment explains
+that it built its own because this module "has no `Queue` to borrow".
 
 ---
 

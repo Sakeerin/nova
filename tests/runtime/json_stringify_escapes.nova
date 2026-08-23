@@ -1,6 +1,18 @@
-// `quote` covers RFC 8259's mandatory escapes: `"` and `\` explicitly, every
-// character below `0x20`, and the two named ones a JSON encoder commonly
-// special-cases (newline, tab). `0x01` stands in for a control character
+// `quote` covers RFC 8259's mandatory escapes: `"` and `\` explicitly and
+// every character below `0x20`. FIVE of those have a named short escape, not
+// two: `escape_control` names `\n`, `\r`, `\t`, `\b` and `\f`, and
+// `std/json/lib.nova` says so at that function. This fixture exercises two of
+// them, newline and tab.
+//
+// The other three are covered in the same ENCODE direction by
+// `json_parse_strings.nova`, whose `report` prints `stringify(parse(src))`:
+// its escaped-backspace, escaped-form-feed and escaped-carriage-return cases,
+// plus the all-eight-together one, pin `\b`, `\f` and `\r` coming back out
+// against goldens. So no coverage gap sits behind this fixture's two. This
+// header claimed two named escapes because it was written in the task where
+// those three arms genuinely had no coverage yet.
+//
+// `0x01` stands in for a control character
 // with no short escape, which must render as `\u0001`. Everything at or
 // above `0x20` passes through unescaped, covered by `hello` in the sibling
 // fixture.

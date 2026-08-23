@@ -110,8 +110,10 @@ fn main() {
     // reads the digits before the sign is applied, and
     // `9223372036854775808` alone overflows `i64::MAX` -- measured against
     // this compiler: `-9223372036854775808` as a literal is
-    // `error[L0001]: unexpected character '9'`. `int_min` below computes
-    // it instead, the ordinary way this limitation is worked around.
+    // error[L0001]: unexpected character `9` -- the backticks are the
+    // lexer's own, its format string quoting the character that way rather
+    // than in single quotes. `int_min` below computes it instead, the
+    // ordinary way this limitation is worked around.
     let int_min = -9223372036854775807 - 1
     report_int(int_min.to_json())
 

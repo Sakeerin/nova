@@ -293,10 +293,18 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // tombstone and 0 for empty, so this is the same walk `grow` already does
     // to find the entries worth reinserting.
     //
-    // The `[fill; n]` seed is forced rather than stylistic: allocating a `[K]`
-    // needs a `K` in hand and Nova has no null, so the first live key seeds the
-    // array and the collecting walk then overwrites every slot. `Vec::push`
-    // grows by the same manoeuvre.
+    // The `[fill; n]` FORM is forced rather than stylistic: the AST has
+    // exactly two array-construction nodes, and a length known only at run
+    // time needs the repeat form, which needs a value in hand -- Nova has no
+    // null. `Vec::push` grows by the same manoeuvre.
+    //
+    // The five-line SEARCH for a live slot below is NOT forced, and this
+    // comment used to read as if it were. No slot is ever uninitialized --
+    // the record's own header note and `grow` below both state that
+    // invariant -- so `self.keys[0]` would seed the array just as well, live
+    // or not, and the collecting walk overwrites all `self.len` slots either
+    // way. The search is removable with no behaviour any test can observe;
+    // it is kept so the seed is visibly a value this map actually holds.
     //
     // Table order is deliberately NOT insertion order, and no caller should
     // assume it is. The strongest true statement is that KEYS() ORDER IS NOT A

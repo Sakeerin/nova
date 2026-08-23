@@ -339,15 +339,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   two mechanisms — `parse_value`'s dispatch refuses a leading `+` and a
   bare leading `.` as `expected a value` before the number scanner is
   reached, while the scanner itself rejects a leading zero before another
-  digit, a lone `-`, a fraction point with no digit after it and an
-  exponent with no digits — a list of what is built and pinned by
+  digit, a `-` with no digit after it (wider than "a lone `-`" — `-a`,
+  `-.5`, `-+1` and `-]` all land there, since only a digit after the sign
+  gets past it), a fraction point with no digit after it and an exponent
+  with no digits — a list of what is built and pinned by
   `tests/runtime/json_parse_values.nova`, `json_parse_strings.nova` and
   `json_parse_numbers.nova`, not a conformance claim against the whole RFC;
-  and `ToJson`/`FromJson` with
-  impls for `Int`, `Float`, `Bool` and `String` and **nothing else** — no
-  container impl and no blanket impl, each rejected as untested public API
-  rather than overlooked. `stringify_pretty` and `@derive` do **not** ship,
-  so §7 is not closed. One new intrinsic, `str_to_float(s: String) -> Float`
+  and `ToJson`/`FromJson` with impls for `Int`, `Float`, `Bool` and `String`
+  and **nothing else** — no container impl and no blanket impl, each
+  rejected as untested public API rather than overlooked.
+  `stringify_pretty` and `@derive` do **not** ship, so §7 is not closed.
+  One new intrinsic, `str_to_float(s: String) -> Float`
   (`Builtin::STD_ONLY` 65 → 66), the inverse of `float_fixed` and a builtin
   for the same reason, which is **correctly rounded decimal-to-binary
   conversion being research-grade and nothing else**: a `digits × 10^exp`
@@ -358,11 +360,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spans any fixed digit range, exactly as `std/json`'s own `hex_digit` does
   — so it is a cost and not a wall; the rounding ground alone carries the
   refusal. `RESERVED_TYPE_NAMES` stays at 7. Adding one intrinsic touches
-  **13 sites**, of which **7 are compiler-forced** (measured by adding only
+  **12 sites**, of which **7 are compiler-forced** (measured by adding only
   the two enum variants and letting the compiler name the rest); reaching 7
   needs `--all-targets`, because one forced site is a description table
   under `#[cfg(test)]` and a plain `cargo check --workspace` finds **6 and
-  reports success**. Three deliberate data-integrity rules, each documented
+  reports success**. The 12 follows a stated counting rule (ADR 0018 §3) —
+  one declaration, `match` arm, array or function body per site, so a
+  variant's doc comment counts with its variant and an array's length with
+  its array — because a seam count with no rule behind it is not
+  reproducible, which is how an earlier draft of that section published an
+  unreachable 13. Three deliberate data-integrity rules, each documented
   at the code: a non-finite `Number` renders as `null`, since JSON has no
   `NaN` and no `Infinity` — deliberately lossy, and a live path rather than
   a theoretical one, because Nova can produce both (`0.0 / 0.0`,
@@ -381,10 +388,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Int`-to-`Char` conversion anywhere, so a code point becomes UTF-8 bytes
   encoded in Nova, then `bytes_from_ints`, then `Bytes::to_string() ->
   Option<String>`, **whose `Option` is the validation** — where an
-  `Int`-to-`Char` primitive would have been strictly worse, the runtime's
-  own `nova_rt_char_to_str` being
-  `char::from_u32(v).unwrap_or(REPLACEMENT_CHARACTER)`, which silently
-  substitutes U+FFFD for exactly the inputs that must be rejected. **No
+  `Int`-to-`Char` primitive would have been strictly worse: it would have
+  wrapped the runtime's own `nova_rt_char_to_str`, whose body silently
+  substitutes U+FFFD for exactly the inputs that must be rejected —
+  `char::from_u32(v as u32).unwrap_or(char::REPLACEMENT_CHARACTER)`. **No
   fixture reaches that `None` arm**, though: the surrogate checks ahead of
   it leave every code point that gets to the encoder a scalar value, so it
   cannot fire as written — a second line of defence, recorded at the code
@@ -418,7 +425,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2026-08-23 amendment. **This does not close Phase 2**: position 10
   `std/http` and position 12 `std/crypto` are both unstarted, and the Phase
   2 gate still needs `examples/05-json-api` and `docs/benchmarks/`, neither
-  of which exists.
+  of which exists. **It also splits `docs/phase-2-plan.md` §2.4**, which
+  bundles `std/net` + `std/http` + `std/json` as one increment: `std/net`
+  shipped alone with the I/O poller, `std/json` ships alone here and ahead
+  of `std/http`, and nothing is left of the bundle as a unit. That plan
+  still describes it as one step; recorded here because a commit that
+  changes a decision must sweep every document asserting it, and this
+  branch's sweep reached `20-STDLIB.md`, `13-RUNTIME.md`, ADR 0017, ADR
+  0018 and this file but not that one — the same way the ADR-0009
+  divergence from `docs/phase-2-plan.md` decision 1 is recorded below.
 - `Map::keys(self) -> [K]`, in `std/collections` — position 3's public API,
   changed from a position-11 increment, because `Object(Map<String,
   JsonValue>)` cannot be serialised without enumerating its keys and `Map`
@@ -936,6 +951,16 @@ asserts the compiler it runs.
     `for (k, v) in m` has no expressible element type. This is the single
     biggest gap: today a collection can only be read back through the keys or
     indices the caller already holds.
+    *(Superseded in two steps, and only in part. Phase 2.2c shipped
+    `Iterator`, `VecIter<T>` and `Vec::iter()`; Phase 2.2d added `for x in it`
+    and six default methods; the position-11 `std/json` increment added
+    `Map::keys(self) -> [K]`. So a `Vec` no longer needs its indices held,
+    and a `Map`'s keys can be enumerated without them. What still holds of
+    the sentence above: a `Map`'s **values** and **pairs** have no API at
+    all, `Set` cannot be enumerated even though it is a `Map` underneath,
+    and no container is itself iterable — there is no `IntoIterator`, so it
+    is `for x in c.iter()` and never `for x in c`. See the Phase 2.2c and
+    2.2d entries below and the `std/json` entry above.)*
   - `Queue` / `Deque` — a ring buffer is expressible, but its `pop_front` would
     want the same iteration story to be useful, and `20-STDLIB.md`'s shape is
     not settled.

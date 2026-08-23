@@ -126,6 +126,15 @@ until the "endless tail of instances" a codec always offers is shipped
 untested. `@derive` is §7's own deferral, described there as "a compiler
 builtin (Phase 2)", not a library `impl` this module could have written.
 
+**That refusal reverses the approved design, which asked for them.** The
+design doc's §7 reads "Ship impls for the primitives and for the obvious
+containers, and **no more**"; the plan's step 3 narrowed it to primitives
+and said "Stop there", and this paragraph is where the narrowing gets
+recorded. Without it, a reader who follows the References below to the
+design doc — cited there for five other sections — would find it asking
+for container impls with nothing anywhere saying they were dropped on
+purpose.
+
 ### 3. One new intrinsic, `str_to_float`, and why a Nova float parser was refused
 
 `Number(Float)` requires decimal text to become an `f64`, and nothing in
@@ -166,11 +175,27 @@ items, shadowable, not builtin types, the same standing `Instant`,
 
 #### The seam count, and the trap that matters more than the count
 
-Adding one intrinsic touches **13 sites** across five files. **7 of the 13
+Adding one intrinsic touches **12 sites** across five files. **7 of the 12
 are compiler-forced** — measured, not read, by adding only the two enum
 variants (`Builtin::StrToFloat`, `RtFunc::StrToFloat`) and then letting
 `cargo check --locked --workspace --all-targets` name the rest. Every one
 of the 7 came back `error[E0004]: non-exhaustive patterns`.
+
+**The counting rule, because a seam count with no rule behind it is not
+reproducible.** A site is one *declaration, `match` arm, array or function
+body in `crates/` that must change* for the new builtin to exist and work.
+Three things therefore do **not** count on their own: a variant's doc
+comment (it belongs to the variant it sits on — both `Builtin::StrToFloat`
+and `RtFunc::StrToFloat` have one, so counting them separately would give
+14 and counting only one of them, as an earlier version of this section
+did, gave an unreproducible 13); an array's length annotation (it belongs
+to the array, which is why omitting `STD_ONLY`'s element and its length
+*together* compiles clean); and the tests that exercise the result, which
+are coverage rather than seam. Under that rule the count is mechanical:
+`grep -rn StrToFloat crates/ --include=*.rs` returns exactly the **10**
+lines that name either enum variant, and the remaining **2** are the
+`extern "C" fn nova_rt_str_to_float` definition and its `symbols()` entry,
+which name the C symbol instead. 10 + 2 = 12.
 
 Two facts about that measurement are worth more to a future reader than
 the number:
@@ -186,10 +211,9 @@ the number:
   together on the second. Fixing the first error and stopping means having
   seen one seventh of the work.
 
-Of the six unforced sites, two are the enum declarations themselves, one
-is the doc comment on the `Builtin` variant, one is the `extern "C"`
-definition, and the two that can actually be *forgotten* behave
-differently — both measured:
+Of the five unforced sites, two are the enum declarations themselves (each
+carrying its own doc comment), one is the `extern "C"` definition, and the
+two that can actually be *forgotten* behave differently — both measured:
 
 - **`STD_ONLY`.** Omitting the array element *and* its length together
   compiles the whole workspace clean with `--all-targets`; only a
@@ -264,7 +288,14 @@ them produces a `Char` from a number. The route used instead, over
 already-shipped primitives:
 
 1. four hex digits become an `Int` code point;
-2. surrogates are paired per RFC 8259 §7, or rejected;
+2. surrogates are paired per RFC 8259 §7, or rejected — and **the
+   rejection is this parser's decision, not conformance**: §7 gives the
+   pair as the form for a character above the BMP, but §8.2 notes that the
+   RFC's own ABNF admits a lone unpaired surrogate and calls the behaviour
+   of software that receives one unpredictable, so requiring the low
+   surrogate is a choice this implementation makes. `20-STDLIB.md` §7 and
+   the CHANGELOG both carry that qualification; it was missing here, in the
+   document §7 sends the reader to;
 3. the code point is encoded to UTF-8 bytes **in Nova** (the four length
    classes, written out);
 4. `bytes_from_ints([Int]) -> Bytes`, then `Bytes::to_string() ->

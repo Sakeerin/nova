@@ -409,8 +409,9 @@ has changed as the compiler has grown, and a stale count here would be worse tha
 
 **AMENDED 2026-08-23 (branch `std-json`): `symbols()` is not the only unforced site, and
 counting the forced ones needs `--all-targets`.** Both measured while adding
-`str_to_float`, that increment's one intrinsic, which touched 13 sites of which 7 were
-compiler-forced.
+`str_to_float`, that increment's one intrinsic, which touched 12 sites of which 7 were
+compiler-forced — 12 under the counting rule ADR 0018 §3 states, which is what makes the
+figure reproducible; a seam count without its rule is not.
 
 1. **`STD_ONLY` membership is unforced too.** Omitting the array element *and* its length
    together compiles the whole workspace clean, test targets included; only a
