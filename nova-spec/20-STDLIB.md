@@ -517,6 +517,101 @@ let u2 = User::from_json(json.parse(s)?)?
 
 `@derive` for ToJson/FromJson is implemented as a compiler builtin (Phase 2).
 
+**AMENDED 2026-08-23 (branch `std-json`): most of this section shipped, and
+the type declaration above needed no change at all.** `std/json` joined
+`STD_MODULES` this increment (`STD_MODULES` **12 → 13**, `"$std.json"`),
+built at `00-MASTER-SPEC.md` §3's position **11 ahead of position 10**. See
+`docs/adr/0018-std-json-scope-and-build-order.md` for that ordering, the one
+new intrinsic, and the codec's data-integrity rules.
+
+**Shipped exactly as written above.** The `pub type JsonValue` declaration
+compiles **verbatim** — including the variant names `Bool` and `String`,
+which shadow builtin type names. Measured against this compiler, not
+assumed: they are accepted, and `match` arms bind them unqualified. So are
+`pub fn stringify(v: JsonValue) -> String`, `pub fn parse(s: String) ->
+Result<JsonValue, JsonError>`, and both traits, with the signatures above.
+`JsonError` — which this section names in the trait signatures without ever
+declaring — is `pub record JsonError { msg: String, at: Int }`. `parse` is
+full RFC 8259, `\uXXXX` escapes and surrogate pairing included; `stringify`
+is total.
+
+**NOT shipped, so this section is not closed.** `stringify_pretty(v:
+JsonValue, indent: Int)` has no implementation. `@derive(ToJson, FromJson)`
+has none either — it remains this section's own deferral to "a compiler
+builtin (Phase 2)", which is why the `record User` example above is still
+unbuildable. And `ToJson`/`FromJson` ship with impls for **`Int`, `Float`,
+`Bool` and `String` and nothing else**: no container impl, no blanket impl.
+That was a decision rather than an omission — see ADR 0018 §2.
+
+**Two behaviours this section does not specify, decided this increment and
+documented at the code.** (1) JSON has no `NaN` and no `Infinity`, so
+`stringify` renders a non-finite `Number` as `null`. That is deliberately
+lossy and a live path, not a theoretical one: Nova can produce both kinds,
+measured (`0.0 / 0.0`, `1.0 / 0.0`). (2) `Int::to_json` rounds silently
+beyond ±2^53, because the trait above returns `JsonValue` and has no error
+channel; `Int::from_json` rejects a fractional `Number` and rejects a
+magnitude outside `i64::MIN..=i64::MAX`, rather than truncating or wrapping
+either one.
+
+**One new intrinsic**, `str_to_float(s: String) -> Float`
+(`Builtin::STD_ONLY` **65 → 66**), the inverse of `float_fixed` and a
+builtin for the same reason. `RESERVED_TYPE_NAMES` stays at **7**:
+`JsonValue` and `JsonError` are ordinary glob-imported, shadowable
+`std/json` items, not builtin types.
+
+**One change outside this section**, recorded here because a reader of §7
+will hit it: `Map::keys(self) -> [K]` was added to `std/collections` (§12,
+`00-MASTER-SPEC.md` §3's position 3) by this position-11 increment, because
+`Object(Map<String, JsonValue>)` cannot be serialised without enumerating
+its keys. Its order is **table order, not insertion order**, and no caller
+should assume otherwise.
+
+**The example block above does not compile, and only part of that is
+specific to this section.** The opening `module std.json` line does not
+parse, which §13's 2026-08-21 amendment records as true of every section in
+this document — no std module source declares a `module` line. Two things
+are specific here: the `?` operator does not exist yet (measured this
+increment, `error[E0900]`, whose own note says the feature "arrives in a
+later milestone"), and `@derive` is unimplemented, as above. Shipped call
+style is unqualified — `stringify(v)`, `Bool::from_json(v)` — since every
+`STD_MODULES` entry is glob-imported into every module.
+
+**The amendment-marker set in this file, regrepped rather than copied
+forward.** Before this increment there were **16**; this increment adds
+**two** — this one, and §12's, recording `Map::keys` — for **18**. That is
+**exhaustive** — every marker in the file as of 2026-08-23, not a
+selection — and it distributes as §1 (2), §3 (1), §4 (5), §5 (2), §7 (1,
+this one), §9 (3), §10 (1), §12 (1, also this increment), §13 (2). Markers
+come in exactly two forms, each starting its own line: 11 prose ones
+beginning `**AMENDED` and 7 in-code-block ones beginning `// AMENDED`.
+There is no third form.
+
+**A plain `grep -c AMENDED` on this file returns 21, not 18, and this
+paragraph and the one above it are the reason** — three of their lines
+mention the word, four times in total, without being markers. (`grep -c`
+counts matching *lines*, not occurrences: 18 marker lines plus those 3 is
+21, while the occurrence count is 22.) The pattern that counts markers
+rather than mentions is line-anchored:
+`grep -cE '^(\*\*|// )AMENDED'`. Use that one, and regrep rather than
+citing any of these numbers from here; all are facts about the file at one
+date, and the plain count in particular moves whenever anyone writes
+*about* the markers rather than adding one.
+
+**The `lib.nova` count moves 13 → 14.** §13's 2026-08-21 amendment records
+"12 `STD_MODULES` entries plus `STD_TEST_MODULE`" as **thirteen** files on
+disk; with `$std.json` it is 13 plus `STD_TEST_MODULE`, **fourteen**. That
+amendment is one behind rather than wrong, exactly as it predicted of
+itself and as §3's and §10's 2026-08-19 amendments (twelve and eleven) were
+before it. This continues that chain rather than editing them.
+
+**Not closed by this increment, and not made any harder by it.** Position
+**10 `std/http`** is unstarted (no `hyper` in `Cargo.lock`, no `std/http/`)
+and unblocked. Position **12 `std/crypto`**, §8 below, is unstarted (no
+`ring` in `Cargo.lock`, no `std/crypto/`). Phase 2's gate
+(`00-MASTER-SPEC.md:245`) needs `examples/05-json-api`, which does not
+exist, and benchmark methodology in `docs/benchmarks/`, which does not
+exist either. **Phase 2 is not complete.**
+
 ---
 
 ## 8. `std/crypto`
@@ -868,6 +963,45 @@ any method: `let m: Map<NotHashable, Int> = Map { len: 0, used: 0, keys: [],
 vals: [], state: [] }` compiles and runs. What the bound on the `impl` actually
 rejects, with `E0013` at monomorphization, is instantiating a *method* —
 `Map::new()`, `insert`, `get`, … — with a key that is not `Hash + Eq`.
+
+**AMENDED 2026-08-23 (branch `std-json`): `Map` gained an enumeration
+method, and it is not the one written above.** `pub fn keys(self) -> [K]`
+shipped in `std/collections/lib.nova` — added by the position-11 `std/json`
+increment, because `Object(Map<String, JsonValue>)` cannot be serialised
+without visiting its keys, and until then `Map`'s whole public API was
+`new`, `insert`, `get`, `contains_key`, `remove`, `len` and `is_empty`:
+every operation except one that enumerates. See
+`docs/adr/0018-std-json-scope-and-build-order.md` §4 for why this was taken
+as a `std/collections` change rather than a private `std/json` helper.
+
+**`Map::iter` as written above is still unwritten, and its signature is
+unwritable today on two counts already settled elsewhere in this
+document.** `impl Iterator<Item = (&K, &V)>` needs references — `&K`, `&V`
+— and §4's 2026-08-12 amendment records references as off this roadmap
+**permanently**, not merely unimplemented (`&Int` is `E0900`, measured).
+Its item type is also a **tuple**, and tuple types are rejected with
+`E0900` — measured, and recorded at §13's 2026-08-21 amendment and in
+`docs/adr/0017-std-sync-channel-shape.md`, which redesigned `channel<T>`
+around exactly that. So `keys() -> [K]` is a substitute for part of `iter`,
+not a step toward the signature above; enumerating *values* or *pairs*
+still has no API at all.
+
+Two properties of `keys()` are documented at the method and are
+deliberately **not** guarantees: it returns **table order, not insertion
+order** (a `grow` reinserts every entry and may reorder them), and its
+`[fill; n]` seed is forced rather than stylistic, since allocating a `[K]`
+needs a `K` in hand and Nova has no null.
+
+**This is not §12's only deviation, and the other one is older than this
+increment**: `Vec::get` and `Map::get` return `Option<T>`/`Option<V>` **by
+value** rather than the `Option<&T>`/`Option<&V>` written above, for the
+same permanent no-references reason, recorded in `CHANGELOG.md` at the
+Phase 2.2a `std/collections` entry rather than here. `Vec::iter` did ship,
+but as a concrete `VecIter<T>` rather than the `impl Iterator<Item = &T>`
+above. And `with_capacity`, `Queue` and `Deque` have no implementation at
+all — grepped, not assumed, and corroborated independently by
+`std/sync/lib.nova`'s ring buffer, whose comment explains that it built its
+own because this module "has no `Queue` to borrow".
 
 ---
 

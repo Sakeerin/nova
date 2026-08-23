@@ -228,10 +228,13 @@ left to check — that function checks binding mutability, field resolution
 by name, and unification, and nothing else. Settled by reading the
 compiler, not by execution.
 
-The three routes are of very unequal reach, and `20-STDLIB.md:931-938`
-ranks `MutexGuard`'s the same way — it had to be corrected on 2026-08-21
-for naming forgery alone, and an earlier version of this section made that
-identical mistake here:
+The three routes are of very unequal reach, and `20-STDLIB.md` §13 ranks
+`MutexGuard`'s the same way, in the paragraph beginning "Neither flag
+reaches tampering" — it had to be corrected on 2026-08-21 for naming
+forgery alone, and an earlier version of this section made that identical
+mistake here. (Cited by content rather than by line: that paragraph was
+`:931-938` when this ADR was written and the 2026-08-23 `std/json`
+amendments moved it to `:1065-1072`.)
 
 - **Forgery grants nothing.** `Sender { ch: c }` is ordinary legal code,
   so the producer/consumer split is intent and not enforcement — but the
