@@ -137,6 +137,16 @@ builtins! {
     /// binary float is a solved problem with sharp edges, and Nova has no
     /// `Float` to `Int` conversion at all to begin one with. Std-only.
     FloatFixed,
+    /// `str_to_float(s: String) -> Float` — parse decimal text as a `Float`.
+    /// Backs `std/json`'s number scanner, its only caller. The exact mirror of
+    /// [`Builtin::FloatFixed`], and a builtin for the same reason: correctly
+    /// rounded decimal-to-binary conversion is a solved problem with sharp
+    /// edges, and Nova cannot begin a digit-by-digit one anyway — there is no
+    /// `Int` → `Float` conversion in the language (no such builtin exists and
+    /// `as` casts are unsupported, `E0900`), so accumulated digits could never
+    /// become a `Float` at all. Std-only, so `str_to_float` is not a reserved
+    /// word in user code.
+    StrToFloat,
     /// `test_selector() -> Int` — which `@test` to run in this process, or a
     /// negative value meaning "print the inventory instead".
     ///
@@ -603,6 +613,7 @@ impl Builtin {
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
+            Builtin::StrToFloat => "str_to_float",
             Builtin::TestSelector => "test_selector",
             Builtin::TaskSpawn => "task_spawn",
             Builtin::TaskIsDone => "task_is_done",
@@ -692,7 +703,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 65] = [
+    pub const STD_ONLY: [Builtin; 66] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -702,6 +713,7 @@ impl Builtin {
         Builtin::StrToUpper,
         Builtin::StrToLower,
         Builtin::FloatFixed,
+        Builtin::StrToFloat,
         Builtin::TestSelector,
         Builtin::TaskSpawn,
         Builtin::TaskIsDone,

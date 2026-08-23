@@ -8382,3 +8382,17 @@ fn json_stringify_escapes_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_parse_numbers_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_parse_numbers.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_parse_numbers.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
