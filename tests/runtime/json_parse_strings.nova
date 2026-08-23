@@ -4,13 +4,14 @@
 //
 // EVERY expected line below was derived from RFC 8259 section 7 and from
 // `stringify`'s own rules, not captured from this program's output. Section 7's
-// grammar is
+// grammar, reflowed onto fewer lines with the RFC's inline comments dropped and
+// its `string` and `escape` rules omitted as not load-bearing here, is
 //
 //     char = unescaped / escape ( %x22 / %x5C / %x2F / %x62 / %x66 /
 //                                 %x6E / %x72 / %x74 / %x75 4HEXDIG )
 //     unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
 //
-// so: eight one-letter escapes plus `\uXXXX`, nothing else after a backslash,
+// so: eight one-character escapes plus `\uXXXX`, nothing else after a backslash,
 // and no character below `0x20` unescaped. Note `unescaped` runs to 10FFFF,
 // which is why `0x7f` (DEL) is ACCEPTED raw below rather than rejected.
 //
@@ -36,7 +37,7 @@ fn main() {
     report("empty", "\"\"")
     report("plain", "\"abc\"")
 
-    // Accepted: each of the eight one-letter escapes on its own. `\/` decodes
+    // Accepted: each of the eight one-character escapes on its own. `\/` decodes
     // to a solidus, which `stringify` then emits UNESCAPED -- escaping it is
     // permitted on input, never required on output.
     report("escaped quote", "\"\\\"\"")
