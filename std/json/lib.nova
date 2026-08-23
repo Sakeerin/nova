@@ -14,7 +14,11 @@ pub type JsonValue =
     | Object(Map<String, JsonValue>)
 
 // `at` is a character index into the input, not a byte offset -- the parser
-// walks `[Char]`.
+// walks `[Char]` -- but that is true only of an error `parse` returns.
+// `FromJson::from_json`, below, constructs `JsonError` too, decoding an
+// already-parsed `JsonValue` tree rather than input text: there is no
+// cursor and no source position to report, so every error `from_json`
+// returns carries a FIXED PLACEHOLDER, `at: 0`, never a real index.
 pub record JsonError { msg: String, at: Int }
 
 // Render `v` as JSON text. Total: there is no input this cannot render.
@@ -761,11 +765,9 @@ fn simple_escape(c: Char) -> Option<String> {
 pub trait ToJson { fn to_json(self) -> JsonValue }
 pub trait FromJson { fn from_json(v: JsonValue) -> Result<Self, JsonError> }
 
-// Every `from_json` below that returns `Err` sets `at: 0`. `JsonError::at`
-// is documented on the record above as a character index into PARSED TEXT,
-// but `from_json` never sees text -- it receives a `JsonValue` that is
-// already a tree, with no source position attached to it -- so `0` is a
-// placeholder, not a claim about where in anything the mismatch sits.
+// Every `from_json` below that returns `Err` uses `at: 0` -- see
+// `JsonError`'s own doc comment above for why a fixed placeholder is
+// correct here rather than an oversight.
 //
 // Scope stops at four primitives -- `Bool`, `String`, `Float`, `Int` -- on
 // purpose. No container impl (`[T]`, `Map<String, T>`, `Option<T>`) is
@@ -848,47 +850,128 @@ impl ToJson for Int {
     fn to_json(self) -> JsonValue { Number(str_to_float("${self}")) }
 }
 
-// RULE (decode): a `Number` converts to `Int` only when it carries no
-// fraction -- `Number(3.0)` decodes to `3`, `Number(3.5)` is an `Err`. A
-// fraction is a decode error and never a silent truncation: this module
-// already marks `stringify`'s non-finite-to-`null` collapse "DELIBERATELY
-// LOSSY" in the encode direction, and letting `from_json` throw away a
-// fraction in the decode direction would make a round trip fabricate a
-// value instead of reporting that it could not produce one.
+// RULE (decode): a `Number` converts to `Int` only when its value is both
+// IN RANGE for `Int` and carries no fraction. Two independent failures,
+// checked in this order:
 //
-// There is no Float-to-Int intrinsic and no `as` cast (`E0900`) anywhere in
-// Nova today, so this reaches `Int` the way `scan_hex4` above reaches one --
-// by walking decimal digits by hand -- except over `Float`'s own `Display`
-// text (`"${n}"`) rather than over source input. `parse_decimal_int`'s
-// `is_digit` check is what makes this reject a fraction (the `.` in
-// `"3.5"`) and a non-finite value (`"inf"`/`"-inf"`/`"NaN"` have no `.` but
-// are not digits either) with the same one guard, rather than three.
+//   * a magnitude outside `i64::MIN..=i64::MAX`
+//     (`-9223372036854775808..=9223372036854775807`) is an `Err`, never a
+//     wrapped value. An earlier version of this function had no bound
+//     check at all: a too-large `Number` reached the digit accumulation
+//     below and wrapped silently, the same way `std/core`'s `mix64`
+//     documents `Int`'s own `*` wrapping rather than trapping. That is
+//     fine for `mix64`, which is mixing bits on purpose; it is not fine
+//     here, decoding externally-supplied JSON, where "a fraction is a
+//     decode error and never a silent truncation" (next bullet) and a
+//     wrapped-away magnitude is the same failure mode applied to the
+//     integer's size instead of its precision.
+//   * a fraction is a decode error and never a silent truncation --
+//     `Number(3.0)` decodes to `3`, `Number(3.5)` is an `Err`. This module
+//     already marks `stringify`'s non-finite-to-`null` collapse
+//     "DELIBERATELY LOSSY" in the encode direction, and letting
+//     `from_json` throw away a fraction in the decode direction would make
+//     a round trip fabricate a value instead of reporting that it could
+//     not produce one.
+//
+// The bound check compares `n` itself, before any text exists, against
+// `-9223372036854775808.0` (`i64::MIN`) and `9223372036854775808.0` (one
+// past `i64::MAX`). Both are exact `Float` values -- both are powers of
+// two -- which `i64::MAX` itself, `9223372036854775807`, is NOT (the
+// nearest `Float` to it is `9223372036854775808.0`, the same value used
+// as the rejected upper bound), so this never has to ask whether an
+// inexact `Float` equals an exact `Int` edge. `NaN` fails both `<` and
+// `>=` here -- a `Float` comparison against `NaN` is always `false`, per
+// `std/core`'s own note on `impl Ord for Float` -- so it is not rejected
+// by this check; it is caught immediately after, by the fraction check,
+// since `"NaN"` is not digit-shaped either. Measured against this
+// compiler, not assumed: a throwaway `out_of_range(n)` returned `false`
+// for `0.0 / 0.0`, and `true` for both `1.0 / 0.0` and its negation.
+//
+// There is no Float-to-Int intrinsic and no `as` cast (`E0900`) anywhere
+// in Nova today, so getting to `Int` at all means walking decimal digits
+// by hand, the way `scan_hex4` above walks hex ones -- over TWO different
+// texts of `n`, not one, and this is the second decision this rule makes
+// explicit rather than by accident:
+//
+//   * `"${n}"`, `Float`'s `Display`, checked ONLY for shape below (every
+//     character but an optional leading `-` must be `0`-`9`) to decide
+//     fraction-or-not. Its DIGITS are never used for the value: `Display`
+//     is a SHORTEST-ROUND-TRIP rendering, not an exact one, and once a
+//     `Float`'s neighbouring representable values are more than 1 apart,
+//     the shortest text that round-trips can be a rounder nearby number
+//     rather than the exact one. Measured, not assumed:
+//     `"${-9223372036854775808.0}"` (`i64::MIN`, exactly representable,
+//     being a power of two) is `"-9223372036854776000"` -- OFF BY 192 from
+//     the value it names, and also outside `Int`'s own range -- exactly
+//     the shape of bug this rule exists to refuse rather than launder
+//     into a wrapped `Int`.
+//   * `float_fixed(n, 0)` for the actual digits, which IS exact --
+//     `std/fmt`'s own comment on `Float::fixed` gives the reason, that
+//     Nova "cannot begin on it, having no `Float` to `Int` conversion at
+//     all", and `nova_rt_float_fixed` is Rust's `format!("{:.0}", v)`, an
+//     exact fixed-precision conversion rather than a shortest-round-trip
+//     one. `float_fixed(-9223372036854775808.0, 0)` is
+//     `"-9223372036854775808"`, the exact value. This is used ONLY for
+//     the digits, never for the shape check above it -- `float_fixed`
+//     ROUNDS a fraction rather than reporting one
+//     (`float_fixed(3.5, 0)` is `"4"`), which would silently turn the
+//     fraction rule above into the very truncation it rejects, if this
+//     text were the one checked for a `.`.
 impl FromJson for Int {
     fn from_json(v: JsonValue) -> Result<Int, JsonError> {
         match v {
-            Number(n) => match parse_decimal_int("${n}") {
-                Some(i) => Ok(i)
-                None => Err(JsonError { msg: "expected an integer", at: 0 })
+            Number(n) => {
+                if n < -9223372036854775808.0 || n >= 9223372036854775808.0 {
+                    Err(JsonError { msg: "integer out of range", at: 0 })
+                } else if parse_decimal_int("${n}").is_none() {
+                    Err(JsonError { msg: "expected an integer", at: 0 })
+                } else {
+                    match parse_decimal_int(float_fixed(n, 0)) {
+                        Some(i) => Ok(i)
+                        None => Err(JsonError { msg: "expected an integer", at: 0 })
+                    }
+                }
             }
             _ => Err(JsonError { msg: "expected a number", at: 0 })
         }
     }
 }
 
-// A `Float`'s own decimal text (`"${n}"` -- never scientific notation,
-// measured against this compiler: `1e300` prints as 301 decimal digits, not
-// as `"1e300"`) parsed back to an `Int`, or `None` if any character is not a
-// digit once an optional leading `-` is consumed. `None` on an EMPTY digit
-// run too, so a bare `"-"` -- unreachable from a real `Float`, but not
-// assumed away -- does not silently become `0`.
+// `s`'s digits as an `Int`, or `None` if any character once an optional
+// leading `-` is consumed is not `0`-`9`, or if there are no digits at all
+// (an empty string, or a bare `"-"`). `from_json` above calls this twice,
+// on two different texts of the same `Number` -- see its comment for why.
 //
-// A magnitude past what `Int` can hold wraps rather than being reported,
-// the same way std/core's `mix64` documents `Int`'s own `*` wrapping
-// instead of trapping: the wraparound happens inside `v * 10 + digit`
-// above, and this function adds no overflow check beyond what that
-// arithmetic already does on its own. No fixture reaches it -- a `Float`
-// that large has already lost so much precision on the way in that its
-// wrapped `Int` is not a behaviour worth pinning.
+// Accumulates NEGATIVE throughout, even for a positive input, negating
+// only once at the very end, rather than the more obvious positive
+// accumulation negated only when `neg` is set.
+//
+// NOT because the positive form gives a wrong answer -- measured, not
+// assumed: mutating this to positive accumulation changes not one output
+// anywhere in the whole 44-target suite. The reason is `i64::MIN`'s own
+// magnitude, `9223372036854775808`, being one past `i64::MAX`: a positive
+// running total reaches exactly `2^63` on that value's last digit, wraps
+// once there, and wraps a second time negating the wrapped result, and
+// Nova's `Int` wraps CONSISTENTLY (mod `2^64`, the same arithmetic
+// `std/core`'s `mix64` documents for `*`) -- so the two wraps cancel and
+// the final value comes out correct either way.
+//
+// Negative accumulation is used anyway because its correctness does not
+// need that cancellation argument at all: every partial sum stays
+// DIRECTLY representable at every step, for `i64::MIN` and for everything
+// smaller in magnitude, with no appeal to wraparound anywhere in the
+// reasoning. "Everything smaller in magnitude" is the whole of what this
+// function is ever asked to parse, but that is an invariant of its ONE
+// caller, not of this function by itself: `from_json` above rejects any
+// `n` outside `i64::MIN..=i64::MAX` by comparing the `Float` itself,
+// before either text this function walks is ever built. This function
+// does not repeat that check -- it has no way to, from a `String` alone,
+// without re-deriving the same comparison from the digits it is still in
+// the middle of reading -- so it stays correct for a magnitude its
+// caller has already ruled out, by cancellation, for exactly the reason
+// measured above; it would not stay correct for a magnitude past that,
+// which is why the bound check in `from_json` is load-bearing and this
+// accumulation direction, on its own, is not a substitute for it.
 fn parse_decimal_int(s: String) -> Option<Int> {
     let cs = s.chars()
     let mut i = 0
@@ -901,8 +984,8 @@ fn parse_decimal_int(s: String) -> Option<Int> {
     let mut v = 0
     while i < cs.len() {
         if !is_digit(cs[i]) { return None }
-        v = v * 10 + (char_to_int(cs[i]) - 48)
+        v = v * 10 - (char_to_int(cs[i]) - 48)
         i = i + 1
     }
-    if neg { Some(-v) } else { Some(v) }
+    if neg { Some(v) } else { Some(-v) }
 }

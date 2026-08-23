@@ -1,4 +1,4 @@
-// `ToJson`/`FromJson`, and the two rules this task decided rather than left
+// `ToJson`/`FromJson`, and the rules this task decided rather than left
 // implicit:
 //
 //   * `Int::to_json` loses precision SILENTLY for a value an `f64` cannot
@@ -11,6 +11,13 @@
 //   * `Int::from_json` accepts a `Number` only when it carries no fraction.
 //     A fractional `Number` is a decode error, not a silent truncation --
 //     `Number(3.5)` does not become `3`.
+//   * `Int::from_json` also rejects a `Number` whose MAGNITUDE is outside
+//     `i64::MIN..=i64::MAX`, added on review: the first version of this
+//     function had no bound check and let an out-of-range `Number` wrap
+//     silently through ordinary `Int` arithmetic instead. `i64::MIN`
+//     itself (`-9223372036854775808.0`, exactly representable, being a
+//     power of two) is the in-range edge and decodes correctly; one past
+//     it (`9223372036854775808.0`, `2^63`) is rejected.
 //
 // Every mismatched-variant case checks the message too, not just that some
 // `Err` came back, so a decoder that returns the WRONG error still fails
@@ -77,6 +84,36 @@ fn main() {
     report_int(Number(-3.0))
     report_int(Number(-3.5))
     report_int(Number(0.0))
+
+    // Int::from_json: magnitude out of range is an error, never a wrapped
+    // value. `i64::MIN` itself is the accepted edge; `2^63`, one past
+    // `i64::MAX`, is the smallest rejected magnitude; `1e300` is a
+    // sanity check far past either.
+    report_int(Number(-9223372036854775808.0))
+    report_int(Number(9223372036854775808.0))
+    report_int(Number(1.0e300))
+
+    // The case that pins WHY `from_json` cannot use `Float`'s `Display`
+    // for the digits it decodes, only for the fraction shape check:
+    // `i64::MIN` round-trips through `to_json` losslessly (its magnitude,
+    // `2^63`, is an exact power of two, so `str_to_float` loses nothing
+    // encoding it) -- but `"${n}"` on the resulting `Float` prints
+    // `"-9223372036854776000"`, a DIFFERENT, out-of-range number, since
+    // `Display` is shortest-round-trip rather than exact once
+    // neighbouring `Float`s are more than 1 apart. Decoding that text
+    // directly would either wrap or wrongly reject a value this codec can
+    // represent exactly. `report_int` must print `ok -9223372036854775808`
+    // here, recovering the original exactly, for the fix to be real
+    // rather than merely plausible.
+    //
+    // `i64::MIN` cannot be written as a literal directly -- the lexer
+    // reads the digits before the sign is applied, and
+    // `9223372036854775808` alone overflows `i64::MAX` -- measured against
+    // this compiler: `-9223372036854775808` as a literal is
+    // `error[L0001]: unexpected character '9'`. `int_min` below computes
+    // it instead, the ordinary way this limitation is worked around.
+    let int_min = -9223372036854775807 - 1
+    report_int(int_min.to_json())
 
     // Int::to_json: precision loss at the f64 mantissa boundary, pinned by
     // comparing the RENDERED text of the two smallest colliding Ints --

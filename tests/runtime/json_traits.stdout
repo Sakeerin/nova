@@ -19,6 +19,10 @@ err expected an integer
 ok -3
 err expected an integer
 ok 0
+ok -9223372036854775808
+err integer out of range
+err integer out of range
+ok -9223372036854775808
 2^53 renders -> 9007199254740992
 2^53 + 1 renders -> 9007199254740992
 collide -> true
