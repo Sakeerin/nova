@@ -171,10 +171,23 @@ impl P {
     // Record a failure at the cursor, unless one is already recorded.
     //
     // The guard IS "first failure wins". `parse` runs its trailing-content
-    // check even after the scanner has failed, so without the guard that check
-    // would overwrite the real cause with a consequence of it: `+1` would
-    // report trailing content rather than the missing digit that stopped the
-    // scanner at position 0.
+    // check even after the value walk has failed, so without the guard that
+    // check would overwrite the real cause with a consequence of it: `01` would
+    // report `trailing content` at 1 rather than the leading zero that actually
+    // stopped the scanner there.
+    //
+    // `01` and NOT `+1` for that example. `+1` no longer reaches `scan_number`
+    // at all -- `parse_value`'s dispatch rejects a leading `+` as `expected a
+    // value` before any digit is looked for -- so it no longer illustrates a
+    // cause the guard protects, only one it renames. That correction was applied
+    // to `parse`'s comment, `scan_number`'s comment and the fixture header in
+    // the same change that made it necessary, and missed here.
+    //
+    // Measured, so the reach is not assumed: dropping this guard rewrites 24
+    // golden lines across the three parse fixtures -- 4 in
+    // `json_parse_numbers.stdout`, 9 in `json_parse_strings.stdout`, 11 in
+    // `json_parse_values.stdout` -- which is every rejection whose cursor stops
+    // short of the end of the input.
     fn fail(mut self, m: String) {
         if self.err.is_none() {
             self.err = Some(JsonError { msg: m, at: self.pos })
@@ -321,6 +334,18 @@ impl P {
     // `n`/`t`/`f` hand off to `keyword`, which matches the WHOLE spelling.
     // Dispatching on the first letter and then consuming a fixed count would
     // read `nxxx` as `null`.
+    //
+    // NESTING DEPTH IS UNBOUNDED. This recurses through `scan_array` and
+    // `scan_object` back into itself with one native frame per level, so an
+    // input nested deeply enough exhausts the stack rather than returning a
+    // `JsonError` -- a `[[[[...` of sufficient length crashes the process, and
+    // no fixture establishes where that threshold is. RFC 8259 section 9
+    // explicitly permits an implementation to set limits on nesting depth, so a
+    // cap would be conforming; none is imposed here, deliberately, because this
+    // increment's scope did not ask for one and a limit chosen without a
+    // measured budget would be a number nothing justifies. Recorded as a known
+    // property, the way `scan_str`'s quadratic cost below is -- not as a claim
+    // that it is safe against hostile input.
     fn parse_value(mut self) -> JsonValue {
         if self.err.is_some() { return Null }
         let c = self.peek()
@@ -701,7 +726,7 @@ fn vec_to_array(v: Vec<JsonValue>) -> [JsonValue] {
     out
 }
 
-// The eight one-letter escapes of RFC 8259 section 7, or `None` for any other
+// The eight one-character escapes of RFC 8259 section 7, or `None` for any other
 // character after a backslash. `\u` is deliberately absent: it consumes four
 // more characters and so needs the cursor, which a free function does not have.
 //

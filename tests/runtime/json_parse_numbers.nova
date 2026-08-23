@@ -15,12 +15,15 @@
 // a form feed would put a raw control byte into the `.stdout` file. For every
 // other case the label is the source text, so those lines read as before.
 //
-// Each rejected case prints the message and the character index. `01`, `+1` and
-// `.5` each produce TWO failures -- the first from the value walk, then
-// `parse`'s trailing-content check on the remainder nothing consumed -- so
-// those three goldens are what pins `fail`'s first-failure-wins guard: without
-// it the printed message would be the trailing-content one. `1e`, `1.` and `-`
-// consume to the end of the input and so produce exactly one failure each.
+// Each rejected case prints the message and the character index. `01`, `+1`,
+// `.5` and the form feed each produce TWO failures -- the first from the value
+// walk, then `parse`'s trailing-content check on the remainder nothing consumed
+// -- so those FOUR goldens are this fixture's share of `fail`'s
+// first-failure-wins guard: without it each printed message would be the
+// trailing-content one. Counted, not eyeballed: dropping the guard changes
+// exactly those four lines here (and 20 more across the strings and values
+// fixtures). `1e`, `1.` and `-` consume to the end of the input and so produce
+// exactly one failure each.
 //
 // `+1` and `.5` are rejected by `parse_value`'s DISPATCH, not by the number
 // scanner: neither `+` nor `.` can begin a JSON value, so neither reaches
@@ -28,13 +31,20 @@
 // still reaches the scanner's own `expected a digit` branch, since `-` is the
 // one sign JSON allows and so is dispatched here before the digit is missing.
 //
-// The last two cases are the whole of `skip_ws`'s coverage, in both directions.
-// `' 1 '` is the only input whose leading whitespace must be SKIPPED, so it is
-// the only one that executes the `bump()` inside `skip_ws`; narrowing that
-// predicate turns it into `expected a digit at 0`. The form feed is the other
-// direction: RFC 8259 admits exactly space, tab, line feed and carriage return
-// as whitespace, so a form feed must NOT be skipped, and widening the predicate
-// to admit it turns this line from an error into `1`.
+// The last two cases are this fixture's share of `skip_ws`'s coverage, in both
+// directions -- NOT the whole of it, and `' 1 '` is NOT the only input whose
+// leading whitespace must be SKIPPED. `json_parse_values.nova` carries three
+// whitespace cases of its own, one of them filling all twelve `ws` slots RFC
+// 8259's structural rules define.
+//
+// Measured rather than divided up by eye: narrowing the predicate to drop
+// `c == ' '` fails TWO targets, changing this fixture's one line -- `' 1 '`
+// becomes `expected a value at 0` -- and SEVEN of that one's. So the values
+// fixture is the stronger half of this coverage, not a duplicate of it.
+//
+// The form feed is the other direction: RFC 8259 admits exactly space, tab, line
+// feed and carriage return as whitespace, so a form feed must NOT be skipped,
+// and widening the predicate to admit it turns this line from an error into `1`.
 fn main() {
     report("0", "0")
     report("-0", "-0")

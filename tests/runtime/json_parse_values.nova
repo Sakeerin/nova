@@ -26,9 +26,16 @@
 // the parse and the re-render together. That works only where the value's text
 // is order-independent, so every object here is single-keyed -- `Map::keys()`
 // returns table order, and a two-key golden would pin hash order rather than
-// behaviour. The one case that NEEDS a two-key object, because an object's
-// `value-separator` has no other home, goes through `either` and accepts both
-// orderings instead.
+// behaviour. The one case whose VALUE has two distinct keys goes through
+// `either` and accepts both orderings instead.
+//
+// That case is NOT the only home of an object's `value-separator`, and an
+// earlier draft of this header claimed it was. Measured: making `scan_object`
+// stop accepting `,` breaks THREE cases here -- `duplicate key`, whose two-member
+// input collapses to a one-key value and so prints through `report`;
+// `trailing comma in an object`, which is a rejection; and this one. What
+// `either` uniquely buys is a parsed value that really does carry two keys, and
+// whitespace on both sides of an object comma.
 fn main() {
     // Accepted: the three literal names, and both empty containers.
     report("null", "null")
