@@ -3,9 +3,12 @@
 // no other route to them.
 //
 // EVERY expected line below was derived from RFC 8259 section 7 and from
-// `stringify`'s own rules, not captured from this program's output. Section 7's
-// grammar, reflowed onto fewer lines with the RFC's inline comments dropped and
-// its `string` and `escape` rules omitted as not load-bearing here, is
+// `stringify`'s own rules, not captured from this program's output. Section 7
+// defines FIVE rules -- `string`, `char`, `escape`, `quotation-mark`,
+// `unescaped` -- of which the two quoted below, reflowed onto fewer lines
+// with the RFC's inline comments dropped, are the load-bearing ones; the
+// other THREE (`string`, `escape`, `quotation-mark`) are omitted because
+// they contribute nothing past what `char` and `unescaped` already say:
 //
 //     char = unescaped / escape ( %x22 / %x5C / %x2F / %x62 / %x66 /
 //                                 %x6E / %x72 / %x74 / %x75 4HEXDIG )

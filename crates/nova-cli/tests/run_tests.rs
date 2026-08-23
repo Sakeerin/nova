@@ -8438,3 +8438,16 @@ fn json_round_trip_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_traits_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/json_traits.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_traits.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
