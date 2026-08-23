@@ -212,6 +212,18 @@ impl P {
     // filler and a repeat literal is the only way to allocate a runtime-length
     // array; every slot is overwritten immediately below, so the space never
     // survives.
+    //
+    // NEITHER half of the `n <= 0` guard is reachable today -- for a stronger
+    // reason than in `chars_to_string`, whose note on exactly this guard the
+    // duplication above had dropped. `scan_number` is this helper's only
+    // caller, `pos` never moves backwards, and the call site sits past at least
+    // one consumed digit, so `n` is always 1 or more. Kept for the reason
+    // `chars_to_string` keeps it: a future caller of this module-private helper
+    // may not bound its own span as carefully. At `n == 0` the general path
+    // would return "" unaided anyway, so that half only skips an allocation --
+    // measured, not assumed: `[' '; 0]` is a legal repeat literal of length 0,
+    // the `0..0` loop is vacuous, and `nova_rt_str_from_chars` of an empty
+    // array builds an empty `String`.
     fn span(self, start: Int, end: Int) -> String {
         let n = end - start
         if n <= 0 { return "" }

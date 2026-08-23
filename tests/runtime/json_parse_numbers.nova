@@ -1,39 +1,56 @@
 // The number scanner, exercised through `parse` -- `P` and `scan_number` are
 // private to `std/json`, so a fixture has no other route to them.
 //
-// Each accepted case prints the source text and what `stringify` produces from
-// the parsed value, so the golden pins the whole path at once: the span the
-// scanner matched, the `Float` the intrinsic produced from that span, and the
+// Each accepted case prints a label and what `stringify` produces from the
+// parsed value, so the golden pins the whole path at once: the span the scanner
+// matched, the `Float` the intrinsic produced from that span, and the
 // rendering. The expected renderings were derived from JSON's grammar and
 // Rust's `f64` Display, not captured from this program's output -- `1e3` is one
 // thousand and renders `1000`, `1.5E-2` is fifteen thousandths and renders
 // `0.015`, and `-0` keeps its sign because an f64 negative zero is a distinct
 // bit pattern that Display shows.
 //
+// `report` takes a LABEL as well as the source text because two inputs below
+// cannot be echoed: leading and trailing spaces are invisible in a golden, and
+// a form feed would put a raw control byte into the `.stdout` file. For every
+// other case the label is the source text, so those lines read as before.
+//
 // Each rejected case prints the message and the character index. `01`, `+1` and
 // `.5` each produce TWO failures -- the scanner's, then `parse`'s
 // trailing-content check on the remainder the scanner did not consume -- so
 // those three goldens are what pins `fail`'s first-failure-wins guard: without
-// it the printed message would be the trailing-content one. `1e` consumes to
-// the end of the input and so produces exactly one failure.
+// it the printed message would be the trailing-content one. `1e` and `1.`
+// consume to the end of the input and so produce exactly one failure each.
+//
+// The last two cases are the whole of `skip_ws`'s coverage, in both directions.
+// `' 1 '` is the only input whose leading whitespace must be SKIPPED, so it is
+// the only one that executes the `bump()` inside `skip_ws`; narrowing that
+// predicate turns it into `expected a digit at 0`. The form feed is the other
+// direction: RFC 8259 admits exactly space, tab, line feed and carriage return
+// as whitespace, so a form feed must NOT be skipped, and widening the predicate
+// to admit it turns this line from an error into `1`.
 fn main() {
-    report("0")
-    report("-0")
-    report("12")
-    report("-3.5")
-    report("1e3")
-    report("1.5E-2")
-    report("2.5")
+    report("0", "0")
+    report("-0", "-0")
+    report("12", "12")
+    report("-3.5", "-3.5")
+    report("1e3", "1e3")
+    report("1.5E-2", "1.5E-2")
+    report("2.5", "2.5")
 
-    report("01")
-    report("+1")
-    report(".5")
-    report("1e")
+    report("01", "01")
+    report("+1", "+1")
+    report(".5", ".5")
+    report("1e", "1e")
+    report("1.", "1.")
+
+    report("' 1 '", " 1 ")
+    report("'\\f1'", "\u{0C}1")
 }
 
-fn report(src: String) {
+fn report(label: String, src: String) {
     match parse(src) {
-        Ok(v) => println("${src} -> ${stringify(v)}")
-        Err(e) => println("${src} -> error: ${e.msg} at ${e.at}")
+        Ok(v) => println("${label} -> ${stringify(v)}")
+        Err(e) => println("${label} -> error: ${e.msg} at ${e.at}")
     }
 }
