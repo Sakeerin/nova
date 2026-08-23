@@ -1,0 +1,131 @@
+// Nova standard library -- JSON.
+//
+// `nova-spec/20-STDLIB.md` section 7's type declaration compiles verbatim,
+// including the variant names that shadow builtin type names. Measured, not
+// assumed: `Bool(Bool)` and `String(String)` are accepted and `match` binds
+// them unqualified.
+
+pub type JsonValue =
+    | Null
+    | Bool(Bool)
+    | Number(Float)
+    | String(String)
+    | Array([JsonValue])
+    | Object(Map<String, JsonValue>)
+
+// `at` is a character index into the input, not a byte offset -- the parser
+// walks `[Char]`.
+pub record JsonError { msg: String, at: Int }
+
+// Render `v` as JSON text. Total: there is no input this cannot render.
+pub fn stringify(v: JsonValue) -> String {
+    match v {
+        Null => "null"
+        Bool(b) => if b { "true" } else { "false" }
+        Number(n) => number_to_json(n)
+        String(s) => quote(s)
+        Array(xs) => {
+            let mut out = "["
+            let mut i = 0
+            while i < xs.len() {
+                if i > 0 { out = "${out}," }
+                out = "${out}${stringify(xs[i])}"
+                i = i + 1
+            }
+            "${out}]"
+        }
+        Object(m) => {
+            let ks = m.keys()
+            let mut out = "{"
+            let mut i = 0
+            while i < ks.len() {
+                if i > 0 { out = "${out}," }
+                match m.get(ks[i]) {
+                    Some(val) => out = "${out}${quote(ks[i])}:${stringify(val)}"
+                    None => out = out
+                }
+                i = i + 1
+            }
+            "${out}}"
+        }
+    }
+}
+
+// JSON has no NaN and no infinity, so a non-finite number cannot be rendered.
+// This emits `null` instead, which is what most codecs do and which keeps
+// `stringify` total and its output always valid JSON. It is DELIBERATELY LOSSY:
+// a round trip through a non-finite number does not preserve it.
+//
+// `n - n != 0.0` is the finiteness test. For any finite `n` the difference is
+// exactly zero; for either infinity it is NaN, and for NaN it is NaN, and NaN
+// compares unequal to everything including itself. This avoids needing an
+// `is_nan` the standard library does not have.
+fn number_to_json(n: Float) -> String {
+    if n - n != 0.0 { "null" } else { "${n}" }
+}
+
+// Escape `s` as a JSON string literal, quotes included. `char_to_int` is how
+// this reaches a character's scalar value -- it is `STD_ONLY`, which is why
+// this helper lives here rather than in a fixture.
+fn quote(s: String) -> String {
+    let cs = s.chars()
+    let mut out = "\""
+    let mut i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        let code = char_to_int(c)
+        if c == '"' {
+            out = "${out}\\\""
+        } else {
+            if c == '\\' {
+                out = "${out}\\\\"
+            } else {
+                if code < 32 {
+                    out = "${out}${escape_control(code)}"
+                } else {
+                    out = "${out}${c}"
+                }
+            }
+        }
+        i = i + 1
+    }
+    "${out}\""
+}
+
+// One hex digit, lowercase, for a nibble in `0..16`. Nova has no formatting
+// width primitive, so `escape_control` builds `\u00XX` two characters at a
+// time through this.
+fn hex_digit(n: Int) -> String {
+    if n == 0 { "0" }
+    else if n == 1 { "1" }
+    else if n == 2 { "2" }
+    else if n == 3 { "3" }
+    else if n == 4 { "4" }
+    else if n == 5 { "5" }
+    else if n == 6 { "6" }
+    else if n == 7 { "7" }
+    else if n == 8 { "8" }
+    else if n == 9 { "9" }
+    else if n == 10 { "a" }
+    else if n == 11 { "b" }
+    else if n == 12 { "c" }
+    else if n == 13 { "d" }
+    else if n == 14 { "e" }
+    else { "f" }
+}
+
+// RFC 8259 requires every control character below `0x20` escaped. Five have
+// a named short escape; every other one falls back to `\u00XX`, which is
+// always exactly two hex digits because `code` is below `0x20`.
+fn escape_control(code: Int) -> String {
+    if code == 10 { "\\n" }
+    else if code == 13 { "\\r" }
+    else if code == 9 { "\\t" }
+    else if code == 8 { "\\b" }
+    else if code == 12 { "\\f" }
+    else {
+        let hi = code / 16
+        let lo = code % 16
+        "\\u00${hex_digit(hi)}${hex_digit(lo)}"
+    }
+}

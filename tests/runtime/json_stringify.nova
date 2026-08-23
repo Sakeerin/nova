@@ -1,0 +1,23 @@
+// `stringify` covers every `JsonValue` variant. The `Object` case is
+// single-keyed because `Map::keys()` returns table order, not insertion
+// order, and a multi-key golden would pin hash order instead of behaviour.
+// The `Number` case also covers the non-finite branch (`1.0 / 0.0`), which
+// Nova can produce -- verified against the real compiler, not assumed --
+// so `null` here is a behaviour a mutation can actually break.
+fn main() {
+    println(stringify(Null))
+    println(stringify(Bool(true)))
+    println(stringify(Bool(false)))
+    println(stringify(Number(3.0)))
+    println(stringify(Number(3.5)))
+    println(stringify(Number(1.0 / 0.0)))
+    println(stringify(String("hello")))
+    println(stringify(Array([Null, Number(1.0), Array([Number(2.0), Number(3.0)])])))
+
+    let mut m: Map<String, JsonValue> = Map::new()
+    m.insert("only", Array([Number(1.0), Number(2.0)]))
+    println(stringify(Object(m)))
+
+    let empty: Map<String, JsonValue> = Map::new()
+    println(stringify(Object(empty)))
+}

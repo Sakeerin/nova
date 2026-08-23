@@ -1,0 +1,14 @@
+// `quote` covers RFC 8259's mandatory escapes: `"` and `\` explicitly, every
+// character below `0x20`, and the two named ones a JSON encoder commonly
+// special-cases (newline, tab). `0x01` stands in for a control character
+// with no short escape, which must render as `\u0001`. Everything at or
+// above `0x20` passes through unescaped, covered by `hello` in the sibling
+// fixture.
+fn main() {
+    println(stringify(String("say \"hi\"")))
+    println(stringify(String("back\\slash")))
+    println(stringify(String("line\none")))
+    println(stringify(String("tab\there")))
+    let cs = "\u{0001}".chars()
+    println(stringify(String("${cs[0]}")))
+}

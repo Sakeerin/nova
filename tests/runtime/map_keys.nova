@@ -1,5 +1,6 @@
-// `keys` returns every live key and no tombstone. The sort makes the assertion
-// independent of table order, which is a hash-order detail no test should pin.
+// `keys` returns every live key and no tombstone. The presence checks and
+// length counts below make the assertion independent of table order, which
+// is a hash-order detail no test should pin.
 fn main() {
     let mut m: Map<String, Int> = Map::new()
     m.insert("b", 2)
