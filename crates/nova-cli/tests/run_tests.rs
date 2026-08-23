@@ -8355,3 +8355,30 @@ fn map_keys_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_stringify_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/json_stringify.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_stringify.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn json_stringify_escapes_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_stringify_escapes.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_stringify_escapes.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
