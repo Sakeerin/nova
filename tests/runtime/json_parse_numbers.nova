@@ -16,11 +16,17 @@
 // other case the label is the source text, so those lines read as before.
 //
 // Each rejected case prints the message and the character index. `01`, `+1` and
-// `.5` each produce TWO failures -- the scanner's, then `parse`'s
-// trailing-content check on the remainder the scanner did not consume -- so
+// `.5` each produce TWO failures -- the first from the value walk, then
+// `parse`'s trailing-content check on the remainder nothing consumed -- so
 // those three goldens are what pins `fail`'s first-failure-wins guard: without
-// it the printed message would be the trailing-content one. `1e` and `1.`
+// it the printed message would be the trailing-content one. `1e`, `1.` and `-`
 // consume to the end of the input and so produce exactly one failure each.
+//
+// `+1` and `.5` are rejected by `parse_value`'s DISPATCH, not by the number
+// scanner: neither `+` nor `.` can begin a JSON value, so neither reaches
+// `scan_number` at all and both report `expected a value`. `-` is the case that
+// still reaches the scanner's own `expected a digit` branch, since `-` is the
+// one sign JSON allows and so is dispatched here before the digit is missing.
 //
 // The last two cases are the whole of `skip_ws`'s coverage, in both directions.
 // `' 1 '` is the only input whose leading whitespace must be SKIPPED, so it is
@@ -43,6 +49,7 @@ fn main() {
     report(".5", ".5")
     report("1e", "1e")
     report("1.", "1.")
+    report("-", "-")
 
     report("' 1 '", " 1 ")
     report("'\\f1'", "\u{0C}1")

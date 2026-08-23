@@ -1,0 +1,33 @@
+empty -> ""
+plain -> "abc"
+escaped quote -> "\""
+escaped backslash -> "\\"
+escaped solidus -> "/"
+escaped backspace -> "\b"
+escaped form feed -> "\f"
+escaped line feed -> "\n"
+escaped carriage return -> "\r"
+escaped tab -> "\t"
+all eight together -> "\"\\/\b\f\n\r\t"
+text around an escape -> "a\tb"
+u0041 is A -> "A"
+u0000 is a NUL -> "\u0000"
+u001f is the last control character -> "\u001f"
+uppercase hex digits -> "\u001b"
+delete is legal unescaped -> true
+u00e9 is two UTF-8 bytes -> true
+u20ac is three UTF-8 bytes -> true
+a surrogate pair is one character -> true
+an uppercase surrogate pair -> true
+the highest code point -> true
+backslash q -> error: unknown escape at 2
+a backslash at the end of the input -> error: unterminated string at 2
+lone high surrogate -> error: a high surrogate must be followed by a low surrogate at 7
+high surrogate then a plain character -> error: a high surrogate must be followed by a low surrogate at 7
+high surrogate then a non-surrogate escape -> error: expected a low surrogate at 13
+lone low surrogate -> error: a low surrogate must follow a high surrogate at 7
+raw line feed in a string -> error: a control character must be escaped at 1
+raw tab in a string -> error: a control character must be escaped at 1
+non-hex digit after u -> error: expected four hexadecimal digits at 5
+only two hex digits after u -> error: expected four hexadecimal digits at 5
+u with nothing after it -> error: expected four hexadecimal digits at 3

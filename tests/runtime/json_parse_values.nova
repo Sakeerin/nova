@@ -1,0 +1,132 @@
+// `parse`'s dispatch over JSON's six value kinds, its two container scanners,
+// and every place RFC 8259 permits whitespace.
+//
+// The expected lines were derived from RFC 8259's grammar -- section 2 for `ws`
+// and the six structural rules, section 4 for `object` and `member`, section 5
+// for `array` -- and not captured from output. That grammar, reflowed onto fewer
+// lines with the RFC's inline comments dropped, is where each rejection below
+// comes from:
+//
+//     ws = *( %x20 / %x09 / %x0A / %x0D )
+//     begin-array = ws %x5B ws        end-array = ws %x5D ws
+//     begin-object = ws %x7B ws       end-object = ws %x7D ws
+//     name-separator = ws %x3A ws     value-separator = ws %x2C ws
+//     array  = begin-array [ value *( value-separator value ) ] end-array
+//     object = begin-object [ member *( value-separator member ) ] end-object
+//     member = string name-separator value
+//
+// Note what the grammar does NOT allow, and which case below pins each: a
+// comma before the closing bracket (`array`'s repetition ends on a value, not a
+// separator), a member whose name is anything but a `string`, a value after the
+// document's single `value`, and a `false`/`true`/`null` spelled short. And note
+// that `ws` is admitted around EVERY structural character on BOTH sides, which
+// is what the `whitespace in every legal position` case walks.
+//
+// `report` prints `stringify` of the parsed value, so each accepted line pins
+// the parse and the re-render together. That works only where the value's text
+// is order-independent, so every object here is single-keyed -- `Map::keys()`
+// returns table order, and a two-key golden would pin hash order rather than
+// behaviour. The one case that NEEDS a two-key object, because an object's
+// `value-separator` has no other home, goes through `either` and accepts both
+// orderings instead.
+fn main() {
+    // Accepted: the three literal names, and both empty containers.
+    report("null", "null")
+    report("true", "true")
+    report("false", "false")
+    report("empty array", "[]")
+    report("empty object", "{}")
+
+    // Accepted: composites. Every scalar kind appears in the first case, so a
+    // dispatch arm that stopped working would show up here as well as above.
+    report("array of every scalar", "[null,true,false,0,-1.5,\"a\"]")
+    report("nested arrays", "[[1,[2,[3]]],[]]")
+    report("deeply nested array", "[[[[[1]]]]]")
+    report("single-key object", "{\"a\":1}")
+    report("object holding an array", "{\"a\":[1,2]}")
+    report("object holding an object", "{\"a\":{\"b\":2}}")
+    report("array holding objects", "[{\"a\":1},{\"b\":2}]")
+    report("an escaped key", "{\"a\\nb\":1}")
+
+    // Accepted, and a DECISION rather than a requirement: RFC 8259 section 4
+    // calls a repeated name's behaviour unpredictable, so nothing obliges a
+    // reader to keep the last pair. This one does, because `Map::insert`
+    // replaces -- and the resulting object has one key, so the golden is
+    // determinate.
+    report("duplicate key", "{\"a\":1,\"a\":2}")
+
+    // Accepted: whitespace. The first two cover an array's separators and the
+    // document's own edges; the third puts whitespace in all twelve `ws` slots
+    // the six structural rules above list, in one input. Adjacent slots
+    // necessarily share one run of characters -- the `ws` after `]` and the `ws`
+    // before `,` are the same four bytes -- which is how the grammar composes
+    // and not a gap in the coverage.
+    report("whitespace inside an array", "[ \t\r\n1 \t\r\n, \t\r\n2 \t\r\n]")
+    report("whitespace around the document", " \t\r\nnull \t\r\n")
+    either(
+        "whitespace in every legal position",
+        " \t\r\n{ \t\r\n\"a\" \t\r\n: \t\r\n[ \t\r\n] \t\r\n, \t\r\n\"b\" \t\r\n: \t\r\n{ \t\r\n} \t\r\n} \t\r\n",
+        "{\"a\":[],\"b\":{}}",
+        "{\"b\":{},\"a\":[]}",
+    )
+
+    // Rejected: no value at all. The second case is also the proof that a
+    // failure's `at` is measured after the leading whitespace, not before it.
+    report("empty input", "")
+    report("only whitespace", "   ")
+
+    // Rejected: a literal name spelled short or wrong. Each name is checked in
+    // FULL, so `nul` is an error rather than `null` with `nul` consumed, and
+    // `truX` fails on the fourth character rather than the first.
+    report("nul", "nul")
+    report("truX", "truX")
+    report("fals", "fals")
+    report("capital False", "False")
+    report("nulll", "nulll")
+
+    // Rejected: a separator with no value after it.
+    report("trailing comma in an array", "[1,]")
+    report("trailing comma in an object", "{\"a\":1,}")
+    report("a comma with nothing before it", "[,1]")
+
+    // Rejected: a member without its `name-separator`, and a name that is not
+    // a `string`.
+    report("missing colon", "{\"a\" 1}")
+    report("a bare word as a key", "{a:1}")
+
+    // Rejected: a string with no closing quote.
+    report("unterminated string", "\"abc")
+
+    // Rejected: brackets that do not balance, in both directions and crossed.
+    report("unclosed array", "[1")
+    report("unclosed object", "{\"a\":1")
+    report("array closed by a brace", "[1}")
+    report("object closed by a bracket", "{\"a\":1]")
+    report("a stray closing bracket", "]")
+    report("a stray closing brace", "}")
+
+    // Rejected: anything after the document's one value. A JSON text is ONE
+    // value, so this is an error and not a stopping point.
+    report("two values", "1 2")
+    report("content after an array", "[]x")
+    report("content after a keyword", "null null")
+}
+
+fn report(label: String, src: String) {
+    match parse(src) {
+        Ok(v) => println("${label} -> ${stringify(v)}")
+        Err(e) => println("${label} -> error: ${e.msg} at ${e.at}")
+    }
+}
+
+// For the one input whose value is a two-key object: accept either key order,
+// since `Map::keys()` promises neither.
+fn either(label: String, src: String, a: String, b: String) {
+    match parse(src) {
+        Ok(v) => {
+            let t = stringify(v)
+            println("${label} -> ${t == a || t == b}")
+        }
+        Err(e) => println("${label} -> error: ${e.msg} at ${e.at}")
+    }
+}

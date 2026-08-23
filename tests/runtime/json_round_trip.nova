@@ -1,0 +1,68 @@
+// `stringify` and `parse` checked against EACH OTHER rather than against a
+// golden line someone chose: build one value using all six `JsonValue`
+// variants, render it, parse the rendering, render again, and compare the two
+// texts. A one-sided bug -- an escape the encoder writes and the decoder
+// misreads, or the reverse -- shows up here as an inequality even if both
+// goldens elsewhere agree with the code that produced them.
+//
+// The value is deliberately awkward in every way the two directions can
+// disagree:
+//
+//   * an array nested inside an object, and an object nested inside that array;
+//   * an empty array and an empty string, both of which take a scanner's
+//     early-exit path rather than its loop;
+//   * a non-integral number (`2.5`) and one whose text needs the fraction
+//     digits kept (`-0.001`);
+//   * a string carrying a quote, a backslash, a line feed, a tab, and a control
+//     character with no short escape -- `\u0001`, which is the only one that
+//     goes through `\uXXXX` in both directions.
+//
+// EVERY object here has exactly one key, because `Map::keys()` returns table
+// order: with two keys, `first == second` would still hold but the printed text
+// would pin a hash ordering. The printed text was derived from `stringify`'s own
+// rules and Rust's `f64` Display, not captured -- `0.0` renders `0`, `1.0`
+// renders `1`, and `quote` escapes `"` `\` LF TAB as `\"` `\\` `\n` `\t` while
+// leaving `q` alone and sending `0x01` to `\u0001`.
+//
+// The second comparison is idempotence: parsing and re-rendering the rendering
+// must be a fixed point. A decoder that lost a character would fail the first
+// comparison; one that ADDED a character on every pass would pass the first and
+// fail this one.
+fn main() {
+    let mut deep: Map<String, JsonValue> = Map::new()
+    deep.insert("d", Number(1.0))
+
+    let none: [JsonValue] = []
+    let inner: [JsonValue] = [Number(1.0), Array([Number(2.0)])]
+
+    let items: [JsonValue] = [
+        Null,
+        Bool(true),
+        Bool(false),
+        Number(0.0),
+        Number(2.5),
+        Number(-0.001),
+        String("q\"\\\n\t\u{0001}"),
+        String(""),
+        Array(none),
+        Array(inner),
+        Object(deep),
+    ]
+
+    let mut root: Map<String, JsonValue> = Map::new()
+    root.insert("root", Array(items))
+
+    let first = stringify(Object(root))
+    match parse(first) {
+        Ok(v) => {
+            let second = stringify(v)
+            println("first == second -> ${first == second}")
+            match parse(second) {
+                Ok(w) => println("second == third -> ${second == stringify(w)}")
+                Err(e) => println("second == third -> error: ${e.msg} at ${e.at}")
+            }
+            println(second)
+        }
+        Err(e) => println("first == second -> error: ${e.msg} at ${e.at}")
+    }
+}

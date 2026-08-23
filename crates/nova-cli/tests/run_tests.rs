@@ -8396,3 +8396,45 @@ fn json_parse_numbers_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_parse_strings_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_parse_strings.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_parse_strings.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn json_parse_values_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_parse_values.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_parse_values.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn json_round_trip_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_round_trip.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_round_trip.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

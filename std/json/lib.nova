@@ -133,18 +133,19 @@ fn escape_control(code: Int) -> String {
 // Parse `s` as JSON. `JsonError::at` is a character index -- a count of Unicode
 // scalar values, matching the `[Char]` the parser walks.
 //
-// Only a JSON NUMBER is accepted so far: the dispatch over JSON's other five
-// value kinds is not built, so this hands the whole input to the number scanner
-// and anything that is not a number fails there.
+// A JSON text is ONE value, so trailing content is an error rather than a
+// stopping point: `parse` skips whitespace, parses a single value, skips
+// whitespace again, and rejects anything left over.
 //
-// The trailing-content check is already in place, and it is deliberate that it
-// runs even when the scanner has already failed: it is the second caller of
-// `fail` that makes `fail`'s first-failure-wins guard observable, and so the
-// thing that keeps that guard tested rather than merely written.
+// It is deliberate that the trailing-content check runs even when the value
+// walk has already failed: it is the second caller of `fail` that makes
+// `fail`'s first-failure-wins guard observable, and so the thing that keeps
+// that guard tested rather than merely written. `err` is then inspected ONCE,
+// here, which is the whole point of carrying the failure in a field.
 pub fn parse(s: String) -> Result<JsonValue, JsonError> {
     let mut p = P { cs: s.chars(), pos: 0, err: None }
     p.skip_ws()
-    let v = p.scan_number()
+    let v = p.parse_value()
     p.skip_ws()
     if !p.at_end() { p.fail("trailing content") }
     match p.err {
@@ -264,11 +265,15 @@ impl P {
     // are recorded here as measured behaviour, not as tested behaviour.
     //
     // Each rejection is a shape JSON forbids that a laxer reader would take:
-    // a leading `+` (only `-` is a sign), a leading zero followed by a digit
-    // (`01` is two tokens, not one number), a `.` with no digit after it, and
-    // an exponent with no digits. `.5` and `+1` both fail on the integer part,
-    // which is where the grammar requires a digit once the optional `-` is
-    // past.
+    // a leading zero followed by a digit (`01` is two tokens, not one number),
+    // a `.` with no digit after it, and an exponent with no digits.
+    //
+    // `+1` and `.5` never arrive here. `parse_value` dispatches to this scanner
+    // only on `-` or a digit, so neither a leading `+` (only `-` is a sign) nor
+    // a bare `.` gets past the dispatch, and both are reported there as
+    // `expected a value` instead. What still reaches the `expected a digit`
+    // branch below is a `-` with no digit after it, which is the `-` case in
+    // `json_parse_numbers.nova`.
     fn scan_number(mut self) -> JsonValue {
         if self.err.is_some() { return Null }
         let start = self.pos
@@ -304,9 +309,414 @@ impl P {
         }
         Number(str_to_float(self.span(start, self.pos)))
     }
+
+    // One JSON value, dispatched on the character at the cursor.
+    //
+    // The dispatch is unambiguous because JSON's six value kinds start on
+    // disjoint character sets -- seven of them, since `true` and `false` are one
+    // kind on two letters: `n`, `t`, `f`, `"`, `[`, `{`, and `-` or a digit.
+    // Anything else is not the start of a value, which is where a leading `+`, a
+    // bare `.`, a stray `]` and an empty input all land.
+    //
+    // `n`/`t`/`f` hand off to `keyword`, which matches the WHOLE spelling.
+    // Dispatching on the first letter and then consuming a fixed count would
+    // read `nxxx` as `null`.
+    fn parse_value(mut self) -> JsonValue {
+        if self.err.is_some() { return Null }
+        let c = self.peek()
+        if c == 'n' { return self.keyword("null", Null) }
+        if c == 't' { return self.keyword("true", Bool(true)) }
+        if c == 'f' { return self.keyword("false", Bool(false)) }
+        if c == '"' {
+            let s = self.scan_str()
+            return String(s)
+        }
+        if c == '[' { return self.scan_array() }
+        if c == '{' { return self.scan_object() }
+        if c == '-' || is_digit(c) { return self.scan_number() }
+        self.fail("expected a value")
+        Null
+    }
+
+    // A literal name -- `null`, `true` or `false` -- matched character by
+    // character against `word`, returning `v` only if all of it is there.
+    //
+    // The mismatch is reported AT the offending character rather than at the
+    // start of the name, so `nul` fails at 3 (where the fourth character should
+    // be) and not at 0.
+    fn keyword(mut self, word: String, v: JsonValue) -> JsonValue {
+        let ws = word.chars()
+        let mut i = 0
+        while i < ws.len() {
+            if self.peek() != ws[i] {
+                self.fail("expected ${word}")
+                return Null
+            }
+            self.bump()
+            i = i + 1
+        }
+        v
+    }
+
+    // A JSON array, cursor on `[`.
+    //
+    // The empty array is checked BEFORE the element loop, which is what makes
+    // `[]` legal while `[1,]` and `[,1]` are not: once the loop is entered, a
+    // value is required, because RFC 8259's `array` repetition ends on a value
+    // and never on a separator.
+    fn scan_array(mut self) -> JsonValue {
+        self.bump()
+        self.skip_ws()
+        if self.peek() == ']' {
+            self.bump()
+            let empty: [JsonValue] = []
+            return Array(empty)
+        }
+        let mut items: Vec<JsonValue> = Vec::new()
+        let mut going = true
+        while going {
+            let v = self.parse_value()
+            if self.err.is_some() { return Null }
+            items.push(v)
+            self.skip_ws()
+            let c = self.peek()
+            if c == ',' {
+                self.bump()
+                self.skip_ws()
+            } else if c == ']' {
+                self.bump()
+                going = false
+            } else {
+                self.fail("expected ',' or ']' in an array")
+                return Null
+            }
+        }
+        Array(vec_to_array(items))
+    }
+
+    // A JSON object, cursor on `{`.
+    //
+    // Mirrors `scan_array`, with a member in place of a value. The key check is
+    // explicit here rather than left to `scan_str`, so a missing key reports
+    // `expected an object key` -- RFC 8259 admits only a `string` as a member
+    // name, so `{a:1}` is an error and not a laxer reader's bare word.
+    //
+    // A repeated key keeps the LAST value, because `Map::insert` replaces.
+    // RFC 8259 section 4 sanctions no particular choice -- it calls the
+    // behaviour of a non-unique name "unpredictable" and observes that many
+    // implementations report the last pair only -- so this is a decision, not a
+    // requirement, and `json_parse_values.nova`'s `duplicate key` case pins it.
+    fn scan_object(mut self) -> JsonValue {
+        self.bump()
+        self.skip_ws()
+        let mut m: Map<String, JsonValue> = Map::new()
+        if self.peek() == '}' {
+            self.bump()
+            return Object(m)
+        }
+        let mut going = true
+        while going {
+            if self.peek() != '"' {
+                self.fail("expected an object key")
+                return Null
+            }
+            let k = self.scan_str()
+            if self.err.is_some() { return Null }
+            self.skip_ws()
+            if self.peek() != ':' {
+                self.fail("expected ':' after an object key")
+                return Null
+            }
+            self.bump()
+            self.skip_ws()
+            let v = self.parse_value()
+            if self.err.is_some() { return Null }
+            m.insert(k, v)
+            self.skip_ws()
+            let c = self.peek()
+            if c == ',' {
+                self.bump()
+                self.skip_ws()
+            } else if c == '}' {
+                self.bump()
+                going = false
+            } else {
+                self.fail("expected ',' or '}' in an object")
+                return Null
+            }
+        }
+        Object(m)
+    }
+
+    // A JSON string literal, cursor on the opening `"`. Returns the DECODED
+    // contents, with every escape resolved; on failure `err` is set and the
+    // return value is `""` rather than meaningful.
+    //
+    // The three arms are exactly RFC 8259's `char`: a closing quote ends the
+    // literal, a backslash starts an escape, and anything else is `unescaped`
+    // -- which the grammar defines as `%x20-21 / %x23-5B / %x5D-10FFFF`. That
+    // range starts at `0x20`, so a raw character below it is a SYNTAX ERROR and
+    // not a character to pass through: tab and line feed are legal whitespace
+    // BETWEEN tokens and still illegal unescaped inside a string. Note the
+    // range runs to `10FFFF` with no upper exclusion, so `0x7f` (DEL) is
+    // ordinary text here and needs no escape.
+    //
+    // The `peek() != '"'` guard is defensive rather than load-bearing today:
+    // `parse_value` dispatches here only on `"`, and `scan_object` checks for
+    // one itself. It is kept for the reason `bump`'s bounds guard is -- a
+    // future caller may not position the cursor as carefully.
+    //
+    // `out` is rebuilt by interpolation on every character, which is quadratic
+    // in the literal's length. That is the same shape `quote` uses in the other
+    // direction, and Nova has no growable string buffer to do better with; it
+    // is recorded here as a known cost, not as a claim that it does not matter.
+    // A `span`-style slice cannot replace it, because an escape means the
+    // decoded text is not a contiguous run of the input.
+    fn scan_str(mut self) -> String {
+        if self.err.is_some() { return "" }
+        if self.peek() != '"' {
+            self.fail("expected a string")
+            return ""
+        }
+        self.bump()
+        let mut out = ""
+        while true {
+            if self.at_end() {
+                self.fail("unterminated string")
+                return ""
+            }
+            let c = self.peek()
+            if c == '"' {
+                self.bump()
+                return out
+            }
+            if c == '\\' {
+                self.bump()
+                let piece = self.scan_escape()
+                if self.err.is_some() { return "" }
+                out = "${out}${piece}"
+            } else if char_to_int(c) < 32 {
+                self.fail("a control character must be escaped")
+                return ""
+            } else {
+                self.bump()
+                out = "${out}${c}"
+            }
+        }
+        out
+    }
+
+    // What one escape decodes to, cursor on the character AFTER the backslash.
+    //
+    // RFC 8259 allows exactly nine forms after a backslash, and a backslash
+    // followed by anything else is an error -- there is no "unknown escapes
+    // pass through" rule. The cursor is not advanced before the failure, so
+    // `at` points at the offending character rather than past it.
+    fn scan_escape(mut self) -> String {
+        if self.at_end() {
+            self.fail("unterminated string")
+            return ""
+        }
+        let e = self.peek()
+        if e == 'u' {
+            self.bump()
+            return self.scan_hex_escape()
+        }
+        match simple_escape(e) {
+            Some(s) => {
+                self.bump()
+                s
+            }
+            None => {
+                self.fail("unknown escape")
+                ""
+            }
+        }
+    }
+
+    // `\uXXXX`, cursor just past the `u`, and the surrogate pairing RFC 8259
+    // section 7 requires for anything above the BMP.
+    //
+    // There is NO Int-to-`Char` conversion in Nova, so this cannot build a
+    // `Char` from a code point. It encodes the code point to UTF-8 bytes here
+    // and hands them to `Bytes::to_string`, whose `Option` is the validation:
+    // `to_string` checks UTF-8 and returns `None`, so a code point that is not
+    // a Unicode scalar value becomes a `JsonError` instead of garbage. That is
+    // why no second intrinsic was added for this. The runtime's own
+    // `nova_rt_char_to_str` would have been strictly worse -- its body is
+    // `char::from_u32(v as u32).unwrap_or(char::REPLACEMENT_CHARACTER)`, so it
+    // silently substitutes U+FFFD for exactly the inputs that must be rejected.
+    //
+    // The `None` arm is therefore a SECOND line of defence, not a redundant
+    // one: the explicit surrogate checks above it make every code point that
+    // reaches the encoder a scalar value, so the arm cannot fire as written.
+    // Deleting the LONE-SURROGATE rejection makes it fire -- measured, not
+    // assumed: with that check gone, `"\udc00"` reports `an escape is not a
+    // valid code point`, because a lone surrogate encodes to a three-byte
+    // sequence Rust's `str::from_utf8` rejects. So the error survives the loss
+    // of that check, and only its message changes.
+    //
+    // Deleting the LOW-SURROGATE RANGE check does NOT reach that arm, and the
+    // asymmetry is why both checks are here rather than one. The
+    // `high surrogate then a non-surrogate escape` case in
+    // `json_parse_strings.nova` -- a high surrogate followed by an escape whose
+    // value is `0x41` -- then combines to `0x11841`, a perfectly ordinary
+    // character, so that input is silently ACCEPTED instead of rejected.
+    // Measured on its own, with the check above this one left in place.
+    fn scan_hex_escape(mut self) -> String {
+        let hi = self.scan_hex4()
+        if self.err.is_some() { return "" }
+        if hi >= 0xDC00 && hi <= 0xDFFF {
+            self.fail("a low surrogate must follow a high surrogate")
+            return ""
+        }
+        let mut cp = hi
+        if hi >= 0xD800 && hi <= 0xDBFF {
+            if self.peek() != '\\' {
+                self.fail("a high surrogate must be followed by a low surrogate")
+                return ""
+            }
+            self.bump()
+            if self.peek() != 'u' {
+                self.fail("a high surrogate must be followed by a low surrogate")
+                return ""
+            }
+            self.bump()
+            let lo = self.scan_hex4()
+            if self.err.is_some() { return "" }
+            if lo < 0xDC00 || lo > 0xDFFF {
+                self.fail("expected a low surrogate")
+                return ""
+            }
+            cp = 0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)
+        }
+        match bytes_from_ints(utf8_bytes(cp)).to_string() {
+            Some(s) => s
+            None => {
+                self.fail("an escape is not a valid code point")
+                ""
+            }
+        }
+    }
+
+    // Exactly four hexadecimal digits, as an `Int`. FOUR is the grammar's own
+    // count (`%x75 4HEXDIG`), not a convenience: reading fewer would leave the
+    // remaining digits to be taken as literal text, and reading more would
+    // swallow the character after the escape.
+    //
+    // A non-hex character stops this, and so does the end of the input, since
+    // `peek`'s past-the-end `'\0'` is not a hexadecimal digit.
+    fn scan_hex4(mut self) -> Int {
+        let mut v = 0
+        let mut i = 0
+        while i < 4 {
+            let d = hex_value(self.peek())
+            if d < 0 {
+                self.fail("expected four hexadecimal digits")
+                return 0
+            }
+            v = v * 16 + d
+            self.bump()
+            i = i + 1
+        }
+        v
+    }
 }
 
 // An ASCII digit. `Char` admits `<=` and `>=` directly (`impl Ord for Char` in
 // `std/core` is built on `<`), so this needs no conversion to `Int` -- which
 // also keeps the past-the-end sentinel `'\0'` a non-digit for free.
 fn is_digit(c: Char) -> Bool { c >= '0' && c <= '9' }
+
+// One hexadecimal digit's value, or `-1` for anything that is not one. `-1`
+// rather than `Option<Int>` because the single caller is a four-iteration loop
+// and an `Option` there buys a `match` per digit and nothing else.
+//
+// The offsets are the ASCII arithmetic: `'0'` is 48, `'a'` is 97 and 97 - 87 is
+// 10, `'A'` is 65 and 65 - 55 is 10. Both letter cases are accepted because RFC
+// 8259's `HEXDIG` is `DIGIT / "A" / ... / "F"` under ABNF's case-insensitive
+// rule for literals.
+fn hex_value(c: Char) -> Int {
+    if c >= '0' && c <= '9' { return char_to_int(c) - 48 }
+    if c >= 'a' && c <= 'f' { return char_to_int(c) - 87 }
+    if c >= 'A' && c <= 'F' { return char_to_int(c) - 55 }
+    // `return`, not a bare `-1`: after the `if` block above, a statement
+    // starting `-` parses as SUBTRACTION from that block's value. Measured.
+    return -1
+}
+
+// `cp` encoded as UTF-8, one `Int` per byte. The four length classes are UTF-8's
+// own: `0..0x80` in one byte, `0x80..0x800` in two, `0x800..0x10000` in three,
+// and the rest in four.
+//
+// Nova has no `Char` built from an `Int`, so this is the only route from a
+// `\uXXXX` code point to a `String`, via `bytes_from_ints` and
+// `Bytes::to_string`.
+//
+// The out-of-range guard returns `0xFF`, which is not a legal UTF-8 byte in any
+// position, so such a code point becomes a `to_string` failure at the call site
+// rather than a mangled character. It is UNREACHABLE as written -- four
+// hexadecimal digits cannot exceed `0xFFFF`, four of them cannot be negative,
+// and the surrogate combine's own maximum is `0x10000 + 0x3FF * 0x400 + 0x3FF`,
+// which is exactly `0x10FFFF`.
+//
+// It is here because the two arms it shields are the only expressions below
+// whose result is not bounded to `0..=255` by construction: `[cp]` for a
+// NEGATIVE `cp`, and the four-byte lead `0xF0 | (cp >> 18)` for an oversized
+// one. Every other byte is masked or has a bounded input -- `0xC0 | (cp >> 6)`
+// tops out at `0xDF`, `0xE0 | (cp >> 12)` at `0xEF`, and a continuation byte at
+// `0xBF`. And the shielding matters because `bytes_from_ints` ABORTS the process
+// on an element outside `0..=255` rather than returning an error.
+fn utf8_bytes(cp: Int) -> [Int] {
+    if cp < 0 || cp > 0x10FFFF { return [0xFF] }
+    if cp < 0x80 { return [cp] }
+    if cp < 0x800 { return [0xC0 | (cp >> 6), 0x80 | (cp & 0x3F)] }
+    if cp < 0x10000 {
+        return [0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
+    }
+    // `return`, not a bare trailing expression: after the `if` block above, a
+    // statement starting `[` parses as an INDEX into that block's value and
+    // fails on the first comma. Measured, not stylistic.
+    return [0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
+}
+
+// A `Vec` copied into the plain `[JsonValue]` that `Array` holds.
+//
+// `scan_array` collects into a `Vec` because it cannot know the element count
+// before it has parsed them, and this is the one-way conversion out. `Null` is
+// the repeat literal's filler -- every slot is overwritten below, so it never
+// survives, and `JsonValue` having a nullary variant is why this needs no
+// `Default` bound.
+//
+// `unwrap_or(Null)` cannot take its default: `i` runs strictly below `v.len()`,
+// which is exactly the range `Vec::get` answers with `Some`.
+fn vec_to_array(v: Vec<JsonValue>) -> [JsonValue] {
+    let n = v.len()
+    let mut out = [Null; n]
+    let mut i = 0
+    while i < n {
+        out[i] = v.get(i).unwrap_or(Null)
+        i = i + 1
+    }
+    out
+}
+
+// The eight one-letter escapes of RFC 8259 section 7, or `None` for any other
+// character after a backslash. `\u` is deliberately absent: it consumes four
+// more characters and so needs the cursor, which a free function does not have.
+//
+// `\b` and `\f` are written as string `\u{...}` escapes because Nova's CHAR
+// literal admits only `\n \t \r \\ \' \0` -- measured against this compiler:
+// anything else falls through `lex_char`'s `_ => None`, so `'\u{0C}'` does not
+// lex at all, while the string lexer's own `\u{...}` does.
+fn simple_escape(c: Char) -> Option<String> {
+    if c == '"' { return Some("\"") }
+    if c == '\\' { return Some("\\") }
+    if c == '/' { return Some("/") }
+    if c == 'b' { return Some("\u{08}") }
+    if c == 'f' { return Some("\u{0C}") }
+    if c == 'n' { return Some("\n") }
+    if c == 'r' { return Some("\r") }
+    if c == 't' { return Some("\t") }
+    None
+}
