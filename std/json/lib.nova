@@ -129,3 +129,172 @@ fn escape_control(code: Int) -> String {
         "\\u00${hex_digit(hi)}${hex_digit(lo)}"
     }
 }
+
+// Parse `s` as JSON. `JsonError::at` is a character index -- a count of Unicode
+// scalar values, matching the `[Char]` the parser walks.
+//
+// Only a JSON NUMBER is accepted so far: the dispatch over JSON's other five
+// value kinds is not built, so this hands the whole input to the number scanner
+// and anything that is not a number fails there.
+//
+// The trailing-content check is already in place, and it is deliberate that it
+// runs even when the scanner has already failed: it is the second caller of
+// `fail` that makes `fail`'s first-failure-wins guard observable, and so the
+// thing that keeps that guard tested rather than merely written.
+pub fn parse(s: String) -> Result<JsonValue, JsonError> {
+    let mut p = P { cs: s.chars(), pos: 0, err: None }
+    p.skip_ws()
+    let v = p.scan_number()
+    p.skip_ws()
+    if !p.at_end() { p.fail("trailing content") }
+    match p.err {
+        Some(e) => Err(e)
+        None => Ok(v)
+    }
+}
+
+// The parser carries its failure in a field instead of returning `Result` at
+// every level. Nova has no `?` operator -- measured against this compiler, not
+// assumed: `?` parses and then typeck rejects it with
+// `error[E0900]: the `?` operator are not supported yet` -- so threading a
+// `Result` through a recursive descent would cost a `match` at every call site
+// and bury the grammar in plumbing.
+//
+// `err` is set at most once: the FIRST failure wins, so a downstream symptom
+// cannot overwrite the real cause. Every step that could read past the end
+// checks `err` first and no-ops, returning `Null` -- after a failure the
+// remaining walk is inert rather than wrong.
+record P { cs: [Char], pos: Int, err: Option<JsonError> }
+
+impl P {
+    // Record a failure at the cursor, unless one is already recorded.
+    //
+    // The guard IS "first failure wins". `parse` runs its trailing-content
+    // check even after the scanner has failed, so without the guard that check
+    // would overwrite the real cause with a consequence of it: `+1` would
+    // report trailing content rather than the missing digit that stopped the
+    // scanner at position 0.
+    fn fail(mut self, m: String) {
+        if self.err.is_none() {
+            self.err = Some(JsonError { msg: m, at: self.pos })
+        }
+    }
+
+    fn at_end(self) -> Bool { self.pos >= self.cs.len() }
+
+    // The character at the cursor, or `'\0'` past the end.
+    //
+    // `'\0'` is a sentinel, not a distinguished value: a real NUL in the input
+    // reads identically here. That is harmless, because NUL appears in no JSON
+    // token -- it is legal only inside a string literal, and RFC 8259 requires
+    // even that one escaped -- so every caller that meets a NUL rejects it,
+    // exactly as it rejects the end of the input. A caller that needs the two
+    // told apart asks `at_end` instead.
+    fn peek(self) -> Char {
+        if self.at_end() { '\0' } else { self.cs[self.pos] }
+    }
+
+    // Advance one character, never past the end, so `pos` stays a valid bound
+    // for `span` below. Every caller in this module bumps only after `peek`
+    // returned a real character, so today the guard is defensive rather than
+    // load-bearing; it is written so that a scanner looping on `bump` cannot
+    // walk off the array.
+    fn bump(mut self) {
+        if !self.at_end() { self.pos = self.pos + 1 }
+    }
+
+    // Characters `start..end` as a `String`, `end` exclusive.
+    //
+    // `std/strings` runs the same algorithm over a plain `[Char]`
+    // (`chars_to_string`), but it is private to that module and Nova has no
+    // cross-module access to a private item, so these five lines are a
+    // deliberate duplication rather than an oversight. `[' '; n]` needs a
+    // filler and a repeat literal is the only way to allocate a runtime-length
+    // array; every slot is overwritten immediately below, so the space never
+    // survives.
+    fn span(self, start: Int, end: Int) -> String {
+        let n = end - start
+        if n <= 0 { return "" }
+        let mut out = [' '; n]
+        for i in 0..n { out[i] = self.cs[start + i] }
+        str_from_chars(out)
+    }
+
+    // Skip JSON's whitespace: space, horizontal tab, line feed, carriage
+    // return. THAT IS THE ENTIRE SET -- RFC 8259 permits no others, so a
+    // vertical tab, a form feed or a non-breaking space is a syntax error and
+    // must not be skipped here.
+    fn skip_ws(mut self) {
+        let mut going = true
+        while going {
+            let c = self.peek()
+            if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+                self.bump()
+            } else {
+                going = false
+            }
+        }
+    }
+
+    // A JSON number: `-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`.
+    //
+    // Validates by walking characters, then slices the matched span and hands
+    // it to `str_to_float`. Validating FIRST is what makes that intrinsic's
+    // `0.0`-on-rejection fallback unreachable: every span reaching it is a text
+    // Rust's `f64` parser also accepts, since Rust's accepted grammar is a
+    // superset of the one above.
+    //
+    // A magnitude no `Float` can hold is ACCEPTED, not rejected: JSON's grammar
+    // sets no range, and Rust's parser saturates rather than failing. Measured
+    // against this compiler: `1e999` parses to infinity, which `stringify` then
+    // renders `null` via `number_to_json`'s non-finite branch, and `1e-999`
+    // parses to `0`. Both are lossy round trips. No fixture pins either -- they
+    // are recorded here as measured behaviour, not as tested behaviour.
+    //
+    // Each rejection is a shape JSON forbids that a laxer reader would take:
+    // a leading `+` (only `-` is a sign), a leading zero followed by a digit
+    // (`01` is two tokens, not one number), a `.` with no digit after it, and
+    // an exponent with no digits. `.5` and `+1` both fail on the integer part,
+    // which is where the grammar requires a digit once the optional `-` is
+    // past.
+    fn scan_number(mut self) -> JsonValue {
+        if self.err.is_some() { return Null }
+        let start = self.pos
+        if self.peek() == '-' { self.bump() }
+        if self.peek() == '0' {
+            self.bump()
+            if is_digit(self.peek()) {
+                self.fail("a leading zero cannot be followed by another digit")
+                return Null
+            }
+        } else if is_digit(self.peek()) {
+            while is_digit(self.peek()) { self.bump() }
+        } else {
+            self.fail("expected a digit")
+            return Null
+        }
+        if self.peek() == '.' {
+            self.bump()
+            if !is_digit(self.peek()) {
+                self.fail("expected a digit after the decimal point")
+                return Null
+            }
+            while is_digit(self.peek()) { self.bump() }
+        }
+        if self.peek() == 'e' || self.peek() == 'E' {
+            self.bump()
+            if self.peek() == '+' || self.peek() == '-' { self.bump() }
+            if !is_digit(self.peek()) {
+                self.fail("expected a digit in the exponent")
+                return Null
+            }
+            while is_digit(self.peek()) { self.bump() }
+        }
+        Number(str_to_float(self.span(start, self.pos)))
+    }
+}
+
+// An ASCII digit. `Char` admits `<=` and `>=` directly (`impl Ord for Char` in
+// `std/core` is built on `<`), so this needs no conversion to `Int` -- which
+// also keeps the past-the-end sentinel `'\0'` a non-digit for free.
+fn is_digit(c: Char) -> Bool { c >= '0' && c <= '9' }

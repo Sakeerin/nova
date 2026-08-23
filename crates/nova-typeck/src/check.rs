@@ -3915,6 +3915,7 @@ impl<'a> Checker<'a> {
             | Builtin::StrToUpper
             | Builtin::StrToLower
             | Builtin::FloatFixed
+            | Builtin::StrToFloat
             | Builtin::TestSelector
             | Builtin::TaskSpawn
             | Builtin::TaskIsDone
@@ -7160,6 +7161,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrFromChars => (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::FloatFixed => (vec![Ty::Float, Ty::Int], Ty::String),
+        Builtin::StrToFloat => (vec![Ty::String], Ty::Float),
         Builtin::TestSelector => (vec![], Ty::Int),
         Builtin::TaskSpawn => (vec![future_of_param0()], Ty::Int),
         Builtin::TaskIsDone => (vec![future_of_param0()], Ty::Bool),
@@ -15083,6 +15085,10 @@ mod tests {
                 Builtin::FloatFixed => (
                     (vec![Ty::Float, Ty::Int], Ty::String),
                     "`float_fixed(self, places)` in `Float::fixed`",
+                ),
+                Builtin::StrToFloat => (
+                    (vec![Ty::String], Ty::Float),
+                    "`str_to_float(span)` in `std/json`'s `scan_number`",
                 ),
                 Builtin::TestSelector => (
                     (vec![], Ty::Int),

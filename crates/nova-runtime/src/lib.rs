@@ -354,6 +354,28 @@ pub unsafe extern "C" fn nova_rt_str_to_lower(s: *const NovaStr) -> *mut NovaStr
     gc_str(&as_str(s).to_lowercase())
 }
 
+/// Parse decimal text as a `Float`.
+///
+/// Returns `0.0` for anything Rust's parser rejects. That fallback is
+/// unreachable by construction: `std/json`'s `scan_number` validates the
+/// number's lexical shape against JSON's grammar — `-?(0|[1-9][0-9]*)`
+/// `(\.[0-9]+)?([eE][+-]?[0-9]+)?` — and only then slices the matched span and
+/// calls this, so every input is a text Rust's `f64` parser also accepts (its
+/// accepted grammar is a strict superset of JSON's).
+///
+/// The fallback exists because **this function must not panic.** It is
+/// `extern "C"` with no `-unwind`, so a panic cannot unwind out of it: it
+/// escalates to `panic in a function that cannot unwind` and aborts the
+/// process. See [`nova_rt_float_fixed`]'s doc comment for the measured
+/// behaviour of that escalation. Hence `unwrap_or`, never `unwrap`.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_to_float(s: *const NovaStr) -> f64 {
+    as_str(s).parse::<f64>().unwrap_or(0.0)
+}
+
 /// Format an `Int` as a string.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
@@ -481,6 +503,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_int_to_str", nova_rt_int_to_str as *const u8),
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_float_fixed", nova_rt_float_fixed as *const u8),
+        ("nova_rt_str_to_float", nova_rt_str_to_float as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
@@ -866,6 +889,38 @@ mod tests {
             assert_eq!(to_string(nova_rt_float_fixed(100.0 / 3.0, 2)), "33.33");
             assert_eq!(to_string(nova_rt_float_fixed(1.5, 3)), "1.500");
             assert_eq!(to_string(nova_rt_float_fixed(33.333, 0)), "33");
+        }
+    }
+
+    /// Every lexical shape `std/json`'s `scan_number` can hand this — an
+    /// integer, a decimal, a negative, and both exponent spellings — plus the
+    /// rejection path.
+    ///
+    /// The rejection cases are the load-bearing ones. `unwrap_or(0.0)` rather
+    /// than `unwrap` is not a style choice: `unwrap` here would abort the whole
+    /// process rather than fail an assertion, because this function cannot
+    /// unwind (see its doc comment). These two cases are what proves the
+    /// fallback returns instead.
+    #[test]
+    fn str_to_float_parses_every_shape_the_json_scanner_produces() {
+        unsafe {
+            assert_eq!(nova_rt_str_to_float(make_str("12")), 12.0);
+            assert_eq!(nova_rt_str_to_float(make_str("2.5")), 2.5);
+            assert_eq!(nova_rt_str_to_float(make_str("-3.5")), -3.5);
+            assert_eq!(nova_rt_str_to_float(make_str("1e3")), 1000.0);
+            assert_eq!(nova_rt_str_to_float(make_str("1.5E-2")), 0.015);
+
+            // `-0` must not collapse to `0`: JSON writes both, they are
+            // distinct `f64` bit patterns, and Display shows the sign. Compared
+            // via the sign bit because `-0.0 == 0.0` is true, so an `assert_eq!`
+            // against `-0.0` would pass even if the sign were lost.
+            let neg_zero = nova_rt_str_to_float(make_str("-0"));
+            assert_eq!(neg_zero, 0.0);
+            assert!(neg_zero.is_sign_negative(), "-0 must keep its sign");
+
+            // Rejected input: text that is not a number, and the empty string.
+            assert_eq!(nova_rt_str_to_float(make_str("nope")), 0.0);
+            assert_eq!(nova_rt_str_to_float(make_str("")), 0.0);
         }
     }
 
