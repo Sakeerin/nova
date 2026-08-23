@@ -1,0 +1,39 @@
+null -> null
+true -> true
+false -> false
+empty array -> []
+empty object -> {}
+array of every scalar -> [null,true,false,0,-1.5,"a"]
+nested arrays -> [[1,[2,[3]]],[]]
+deeply nested array -> [[[[[1]]]]]
+single-key object -> {"a":1}
+object holding an array -> {"a":[1,2]}
+object holding an object -> {"a":{"b":2}}
+array holding objects -> [{"a":1},{"b":2}]
+an escaped key -> {"a\nb":1}
+duplicate key -> {"a":2}
+whitespace inside an array -> [1,2]
+whitespace around the document -> null
+whitespace in every legal position -> true
+empty input -> error: expected a value at 0
+only whitespace -> error: expected a value at 3
+nul -> error: expected null at 3
+truX -> error: expected true at 3
+fals -> error: expected false at 4
+capital False -> error: expected a value at 0
+nulll -> error: trailing content at 4
+trailing comma in an array -> error: expected a value at 3
+trailing comma in an object -> error: expected an object key at 7
+a comma with nothing before it -> error: expected a value at 1
+missing colon -> error: expected ':' after an object key at 5
+a bare word as a key -> error: expected an object key at 1
+unterminated string -> error: unterminated string at 4
+unclosed array -> error: expected ',' or ']' in an array at 2
+unclosed object -> error: expected ',' or '}' in an object at 6
+array closed by a brace -> error: expected ',' or ']' in an array at 2
+object closed by a bracket -> error: expected ',' or '}' in an object at 6
+a stray closing bracket -> error: expected a value at 0
+a stray closing brace -> error: expected a value at 0
+two values -> error: trailing content at 2
+content after an array -> error: trailing content at 2
+content after a keyword -> error: trailing content at 5

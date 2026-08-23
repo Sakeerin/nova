@@ -6,9 +6,10 @@
 1.5E-2 -> 0.015
 2.5 -> 2.5
 01 -> error: a leading zero cannot be followed by another digit at 1
-+1 -> error: expected a digit at 0
-.5 -> error: expected a digit at 0
++1 -> error: expected a value at 0
+.5 -> error: expected a value at 0
 1e -> error: expected a digit in the exponent at 2
 1. -> error: expected a digit after the decimal point at 2
+- -> error: expected a digit at 1
 ' 1 ' -> 1
-'\f1' -> error: expected a digit at 0
+'\f1' -> error: expected a value at 0

@@ -1,0 +1,119 @@
+// JSON string literals and every escape RFC 8259 defines, exercised through
+// `parse` -- `P` and its scanners are private to `std/json`, so a fixture has
+// no other route to them.
+//
+// EVERY expected line below was derived from RFC 8259 section 7 and from
+// `stringify`'s own rules, not captured from this program's output. Section 7's
+// grammar is
+//
+//     char = unescaped / escape ( %x22 / %x5C / %x2F / %x62 / %x66 /
+//                                 %x6E / %x72 / %x74 / %x75 4HEXDIG )
+//     unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
+//
+// so: eight one-letter escapes plus `\uXXXX`, nothing else after a backslash,
+// and no character below `0x20` unescaped. Note `unescaped` runs to 10FFFF,
+// which is why `0x7f` (DEL) is ACCEPTED raw below rather than rejected.
+//
+// Two printing rules keep this file and its golden free of raw control bytes,
+// which is the trap this increment already hit once:
+//
+//   * `report` prints `stringify(parse(src))`, never the decoded string. A
+//     decoded `\b` is a raw `0x08`; re-encoding it through `stringify` turns it
+//     back into the two printable characters `\b`. So the golden pins the
+//     decode and the re-encode at once, and stays printable.
+//   * `same` prints only a BOOLEAN, for the cases whose decoded character
+//     `stringify` would emit raw: the multi-byte code points and DEL. It
+//     compares against a Nova `\u{...}` literal, so the expected code point is
+//     written in the source rather than trusted from output. That comparison is
+//     the ONLY thing that catches a wrong-but-valid code point -- dropping the
+//     `* 0x400` from the surrogate combine yields U+1023D for the pair below,
+//     which is a perfectly encodable character one scalar value long.
+//
+// The label is never the source text, because most of these inputs are
+// unreadable once doubly escaped.
+fn main() {
+    // Accepted: no escape, and the empty string.
+    report("empty", "\"\"")
+    report("plain", "\"abc\"")
+
+    // Accepted: each of the eight one-letter escapes on its own. `\/` decodes
+    // to a solidus, which `stringify` then emits UNESCAPED -- escaping it is
+    // permitted on input, never required on output.
+    report("escaped quote", "\"\\\"\"")
+    report("escaped backslash", "\"\\\\\"")
+    report("escaped solidus", "\"\\/\"")
+    report("escaped backspace", "\"\\b\"")
+    report("escaped form feed", "\"\\f\"")
+    report("escaped line feed", "\"\\n\"")
+    report("escaped carriage return", "\"\\r\"")
+    report("escaped tab", "\"\\t\"")
+
+    // Accepted: all eight at once, in the grammar's own order, and an escape
+    // with ordinary text on both sides.
+    report("all eight together", "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\"")
+    report("text around an escape", "\"a\\tb\"")
+
+    // Accepted: `\uXXXX` below `0x80`. `\u0000` is the case that shows `peek`'s
+    // past-the-end `'\0'` is a sentinel and not a distinguished value: a real
+    // NUL arrives here as data and survives.
+    report("u0041 is A", "\"\\u0041\"")
+    report("u0000 is a NUL", "\"\\u0000\"")
+    report("u001f is the last control character", "\"\\u001f\"")
+    report("uppercase hex digits", "\"\\u001B\"")
+
+    // Accepted, compared rather than printed. Each row picks a code point in a
+    // different UTF-8 length class, so the four-range encoder is covered in
+    // full: one byte (DEL), two (U+00E9), three (U+20AC), four (U+1F600 and
+    // U+10FFFF, both reached only through a surrogate pair).
+    same("delete is legal unescaped", "\"\\u007f\"", "\u{7F}")
+    same("u00e9 is two UTF-8 bytes", "\"\\u00e9\"", "\u{E9}")
+    same("u20ac is three UTF-8 bytes", "\"\\u20ac\"", "\u{20AC}")
+    same("a surrogate pair is one character", "\"\\ud83d\\ude00\"", "\u{1F600}")
+    same("an uppercase surrogate pair", "\"\\uD83D\\uDE00\"", "\u{1F600}")
+    same("the highest code point", "\"\\udbff\\udfff\"", "\u{10FFFF}")
+
+    // Rejected. A backslash admits exactly the nine forms above; `q` is not one
+    // of them, and a backslash with nothing after it ends the input inside a
+    // string.
+    report("backslash q", "\"\\q\"")
+    report("a backslash at the end of the input", "\"\\")
+
+    // Rejected: surrogates outside a well-formed pair. `\ud83d` alone, a high
+    // surrogate followed by a plain character, a high surrogate followed by an
+    // escape that is not a low surrogate, and a low surrogate leading.
+    report("lone high surrogate", "\"\\ud83d\"")
+    report("high surrogate then a plain character", "\"\\ud83dA\"")
+    report("high surrogate then a non-surrogate escape", "\"\\ud83d\\u0041\"")
+    report("lone low surrogate", "\"\\udc00\"")
+
+    // Rejected: a raw character below `0x20`. Both of these are legal JSON
+    // WHITESPACE between tokens and still illegal unescaped inside a string,
+    // which is the distinction the control-character check enforces.
+    report("raw line feed in a string", "\"\n\"")
+    report("raw tab in a string", "\"\t\"")
+
+    // Rejected: `\u` without four hex digits. The second case stops on the
+    // closing quote and the third on the END OF THE INPUT, so between them the
+    // count is what fails rather than the character class -- and the third is
+    // what pins `peek`'s past-the-end `'\0'` being no hexadecimal digit either.
+    report("non-hex digit after u", "\"\\u00zz\"")
+    report("only two hex digits after u", "\"\\u12\"")
+    report("u with nothing after it", "\"\\u")
+}
+
+fn report(label: String, src: String) {
+    match parse(src) {
+        Ok(v) => println("${label} -> ${stringify(v)}")
+        Err(e) => println("${label} -> error: ${e.msg} at ${e.at}")
+    }
+}
+
+// Compare the parsed value against `String(want)` through `stringify`, so this
+// needs no `match` over `JsonValue`'s six variants: two values stringify alike
+// only if they are the same string.
+fn same(label: String, src: String, want: String) {
+    match parse(src) {
+        Ok(v) => println("${label} -> ${stringify(v) == stringify(String(want))}")
+        Err(e) => println("${label} -> error: ${e.msg} at ${e.at}")
+    }
+}
