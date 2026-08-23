@@ -1,0 +1,90 @@
+// `ToJson`/`FromJson`, and the two rules this task decided rather than left
+// implicit:
+//
+//   * `Int::to_json` loses precision SILENTLY for a value an `f64` cannot
+//     hold exactly, by rounding to the nearest representable `Float` --
+//     `Int::to_json` returns `JsonValue`, not a `Result`, so there is no
+//     error channel to refuse through even if refusing were wanted.
+//     `9007199254740992` (`2^53`) and `9007199254740993` (`2^53 + 1`) are
+//     the smallest colliding pair -- both render the same JSON text below,
+//     which is the loss made visible.
+//   * `Int::from_json` accepts a `Number` only when it carries no fraction.
+//     A fractional `Number` is a decode error, not a silent truncation --
+//     `Number(3.5)` does not become `3`.
+//
+// Every mismatched-variant case checks the message too, not just that some
+// `Err` came back, so a decoder that returns the WRONG error still fails
+// the golden.
+fn report_bool(v: JsonValue) {
+    match Bool::from_json(v) {
+        Ok(b) => println("ok ${b}")
+        Err(e) => println("err ${e.msg}")
+    }
+}
+
+fn report_string(v: JsonValue) {
+    match String::from_json(v) {
+        Ok(s) => println("ok ${s}")
+        Err(e) => println("err ${e.msg}")
+    }
+}
+
+fn report_float(v: JsonValue) {
+    match Float::from_json(v) {
+        Ok(f) => println("ok ${f}")
+        Err(e) => println("err ${e.msg}")
+    }
+}
+
+fn report_int(v: JsonValue) {
+    match Int::from_json(v) {
+        Ok(i) => println("ok ${i}")
+        Err(e) => println("err ${e.msg}")
+    }
+}
+
+fn main() {
+    // Round trip: to_json, rendered, then from_json, for each of the four
+    // primitives this task adds an impl for.
+    println(stringify(true.to_json()))
+    report_bool(true.to_json())
+    println(stringify(false.to_json()))
+    report_bool(false.to_json())
+
+    println(stringify("hello".to_json()))
+    report_string("hello".to_json())
+
+    println(stringify((2.5).to_json()))
+    report_float((2.5).to_json())
+
+    println(stringify((42).to_json()))
+    report_int((42).to_json())
+
+    println(stringify((-7).to_json()))
+    report_int((-7).to_json())
+
+    // Mismatched variant: from_json on the wrong JsonValue kind is an
+    // error, never a coerced or default value.
+    report_bool(Number(1.0))
+    report_string(Null)
+    report_float(Bool(true))
+    report_int(String("no"))
+
+    // Int::from_json: an integral Number decodes; a fractional one is an
+    // error rather than a silent truncation. Both signs.
+    report_int(Number(3.0))
+    report_int(Number(3.5))
+    report_int(Number(-3.0))
+    report_int(Number(-3.5))
+    report_int(Number(0.0))
+
+    // Int::to_json: precision loss at the f64 mantissa boundary, pinned by
+    // comparing the RENDERED text of the two smallest colliding Ints --
+    // JsonValue carries no Eq, so the comparison goes through stringify,
+    // the same way json_round_trip.nova compares parsed values.
+    let a = stringify((9007199254740992).to_json())
+    let b = stringify((9007199254740993).to_json())
+    println("2^53 renders -> ${a}")
+    println("2^53 + 1 renders -> ${b}")
+    println("collide -> ${a == b}")
+}

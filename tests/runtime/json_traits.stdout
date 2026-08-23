@@ -1,0 +1,24 @@
+true
+ok true
+false
+ok false
+"hello"
+ok hello
+2.5
+ok 2.5
+42
+ok 42
+-7
+ok -7
+err expected a bool
+err expected a string
+err expected a number
+err expected a number
+ok 3
+err expected an integer
+ok -3
+err expected an integer
+ok 0
+2^53 renders -> 9007199254740992
+2^53 + 1 renders -> 9007199254740992
+collide -> true
