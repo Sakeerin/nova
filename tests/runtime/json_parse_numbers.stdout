@@ -3,6 +3,7 @@
 12 -> 12
 -3.5 -> -3.5
 1e3 -> 1000
+1e+3 -> 1000
 1.5E-2 -> 0.015
 2.5 -> 2.5
 01 -> error: a leading zero cannot be followed by another digit at 1

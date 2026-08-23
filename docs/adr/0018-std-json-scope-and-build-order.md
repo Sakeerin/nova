@@ -135,21 +135,28 @@ only, `float_fixed` formatting a float with no inverse. So
 wrapping Rust's parser — the exact mirror of `float_fixed`, and a builtin
 for the same reason.
 
-Reimplementing it in Nova was rejected on two grounds, and the second is
-stronger than the first:
+Reimplementing it in Nova was rejected on two grounds, and the **first** is
+the stronger. The second is a cost, not a wall:
 
 1. **Correctly rounded decimal-to-binary conversion is research-grade.**
    The obvious `digits × 10^exp` accumulation double-rounds — once into
    the accumulated significand, once into the scaling — so
    `parse(stringify(v)) != v` for some inputs. "Our JSON codec does not
    round-trip numbers" is a bad property to choose deliberately, and it is
-   the one property a codec is most often trusted for.
-2. **Nova cannot begin such a parser today at all.** There is no
-   `Int`-to-`Float` conversion anywhere in the language: no builtin
-   provides one and `as` casts are unsupported (`E0900`). Accumulated
-   decimal digits could therefore never become a `Float`, however
-   carefully they were accumulated. The refusal is not a judgement call
-   about effort; the alternative does not exist.
+   the one property a codec is most often trusted for. **This ground alone
+   carries the refusal.**
+2. **The missing `Int`-to-`Float` conversion makes such a parser awkward,
+   not impossible.** There is no such builtin anywhere in the language and
+   `as` casts are unsupported (`E0900`), so digits cannot be accumulated
+   into a `Float` the obvious way. An earlier version of this section read
+   that as "accumulated decimal digits could never become a `Float`" and
+   "the alternative does not exist", and ranked it *above* ground 1.
+   **That was false and is corrected here.** `std/json`'s own `hex_digit`
+   demonstrates the shape — an if/else chain from `Int` to a literal — and
+   the same construction gives `Int` to `Float` with no conversion builtin
+   and no cast, one arm per digit value. So this ground raises the cost of
+   the alternative; it does not remove it, and the decision rests on
+   ground 1.
 
 Counts: `Builtin::STD_ONLY` **65 → 66**, `STD_MODULES` **12 → 13**
 (`$std.json`), `RESERVED_TYPE_NAMES` unchanged at **7** — `JsonValue`,
@@ -219,10 +226,28 @@ rather than a private helper inside `std/json`: **a map that cannot be
 enumerated is arguably incomplete regardless of json.** Serialisation is
 merely the first caller to notice. Two properties are documented at the
 method and are deliberately not guarantees: keys come back in **table
-order, which is not insertion order** (a `grow` reinserts every entry and
-may reorder them), and the `[fill; n]` seed the implementation needs is
-forced rather than stylistic, since allocating a `[K]` requires a `K` in
-hand and Nova has no null.
+order, which is not insertion order**, and the `[fill; n]` seed the
+implementation needs is forced rather than stylistic, since allocating a
+`[K]` requires a `K` in hand and Nova has no null.
+
+The table-order note is stronger than "a `grow` may reorder them", which is
+how it read first and which understates it. **`keys()` order is not a
+function of the key set alone.** Hash order alone reverses insertion order
+with **no growth at all** — measured: inserting `"a"`, `"c"`, `"e"` into a
+fresh map returns `"e"`, `"c"`, `"a"`, three entries in a cap-8 table that
+never reaches the 3/4 threshold, and 2046 of the 15 600 ordered triples of
+distinct lowercase letters come back exactly reversed the same way — and
+linear probing makes the order depend on **arrival sequence**: when two
+keys share a home slot, whichever arrives second takes the forward slot.
+Naming only `grow` leaves a reader free to infer that a map which never
+grows preserves insertion order, and that inference is false.
+
+That has a measured consequence in this increment's own test material.
+Re-inserting a two-key object's keys in emitted order flips their slot
+order for **56 of the 3782** ordered pairs of single-character `[a-zA-Z0-9]`
+keys — all 56 stable 2-cycles — which is why `json_round_trip.nova` keeps
+every object single-keyed. That restriction protects its `first == second`
+assertion, not merely its golden's determinism.
 
 ### 5. The `\uXXXX` route, and why it needed no second intrinsic
 
@@ -325,6 +350,80 @@ and both are easy to get wrong:
   (`float_fixed(3.5, 0)` is `"4"`) and checking that text for a `.` would
   turn the fraction rule into the truncation it rejects.
 
+### 8. Two unbounded costs, both disclosed here rather than only at the code
+
+The Phase 2 **gate** is `examples/05-json-api`, which means `std/json` in
+front of a socket, reading text somebody else chose. A reader deciding
+whether that is acceptable reads this ADR and `20-STDLIB.md` §7 — not
+`parse_value`'s body. Both properties below were previously recorded at
+exactly one place in the tree, or at none, and both are recorded here now
+for that reason. **Neither is a bug**; both are decisions, and both are
+measured.
+
+**Nesting depth is unbounded in both directions, and exceeding it kills the
+process.** `parse_value` recurses through `scan_array`/`scan_object`, and
+`stringify` recurses through its `Array`/`Object` arms, one native frame per
+level in each. Exhausting the stack is a **hard abort, not a `JsonError`** —
+`parse` has no way to return one from a frame that no longer exists, and
+`stringify` has no error channel at all. Measured, debug build, Windows:
+
+| direction | survives | dies |
+|---|---|---|
+| `parse` of `[` × N, `1`, `]` × N | N = 5000 | N = 6000 |
+| `stringify` of a value N levels deep | N = 1024, 4096, 8192 | N = 20000 |
+
+Roughly **12 KB of input text is enough to abort the process** — less than
+most HTTP request bodies. No fixture pins either threshold and none can: a
+fixture that crashed the process would fail the suite by construction. The
+exact numbers are stack-size and frame-layout artefacts of this build; the
+unboundedness is the portable part.
+
+RFC 8259 §9 explicitly permits limits on nesting depth, so a cap would be
+conforming. **None is imposed, and that is a decision.** A stack-size
+artefact is not a budget a cap can be derived from, and a number taken from
+one machine's stack would be wrong on the next; a cap also needs an API
+choice this increment's scope did not include — which depth, and whether
+exceeding it is an ordinary `JsonError` or a failure a caller must
+distinguish from bad syntax. What is owed instead is this disclosure. **A
+consumer of `std/json` on a socket needs a depth limit imposed above it,
+by its caller, until one exists here.**
+
+This also fixes a word. **`stringify` is total over *values*, not over
+*depth*** — there is no `JsonValue` *shape* it cannot render and no error
+channel to report one with, which is the sense §6 above intends when it
+writes "total — no `Result`, no error state". The unqualified form stood at
+four sites — `std/json/lib.nova`'s header comment on `stringify` and its
+`number_to_json` note, `20-STDLIB.md` §7, and this increment's `CHANGELOG`
+entry — and is qualified at all four now. The dated plan and design
+documents under `docs/superpowers/` also use it and are left as written at
+their own date, in this project's standing convention for dated artefacts.
+
+**Four string accumulators are quadratic, not two, and the two that were
+recorded are the smaller pair.** `quote` and `scan_str` rebuild `out` by
+interpolation once per character, which is quadratic in **one string
+literal**. `stringify`'s `Array` and `Object` arms do the same once per
+element, which is quadratic in the **whole rendered document** — a strictly
+larger exposure, since every document pays it. Measured with a flat ~180 ms
+compile baseline subtracted, so the compiler is not the quadratic party;
+absolutes are debug-build numbers, asymptotics are not build-dependent:
+
+| input | `parse` | `stringify` |
+|---|---|---|
+| array of 4 000 one-char numbers | 279 ms | 236 ms |
+| 8 000 | 282 ms | 1 309 ms |
+| 16 000 | 344 ms | 11 622 ms |
+
+`parse` is effectively flat; `stringify` grows **5.5x then 8.9x per
+doubling**, so a ~32 KB document renders in about **twelve seconds**. One
+string literal through `scan_str` costs 182 ms at 8 000 characters, 473 at
+16 000, 2 256 at 32 000 and **15 624 at 64 000**. So `scan_str` becomes
+user-visible at roughly a **30 KB single string literal** and only for long
+*individual* strings, while **`stringify` fires on every document and is
+visible from about 16 KB of output**. Neither is fixable without a growable
+string buffer the language does not have (`String` has no `+`, `E0013`), so
+neither is capped; this closes the "unmeasured" deferral the cost carried
+before.
+
 ## Consequences
 
 - **Phase 2 is not complete, and this increment does not close it.**
@@ -359,6 +458,18 @@ and both are easy to get wrong:
   the whole mechanism of `Int::to_json`. Any future change to its
   rounding, its sentinel, or its acceptance grammar reaches both
   directions of the codec.
+- **`float_fixed` has two callers now as well, and nothing recorded that
+  until this bullet.** It was introduced for `std/fmt`'s `Float::fixed`;
+  `Int::from_json` is the second, taking an integral `Float`'s exact digits
+  from `float_fixed(n, 0)` for the reason §7 above gives. So the *mirror
+  pair* of intrinsics each gained a second caller in this increment, one in
+  each direction of the codec, and a change to `float_fixed`'s rounding or
+  its `0..=17` clamp now reaches the JSON decode path as well as `std/fmt`.
+  Worth its own bullet because the `str_to_float` bullet above was written
+  while **both** variants' doc comments in `crates/nova-resolver/src/lib.rs`
+  still claimed a single caller — and `Int::from_json`'s own twelve-line
+  comment reasons about precisely the blast radius that claim misdirected.
+  Both comments are corrected.
 - **No other ADR is needed for this increment.** Nothing here changes the
   execution model, the resource model, or the GC. The 8 `#[ignore]`d
   ADR-0010 GC tests are untouched.
@@ -382,7 +493,9 @@ and both are easy to get wrong:
   and still partial
 - `std/json/lib.nova`: `JsonValue`, `JsonError`, `stringify`, `parse`, the
   poisoned-parser record `P`, and the two codec rules with their reasoning
-  at the impls
+  at the impls; §8's two disclosures live at `stringify`'s header comment,
+  `parse_value` (the depth reasoning, stated once for both directions) and
+  `scan_str` (the accumulator numbers, all four sites)
 - `std/collections/lib.nova`: `Map::keys`, with the table-order and
   `[fill; n]` notes
 - `crates/nova-resolver/src/lib.rs`: `Builtin::StrToFloat` and its doc

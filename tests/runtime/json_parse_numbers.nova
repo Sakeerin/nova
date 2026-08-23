@@ -10,6 +10,17 @@
 // `0.015`, and `-0` keeps its sign because an f64 negative zero is a distinct
 // bit pattern that Display shows.
 //
+// ALL THREE EXPONENT SIGNS are here, not two: `1e3` has none, `1.5E-2` has the
+// `-`, and `1e+3` has the EXPLICIT `+` that JSON's `([eE][+-]?[0-9]+)?` admits
+// and that `scan_number` consumes at its `self.peek() == '+'` branch. `1e+3`
+// renders `1000`, the same value `1e3` does, which is the point: the `+` is
+// accepted and contributes nothing to the value. Before this case existed no
+// explicit `+` exponent appeared anywhere in the repository -- grepped over
+// `tests/`, `std/` and `crates/`, zero matches -- so the end-to-end path for
+// that arm of the grammar was unexercised while both this fixture and
+// `str_to_float_parses_every_shape_the_json_scanner_produces` claimed to cover
+// every shape the scanner produces.
+//
 // `report` takes a LABEL as well as the source text because two inputs below
 // cannot be echoed: leading and trailing spaces are invisible in a golden, and
 // a form feed would put a raw control byte into the `.stdout` file. For every
@@ -51,6 +62,7 @@ fn main() {
     report("12", "12")
     report("-3.5", "-3.5")
     report("1e3", "1e3")
+    report("1e+3", "1e+3")
     report("1.5E-2", "1.5E-2")
     report("2.5", "2.5")
 

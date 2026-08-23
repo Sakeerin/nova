@@ -532,21 +532,25 @@ assumed: they are accepted, and `match` arms bind them unqualified. So are
 Result<JsonValue, JsonError>`, and both traits, with the signatures above.
 `JsonError` — which this section names in the trait signatures without ever
 declaring — is `pub record JsonError { msg: String, at: Int }`. `stringify`
-is total. What `parse` implements, and what `tests/runtime/`'s
-`json_parse_values.nova`, `json_parse_strings.nova` and
-`json_parse_numbers.nova` execute: all six `JsonValue` forms; one value per
-document, with trailing content rejected; RFC 8259 section 7's nine escape
-forms (its eight one-character escapes, and `u` followed by four hexadecimal
-digits — both counted after the backslash, which is how `std/json/lib.nova`
-and the strings fixture count them, where the RFC counts the backslash too
-and calls them two-character and six-character sequences); a high surrogate
-combined with a following low surrogate, which is that section's own form
-for a character outside the BMP; and JSON's number grammar, whose six
-rejections belong to two mechanisms — `parse_value`'s dispatch refuses a
-leading `+` and a bare leading `.` as `expected a value`, neither of which
-can begin a value, so neither reaches the number scanner at all, while the
-scanner itself rejects a leading zero before another digit, a lone `-`, a
-fraction point with no digit after it and an exponent with no digits.
+is total **over values** — no `JsonValue` shape it cannot render, and no
+error channel to report one with — but **not over nesting depth**; the two
+unbounded costs recorded below are the qualification, and they matter to a
+reader deciding whether this module may face a socket. What `parse`
+implements, and what `tests/runtime/`'s `json_parse_values.nova`,
+`json_parse_strings.nova` and `json_parse_numbers.nova` execute, is this:
+all six `JsonValue` forms; one value per document, with trailing content
+rejected; RFC 8259 section 7's nine escape forms (its eight one-character
+escapes, and `u` followed by four hexadecimal digits — both counted after
+the backslash, which is how `std/json/lib.nova` and the strings fixture
+count them, where the RFC counts the backslash too and calls them
+two-character and six-character sequences); a high surrogate combined with
+a following low surrogate, which is that section's own form for a character
+outside the BMP; and JSON's number grammar, whose six rejections belong to
+two mechanisms — `parse_value`'s dispatch refuses a leading `+` and a bare
+leading `.` as `expected a value`, neither of which can begin a value, so
+neither reaches the number scanner at all, while the scanner itself rejects
+a leading zero before another digit, a lone `-`, a fraction point with no
+digit after it and an exponent with no digits.
 
 **Two of those clauses are narrower than they sound.** *Requiring* the low
 surrogate is this parser's decision rather than conformance: RFC 8259
@@ -578,6 +582,40 @@ beyond ±2^53, because the trait above returns `JsonValue` and has no error
 channel; `Int::from_json` rejects a fractional `Number` and rejects a
 magnitude outside `i64::MIN..=i64::MAX`, rather than truncating or wrapping
 either one.
+
+**Two unbounded costs, recorded here because the Phase 2 gate puts this
+module in front of a socket.** Both are decisions, both are measured on a
+debug build of this compiler on Windows, and neither is a bug. Full
+reasoning in ADR 0018 §8.
+
+1. **Nesting depth is unbounded in both directions, and exceeding it kills
+   the process.** `parse` and `stringify` each recurse with one native frame
+   per level, so a deeply nested input or value exhausts the stack. That is
+   a **hard abort, not a `JsonError`** — `parse` cannot return one from a
+   frame that no longer exists, and `stringify` has no error channel at all.
+   Measured: `parse` of `[` × 5000 then `1` then `]` × 5000 succeeds and the
+   same at 6000 dies; `stringify` of a value 8192 levels deep renders and
+   20000 dies. **Roughly 12 KB of input text is enough to abort the
+   process.** RFC 8259 section 9 permits a depth limit, so a cap would be
+   conforming; **none is imposed, deliberately**, because a stack-size
+   threshold is not a portable budget to derive one from and the API choice
+   a cap needs was outside this increment's scope. **A caller putting
+   `std/json` on a socket must impose a depth limit above it.** The exact
+   numbers are artefacts of this build; the unboundedness is not.
+2. **Four string accumulators are quadratic, and the dominant pair is
+   `stringify`'s.** `quote` and `scan_str` are quadratic in **one string
+   literal**; `stringify`'s `Array` and `Object` arms are quadratic in the
+   **whole rendered document**, so every document pays it. Measured with the
+   flat ~180 ms compile baseline subtracted: an array of 4 000 / 8 000 /
+   16 000 one-character numbers parses in 279 / 282 / 344 ms — effectively
+   flat — and renders in 236 / 1 309 / **11 622** ms, growing 5.5x then 8.9x
+   per doubling, so **a ~32 KB document takes about twelve seconds to
+   render**. One string literal costs 182 ms at 8 000 characters and 15 624
+   at 64 000. So `scan_str` becomes visible at roughly a **30 KB single
+   string literal**, and `stringify` from about **16 KB of output**. Absolute
+   numbers are debug-build numbers; the asymptotics are not. Nova has no
+   growable string buffer (`String` has no `+`, `E0013`), so neither is
+   fixable without a language change.
 
 **One new intrinsic**, `str_to_float(s: String) -> Float`
 (`Builtin::STD_ONLY` **65 → 66**), the inverse of `float_fixed` and a
@@ -979,11 +1017,16 @@ pub record Deque<T> { /* opaque */ }
 ```
 
 `Map`'s and `Set`'s `Hash + Eq` requirement is written on the **`impl` block**,
-not on the record's own type parameters. A trait bound on a *record* (or sum)
-type parameter is rejected with `E0900`: bounds are discharged at
-monomorphization, which walks function and impl instances, so a bound in that
-position would enforce nothing. Writing it on the `impl` is not a workaround but
-the enforced spelling — it is what `std/collections` does.
+not on the record's own type parameters. A trait bound on a *sum* type
+parameter is rejected with `E0900`; on a **record** type parameter it is
+**accepted** — measured, a record with a bounded type parameter compiles and
+runs — but it constrains nothing, because Phase 2.2d made that position a
+**resolution scope** for projections in field types rather than a constraint
+(`docs/adr/0007-record-parameter-bounds.md` §1). Either way, bounds are
+discharged at monomorphization, which walks function and impl instances, so a
+bound in that position enforces nothing. Writing it on the `impl` is not a
+workaround but the enforced spelling — it is what `std/collections` does, and
+its own comments record the same correction.
 
 The enforcement is per method instantiation, not on the type itself. Nova has
 no field privacy, so a record literal reaches the type without going through
@@ -1016,9 +1059,19 @@ still has no API at all.
 
 Two properties of `keys()` are documented at the method and are
 deliberately **not** guarantees: it returns **table order, not insertion
-order** (a `grow` reinserts every entry and may reorder them), and its
-`[fill; n]` seed is forced rather than stylistic, since allocating a `[K]`
-needs a `K` in hand and Nova has no null.
+order**, and its `[fill; n]` seed is forced rather than stylistic, since
+allocating a `[K]` needs a `K` in hand and Nova has no null.
+
+The first is stronger than a `grow` caveat: **`keys()` order is not a
+function of the key set alone.** Hash order alone reverses insertion order
+with **no growth at all** — measured: inserting `"a"`, `"c"`, `"e"` into a
+fresh map returns `"e"`, `"c"`, `"a"`, three entries in a cap-8 table that
+never reaches the 3/4 threshold — and linear probing makes slot order
+depend on arrival sequence, so re-inserting the same keys in a different
+order can change what `keys()` returns. A `grow` reinserting every entry is
+a further reordering on top of that, not the only one. Stating only the
+`grow` case would let a reader infer that a map which never grows preserves
+insertion order; that inference is false.
 
 **This is not §12's only deviation, and the other one is older than this
 increment**: `Vec::get` and `Map::get` return `Option<T>`/`Option<V>` **by

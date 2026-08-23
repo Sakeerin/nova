@@ -232,9 +232,10 @@ The three routes are of very unequal reach, and `20-STDLIB.md` §13 ranks
 `MutexGuard`'s the same way, in the paragraph beginning "Neither flag
 reaches tampering" — it had to be corrected on 2026-08-21 for naming
 forgery alone, and an earlier version of this section made that identical
-mistake here. (Cited by content rather than by line: that paragraph was
-`:931-938` when this ADR was written and the 2026-08-23 `std/json`
-amendments moved it to `:1065-1072`.)
+mistake here. (Cited by its opening words, and **its line number is
+deliberately not recorded**, because it moves: every number this citation
+has ever carried has been wrong, including the one it was written with.
+Grep the quoted phrase.)
 
 - **Forgery grants nothing.** `Sender { ch: c }` is ordinary legal code,
   so the producer/consumer split is intent and not enforcement — but the

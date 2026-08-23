@@ -132,20 +132,32 @@ builtins! {
     /// same reason as [`Builtin::StrToUpper`]. Std-only.
     StrToLower,
     /// `float_fixed(v: Float, places: Int) -> String` — render `v` to a fixed
-    /// number of decimal places. Backs `std/fmt`'s `Float::fixed`, its only
-    /// caller. Nova cannot implement this itself: decimal rendering of a
-    /// binary float is a solved problem with sharp edges, and Nova has no
-    /// `Float` to `Int` conversion at all to begin one with. Std-only.
+    /// number of decimal places. **Two callers, not one.** It was introduced
+    /// for `std/fmt`'s `Float::fixed` (`std/fmt/lib.nova`), and `std/json`'s
+    /// `impl FromJson for Int` (`std/json/lib.nova`) is now the second: it
+    /// takes an integral `Float`'s digits from `float_fixed(n, 0)` because
+    /// `Float`'s `Display` is a shortest-round-trip rendering rather than an
+    /// exact one. So a change to its rounding or its clamping reaches the JSON
+    /// decode path as well as `std/fmt`. Nova cannot implement this itself:
+    /// decimal rendering of a binary float is a solved problem with sharp
+    /// edges, and Nova has no `Float` to `Int` conversion at all to begin one
+    /// with. Std-only.
     FloatFixed,
     /// `str_to_float(s: String) -> Float` — parse decimal text as a `Float`.
-    /// Backs `std/json`'s number scanner, its only caller. The exact mirror of
-    /// [`Builtin::FloatFixed`], and a builtin for the same reason: correctly
-    /// rounded decimal-to-binary conversion is a solved problem with sharp
-    /// edges, and Nova cannot begin a digit-by-digit one anyway — there is no
-    /// `Int` → `Float` conversion in the language (no such builtin exists and
-    /// `as` casts are unsupported, `E0900`), so accumulated digits could never
-    /// become a `Float` at all. Std-only, so `str_to_float` is not a reserved
-    /// word in user code.
+    /// **Two callers, not one.** It was introduced for `std/json`'s number
+    /// scanner, and `impl ToJson for Int` is now the second, which does not go
+    /// through the scanner at all. The exact mirror of [`Builtin::FloatFixed`],
+    /// and a builtin for the same reason: correctly rounded decimal-to-binary
+    /// conversion is a solved problem with sharp edges, and the obvious
+    /// `digits × 10^exp` accumulation double-rounds — once into the
+    /// significand, once into the scaling — so a Nova reimplementation would
+    /// not round-trip its own output. That is the whole of the refusal. The
+    /// language also has no `Int` → `Float` conversion (no such builtin, and
+    /// `as` casts are unsupported, `E0900`), but that is a cost rather than a
+    /// wall: an if/else chain from `Int` to a `Float` literal spans any fixed
+    /// digit range, the same construction `std/json`'s own `hex_digit` uses
+    /// over sixteen arms to reach `String` literals. Std-only, so
+    /// `str_to_float` is not a reserved word in user code.
     StrToFloat,
     /// `test_selector() -> Int` — which `@test` to run in this process, or a
     /// negative value meaning "print the inventory instead".
