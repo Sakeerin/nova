@@ -17,9 +17,11 @@
 // accepted and contributes nothing to the value. Before this case existed no
 // explicit `+` exponent appeared anywhere in the repository -- grepped over
 // `tests/`, `std/` and `crates/`, zero matches -- so the end-to-end path for
-// that arm of the grammar was unexercised while both this fixture and
+// that arm of the grammar was unexercised while
 // `str_to_float_parses_every_shape_the_json_scanner_produces` claimed to cover
-// every shape the scanner produces.
+// every shape the scanner produces. That claim was the unit test's, not this
+// fixture's, and adding the case here does not license one: this fixture
+// pins its share of the scanner's coverage, not the whole of it.
 //
 // `report` takes a LABEL as well as the source text because two inputs below
 // cannot be echoed: leading and trailing spaces are invisible in a golden, and

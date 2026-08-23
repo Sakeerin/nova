@@ -972,9 +972,12 @@ impl ToJson for Int {
 // nearest `Float` to it is `9223372036854775808.0`, the same value used
 // as the rejected upper bound), so this never has to ask whether an
 // inexact `Float` equals an exact `Int` edge. `NaN` fails both `<` and
-// `>=` here -- `==` and all four ORDERING comparisons are `false` whenever
-// either operand is `NaN`, which is the narrow form of the claim and the
-// one `std/core`'s own note on `impl Ord for Float` makes. `!=` is the
+// `>=` here. `<` and `==` are both `false` whenever either operand is
+// `NaN`, which is what `std/core`'s own note on `impl Ord for Float`
+// states -- that note names those two operators and no others. The same
+// holds for `>`, `<=` and `>=` under IEEE 754, and of those the `<` and
+// `>=` used right here are the ones measured below; `>` and `<=` are
+// neither cited nor measured anywhere in this tree. `!=` is the
 // exception and is `true`, which is exactly what `number_to_json`'s
 // `n - n != 0.0` finiteness test above depends on, so "a comparison
 // against `NaN` is always false" would contradict this file's own

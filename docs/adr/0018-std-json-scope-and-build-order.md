@@ -158,7 +158,8 @@ the stronger. The second is a cost, not a wall:
    not impossible.** There is no such builtin anywhere in the language and
    `as` casts are unsupported (`E0900`), so digits cannot be accumulated
    into a `Float` the obvious way. An earlier version of this section read
-   that as "accumulated decimal digits could never become a `Float`" and
+   that as "accumulated decimal digits could therefore never become a
+   `Float`" and
    "the alternative does not exist", and ranked it *above* ground 1.
    **That was false and is corrected here.** `std/json`'s own `hex_digit`
    demonstrates the shape — an if/else chain from `Int` to a literal — and
