@@ -324,7 +324,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compiles **verbatim**, shadowing variant names included — measured, not
   assumed. Shipped with it: `pub record JsonError { msg: String, at: Int }`
   (which §7 names in the trait signatures but never declares),
-  `stringify`, total; `parse`, accepting all six `JsonValue` forms, one
+  `stringify`, total **over values** (no `JsonValue` shape it cannot render,
+  no error channel) but **not over nesting depth**, on which see the two
+  unbounded costs below; `parse`, accepting all six `JsonValue` forms, one
   value per document with trailing content rejected, RFC 8259 section 7's
   nine escape forms (its eight one-character escapes, and `u` followed by
   four hexadecimal digits — both counted after the backslash, where the RFC
@@ -347,12 +349,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than overlooked. `stringify_pretty` and `@derive` do **not** ship,
   so §7 is not closed. One new intrinsic, `str_to_float(s: String) -> Float`
   (`Builtin::STD_ONLY` 65 → 66), the inverse of `float_fixed` and a builtin
-  for the same reason: correct decimal-to-binary rounding is research-grade
-  (a `digits × 10^exp` accumulation double-rounds, and a codec whose
-  numbers do not round-trip is a bad property to choose deliberately), and
-  Nova could not begin such a parser anyway — there is no `Int`-to-`Float`
-  conversion in the language, so accumulated digits could never become a
-  `Float`. `RESERVED_TYPE_NAMES` stays at 7. Adding one intrinsic touches
+  for the same reason, which is **correctly rounded decimal-to-binary
+  conversion being research-grade and nothing else**: a `digits × 10^exp`
+  accumulation double-rounds, and a codec whose numbers do not round-trip
+  is a bad property to choose deliberately. Nova's missing `Int`-to-`Float`
+  conversion (no builtin, `as` casts `E0900`) makes a Nova parser awkward
+  rather than impossible — an if/else chain from `Int` to a `Float` literal
+  spans any fixed digit range, exactly as `std/json`'s own `hex_digit` does
+  — so it is a cost and not a wall; the rounding ground alone carries the
+  refusal. `RESERVED_TYPE_NAMES` stays at 7. Adding one intrinsic touches
   **13 sites**, of which **7 are compiler-forced** (measured by adding only
   the two enum variants and letting the compiler name the rest); reaching 7
   needs `--all-targets`, because one forced site is a description table
@@ -384,9 +389,31 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it leave every code point that gets to the encoder a scalar value, so it
   cannot fire as written — a second line of defence, recorded at the code
   and unexercised by construction. One-character escapes and raw characters
-  never pass through that `Option` at all. Nine new tests,
-  1048 → 1057: seven `json_*` `nova run` fixtures, one for
-  `Map::keys`, and one Rust unit test on the intrinsic. See
+  never pass through that `Option` at all. **Two unbounded costs, both
+  measured and both deliberate, recorded because the Phase 2 gate puts this
+  module in front of a socket.** (1) **Nesting depth is unbounded in both
+  directions and exceeding it kills the process** — `parse` and `stringify`
+  each recurse one native frame per level, and exhausting the stack is a
+  hard abort, not a `JsonError`, since `parse` cannot return from a frame
+  that no longer exists and `stringify` has no error channel. Measured,
+  debug build: `parse` of `[` × 5000 `1` `]` × 5000 succeeds and 6000 dies;
+  `stringify` of a value 8192 levels deep renders and 20000 dies — so
+  **roughly 12 KB of input text aborts the process.** RFC 8259 section 9
+  permits a depth cap; none is imposed, deliberately, a stack-size
+  threshold being no portable budget to derive one from. **A caller putting
+  `std/json` on a socket must cap depth above it.** (2) **Four string
+  accumulators are quadratic, and the dominant pair is `stringify`'s** —
+  `quote` and `scan_str` are quadratic in one string literal, while
+  `stringify`'s `Array` and `Object` arms are quadratic in the whole
+  rendered document, so every document pays. Measured with the flat ~180 ms
+  compile baseline subtracted: 4 000 / 8 000 / 16 000 one-character numbers
+  parse in 279 / 282 / 344 ms, effectively flat, and render in 236 / 1 309
+  / **11 622** ms, so a ~32 KB document takes about twelve seconds to
+  render; one string literal costs 182 ms at 8 000 characters and 15 624 at
+  64 000. Absolutes are debug-build numbers, asymptotics are not, and
+  neither is fixable without a growable string buffer the language does not
+  have. Nine new tests, 1048 → 1057: seven `json_*` `nova run` fixtures,
+  one for `Map::keys`, and one Rust unit test on the intrinsic. See
   `docs/adr/0018-std-json-scope-and-build-order.md` and `20-STDLIB.md` §7's
   2026-08-23 amendment. **This does not close Phase 2**: position 10
   `std/http` and position 12 `std/crypto` are both unstarted, and the Phase
@@ -398,9 +425,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had every operation except the one that visits what is there. Taken as a
   `std/collections` change rather than a private `std/json` helper because
   a map that cannot be enumerated is arguably incomplete regardless of
-  json. Returns **table order, not insertion order** — a `grow` reinserts
-  every entry and may reorder them — which is documented at the method as
-  explicitly not a guarantee.
+  json. Returns **table order, not insertion order**, documented at the
+  method as explicitly not a guarantee. The precise statement is that
+  **`keys()` order is not a function of the key set alone**: hash order
+  alone reverses insertion order with **no growth at all** (measured —
+  inserting `"a"`, `"c"`, `"e"` returns `"e"`, `"c"`, `"a"`, three entries
+  in a cap-8 table that never reaches the 3/4 threshold), and linear
+  probing makes slot order depend on arrival sequence, with a `grow`
+  reinserting every entry as a further reordering rather than the only one.
+  Naming only `grow` would suggest a map that never grows preserves
+  insertion order; it does not.
 
 ### Changed
 

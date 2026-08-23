@@ -893,8 +893,15 @@ mod tests {
     }
 
     /// Every lexical shape `std/json`'s `scan_number` can hand this — an
-    /// integer, a decimal, a negative, and both exponent spellings — plus the
-    /// rejection path.
+    /// integer, a decimal, a negative, both exponent letters, and all three
+    /// exponent signs — plus the rejection path.
+    ///
+    /// "Both exponent spellings" is what this used to say, and it covered only
+    /// `e` versus `E`, leaving out the `[+-]?` the grammar quoted on
+    /// [`nova_rt_str_to_float`] admits beside them. `scan_number` accepts an
+    /// explicit `+` there, so `1e+3` is a shape it really can hand this, and
+    /// before that case was added no explicit `+` exponent existed anywhere in
+    /// the repository — grepped, not assumed.
     ///
     /// The rejection cases are the load-bearing ones. `unwrap_or(0.0)` rather
     /// than `unwrap` is not a style choice: `unwrap` here would abort the whole
@@ -908,6 +915,7 @@ mod tests {
             assert_eq!(nova_rt_str_to_float(make_str("2.5")), 2.5);
             assert_eq!(nova_rt_str_to_float(make_str("-3.5")), -3.5);
             assert_eq!(nova_rt_str_to_float(make_str("1e3")), 1000.0);
+            assert_eq!(nova_rt_str_to_float(make_str("1e+3")), 1000.0);
             assert_eq!(nova_rt_str_to_float(make_str("1.5E-2")), 0.015);
 
             // `-0` must not collapse to `0`: JSON writes both, they are

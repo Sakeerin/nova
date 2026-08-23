@@ -212,8 +212,10 @@ pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 // beginning "Neither flag reaches tampering", where naming forgery alone
 // was corrected on 2026-08-21 for understating the reach. An earlier
 // version of this comment made exactly that mistake here; corrected
-// 2026-08-22. Cited by content rather than by line: it was `:931-938`
-// until the 2026-08-23 `std/json` amendments moved it to `:1065-1072`.
+// 2026-08-22. Cited by its opening words, and its LINE NUMBER IS
+// DELIBERATELY NOT RECORDED, because it moves: every number this citation
+// has ever carried has been wrong, including the one it was written with.
+// Grep the quoted phrase.
 pub record Sender<T> { ch: Channel<T> }
 pub record Receiver<T> { ch: Channel<T> }
 

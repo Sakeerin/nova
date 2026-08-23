@@ -21,7 +21,26 @@ pub type JsonValue =
 // returns carries a FIXED PLACEHOLDER, `at: 0`, never a real index.
 pub record JsonError { msg: String, at: Int }
 
-// Render `v` as JSON text. Total: there is no input this cannot render.
+// Render `v` as JSON text.
+//
+// TOTAL OVER VALUES, NOT OVER DEPTH. There is no `JsonValue` whose *shape*
+// this cannot render and no error channel to report one with -- that is the
+// sense in which `stringify` is called total throughout the records. It is NOT
+// total over nesting depth: the `Array` and `Object` arms recurse back into
+// this function with one native frame per level, so a value nested deeply
+// enough exhausts the stack and THE PROCESS DIES. No `JsonError` is produced,
+// because there is nowhere to put one.
+//
+// Measured against this compiler, debug build, on Windows: a value nested
+// 1024, 4096 and 8192 levels deep all render; 20000 levels overflows the stack
+// and the process aborts. `parse` has the identical property in the other
+// direction, with its own measured threshold at `parse_value`, and the
+// reasoning for imposing no cap in either direction is recorded there once.
+//
+// The two accumulator arms below are also QUADRATIC IN THE WHOLE RENDERED
+// DOCUMENT, not in one literal: `out = "${out}..."` rebuilds the entire string
+// once per element. The numbers for all four accumulators in this file, and
+// why these two are the ones that matter, are at `scan_str`.
 pub fn stringify(v: JsonValue) -> String {
     match v {
         Null => "null"
@@ -57,7 +76,8 @@ pub fn stringify(v: JsonValue) -> String {
 
 // JSON has no NaN and no infinity, so a non-finite number cannot be rendered.
 // This emits `null` instead, which is what most codecs do and which keeps
-// `stringify` total and its output always valid JSON. It is DELIBERATELY LOSSY:
+// `stringify` total over values -- depth is a separate matter, see its own
+// note -- and its output always valid JSON. It is DELIBERATELY LOSSY:
 // a round trip through a non-finite number does not preserve it.
 //
 // `n - n != 0.0` is the finiteness test. For any finite `n` the difference is
@@ -339,17 +359,35 @@ impl P {
     // Dispatching on the first letter and then consuming a fixed count would
     // read `nxxx` as `null`.
     //
-    // NESTING DEPTH IS UNBOUNDED. This recurses through `scan_array` and
-    // `scan_object` back into itself with one native frame per level, so an
-    // input nested deeply enough exhausts the stack rather than returning a
-    // `JsonError` -- a `[[[[...` of sufficient length crashes the process, and
-    // no fixture establishes where that threshold is. RFC 8259 section 9
-    // explicitly permits an implementation to set limits on nesting depth, so a
-    // cap would be conforming; none is imposed here, deliberately, because this
-    // increment's scope did not ask for one and a limit chosen without a
-    // measured budget would be a number nothing justifies. Recorded as a known
-    // property, the way `scan_str`'s quadratic cost below is -- not as a claim
-    // that it is safe against hostile input.
+    // NESTING DEPTH IS UNBOUNDED, IN BOTH DIRECTIONS. This recurses through
+    // `scan_array` and `scan_object` back into itself with one native frame per
+    // level, so an input nested deeply enough exhausts the stack rather than
+    // returning a `JsonError` -- a `[[[[...` of sufficient length crashes the
+    // process. `stringify` has the identical property rendering a value back
+    // out, recorded at `stringify` itself.
+    //
+    // MEASURED against this compiler, debug build, on Windows: `[` x 5000, `1`,
+    // `]` x 5000 parses fine; the same input at depth 6000 overflows the stack
+    // and the process aborts. That is roughly a 12 KB text producing a HARD
+    // ABORT rather than a `JsonError`, from an input smaller than most HTTP
+    // request bodies. No fixture pins the threshold and none can: a fixture
+    // that crashed the process would fail the suite by construction. The exact
+    // number is a function of stack size and frame layout, so it is a
+    // measurement of THIS BUILD rather than a portable budget; the
+    // unboundedness is the portable part.
+    //
+    // RFC 8259 section 9 explicitly permits an implementation to set limits on
+    // nesting depth, so a cap would be conforming. NONE IS IMPOSED, and that is
+    // a DECISION rather than an oversight, restated now that the threshold has
+    // been measured: a stack-size artefact is not a budget a cap can be derived
+    // from, and a number taken from one machine's stack would be wrong on the
+    // next; a cap also needs an API choice this increment's scope did not
+    // include, namely which depth and whether exceeding it is an ordinary
+    // `JsonError` or something a caller must distinguish from bad syntax. What
+    // is owed instead is the disclosure, which now also stands in ADR 0018 and
+    // `nova-spec/20-STDLIB.md` section 7 rather than only here. Recorded as a
+    // known property, the way `scan_str`'s quadratic cost below is -- not as a
+    // claim that it is safe against hostile input.
     fn parse_value(mut self) -> JsonValue {
         if self.err.is_some() { return Null }
         let c = self.peek()
@@ -501,6 +539,32 @@ impl P {
     // is recorded here as a known cost, not as a claim that it does not matter.
     // A `span`-style slice cannot replace it, because an escape means the
     // decoded text is not a contiguous run of the input.
+    //
+    // FOUR ACCUMULATORS IN THIS FILE HAVE THAT SHAPE, NOT TWO, and the two this
+    // note used to omit are the DOMINANT ones. `quote` and this function are
+    // quadratic in ONE STRING LITERAL. `stringify`'s `Array` and `Object` arms
+    // are quadratic in the WHOLE RENDERED DOCUMENT -- a strictly larger
+    // exposure, since every document pays it and not only a document that
+    // happens to contain a long string.
+    //
+    // Measured on a debug build of this compiler, with the flat ~180 ms compile
+    // baseline subtracted so the compiler is not the quadratic party. The
+    // ABSOLUTE numbers are debug-build numbers; the ASYMPTOTICS are not
+    // build-dependent.
+    //
+    //   * An array of N one-character numbers. `parse` is effectively flat --
+    //     279 ms at N=4000, 282 ms at 8000, 344 ms at 16000 -- while
+    //     `stringify` of the parsed value takes 236 ms, 1309 ms and 11622 ms,
+    //     growing 5.5x then 8.9x per doubling. At N=16000 the output is about
+    //     32 KB and takes ROUGHLY TWELVE SECONDS to render.
+    //   * One string literal of N characters, through this function: 182 ms at
+    //     N=8000, 473 ms at 16000, 2256 ms at 32000, 15624 ms at 64000.
+    //
+    // So this site becomes user-visible at roughly a 30 KB SINGLE STRING
+    // LITERAL and only fires on long individual strings, while `stringify`
+    // fires on EVERY DOCUMENT and is visible from about 16 KB of output.
+    // Neither is capped, and neither is fixable without a growable string
+    // buffer the language does not have.
     fn scan_str(mut self) -> String {
         if self.err.is_some() { return "" }
         if self.peek() != '"' {
@@ -841,8 +905,8 @@ impl FromJson for Float {
 // `json_traits.nova`'s "precision loss at the f64 mantissa boundary" case
 // pins that exact pair colliding on one rendered JSON text.
 //
-// The conversion goes through `str_to_float`, the only route from text to
-// `Float` this language has -- there is no `as` cast (`E0900`) and no
+// The conversion goes through `str_to_float`, the only PRIMITIVE route from
+// text to `Float` this language has -- there is no `as` cast (`E0900`) and no
 // Int-to-Float intrinsic anywhere in Nova today. `"${self}"` is `Int`'s own
 // `Display`, exact for the full `Int` range, so all of the rounding above
 // happens inside `str_to_float` and none of it in the formatting step.

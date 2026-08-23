@@ -17,9 +17,20 @@
 //     character with no short escape -- `\u0001`, which is the only one that
 //     goes through `\uXXXX` in both directions.
 //
-// EVERY object here has exactly one key, because `Map::keys()` returns table
-// order: with two keys, `first == second` would still hold but the printed text
-// would pin a hash ordering. The printed text was derived from `stringify`'s own
+// EVERY object here has exactly one key, and that restriction protects THIS
+// FIXTURE'S PRIMARY ASSERTION, not merely the determinism of its golden.
+// `Map::keys()` returns table order, and re-inserting keys in emitted slot
+// order can CHANGE that order: when two keys share a home slot, linear probing
+// puts whichever arrives second in the forward slot, so emitting and reparsing
+// swaps which one probes and the slot order flips. Measured over all 3782
+// ordered pairs of single-character keys from `[a-zA-Z0-9]`: 56 of them give
+// `first != second`, and all 56 are stable 2-cycles in which a third render
+// equals the first. Inserting `"p"` then `"h"` is one -- it renders
+// `{"h":1,"p":2}`, whose reparse renders `{"p":2,"h":1}`, whose reparse renders
+// the first again. NO `grow` IS INVOLVED: two entries never approach a cap-8
+// table's 3/4 threshold. So `first == second` would simply FAIL for 1.5% of
+// two-key objects; a golden pinning a hash ordering is the weaker of the two
+// reasons, not the whole one. The printed text was derived from `stringify`'s own
 // rules and Rust's `f64` Display, not captured -- `0.0` renders `0`, `1.0`
 // renders `1`, and `quote` escapes `"` `\` LF TAB as `\"` `\\` `\n` `\t` while
 // leaving `q` alone and sending `0x01` to `\u0001`.

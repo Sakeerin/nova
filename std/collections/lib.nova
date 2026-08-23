@@ -299,7 +299,14 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // grows by the same manoeuvre.
     //
     // Table order is deliberately NOT insertion order, and no caller should
-    // assume it is: a `grow` reinserts every entry and can reorder them.
+    // assume it is. The strongest true statement is that KEYS() ORDER IS NOT A
+    // FUNCTION OF THE KEY SET ALONE. Hash order alone reverses insertion order
+    // with NO GROWTH AT ALL -- measured: inserting `"a"`, `"c"`, `"e"` into a
+    // fresh map returns `"e"`, `"c"`, `"a"`, three entries in a cap-8 table
+    // that never reaches the 3/4 threshold -- and a `grow` then reinserts every
+    // entry and can reorder them again on top of that. Naming only `grow`
+    // would let a reader infer that a map which never grows preserves
+    // insertion order, and that inference is false.
     pub fn keys(self) -> [K] {
         if self.len == 0 { return [] }
         let cap = self.state.len()
