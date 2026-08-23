@@ -532,15 +532,34 @@ assumed: they are accepted, and `match` arms bind them unqualified. So are
 Result<JsonValue, JsonError>`, and both traits, with the signatures above.
 `JsonError` — which this section names in the trait signatures without ever
 declaring — is `pub record JsonError { msg: String, at: Int }`. `stringify`
-is total. What `parse` implements, and what the fixtures execute: all six
-`JsonValue` forms; one value per document, with trailing content rejected;
-RFC 8259 section 7's eight one-character escapes and its six-character
-Unicode escape, combining a high surrogate with the low one that must
-follow it; JSON's number grammar, rejecting a leading `+`, a leading zero
-before another digit, a bare fraction point and an exponent with no digits;
-and UTF-8 validation of every decoded code point through
-`Bytes::to_string`'s `Option`. That is a list of what is built, not a
-conformance claim against the whole RFC.
+is total. What `parse` implements, and what `tests/runtime/`'s
+`json_parse_values.nova`, `json_parse_strings.nova` and
+`json_parse_numbers.nova` execute: all six `JsonValue` forms; one value per
+document, with trailing content rejected; RFC 8259 section 7's nine escape
+forms (its eight one-character escapes, and `u` followed by four hexadecimal
+digits — both counted after the backslash, which is how `std/json/lib.nova`
+and the strings fixture count them, where the RFC counts the backslash too
+and calls them two-character and six-character sequences); a high surrogate
+combined with a following low surrogate, which is that section's own form
+for a character outside the BMP; and JSON's number grammar, whose six
+rejections belong to two mechanisms — `parse_value`'s dispatch refuses a
+leading `+` and a bare leading `.` as `expected a value`, neither of which
+can begin a value, so neither reaches the number scanner at all, while the
+scanner itself rejects a leading zero before another digit, a lone `-`, a
+fraction point with no digit after it and an exponent with no digits.
+
+**Two of those clauses are narrower than they sound.** *Requiring* the low
+surrogate is this parser's decision rather than conformance: RFC 8259
+section 8.2 notes that its own ABNF admits a lone unpaired surrogate, and
+calls the behaviour of software that receives one unpredictable. And code
+points from the hexadecimal escape are UTF-8 validated through
+`Bytes::to_string`'s `Option`, but **nothing exercises a failure of it**:
+the surrogate checks ahead of it leave every code point that reaches the
+encoder a scalar value, so that `None` arm cannot fire as written — a
+second line of defence, as `scan_hex_escape`'s own comment in
+`std/json/lib.nova` records. One-character escapes and raw characters never
+pass through that `Option` at all. So the list above is what is built, not
+a conformance claim against the whole RFC.
 
 **NOT shipped, so this section is not closed.** `stringify_pretty(v:
 JsonValue, indent: Int)` has no implementation. `@derive(ToJson, FromJson)`
