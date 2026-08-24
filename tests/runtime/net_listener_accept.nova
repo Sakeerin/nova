@@ -1,0 +1,135 @@
+// A real connection, end to end, across the listener this increment added:
+// `bind` on port 0, `local_port` to learn the kernel's choice, `accept`
+// parking until a client arrives, then one round trip over the accepted
+// stream. Unlike every other `std/net` fixture, this one needs no Rust peer
+// in `run_tests.rs` -- both ends are Nova, in two tasks of one process.
+//
+// **This is `local_port`'s only runtime fixture.** Until it existed, nothing
+// under `tests/runtime` called `local_port` at all, and that gap was not
+// merely a missing test: `RtFunc::NetClose` and `RtFunc::NetLocalPort` are
+// *indistinguishable* in `RtFunc::signature` (`crates/nova-mir/src/lib.rs`)
+// -- both `(vec![I64], I64)` -- so a lowering arm naming one where it meant
+// the other emits a call neither that table nor LLVM's
+// `every_rt_func_is_declared_with_its_real_signature` can fault. The
+// `NetClose`-as-`NetLocalPort` direction was already caught by
+// `net_lifetime.stdout`'s `close: ok`; the reverse direction was caught by
+// nothing. It is caught here, and that was **measured rather than reasoned
+// about**: with `local_port`'s body pointed at `net_close`, the first line
+// below flips to `server: port in range false` and the second becomes
+// `nova: panic: accept: socket is not open`, exit 127 -- so the swap fails
+// both this golden and the test's `.success()`, on the *first* line, with no
+// hang anywhere. (Beware measuring this the cheap way: `std` is embedded in
+// the compiler by `include_str!`, so editing `std/net/lib.nova` and rerunning
+// a stale `nova` binary reports a false pass. It must be rebuilt.)
+//
+// **The port is asserted by value, not merely by `Ok`.** Two ways, because
+// neither alone is enough, and the first is load-bearing precisely because of
+// what the measurement above found. The range check below is weak (it rules
+// out 0 and a decode that overflowed, nothing finer) but it is *deterministic
+// and first*, so a bad port is a named golden mismatch rather than a client
+// dialling into the void. The second is that the client connects to *that
+// reported number* and the server's `accept` returns, which no wrong port can
+// fake. The exact number is deliberately absent from the golden -- the kernel
+// chooses it, so printing it would make the golden unmatchable.
+//
+// **PORT 0 IS REQUIRED, NOT PREFERRED.** A fixed port collides whenever two
+// test binaries run concurrently, and this suite runs its fixtures in
+// parallel. Note the *other* half of that: this fixture holds its listener
+// from `bind` to the `close` on the last line, so it cannot reproduce the
+// bind-then-drop shape `write_refused_port_file` in
+// `crates/nova-cli/tests/run_tests.rs` documents as an accepted race -- there
+// is no window here in which the kernel could hand this port to anyone else.
+//
+// **NO CHANNEL, deliberately.** `recv` on an empty channel spins
+// unconditionally (`channel_recv_suspends_only_to_retry.nova`), so a consumer
+// waiting on a socket-parked producer could never be woken. None is needed:
+// `bind` and `local_port` are plain `fn`s that cannot suspend, so the port is
+// known before anything parks and travels to the client as a plain `spawn`
+// argument.
+//
+// **ONE SOCKET WAIT PER TASK, and that is why there are two tasks.** Staging
+// two I/O waits in a single poll ends the process (`stage_park` in
+// `crates/nova-runtime/src/task.rs`), so the task parked in `accept` cannot
+// also be the task reading a connection, and this language has no `select` to
+// fold them. Sequential waits within one task are fine -- `main` below does
+// `accept`, then `read`, then `write` -- and it is only two staged in a single
+// poll that aborts.
+//
+// **NO ASSERTION ON ELAPSED TIME**, and none is needed, because the output
+// order here is forced by data dependency rather than by scheduling. The
+// client's one line cannot print until its `read` returns, which cannot
+// happen until the server has echoed, which cannot happen until the server's
+// own two lines have printed. So whichever of the two parked tasks the poller
+// happens to wake first -- and either order is legitimate, since a loopback
+// `connect` and the listener's readiness settle together -- the six lines
+// below come out in exactly one order. `main`'s last line follows a `join`,
+// so it is last. That is what makes this fixture safe to run in parallel with
+// the rest of the suite; it is not a timing assertion at all.
+//
+// What this does *not* pin: that `accept` genuinely parks rather than
+// blocking the executor thread. Nothing in this output can tell those apart,
+// for exactly the reason `net_roundtrip.nova`'s header gives about `connect`
+// -- both eventually produce the same bytes. The park is pinned on the
+// runtime side instead, by
+// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` in
+// `crates/nova-runtime/src/net.rs`.
+async fn client(port: Int) {
+    let payload = "hi from the client"
+    let s = match connect("127.0.0.1:${port}").await {
+        Ok(s) => s
+        Err(e) => panic("client connect: ${e.message}")
+    }
+    let _ = match s.write(bytes_from_string(payload)).await {
+        Ok(count) => count
+        Err(e) => panic("client write: ${e.message}")
+    }
+    let echoed = match s.read(64).await {
+        Ok(b) => b
+        Err(e) => panic("client read: ${e.message}")
+    }
+    match echoed.to_string() {
+        Some(text) => println("client: echo matches ${text == payload}")
+        None => println("client: echo <non-utf8>")
+    }
+    let _ = s.close().await
+}
+
+async fn main() {
+    let l = match bind("127.0.0.1:0") {
+        Ok(l) => l
+        Err(e) => panic("bind: ${e.message}")
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => panic("local_port: ${e.message}")
+    }
+    println("server: port in range ${(port > 0) && (port < 65536)}")
+
+    let h = spawn(client(port))
+
+    let conn = match l.accept().await {
+        Ok(c) => c
+        Err(e) => panic("accept: ${e.message}")
+    }
+    let got = match conn.read(64).await {
+        Ok(b) => b
+        Err(e) => panic("server read: ${e.message}")
+    }
+    println("server: read ${got.len()} bytes")
+    let sent = match conn.write(got).await {
+        Ok(count) => count
+        Err(e) => panic("server write: ${e.message}")
+    }
+    println("server: echoed ${sent} bytes")
+    match conn.close().await {
+        Ok(_) => println("server: conn closed")
+        Err(e) => panic("server conn close: ${e.message}")
+    }
+
+    h.join().await
+
+    match l.close().await {
+        Ok(_) => println("server: listener closed")
+        Err(e) => panic("listener close: ${e.message}")
+    }
+}

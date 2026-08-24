@@ -647,16 +647,27 @@ impl RtFunc {
             // typeck-side `builtin_signatures_are_what_the_std_call_sites_use`
             // is equally blind to the swap.
             //
-            // Only a test that *runs* the compiled program catches it, and the
-            // two directions are **not** equally covered. `NetClose` lowered to
-            // `NetLocalPort` *is* caught: it would run
-            // `nova_rt_net_local_port` against a stream fd, miss the listener
-            // kind check, and make `TcpStream::close` report `Err`, so
+            // Only a test that *runs* the compiled program catches it, and
+            // both directions now do. `NetClose` lowered to `NetLocalPort`
+            // would run `nova_rt_net_local_port` against a stream fd, miss the
+            // listener kind check, and make `TcpStream::close` report `Err`, so
             // `tests/runtime/net_lifetime.stdout`'s first golden line
             // (`close: ok`) and `net_roundtrip.stdout`'s last one both fail.
-            // `NetLocalPort` lowered to `NetClose` is *not* caught: nothing
-            // under `tests/runtime` calls `local_port` as of this increment, so
-            // that one direction is genuinely unpinned.
+            // `NetLocalPort` lowered to `NetClose` was unpinned until
+            // `tests/runtime/net_listener_accept.nova` -- the first and still
+            // only fixture that calls `local_port`. That direction was
+            // measured, not reasoned about: with `local_port`'s body pointed at
+            // `net_close`, that fixture's first golden line flips to
+            // `server: port in range false` (the close returns status `0`, so
+            // the `Ok` arm still runs and decodes the payload slot `bind`
+            // already emptied -- to something outside 1..=65535, which is what
+            // that flipped line measures) *and* the now-closed listener makes
+            // the next line `nova: panic: accept: socket is not open`, exit
+            // 127. So the
+            // swap fails both the golden and the `.success()` assertion, and
+            // fails them on the fixture's *first* line rather than hanging --
+            // which is the whole reason that line asserts the port's range
+            // instead of trusting the client's `connect` to notice.
             //
             // `NetAccept` shares that same single-`I64` parameter list but
             // *not* the hazard, and the reason is worth stating rather than
