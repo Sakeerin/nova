@@ -345,8 +345,8 @@ rt_funcs! {
     /// Idempotent, as `FileClose`.
     ///
     /// **Not a future constructor** — it returns its status directly, exactly
-    /// `FileClose`'s shape. `NetListen` below is the only other member of this
-    /// group that does.
+    /// `FileClose`'s shape. `NetListen` and `NetLocalPort` below are the only
+    /// other members of this group that do.
     NetClose,
     /// `(i64 fd, i64 max) -> ptr to { poll_code, state }` — a fresh future
     /// that reads up to `max` bytes from `fd`, non-blockingly.
@@ -379,8 +379,9 @@ rt_funcs! {
     /// `(ptr addr) -> i64` — bind and listen on `addr` ("host:port"),
     /// registering a non-blocking listening socket.
     ///
-    /// **Not a future constructor**, the only member of this group besides
-    /// `NetClose` that is not: the `bind` and `listen` *syscalls* do not block,
+    /// **Not a future constructor**, one of the three members of this group
+    /// that are not, with `NetClose` and `NetLocalPort`: the `bind` and
+    /// `listen` *syscalls* do not block,
     /// so there is no suspension to model. `0` on success, with the new fd
     /// waiting in `FsTakeBytes` as an 8-byte little-endian payload, as
     /// `NetConnect`'s and `FileOpen`'s own; otherwise an `IoErrorKind` status
@@ -392,6 +393,22 @@ rt_funcs! {
     /// `crates/nova-runtime/src/net.rs` for that caveat and for how its
     /// resolution differs from `NetConnect`'s.
     NetListen,
+    /// `(i64 fd) -> i64` — the port the listening socket behind `fd` is bound
+    /// to, which is how a caller learns the kernel's choice after a `NetListen`
+    /// on port 0.
+    ///
+    /// **Not a future constructor**, the third member of this group that is
+    /// not, with `NetClose` and `NetListen`: `local_addr` is a `getsockname`
+    /// call over bookkeeping the kernel already holds, so there is no
+    /// suspension to model. Unlike `NetListen` it takes no address, so it
+    /// carries none of that variant's blocking-resolution caveat either.
+    ///
+    /// `0` on success, **with the port waiting in `FsTakeBytes`** as an 8-byte
+    /// little-endian payload rather than in the return value, which is the
+    /// status word itself; otherwise an `IoErrorKind` status code, as
+    /// `FsReadToString` — including an fd that names a connected stream rather
+    /// than a listener, which is a wrong-kind miss and not a port.
+    NetLocalPort,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -501,6 +518,7 @@ impl RtFunc {
             RtFunc::NetWrite => "nova_rt_net_write_future",
             RtFunc::NetReadTimeout => "nova_rt_net_read_timeout_future",
             RtFunc::NetListen => "nova_rt_net_listen",
+            RtFunc::NetLocalPort => "nova_rt_net_local_port",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -589,10 +607,11 @@ impl RtFunc {
             // state }` pointer), not `MirTy::I64` — the same shape
             // `TaskSleepFutureNanos`/`TaskJoinFuture` use above, unlike every
             // `FsWrite`/`File*`/`Io*` entry directly above this group.
-            // `NetClose` and `NetListen` are the two that return `MirTy::I64`,
-            // exactly `FileClose`'s shape. `NetListen` and `NetConnect` take
-            // the same single `Ptr` (an address string) and differ only in the
-            // return: `I64` for the status word, `Ptr` for the future.
+            // `NetClose`, `NetListen` and `NetLocalPort` are the three that
+            // return `MirTy::I64`, exactly `FileClose`'s shape. `NetListen` and
+            // `NetConnect` take the same single `Ptr` (an address string) and
+            // differ only in the return: `I64` for the status word, `Ptr` for
+            // the future.
             //
             // This table *declares* those classes and checks nothing itself.
             // Its consumers are the two backends, which build every
@@ -603,12 +622,25 @@ impl RtFunc {
             // `NetConnect` where it meant `NetListen` would emit a well-formed
             // call with the wrong return class, caught by neither this table
             // nor that test.
+            //
+            // `NetClose` and `NetLocalPort` sharpen that hazard, because they
+            // are *indistinguishable here* -- both `(vec![I64], I64)` -- so a
+            // lowering arm confusing the two would emit a call this table
+            // cannot fault and that IR test cannot fault either, and the only
+            // thing that separates them is which symbol `symbol()` names. The
+            // typeck-side `builtin_signatures_are_what_the_std_call_sites_use`
+            // is equally blind to the swap. Only a test that *runs* the
+            // compiled program would catch it, and as of this increment
+            // `local_port` has no such fixture: nothing under `tests/runtime`
+            // calls it, so the swap is currently unpinned rather than merely
+            // hard to pin.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),
             RtFunc::NetWrite => (vec![MirTy::I64, MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetReadTimeout => (vec![MirTy::I64, MirTy::I64, MirTy::I64], MirTy::Ptr),
             RtFunc::NetListen => (vec![MirTy::Ptr], MirTy::I64),
+            RtFunc::NetLocalPort => (vec![MirTy::I64], MirTy::I64),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),

@@ -1,7 +1,8 @@
 //! Open TCP handles, keyed by descriptor; the two-phase, non-blocking
 //! `connect` that populates the table; the `read`, `write`, and
-//! `read_timeout` futures that act on it; and the `listen` that puts the
-//! table's other kind of entry -- a listening socket -- into it.
+//! `read_timeout` futures that act on it; the `listen` that puts the table's
+//! other kind of entry -- a listening socket -- into it; and the `local_port`
+//! that reads back which port the kernel gave one.
 //!
 //! # Two kinds of handle, one table
 //!
@@ -177,14 +178,13 @@ fn with_stream<R>(fd: i64, f: impl FnOnce(&mut TcpStream) -> R) -> Option<R> {
 /// Run `f` against the listener behind `fd`. Same collapse of absent-and
 /// wrong-kind into one `None` as [`with_stream`].
 ///
-/// `#[allow(dead_code)]` for exactly as long as this increment's Task 1 is
-/// the whole of it: nothing in production reads a listener yet, and the only
-/// caller is `is_listener_for_test` below. `net_local_port` (Task 2) and
-/// `net_accept` (Task 3) are its production callers, and the attribute goes
-/// with the first of them rather than being left to mask a genuinely dead
-/// accessor later -- the same lifecycle `poll.rs`'s `Interest` records for
-/// its own former one.
-#[allow(dead_code)]
+/// [`nova_rt_net_local_port`] is its production caller; `net_accept` (Task 3)
+/// will be the second. It carried `#[allow(dead_code)]` for exactly as long as
+/// this increment's Task 1 was the whole of it -- nothing in production read a
+/// listener then, and the only caller was `is_listener_for_test` below -- and
+/// the attribute left with the arrival of the first real caller rather than
+/// being kept on to mask a genuinely dead accessor later. That is the same
+/// lifecycle `poll.rs`'s `Interest` records for its own former one.
 fn with_listener<R>(fd: i64, f: impl FnOnce(&mut TcpListener) -> R) -> Option<R> {
     SOCKETS.with(|sockets| {
         let Ok(mut sockets) = sockets.try_borrow_mut() else {
@@ -247,11 +247,17 @@ fn remove_socket(fd: i64) {
 /// `stash_count`) use, reproduced here rather than shared across modules for
 /// the same reason those give: a second, self-contained implementation of one
 /// small encoding costs less than reaching past the four names this module
-/// imports from `fs`. Used here for two different payloads across this
-/// module's life -- `connect`'s new fd ([`finish_connect`]) and, since Task 4,
-/// `write`'s reported byte count ([`try_write`]) -- the same dual use
-/// `file.rs`'s own copy of this function already has for `open`'s fd and
-/// `write`'s count.
+/// imports from `fs`.
+///
+/// **Every payload this module puts in `Slot::Buffer` goes through it**, and
+/// the roster grew twice in this increment alone: `connect`'s new fd
+/// ([`finish_connect`]), `write`'s reported byte count ([`try_write`]),
+/// `listen`'s new listener fd ([`nova_rt_net_listen`]) and a listener's bound
+/// port ([`nova_rt_net_local_port`]). Deliberately stated without a count --
+/// the previous wording said "two different payloads" and was falsified by the
+/// very next function added to this file -- so a reader wanting the call sites
+/// should grep for them rather than trust a number here. `file.rs`'s own copy
+/// carries the same multiple use, for `open`'s fd and `write`'s count.
 fn stash_i64(n: i64) {
     stash(Slot::Buffer, crate::bytes::gc_bytes(&n.to_le_bytes()));
 }
@@ -362,6 +368,50 @@ pub unsafe extern "C" fn nova_rt_net_listen(addr: *const NovaStr) -> i64 {
     let fd = register_new_socket(Sock::Listener(listener));
     stash_i64(fd);
     OK
+}
+
+/// Report the port `fd`'s listener is bound to, which is how a caller learns
+/// the kernel's choice after binding port 0.
+///
+/// **Non-suspending, so this is an ordinary status word like
+/// [`nova_rt_net_close`] and [`nova_rt_net_listen`] rather than a future
+/// constructor, and it gets no poll function.** `TcpListener::local_addr` is a
+/// `getsockname` call over bookkeeping the kernel already holds: nothing waits
+/// on a peer, and -- unlike [`nova_rt_net_listen`] -- there is no address
+/// argument at all, so none of that function's name-resolution caveat applies
+/// here. This one really cannot block, on any argument.
+///
+/// **The port travels in `Slot::Buffer` rather than in the return value,
+/// because the return value is already spoken for: it *is* the error kind.** A
+/// port there would make `0` ambiguous -- success, or a port of zero -- and
+/// every non-zero port indistinguishable from a failure status. So the answer
+/// rides the same 8-byte little-endian channel [`nova_rt_net_listen`]'s fd
+/// rides, decoded on the Nova side by the same `decode_count`.
+///
+/// **A stream fd is an error here, not a port, and the kind check is what
+/// refuses it rather than the syscall.** A connected socket genuinely has a
+/// local port, so `local_addr` would have answered; [`with_listener`] never
+/// reaches it, and the miss collapses into [`closed_fd_error`] exactly as an
+/// absent, closed, stale or forged fd does. See [`Sock`]'s own doc comment for
+/// why that collapse is deliberate rather than an omission, and
+/// `net_local_port_on_a_stream_fd_is_an_error` for the test that pins it.
+///
+/// `i64::from(addr.port())` rather than a cast: `port()` is a `u16`, so the
+/// widening is infallible and needs no `as`.
+///
+/// # Safety
+/// No pointer argument, so no dereference precondition; marked `unsafe
+/// extern "C"` for uniformity with this crate's other JIT-registered symbols.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_net_local_port(fd: i64) -> i64 {
+    match with_listener(fd, |l| l.local_addr()) {
+        Some(Ok(addr)) => {
+            stash_i64(i64::from(addr.port()));
+            OK
+        }
+        Some(Err(e)) => fail(&e),
+        None => closed_fd_error(),
+    }
 }
 
 /// Resolve `addr` ("host:port") to one socket address.
@@ -1227,6 +1277,13 @@ mod tests {
     /// Test-only: decode an fd [`stash_i64`] stashed -- the mirror image of
     /// that function's own 8-byte little-endian encoding, matching
     /// `file.rs`'s own `take_fd` test helper.
+    ///
+    /// **Named for the payload it was written against, not the only one it
+    /// reads.** [`stash_i64`]'s encoding is the same whatever the number means,
+    /// so this also decodes a write's byte count and, since
+    /// [`nova_rt_net_local_port`], a listener's bound port. The name is kept to
+    /// stay aligned with `file.rs`'s own helper rather than renamed for each
+    /// new payload.
     fn take_fd() -> i64 {
         let ptr = crate::fs::take_for_test(Slot::Buffer) as *const NovaStr;
         // Checked before the dereference, not after: an empty slot hands back
@@ -1880,6 +1937,127 @@ mod tests {
         // SAFETY: `addr` is the live `NovaStr` allocated immediately above.
         let status = unsafe { nova_rt_net_listen(addr) };
         assert_ne!(status, OK, "binding an unroutable address must fail");
+    }
+
+    /// `net_local_port` on a listener bound to port 0 must report the port the
+    /// kernel actually chose. That is the whole reason the intrinsic exists:
+    /// `bind("127.0.0.1:0")` otherwise leaves a caller holding a listening
+    /// socket with no way to tell anyone where it is.
+    ///
+    /// **The range check alone does not catch a wrong port**, so the assertion
+    /// that carries the weight is the equality against the listener's own
+    /// `local_addr`: it pins that the number reaching `Slot::Buffer` is this
+    /// listener's port *unaltered*, which is the whole claim. It shares
+    /// [`with_listener`] and `local_addr` with the code under test and is not
+    /// an independent oracle, deliberately -- what is under test here is the
+    /// encode-and-stash step between them, and a mutation anywhere in it dies.
+    ///
+    /// **The `std` connect below is a reachability check, not a second
+    /// discriminator, and this is measured rather than assumed.** Mutating the
+    /// intrinsic to stash `port + 1` left the dial *passing*: `cargo test` runs
+    /// this binary's tests in parallel threads, several of which hold their own
+    /// ephemeral loopback listeners, so a neighbouring port is routinely
+    /// occupied by a sibling test and answers the connect. The dial still earns
+    /// its place -- it proves the reported port is genuinely listening and
+    /// accepting, which a port number read out of a struct cannot show -- but a
+    /// reader must not mistake it for the assertion that pins the value. The
+    /// peer socket is never accepted (no `accept` intrinsic exists until
+    /// Task 3) and does not need to be: the handshake completes in the kernel
+    /// on a listening socket's behalf whether or not the application ever picks
+    /// the connection up.
+    ///
+    /// **The port arrives in `Slot::Buffer`, not in the status word**, so this
+    /// reads it with [`take_fd`] exactly as
+    /// [`net_listen_binds_an_ephemeral_port_and_registers_a_listener`] reads
+    /// its fd -- and with no [`with_test_current`] wrapper, for the reason that
+    /// test's own doc comment records: nothing here is spawned, so the stash
+    /// and the read back run under the same `CURRENT`.
+    #[test]
+    fn net_local_port_reports_the_kernel_assigned_port() {
+        let addr = crate::gc_str("127.0.0.1:0");
+        // SAFETY: `addr` is the live `NovaStr` allocated immediately above.
+        assert_eq!(unsafe { nova_rt_net_listen(addr) }, OK);
+        let fd = take_fd();
+
+        let status = unsafe { nova_rt_net_local_port(fd) };
+        assert_eq!(status, OK, "a bound listener must report its port");
+        let port = take_fd();
+        assert!(
+            port > 0 && port < 65536,
+            "port must be a real, in-range port the kernel assigned, got {port}"
+        );
+
+        let actual = with_listener(fd, |l| l.local_addr())
+            .expect("the fd must still be registered as a listener")
+            .expect("a bound listener must have a local address");
+        assert_eq!(
+            port,
+            i64::from(actual.port()),
+            "the stashed port must be this listener's own port, unaltered -- \
+             the encode-and-stash step between `local_addr` and `Slot::Buffer` \
+             is what this pins"
+        );
+
+        let dialed = std::net::TcpStream::connect(("127.0.0.1", port as u16));
+        assert!(
+            dialed.is_ok(),
+            "nothing accepted a connection on port {port}. The assertion above \
+             has already established that this is the listener's own port, so \
+             the port number is not the problem -- this fd is registered and \
+             bound but not actually listening, which is what `net_listen` \
+             failing to reach its `listen` step would look like: {dialed:?}"
+        );
+        drop(dialed);
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// A connected stream fd must be an error here, not a port -- **and the
+    /// syscall is not what refuses it**. A connected socket genuinely has a
+    /// local port, so `local_addr` would have answered happily; what fails is
+    /// [`with_listener`]'s kind check, before any syscall runs.
+    ///
+    /// **The status is `OTHER`, the identical one an absent fd produces**, and
+    /// this pins that rather than merely `!= OK`, exactly as
+    /// [`reading_a_listener_fd_is_an_error_not_a_stream_read`] pins the mirror
+    /// case. The collapse is deliberate and recorded on [`closed_fd_error`];
+    /// a reader looking for a distinguishable wrong-kind status will not find
+    /// one to rely on.
+    ///
+    /// The far end is held alive for the whole test. Dropping it would tear the
+    /// connection down underneath the assertion and leave a passing test that
+    /// proved something else.
+    #[test]
+    fn net_local_port_on_a_stream_fd_is_an_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let fd = connect_blocking_for_test(&addr);
+        let (_server, _) = listener.accept().expect("accept");
+
+        let status = unsafe { nova_rt_net_local_port(fd) };
+        assert_eq!(
+            status, OTHER,
+            "a stream is the wrong kind for local_port, and must report the \
+             same catch-all error an absent fd does -- not succeed with the \
+             stream's own local port, and not a distinct wrong-kind code"
+        );
+
+        assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    /// An fd this module never issued takes the same path a wrong-kind one
+    /// does -- [`with_listener`]'s `None` arm, reported by
+    /// [`closed_fd_error`]. The `net_local_port` sibling of
+    /// `closing_a_never_issued_fd_is_still_ok`, except that a *read* of an
+    /// absent fd is an error rather than the no-op a close is.
+    #[test]
+    fn net_local_port_on_an_absent_fd_is_an_error() {
+        let status = unsafe { nova_rt_net_local_port(999_999) };
+        assert_eq!(
+            status, OTHER,
+            "an unregistered fd must not report a port, and reports the same \
+             catch-all error a wrong-kind fd does"
+        );
     }
 
     /// A read against a listener fd must fail rather than treat the entry as a

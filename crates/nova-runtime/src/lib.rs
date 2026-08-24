@@ -632,6 +632,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             net::nova_rt_net_read_timeout_future as *const u8,
         ),
         ("nova_rt_net_listen", net::nova_rt_net_listen as *const u8),
+        (
+            "nova_rt_net_local_port",
+            net::nova_rt_net_local_port as *const u8,
+        ),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",
