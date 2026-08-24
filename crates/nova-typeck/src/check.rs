@@ -3957,6 +3957,7 @@ impl<'a> Checker<'a> {
             | Builtin::NetRead
             | Builtin::NetWrite
             | Builtin::NetReadTimeout
+            | Builtin::NetListen
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7212,11 +7213,14 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::IoStderrWrite => (vec![Ty::Bytes], Ty::Int),
         Builtin::IoStdoutFlush => (vec![], Ty::Int),
         Builtin::IoStderrFlush => (vec![], Ty::Int),
-        // Four of these five are future constructors, not status words —
+        // Most of this group are future constructors, not status words —
         // `Ty::Future(Box::new(Ty::Int))`, not a plain `Ty::Int` — unlike
         // every `Fs*`/`File*`/`Io*` builtin above. `.await`ing the future
-        // produces the `Int` status. `NetClose` alone stays a plain status,
-        // matching `Builtin::FileClose`'s shape exactly.
+        // produces the `Int` status. `NetClose` and `NetListen` are the
+        // exceptions and stay plain statuses, matching `Builtin::FileClose`'s
+        // shape exactly: neither can block, so neither has a suspension to
+        // model. `NetListen` returning `Ty::Int` rather than a future is
+        // exactly what makes `std/net`'s `bind` a plain `fn`.
         Builtin::NetConnect => (vec![Ty::String], Ty::Future(Box::new(Ty::Int))),
         Builtin::NetClose => (vec![Ty::Int], Ty::Int),
         Builtin::NetRead => (vec![Ty::Int, Ty::Int], Ty::Future(Box::new(Ty::Int))),
@@ -7225,6 +7229,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
             vec![Ty::Int, Ty::Int, Ty::Int],
             Ty::Future(Box::new(Ty::Int)),
         ),
+        Builtin::NetListen => (vec![Ty::String], Ty::Int),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15288,6 +15293,11 @@ mod tests {
                     ),
                     "`net_read_timeout(self.fd, max, ms).await` in `std/net`'s \
                      `TcpStream::read_timeout`",
+                ),
+                Builtin::NetListen => (
+                    (vec![Ty::String], Ty::Int),
+                    "`net_listen(addr)` -- with no `.await`, since it cannot \
+                     suspend -- in `std/net`'s `bind`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),

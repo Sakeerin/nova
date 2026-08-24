@@ -728,6 +728,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::NetRead => Lowering::Runtime(RtFunc::NetRead),
                     Builtin::NetWrite => Lowering::Runtime(RtFunc::NetWrite),
                     Builtin::NetReadTimeout => Lowering::Runtime(RtFunc::NetReadTimeout),
+                    Builtin::NetListen => Lowering::Runtime(RtFunc::NetListen),
                     Builtin::BytesLen => Lowering::Runtime(RtFunc::BytesLen),
                     Builtin::BytesFromString => Lowering::Runtime(RtFunc::BytesFromString),
                     Builtin::BytesIsUtf8 => Lowering::Runtime(RtFunc::BytesIsUtf8),
