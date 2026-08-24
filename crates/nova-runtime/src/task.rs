@@ -4899,8 +4899,12 @@ mod tests {
     /// longer for the reason an earlier version of this comment gave -- that
     /// nothing outside a test could populate a real, unresolved `Wait::Io`
     /// through `run_to_completion`. `net.rs` now stages exactly that from
-    /// three of its four operations (`connect`, `read` and `write` all pass
-    /// `deadline: None`), so the arm is reached in production and end to end by
+    /// `connect`, `read`, `write` and `accept`, each passing `deadline: None`
+    /// -- every socket operation there but `read_timeout`, which is the one
+    /// that carries a deadline. No count is given here on purpose: an earlier
+    /// wording said "three of its four" and `poll_accept`'s arrival falsified
+    /// it, so the roster is named rather than counted.
+    /// The arm is reached in production and end to end by
     /// every `std/net` runtime fixture: `tests/runtime/net_interleave.nova`'s
     /// `connect` in `main` parks the only live task on an untimed `Wait::Io`
     /// and drains the queue behind it, which is that arm exactly.

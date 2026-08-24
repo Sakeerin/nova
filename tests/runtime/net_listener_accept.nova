@@ -73,6 +73,27 @@
 // runtime side instead, by
 // `accept_parks_until_a_client_connects_then_yields_a_stream_fd` in
 // `crates/nova-runtime/src/net.rs`.
+//
+// **THREE OF THE SIX GOLDEN LINES REST ON CIRCUMSTANCE, NOT ON CONTRACT**, and
+// a reader changing the payload needs to know which. `Write::write` here is
+// one non-blocking attempt and **may legally write fewer bytes than given**
+// (`std/net/lib.nova`'s own `write_stream` comment says so); `read` is
+// equally permissive, since a short read is explicitly *not* end of stream.
+// So `server: read 18 bytes`, `server: echoed 18 bytes` and -- through the
+// client's own `read(64)` -- `client: echo matches true` all hold because an
+// 18-byte payload crosses loopback in a single segment, not because anything
+// guarantees it. They are reliable at this size and would stay reliable well
+// past it; they are not contractual at any size.
+//
+// The consequence is bounded, which is why this is a warning and not a
+// redesign: a short read or write makes a line *differ* from the golden, so
+// the fixture fails loudly rather than passing on a weaker property. If you
+// raise the payload past one segment, expect these three lines to need
+// either a loop or a different assertion -- and do not read a failure there
+// as a regression in `accept`. The other three lines are contractual:
+// `server: port in range true` is pinned by the mutation described in
+// `RtFunc::signature`'s comment, and both `closed` lines by
+// `TcpListener::close`'s documented kind-agnostic table removal.
 async fn client(port: Int) {
     let payload = "hi from the client"
     let s = match connect("127.0.0.1:${port}").await {

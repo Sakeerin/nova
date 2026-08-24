@@ -663,8 +663,8 @@ impl RtFunc {
             // already emptied -- to something outside 1..=65535, which is what
             // that flipped line measures) *and* the now-closed listener makes
             // the next line `nova: panic: accept: socket is not open`, exit
-            // 127. So the
-            // swap fails both the golden and the `.success()` assertion, and
+            // 127. So the swap fails both the golden and the `.success()`
+            // assertion, and
             // fails them on the fixture's *first* line rather than hanging --
             // which is the whole reason that line asserts the port's range
             // instead of trusting the client's `connect` to notice.
