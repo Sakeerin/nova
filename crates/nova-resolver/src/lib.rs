@@ -436,8 +436,13 @@ builtins! {
     /// ("host:port"), non-blockingly.
     ///
     /// **A future constructor, not a status word — the one thing that makes
-    /// this builtin and the three below it unlike every `fs_*`/`file_*`/
-    /// `io_*` intrinsic above.** Those return an `i64` status directly,
+    /// this builtin and the three other future constructors in this group
+    /// ([`Builtin::NetRead`], [`Builtin::NetWrite`],
+    /// [`Builtin::NetReadTimeout`]) unlike every `fs_*`/`file_*`/`io_*`
+    /// intrinsic above.** Named rather than counted positionally: six variants
+    /// now sit below this one and three of them are *not* future constructors,
+    /// so "the three below it" would read as "the next three" and be wrong that
+    /// way. Those return an `i64` status directly,
     /// synchronously; this one returns a `*mut u8` future state object
     /// (surfaced to Nova as `Future<Int>`) that must itself be `.await`ed to
     /// produce the `Int` status — `0` on success, with the new fd waiting in

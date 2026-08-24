@@ -249,15 +249,28 @@ fn remove_socket(fd: i64) {
 /// small encoding costs less than reaching past the four names this module
 /// imports from `fs`.
 ///
-/// **Every payload this module puts in `Slot::Buffer` goes through it**, and
-/// the roster grew twice in this increment alone: `connect`'s new fd
-/// ([`finish_connect`]), `write`'s reported byte count ([`try_write`]),
-/// `listen`'s new listener fd ([`nova_rt_net_listen`]) and a listener's bound
-/// port ([`nova_rt_net_local_port`]). Deliberately stated without a count --
-/// the previous wording said "two different payloads" and was falsified by the
-/// very next function added to this file -- so a reader wanting the call sites
-/// should grep for them rather than trust a number here. `file.rs`'s own copy
-/// carries the same multiple use, for `open`'s fd and `write`'s count.
+/// **Every payload this module encodes as an *integer* goes through it**:
+/// `connect`'s new fd ([`finish_connect`]), `write`'s reported byte count
+/// ([`try_write`]), `listen`'s new listener fd ([`nova_rt_net_listen`]) and a
+/// listener's bound port ([`nova_rt_net_local_port`]).
+///
+/// **That is not every `Slot::Buffer` payload, and the exception is this
+/// module's most-used one.** [`try_read`] writes the slot directly, with the
+/// raw bytes it read: those are already a byte payload, so there is no integer
+/// to encode and nothing for this function to do. A reader must therefore not
+/// conclude that everything reaching `Slot::Buffer` from this module is eight
+/// little-endian bytes -- on the read path it is the payload itself, of
+/// whatever length the read returned.
+///
+/// Deliberately a roster with no quantifier over call sites. The wording
+/// before this one said "two different payloads", which the very next function
+/// added to this file falsified; the wording after that said "every payload
+/// this module puts in `Slot::Buffer`", which was not merely stale but false,
+/// for the [`try_read`] reason above. **Replacing a count with a universal
+/// trades a claim that goes stale for one that is wrong** -- so this names its
+/// members and quantifies only over the thing it actually covers. `file.rs`'s
+/// own copy carries the same multiple use, for `open`'s fd and `write`'s
+/// count.
 fn stash_i64(n: i64) {
     stash(Slot::Buffer, crate::bytes::gc_bytes(&n.to_le_bytes()));
 }
@@ -1405,10 +1418,19 @@ mod tests {
     ///
     /// **Narrower than its name since [`Sock`] arrived**: it went from "is
     /// registered" to "is registered as a stream" when its body became
-    /// [`with_stream`]. Every existing caller passes an fd `connect` produced,
-    /// so none of them can tell the difference, and the narrowing is what
-    /// makes it the right partner for [`is_listener_for_test`] -- the two
-    /// together say which variant an fd holds, not merely that it holds one.
+    /// [`with_stream`]. Most callers pass an fd `connect` produced and cannot
+    /// tell the difference -- but **one caller deliberately can, and its whole
+    /// assertion rests on it**:
+    /// `net_listen_binds_an_ephemeral_port_and_registers_a_listener` checks
+    /// `!is_open_for_test(fd)` against an fd **`net_listen`** produced, which
+    /// is the narrowing being observed rather than merely tolerated. That is
+    /// what makes this the right partner for [`is_listener_for_test`] -- the
+    /// two together say which variant an fd holds, not merely that it holds
+    /// one.
+    ///
+    /// The sentence this replaced claimed no caller could tell the difference.
+    /// That was false the moment it was written: the assertion above shipped in
+    /// the very same commit, two screens further down this file.
     fn is_open_for_test(fd: i64) -> bool {
         with_stream(fd, |_| ()).is_some()
     }
@@ -2283,10 +2305,19 @@ mod tests {
 
     /// The one test that proves `finish_connect`'s successful path really
     /// does stash the new fd via `fs::Slot::Buffer` -- the side channel
-    /// Task 5's Nova-facing wrapper will read from, and the piece every
-    /// other test in this file deliberately bypasses (see
+    /// Task 5's Nova-facing wrapper will read from, and the piece every other
+    /// ***connect*** test in this file deliberately bypasses (see
     /// [`state_slot_of`]'s own doc comment for why they do, and why that is
     /// not itself a hole in coverage without this test to fill it).
+    ///
+    /// **Scoped to the connect tests deliberately.** This once read "every
+    /// other test in this file", which was false: the `read`/`read_timeout`
+    /// tests have always read `Slot::Buffer` through `take_bytes_for_test`, and
+    /// `net_listen`'s and `net_local_port`'s tests read it through `take_fd`.
+    /// What is special here is not touching the slot at all -- it is being the
+    /// only test that reads *`finish_connect`'s* fd from it rather than out of
+    /// the state object, which is the ordering hazard [`state_slot_of`]
+    /// documents.
     ///
     /// Spawns the connect future directly (`nova_rt_task_spawn`, not
     /// `nova_rt_task_block_on`) so this test -- not `block_on` -- controls
