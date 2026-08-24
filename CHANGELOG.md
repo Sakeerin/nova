@@ -459,8 +459,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pub record TcpListener { fd: Int }` plus
   `bind(addr: String) -> Result<TcpListener, IoError>`,
   `local_port(self) -> Result<Int, IoError>`,
-  `accept(self) -> Result<TcpStream, IoError>` and a `close` matching
-  `TcpStream`'s. Three intrinsics (`STD_ONLY` 66 → 69): `net_listen` and
+  `async accept(self) -> Result<TcpStream, IoError>` and an
+  `async close(self) -> Result<(), IoError>` matching `TcpStream`'s. The
+  `async` markers belong in this list rather than being flattened out of
+  it: `bind` and `local_port` cannot suspend and so are plain `fn`, while
+  `close` is `async` anyway to match `TcpStream::close` — the one
+  deliberate exception to that rule, and the distinction §16 spends a
+  paragraph on. Three intrinsics (`STD_ONLY` 66 → 69): `net_listen` and
   `net_local_port` cannot suspend and so take `net_close`'s plain
   status-word shape with no poll function, while `net_accept` does suspend
   and has one hand-written `extern "C-unwind"` poll function, written
@@ -473,23 +478,34 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than a lookup that succeeds oddly.
   `accept` returns a `TcpStream` indistinguishable from a connected one, so
   every existing `Read`, `Write`, `read_timeout` and `close` works on it.
-  Nothing in the poller changed: accept-readiness is read-readiness on both
-  `select` and `WSAPoll`, so `Interest` gained no variant.
+  The poller's `Interest` and its wait logic did not change:
+  accept-readiness is read-readiness on both `select` and `WSAPoll`, so
+  `Interest` gained no variant. This said "nothing in the poller changed",
+  which was too broad — `poll.rs`'s module doc comment did change, and
+  nothing else in the file did.
   **Two failures collapse to `IoError { kind: Other }`, deliberately**:
   `IoErrorKind` has eight variants and `AddrInUse` is not one, so an
   address already in use is separable only by the OS message; wrong-kind
   access collapses the same way, because one kind-checked table reports
   absent and wrong-kind through the same `None`. Adding a variant is a
   wire-contract change across two crates and was not made.
-  **What this does not close.** Concurrency is not proven: no fixture parks
-  two sockets at once, there is no `select`/`race`/`join_all`, and one
-  socket wait per task is enforced by process abort, so a server needs two
-  tasks minimum. `accept` also makes the poller's `FD_SETSIZE` rejection
-  path reachable from Nova for the first time — on Unix a descriptor at or
-  above the ceiling is skipped, never re-watched, and its task is never
-  woken and never errors — and that path has still never executed on any
-  platform; see the dated amendment in
-  `docs/adr/0013-io-poller.md`. The non-blocking assertions are
+  **What this does not close.** Concurrency is not proven *at scale*.
+  This said "no fixture parks two sockets at once"; the fixture added by
+  this increment falsifies that, parking two tasks on two sockets on every
+  run, which is what shows the park path works at all. What stays unproven
+  is *many* concurrent connections: there is no `select`/`race`/`join_all`,
+  and one socket wait per task is enforced by process abort, so a server
+  needs two tasks minimum. `accept` also makes a many-descriptor process
+  the first *realistic* shape for this module. It does not make the
+  poller's `FD_SETSIZE` rejection path reachable — that rejection is on a
+  descriptor's number, one socket at a time, so one socket has always
+  sufficed, and `std/fs`'s long-lived descriptors could already push a
+  socket's number past the ceiling with no listener involved. On Unix a
+  descriptor at or above the ceiling is skipped, never re-watched, and its
+  task is never woken and never errors; no `IoError` reaches the Nova
+  program, though the process does emit a rate-limited warning line. That
+  path has still never executed on any platform; see the dated amendment
+  in `docs/adr/0013-io-poller.md`. The non-blocking assertions are
   platform-conditional, decided by a kernel-calibrated probe, and where it
   declines the coverage is *unknown* rather than claimed. UDP and Unix
   sockets stay unbuilt. **Phase 2 is not complete**: positions 10 and 12,

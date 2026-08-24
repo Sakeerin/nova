@@ -447,11 +447,27 @@ builtins! {
     /// the next time `std/net` grows — **this sentence has already been
     /// rewritten twice for exactly that reason**, once when
     /// [`Builtin::NetLocalPort`] landed and again when
-    /// [`Builtin::NetAccept`] did. Two rewrites over three staleness events:
-    /// `main`'s "the three below it" first went wrong when
-    /// [`Builtin::NetListen`] arrived and was left standing for an increment.
-    /// Those status words return an `i64` directly,
-    /// synchronously; this one returns a `*mut u8` future state object
+    /// [`Builtin::NetAccept`] did.
+    ///
+    /// The archaeology that used to close this paragraph is retracted rather
+    /// than recounted. It said: "Two rewrites over three staleness events:
+    /// `main`'s 'the three below it' first went wrong when
+    /// [`Builtin::NetListen`] arrived and was left standing for an
+    /// increment." The count and the ordinal are both wrong, under either
+    /// reading of the wording they describe. Read as its own words invite --
+    /// the next three variants -- "the three below it" was **already** wrong
+    /// on `main`, because [`Builtin::NetClose`] is the variant directly below
+    /// and is not a future constructor at all. Read as the three *other*
+    /// future constructors, it stayed true through both
+    /// [`Builtin::NetListen`] and [`Builtin::NetLocalPort`], since both are
+    /// status words, and only [`Builtin::NetAccept`] falsified it. So
+    /// [`Builtin::NetListen`] falsified no wording here at all. The sentence
+    /// it did falsify was [`Builtin::NetClose`]'s own "the one member of this
+    /// group of five", and that was corrected in the very commit that added
+    /// [`Builtin::NetListen`] rather than left standing.
+    ///
+    /// Those status words return an `i64` directly and synchronously; this
+    /// one returns a `*mut u8` future state object
     /// (surfaced to Nova as `Future<Int>`) that must itself be `.await`ed to
     /// produce the `Int` status — `0` on success, with the new fd waiting in
     /// [`Builtin::FsTakeBytes`] as an 8-byte little-endian payload, the same
@@ -465,14 +481,24 @@ builtins! {
     /// `net_close(fd: Int) -> Int` — close `fd`, dropping the underlying
     /// handle and releasing its OS handle.
     ///
-    /// **Not a future constructor**, unlike [`Builtin::NetConnect`] and the
-    /// read/write group below it — an ordinary status word, exactly
-    /// [`Builtin::FileClose`]'s shape, for the identical reason: idempotent,
+    /// **Not a future constructor**, unlike every future constructor
+    /// [`Builtin::NetConnect`]'s own doc comment rosters — an ordinary status
+    /// word, exactly [`Builtin::FileClose`]'s shape, for the identical reason:
+    /// idempotent,
     /// since `std/net`'s `close` cannot consume its receiver (Nova has no
     /// move checking), so a caller can always reach a second call, and
     /// closing an already-closed, stale, or forged fd finds nothing in the
     /// runtime's handle table and still reports success. No payload. Runtime
     /// symbol `nova_rt_net_close` (`crates/nova-runtime/src/net.rs`).
+    ///
+    /// That contrast read "unlike [`Builtin::NetConnect`] and the read/write
+    /// group below it", phrased that way in the commit that added
+    /// [`Builtin::NetListen`] so it would survive the group growing. It did
+    /// not survive [`Builtin::NetAccept`], which is a future constructor
+    /// below this one and is neither a read nor a write, so the one variant
+    /// added after the rewrite is exactly the one the growth-proof phrasing
+    /// excluded. Deferring to [`Builtin::NetConnect`]'s roster leaves one
+    /// list to keep current instead of two that can disagree.
     ///
     /// **Serves a listener as well as a connected stream**, which is why
     /// [`Builtin::NetListen`] adds no close of its own: the runtime keeps both
@@ -555,9 +581,15 @@ builtins! {
     /// `fd` is bound to, which is how a caller learns the kernel's choice after
     /// [`Builtin::NetListen`] on port 0.
     ///
-    /// **Not a future constructor**, the third builtin in this group that is
-    /// not, joining [`Builtin::NetClose`] and [`Builtin::NetListen`] rather
-    /// than the read/write group: `local_addr` is a `getsockname` call over
+    /// **Not a future constructor**, joining [`Builtin::NetClose`] and
+    /// [`Builtin::NetListen`] rather than the future constructors
+    /// [`Builtin::NetConnect`]'s own doc comment rosters. This read "the third
+    /// builtin in this group that is not", contrasted "rather than the
+    /// read/write group": the ordinal ranks within a group that grows, and
+    /// "the read/write group" stopped naming the future constructors the
+    /// moment [`Builtin::NetAccept`] joined them, which is the same pair of
+    /// habits corrected at [`Builtin::NetConnect`] and [`Builtin::NetClose`]
+    /// above. `local_addr` is a `getsockname` call over
     /// bookkeeping the kernel already holds, so there is no suspension to model
     /// and `std/net`'s `local_port` is a plain `fn` rather than an `async fn`.
     ///

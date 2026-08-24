@@ -1,8 +1,14 @@
 // A real connection, end to end, across the listener this increment added:
 // `bind` on port 0, `local_port` to learn the kernel's choice, `accept`
 // parking until a client arrives, then one round trip over the accepted
-// stream. Unlike every other `std/net` fixture, this one needs no Rust peer
-// in `run_tests.rs` -- both ends are Nova, in two tasks of one process.
+// stream. **The only `std/net` fixture with no port file and no Rust peer**
+// -- both ends are Nova, in two tasks of one process. (This said "Unlike
+// every other `std/net` fixture, this one needs no Rust peer in
+// `run_tests.rs`". `net_refused` needs none either: its whole point is that
+// nothing is listening, so it calls `write_refused_port_file` and no
+// `EchoServer`. It does take a port file, which is what leaves the property
+// above exclusive -- and exclusive in a way that survives the group
+// growing, unlike a bare "unlike every other".)
 //
 // **This is `local_port`'s only runtime fixture.** Until it existed, nothing
 // under `tests/runtime` called `local_port` at all, and that gap was not
@@ -18,9 +24,17 @@
 // below flips to `server: port in range false` and the second becomes
 // `nova: panic: accept: socket is not open`, exit 127 -- so the swap fails
 // both this golden and the test's `.success()`, on the *first* line, with no
-// hang anywhere. (Beware measuring this the cheap way: `std` is embedded in
-// the compiler by `include_str!`, so editing `std/net/lib.nova` and rerunning
-// a stale `nova` binary reports a false pass. It must be rebuilt.)
+// hang anywhere.
+//
+// **BEWARE MEASURING ANY STD-SIDE MUTATION THE CHEAP WAY**, here or anywhere
+// in this project. Every `std/*/lib.nova` is embedded in the compiler by
+// `include_str!`, so editing one and rerunning a stale `nova` binary
+// exercises the std that was baked into that binary, not the mutation --
+// and it reports a **false pass**, which is the direction that does not
+// announce itself. This is not specific to `std/net`, and not specific to
+// the measurement above: it applies to every mutation of every std module,
+// including the ones a future increment will run against modules that do
+// not exist yet. The compiler must be rebuilt before the run counts.
 //
 // **The port is asserted by value, not merely by `Ok`.** Two ways, because
 // neither alone is enough, and the first is load-bearing precisely because of
@@ -66,13 +80,28 @@
 // so it is last. That is what makes this fixture safe to run in parallel with
 // the rest of the suite; it is not a timing assertion at all.
 //
-// What this does *not* pin: that `accept` genuinely parks rather than
-// blocking the executor thread. Nothing in this output can tell those apart,
-// for exactly the reason `net_roundtrip.nova`'s header gives about `connect`
-// -- both eventually produce the same bytes. The park is pinned on the
-// runtime side instead, by
+// **WHAT THIS PINS ABOUT THE PARK, AND HOW WEAKLY.** This paragraph used to
+// say it pins nothing: "Nothing in this output can tell those apart, for
+// exactly the reason `net_roundtrip.nova`'s header gives about `connect` --
+// both eventually produce the same bytes." That reason does not transfer,
+// and why it does not is this fixture's whole shape. `net_roundtrip`'s peer
+// is an independent Rust thread in `run_tests.rs`, so a blocking `connect`
+// there still completes and still produces the same bytes. Here the only
+// thing that can ever connect is the client task, which this same executor
+// thread must poll -- and it has not been polled when `accept` first runs,
+// because `spawn` merely enqueues it. So a blocking `accept` blocks the one
+// thread that could produce its own client: the process hangs and prints
+// none of the six lines. This fixture does discriminate.
+//
+// It discriminates by **hanging**, which is strictly weaker than a named
+// failure -- a hang cites no line and arrives as a CI timeout. That is not
+// hypothetical: deleting `net_listen`'s `set_nonblocking(true)` is what hung
+// the runtime-side test, as `nova_rt_net_listen`'s own doc comment records.
+// So the assertion still lives on the runtime side, in
 // `accept_parks_until_a_client_connects_then_yields_a_stream_fd` in
-// `crates/nova-runtime/src/net.rs`.
+// `crates/nova-runtime/src/net.rs`, which reads the mode back where the
+// platform allows it and names the failure where it cannot. Read this as
+// "the park is pinned here only by a hang", not as "not pinned here".
 //
 // **THREE OF THE SIX GOLDEN LINES REST ON CIRCUMSTANCE, NOT ON CONTRACT**, and
 // a reader changing the payload needs to know which. `Write::write` here is

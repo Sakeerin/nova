@@ -20,15 +20,28 @@
 //! **No longer true, as of 2026-08-16 (branch `io-poller-std-net`):** this
 //! module's doc comment used to say no caller in this crate ever builds a
 //! non-empty `sockets` slice. `net.rs` now does -- `connect`, `read`, `write`,
-//! `read_timeout` and `accept`'s poll functions stage a `Wait::Io` through
-//! `task.rs`'s `stage_io_park` at five sites between them, so `task.rs`'s
-//! `io_parks` returns a non-empty slice in production and the non-empty path
-//! below is reached by ordinary Nova programs, not only by this module's own
-//! tests against real loopback sockets. Those tests remain the only thing that
-//! exercises it *directly*. A **listening** socket is watched through the same
-//! `Interest::Read` a stream is, with no new variant: `select` reports a
-//! pending connection in its read set and `WSAPoll` reports it as
-//! `POLLRDNORM`.
+//! `read_timeout` and `accept`'s poll functions each stage a `Wait::Io`
+//! through `task.rs`'s `stage_io_park`, so `task.rs`'s `io_parks` returns a
+//! non-empty slice in production and the non-empty path below is reached by
+//! ordinary Nova programs rather than only by tests. A roster with no count:
+//! this said "at five sites between them", and a count here goes stale the
+//! next time `std/net` grows, exactly as ADR 0013's roster of these same
+//! poll functions already did once.
+//!
+//! **The callers that reach [`wait`] directly are not only this module's own
+//! tests**, though that is what this paragraph claimed until the final review
+//! of branch `std-net-listener` -- and that branch made the claim more wrong
+//! rather than less. `net.rs`'s test helpers call `crate::poll::wait`
+//! themselves, to block on real readiness rather than sleep while waiting for
+//! a peer's bytes or a peer address, and the accept test added on that branch
+//! calls it a third time. So the direct callers are `task.rs`'s
+//! `run_to_completion` in production, plus this module's own tests and
+//! `net.rs`'s -- a roster that grows whenever a test needs to wait on a real
+//! socket without an executor to park in.
+//!
+//! A **listening** socket is watched through the same `Interest::Read` a
+//! stream is, with no new variant: `select` reports a pending connection in
+//! its read set and `WSAPoll` reports it as `POLLRDNORM`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -45,7 +58,9 @@ pub struct RawSocket(pub i64);
 ///
 /// Both variants are constructed in production now: `net.rs` stages
 /// `Interest::Write` for a `connect` and a `write`, and `Interest::Read` for a
-/// `read` and a `read_timeout`. An earlier `#[allow(dead_code)]` here recorded
+/// `read`, a `read_timeout` and an `accept` -- accept-readiness being read
+/// readiness, which is why watching a listener needed no third variant. An
+/// earlier `#[allow(dead_code)]` here recorded
 /// that `wait` below only *matched* on them and nothing built one outside a
 /// test; that stopped being true when `net.rs` landed, and the attribute is
 /// gone with it rather than left to mask a genuinely dead variant later.

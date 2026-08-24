@@ -43,10 +43,19 @@ this increment writes should correct that as it goes.
 terminating fixture that exercises a real connection end to end; Rust unit tests for the two
 non-suspending intrinsics; the records in §8.
 
-**Out, deliberately.** Concurrency is *not* proven by this increment. No fixture will park two
-sockets at once, no `select`/`race`/`join_all` is added, the `FD_SETSIZE` skip path is not fixed,
-UDP and Unix sockets stay unbuilt, and `IoErrorKind` gains no variant. Each exclusion is recorded
-in §6 or §8 as a known limitation, not left silent.
+**Out, deliberately.** Concurrency is *not* proven **at scale** by this increment. **Many**
+concurrent connections stay unproven, no `select`/`race`/`join_all` is added, the `FD_SETSIZE` skip
+path is not fixed, UDP and Unix sockets stay unbuilt, and `IoErrorKind` gains no variant. Each
+exclusion is recorded in §6 or §8 as a known limitation, not left silent.
+
+> **CORRECTED 2026-08-24, final whole-branch review.** This read "No fixture will park two sockets
+> at once." §8's own fixture falsifies it: `accept` parks the server task on the listener, the
+> spawned client's first poll parks unconditionally (`platform_connect` folds a synchronous loopback
+> `connect` into would-block too), and the executor reaches its poller only once the ready queue has
+> drained — so two tasks sit parked on two sockets on every run, under every legal schedule. The
+> sentence was reaching for *scale*, and Task 5 transcribed it literally into `20-STDLIB.md` and
+> `CHANGELOG.md`, where three review dimensions then found it. Corrected here because this file is
+> the origin, and a future increment will read it as precedent.
 
 ---
 
@@ -193,13 +202,23 @@ in code or records; none is fixed here.
    pinned by "a second I/O wait in the same poll must collide" (`task.rs:3676`) and again with a
    deadline present (`:3693`). A listener plus a live connection is therefore **two tasks minimum**,
    and there is no `select`/`race`/`join_all` to avoid that.
-2. **The `FD_SETSIZE` skip path becomes reachable for the first time.** On Unix, `poll::wait` uses
-   `select`, and an fd at or above the ceiling is skipped and never watched again
-   (`poll.rs:302-313`); because only `read_timeout` stages a deadline, that task is **never woken
-   again and never surfaces an error**. Windows `WSAPoll` has no such ceiling. Neither this path nor
-   the poller's non-`EINTR` error path has ever executed on any platform (`poll.rs:254-257`). A
-   many-connection server reaches both first. **This is the single most important thing this
-   increment records and does not solve.**
+2. **A many-descriptor process becomes the first realistic shape for this module, and the
+   `FD_SETSIZE` skip path is what it runs into.** On Unix, `poll::wait` uses `select`, and an fd at
+   or above the ceiling is skipped and never watched again; because only `read_timeout` stages a
+   deadline, that task is **never woken again and never surfaces an error**, though the process does
+   log a rate-limited warning. Windows `WSAPoll` has no such ceiling. Neither this path nor the
+   poller's non-`EINTR` error path has ever executed on any platform. A many-connection server
+   reaches both first. **This is the single most important thing this increment records and does not
+   solve.**
+
+   > **CORRECTED 2026-08-24, final whole-branch review.** This read "The `FD_SETSIZE` skip path
+   > becomes reachable for the first time," and Task 5 wrote that premise into ADR 0013 and the
+   > CHANGELOG, where four review dimensions found it. It is false: the rejection tests a
+   > descriptor's *number*, one socket at a time, independently of how many sockets are in the wait
+   > set, so **one socket has always sufficed** — and `std/fs`'s `open` already holds an OS
+   > descriptor until an explicit `close`, so descriptor pressure from files alone can push a later
+   > socket past the ceiling with no listener anywhere in the program. `accept` changes which
+   > programs plausibly get there, not whether any can.
 3. **A hung connection is silent.** An untimed `Wait::Io` is never reported as a deadlock
    (`task.rs:1006-1009`), and `block_on` cannot return while any task is parked (`task.rs:992-994`),
    so there is no graceful-shutdown path.
@@ -226,10 +245,19 @@ That last point is a convention with evidence on both sides, so state it accurat
 a prohibition: there is **no blanket ban** on timing assertions in this suite. The established
 practice is to prove parking by **wake order rather than elapsed time** — `sleep(ms)`, "the first
 primitive that parks rather than spins, proved by wake *order* rather than by elapsed time"
-(`run_tests.rs:1196-1197`). The one test that does assert wall-clock time (`elapsed < 15s`,
-`run_tests.rs:5151-5161`) is **precisely the test observed flaking twice during this project's last
-increment**, with its spawned binary dying at `0xc0000005`. That is the argument for order over
-duration here, and it is stronger than a rule that does not exist.
+(`run_tests.rs:1196-1197`).
+
+> **CORRECTED 2026-08-24, final whole-branch review.** This went on to call the `elapsed < 15s`
+> assertion in `run_tests.rs` "the one test that does assert wall-clock time", and derived
+> order-over-duration from its having flaked twice. The superlative is false and the derivation runs
+> the wrong way. `tests/runtime/time_elapsed.nova` asserts wall-clock time three times over and
+> exists to do so, and its own header explains why it **cannot** flake: the clock is monotonic and
+> `sleep` guarantees a floor, so a measurement can only exceed the interval. The real distinction is
+> **bound direction, not duration versus order**. A *lower* bound on elapsed time is safe. A tight
+> *upper* bound is what flaked at `elapsed < 15s`, and `time_elapsed.nova`'s own `as_secs() < 3600`
+> is an upper bound so loose it cannot. So the rule this fixture should follow is not "assert no
+> elapsed time" but "assert no tight upper bound on it" — and here order is available and needs no
+> bound at all, which is the actual reason to prefer it.
 
 **Port 0 is required, not preferred.** A fixed port collides when test binaries run concurrently.
 The existing `dead_addr()` flake (`net.rs:1571-1576`) is that failure: it binds `127.0.0.1:0` and
@@ -252,13 +280,20 @@ mutant's behaviour, not the shipped code's.
 ## 9. Records
 
 - **`20-STDLIB.md` §16** — a dated amendment in house style
-  (`**AMENDED <date> (branch \`<branch>\`):**`). The sentence at `:1509-1512` becomes two-thirds
-  false and must say so in place. The amendment also carries: §1's index line names UDP and Unix
+  (`**AMENDED <date> (branch \`<branch>\`):**`). The sentence at `:1509-1512` becomes partly
+  false and must say so in place, naming which of the three moved rather than giving a fraction.
+  (**CORRECTED 2026-08-24:** this instructed "becomes two-thirds false", and Task 5 transcribed the
+  fraction verbatim. The retracted sentence sets its own denominator — "none of the three is built"
+  over the server side, UDP and Unix sockets — and exactly one shipped, so the fraction was one
+  third. A roster of what moved cannot go stale the way a ratio does.) The amendment also carries: §1's index line names UDP and Unix
   sockets but not the server side; the four new signatures; the `bind`/`local_port` non-`async`
   divergence from `close` and why; and both error collapses from §6.
 - **ADR 0013 (the I/O poller)** — a dated amendment, **not a new ADR**, because what is being
-  accepted is a property of the poller's own design: this increment knowingly makes the
-  never-executed `FD_SETSIZE` skip path reachable for the first time.
+  accepted is a property of the poller's own design: this increment knowingly makes a
+  many-descriptor process the first realistic shape for this module, and the never-executed
+  `FD_SETSIZE` skip path is what such a process runs into. (**CORRECTED 2026-08-24:** this
+  instructed "makes the never-executed `FD_SETSIZE` skip path reachable for the first time" — see
+  the correction under §7 for why that premise is false.)
 - **`CHANGELOG.md`** — `[Unreleased]`, `### Added`, lines at most 78 columns.
 - **No new ADR.** This finishes position 9 in order.
 - **Phase 2 stays incomplete** and the tag stays `v0.2.0-alpha.1`: `00-MASTER-SPEC.md` §7 makes
@@ -274,10 +309,16 @@ mutant's behaviour, not the shipped code's.
   Baseline **1057 passed / 0 failed / 8 ignored**.
 - Clippy `-D warnings` on **both** ubuntu and windows; `cargo fmt --all -- --check`. **MSRV 1.78:
   no `reason = "..."` in any lint attribute.**
-- The ignored GC tests stay ignored and untouched. Note the ignored count is **8 unconditional
+- The ignored GC tests stay ignored and untouched. The attribute census is **8 unconditional
   attributes** (six in `gc.rs`, two in `task.rs`) plus **one conditional** —
-  `#[cfg_attr(target_os = "linux", ignore = ...)]` on `extern_ffi_run` — so the runtime count is 8
-  on Windows and macOS and 9 on Linux, and CI's advisory `--ignored` step is red on Linux by design.
+  `#[cfg_attr(target_os = "linux", ignore = ...)]` on `extern_ffi_run`. Runtime counts:
+  **Windows 8, macOS 0, Linux 1.** CI's advisory `--ignored` step is red on Linux by design.
+  (**CORRECTED 2026-08-24, final whole-branch review:** this said "the runtime count is 8 on Windows
+  and macOS and 9 on Linux". The census was right and the platform mapping was false. All six
+  `gc.rs` attributes sit inside `mod registry` and both `task.rs` attributes inside
+  `mod root_registration`, and **both modules are `#[cfg(windows)]`** — so off Windows those eight
+  tests are not compiled and so cannot be ignored. The single Linux ignore is `extern_ffi_run`,
+  which on macOS *runs*. Task 5 transcribed the false mapping into the plan as well.)
 - The poll ABI is **frozen**. No panic may cross a generated poll boundary.
 - `std/net/lib.nova` is `include_str!`'d, so editing it forces a full workspace rebuild.
 - Commit messages to a UTF-8 file applied with `git commit -F`, **never a heredoc**; each body ends

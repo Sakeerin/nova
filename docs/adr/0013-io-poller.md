@@ -168,18 +168,50 @@ amendment).
   which already carries the identically-shaped deadline-starvation and
   livelock footguns from the park-set amendment, rather than restated here.
 
-- **AMENDED 2026-08-23 (branch `std-net-listener`): `accept` makes this
-  decision's one unexercised rejection path reachable for the first time, and
-  this increment records that rather than solving it.** `std/net` gained
-  `bind`/`accept`/`local_port`, so a Nova program can now hold a listening
-  socket and any number of accepted ones at once — where before this poller
-  only ever saw sockets a single `connect` had produced. The Unix arm selects
-  on them with `select`, which rejects any descriptor at or above
-  `FD_SETSIZE`; and because only `read_timeout` stages a deadline, a task
-  whose descriptor is rejected is **never woken again and never surfaces an
-  error**. Windows `WSAPoll` has no equivalent ceiling. So the failure mode a
-  many-connection server reaches first is a task that stops, silently, with
-  nothing to observe.
+- **AMENDED 2026-08-24 (branch `std-net-listener`): `accept` makes a
+  many-descriptor process the first realistic shape for `std/net`, and this
+  increment records this decision's one unexercised rejection path rather
+  than solving it.** `std/net` gained `bind`/`accept`/`local_port`, so a Nova
+  program can now hold a listening socket and any number of accepted ones at
+  once.
+
+  **This amendment first said `accept` makes that path "reachable for the
+  first time", and that the failure mode is a task that stops "silently, with
+  nothing to observe". Both are wrong, and how they are wrong matters more
+  than the corrections.**
+
+  The rejection is on a descriptor's **number**, not on how many sockets are
+  in the wait set: the Unix arm skips a socket `if fd < 0 || fd as usize >=
+  libc::FD_SETSIZE`, once per socket, independently of how long the slice is.
+  **So one socket has always sufficed.** And a route to it predates this
+  increment entirely: `std/fs`'s `open` hands back a `File { fd: Int }` whose
+  OS descriptor stays open until an explicit `close`, so descriptors
+  accumulated there push a later socket's number up — no listener and no
+  `accept` involved anywhere. Whether a particular process can actually get
+  there depends on its own `RLIMIT_NOFILE` relative to `FD_SETSIZE`, which
+  this module does not control and which on many systems are the same number;
+  the point is not that the route is easy but that nothing about `accept` is
+  what opens it. **Read, not run**, like the path itself.
+
+  What is true is that `accept` makes a many-descriptor process the first
+  *realistic* shape for this module, which is what makes the ceiling worth a
+  reader's attention now rather than in principle. The Unix arm selects with
+  `select`, which rejects any descriptor at or above `FD_SETSIZE`; and because
+  only `read_timeout` stages a deadline, a task whose descriptor is rejected
+  is **never woken again and never surfaces an error**. Windows `WSAPoll` has
+  no equivalent ceiling. So the failure mode a many-connection server reaches
+  first is a task that simply stops.
+
+  **Nothing in the language can observe that, but the process is not silent
+  — both halves matter.** No `IoError` ever reaches the Nova program, so
+  nothing written in this language can branch on it, retry, or report it;
+  that is the real defect and it is unchanged. But the process does emit a
+  rate-limited `tracing::warn!` line naming the offending socket and
+  `FD_SETSIZE` (at most one line per second, gated because that loop runs
+  once per socket per call), and `nova-cli` installs a subscriber at `WARN`
+  by default, so an operator reading stderr sees it. The poller's own comment
+  two lines above the call already says "`tracing::warn!` rather than
+  silence".
 
   That path was already labelled, and the label is still accurate. This
   file's own poller reads, verbatim at `crates/nova-runtime/src/poll.rs`:
@@ -188,15 +220,14 @@ amendment).
   descriptor number above `FD_SETSIZE`, the other a real socket-level fault --
   so both remain read-not-run on every platform, Windows included."
 
-  Nothing in this increment changes that. What changed is only that the path
-  is now **reachable from Nova** rather than reachable in principle: before
-  `accept` existed, a program had no way to accumulate enough descriptors to
-  approach the ceiling through this module at all. The decision to leave it
-  stands on the same ground the Decision section gives for choosing
-  `select`/`WSAPoll` over IOCP, and a cap or a `poll(2)`-based Unix arm is a
-  later increment's to make — but a reader deciding whether to point
-  `std/net` at a socket that accepts should know that this is where it breaks
-  and that nothing has ever executed the break.
+  Nothing in this increment changes that. What changed is only which shapes
+  of program make the ceiling plausible to reach — not whether it can be
+  reached, which it always could, and not whether anything has reached it,
+  which nothing has. The decision to leave it stands on the same ground the
+  Decision section gives for choosing `select`/`WSAPoll` over IOCP, and a cap
+  or a `poll(2)`-based Unix arm is a later increment's to make — but a reader
+  deciding whether to point `std/net` at a socket that accepts should know
+  that this is where it breaks and that nothing has ever executed the break.
 
 ## References
 
@@ -212,7 +243,7 @@ amendment).
   `io_parks`, `wake_ready`, `wake_due`, `deadlock_report`/`report_deadlock`
 - `crates/nova-runtime/src/net.rs`: the first production source of a
   non-empty socket set for `poll::wait` to see — `connect`, `read`, `write`,
-  `read_timeout` and (since 2026-08-23) `accept` each stage a `Wait::Io`
+  `read_timeout` and (since 2026-08-24) `accept` each stage a `Wait::Io`
   through `stage_io_park`, `read_timeout` being the only one that passes a
   deadline; no count is given here because an earlier wording named four and
   `accept`'s arrival falsified it; `task.rs`'s `run_to_completion` remains

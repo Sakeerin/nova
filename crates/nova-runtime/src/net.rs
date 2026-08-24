@@ -382,15 +382,21 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 /// **Which platforms that covers is decided at runtime, not asserted here.**
 /// An earlier version of this paragraph claimed the mode is readable "on Linux
 /// and macOS" and that the deletion "fails a named assertion on
-/// `ubuntu-latest` and `macos-latest`". That was a guess, and probably a wrong
-/// one: `std` sets the mode with `ioctl(FIONBIO)` rather than
-/// `fcntl(F_SETFL)`, and those are the same bit only where the kernel makes
-/// them so -- Linux handles `FIONBIO` in the VFS and updates the `f_flags`
-/// that `F_GETFL` returns, while a BSD-derived kernel routes socket `FIONBIO`
-/// to socket state `F_GETFL` does not report. Asserting the equivalence would
-/// have reddened **every green run** on any platform where it does not hold,
-/// so `nonblocking_for_test` now measures whether the read-back works before
-/// trusting it, and skips where it does not. See its doc comment.
+/// `ubuntu-latest` and `macos-latest`". That was a guess: `std` sets the mode
+/// with `ioctl(FIONBIO)` rather than `fcntl(F_SETFL)`, and those are the same
+/// bit only where the kernel makes them so.
+///
+/// **Which kernels those are is a question this file deliberately does not
+/// answer.** It used to answer it, flatly -- Linux updates the `f_flags`
+/// `F_GETFL` returns, a BSD-derived kernel routes socket `FIONBIO` to socket
+/// state `F_GETFL` does not report. Two readings of the kernel sources
+/// disagree about that, neither is settleable from this project, and **the
+/// point of the calibration is that it need not be settled.**
+/// `nonblocking_for_test` measures whether the read-back works on the kernel
+/// actually running and skips where it does not, so no assertion here rests
+/// on which reading is right. Asserting the equivalence instead would have
+/// reddened **every green run** wherever it does not hold. See
+/// `nonblocking_for_test`'s doc comment.
 ///
 /// Windows always skips: the mode is set with `ioctlsocket(FIONBIO)` and no
 /// Win32 call reports it back, so there the only observation available really
@@ -1700,8 +1706,26 @@ mod tests {
 
     /// Test-only: `O_NONBLOCK` as `fcntl(F_GETFL)` reports it for `socket`.
     ///
-    /// The read half of `crate::poll`'s own `platform_set_nonblocking` --
-    /// same call, same cast, same constant -- with only the mask added.
+    /// Related to `crate::poll`'s own `platform_set_nonblocking` -- same
+    /// `fcntl(F_GETFL)` call, same cast, same constant. This was described as
+    /// "the read half of" that function "with only the mask added", which
+    /// understated the differences enough to mislead, so they are named.
+    /// That function makes a **second** call this one never makes,
+    /// `fcntl(F_SETFL, flags | O_NONBLOCK)`, so `O_NONBLOCK` is an OR there
+    /// and an AND mask here; and it reports a failed `fcntl` as an `Err`,
+    /// where this one ends the test, which is right for a test helper and
+    /// would be wrong on a poll path.
+    ///
+    /// **The larger difference is that it is not that setter's work this
+    /// reads back.** Both production calls this helper is pointed at --
+    /// `nova_rt_net_listen`'s and `try_accept`'s -- go through `std`'s own
+    /// `TcpListener`/`TcpStream::set_nonblocking`, which on unix is
+    /// `ioctl(FIONBIO)`. `platform_connect` is the caller that uses
+    /// `platform_set_nonblocking`. So naming this the read half of
+    /// `platform_set_nonblocking` named the wrong counterpart for the use it
+    /// actually has -- and that mismatch is exactly why
+    /// [`fcntl_observes_std_nonblocking`] calibrates against `std`'s setter
+    /// rather than against this crate's.
     #[cfg(unix)]
     fn o_nonblock_is_set(socket: crate::poll::RawSocket) -> bool {
         let fd = socket.0 as std::os::unix::io::RawFd;
@@ -1726,14 +1750,21 @@ mod tests {
     /// `ioctl(fd, FIONBIO, &1)` on every unix but Solaris, illumos and Vita
     /// (`library/std/.../socket/unix.rs`, and its own comment there says
     /// "FIONBIO is inadequate for sockets on illumos/Solaris"). `FIONBIO` and
-    /// `O_NONBLOCK` are only the *same* bit where the kernel makes them so:
-    /// Linux handles `FIONBIO` generically in the VFS and sets the file's
-    /// `f_flags`, which is exactly what `F_GETFL` returns, so the two agree;
-    /// on a BSD-derived kernel the socket `FIONBIO` path sets socket state
-    /// that `F_GETFL` does not report, and only `F_SETFL` writes both. So a
-    /// `#[cfg(unix)]` assertion here would be asserting an equivalence that
-    /// need not hold, and **the failure would land on every green run**, not
-    /// only on runs under mutation.
+    /// `O_NONBLOCK` are only the *same* bit where the kernel makes them so.
+    /// **Which kernels make them so is left unanswered on purpose**, and this
+    /// function is the reason it can be. An earlier version of this paragraph
+    /// answered it flatly: "Linux handles `FIONBIO` generically in the VFS
+    /// and sets the file's `f_flags`, which is exactly what `F_GETFL`
+    /// returns, so the two agree; on a BSD-derived kernel the socket
+    /// `FIONBIO` path sets socket state that `F_GETFL` does not report, and
+    /// only `F_SETFL` writes both." Two readings of the kernel sources
+    /// conflict on that, and neither can be settled from this project or from
+    /// this host. Nothing below needs it settled: the probe reports what the
+    /// running kernel actually does. So a `#[cfg(unix)]` assertion here would
+    /// be asserting an equivalence that need not hold, and **the failure
+    /// would land on every green run**, not only on runs under mutation --
+    /// which is the argument for measuring, and it does not depend on either
+    /// reading being the right one.
     ///
     /// Rather than ship that guess -- from a host where no unix arm can even
     /// be compiled -- this asks the running kernel. It is **two-sided on
@@ -3455,15 +3486,32 @@ mod tests {
     /// version of this paragraph asserted "Linux and macOS" outright, which
     /// would have reddened every green run wherever that is false.
     ///
-    /// **One known way this can flake, shared with `dead_addr`.** The first
-    /// poll asserts that *nothing* has connected yet, and this listener holds
-    /// an ephemeral port a sibling test in this same binary could in principle
-    /// dial: [`dead_addr`] binds `127.0.0.1:0` and then drops the listener, so
-    /// the port it returns is free for this test to be handed and for
-    /// `connecting_to_a_closed_port_is_connection_refused` to then dial. That
-    /// window is the pre-existing flake [`dead_addr`]'s own comment records,
-    /// not a new one, and this test keeps its listener alive for the listener's
-    /// whole life rather than reproducing the shape.
+    /// **One known way this can flake -- and this test introduced a second
+    /// binder into the enumeration.** The first poll asserts that *nothing*
+    /// has connected yet, and this listener holds an ephemeral port a sibling
+    /// test in this same binary could in principle dial. Two things in this
+    /// binary bind `127.0.0.1:0` and then drop it, freeing the port for
+    /// whoever the kernel hands it to next:
+    ///
+    /// - [`dead_addr`], whose returned port
+    ///   `connecting_to_a_closed_port_is_connection_refused` then dials.
+    /// - [`fcntl_observes_std_nonblocking`]'s calibration, which binds **two**
+    ///   listeners and drops both when its closure returns. On unix only,
+    ///   since that function is `#[cfg(unix)]`, and reached only from this
+    ///   test, which is its sole caller. Because it runs after this test has
+    ///   already bound, the ports it frees are a window for *siblings* rather
+    ///   than for this test.
+    ///
+    /// That second entry is the correction. This paragraph concluded that the
+    /// window "is the pre-existing flake [`dead_addr`]'s own comment records,
+    /// **not a new one**" while enumerating only [`dead_addr`] -- and the
+    /// calibration shipped in the same increment as that conclusion, inside
+    /// the very test this comment documents. It is the same *kind* of window,
+    /// and it is a second instance of the bind-then-drop shape the design
+    /// spec said not to introduce, so "not a new one" was wrong about the
+    /// count even though it was right about the kind. This test itself still
+    /// holds its listener for the listener's whole life and does not
+    /// reproduce the shape.
     #[test]
     fn accept_parks_until_a_client_connects_then_yields_a_stream_fd() {
         let addr = crate::gc_str("127.0.0.1:0");
