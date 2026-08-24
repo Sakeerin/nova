@@ -90,8 +90,12 @@
 // thing that can ever connect is the client task, which this same executor
 // thread must poll -- and it has not been polled when `accept` first runs,
 // because `spawn` merely enqueues it. So a blocking `accept` blocks the one
-// thread that could produce its own client: the process hangs and prints
-// none of the six lines. This fixture does discriminate.
+// thread that could produce its own client: the process hangs after printing
+// only the first of the six lines. Only the first, because
+// `server: port in range` is printed before `spawn` and before `accept` --
+// which is the same ordering the "deterministic and first" paragraph above
+// relies on. Five of six lines missing is still a decisive difference from
+// the golden, so this fixture does discriminate.
 //
 // It discriminates by **hanging**, which is strictly weaker than a named
 // failure -- a hang cites no line and arrives as a CI timeout. That is not
