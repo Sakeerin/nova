@@ -444,9 +444,13 @@ builtins! {
     /// this one are a mix of future constructors and status words in no
     /// particular order, so "the three below it" would read as "the next
     /// three" and be wrong that way, and any number written here goes stale
-    /// the next time `std/net` grows — it has already gone stale twice, at
-    /// [`Builtin::NetLocalPort`] and again at [`Builtin::NetAccept`]. Those
-    /// status words return an `i64` directly,
+    /// the next time `std/net` grows — **this sentence has already been
+    /// rewritten twice for exactly that reason**, once when
+    /// [`Builtin::NetLocalPort`] landed and again when
+    /// [`Builtin::NetAccept`] did. Two rewrites over three staleness events:
+    /// `main`'s "the three below it" first went wrong when
+    /// [`Builtin::NetListen`] arrived and was left standing for an increment.
+    /// Those status words return an `i64` directly,
     /// synchronously; this one returns a `*mut u8` future state object
     /// (surfaced to Nova as `Future<Int>`) that must itself be `.await`ed to
     /// produce the `Int` status — `0` on success, with the new fd waiting in

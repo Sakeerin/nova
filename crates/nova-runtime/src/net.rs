@@ -368,14 +368,27 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 /// passes, so that one test is the whole of the coverage -- counted, not
 /// assumed, across all 44 targets.
 ///
-/// **A hang is weaker than an assertion and is recorded as such.** Under
-/// `cargo test` it surfaces as a CI timeout with no message naming this line,
-/// which is a build failure but a poor diagnostic. Making it an assertion
-/// instead would need a portable "is this handle non-blocking" query, and
-/// there is none: Windows offers no way to read a socket's blocking mode back,
-/// so the only observation available is that an operation which should have
-/// returned immediately did not. The accepted stream's own `set_nonblocking`
-/// in [`try_accept`] is pinned the same way and for the same reason.
+/// **A hang is weaker than an assertion, so on the two platforms that can do
+/// better there is now an assertion as well.**
+/// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` reads this
+/// listener's blocking mode back before its first poll, through
+/// `nonblocking_for_test`, and names the failure. That check is **unix-only,
+/// and the asymmetry is in the platform APIs rather than in the test**:
+///
+/// * On **Linux and macOS** the mode is readable. `fcntl` has an `F_GETFL`
+///   companion to the `F_SETFL` that sets the bit, so deleting the call below
+///   fails a named assertion on `ubuntu-latest` and `macos-latest`.
+/// * On **Windows** it is not. The mode is set with `ioctlsocket(FIONBIO)`,
+///   which is write-only, and no Win32 call reports it back -- so on
+///   `windows-latest` the only observation available really is that an
+///   operation which should have returned immediately did not, and the
+///   deletion still surfaces as the hang described above rather than as a
+///   message.
+///
+/// So the diagnostic is good on two of three CI platforms and a timeout on the
+/// third, which is the best this API surface allows. The accepted stream's own
+/// `set_nonblocking` in [`try_accept`] is still pinned only by the hang shape,
+/// via that test's closing [`try_read`] probe.
 ///
 /// Uses `std::net::TcpListener::bind` directly, unlike `connect`, which had to
 /// issue its own syscall (see this module's own header): there is no
@@ -1382,6 +1395,16 @@ enum AcceptStep {
 /// the other two. The listener's own `set_nonblocking` in
 /// [`nova_rt_net_listen`] governs the `accept` call; this one governs every
 /// operation on what it returns.
+///
+/// **If that `set_nonblocking` fails, the just-accepted `TcpStream` is
+/// dropped, which closes the connection on the peer.** That is the intended
+/// behaviour and not an oversight: the stream has not been registered yet, so
+/// returning the status without dropping it would either leak the handle or
+/// leave a blocking socket in the table for a later `read` to stall the
+/// executor on. The peer sees the connection accepted and immediately reset,
+/// and the Nova caller gets an `IoError` from its `accept` rather than a
+/// `TcpStream` it cannot use. No other arm here can leave a partially
+/// registered entry.
 fn try_accept(fd: i64) -> AcceptStep {
     let attempt = with_listener(fd, |listener| {
         (raw_socket_of_listener(listener), listener.accept())
@@ -1658,6 +1681,50 @@ mod tests {
     /// with the identical body against [`with_listener`].
     fn is_listener_for_test(fd: i64) -> bool {
         with_listener(fd, |_| ()).is_some()
+    }
+
+    /// Test-only: whether `socket` is non-blocking, read back from the
+    /// kernel -- or `None` where the platform cannot say.
+    ///
+    /// **`Some` on unix, `None` on Windows, and that asymmetry is the point
+    /// rather than a gap.** `fcntl` has an `F_GETFL` companion to the
+    /// `F_SETFL` that [`crate::poll::set_nonblocking`] uses, so on Linux and
+    /// macOS a socket's blocking mode is readable. Windows sets the mode with
+    /// `ioctlsocket(FIONBIO)`, which is write-only, and no Win32 call reports
+    /// the current mode back. Returning an `Option` puts that difference in
+    /// one place instead of a `#[cfg]` at every call site, and makes the
+    /// caller's skip explicit.
+    ///
+    /// The unix body is the first half of `crate::poll`'s own
+    /// `platform_set_nonblocking`, unchanged -- same call, same cast, same
+    /// constant -- with only the mask added. That is deliberate: `Test
+    /// (ubuntu-latest)` and `Test (macos-latest)` already build and run that
+    /// function, so the idiom is measured on both, which matters here because
+    /// **this arm cannot be compiled on a Windows development machine at all**
+    /// (no unix C toolchain for the build script, so even
+    /// `cargo check --target x86_64-unknown-linux-gnu` fails before type
+    /// checking).
+    #[cfg(unix)]
+    fn nonblocking_for_test(socket: crate::poll::RawSocket) -> Option<bool> {
+        let fd = socket.0 as std::os::unix::io::RawFd;
+        // SAFETY: `fcntl(F_GETFL)` reads `fd`'s flags and writes no buffer,
+        // exactly as `platform_set_nonblocking` does before it ORs the bit in.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(
+            flags >= 0,
+            "fcntl(F_GETFL) failed for socket {}: {}",
+            socket.0,
+            std::io::Error::last_os_error()
+        );
+        Some(flags & libc::O_NONBLOCK != 0)
+    }
+
+    /// Windows cannot read a socket's blocking mode back, so it answers
+    /// "cannot say" -- see the unix definition above for why, and why that is
+    /// a platform fact rather than a missing test.
+    #[cfg(not(unix))]
+    fn nonblocking_for_test(_socket: crate::poll::RawSocket) -> Option<bool> {
+        None
     }
 
     /// Test-only: the `(PollFn, state)` pair inside a future's `{ poll_code,
@@ -2978,16 +3045,23 @@ mod tests {
     /// their [`with_stream`] `None` arms without touching the other two.
     ///
     /// **Named rather than counted, and `accept` is deliberately outside it.**
-    /// This used to read "the three futures this task adds", which was a count
-    /// over a population that has since grown -- [`nova_rt_net_accept_future`]
-    /// is a fourth future in this file. It is not folded in here because its
-    /// miss is a *different* lookup: these three go through [`with_stream`] and
-    /// `accept` goes through [`with_listener`], so covering it would not be one
-    /// more iteration of the same shape. **That arm is genuinely unpinned**:
-    /// nothing exercises [`try_accept`]'s `None` case, so a closed, stale,
-    /// forged or wrong-kind fd reaching `accept` reports
-    /// [`closed_fd_error`]'s status by construction rather than by
-    /// measurement.
+    /// This used to read "the three futures this task adds", a count over a
+    /// population that has since grown; the fix is the roster in the sentence
+    /// above, with no number at all. Writing a corrected number here would
+    /// just queue up the next correction -- and the first attempt at this
+    /// paragraph proved the point by calling
+    /// [`nova_rt_net_accept_future`] "a fourth future in this file" when the
+    /// file defines five (`connect`, `read`, `write`, `read_timeout`,
+    /// `accept`).
+    ///
+    /// `accept` is outside this test because its miss is a *different* lookup:
+    /// these three go through [`with_stream`] and `accept` goes through
+    /// [`with_listener`], so covering it here would not be one more iteration
+    /// of the same shape. It has its own test instead --
+    /// [`accepting_on_a_closed_or_wrong_kind_fd_is_an_error_not_a_park`],
+    /// which pins the closed, never-issued and wrong-kind cases against
+    /// [`closed_fd_error`]'s status. An earlier version of this paragraph
+    /// recorded that arm as unpinned; it no longer is.
     #[test]
     fn using_a_closed_socket_is_an_error_not_a_panic_for_read_write_and_read_timeout() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3299,6 +3373,16 @@ mod tests {
     /// `set_nonblocking` this would hang on `ubuntu-latest` alone while passing
     /// here.
     ///
+    /// **The *listener's* non-blocking mode is pinned separately, and by an
+    /// assertion rather than by a hang.** `nonblocking_for_test` reads the
+    /// mode back off the listener before the first poll, so deleting
+    /// [`nova_rt_net_listen`]'s `set_nonblocking(true)` fails with a message
+    /// naming the line on Linux and macOS instead of hanging this test. It
+    /// cannot do the same on Windows, where the mode is write-only; that
+    /// platform split is recorded on both `nonblocking_for_test` and
+    /// [`nova_rt_net_listen`]. It has to run *before* the first poll, because
+    /// against a blocking listener that poll is what never returns.
+    ///
     /// **One known way this can flake, shared with `dead_addr`.** The first
     /// poll asserts that *nothing* has connected yet, and this listener holds
     /// an ephemeral port a sibling test in this same binary could in principle
@@ -3318,6 +3402,22 @@ mod tests {
         let port = take_fd();
         let expected_socket = with_listener(listener_fd, |l| raw_socket_of_listener(l))
             .expect("test setup: the fd must be registered as a listener");
+
+        // Pins `nova_rt_net_listen`'s own `set_nonblocking(true)` with a named
+        // assertion, before the first poll rather than after it, because a
+        // blocking listener makes that poll never return. Skipped where the
+        // platform cannot read the mode back -- see `nonblocking_for_test`, and
+        // `nova_rt_net_listen`'s doc comment for what the deletion looks like
+        // on each platform.
+        if let Some(nonblocking) = nonblocking_for_test(expected_socket) {
+            assert!(
+                nonblocking,
+                "nova_rt_net_listen must leave the listener non-blocking: the \
+                 accept below would otherwise block this thread instead of \
+                 parking the task, and surface as a CI timeout naming no \
+                 line rather than as this message"
+            );
+        }
 
         let fut = unsafe { nova_rt_net_accept_future(listener_fd) };
         let (poll, state) = poll_fn_and_state(fut);
@@ -3394,6 +3494,81 @@ mod tests {
         drop(client);
         assert_eq!(unsafe { nova_rt_net_close(accepted_fd) }, OK);
         assert_eq!(unsafe { nova_rt_net_close(listener_fd) }, OK);
+    }
+
+    /// [`try_accept`]'s `None` arm: an `accept` that finds no listener must
+    /// report an error, not park and not panic. Covers all three ways to miss
+    /// -- a **closed** listener, an fd this module **never issued**, and a
+    /// **connected stream** whose entry is the wrong [`Sock`] variant -- since
+    /// a mutation could plausibly break the kind check while leaving the
+    /// presence check working, or the reverse.
+    ///
+    /// **This is what `std/net`'s `accept` promises in writing**, at
+    /// `std/net/lib.nova`'s "Errors as `IoError { kind: Other }` on a closed,
+    /// stale or forged listener, and on a `TcpListener` whose `fd` actually
+    /// names a connected stream". Nothing measured either half before this
+    /// test: the sibling
+    /// `using_a_closed_socket_is_an_error_not_a_panic_for_read_write_and_read_timeout`
+    /// covers the same ground for the three [`with_stream`] futures and cannot
+    /// be extended to cover this one, because the lookup that fails is
+    /// [`with_listener`].
+    ///
+    /// **`block_on` is safe here, and that is an argument rather than an
+    /// assumption.** All three cases resolve inside [`with_listener`]'s `None`
+    /// arm on the very first poll, before any socket is touched, so no park is
+    /// ever staged -- the same reason
+    /// [`reading_a_listener_fd_is_an_error_not_a_stream_read`] can drive the
+    /// real `read` future this way. Were that reasoning wrong the failure mode
+    /// would be a hang rather than a red assertion, so: the wrong-kind case
+    /// below is the one that would expose it, since it is the only one of the
+    /// three holding a socket that could ever become readable.
+    ///
+    /// **The status is `OTHER` in all three cases, and this pins that rather
+    /// than merely `!= OK`.** The wrong-kind collapse is deliberate and
+    /// recorded on [`closed_fd_error`] -- `fs.rs`'s `IoErrorKind` table has no
+    /// wrong-kind variant -- so a reader looking for a distinguishable
+    /// wrong-kind status will not find one to rely on here either.
+    #[test]
+    fn accepting_on_a_closed_or_wrong_kind_fd_is_an_error_not_a_park() {
+        let addr = crate::gc_str("127.0.0.1:0");
+        // SAFETY: `addr` is the live `NovaStr` allocated immediately above.
+        assert_eq!(unsafe { nova_rt_net_listen(addr) }, OK);
+        let closed_fd = take_fd();
+        assert_eq!(unsafe { nova_rt_net_close(closed_fd) }, OK);
+        let closed =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_accept_future(closed_fd)) };
+        assert_eq!(
+            closed, OTHER,
+            "accepting on a closed listener must report the catch-all error, \
+             not succeed and not park"
+        );
+
+        let absent =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_accept_future(999_999)) };
+        assert_eq!(
+            absent, OTHER,
+            "accepting on an fd this module never issued must report the same \
+             catch-all error a closed listener does"
+        );
+
+        // The far end is held alive for the rest of the test: dropping it would
+        // tear the connection down underneath the assertion and leave a passing
+        // test that proved something else, exactly as
+        // `net_local_port_on_a_stream_fd_is_an_error` records.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let stream_addr = listener.local_addr().expect("addr").to_string();
+        let stream_fd = connect_blocking_for_test(&stream_addr);
+        let (_server, _) = listener.accept().expect("accept");
+        let wrong_kind =
+            unsafe { crate::task::nova_rt_task_block_on(nova_rt_net_accept_future(stream_fd)) };
+        assert_eq!(
+            wrong_kind, OTHER,
+            "a connected stream is the wrong kind for accept, and must report \
+             the same catch-all error an absent fd does -- not accept on \
+             it, and not a distinct wrong-kind code"
+        );
+
+        assert_eq!(unsafe { nova_rt_net_close(stream_fd) }, OK);
     }
 
     /// The exact layout `nova_rt_net_read_future` builds -- the same
