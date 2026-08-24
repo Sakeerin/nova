@@ -7499,6 +7499,31 @@ fn net_lifetime_run() {
         .stdout(expected);
 }
 
+/// `bind`, `local_port`, `accept` and both `close`s, end to end, with a real
+/// connection crossing the listener. **The only `std/net` fixture that needs
+/// no `EchoServer`**: both ends are Nova, in two tasks of one process, so
+/// there is no port file and no Rust peer here — the listener binds
+/// `127.0.0.1:0` itself and hands the kernel's choice to a spawned client
+/// task as a plain `spawn` argument.
+///
+/// Also `local_port`'s only runtime fixture, which is why it exists as much
+/// as the round trip is: `RtFunc::NetClose` and `RtFunc::NetLocalPort` are
+/// indistinguishable in `RtFunc::signature`, and this pins the one direction
+/// of that swap nothing else could. See the fixture's own header.
+#[test]
+fn net_listener_accept_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/net_listener_accept.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/net_listener_accept.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `Duration`'s three constructors and two accessors, over fixed inputs with
 /// no real clock involved. See `tests/runtime/time_conversions.nova`'s own
 /// header for why the fourth line (`from_micros(1).as_millis()` is `0`) is
