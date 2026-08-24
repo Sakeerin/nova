@@ -355,40 +355,48 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 /// of parking the one task, defeating the point of the poller for every
 /// sibling task on it.
 ///
-/// **Now measured, and the answer is a hang rather than a failure.** Deleting
+/// **Now measured. The answer was a hang; it is a named assertion wherever
+/// the mode can be read back, and a hang everywhere else.** Deleting
 /// that `set_nonblocking` call used to fail nothing at all: before
 /// [`nova_rt_net_accept_future`] existed no test reached an `accept`, so the
 /// whole suite stayed green with a blocking listener sitting in the table.
 /// With `accept` in place the deletion was run again, and
-/// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` **hangs**:
+/// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` **hung**:
 /// [`try_accept`]'s `accept` call blocks this thread inside the very first
 /// poll instead of reporting would-block, so the future never returns
 /// `POLL_PENDING`, the executor is blocked rather than the task parked, and
 /// the test binary never exits. Every other test in the workspace still
-/// passes, so that one test is the whole of the coverage -- counted, not
-/// assumed, across all 44 targets.
+/// passed, so that one test is the whole of the coverage -- counted, not
+/// assumed, across all 44 targets. That is still what happens on a platform
+/// that cannot report the mode back, which is why the hang is described here
+/// rather than deleted.
 ///
-/// **A hang is weaker than an assertion, so on the two platforms that can do
-/// better there is now an assertion as well.**
+/// **A hang is weaker than an assertion, so wherever the mode can be observed
+/// there is now an assertion as well.**
 /// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` reads this
 /// listener's blocking mode back before its first poll, through
-/// `nonblocking_for_test`, and names the failure. That check is **unix-only,
-/// and the asymmetry is in the platform APIs rather than in the test**:
+/// `nonblocking_for_test`, and names the failure. The accepted stream's own
+/// `set_nonblocking` in [`try_accept`] is pinned the same way in the same
+/// test, so neither call is hang-only any more.
 ///
-/// * On **Linux and macOS** the mode is readable. `fcntl` has an `F_GETFL`
-///   companion to the `F_SETFL` that sets the bit, so deleting the call below
-///   fails a named assertion on `ubuntu-latest` and `macos-latest`.
-/// * On **Windows** it is not. The mode is set with `ioctlsocket(FIONBIO)`,
-///   which is write-only, and no Win32 call reports it back -- so on
-///   `windows-latest` the only observation available really is that an
-///   operation which should have returned immediately did not, and the
-///   deletion still surfaces as the hang described above rather than as a
-///   message.
+/// **Which platforms that covers is decided at runtime, not asserted here.**
+/// An earlier version of this paragraph claimed the mode is readable "on Linux
+/// and macOS" and that the deletion "fails a named assertion on
+/// `ubuntu-latest` and `macos-latest`". That was a guess, and probably a wrong
+/// one: `std` sets the mode with `ioctl(FIONBIO)` rather than
+/// `fcntl(F_SETFL)`, and those are the same bit only where the kernel makes
+/// them so -- Linux handles `FIONBIO` in the VFS and updates the `f_flags`
+/// that `F_GETFL` returns, while a BSD-derived kernel routes socket `FIONBIO`
+/// to socket state `F_GETFL` does not report. Asserting the equivalence would
+/// have reddened **every green run** on any platform where it does not hold,
+/// so `nonblocking_for_test` now measures whether the read-back works before
+/// trusting it, and skips where it does not. See its doc comment.
 ///
-/// So the diagnostic is good on two of three CI platforms and a timeout on the
-/// third, which is the best this API surface allows. The accepted stream's own
-/// `set_nonblocking` in [`try_accept`] is still pinned only by the hang shape,
-/// via that test's closing [`try_read`] probe.
+/// Windows always skips: the mode is set with `ioctlsocket(FIONBIO)` and no
+/// Win32 call reports it back, so there the only observation available really
+/// is that an operation which should have returned immediately did not, and
+/// the deletion still surfaces as the hang described above rather than as a
+/// message.
 ///
 /// Uses `std::net::TcpListener::bind` directly, unlike `connect`, which had to
 /// issue its own syscall (see this module's own header): there is no
@@ -1396,6 +1404,13 @@ enum AcceptStep {
 /// [`nova_rt_net_listen`] governs the `accept` call; this one governs every
 /// operation on what it returns.
 ///
+/// **Deleting this line is a named assertion failure, not only a hang**, in
+/// `accept_parks_until_a_client_connects_then_yields_a_stream_fd`: it reads the
+/// accepted stream's mode back alongside the listener's, wherever the platform
+/// can report it. Where it cannot, the same test's [`try_read`] probe still
+/// catches the deletion as a hang. See `nonblocking_for_test` for why "wherever
+/// the platform can" is measured at runtime rather than written as a `#[cfg]`.
+///
 /// **If that `set_nonblocking` fails, the just-accepted `TcpStream` is
 /// dropped, which closes the connection on the peer.** That is the intended
 /// behaviour and not an oversight: the stream has not been registered yet, so
@@ -1683,29 +1698,12 @@ mod tests {
         with_listener(fd, |_| ()).is_some()
     }
 
-    /// Test-only: whether `socket` is non-blocking, read back from the
-    /// kernel -- or `None` where the platform cannot say.
+    /// Test-only: `O_NONBLOCK` as `fcntl(F_GETFL)` reports it for `socket`.
     ///
-    /// **`Some` on unix, `None` on Windows, and that asymmetry is the point
-    /// rather than a gap.** `fcntl` has an `F_GETFL` companion to the
-    /// `F_SETFL` that [`crate::poll::set_nonblocking`] uses, so on Linux and
-    /// macOS a socket's blocking mode is readable. Windows sets the mode with
-    /// `ioctlsocket(FIONBIO)`, which is write-only, and no Win32 call reports
-    /// the current mode back. Returning an `Option` puts that difference in
-    /// one place instead of a `#[cfg]` at every call site, and makes the
-    /// caller's skip explicit.
-    ///
-    /// The unix body is the first half of `crate::poll`'s own
-    /// `platform_set_nonblocking`, unchanged -- same call, same cast, same
-    /// constant -- with only the mask added. That is deliberate: `Test
-    /// (ubuntu-latest)` and `Test (macos-latest)` already build and run that
-    /// function, so the idiom is measured on both, which matters here because
-    /// **this arm cannot be compiled on a Windows development machine at all**
-    /// (no unix C toolchain for the build script, so even
-    /// `cargo check --target x86_64-unknown-linux-gnu` fails before type
-    /// checking).
+    /// The read half of `crate::poll`'s own `platform_set_nonblocking` --
+    /// same call, same cast, same constant -- with only the mask added.
     #[cfg(unix)]
-    fn nonblocking_for_test(socket: crate::poll::RawSocket) -> Option<bool> {
+    fn o_nonblock_is_set(socket: crate::poll::RawSocket) -> bool {
         let fd = socket.0 as std::os::unix::io::RawFd;
         // SAFETY: `fcntl(F_GETFL)` reads `fd`'s flags and writes no buffer,
         // exactly as `platform_set_nonblocking` does before it ORs the bit in.
@@ -1716,7 +1714,76 @@ mod tests {
             socket.0,
             std::io::Error::last_os_error()
         );
-        Some(flags & libc::O_NONBLOCK != 0)
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    /// Test-only: whether `fcntl(F_GETFL)` can actually observe the mode
+    /// `std`'s `set_nonblocking` sets, **on the platform running right now**,
+    /// decided by experiment and cached.
+    ///
+    /// **Why this is decided at runtime instead of by a `#[cfg]`.** `std` does
+    /// not set a socket's mode with `fcntl(F_SETFL)`; it calls
+    /// `ioctl(fd, FIONBIO, &1)` on every unix but Solaris, illumos and Vita
+    /// (`library/std/.../socket/unix.rs`, and its own comment there says
+    /// "FIONBIO is inadequate for sockets on illumos/Solaris"). `FIONBIO` and
+    /// `O_NONBLOCK` are only the *same* bit where the kernel makes them so:
+    /// Linux handles `FIONBIO` generically in the VFS and sets the file's
+    /// `f_flags`, which is exactly what `F_GETFL` returns, so the two agree;
+    /// on a BSD-derived kernel the socket `FIONBIO` path sets socket state
+    /// that `F_GETFL` does not report, and only `F_SETFL` writes both. So a
+    /// `#[cfg(unix)]` assertion here would be asserting an equivalence that
+    /// need not hold, and **the failure would land on every green run**, not
+    /// only on runs under mutation.
+    ///
+    /// Rather than ship that guess -- from a host where no unix arm can even
+    /// be compiled -- this asks the running kernel. It is **two-sided on
+    /// purpose**: a socket `std` made non-blocking must read as non-blocking
+    /// *and* a freshly bound one must read as blocking. One-sided calibration
+    /// would be satisfied by a broken probe that always answered the same way,
+    /// which would make every assertion built on it vacuous.
+    ///
+    /// This module has already paid for the other approach once:
+    /// [`await_peer_bytes_for_test`] records a test that assumed Linux and
+    /// Windows loopback behaviour generalised and failed on `macos-latest`
+    /// alone.
+    #[cfg(unix)]
+    fn fcntl_observes_std_nonblocking() -> bool {
+        static ANSWER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ANSWER.get_or_init(|| {
+            let blocking = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("calibration: binding a loopback listener must succeed");
+            let nonblocking = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("calibration: binding a loopback listener must succeed");
+            nonblocking
+                .set_nonblocking(true)
+                .expect("calibration: set_nonblocking must succeed");
+            let reads_set = o_nonblock_is_set(raw_socket_of_listener(&nonblocking));
+            let reads_clear = !o_nonblock_is_set(raw_socket_of_listener(&blocking));
+            reads_set && reads_clear
+        })
+    }
+
+    /// Test-only: whether `socket` is non-blocking, read back from the kernel
+    /// -- or `None` where that cannot be observed.
+    ///
+    /// `None` on Windows, where the mode is set with `ioctlsocket(FIONBIO)`
+    /// and no Win32 call reports it back, and `None` on any unix where
+    /// [`fcntl_observes_std_nonblocking`] finds that `F_GETFL` does not see
+    /// what `std`'s `set_nonblocking` sets. Returning an `Option` puts that
+    /// whole question in one place instead of a `#[cfg]` at every call site,
+    /// and makes the caller's skip explicit.
+    ///
+    /// **The unix arm cannot be compiled on a Windows development machine at
+    /// all** -- there is no unix C toolchain for the build script, so even
+    /// `cargo check --target x86_64-unknown-linux-gnu` fails before type
+    /// checking -- which is the other half of why the platform question is
+    /// answered by experiment rather than by a `#[cfg]` written here blind.
+    #[cfg(unix)]
+    fn nonblocking_for_test(socket: crate::poll::RawSocket) -> Option<bool> {
+        if !fcntl_observes_std_nonblocking() {
+            return None;
+        }
+        Some(o_nonblock_is_set(socket))
     }
 
     /// Windows cannot read a socket's blocking mode back, so it answers
@@ -3362,26 +3429,31 @@ mod tests {
     /// no `Interest` variant: `select` reports a pending connection in its
     /// read set and `WSAPoll` reports it as `POLLRDNORM`.
     ///
-    /// **The accepted stream must be non-blocking, and the probe at the end is
-    /// what pins that.** A fresh connection with nothing written to it yet has
-    /// nothing to read, so [`try_read`] against it must report
-    /// [`ReadStep::WouldBlock`]; against a *blocking* accepted socket the same
-    /// call would block this test's thread instead, so that mutation shows up
-    /// as a hang rather than as a failed assertion. `accept` does not propagate
-    /// the listener's non-blocking mode on every platform -- Linux's
-    /// `accept(2)` explicitly does not -- so without the explicit
-    /// `set_nonblocking` this would hang on `ubuntu-latest` alone while passing
-    /// here.
+    /// **Both `set_nonblocking` calls are pinned twice over: by behaviour, and
+    /// by a read-back where the platform allows one.**
     ///
-    /// **The *listener's* non-blocking mode is pinned separately, and by an
-    /// assertion rather than by a hang.** `nonblocking_for_test` reads the
-    /// mode back off the listener before the first poll, so deleting
-    /// [`nova_rt_net_listen`]'s `set_nonblocking(true)` fails with a message
-    /// naming the line on Linux and macOS instead of hanging this test. It
-    /// cannot do the same on Windows, where the mode is write-only; that
-    /// platform split is recorded on both `nonblocking_for_test` and
-    /// [`nova_rt_net_listen`]. It has to run *before* the first poll, because
-    /// against a blocking listener that poll is what never returns.
+    /// The behavioural half comes first and works everywhere. A fresh
+    /// connection with nothing written to it yet has nothing to read, so
+    /// [`try_read`] against it must report [`ReadStep::WouldBlock`]; against a
+    /// *blocking* accepted socket the same call would block this test's thread
+    /// instead, so [`try_accept`]'s `set_nonblocking` surfaces as a hang. That
+    /// matters because `accept` does not propagate the listener's mode on
+    /// every platform -- Linux's `accept(2)` explicitly does not -- so without
+    /// the explicit call this would hang on `ubuntu-latest` alone while
+    /// passing here.
+    ///
+    /// The read-back half turns both hangs into named failures. It runs twice:
+    /// once on the **listener**, before the first poll, pinning
+    /// [`nova_rt_net_listen`]'s `set_nonblocking(true)`; and once on the
+    /// **accepted stream**, pinning [`try_accept`]'s. The listener check must
+    /// come before that first poll, because against a blocking listener the
+    /// poll is what never returns. Both go through `nonblocking_for_test` and
+    /// both skip on the same terms -- **which platforms those are is measured
+    /// at runtime rather than assumed**, for the reason its doc comment gives
+    /// at length: `std` sets the mode with `ioctl(FIONBIO)`, and `F_GETFL` only
+    /// sees that where the kernel makes the two the same bit. An earlier
+    /// version of this paragraph asserted "Linux and macOS" outright, which
+    /// would have reddened every green run wherever that is false.
     ///
     /// **One known way this can flake, shared with `dead_addr`.** The first
     /// poll asserts that *nothing* has connected yet, and this listener holds
@@ -3490,6 +3562,22 @@ mod tests {
              written to it, so a read must report would-block rather than \
              waiting for a byte"
         );
+        // And the same read-back the listener gets, for `try_accept`'s own
+        // `set_nonblocking` on this accepted stream -- so that deletion is a
+        // named failure too wherever the mode is observable, not only the hang
+        // the probe above would become. Skipped on the same terms; see
+        // `nonblocking_for_test`.
+        let accepted_socket = with_stream(accepted_fd, |s| raw_socket_of(s))
+            .expect("the accepted fd must be a live stream entry");
+        if let Some(nonblocking) = nonblocking_for_test(accepted_socket) {
+            assert!(
+                nonblocking,
+                "try_accept must leave the accepted stream non-blocking: \
+                 `accept` does not propagate the listener's mode on every \
+                 platform, and a blocking connection would block this whole \
+                 executor thread on its first read"
+            );
+        }
 
         drop(client);
         assert_eq!(unsafe { nova_rt_net_close(accepted_fd) }, OK);
