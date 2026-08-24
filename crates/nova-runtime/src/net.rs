@@ -113,11 +113,29 @@ use std::time::{Duration, Instant};
 
 /// A registered handle: either a connected stream or a listening socket.
 ///
-/// One table rather than two, so there is one `NEXT_FD` space, one closedness
-/// invariant and one `close`. The payoff is that a kind mismatch is an
-/// explicit error: a read against a listener fd reports wrong-kind rather
-/// than reporting "closed", which is the wrong-and-plausible answer a second
-/// table would give.
+/// **One table rather than two, and the whole payoff is in what stays
+/// single**: one `NEXT_FD` space, so no fd can ever name two different
+/// handles; one closedness invariant, so "absence from the table is
+/// closedness" holds for both kinds at once rather than being restated per
+/// table; and one `close` -- [`remove_socket`] removes an entry by key
+/// regardless of which variant it holds, so [`nova_rt_net_close`] serves a
+/// listener unchanged and this increment adds no fourth intrinsic.
+///
+/// **A kind mismatch is *not* separately reportable, and that is a deliberate
+/// consequence rather than a second payoff.** Every accessor has to say which
+/// kind it wants ([`with_stream`], [`with_listener`]), and asking for the
+/// wrong one collapses into the same `None` an absent fd gives -- so a read
+/// against a listener fd produces exactly what a closed, stale or forged fd
+/// produces: [`closed_fd_error`]'s status `OTHER`, with the message "socket is
+/// not open". Bit for bit the same answer, at the Nova boundary and here. The
+/// collapse is not an oversight: `fs.rs`'s `IoErrorKind` table has no
+/// wrong-kind variant, and adding one would be a wire-contract change across
+/// `fs.rs` and `std/io` together, out of scope for this increment. A second
+/// table would not have bought a distinction either -- it would have made the
+/// wrong-kind lookup miss for the identical reason. See [`closed_fd_error`]
+/// for the same statement where the status is actually produced, and
+/// `reading_a_listener_fd_is_an_error_not_a_stream_read` for the test that
+/// pins it.
 enum Sock {
     Stream(TcpStream),
     Listener(TcpListener),
@@ -283,16 +301,44 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 ///
 /// **Non-suspending, so this is an ordinary status word like
 /// [`nova_rt_net_close`] rather than a future constructor and gets no poll
-/// function.** Binding and listening do not block: `bind` and `listen` are
-/// both immediate kernel bookkeeping, and the waiting a server does happens in
-/// `accept`, which is a separate intrinsic. On success the new fd is stashed
-/// via `Slot::Buffer` exactly as `connect`'s is, so the Nova side decodes it
-/// with the same `decode_count`.
+/// function.** The `bind` and `listen` *syscalls* are immediate kernel
+/// bookkeeping -- neither waits on a peer -- and the waiting a server does
+/// happens in `accept`, which is a separate intrinsic. On success the new fd
+/// is stashed via `Slot::Buffer` exactly as `connect`'s is, so the Nova side
+/// decodes it with the same `decode_count`.
+///
+/// **Name resolution is the one path that can still block this thread, and the
+/// sentence above deliberately does not cover it.** `addr` reaches
+/// `TcpListener::bind` as a `&str`, so `std` resolves it through
+/// `ToSocketAddrs`: a numeric address parses in userspace and never blocks,
+/// but `std/net`'s `bind(addr: String)` is reachable from user Nova code with
+/// a hostname, and that lookup blocks with no future to park on. This is
+/// exactly the caveat [`resolve_addr`] already records for `connect`, with the
+/// same status -- out of scope for this increment rather than handled -- so it
+/// is not restated in full here. "Cannot suspend" is therefore a claim about
+/// the syscalls, not about every string a caller can pass.
+///
+/// **Resolution also differs from this module's `connect` in a second way,
+/// written down nowhere until now:** `connect` goes through [`resolve_addr`],
+/// which takes only the *first* address a multi-address name yields; this
+/// hands the whole string to `std`, whose `TcpListener::bind` attempts each
+/// resolved address in turn and reports a failure only once every one of them
+/// has failed. So a multi-address name gets a try-each policy here and a
+/// first-only policy there. Neither is wrong, but they are not the same
+/// policy, and a reader assuming the two intrinsics resolve identically would
+/// be wrong.
 ///
 /// `set_nonblocking(true)` is load-bearing rather than hygiene: an `accept`
 /// against a blocking listener would block this whole executor thread instead
 /// of parking the one task, defeating the point of the poller for every
 /// sibling task on it.
+///
+/// **Still reasoned, not measured, as of this increment:** deleting that
+/// `set_nonblocking` call fails nothing. No test that exists yet reaches an
+/// `accept`, so the whole suite stays green with a blocking listener sitting
+/// in the table, and a reader who removes the line gets no warning from here.
+/// The failure surfaces only once `net_accept` exists, and that task's own
+/// mutation step is what will measure it.
 ///
 /// Uses `std::net::TcpListener::bind` directly, unlike `connect`, which had to
 /// issue its own syscall (see this module's own header): there is no
@@ -1815,10 +1861,19 @@ mod tests {
     /// An address no local interface owns cannot be bound, and that failure
     /// has to arrive as a status rather than as a handle nothing listens on.
     /// `192.0.2.0/24` is TEST-NET-1 (RFC 5737), reserved for documentation and
-    /// never routed or assigned, so `bind` reports `EADDRNOTAVAIL` /
-    /// `WSAEADDRNOTAVAIL` on all three CI platforms -- chosen over a
+    /// never routed or assigned, so no host has it -- chosen over a
     /// privileged-port-on-loopback failure, which would depend on whether the
     /// test runs as root.
+    ///
+    /// **Measured on Windows only so far**, where the status is
+    /// `WSAEADDRNOTAVAIL` (`os error 10049`); the Unix arms are *reasoned, not
+    /// measured*, this module's own convention for a path read rather than run
+    /// (see `poll.rs`'s "Still reasoned, not measured" note for the
+    /// precedent). `EADDRNOTAVAIL` is the documented answer there and CI will
+    /// settle it on `ubuntu-latest` and `macos-latest` the first time this runs
+    /// on them. The assertion is deliberately `!= OK` rather than a specific
+    /// status for that reason: what this test pins is that an unbindable
+    /// address is an error and not a handle, which holds under any of them.
     #[test]
     fn net_listen_reports_an_error_for_an_unbindable_address() {
         let addr = crate::gc_str("192.0.2.1:1");
