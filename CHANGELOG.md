@@ -481,8 +481,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The poller's `Interest` and its wait logic did not change:
   accept-readiness is read-readiness on both `select` and `WSAPoll`, so
   `Interest` gained no variant. This said "nothing in the poller changed",
-  which was too broad — `poll.rs`'s module doc comment did change, and
-  nothing else in the file did.
+  which was too broad: `poll.rs`'s module doc comment changed, and so did
+  `Interest`'s own doc comment — no executable line in that file did. The
+  first correction here said "nothing else in the file did", which the very
+  commit that wrote it falsified by editing `Interest`'s doc two findings
+  later.
   **Two failures collapse to `IoError { kind: Other }`, deliberately**:
   `IoErrorKind` has eight variants and `AddrInUse` is not one, so an
   address already in use is separable only by the OS message; wrong-kind

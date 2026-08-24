@@ -210,8 +210,9 @@ amendment).
   `FD_SETSIZE` (at most one line per second, gated because that loop runs
   once per socket per call), and `nova-cli` installs a subscriber at `WARN`
   by default, so an operator reading stderr sees it. The poller's own comment
-  two lines above the call already says "`tracing::warn!` rather than
-  silence".
+  at that call site already says "`tracing::warn!` rather than silence" --
+  cited by its wording rather than its line, because three line citations on
+  this branch went stale or were wrong.
 
   That path was already labelled, and the label is still accurate. This
   file's own poller reads, verbatim at `crates/nova-runtime/src/poll.rs`:
