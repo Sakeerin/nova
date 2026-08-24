@@ -7246,12 +7246,20 @@ fn file_open_dir_run() {
 
 // === Task 6 (I/O poller and std/net increment): std/net fixtures ===
 //
-// Every fixture below needs a real TCP peer at a port it cannot know in
-// advance (the OS hands out an ephemeral one), so each test binds one itself
-// and hands the Nova program the port number through a file: `EchoServer`
-// (and `write_refused_port_file`, for the one fixture that wants nothing
+// Every fixture below *except* `net_listener_accept_run` needs a real TCP
+// peer at a port it cannot know in advance (the OS hands out an ephemeral
+// one), so each of those tests binds one itself and hands the Nova program
+// the port number through a file: `EchoServer` (and
+// `write_refused_port_file`, for the one fixture that wants nothing
 // listening) writes it, and the paired `.nova` fixture reads it back with
 // `fs::read_to_string`.
+//
+// `net_listener_accept_run` is the exception and needs none of that
+// machinery: both ends of its connection are Nova, in two tasks of one
+// process, so it binds `127.0.0.1:0` itself and passes the kernel's choice
+// to a spawned client as an ordinary argument. The paragraph below therefore
+// does not describe it either -- with no port file, it has no port-file path
+// to collide on.
 //
 // **That file's path is derived from the fixture's own name alone, not this
 // process** — unlike `unique_temp_dir`, which folds in `std::process::id()`
