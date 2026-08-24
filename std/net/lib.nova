@@ -38,14 +38,16 @@
 // already replaced. Keep them straight-line, the same discipline `std/fs`
 // and `std/io` already document for their own wrappers.
 //
-// `net_close` and `net_listen` are the exceptions, exactly as
-// `crates/nova-resolver/src/lib.rs`'s own doc comments for
-// `Builtin::NetClose` and `Builtin::NetListen` state: both are ordinary
-// status words rather than future constructors, so `TcpStream::close`,
-// `TcpListener::close` and `bind` below call them directly, with no `.await`
-// at all — the identical shape `std/fs`'s `File::close` already uses for
-// `file_close`. The straight-line rule still applies to them: `bind` reads
-// its fd out of the payload slot with nothing awaited in between.
+// `net_close`, `net_listen` and `net_local_port` are the exceptions, exactly
+// as `crates/nova-resolver/src/lib.rs`'s own doc comments for
+// `Builtin::NetClose`, `Builtin::NetListen` and `Builtin::NetLocalPort` state:
+// all three are ordinary status words rather than future constructors, so
+// `TcpStream::close`, `TcpListener::close`, `bind` and
+// `TcpListener::local_port` below call them directly, with no `.await` at all
+// — the identical shape `std/fs`'s `File::close` already uses for
+// `file_close`. The straight-line rule still applies to them: `bind` and
+// `local_port` each read their payload out of the slot with nothing awaited in
+// between.
 
 pub record TcpStream { fd: Int }
 
@@ -136,8 +138,10 @@ async fn write_stream(s: TcpStream, buf: Bytes) -> Result<Int, IoError> {
 // wraps a single `std::net::TcpStream::write` attempt), so there is no
 // userspace buffer for a flush to push out, exactly the shape Rust's own
 // `impl Write for std::net::TcpStream` uses for the identical reason. There
-// is no `net_flush` builtin and this task deliberately does not add a sixth
-// one to back a no-op. **If `std/net` ever grows write buffering, this
+// is no `net_flush` builtin and none is added to back a no-op. (This comment
+// used to say "a sixth one", counting the five net builtins that existed when
+// it was written; the count was stale within one increment, so it is gone
+// rather than maintained.) **If `std/net` ever grows write buffering, this
 // becomes load-bearing and needs a real intrinsic** — a future reader should
 // not mistake this for an oversight.
 async fn flush_stream(s: TcpStream) -> Result<(), IoError> {
@@ -203,6 +207,32 @@ impl TcpListener {
         let status = net_close(self.fd)
         if status == 0 {
             return Ok(())
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+
+    // The port this listener is bound to, which is how a caller learns the
+    // kernel's choice after binding port 0.
+    //
+    // **A plain `fn`, not an `async fn`: this cannot suspend** -- the same
+    // rule `bind` states, and the same one `close` above deliberately
+    // excepts. Reading a bound port is bookkeeping the kernel already holds,
+    // and unlike `bind` there is no address argument at all, so `bind`'s
+    // hostname caveat has nothing to apply to here: this one cannot block on
+    // any argument.
+    //
+    // The port arrives in the payload slot rather than as the returned status,
+    // because that status *is* the error kind -- a port carried there would
+    // make `0` ambiguous and every non-zero port indistinguishable from a
+    // failure. So it is read back with the same `decode_count` `bind` uses for
+    // its fd, straight-line with nothing awaited in between.
+    //
+    // Errors on a closed, stale or forged listener, `IoError { kind: Other }`
+    // by the same missed table lookup every other operation reports that way.
+    pub fn local_port(self) -> Result<Int, IoError> {
+        let status = net_local_port(self.fd)
+        if status == 0 {
+            return Ok(decode_count(fs_take_bytes()))
         }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }

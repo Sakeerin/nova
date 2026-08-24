@@ -3958,6 +3958,7 @@ impl<'a> Checker<'a> {
             | Builtin::NetWrite
             | Builtin::NetReadTimeout
             | Builtin::NetListen
+            | Builtin::NetLocalPort
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7216,11 +7217,26 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         // Most of this group are future constructors, not status words —
         // `Ty::Future(Box::new(Ty::Int))`, not a plain `Ty::Int` — unlike
         // every `Fs*`/`File*`/`Io*` builtin above. `.await`ing the future
-        // produces the `Int` status. `NetClose` and `NetListen` are the
-        // exceptions and stay plain statuses, matching `Builtin::FileClose`'s
-        // shape exactly: neither can block, so neither has a suspension to
-        // model. `NetListen` returning `Ty::Int` rather than a future is
-        // exactly what makes `std/net`'s `bind` a plain `fn`.
+        // produces the `Int` status. `NetClose`, `NetListen` and
+        // `NetLocalPort` are the exceptions and stay plain statuses, matching
+        // `Builtin::FileClose`'s shape exactly: none of their *syscalls* can
+        // block, so none of them has a suspension to model.
+        //
+        // **That is a claim about the syscalls, not about every argument.**
+        // `NetClose` and `NetLocalPort` take an `Int` fd and reach nothing but
+        // the runtime's own handle table, so for those two it is the whole
+        // story. `NetListen` takes a `String` a user program chooses, and a
+        // hostname in it resolves through `std`'s `ToSocketAddrs` — a blocking
+        // lookup with no future to park on. `resolve_addr`'s own doc comment in
+        // `crates/nova-runtime/src/net.rs` records that caveat for `connect`,
+        // and it applies to `NetListen` unchanged: out of scope rather than
+        // handled. `bind` and `listen` not blocking is what makes `Ty::Int` the
+        // right return for it; resolving a name it was handed is a separate
+        // path that can still block this thread.
+        //
+        // `NetListen` and `NetLocalPort` returning `Ty::Int` rather than a
+        // future is exactly what makes `std/net`'s `bind` and `local_port`
+        // plain `fn`s.
         Builtin::NetConnect => (vec![Ty::String], Ty::Future(Box::new(Ty::Int))),
         Builtin::NetClose => (vec![Ty::Int], Ty::Int),
         Builtin::NetRead => (vec![Ty::Int, Ty::Int], Ty::Future(Box::new(Ty::Int))),
@@ -7230,6 +7246,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
             Ty::Future(Box::new(Ty::Int)),
         ),
         Builtin::NetListen => (vec![Ty::String], Ty::Int),
+        Builtin::NetLocalPort => (vec![Ty::Int], Ty::Int),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15298,6 +15315,11 @@ mod tests {
                     (vec![Ty::String], Ty::Int),
                     "`net_listen(addr)` -- with no `.await`, since it cannot \
                      suspend -- in `std/net`'s `bind`",
+                ),
+                Builtin::NetLocalPort => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`net_local_port(self.fd)` -- with no `.await`, since it \
+                     cannot suspend -- in `std/net`'s `TcpListener::local_port`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),
