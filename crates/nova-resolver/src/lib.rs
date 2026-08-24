@@ -506,10 +506,21 @@ builtins! {
     /// ("host:port"), registering a non-blocking listening socket.
     ///
     /// **Not a future constructor**, the second builtin in this group after
-    /// [`Builtin::NetClose`] that is not: binding and listening are immediate
-    /// kernel bookkeeping and cannot block, so there is no suspension to model
-    /// and `std/net`'s `bind` is a plain `fn` rather than an `async fn`. The
-    /// waiting a server does happens in `accept`, which is a separate builtin.
+    /// [`Builtin::NetClose`] that is not: the `bind` and `listen` *syscalls*
+    /// are immediate kernel bookkeeping and do not block, so there is no
+    /// suspension to model and `std/net`'s `bind` is a plain `fn` rather than
+    /// an `async fn`. The waiting a server does happens in `accept`, which is
+    /// a separate builtin.
+    ///
+    /// **That is a claim about the syscalls, not about every argument.** A
+    /// numeric address never blocks, but this builtin's parameter is a
+    /// `String` a user program chooses, and a hostname resolves through
+    /// `std`'s `ToSocketAddrs` — a blocking lookup with no future to park on.
+    /// `resolve_addr`'s own doc comment in `crates/nova-runtime/src/net.rs`
+    /// records that caveat for `connect`, and it applies here unchanged:
+    /// out of scope rather than handled. `nova_rt_net_listen`'s doc comment
+    /// also records where its resolution *differs* from `connect`'s, since it
+    /// does not go through `resolve_addr` at all.
     ///
     /// Returns a status code as [`Builtin::FsReadToString`] does — `0` on
     /// success, with the new fd waiting in [`Builtin::FsTakeBytes`] as an

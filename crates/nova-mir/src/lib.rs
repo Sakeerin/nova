@@ -380,12 +380,17 @@ rt_funcs! {
     /// registering a non-blocking listening socket.
     ///
     /// **Not a future constructor**, the only member of this group besides
-    /// `NetClose` that is not: binding and listening cannot block, so there is
-    /// no suspension to model. `0` on success, with the new fd waiting in
-    /// `FsTakeBytes` as an 8-byte little-endian payload, as `NetConnect`'s and
-    /// `FileOpen`'s own; otherwise an `IoErrorKind` status code, as
-    /// `FsReadToString`. Closed with `NetClose`, which serves both kinds of
-    /// handle.
+    /// `NetClose` that is not: the `bind` and `listen` *syscalls* do not block,
+    /// so there is no suspension to model. `0` on success, with the new fd
+    /// waiting in `FsTakeBytes` as an 8-byte little-endian payload, as
+    /// `NetConnect`'s and `FileOpen`'s own; otherwise an `IoErrorKind` status
+    /// code, as `FsReadToString`. Closed with `NetClose`, which serves both
+    /// kinds of handle.
+    ///
+    /// A hostname argument still resolves through a blocking lookup, which no
+    /// future here parks on — see `nova_rt_net_listen`'s own doc comment in
+    /// `crates/nova-runtime/src/net.rs` for that caveat and for how its
+    /// resolution differs from `NetConnect`'s.
     NetListen,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
@@ -585,10 +590,19 @@ impl RtFunc {
             // `TaskSleepFutureNanos`/`TaskJoinFuture` use above, unlike every
             // `FsWrite`/`File*`/`Io*` entry directly above this group.
             // `NetClose` and `NetListen` are the two that return `MirTy::I64`,
-            // exactly `FileClose`'s shape. Note `NetListen` takes a `Ptr` (its
-            // address string) and returns an `I64`, the reverse of
-            // `NetConnect`'s `Ptr` -> `Ptr`, so a lowering that confused the
-            // two would be a type error here rather than a wrong call.
+            // exactly `FileClose`'s shape. `NetListen` and `NetConnect` take
+            // the same single `Ptr` (an address string) and differ only in the
+            // return: `I64` for the status word, `Ptr` for the future.
+            //
+            // This table *declares* those classes and checks nothing itself.
+            // Its consumers are the two backends, which build every
+            // declaration and call from it, and LLVM's
+            // `every_rt_func_is_declared_with_its_real_signature` pins each
+            // entry against the IR that comes out. What nothing pins is a
+            // *lowering arm's choice of variant*: `lower.rs` naming
+            // `NetConnect` where it meant `NetListen` would emit a well-formed
+            // call with the wrong return class, caught by neither this table
+            // nor that test.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),

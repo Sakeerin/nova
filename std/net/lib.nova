@@ -156,10 +156,22 @@ pub record TcpListener { fd: Int }
 // Bind and listen on `addr` ("host:port"). Pass port 0 to let the kernel
 // choose, then read it back with `local_port`.
 //
-// **A plain `fn`, not an `async fn`: this cannot suspend.** Binding and
-// listening never block, so `net_listen` is an ordinary status word and
-// there is no future to await. Forcing `.await` here would misstate the
+// **A plain `fn`, not an `async fn`: this cannot suspend.** The `bind` and
+// `listen` syscalls do not block, so `net_listen` is an ordinary status word
+// and there is no future to await. Forcing `.await` here would misstate the
 // cost. Note the deliberate exception at `TcpListener::close` below.
+//
+// **One caveat, and it is about `addr` rather than about the syscalls.** A
+// numeric address ("127.0.0.1:8080") never blocks. A *hostname* is resolved
+// by the runtime through Rust's `ToSocketAddrs`, which is a blocking DNS
+// lookup with no future to park on -- so passing one blocks this whole
+// executor thread, every sibling task included, for as long as resolution
+// takes. `connect` above carries the identical caveat for the identical
+// reason (`resolve_addr` in `crates/nova-runtime/src/net.rs`); neither
+// function makes name resolution asynchronous, and this module does not
+// pretend otherwise. Pass a numeric address on any path where that matters.
+// The two also resolve by *different* policies for a name yielding several
+// addresses -- see `nova_rt_net_listen`'s own doc comment.
 //
 // An address already in use arrives as `IoError { kind: Other }`, not a
 // distinct kind: `IoErrorKind` has eight variants and `AddrInUse` is not
