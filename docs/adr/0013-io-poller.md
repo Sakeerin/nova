@@ -168,6 +168,36 @@ amendment).
   which already carries the identically-shaped deadline-starvation and
   livelock footguns from the park-set amendment, rather than restated here.
 
+- **AMENDED 2026-08-23 (branch `std-net-listener`): `accept` makes this
+  decision's one unexercised rejection path reachable for the first time, and
+  this increment records that rather than solving it.** `std/net` gained
+  `bind`/`accept`/`local_port`, so a Nova program can now hold a listening
+  socket and any number of accepted ones at once — where before this poller
+  only ever saw sockets a single `connect` had produced. The Unix arm selects
+  on them with `select`, which rejects any descriptor at or above
+  `FD_SETSIZE`; and because only `read_timeout` stages a deadline, a task
+  whose descriptor is rejected is **never woken again and never surfaces an
+  error**. Windows `WSAPoll` has no equivalent ceiling. So the failure mode a
+  many-connection server reaches first is a task that stops, silently, with
+  nothing to observe.
+
+  That path was already labelled, and the label is still accurate. This
+  file's own poller reads, verbatim at `crates/nova-runtime/src/poll.rs`:
+  "**Still reasoned, not measured:** the `FD_SETSIZE` rejection path and the
+  non-`EINTR` error/backoff path below. No test reaches either -- one needs a
+  descriptor number above `FD_SETSIZE`, the other a real socket-level fault --
+  so both remain read-not-run on every platform, Windows included."
+
+  Nothing in this increment changes that. What changed is only that the path
+  is now **reachable from Nova** rather than reachable in principle: before
+  `accept` existed, a program had no way to accumulate enough descriptors to
+  approach the ceiling through this module at all. The decision to leave it
+  stands on the same ground the Decision section gives for choosing
+  `select`/`WSAPoll` over IOCP, and a cap or a `poll(2)`-based Unix arm is a
+  later increment's to make — but a reader deciding whether to point
+  `std/net` at a socket that accepts should know that this is where it breaks
+  and that nothing has ever executed the break.
+
 ## References
 
 - Design: `docs/superpowers/specs/2026-08-15-io-poller-and-std-net-design.md`
@@ -182,9 +212,11 @@ amendment).
   `io_parks`, `wake_ready`, `wake_due`, `deadlock_report`/`report_deadlock`
 - `crates/nova-runtime/src/net.rs`: the first production source of a
   non-empty socket set for `poll::wait` to see — `connect`, `read`, `write`,
-  and `read_timeout`'s poll functions each stage a `Wait::Io` through
-  `stage_io_park`; `task.rs`'s `run_to_completion` remains `poll::wait`'s only
-  caller
+  `read_timeout` and (since 2026-08-23) `accept` each stage a `Wait::Io`
+  through `stage_io_park`, `read_timeout` being the only one that passes a
+  deadline; no count is given here because an earlier wording named four and
+  `accept`'s arrival falsified it; `task.rs`'s `run_to_completion` remains
+  `poll::wait`'s only caller
 - `docs/adr/0009-async-execution-model.md` §1: the thread-local-heap argument
   this decision's first alternative reapplies, and the 2026-08-16 amendment
   recording this decision's two new footguns

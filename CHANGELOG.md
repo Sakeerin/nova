@@ -451,6 +451,52 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Naming only `grow` would suggest a map that never grows preserves
   insertion order; it does not.
 
+- **A server side for `std/net`** — `TcpListener`, `bind`, `local_port` and
+  `accept` — so that Phase 2 position 10 (`std/http`) has a transport to
+  build a server on. Position 9's own section had assigned all three to "a
+  future increment"; this is that increment, so it closes a position in order
+  rather than deviating from the build order, and adds no ADR.
+  `pub record TcpListener { fd: Int }` plus
+  `bind(addr: String) -> Result<TcpListener, IoError>`,
+  `local_port(self) -> Result<Int, IoError>`,
+  `accept(self) -> Result<TcpStream, IoError>` and a `close` matching
+  `TcpStream`'s. Three intrinsics (`STD_ONLY` 66 → 69): `net_listen` and
+  `net_local_port` cannot suspend and so take `net_close`'s plain
+  status-word shape with no poll function, while `net_accept` does suspend
+  and has one hand-written `extern "C-unwind"` poll function, written
+  level-triggered and tag-free because the frozen ABI carries no waker and
+  records no reason for a wake. `close` needed no fourth intrinsic: the
+  runtime removes a table entry by key regardless of kind, so a listener and
+  a stream share one. Listeners live in the existing socket table as a
+  two-variant enum, which keeps one descriptor space, one closedness
+  invariant and one `close` — and makes a kind mismatch an ordinary error
+  rather than a lookup that succeeds oddly.
+  `accept` returns a `TcpStream` indistinguishable from a connected one, so
+  every existing `Read`, `Write`, `read_timeout` and `close` works on it.
+  Nothing in the poller changed: accept-readiness is read-readiness on both
+  `select` and `WSAPoll`, so `Interest` gained no variant.
+  **Two failures collapse to `IoError { kind: Other }`, deliberately**:
+  `IoErrorKind` has eight variants and `AddrInUse` is not one, so an
+  address already in use is separable only by the OS message; wrong-kind
+  access collapses the same way, because one kind-checked table reports
+  absent and wrong-kind through the same `None`. Adding a variant is a
+  wire-contract change across two crates and was not made.
+  **What this does not close.** Concurrency is not proven: no fixture parks
+  two sockets at once, there is no `select`/`race`/`join_all`, and one
+  socket wait per task is enforced by process abort, so a server needs two
+  tasks minimum. `accept` also makes the poller's `FD_SETSIZE` rejection
+  path reachable from Nova for the first time — on Unix a descriptor at or
+  above the ceiling is skipped, never re-watched, and its task is never
+  woken and never errors — and that path has still never executed on any
+  platform; see the dated amendment in
+  `docs/adr/0013-io-poller.md`. The non-blocking assertions are
+  platform-conditional, decided by a kernel-calibrated probe, and where it
+  declines the coverage is *unknown* rather than claimed. UDP and Unix
+  sockets stay unbuilt. **Phase 2 is not complete**: positions 10 and 12,
+  `examples/05-json-api` and `docs/benchmarks/` are all still absent, and
+  the tag stays `v0.2.0-alpha.1` because §7 of `00-MASTER-SPEC.md` makes
+  `v0.{phase}.0` assert that a phase is done.
+
 ### Changed
 
 Filed here as well as under Added, because this changes the meaning of code
