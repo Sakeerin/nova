@@ -1510,3 +1510,63 @@ all, for the reasons given above. `bind`/`accept`/`TcpListener` (a server
 side), UDP, and Unix sockets are all named in §1's module-index line for
 `std/net`, but none of the three is built by this section; each remains a
 future increment's to add.
+
+
+**AMENDED 2026-08-23 (branch `std-net-listener`): the paragraph above is now
+two-thirds false, and it overstated what §1 says even when it was written.**
+`bind`, `accept` and `TcpListener` shipped this increment; UDP and Unix
+sockets remain unbuilt. And the claim that all three were "named in §1's
+module-index line" was never right: that line reads
+`std/net          TCP/UDP/Unix sockets`, which names UDP and Unix sockets
+explicitly and leaves the server side implied by "TCP" alone.
+
+The surface added, verbatim:
+
+```nova
+pub record TcpListener { fd: Int }
+
+pub fn bind(addr: String) -> Result<TcpListener, IoError>
+pub fn local_port(self) -> Result<Int, IoError>        // on TcpListener
+pub async fn accept(self) -> Result<TcpStream, IoError>
+pub async fn close(self) -> Result<(), IoError>        // on TcpListener
+```
+
+`accept` yields a `TcpStream` carrying the accepted fd, indistinguishable from
+a connected one, so every `Read`, `Write`, `read_timeout` and `close` above
+works on it unchanged. Three runtime intrinsics back it — `net_listen`,
+`net_local_port` and `net_accept` — of which only `net_accept` suspends and so
+has a poll function. `close` needed no fourth: the runtime removes a table
+entry by key regardless of which kind it holds, so `TcpListener::close` calls
+the same `net_close` a stream does.
+
+**`bind` and `local_port` are plain `fn`, and that is a rule with one
+deliberate exception.** Neither can suspend, so neither takes `async fn` —
+forcing `.await` would misstate the cost. `TcpListener::close` is declared
+`async fn` **anyway**, matching the `TcpStream::close` above it, because a
+server closes both handles in sequence and a reader should not have to
+remember which of two identically named socket methods needs `.await`. The
+exception is named here rather than left for a reader to notice, because a
+rule with a silent exception is worse than either.
+
+**Two error collapses, both deliberate and neither distinguishable by kind.**
+`IoErrorKind` has eight variants and **`AddrInUse` is not among them**, so an
+address already in use — the most likely `bind` failure, and the first one a
+user meets — arrives as `IoError { kind: Other }`, separable only by the
+operating system's own `message` text. Wrong-kind access collapses the same
+way: `read` on a listener fd, or `accept` on a stream fd, is `Other` too,
+because one kind-checked table reports absent and wrong-kind through the same
+`None`. Adding a variant is a wire-contract change across the runtime's `fail`
+and `std/io`'s `io_error_kind_of` together, and was deliberately not made.
+
+**What this increment did not do, each recorded rather than left silent.**
+Concurrency is **not proven**: no fixture parks two sockets at once, nothing
+adds `select`/`race`/`join_all`, and one socket wait per task is enforced by
+**process abort** — staging two `Wait::Io` in a single poll aborts — so a
+server needs at least two tasks and has no way to avoid that. The
+non-blocking mode of the listening and accepted sockets is pinned by
+assertions that are **platform-conditional**: a kernel-calibrated probe
+decides at run time whether the read-back observes what `std` actually sets,
+and where it cannot, coverage falls back to the operation hanging. **A skip is
+silent**, so on a platform where the probe declines, coverage of that property
+is *unknown* rather than claimed. UDP and Unix sockets stay unbuilt, and
+`IoErrorKind` gains no variant.
