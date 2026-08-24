@@ -1,8 +1,9 @@
 //! Open TCP handles, keyed by descriptor; the two-phase, non-blocking
 //! `connect` that populates the table; the `read`, `write`, and
 //! `read_timeout` futures that act on it; the `listen` that puts the table's
-//! other kind of entry -- a listening socket -- into it; and the `local_port`
-//! that reads back which port the kernel gave one.
+//! other kind of entry -- a listening socket -- into it; the `local_port`
+//! that reads back which port the kernel gave one; and the `accept` that
+//! turns an incoming connection into an ordinary stream entry.
 //!
 //! # Two kinds of handle, one table
 //!
@@ -178,13 +179,13 @@ fn with_stream<R>(fd: i64, f: impl FnOnce(&mut TcpStream) -> R) -> Option<R> {
 /// Run `f` against the listener behind `fd`. Same collapse of absent-and
 /// wrong-kind into one `None` as [`with_stream`].
 ///
-/// [`nova_rt_net_local_port`] is its production caller; `net_accept` (Task 3)
-/// will be the second. It carried `#[allow(dead_code)]` for exactly as long as
-/// this increment's Task 1 was the whole of it -- nothing in production read a
-/// listener then, and the only caller was `is_listener_for_test` below -- and
-/// the attribute left with the arrival of the first real caller rather than
-/// being kept on to mask a genuinely dead accessor later. That is the same
-/// lifecycle `poll.rs`'s `Interest` records for its own former one.
+/// [`nova_rt_net_local_port`] and [`try_accept`] are its production callers.
+/// It carried `#[allow(dead_code)]` for exactly as long as this increment's
+/// Task 1 was the whole of it -- nothing in production read a listener then,
+/// and the only caller was `is_listener_for_test` below -- and the attribute
+/// left with the arrival of the first real caller rather than being kept on to
+/// mask a genuinely dead accessor later. That is the same lifecycle `poll.rs`'s
+/// `Interest` records for its own former one.
 fn with_listener<R>(fd: i64, f: impl FnOnce(&mut TcpListener) -> R) -> Option<R> {
     SOCKETS.with(|sockets| {
         let Ok(mut sockets) = sockets.try_borrow_mut() else {
@@ -251,8 +252,9 @@ fn remove_socket(fd: i64) {
 ///
 /// **Every payload this module encodes as an *integer* goes through it**:
 /// `connect`'s new fd ([`finish_connect`]), `write`'s reported byte count
-/// ([`try_write`]), `listen`'s new listener fd ([`nova_rt_net_listen`]) and a
-/// listener's bound port ([`nova_rt_net_local_port`]).
+/// ([`try_write`]), `listen`'s new listener fd ([`nova_rt_net_listen`]), a
+/// listener's bound port ([`nova_rt_net_local_port`]) and an accepted
+/// connection's new fd ([`try_accept`]).
 ///
 /// **That is not every `Slot::Buffer` payload, and the exception is this
 /// module's most-used one.** [`try_read`] writes the slot directly, with the
@@ -322,7 +324,8 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 /// [`nova_rt_net_close`] rather than a future constructor and gets no poll
 /// function.** The `bind` and `listen` *syscalls* are immediate kernel
 /// bookkeeping -- neither waits on a peer -- and the waiting a server does
-/// happens in `accept`, which is a separate intrinsic. On success the new fd
+/// happens in [`nova_rt_net_accept_future`], which is a separate intrinsic and
+/// *is* a future constructor. On success the new fd
 /// is stashed via `Slot::Buffer` exactly as `connect`'s is, so the Nova side
 /// decodes it with the same `decode_count`.
 ///
@@ -352,12 +355,27 @@ pub unsafe extern "C" fn nova_rt_net_close(fd: i64) -> i64 {
 /// of parking the one task, defeating the point of the poller for every
 /// sibling task on it.
 ///
-/// **Still reasoned, not measured, as of this increment:** deleting that
-/// `set_nonblocking` call fails nothing. No test that exists yet reaches an
-/// `accept`, so the whole suite stays green with a blocking listener sitting
-/// in the table, and a reader who removes the line gets no warning from here.
-/// The failure surfaces only once `net_accept` exists, and that task's own
-/// mutation step is what will measure it.
+/// **Now measured, and the answer is a hang rather than a failure.** Deleting
+/// that `set_nonblocking` call used to fail nothing at all: before
+/// [`nova_rt_net_accept_future`] existed no test reached an `accept`, so the
+/// whole suite stayed green with a blocking listener sitting in the table.
+/// With `accept` in place the deletion was run again, and
+/// `accept_parks_until_a_client_connects_then_yields_a_stream_fd` **hangs**:
+/// [`try_accept`]'s `accept` call blocks this thread inside the very first
+/// poll instead of reporting would-block, so the future never returns
+/// `POLL_PENDING`, the executor is blocked rather than the task parked, and
+/// the test binary never exits. Every other test in the workspace still
+/// passes, so that one test is the whole of the coverage -- counted, not
+/// assumed, across all 44 targets.
+///
+/// **A hang is weaker than an assertion and is recorded as such.** Under
+/// `cargo test` it surfaces as a CI timeout with no message naming this line,
+/// which is a build failure but a poor diagnostic. Making it an assertion
+/// instead would need a portable "is this handle non-blocking" query, and
+/// there is none: Windows offers no way to read a socket's blocking mode back,
+/// so the only observation available is that an operation which should have
+/// returned immediately did not. The accepted stream's own `set_nonblocking`
+/// in [`try_accept`] is pinned the same way and for the same reason.
 ///
 /// Uses `std::net::TcpListener::bind` directly, unlike `connect`, which had to
 /// issue its own syscall (see this module's own header): there is no
@@ -430,8 +448,19 @@ pub unsafe extern "C" fn nova_rt_net_local_port(fd: i64) -> i64 {
 /// Resolve `addr` ("host:port") to one socket address.
 ///
 /// Uses `std`'s own `ToSocketAddrs` -- the identical resolution
-/// `std::net::TcpStream::connect` performs -- taking the first result, the
-/// same choice `TcpStream::connect` itself makes for a multi-address name.
+/// `std::net::TcpStream::connect` performs -- and takes the first result.
+///
+/// **That first-only choice is *not* what `std` does, and the sentence here
+/// used to claim it was.** `std::net::TcpStream::connect` attempts each
+/// resolved address in turn and reports a failure only once every one of them
+/// has failed; this attempts exactly one. The behaviour is deliberate and
+/// unchanged -- the two-phase, non-blocking `connect` this module builds has
+/// no place to hold "the addresses not tried yet" across a suspension, and
+/// [`nova_rt_net_listen`]'s own doc comment already records that the two
+/// intrinsics therefore resolve by different policies -- but the *reason*
+/// given was false, so it is gone. A multi-address name that resolves to a
+/// dead address first fails here where `std` would have moved on.
+///
 /// Every caller in this project's own fixtures passes a numeric loopback
 /// address, for which this never reaches real DNS; a hostname would, and
 /// this module does not attempt to make that lookup itself non-blocking --
@@ -455,6 +484,26 @@ fn raw_socket_of(stream: &TcpStream) -> RawSocket {
 fn raw_socket_of(stream: &TcpStream) -> RawSocket {
     use std::os::windows::io::AsRawSocket;
     RawSocket(stream.as_raw_socket() as i64)
+}
+
+/// [`raw_socket_of`]'s sibling across [`Sock`], for a listening socket.
+///
+/// A separate function rather than one generic over `AsRawFd`/`AsRawSocket`:
+/// the trait that supplies the handle is itself platform-specific, so a
+/// generic version would still need both `#[cfg]` arms and would additionally
+/// have to name a different bound in each -- two arms either way, with a type
+/// parameter added for nothing. `TcpListener` and `TcpStream` are the only two
+/// types this module ever asks for a handle, and neither is generic.
+#[cfg(unix)]
+fn raw_socket_of_listener(listener: &TcpListener) -> RawSocket {
+    use std::os::unix::io::AsRawFd;
+    RawSocket(i64::from(listener.as_raw_fd()))
+}
+
+#[cfg(windows)]
+fn raw_socket_of_listener(listener: &TcpListener) -> RawSocket {
+    use std::os::windows::io::AsRawSocket;
+    RawSocket(listener.as_raw_socket() as i64)
 }
 
 /// Create a socket for `addr`'s family, set it non-blocking, and issue the
@@ -1245,7 +1294,7 @@ unsafe extern "C-unwind" fn poll_read_timeout(state: *mut u8, _task_ctx: *mut u8
 /// Stages `Wait::Io { socket, interest: Interest::Read, deadline: Some(_) }`
 /// through `task.rs`'s `stage_io_park` seam -- the only operation in this
 /// module that ever passes a deadline through it; `connect`, plain `read`,
-/// and plain `write` each stage `None`.
+/// plain `write` and `accept` each stage `None`.
 ///
 /// # Safety
 /// No pointer argument, so no dereference precondition beyond `build_future`'s
@@ -1265,6 +1314,175 @@ pub unsafe extern "C-unwind" fn nova_rt_net_read_timeout_future(
             slots.add(RT_SLOT_MAX).write(max);
             slots.add(RT_SLOT_DEADLINE).write(ms);
         }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `accept` -- the listener operation that waits on a peer.
+//
+// Parks on `Interest::Read` through the same `stage_io_park` seam `read` uses,
+// and needs no resume tag for `poll_read`'s own reason: re-attempting the
+// accept is the same operation on every poll, so repeating it is correct
+// whether this is the first poll or the fifth, and trying it before ever
+// parking means a connection already sitting in the backlog completes on the
+// very first poll with no park staged at all.
+//
+// **Accept-readiness is read-readiness, so `poll.rs` needs no new
+// `Interest`.** `select` reports a listening socket with a pending connection
+// in its read set, and `WSAPoll` reports it as `POLLRDNORM` -- the same
+// signals a readable stream produces, which is why a listener can share the
+// poller's existing `Interest::Read` rather than needing a third variant to be
+// threaded through `task.rs`'s `Wait` and both of `poll.rs`'s platform arms.
+// ---------------------------------------------------------------------------
+
+/// What one non-blocking `TcpListener::accept` attempt produced. Mirrors
+/// [`ReadStep`] and [`WriteStep`] exactly, against a listener rather than a
+/// stream.
+enum AcceptStep {
+    /// The attempt settled: a connection was accepted (registered as a fresh
+    /// [`Sock::Stream`] with its new fd stashed via [`stash_i64`]) or a real
+    /// I/O error ([`fail`]'s status) or `fd` was not a live listener
+    /// ([`closed_fd_error`]). Either way there is nothing left to do but
+    /// report this status.
+    Done(i64),
+    /// The listener is open but no connection is pending right now. Carries
+    /// the raw socket a caller should park on for `Interest::Read`.
+    WouldBlock(RawSocket),
+}
+
+/// One non-blocking `TcpListener::accept` attempt against `fd`, registering
+/// the accepted connection and stashing its new fd via [`stash_i64`] on
+/// success.
+///
+/// **The accepted stream is registered *outside* [`with_listener`]'s closure,
+/// and that is a correctness requirement rather than a style choice.**
+/// [`register_new_socket`] takes the very `SOCKETS` borrow [`with_listener`]
+/// is still holding, and a nested fallible re-borrow fails rather than
+/// waiting -- which this module's accessors turn into an `abort_with`, ending
+/// the process. So the closure hands the accepted `TcpStream` straight back
+/// out and everything that touches the table again runs after the borrow is
+/// released. [`try_read`] can stash from inside its own closure because
+/// `fs.rs`'s slot table is a different `RefCell`; this cannot, because the
+/// table is the same one.
+///
+/// **The listener's raw socket is taken on every attempt, including the ones
+/// that succeed and never use it.** It is one field read off a handle already
+/// in hand, and taking it here rather than in a second [`with_listener`] call
+/// on the would-block path keeps this to exactly one table lookup per poll --
+/// and removes a second `None` arm that could only ever mean "the table
+/// changed between two lookups inside one poll", a case nothing can produce
+/// and no reader could act on.
+///
+/// **The accepted stream is set non-blocking explicitly, not left to
+/// inherit.** `accept` propagates the listening socket's non-blocking mode on
+/// some platforms and not others -- Linux's `accept(2)` documents that the new
+/// socket does *not* inherit `O_NONBLOCK` -- so without this a Nova server's
+/// first `read` on an accepted connection would block the whole executor
+/// thread on one of this project's three CI platforms and park correctly on
+/// the other two. The listener's own `set_nonblocking` in
+/// [`nova_rt_net_listen`] governs the `accept` call; this one governs every
+/// operation on what it returns.
+fn try_accept(fd: i64) -> AcceptStep {
+    let attempt = with_listener(fd, |listener| {
+        (raw_socket_of_listener(listener), listener.accept())
+    });
+    match attempt {
+        Some((_, Ok((stream, _peer)))) => {
+            if let Err(e) = stream.set_nonblocking(true) {
+                return AcceptStep::Done(fail(&e));
+            }
+            let accepted = register_new_socket(Sock::Stream(stream));
+            stash_i64(accepted);
+            AcceptStep::Done(OK)
+        }
+        Some((socket, Err(e))) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            AcceptStep::WouldBlock(socket)
+        }
+        Some((_, Err(e))) => AcceptStep::Done(fail(&e)),
+        None => AcceptStep::Done(closed_fd_error()),
+    }
+}
+
+/// Where an `accept` future keeps its listener fd between polls. One slot and
+/// no resume tag, unlike `connect`'s and `read_timeout`'s state: there is
+/// nothing to carry across a suspension but the fd, and nothing to compute
+/// once.
+const ACCEPT_SLOT_FD: usize = STATE_SLOT_TEMPS;
+
+/// State size for an `accept` future: the ABI minimum plus the one temp slot
+/// holding the listener fd.
+const ACCEPT_STATE_SIZE: usize = STATE_MIN_SIZE + 8;
+
+const _: () = assert!(ACCEPT_STATE_SIZE >= (ACCEPT_SLOT_FD + 1) * 8);
+
+/// The accept future's poll function: one non-blocking `accept` attempt,
+/// parking on the listener's read-readiness when no connection is pending.
+///
+/// **Level-triggered and tag-free, which is mandatory here rather than
+/// stylistic.** The poll ABI is frozen and `task_ctx` is always null (see
+/// `task.rs`'s own `PollFn` doc comment), and `task.rs`'s wake paths just move
+/// a parked task back onto the ready queue without recording *why* -- so this
+/// never asks what woke it and instead re-derives its whole answer from the
+/// listener on every call, exactly as [`poll_read`] and [`poll_read_timeout`]
+/// re-derive theirs. Re-attempting the accept is also what makes a spurious
+/// wake harmless: it finds `WouldBlock` again, stages the same wait again, and
+/// nothing is left permanently parked with no one to wake it.
+///
+/// Must not unwind, as every other `PollFn` in this crate must not: every
+/// fallible step -- the fallible table borrows inside [`try_accept`],
+/// `set_nonblocking` on the accepted stream, and the `accept` call itself --
+/// already returns a value [`try_accept`] maps into a status rather than
+/// unwrapping it.
+unsafe extern "C-unwind" fn poll_accept(state: *mut u8, _task_ctx: *mut u8) -> i64 {
+    let slots = state as *mut i64;
+    // SAFETY: `state` is the object `nova_rt_net_accept_future` built, at
+    // least `ACCEPT_STATE_SIZE` bytes, so the slot below is in bounds.
+    let fd = unsafe { slots.add(ACCEPT_SLOT_FD).read() };
+    match try_accept(fd) {
+        AcceptStep::Done(status) => {
+            // SAFETY: same object, output slot.
+            unsafe { slots.add(STATE_SLOT_OUTPUT).write(status) };
+            POLL_READY
+        }
+        AcceptStep::WouldBlock(socket) => {
+            stage_io_park(socket, Interest::Read, None);
+            POLL_PENDING
+        }
+    }
+}
+
+/// A fresh `Future<Int>` (a status, per this module's boundary design) that
+/// waits for the next incoming connection on the listener behind `fd`. On
+/// success the accepted connection's new fd is stashed via `Slot::Buffer`,
+/// the identical 8-byte little-endian channel [`nova_rt_net_listen`]'s own fd
+/// rides -- so the Nova side decodes it with the same `decode_count`.
+///
+/// **Waiting on a peer is what makes this a future**, and it is the only
+/// thing that does: [`nova_rt_net_listen`] and [`nova_rt_net_local_port`] are
+/// ordinary status words because their syscalls cannot wait on one. Stated as
+/// a property rather than as a position or a count, deliberately -- every
+/// numbered claim about this module's future/status split written so far has
+/// gone stale within an increment.
+///
+/// **The state object is fresh on every call**, for the same reason
+/// [`nova_rt_net_connect_future`]'s own doc comment gives: the whole value
+/// carried across a suspension is this state object's own listener fd, so two
+/// accepts in flight at once would otherwise corrupt each other. Two accepts
+/// in flight in the *same task* still cannot happen, for a different reason --
+/// staging two I/O waits in one poll ends the process (`task.rs`'s
+/// `stage_park`), so a server needs one task per concurrent wait.
+///
+/// # Safety
+/// No pointer argument, so no dereference precondition beyond `build_future`'s
+/// own; marked `unsafe extern "C-unwind"` for uniformity with this module's
+/// other future constructors.
+#[no_mangle]
+pub unsafe extern "C-unwind" fn nova_rt_net_accept_future(fd: i64) -> *mut u8 {
+    let poll: PollFn = poll_accept;
+    build_future(poll, ACCEPT_STATE_SIZE, |slots| {
+        // SAFETY: `slots` addresses a live `ACCEPT_STATE_SIZE` block, and the
+        // slot is in bounds by the assertion above.
+        unsafe { slots.add(ACCEPT_SLOT_FD).write(fd) };
     })
 }
 
@@ -1983,10 +2201,13 @@ mod tests {
     /// its place -- it proves the reported port is genuinely listening and
     /// accepting, which a port number read out of a struct cannot show -- but a
     /// reader must not mistake it for the assertion that pins the value. The
-    /// peer socket is never accepted (no `accept` intrinsic exists until
-    /// Task 3) and does not need to be: the handshake completes in the kernel
-    /// on a listening socket's behalf whether or not the application ever picks
-    /// the connection up.
+    /// peer socket is never accepted -- `nova_rt_net_accept_future` now exists
+    /// and this test still does not use it -- and does not need to be: the
+    /// handshake completes in the kernel on a listening socket's behalf whether
+    /// or not the application ever picks the connection up. That is exactly
+    /// what keeps this test about `local_port` alone;
+    /// [`accept_parks_until_a_client_connects_then_yields_a_stream_fd`] is
+    /// where picking the connection up is what is under test.
     ///
     /// **The port arrives in `Slot::Buffer`, not in the status word**, so this
     /// reads it with [`take_fd`] exactly as
@@ -2750,11 +2971,23 @@ mod tests {
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
     }
 
-    /// Using any of the three futures this task adds against a closed fd is
-    /// an ordinary error, not a panic -- the async-future shape of
-    /// `file.rs`'s `using_a_file_after_close_is_an_error_not_a_panic`. Checks
-    /// all three individually, since a mutation could plausibly land in just
-    /// one of their `with_stream` `None` arms without touching the other two.
+    /// Using `read`, `write` or `read_timeout` against a closed fd is an
+    /// ordinary error, not a panic -- the async-future shape of `file.rs`'s
+    /// `using_a_file_after_close_is_an_error_not_a_panic`. Checks all three
+    /// individually, since a mutation could plausibly land in just one of
+    /// their [`with_stream`] `None` arms without touching the other two.
+    ///
+    /// **Named rather than counted, and `accept` is deliberately outside it.**
+    /// This used to read "the three futures this task adds", which was a count
+    /// over a population that has since grown -- [`nova_rt_net_accept_future`]
+    /// is a fourth future in this file. It is not folded in here because its
+    /// miss is a *different* lookup: these three go through [`with_stream`] and
+    /// `accept` goes through [`with_listener`], so covering it would not be one
+    /// more iteration of the same shape. **That arm is genuinely unpinned**:
+    /// nothing exercises [`try_accept`]'s `None` case, so a closed, stale,
+    /// forged or wrong-kind fd reaching `accept` reports
+    /// [`closed_fd_error`]'s status by construction rather than by
+    /// measurement.
     #[test]
     fn using_a_closed_socket_is_an_error_not_a_panic_for_read_write_and_read_timeout() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -3028,6 +3261,139 @@ mod tests {
         assert_eq!(bytes, b"hi");
 
         assert_eq!(unsafe { nova_rt_net_close(fd) }, OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // `accept` -- the listener operation that waits on a peer.
+    // -----------------------------------------------------------------------
+
+    /// `accept` must park while nothing has connected and settle with a
+    /// **stream** fd once something has -- and the park has to be a real one,
+    /// staged on the listener's own socket for `Interest::Read` with no
+    /// deadline.
+    ///
+    /// **Why the return value of the first poll is the load-bearing assertion,
+    /// and why it is still not enough on its own.** The same argument
+    /// [`a_read_with_no_data_parks_and_completes_when_data_arrives`] makes at
+    /// length applies here unchanged: an `accept` that spun on `WouldBlock`
+    /// instead of parking, or that treated `WouldBlock` as a settled error,
+    /// would still hand back a usable connection once the client below
+    /// connects, so an outcome-only test cannot tell a park from a busy spin --
+    /// and a future that returns `POLL_PENDING` while staging *nothing* looks
+    /// identical from the return value alone. So this reads back what was
+    /// actually staged as well, via `crate::task::staged_io_for_test`.
+    ///
+    /// **Accept-readiness is read-readiness**, which is why the staged
+    /// interest asserted below is `Interest::Read` and why this increment adds
+    /// no `Interest` variant: `select` reports a pending connection in its
+    /// read set and `WSAPoll` reports it as `POLLRDNORM`.
+    ///
+    /// **The accepted stream must be non-blocking, and the probe at the end is
+    /// what pins that.** A fresh connection with nothing written to it yet has
+    /// nothing to read, so [`try_read`] against it must report
+    /// [`ReadStep::WouldBlock`]; against a *blocking* accepted socket the same
+    /// call would block this test's thread instead, so that mutation shows up
+    /// as a hang rather than as a failed assertion. `accept` does not propagate
+    /// the listener's non-blocking mode on every platform -- Linux's
+    /// `accept(2)` explicitly does not -- so without the explicit
+    /// `set_nonblocking` this would hang on `ubuntu-latest` alone while passing
+    /// here.
+    ///
+    /// **One known way this can flake, shared with `dead_addr`.** The first
+    /// poll asserts that *nothing* has connected yet, and this listener holds
+    /// an ephemeral port a sibling test in this same binary could in principle
+    /// dial: [`dead_addr`] binds `127.0.0.1:0` and then drops the listener, so
+    /// the port it returns is free for this test to be handed and for
+    /// `connecting_to_a_closed_port_is_connection_refused` to then dial. That
+    /// window is the pre-existing flake [`dead_addr`]'s own comment records,
+    /// not a new one, and this test keeps its listener alive for the listener's
+    /// whole life rather than reproducing the shape.
+    #[test]
+    fn accept_parks_until_a_client_connects_then_yields_a_stream_fd() {
+        let addr = crate::gc_str("127.0.0.1:0");
+        // SAFETY: `addr` is the live `NovaStr` allocated immediately above.
+        assert_eq!(unsafe { nova_rt_net_listen(addr) }, OK);
+        let listener_fd = take_fd();
+        assert_eq!(unsafe { nova_rt_net_local_port(listener_fd) }, OK);
+        let port = take_fd();
+        let expected_socket = with_listener(listener_fd, |l| raw_socket_of_listener(l))
+            .expect("test setup: the fd must be registered as a listener");
+
+        let fut = unsafe { nova_rt_net_accept_future(listener_fd) };
+        let (poll, state) = poll_fn_and_state(fut);
+
+        let first = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+        assert_eq!(
+            first, POLL_PENDING,
+            "an accept with no client connected must park rather than settle"
+        );
+        assert_eq!(
+            crate::task::staged_io_for_test(),
+            Some((expected_socket, Interest::Read, None)),
+            "an accept with no client connected must genuinely stage a park on \
+             Interest::Read for this listener's own socket, with no deadline -- \
+             not merely return POLL_PENDING while parking nothing"
+        );
+        // The staged park has to go before the next poll can stage its own: a
+        // same-kind pair aborts the process (`try_stage`'s own doc comment),
+        // which is what makes every later park below observable at all.
+        drain_stray_pending_park_for_test();
+
+        let client = std::net::TcpStream::connect(("127.0.0.1", port as u16))
+            .expect("test setup: a loopback connect to this listener must succeed");
+
+        // The connect returning does not mean the connection has reached this
+        // listener's backlog yet, so this polls until it has, blocking on real
+        // read-readiness in between rather than sleeping -- the same shape
+        // `await_peer_bytes_for_test` uses for the same kind of asynchrony.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ready = loop {
+            let outcome = with_test_current(0, || unsafe { poll(state, std::ptr::null_mut()) });
+            if outcome == POLL_READY {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a client connected on port {port} and this accept never \
+                 settled"
+            );
+            drain_stray_pending_park_for_test();
+            crate::poll::wait(&[(expected_socket, Interest::Read)], Some(deadline));
+        };
+        assert_eq!(ready, POLL_READY);
+        assert_eq!(
+            unsafe { (state as *mut i64).add(STATE_SLOT_OUTPUT).read() },
+            OK,
+            "a settled accept must report success, not a status"
+        );
+
+        // Read before anything else allocates: `Slot::Buffer`'s payload is
+        // rooted by nothing, exactly as `take_fd`'s own comment records.
+        let accepted_fd = with_test_current(0, take_fd);
+        assert!(
+            accepted_fd > 0 && accepted_fd != listener_fd,
+            "the accepted connection must get a fresh fd of its own, never the \
+             listener's: got {accepted_fd} against listener {listener_fd}"
+        );
+        assert!(
+            is_open_for_test(accepted_fd),
+            "the accepted fd must be registered as a stream, so every read, \
+             write and read_timeout works on it unchanged"
+        );
+        assert!(
+            !is_listener_for_test(accepted_fd),
+            "and must not answer as a listener -- one table, two variants"
+        );
+        assert!(
+            matches!(try_read(accepted_fd, 1), ReadStep::WouldBlock(_)),
+            "the accepted stream must be non-blocking: nothing has been \
+             written to it, so a read must report would-block rather than \
+             waiting for a byte"
+        );
+
+        drop(client);
+        assert_eq!(unsafe { nova_rt_net_close(accepted_fd) }, OK);
+        assert_eq!(unsafe { nova_rt_net_close(listener_fd) }, OK);
     }
 
     /// The exact layout `nova_rt_net_read_future` builds -- the same

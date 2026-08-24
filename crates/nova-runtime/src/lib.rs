@@ -636,6 +636,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_net_local_port",
             net::nova_rt_net_local_port as *const u8,
         ),
+        (
+            "nova_rt_net_accept_future",
+            net::nova_rt_net_accept_future as *const u8,
+        ),
         ("nova_rt_bytes_len", bytes::nova_rt_bytes_len as *const u8),
         (
             "nova_rt_bytes_from_string",

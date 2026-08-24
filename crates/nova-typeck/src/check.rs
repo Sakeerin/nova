@@ -3959,6 +3959,7 @@ impl<'a> Checker<'a> {
             | Builtin::NetReadTimeout
             | Builtin::NetListen
             | Builtin::NetLocalPort
+            | Builtin::NetAccept
             | Builtin::BytesLen
             | Builtin::BytesFromString
             | Builtin::BytesIsUtf8
@@ -7240,6 +7241,14 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         // `NetListen` and `NetLocalPort` returning `Ty::Int` rather than a
         // future is exactly what makes `std/net`'s `bind` and `local_port`
         // plain `fn`s.
+        //
+        // **`NetAccept` takes an `Int` fd as well and is not an exception**,
+        // which is the reading a reader could otherwise take from the
+        // paragraph above: an `Int` parameter is what removes the
+        // *resolution* caveat, not what makes an operation non-suspending.
+        // `accept` waits on a peer -- the one thing none of the three status
+        // words does -- so it is a `Ty::Future` despite sharing
+        // `NetLocalPort`'s exact parameter list.
         Builtin::NetConnect => (vec![Ty::String], Ty::Future(Box::new(Ty::Int))),
         Builtin::NetClose => (vec![Ty::Int], Ty::Int),
         Builtin::NetRead => (vec![Ty::Int, Ty::Int], Ty::Future(Box::new(Ty::Int))),
@@ -7250,6 +7259,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         ),
         Builtin::NetListen => (vec![Ty::String], Ty::Int),
         Builtin::NetLocalPort => (vec![Ty::Int], Ty::Int),
+        Builtin::NetAccept => (vec![Ty::Int], Ty::Future(Box::new(Ty::Int))),
         Builtin::BytesLen => (vec![Ty::Bytes], Ty::Int),
         Builtin::BytesFromString => (vec![Ty::String], Ty::Bytes),
         Builtin::BytesIsUtf8 => (vec![Ty::Bytes], Ty::Bool),
@@ -15323,6 +15333,11 @@ mod tests {
                     (vec![Ty::Int], Ty::Int),
                     "`net_local_port(self.fd)` -- with no `.await`, since it \
                      cannot suspend -- in `std/net`'s `TcpListener::local_port`",
+                ),
+                Builtin::NetAccept => (
+                    (vec![Ty::Int], Ty::Future(Box::new(Ty::Int))),
+                    "`net_accept(self.fd).await` in `std/net`'s \
+                     `TcpListener::accept`",
                 ),
                 Builtin::BytesLen => (
                     (vec![Ty::Bytes], Ty::Int),

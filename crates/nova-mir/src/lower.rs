@@ -730,6 +730,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::NetReadTimeout => Lowering::Runtime(RtFunc::NetReadTimeout),
                     Builtin::NetListen => Lowering::Runtime(RtFunc::NetListen),
                     Builtin::NetLocalPort => Lowering::Runtime(RtFunc::NetLocalPort),
+                    Builtin::NetAccept => Lowering::Runtime(RtFunc::NetAccept),
                     Builtin::BytesLen => Lowering::Runtime(RtFunc::BytesLen),
                     Builtin::BytesFromString => Lowering::Runtime(RtFunc::BytesFromString),
                     Builtin::BytesIsUtf8 => Lowering::Runtime(RtFunc::BytesIsUtf8),

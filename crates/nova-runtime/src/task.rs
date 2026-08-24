@@ -652,12 +652,15 @@ fn stage_park(wait: Wait) {
 /// is a compile error here rather than a silent miss in a sibling module that
 /// matched on it.
 ///
-/// `net.rs` calls this from four production sites: `poll_connect`
+/// `net.rs` calls this from five production sites: `poll_connect`
 /// (`Interest::Write`), `poll_read` (`Interest::Read`), `poll_write`
-/// (`Interest::Write`) and `poll_read_timeout` (`Interest::Read`, and the only
-/// one of the four that passes a `deadline`). An earlier `#[allow(dead_code)]`
-/// here recorded that no caller existed yet; it has been removed with its
-/// reason rather than left to mask a real dead-code finding.
+/// (`Interest::Write`), `poll_read_timeout` (`Interest::Read`, and the only
+/// one of the five that passes a `deadline`) and `poll_accept`
+/// (`Interest::Read`, because accept-readiness *is* read-readiness on both
+/// `select` and `WSAPoll`, which is why a listening socket needed no third
+/// `Interest`). An earlier `#[allow(dead_code)]` here recorded that no caller
+/// existed yet; it has been removed with its reason rather than left to mask a
+/// real dead-code finding.
 pub(crate) fn stage_io_park(socket: RawSocket, interest: Interest, deadline: Option<Instant>) {
     stage_park(Wait::Io {
         socket,
@@ -1050,10 +1053,13 @@ fn earliest_deadline() -> Option<Instant> {
 /// waiting for.
 ///
 /// This returns a non-empty vector in production now: `net.rs` stages a
-/// [`Wait::Io`] from each of its four poll functions (see [`stage_io_park`]),
-/// so an ordinary Nova program awaiting a `connect`, `read`, `write` or
-/// `read_timeout` puts a real socket here, and `run_to_completion`'s
-/// drained-queue match hands it to `poll::wait`. An earlier version of this
+/// [`Wait::Io`] from each of its five poll functions (see [`stage_io_park`]),
+/// so an ordinary Nova program awaiting a `connect`, `read`, `write`,
+/// `read_timeout` or `accept` puts a real socket here, and
+/// `run_to_completion`'s drained-queue match hands it to `poll::wait`. A
+/// listening socket goes in through the same `Interest::Read` a stream does,
+/// because accept-readiness *is* read-readiness on both of `poll::wait`'s
+/// platform arms. An earlier version of this
 /// comment said the opposite -- that nothing outside this module's own tests
 /// ever staged one, so this always returned empty -- which was true only
 /// before `net.rs` existed.
