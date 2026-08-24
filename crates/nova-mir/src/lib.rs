@@ -345,8 +345,10 @@ rt_funcs! {
     /// Idempotent, as `FileClose`.
     ///
     /// **Not a future constructor** — it returns its status directly, exactly
-    /// `FileClose`'s shape. `NetListen` and `NetLocalPort` below are the only
-    /// other members of this group that do.
+    /// `FileClose`'s shape. `NetListen` and `NetLocalPort` below do the same.
+    /// A roster, not a closed world: this read "are the only other members of
+    /// this group that do", which is true today and is the shape that has
+    /// gone stale twice in this group already.
     NetClose,
     /// `(i64 fd, i64 max) -> ptr to { poll_code, state }` — a fresh future
     /// that reads up to `max` bytes from `fd`, non-blockingly.
@@ -397,10 +399,11 @@ rt_funcs! {
     /// to, which is how a caller learns the kernel's choice after a `NetListen`
     /// on port 0.
     ///
-    /// **Not a future constructor**, the third member of this group that is
-    /// not, with `NetClose` and `NetListen`: `local_addr` is a `getsockname`
-    /// call over bookkeeping the kernel already holds, so there is no
-    /// suspension to model. Unlike `NetListen` it takes no address, so it
+    /// **Not a future constructor**, with `NetClose` and `NetListen` — a
+    /// roster rather than the ordinal this read before ("the third member of
+    /// this group that is not"), which ranks within a group that grows:
+    /// `local_addr` is a `getsockname` call over bookkeeping the kernel
+    /// already holds, so there is no suspension to model. Unlike `NetListen` it takes no address, so it
     /// carries none of that variant's blocking-resolution caveat either.
     ///
     /// `0` on success, **with the port waiting in `FsTakeBytes`** as an 8-byte
@@ -669,13 +672,38 @@ impl RtFunc {
             // which is the whole reason that line asserts the port's range
             // instead of trusting the client's `connect` to notice.
             //
-            // `NetAccept` shares that same single-`I64` parameter list but
-            // *not* the hazard, and the reason is worth stating rather than
-            // leaving a reader to check: it returns `Ptr`, so confusing it
-            // with either of those two in a lowering arm changes the return
-            // class and this table faults it, exactly as it would fault
-            // `NetConnect` swapped for `NetListen`. The indistinguishable pair
-            // stays a pair.
+            // Anyone re-running that measurement must rebuild the compiler
+            // first: every `std/*/lib.nova` is `include_str!`'d into it, so a
+            // stale binary exercises the std baked into it rather than the
+            // mutation, and reports a **false pass**. The fixture's own
+            // header states the same hazard at length; it is repeated here
+            // because this is the other place the mutation is described, and
+            // a reader who arrives here first would otherwise not meet it.
+            //
+            // `NetAccept` shares that same single-`I64` parameter list and
+            // differs from the pair only in returning `Ptr`. An earlier
+            // version of this paragraph drew a conclusion from that which
+            // this block's own premise above forbids: it said confusing
+            // `NetAccept` with either of those two "changes the return class
+            // and this table faults it, exactly as it would fault
+            // `NetConnect` swapped for `NetListen`". That contradicted the
+            // premise -- this table declares and checks nothing -- and named
+            // the very same hypothetical swap the paragraph above calls
+            // caught by nothing. **The premise is the half that survives.**
+            //
+            // What a return-class change actually does, **read rather than
+            // run**, since no build here confirmed it: `Stmt::CallRuntime`
+            // carries no expected return type at all -- only `dst`, `func`
+            // and `args`. `lower_call` types `dst` from typeck's signature
+            // for the call expression, while the LLVM backend emits the call
+            // under this table's own `func.signature()` return. So a swapped
+            // variant makes those two disagree and surfaces as mismatched IR
+            // **in that backend alone**; Cranelift's `def_temp` would not see
+            // it, because `I64` and `Ptr` are one type there on a 64-bit
+            // target. A return-class change is therefore not caught *here*,
+            // and downstream it is caught on only one of two backends. The
+            // indistinguishable pair stays a pair, and nothing in this table
+            // is what separates any of them.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),

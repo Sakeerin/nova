@@ -1512,8 +1512,15 @@ side), UDP, and Unix sockets are all named in §1's module-index line for
 future increment's to add.
 
 
-**AMENDED 2026-08-23 (branch `std-net-listener`): the paragraph above is now
-two-thirds false, and it overstated what §1 says even when it was written.**
+**AMENDED 2026-08-24 (branch `std-net-listener`): the paragraph above is now
+partly false, and it overstated what §1 says even when it was written.**
+(This read "two-thirds false" until the final whole-branch review. The
+retracted sentence sets its own denominator — "none of the three is built"
+over the server side, UDP and Unix sockets — and exactly one of the three
+shipped, so the fraction was one third. No fraction is given now: the
+sentence below names which of the three moved, which is the whole truth and
+cannot go stale the way a ratio does. The stamp read 2026-08-23 for the same
+reason it was wrong elsewhere — the amendment landed on the 24th.)
 `bind`, `accept` and `TcpListener` shipped this increment; UDP and Unix
 sockets remain unbuilt. And the claim that all three were "named in §1's
 module-index line" was never right: that line reads
@@ -1559,10 +1566,20 @@ because one kind-checked table reports absent and wrong-kind through the same
 and `std/io`'s `io_error_kind_of` together, and was deliberately not made.
 
 **What this increment did not do, each recorded rather than left silent.**
-Concurrency is **not proven**: no fixture parks two sockets at once, nothing
-adds `select`/`race`/`join_all`, and one socket wait per task is enforced by
-**process abort** — staging two `Wait::Io` in a single poll aborts — so a
-server needs at least two tasks and has no way to avoid that. The
+Concurrency is **not proven at scale**, which is narrower than what this
+paragraph first claimed. It said "no fixture parks two sockets at once", and
+this increment's own `tests/runtime/net_listener_accept.nova` falsifies that:
+`accept` parks the server task on the listener, the spawned client's first
+poll then parks on its own socket unconditionally — `platform_connect` folds
+a synchronous loopback `connect` into would-block as well, so there is no
+schedule in which the client settles without parking — and the executor
+reaches its poller only once the ready queue has drained, so **two tasks are
+parked on two sockets simultaneously on every run**. That is exactly what
+shows the park path works at all. What stays unproven is **many** concurrent
+connections: nothing adds `select`/`race`/`join_all`, and one socket wait per
+task is enforced by **process abort** — staging two `Wait::Io` in a single
+poll aborts — so a server needs at least two tasks and has no way to avoid
+that. The
 non-blocking mode of the listening and accepted sockets is pinned by
 assertions that are **platform-conditional**: a kernel-calibrated probe
 decides at run time whether the read-back observes what `std` actually sets,

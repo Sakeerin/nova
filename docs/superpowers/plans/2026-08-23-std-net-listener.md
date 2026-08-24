@@ -16,7 +16,7 @@
 - **Sum every `test result:` line across all 44 targets. Never pipe cargo output through `head` or `tail`.** Baseline: **1057 passed / 0 failed / 8 ignored**.
 - Clippy `--all-targets -- -D warnings` on ubuntu **and** windows; `cargo fmt --all -- --check`.
 - **MSRV 1.78: no `reason = "..."` in any lint attribute.**
-- The ignored GC tests stay ignored and untouched. The count is **8 unconditional attributes** (six in `gc.rs`, two in `task.rs`) plus **one conditional** — `#[cfg_attr(target_os = "linux", ignore = ...)]` on `extern_ffi_run` — so the runtime count is 8 on Windows/macOS and **9 on Linux**, and CI's advisory `--ignored` step is red on Linux **by design**.
+- The ignored GC tests stay ignored and untouched. The attribute census is **8 unconditional attributes** (six in `gc.rs`, two in `task.rs`) plus **one conditional** — `#[cfg_attr(target_os = "linux", ignore = ...)]` on `extern_ffi_run`. Runtime counts: **Windows 8, macOS 0, Linux 1.** CI's advisory `--ignored` step is red on Linux **by design**. (**CORRECTED 2026-08-24, final whole-branch review:** this said "the runtime count is 8 on Windows/macOS and 9 on Linux". The census was right; the platform mapping was false. All six `gc.rs` attributes sit inside `mod registry` and both `task.rs` attributes inside `mod root_registration`, and **both modules are `#[cfg(windows)]`**, so off Windows those eight tests are not compiled and cannot be ignored. The single Linux ignore is `extern_ffi_run`, which on macOS *runs*. The same false mapping is in the design spec, which is where it came from.)
 - The poll ABI is **frozen**: `PollFn = unsafe extern "C-unwind" fn(*mut u8, *mut u8) -> i64`, `POLL_PENDING = 0`, `POLL_READY = 1`, `task_ctx` always null.
 - **No panic may cross a generated poll boundary.**
 - `std/net/lib.nova` is `include_str!`'d, so editing it forces a full workspace rebuild.
@@ -699,21 +699,23 @@ Five consecutive passes. This fixture binds a real port, so flakiness here is th
 ## Task 5: Records
 
 **Files:**
-- Modify: `nova-spec/20-STDLIB.md` (§16, and §1's index line), `docs/adr/0013-io-poller.md`, `CHANGELOG.md`
+- Modify: `nova-spec/20-STDLIB.md` (§16 only), `docs/adr/0013-io-poller.md`, `CHANGELOG.md`
+
+(**CORRECTED 2026-08-24, final whole-branch review:** this listed "§16, and §1's index line". No step below asks for an edit to §1's index line, and no commit made one — Step 1's third bullet asks for the index line's imprecision to be **recorded inside the §16 amendment**, which is what shipped. The promise was the only thing wrong; the work was right.)
 
 - [ ] **Step 1: Amend `20-STDLIB.md` §16**
 
-House style: `**AMENDED <date> (branch \`<branch>\`):**`. The sentence at `:1509-1512` — "`bind`/`accept`/`TcpListener` (a server side), UDP, and Unix sockets are all named in §1's module-index line for `std/net`, but none of the three is built by this section; each remains a future increment's to add" — is now **two-thirds false**. Say so in place. The amendment must also carry:
+House style: `**AMENDED <date> (branch \`<branch>\`):**`. The sentence at `:1509-1512` — "`bind`/`accept`/`TcpListener` (a server side), UDP, and Unix sockets are all named in §1's module-index line for `std/net`, but none of the three is built by this section; each remains a future increment's to add" — is now **partly false**. Say so in place, naming which of the three moved rather than giving a fraction. (**CORRECTED 2026-08-24, final whole-branch review:** this instructed "is now **two-thirds false**", and Task 5 transcribed the fraction verbatim into `20-STDLIB.md`. The retracted sentence sets its own denominator — "none of the three is built" over the server side, UDP and Unix sockets — and exactly one shipped, so the fraction was one third. A roster of what moved cannot go stale the way a ratio does.) The amendment must also carry:
 
 - The four new signatures, verbatim.
 - That §1's index line (`20-STDLIB.md:16`, `std/net          TCP/UDP/Unix sockets`) names UDP and Unix sockets but **not** the server side, which is only implied by "TCP" — so the sentence being amended overstated what §1 says.
 - The plain-`fn` rule for `bind`/`local_port` **and** its one deliberate exception at `close`, with the reason. A principle with a silent exception is worse than either.
 - Both error collapses: `AddrInUse` is not among `IoErrorKind`'s eight variants so an in-use port reports `Other`, and wrong-kind access reports `Other` for the same reason.
-- That concurrency is **not** proven by this increment: no fixture parks two sockets at once, and there is no `select`.
+- That concurrency is **not** proven **at scale** by this increment: **many** concurrent connections stay unproven, and there is no `select`. (**CORRECTED 2026-08-24, final whole-branch review:** this instructed "no fixture parks two sockets at once", and Task 5 transcribed it into `20-STDLIB.md` and `CHANGELOG.md`, where three review dimensions found it. Task 4's own fixture falsifies it: `accept` parks the server task on the listener, the spawned client's first poll parks unconditionally, and the executor reaches its poller only once the ready queue has drained — so two tasks sit parked on two sockets on every run. The instruction was reaching for scale and said something stronger and false.)
 
 - [ ] **Step 2: Amend `docs/adr/0013-io-poller.md`**
 
-A dated amendment, **not a new ADR** — what is being accepted is a property of the poller's own design. Record that a listener makes the `FD_SETSIZE` skip path reachable for the first time: on Unix an fd at or above the ceiling is skipped and never watched again, and because only `read_timeout` stages a deadline that task is never woken and never errors. Quote the poller's own comment — it already calls that path and the non-`EINTR` error path "still reasoned, not measured" — and state that this increment does not change it.
+A dated amendment, **not a new ADR** — what is being accepted is a property of the poller's own design. Record that `accept` makes a many-descriptor process the first **realistic** shape for this module, and that the `FD_SETSIZE` skip path is what such a process runs into: on Unix an fd at or above the ceiling is skipped and never watched again, and because only `read_timeout` stages a deadline that task is never woken and never errors — though the process does log a rate-limited warning, so it is the *language* that cannot observe it, not the operator. (**CORRECTED 2026-08-24, final whole-branch review:** this instructed "makes the `FD_SETSIZE` skip path reachable for the first time", and Task 5 wrote that premise into ADR 0013 and the CHANGELOG, where four review dimensions found it. The rejection tests a descriptor's *number*, one socket at a time, so one socket has always sufficed; and `std/fs`'s long-lived descriptors could already push a socket past the ceiling with no listener involved.) Quote the poller's own comment — it already calls that path and the non-`EINTR` error path "still reasoned, not measured" — and state that this increment does not change it.
 
 - [ ] **Step 3: Add the CHANGELOG entry**
 

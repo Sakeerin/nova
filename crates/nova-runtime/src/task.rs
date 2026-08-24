@@ -4899,11 +4899,16 @@ mod tests {
     /// longer for the reason an earlier version of this comment gave -- that
     /// nothing outside a test could populate a real, unresolved `Wait::Io`
     /// through `run_to_completion`. `net.rs` now stages exactly that from
-    /// `connect`, `read`, `write` and `accept`, each passing `deadline: None`
-    /// -- every socket operation there but `read_timeout`, which is the one
-    /// that carries a deadline. No count is given here on purpose: an earlier
-    /// wording said "three of its four" and `poll_accept`'s arrival falsified
-    /// it, so the roster is named rather than counted.
+    /// `connect`, `read`, `write` and `accept`, each passing `deadline: None`;
+    /// `read_timeout` stages a wait as well and is the one that carries a
+    /// deadline. A roster with neither a count nor a quantifier, because this
+    /// comment has now had one of each go wrong. It said "three of its four",
+    /// which `poll_accept`'s arrival falsified. The replacement said "every
+    /// socket operation there but `read_timeout`", which the same increment
+    /// falsified in the other direction: `net_listen`, `net_local_port` and
+    /// `net_close` are socket operations in that module which stage no wait at
+    /// all, so "every socket operation" was never the population being
+    /// described. Naming the poll functions that park is.
     /// The arm is reached in production and end to end by
     /// every `std/net` runtime fixture: `tests/runtime/net_interleave.nova`'s
     /// `connect` in `main` parks the only live task on an untimed `Wait::Io`

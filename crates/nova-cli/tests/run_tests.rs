@@ -7508,11 +7508,18 @@ fn net_lifetime_run() {
 }
 
 /// `bind`, `local_port`, `accept` and both `close`s, end to end, with a real
-/// connection crossing the listener. **The only `std/net` fixture that needs
-/// no `EchoServer`**: both ends are Nova, in two tasks of one process, so
-/// there is no port file and no Rust peer here — the listener binds
-/// `127.0.0.1:0` itself and hands the kernel's choice to a spawned client
-/// task as a plain `spawn` argument.
+/// connection crossing the listener. **The only `std/net` fixture with no
+/// port file and no Rust peer**: both ends are Nova, in two tasks of one
+/// process, so the listener binds `127.0.0.1:0` itself and hands the
+/// kernel's choice to a spawned client task as a plain `spawn` argument.
+///
+/// This said "**the only `std/net` fixture that needs no `EchoServer`**",
+/// which `net_refused_run` falsifies — its entire point is that nothing is
+/// listening, so it touches no `EchoServer` either, and the section header
+/// above this group already names it for exactly that reason. The property
+/// stated above is the one that is genuinely exclusive, and it survives the
+/// group growing: `net_refused_run` does write a port file, so this stays
+/// the one `net_*` fixture needing neither a port file nor a Rust peer.
 ///
 /// Also `local_port`'s only runtime fixture, which is why it exists as much
 /// as the round trip is: `RtFunc::NetClose` and `RtFunc::NetLocalPort` are
