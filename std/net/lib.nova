@@ -284,7 +284,10 @@ impl TcpListener {
     // Errors as `IoError { kind: Other }` on a closed, stale or forged
     // listener, and on a `TcpListener` whose `fd` actually names a connected
     // stream -- the same wrong-kind collapse `local_port` above documents at
-    // length, and not distinguishable from the closed case.
+    // length, and not distinguishable from the closed case. Both halves of
+    // that promise are measured, in `net.rs`'s
+    // `accepting_on_a_closed_or_wrong_kind_fd_is_an_error_not_a_park`; until
+    // that test was added this comment asserted a boundary nothing checked.
     pub async fn accept(self) -> Result<TcpStream, IoError> {
         let status = net_accept(self.fd).await
         if status == 0 {

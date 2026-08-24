@@ -648,9 +648,12 @@ fn stage_park(wait: Wait) {
 ///
 /// The narrow seam `net.rs` stages an I/O wait through, so it never needs to
 /// construct a [`Wait`] itself. `Wait` and [`stage_park`] stay private --
-/// every exhaustive match on `Wait` lives in this module, so a fifth variant
+/// every exhaustive match on `Wait` lives in this module, so **a new variant**
 /// is a compile error here rather than a silent miss in a sibling module that
-/// matched on it.
+/// matched on it. (This said "a fifth variant" until 2026-08-24; `Wait` has
+/// three -- `Deadline`, `Task`, `Io` -- so the next one added is the fourth.
+/// The property does not depend on the number, so the number is gone rather
+/// than corrected.)
 ///
 /// `net.rs` calls this from five production sites: `poll_connect`
 /// (`Interest::Write`), `poll_read` (`Interest::Read`), `poll_write`
