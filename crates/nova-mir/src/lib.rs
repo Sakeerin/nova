@@ -629,11 +629,18 @@ impl RtFunc {
             // cannot fault and that IR test cannot fault either, and the only
             // thing that separates them is which symbol `symbol()` names. The
             // typeck-side `builtin_signatures_are_what_the_std_call_sites_use`
-            // is equally blind to the swap. Only a test that *runs* the
-            // compiled program would catch it, and as of this increment
-            // `local_port` has no such fixture: nothing under `tests/runtime`
-            // calls it, so the swap is currently unpinned rather than merely
-            // hard to pin.
+            // is equally blind to the swap.
+            //
+            // Only a test that *runs* the compiled program catches it, and the
+            // two directions are **not** equally covered. `NetClose` lowered to
+            // `NetLocalPort` *is* caught: it would run
+            // `nova_rt_net_local_port` against a stream fd, miss the listener
+            // kind check, and make `TcpStream::close` report `Err`, so
+            // `tests/runtime/net_lifetime.stdout`'s first golden line
+            // (`close: ok`) and `net_roundtrip.stdout`'s last one both fail.
+            // `NetLocalPort` lowered to `NetClose` is *not* caught: nothing
+            // under `tests/runtime` calls `local_port` as of this increment, so
+            // that one direction is genuinely unpinned.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),

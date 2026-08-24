@@ -227,8 +227,19 @@ impl TcpListener {
     // failure. So it is read back with the same `decode_count` `bind` uses for
     // its fd, straight-line with nothing awaited in between.
     //
-    // Errors on a closed, stale or forged listener, `IoError { kind: Other }`
-    // by the same missed table lookup every other operation reports that way.
+    // Errors as `IoError { kind: Other }` on a closed, stale or forged
+    // listener, by the same missed table lookup every other operation reports
+    // that way.
+    //
+    // **A `TcpListener` whose `fd` actually names a connected stream is that
+    // same case, and is not distinguishable from it.** `fd` is not
+    // privacy-enforced, so `TcpListener { fd: s.fd }` built from a `TcpStream`
+    // compiles; the runtime keeps streams and listeners in one table and its
+    // kind-checked lookup collapses wrong-kind into the identical miss an
+    // absent fd gives. `IoErrorKind` has no wrong-kind variant to report
+    // instead -- the same reason `bind` above gives for `AddrInUse` arriving as
+    // `Other` -- so a stream fd here yields `Other` with the runtime's own
+    // "socket is not open" message, and no Nova code can tell the two apart.
     pub fn local_port(self) -> Result<Int, IoError> {
         let status = net_local_port(self.fd)
         if status == 0 {

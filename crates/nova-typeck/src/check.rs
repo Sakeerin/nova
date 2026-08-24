@@ -7223,9 +7223,12 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         // block, so none of them has a suspension to model.
         //
         // **That is a claim about the syscalls, not about every argument.**
-        // `NetClose` and `NetLocalPort` take an `Int` fd and reach nothing but
-        // the runtime's own handle table, so for those two it is the whole
-        // story. `NetListen` takes a `String` a user program chooses, and a
+        // `NetClose` and `NetLocalPort` take an `Int` fd, so there is no
+        // address for `std`'s `ToSocketAddrs` to resolve and no blocking lookup
+        // to reach. Their syscalls are immediate kernel bookkeeping -- `close`
+        // on the dropped handle, `getsockname` for the port -- so for those two
+        // the syscall claim is the whole story. `NetListen` takes a `String` a
+        // user program chooses, and a
         // hostname in it resolves through `std`'s `ToSocketAddrs` — a blocking
         // lookup with no future to park on. `resolve_addr`'s own doc comment in
         // `crates/nova-runtime/src/net.rs` records that caveat for `connect`,
