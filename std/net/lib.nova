@@ -11,7 +11,7 @@
 // and not because no poller exists, but because a regular file is not
 // readiness-pollable by `select`/`WSAPoll` on any of this project's three CI
 // platforms (docs/adr/0013-io-poller.md's IOCP alternative) -- `connect`,
-// `read`, `write` and `read_timeout` below run against
+// `read`, `write`, `read_timeout` and `TcpListener::accept` below run against
 // `crates/nova-runtime/src/net.rs`'s
 // non-blocking sockets and this crate's real poller
 // (`crates/nova-runtime/src/poll.rs`): a call that cannot complete
@@ -28,8 +28,9 @@
 // each one calling a private `async fn` and returning its future unawaited.
 //
 // **Every wrapper below awaits its own future-constructor builtin (`net_connect`/
-// `net_read`/`net_write`/`net_read_timeout`) exactly once, then reads the
-// per-task payload/message slot with no further `.await` in between.** Those
+// `net_read`/`net_write`/`net_read_timeout`/`net_accept`) exactly once, then
+// reads the per-task payload/message slot with no further `.await` in
+// between.** Those
 // slots are per-task, keyed on the polling task
 // (`crates/nova-runtime/src/fs.rs`'s `SLOTS`/`slot_index`), so a sibling task
 // cannot clobber them — but within one task a second operation still
@@ -244,6 +245,50 @@ impl TcpListener {
         let status = net_local_port(self.fd)
         if status == 0 {
             return Ok(decode_count(fs_take_bytes()))
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
+
+    // Waits for the next incoming connection, suspending the calling task
+    // rather than blocking the executor.
+    //
+    // **An `async fn` on its merits, not by convention** -- the rule `bind`
+    // states is "plain `fn` for anything that cannot suspend", and this is the
+    // one operation on a listener that genuinely can. The `accept` syscall
+    // waits on a peer, so `net_accept` is a future constructor and the
+    // `.await` here is real: while it is parked, sibling tasks on this thread
+    // keep running.
+    //
+    // The returned `TcpStream` is indistinguishable from a connected one, so
+    // `Read`, `Write`, `read_timeout` and `close` above all work on it
+    // unchanged. Its fd arrives in the payload slot rather than as the
+    // returned status, read back with the same `decode_count` `bind` and
+    // `connect` use for their own -- straight-line, with nothing awaited
+    // between the `.await` above and the read, the discipline this module's
+    // header states.
+    //
+    // **One socket wait per task, enforced by process abort.** Staging two
+    // I/O waits in a single poll ends the process (`stage_park` in
+    // `crates/nova-runtime/src/task.rs`), so a task parked in `accept` cannot
+    // also be reading or writing a connection: a server needs at least two
+    // tasks -- one accepting, one per connection it serves -- and this
+    // language has no `select` or `race` to fold them into one. `spawn` is the
+    // whole of what makes that possible.
+    //
+    // **No timeout.** There is no `accept_timeout` counterpart to
+    // `TcpStream::read_timeout`, so a task waiting here waits until a
+    // connection arrives or the process ends; an untimed wait is never
+    // reported as a deadlock, and `block_on` cannot return while any task is
+    // parked, so there is no graceful-shutdown path through this.
+    //
+    // Errors as `IoError { kind: Other }` on a closed, stale or forged
+    // listener, and on a `TcpListener` whose `fd` actually names a connected
+    // stream -- the same wrong-kind collapse `local_port` above documents at
+    // length, and not distinguishable from the closed case.
+    pub async fn accept(self) -> Result<TcpStream, IoError> {
+        let status = net_accept(self.fd).await
+        if status == 0 {
+            return Ok(TcpStream { fd: decode_count(fs_take_bytes()) })
         }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }

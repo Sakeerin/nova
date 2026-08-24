@@ -19,13 +19,16 @@
 //!
 //! **No longer true, as of 2026-08-16 (branch `io-poller-std-net`):** this
 //! module's doc comment used to say no caller in this crate ever builds a
-//! non-empty `sockets` slice. `net.rs` now does -- `connect`, `read`, `write`
-//! and `read_timeout`'s poll functions stage a `Wait::Io` through `task.rs`'s
-//! `stage_io_park` at four sites between them, so `task.rs`'s `io_parks`
-//! returns a non-empty slice in production and the non-empty path below is
-//! reached by ordinary Nova programs, not only by this module's own tests
-//! against real loopback sockets. Those tests remain the only thing that
-//! exercises it *directly*.
+//! non-empty `sockets` slice. `net.rs` now does -- `connect`, `read`, `write`,
+//! `read_timeout` and `accept`'s poll functions stage a `Wait::Io` through
+//! `task.rs`'s `stage_io_park` at five sites between them, so `task.rs`'s
+//! `io_parks` returns a non-empty slice in production and the non-empty path
+//! below is reached by ordinary Nova programs, not only by this module's own
+//! tests against real loopback sockets. Those tests remain the only thing that
+//! exercises it *directly*. A **listening** socket is watched through the same
+//! `Interest::Read` a stream is, with no new variant: `select` reports a
+//! pending connection in its read set and `WSAPoll` reports it as
+//! `POLLRDNORM`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

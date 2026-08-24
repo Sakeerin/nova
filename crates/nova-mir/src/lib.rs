@@ -409,6 +409,21 @@ rt_funcs! {
     /// `FsReadToString` — including an fd that names a connected stream rather
     /// than a listener, which is a wrong-kind miss and not a port.
     NetLocalPort,
+    /// `(i64 fd) -> ptr to { poll_code, state }` — a fresh future that waits
+    /// for the next incoming connection on the listening socket behind `fd`.
+    ///
+    /// A future constructor, as `NetConnect`'s doc comment explains — unlike
+    /// `NetClose` and `NetLocalPort`, whose syscalls cannot wait on a peer.
+    /// `.await`ing it produces `0` on success, with the accepted connection's
+    /// new fd waiting in `FsTakeBytes` as an 8-byte little-endian payload, as
+    /// `NetListen`'s and `NetConnect`'s own; otherwise an `IoErrorKind` status
+    /// code, as `FsReadToString` — including an fd that names a connected
+    /// stream rather than a listener, which is the same wrong-kind miss
+    /// `NetLocalPort` describes.
+    ///
+    /// The accepted fd is an ordinary stream fd, so `NetRead`, `NetWrite`,
+    /// `NetReadTimeout` and `NetClose` all act on it unchanged.
+    NetAccept,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -519,6 +534,7 @@ impl RtFunc {
             RtFunc::NetReadTimeout => "nova_rt_net_read_timeout_future",
             RtFunc::NetListen => "nova_rt_net_listen",
             RtFunc::NetLocalPort => "nova_rt_net_local_port",
+            RtFunc::NetAccept => "nova_rt_net_accept_future",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -641,6 +657,14 @@ impl RtFunc {
             // `NetLocalPort` lowered to `NetClose` is *not* caught: nothing
             // under `tests/runtime` calls `local_port` as of this increment, so
             // that one direction is genuinely unpinned.
+            //
+            // `NetAccept` shares that same single-`I64` parameter list but
+            // *not* the hazard, and the reason is worth stating rather than
+            // leaving a reader to check: it returns `Ptr`, so confusing it
+            // with either of those two in a lowering arm changes the return
+            // class and this table faults it, exactly as it would fault
+            // `NetConnect` swapped for `NetListen`. The indistinguishable pair
+            // stays a pair.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),
@@ -648,6 +672,7 @@ impl RtFunc {
             RtFunc::NetReadTimeout => (vec![MirTy::I64, MirTy::I64, MirTy::I64], MirTy::Ptr),
             RtFunc::NetListen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::NetLocalPort => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::NetAccept => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),
