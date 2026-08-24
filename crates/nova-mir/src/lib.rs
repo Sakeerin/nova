@@ -340,11 +340,13 @@ rt_funcs! {
     /// little-endian payload, as `FileOpen`'s own fd; otherwise an
     /// `IoErrorKind` status code, as `FsReadToString`.
     NetConnect,
-    /// `(i64 fd) -> i64` — close `fd`, dropping the underlying connection and
-    /// releasing its OS handle. Idempotent, as `FileClose`.
+    /// `(i64 fd) -> i64` — close `fd`, dropping the underlying handle (a
+    /// connection or a listener alike) and releasing its OS handle.
+    /// Idempotent, as `FileClose`.
     ///
-    /// **Not a future constructor** — the one member of this group of five
-    /// that returns its status directly, exactly `FileClose`'s shape.
+    /// **Not a future constructor** — it returns its status directly, exactly
+    /// `FileClose`'s shape. `NetListen` below is the only other member of this
+    /// group that does.
     NetClose,
     /// `(i64 fd, i64 max) -> ptr to { poll_code, state }` — a fresh future
     /// that reads up to `max` bytes from `fd`, non-blockingly.
@@ -374,6 +376,17 @@ rt_funcs! {
     /// otherwise identical to `NetRead`, including EOF/short-read semantics
     /// and where the bytes land on success.
     NetReadTimeout,
+    /// `(ptr addr) -> i64` — bind and listen on `addr` ("host:port"),
+    /// registering a non-blocking listening socket.
+    ///
+    /// **Not a future constructor**, the only member of this group besides
+    /// `NetClose` that is not: binding and listening cannot block, so there is
+    /// no suspension to model. `0` on success, with the new fd waiting in
+    /// `FsTakeBytes` as an 8-byte little-endian payload, as `NetConnect`'s and
+    /// `FileOpen`'s own; otherwise an `IoErrorKind` status code, as
+    /// `FsReadToString`. Closed with `NetClose`, which serves both kinds of
+    /// handle.
+    NetListen,
     /// `(bytes) -> i64` — the byte length. Not a character count: `Bytes` has
     /// no encoding.
     BytesLen,
@@ -482,6 +495,7 @@ impl RtFunc {
             RtFunc::NetRead => "nova_rt_net_read_future",
             RtFunc::NetWrite => "nova_rt_net_write_future",
             RtFunc::NetReadTimeout => "nova_rt_net_read_timeout_future",
+            RtFunc::NetListen => "nova_rt_net_listen",
             RtFunc::BytesLen => "nova_rt_bytes_len",
             RtFunc::BytesFromString => "nova_rt_bytes_from_string",
             RtFunc::BytesIsUtf8 => "nova_rt_bytes_is_utf8",
@@ -566,17 +580,21 @@ impl RtFunc {
             RtFunc::IoStdinRead => (vec![MirTy::I64], MirTy::I64),
             RtFunc::IoStdoutWrite | RtFunc::IoStderrWrite => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::IoStdoutFlush | RtFunc::IoStderrFlush => (vec![], MirTy::I64),
-            // Four of these five return `MirTy::Ptr` (a future's `{ poll_code,
+            // Most of this group return `MirTy::Ptr` (a future's `{ poll_code,
             // state }` pointer), not `MirTy::I64` — the same shape
             // `TaskSleepFutureNanos`/`TaskJoinFuture` use above, unlike every
             // `FsWrite`/`File*`/`Io*` entry directly above this group.
-            // `NetClose` alone returns `MirTy::I64`, exactly `FileClose`'s
-            // shape.
+            // `NetClose` and `NetListen` are the two that return `MirTy::I64`,
+            // exactly `FileClose`'s shape. Note `NetListen` takes a `Ptr` (its
+            // address string) and returns an `I64`, the reverse of
+            // `NetConnect`'s `Ptr` -> `Ptr`, so a lowering that confused the
+            // two would be a type error here rather than a wrong call.
             RtFunc::NetConnect => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetClose => (vec![MirTy::I64], MirTy::I64),
             RtFunc::NetRead => (vec![MirTy::I64, MirTy::I64], MirTy::Ptr),
             RtFunc::NetWrite => (vec![MirTy::I64, MirTy::Ptr], MirTy::Ptr),
             RtFunc::NetReadTimeout => (vec![MirTy::I64, MirTy::I64, MirTy::I64], MirTy::Ptr),
+            RtFunc::NetListen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesLen => (vec![MirTy::Ptr], MirTy::I64),
             RtFunc::BytesFromString => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesIsUtf8 => (vec![MirTy::Ptr], MirTy::I8),

@@ -38,11 +38,14 @@
 // already replaced. Keep them straight-line, the same discipline `std/fs`
 // and `std/io` already document for their own wrappers.
 //
-// `net_close` is the one exception, exactly as `crates/nova-runtime/src/net.rs`'s
-// own doc comment for `Builtin::NetClose` states: an ordinary status word,
-// not a future constructor, so `TcpStream::close` below calls it directly,
-// with no `.await` at all — the identical shape `std/fs`'s `File::close`
-// already uses for `file_close`.
+// `net_close` and `net_listen` are the exceptions, exactly as
+// `crates/nova-resolver/src/lib.rs`'s own doc comments for
+// `Builtin::NetClose` and `Builtin::NetListen` state: both are ordinary
+// status words rather than future constructors, so `TcpStream::close`,
+// `TcpListener::close` and `bind` below call them directly, with no `.await`
+// at all — the identical shape `std/fs`'s `File::close` already uses for
+// `file_close`. The straight-line rule still applies to them: `bind` reads
+// its fd out of the payload slot with nothing awaited in between.
 
 pub record TcpStream { fd: Int }
 
@@ -144,4 +147,51 @@ async fn flush_stream(s: TcpStream) -> Result<(), IoError> {
 impl Write for TcpStream {
     fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_stream(self, buf) }
     fn flush(self) -> Future<Result<(), IoError>> { flush_stream(self) }
+}
+
+// A listening socket. Server side of `std/net`, added because Phase 2
+// position 10 (`std/http`) has no transport without it.
+pub record TcpListener { fd: Int }
+
+// Bind and listen on `addr` ("host:port"). Pass port 0 to let the kernel
+// choose, then read it back with `local_port`.
+//
+// **A plain `fn`, not an `async fn`: this cannot suspend.** Binding and
+// listening never block, so `net_listen` is an ordinary status word and
+// there is no future to await. Forcing `.await` here would misstate the
+// cost. Note the deliberate exception at `TcpListener::close` below.
+//
+// An address already in use arrives as `IoError { kind: Other }`, not a
+// distinct kind: `IoErrorKind` has eight variants and `AddrInUse` is not
+// among them, so the most likely failure of this function is discriminable
+// only by `message`, whose text is the operating system's own. Adding a
+// variant is a wire-contract change across the runtime's `fail` and
+// `std/io`'s `io_error_kind_of` together, and is deliberately not done here.
+pub fn bind(addr: String) -> Result<TcpListener, IoError> {
+    let status = net_listen(addr)
+    if status == 0 {
+        return Ok(TcpListener { fd: decode_count(fs_take_bytes()) })
+    }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+impl TcpListener {
+    // Stops accepting and releases the port. Idempotent, for the same reason
+    // `TcpStream::close` is: Nova has no move checking, so `self` by value
+    // cannot prevent a second call.
+    //
+    // **An `async fn` even though it cannot suspend** -- the one deliberate
+    // exception to the rule stated at `bind` above. It calls the same
+    // `net_close` a stream does, with no `.await`, because the runtime's
+    // table removes an entry by key regardless of which kind it holds. It is
+    // declared `async` to match the shipped `TcpStream::close`: a server
+    // closes both handles in sequence, and a reader should not have to
+    // remember which of two identically named socket methods needs `.await`.
+    pub async fn close(self) -> Result<(), IoError> {
+        let status = net_close(self.fd)
+        if status == 0 {
+            return Ok(())
+        }
+        Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+    }
 }

@@ -450,17 +450,22 @@ builtins! {
     /// Std-only.
     NetConnect,
     /// `net_close(fd: Int) -> Int` — close `fd`, dropping the underlying
-    /// connection and releasing its OS handle.
+    /// handle and releasing its OS handle.
     ///
-    /// **The one member of this group of five that is not a future
-    /// constructor** — an ordinary status word, exactly
+    /// **Not a future constructor**, unlike [`Builtin::NetConnect`] and the
+    /// read/write group below it — an ordinary status word, exactly
     /// [`Builtin::FileClose`]'s shape, for the identical reason: idempotent,
     /// since `std/net`'s `close` cannot consume its receiver (Nova has no
     /// move checking), so a caller can always reach a second call, and
     /// closing an already-closed, stale, or forged fd finds nothing in the
     /// runtime's handle table and still reports success. No payload. Runtime
     /// symbol `nova_rt_net_close` (`crates/nova-runtime/src/net.rs`).
-    /// Std-only.
+    ///
+    /// **Serves a listener as well as a connected stream**, which is why
+    /// [`Builtin::NetListen`] adds no close of its own: the runtime keeps both
+    /// kinds in one handle table and removes an entry by key regardless of
+    /// which kind it holds. `TcpListener::close` in `std/net` calls this same
+    /// builtin. Std-only.
     NetClose,
     /// `net_read(fd: Int, max: Int) -> Future<Int>` — read up to `max` bytes
     /// from `fd`, non-blockingly.
@@ -497,6 +502,29 @@ builtins! {
     /// symbol `nova_rt_net_read_timeout_future`
     /// (`crates/nova-runtime/src/net.rs`). Std-only.
     NetReadTimeout,
+    /// `net_listen(addr: String) -> Int` — bind and listen on `addr`
+    /// ("host:port"), registering a non-blocking listening socket.
+    ///
+    /// **Not a future constructor**, the second builtin in this group after
+    /// [`Builtin::NetClose`] that is not: binding and listening are immediate
+    /// kernel bookkeeping and cannot block, so there is no suspension to model
+    /// and `std/net`'s `bind` is a plain `fn` rather than an `async fn`. The
+    /// waiting a server does happens in `accept`, which is a separate builtin.
+    ///
+    /// Returns a status code as [`Builtin::FsReadToString`] does — `0` on
+    /// success, with the new fd waiting in [`Builtin::FsTakeBytes`] as an
+    /// 8-byte little-endian payload, the same channel [`Builtin::NetConnect`]
+    /// and [`Builtin::FileOpen`] use for their own fds. The fd is closed with
+    /// [`Builtin::NetClose`], which serves both kinds of handle.
+    ///
+    /// **An address already in use arrives as `Other`, not a distinct kind.**
+    /// `fs.rs`'s `IoErrorKind` table has no `AddrInUse` variant, so the most
+    /// likely failure of this builtin is discriminable only by the message
+    /// text the operating system supplied. Adding a variant is a wire-contract
+    /// change across the runtime's `fail` and `std/io`'s `io_error_kind_of`
+    /// together, and is deliberately not done. Runtime symbol
+    /// `nova_rt_net_listen` (`crates/nova-runtime/src/net.rs`). Std-only.
+    NetListen,
     /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
     /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
     /// Nova cannot read a `Bytes` value's own header (no length, indexing or
@@ -667,6 +695,7 @@ impl Builtin {
             Builtin::NetRead => "net_read",
             Builtin::NetWrite => "net_write",
             Builtin::NetReadTimeout => "net_read_timeout",
+            Builtin::NetListen => "net_listen",
             Builtin::BytesLen => "bytes_len",
             // Deliberately not "bytes_from_string" — see this variant's doc
             // comment for why that would collide with `std/bytes`'s own
@@ -715,7 +744,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 66] = [
+    pub const STD_ONLY: [Builtin; 67] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -767,6 +796,7 @@ impl Builtin {
         Builtin::NetRead,
         Builtin::NetWrite,
         Builtin::NetReadTimeout,
+        Builtin::NetListen,
         Builtin::BytesLen,
         Builtin::BytesFromString,
         Builtin::BytesIsUtf8,
@@ -2467,13 +2497,19 @@ mod tests {
         }
     }
 
-    /// The five `std/net` builtins are `STD_ONLY`, per the brief this task
+    /// Every `std/net` builtin is `STD_ONLY`, per the brief this task
     /// was written against. `STD_ONLY.contains` rather than the loop
     /// `no_std_only_builtin_is_a_reserved_word`/
     /// `std_only_builtins_are_visible_inside_std_modules` already run over
-    /// the whole array: this test pins these five *by name*, so deleting one
+    /// the whole array: this test pins each one *by name*, so deleting one
     /// from `STD_ONLY` (rather than merely narrowing its behaviour) fails
     /// here specifically instead of only shrinking a loop bound elsewhere.
+    ///
+    /// The list grows with the module: `NetListen` joined the original five
+    /// when `std/net` gained its listener, and this test is the reason a new
+    /// net builtin cannot be added to the enum and left out of `STD_ONLY`
+    /// without a named failure -- provided whoever adds it also adds it here,
+    /// which no compiler enforces.
     ///
     /// `STD_ONLY` membership is the whole of what this asserts. It was
     /// originally named `..._and_build_futures`, which promised a second
@@ -2490,6 +2526,7 @@ mod tests {
             Builtin::NetRead,
             Builtin::NetWrite,
             Builtin::NetReadTimeout,
+            Builtin::NetListen,
         ] {
             assert!(
                 Builtin::STD_ONLY.contains(&b),
