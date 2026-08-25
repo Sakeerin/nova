@@ -21,6 +21,28 @@ pub type JsonValue =
 // returns carries a FIXED PLACEHOLDER, `at: 0`, never a real index.
 pub record JsonError { msg: String, at: Int }
 
+// The deepest nesting `parse` accepts. RFC 8259 section 9 permits a limit --
+// "An implementation may set limits on the maximum depth of nesting" -- so a
+// cap conforms.
+//
+// 128 IS A DECLARED CONTRACT AND DELIBERATELY NOT DERIVED FROM THIS BUILD'S
+// STACK. That distinction answers the objection this file used to raise against
+// any cap: a stack-size threshold is not a portable budget, and a number taken
+// from one machine's stack would be wrong on the next. 128 is instead the
+// budget `serde_json` starts a deserializer with -- a bare `remaining_depth:
+// 128` literal on a `u8` field in its `src/de.rs`, not a named constant, and
+// defeatable there through `disable_recursion_limit`. Read at `master` on
+// 2026-08-25 and cited as a precedent that makes 128 defensible, not as a
+// standard: Jackson's `StreamReadConstraints.maxNestingDepth()` defaults to
+// 1000, CPython has no JSON-specific constant and inherits the interpreter's
+// recursion limit, and Go's `encoding/json` caps nothing.
+//
+// For scale rather than for derivation: this build was measured parsing depth
+// 5000 successfully and overflowing its stack at 6000, on an input of 12001
+// characters. 128 sits far below that on the platform where it was measured,
+// which is what makes it portable.
+const MAX_DEPTH: Int = 128
+
 // Render `v` as JSON text.
 //
 // TOTAL OVER VALUES, NOT OVER DEPTH. There is no `JsonValue` whose *shape*
@@ -243,7 +265,7 @@ fn escape_control(code: Int) -> String {
 pub fn parse(s: String) -> Result<JsonValue, JsonError> {
     let mut p = P { cs: s.chars(), pos: 0, err: None }
     p.skip_ws()
-    let v = p.parse_value()
+    let v = p.parse_value(0)
     p.skip_ws()
     if !p.at_end() { p.fail("trailing content") }
     match p.err {
@@ -281,11 +303,12 @@ impl P {
     // to `parse`'s comment, `scan_number`'s comment and the fixture header in
     // the same change that made it necessary, and missed here.
     //
-    // Measured, so the reach is not assumed: dropping this guard rewrites 24
-    // golden lines across the three parse fixtures -- 4 in
-    // `json_parse_numbers.stdout`, 9 in `json_parse_strings.stdout`, 11 in
-    // `json_parse_values.stdout` -- which is every rejection whose cursor stops
-    // short of the end of the input AND whose value walk already failed.
+    // Measured, so the reach is not assumed: dropping this guard rewrites every
+    // golden line whose rejection stops the cursor short of the end of the
+    // input AND whose value walk had already failed. The predicate is the
+    // durable part; the count is not, and this file's parse fixtures have grown
+    // since it was taken. Re-measure by deleting the guard rather than citing a
+    // number from here.
     //
     // Both halves of that predicate are load-bearing. Four more goldens in
     // `json_parse_values.stdout` also stop short of the end -- the
@@ -440,37 +463,43 @@ impl P {
     // Dispatching on the first letter and then consuming a fixed count would
     // read `nxxx` as `null`.
     //
-    // NESTING DEPTH IS UNBOUNDED, IN BOTH DIRECTIONS. This recurses through
-    // `scan_array` and `scan_object` back into itself with one native frame per
-    // level, so an input nested deeply enough exhausts the stack rather than
-    // returning a `JsonError` -- a `[[[[...` of sufficient length crashes the
-    // process. `stringify` has the identical property rendering a value back
-    // out, recorded at `stringify` itself.
+    // NESTING DEPTH IS CAPPED IN THIS DIRECTION. This recurses through
+    // `scan_array` and `scan_object` back into itself, and the check above
+    // bounds that recursion at `MAX_DEPTH`, reporting an ordinary `JsonError`
+    // through the same channel as a syntax error. `stringify` is bounded
+    // differently -- it does not recurse at all -- and says so at its own
+    // header rather than here, so this file no longer states one property for
+    // both directions.
     //
-    // MEASURED against this compiler, debug build, on Windows: `[` x 5000, `1`,
-    // `]` x 5000 parses fine; the same input at depth 6000 overflows the stack
-    // and the process aborts. That is roughly a 12 KB text producing a HARD
-    // ABORT rather than a `JsonError`, from an input smaller than most HTTP
-    // request bodies. No fixture pins the threshold and none can: a fixture
-    // that crashed the process would fail the suite by construction. The exact
-    // number is a function of stack size and frame layout, so it is a
-    // measurement of THIS BUILD rather than a portable budget; the
-    // unboundedness is the portable part.
+    // WHAT THE NUMBER COUNTS. A leaf costs a depth level and an empty
+    // innermost container does not, because the empty-container fast paths in
+    // `scan_array` and `scan_object` return without re-entering this function.
+    // So 128 containers wrapping a leaf is accepted and 129 is not, while 129
+    // containers ending empty is accepted and 130 is not. Both boundaries are
+    // pinned: `json_depth_leaf.nova` and `json_depth_empty.nova`.
     //
-    // RFC 8259 section 9 explicitly permits an implementation to set limits on
-    // nesting depth, so a cap would be conforming. NONE IS IMPOSED, and that is
-    // a DECISION rather than an oversight, restated now that the threshold has
-    // been measured: a stack-size artefact is not a budget a cap can be derived
-    // from, and a number taken from one machine's stack would be wrong on the
-    // next; a cap also needs an API choice this increment's scope did not
-    // include, namely which depth and whether exceeding it is an ordinary
-    // `JsonError` or something a caller must distinguish from bad syntax. What
-    // is owed instead is the disclosure, which now also stands in ADR 0018 and
-    // `nova-spec/20-STDLIB.md` section 7 rather than only here. Recorded as a
-    // known property, the way `scan_str`'s quadratic cost below is -- not as a
-    // claim that it is safe against hostile input.
-    fn parse_value(mut self) -> JsonValue {
+    // RETRACTED, quoted so the retraction is legible. This paragraph used to
+    // say a cap was declined deliberately because "a stack-size artefact is not
+    // a budget a cap can be derived from", and that a cap "needs an API choice
+    // this increment's scope did not include, namely which depth and whether
+    // exceeding it is an ordinary `JsonError` or something a caller must
+    // distinguish from bad syntax." The objection was right and is honoured
+    // rather than overruled: `MAX_DEPTH` is a declared contract, not a number
+    // read off this build's stack. Both deferred questions are answered -- the
+    // counting rule is above, and the failure is an ordinary `JsonError`,
+    // deliberately indistinguishable in shape from bad syntax, so a caller that
+    // must tell them apart matches the message. That is a weak contract and is
+    // named as one.
+    //
+    // The claim that no fixture could pin the threshold was true of a
+    // STACK threshold -- a fixture that crashed the process would fail the
+    // suite by construction -- and stops applying to a declared constant.
+    fn parse_value(mut self, d: Int) -> JsonValue {
         if self.err.is_some() { return Null }
+        if d > MAX_DEPTH {
+            self.fail("maximum nesting depth exceeded")
+            return Null
+        }
         let c = self.peek()
         if c == 'n' { return self.keyword("null", Null) }
         if c == 't' { return self.keyword("true", Bool(true)) }
@@ -479,8 +508,8 @@ impl P {
             let s = self.scan_str()
             return String(s)
         }
-        if c == '[' { return self.scan_array() }
-        if c == '{' { return self.scan_object() }
+        if c == '[' { return self.scan_array(d) }
+        if c == '{' { return self.scan_object(d) }
         if c == '-' || is_digit(c) { return self.scan_number() }
         self.fail("expected a value")
         Null
@@ -512,7 +541,7 @@ impl P {
     // `[]` legal while `[1,]` and `[,1]` are not: once the loop is entered, a
     // value is required, because RFC 8259's `array` repetition ends on a value
     // and never on a separator.
-    fn scan_array(mut self) -> JsonValue {
+    fn scan_array(mut self, d: Int) -> JsonValue {
         self.bump()
         self.skip_ws()
         if self.peek() == ']' {
@@ -523,7 +552,7 @@ impl P {
         let mut items: Vec<JsonValue> = Vec::new()
         let mut going = true
         while going {
-            let v = self.parse_value()
+            let v = self.parse_value(d + 1)
             if self.err.is_some() { return Null }
             items.push(v)
             self.skip_ws()
@@ -554,7 +583,7 @@ impl P {
     // behaviour of a non-unique name "unpredictable" and observes that many
     // implementations report the last pair only -- so this is a decision, not a
     // requirement, and `json_parse_values.nova`'s `duplicate key` case pins it.
-    fn scan_object(mut self) -> JsonValue {
+    fn scan_object(mut self, d: Int) -> JsonValue {
         self.bump()
         self.skip_ws()
         let mut m: Map<String, JsonValue> = Map::new()
@@ -577,7 +606,7 @@ impl P {
             }
             self.bump()
             self.skip_ws()
-            let v = self.parse_value()
+            let v = self.parse_value(d + 1)
             if self.err.is_some() { return Null }
             m.insert(k, v)
             self.skip_ws()

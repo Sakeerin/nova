@@ -1,0 +1,2 @@
+128 containers + leaf -> Ok
+129 containers + leaf -> Err maximum nesting depth exceeded at 129

@@ -1,0 +1,38 @@
+// The depth cap's boundary on the shape where the innermost container is
+// EMPTY.
+//
+// WHICH SHAPE 128 COUNTS HERE: it does not count containers. An empty
+// container is one level cheaper than a container holding a leaf, because
+// `scan_array` and `scan_object` each return from an empty-container fast path
+// WITHOUT calling `parse_value`, and `parse_value` is what checks the depth. So
+// no check runs at the innermost level and 129 containers is accepted, where
+// the sibling fixture `json_depth_leaf.nova` rejects 129 of the leaf shape.
+//
+// Both rejections report the same `at`, because both fail on entry to the
+// `parse_value` that would have been one level too deep, with the same number
+// of opening brackets consumed.
+fn repeat(s: String, n: Int) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = "${out}${s}"
+        i = i + 1
+    }
+    out
+}
+
+fn nest(n: Int, mid: String) -> String {
+    "${repeat("[", n)}${mid}${repeat("]", n)}"
+}
+
+fn report(label: String, src: String) {
+    match parse(src) {
+        Ok(_) => println("${label} -> Ok")
+        Err(e) => println("${label} -> Err ${e.msg} at ${e.at}")
+    }
+}
+
+fn main() {
+    report("129 containers, empty innermost", nest(129, ""))
+    report("130 containers, empty innermost", nest(130, ""))
+}

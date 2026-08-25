@@ -1,0 +1,36 @@
+// The depth cap's boundary on the shape where a LEAF sits innermost.
+//
+// WHICH SHAPE 128 COUNTS HERE: containers plus a leaf. The leaf occupies a
+// depth level of its own, because `parse_value` is what checks the depth and
+// the leaf is a `parse_value` call. So 128 containers wrapping a leaf is the
+// deepest accepted input of this shape, and 129 is the first rejected one.
+//
+// The sibling fixture `json_depth_empty.nova` pins the OTHER shape, where the
+// innermost container is empty and one level cheaper, and it accepts 129. A
+// single fixture asserting "129 is rejected" would be true here and false
+// there, which is the off-by-one this pair exists to make impossible.
+fn repeat(s: String, n: Int) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < n {
+        out = "${out}${s}"
+        i = i + 1
+    }
+    out
+}
+
+fn nest(n: Int, mid: String) -> String {
+    "${repeat("[", n)}${mid}${repeat("]", n)}"
+}
+
+fn report(label: String, src: String) {
+    match parse(src) {
+        Ok(_) => println("${label} -> Ok")
+        Err(e) => println("${label} -> Err ${e.msg} at ${e.at}")
+    }
+}
+
+fn main() {
+    report("128 containers + leaf", nest(128, "1"))
+    report("129 containers + leaf", nest(129, "1"))
+}

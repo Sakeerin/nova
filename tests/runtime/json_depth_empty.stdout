@@ -1,0 +1,2 @@
+129 containers, empty innermost -> Ok
+130 containers, empty innermost -> Err maximum nesting depth exceeded at 129
