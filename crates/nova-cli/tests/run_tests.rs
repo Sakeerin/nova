@@ -8568,3 +8568,44 @@ fn json_stringify_cycle_panics_with_a_named_message() {
         "expected the guard, not a stack overflow or an allocator abort, stderr: {stderr}"
     );
 }
+
+/// The depth guard, pinned by a value that terminates either way, unlike the
+/// cyclic fixture above: one level past `MAX_RENDER_DEPTH` (100001) panics
+/// with the guard in place, and renders (exit 0) with it deleted. A deleted
+/// guard therefore fails THIS test's `.failure()` assertion promptly, rather
+/// than hanging the way the cyclic fixture does when the guard is gone.
+#[test]
+fn json_render_guard_panics_with_a_named_message() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_render_guard.nova"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: stringify: nesting too deep or cyclic value"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("has overflowed its stack") && !stderr.contains("memory allocation of"),
+        "expected the guard, not a stack overflow or an allocator abort, stderr: {stderr}"
+    );
+}
+
+/// The depth guard's lower side: `MAX_RENDER_DEPTH - 1` (99999) must still
+/// render successfully. Pins that the bound is not below 99999 -- not the
+/// exact bound, which only this test together with
+/// `json_render_guard_panics_with_a_named_message` brackets.
+#[test]
+fn json_render_guard_under_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_render_guard_under.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_render_guard_under.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

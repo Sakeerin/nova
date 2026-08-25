@@ -1,0 +1,26 @@
+// The depth guard's LOWER side, pinned. `json_render_guard.nova` pins that
+// one level past `MAX_RENDER_DEPTH` panics; nothing before this fixture
+// pinned that legitimate input well within the bound still renders.
+//
+// This does NOT pin the exact bound -- it pins that the bound is not below
+// 99999, which is a weaker claim. A mutation that lowered
+// `MAX_RENDER_DEPTH` to, say, 100 would make this fixture fail without this
+// fixture ever having measured where between 100 and 100000 the real edge
+// sits. Only `json_render_guard.nova`, together with this one, pins the
+// edge itself, and only because the two together bracket it at
+// `MAX_RENDER_DEPTH` exactly (100001 panics, 99999 renders).
+//
+// Depth chosen as `MAX_RENDER_DEPTH - 1` = 99999, one below the guard's
+// panic threshold, so the two fixtures bracket the same boundary from
+// opposite sides. Measured against this build: renders in about 2.1
+// seconds.
+fn main() {
+    let mut v = Number(1.0)
+    let mut i = 0
+    while i < 99999 {
+        v = Array([v])
+        i = i + 1
+    }
+    println("built, about to render")
+    println("${stringify(v).len()}")
+}
