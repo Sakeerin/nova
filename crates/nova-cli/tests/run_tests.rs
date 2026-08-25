@@ -8519,3 +8519,52 @@ fn json_depth_empty_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_render_deep_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_render_deep.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_render_deep.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn json_object_forged_map_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_object_forged_map.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_object_forged_map.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// A cyclic value must fail by the guard's own named panic, not by a stack
+/// overflow and not by running until the allocator gives up. Asserting the
+/// message is the whole point: the failure this replaces carried none.
+#[test]
+fn json_stringify_cycle_panics_with_a_named_message() {
+    let out = nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_stringify_cycle.nova"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nova: panic: stringify: nesting too deep or cyclic value"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("has overflowed its stack") && !stderr.contains("memory allocation of"),
+        "expected the guard, not a stack overflow or an allocator abort, stderr: {stderr}"
+    );
+}

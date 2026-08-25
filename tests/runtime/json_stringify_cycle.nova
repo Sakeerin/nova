@@ -1,0 +1,20 @@
+// A cyclic `JsonValue` and the guard that refuses it.
+//
+// Nova arrays are heap references, so three lines close a loop. Before this
+// increment the recursive `stringify` met it with a stack overflow: fatal,
+// under a second, and carrying no message. The iterative form has no such
+// natural floor -- unguarded it grows the work list one net item per pop
+// forever, ending in an allocator abort that prints neither a `nova: panic:`
+// prefix nor a location. The guard turns that back into an immediate, named
+// failure, which is better than either.
+//
+// The guard is on NESTING DEPTH and not on work-list length, deliberately: a
+// cycle grows depth without bound while a wide, shallow document grows only
+// length, and a length bound would refuse legitimate input.
+fn main() {
+    let mut a: [JsonValue] = [Null]
+    let v = Array(a)
+    a[0] = v
+    println("about to render a cyclic value")
+    println("${stringify(v).len()}")
+}
