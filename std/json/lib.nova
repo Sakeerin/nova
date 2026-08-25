@@ -109,32 +109,85 @@ fn number_to_json(n: Float) -> String {
     if n - n != 0.0 { "null" } else { "${n}" }
 }
 
+// A growable character buffer, appended to and drained once.
+//
+// `Vec<Char>` plus `str_from_chars` IS the growable string buffer this file's
+// cost note used to say the language did not have. `Vec` grows by doubling
+// (`std/collections`) so appending is amortised O(1), and `str_from_chars`
+// encodes a `[Char]` in one pass, so N appends plus one drain is linear where
+// `out = "${out}..."` is quadratic. Measured, this compiler, debug build, with
+// a 129 ms compile baseline included: pushing n characters took 142, 135, 132
+// and 142 ms at n = 8000, 16000, 32000 and 64000 -- flat across an eightfold
+// range -- against 164, 249, 447 and 752 ms for interpolation.
+//
+// The parameter is `mut b` and not `b`. A plain `b: Vec<Char>` fails
+// `E0060: Vec_T.push mutates its receiver, but b is immutable`. Records are
+// heap objects passed by pointer, so the mutation reaches the caller --
+// including `Vec::push`'s reassignment of its backing array when it grows,
+// which is the case that would break a value-semantics assumption. Measured,
+// not assumed.
+fn buf_push_str(mut b: Vec<Char>, s: String) {
+    let cs = s.chars()
+    let mut i = 0
+    while i < cs.len() {
+        b.push(cs[i])
+        i = i + 1
+    }
+}
+
+// The buffer's contents as a `String`. The same manoeuvre `vec_to_array` runs
+// for `JsonValue`: allocate an exact-length array, copy, hand it on.
+//
+// THE EXACT-LENGTH COPY IS LOAD-BEARING and is not redundant with the `Vec`'s
+// own backing array: that array is the buffer's CAPACITY, not its length, so
+// encoding it directly would append the filler character of every unused slot.
+// A mutation that returns the backing array PASSES at any length that happens
+// to equal capacity, and capacity is always a power of two here, so exercise
+// the drain at a length that is not one.
+//
+// `unwrap_or(' ')` cannot take its default: `i` runs strictly below `b.len()`,
+// which is exactly the range `Vec::get` answers with `Some`.
+fn vec_chars_to_string(b: Vec<Char>) -> String {
+    let n = b.len()
+    let mut out = [' '; n]
+    let mut i = 0
+    while i < n {
+        out[i] = b.get(i).unwrap_or(' ')
+        i = i + 1
+    }
+    str_from_chars(out)
+}
+
 // Escape `s` as a JSON string literal, quotes included. `char_to_int` is how
 // this reaches a character's scalar value -- it is `STD_ONLY`, which is why
 // this helper lives here rather than in a fixture.
 fn quote(s: String) -> String {
     let cs = s.chars()
-    let mut out = "\""
+    let mut out: Vec<Char> = Vec::new()
+    out.push('"')
     let mut i = 0
     while i < cs.len() {
         let c = cs[i]
         let code = char_to_int(c)
         if c == '"' {
-            out = "${out}\\\""
+            out.push('\\')
+            out.push('"')
         } else {
             if c == '\\' {
-                out = "${out}\\\\"
+                out.push('\\')
+                out.push('\\')
             } else {
                 if code < 32 {
-                    out = "${out}${escape_control(code)}"
+                    buf_push_str(out, escape_control(code))
                 } else {
-                    out = "${out}${c}"
+                    out.push(c)
                 }
             }
         }
         i = i + 1
     }
-    "${out}\""
+    out.push('"')
+    vec_chars_to_string(out)
 }
 
 // One hex digit, lowercase, for a nibble in `0..16`. Nova has no formatting
@@ -561,38 +614,45 @@ impl P {
     // one itself. It is kept for the reason `bump`'s bounds guard is -- a
     // future caller may not position the cursor as carefully.
     //
-    // `out` is rebuilt by interpolation on every character, which is quadratic
-    // in the literal's length. That is the same shape `quote` uses in the other
-    // direction, and Nova has no growable string buffer to do better with; it
-    // is recorded here as a known cost, not as a claim that it does not matter.
-    // A `span`-style slice cannot replace it, because an escape means the
-    // decoded text is not a contiguous run of the input.
+    // `out` used to be described here as "rebuilt by interpolation on every
+    // character, which is quadratic in the literal's length", with Nova
+    // having "no growable string buffer to do better with". Both retracted by
+    // the roster below: `out` is now a `Vec<Char>`, appended to and drained
+    // once, and that buffer is exactly what the second clause said did not
+    // exist. What did NOT change is why a plain slice cannot stand in for the
+    // loop: a `span`-style slice still cannot replace it, because an escape
+    // means the decoded text is not a contiguous run of the input, so the
+    // characters still have to be assembled one at a time, only now into a
+    // buffer rather than by interpolation.
     //
-    // FOUR ACCUMULATORS IN THIS FILE HAVE THAT SHAPE, NOT TWO, and the two this
-    // note used to omit are the DOMINANT ones. `quote` and this function are
-    // quadratic in ONE STRING LITERAL. `stringify`'s `Array` and `Object` arms
-    // are quadratic in the WHOLE RENDERED DOCUMENT -- a strictly larger
-    // exposure, since every document pays it and not only a document that
-    // happens to contain a long string.
+    // THE ACCUMULATOR ROSTER IN THIS FILE, by name rather than by count, and
+    // what changed. `quote` and this function each built one string literal by
+    // interpolation; `stringify`'s `Array` and `Object` arms built the whole
+    // rendered document that way. `quote` and this function now append into a
+    // `Vec<Char>` drained once through `str_from_chars` instead, so neither is
+    // quadratic in what it emits. `stringify`'s two arms do not yet -- that
+    // migration is later work in this same increment, not this task's.
     //
-    // Measured on a debug build of this compiler, with the flat ~180 ms compile
-    // baseline subtracted so the compiler is not the quadratic party. The
-    // ABSOLUTE numbers are debug-build numbers; the ASYMPTOTICS are not
-    // build-dependent.
+    // Regrep before citing the first half of that claim: `grep -n 'out =
+    // "${out}'` over this file matches lines inside `stringify`'s `Array` and
+    // `Object` arms and nowhere inside the BODY of `quote` or of `scan_str` --
+    // those two no longer build a string that way, whatever a comment
+    // (including this one) goes on to quote for illustration.
     //
-    //   * An array of N one-character numbers. `parse` is effectively flat --
-    //     279 ms at N=4000, 282 ms at 8000, 344 ms at 16000 -- while
-    //     `stringify` of the parsed value takes 236 ms, 1309 ms and 11622 ms,
-    //     growing 5.5x then 8.9x per doubling. At N=16000 the output is about
-    //     32 KB and takes ROUGHLY TWELVE SECONDS to render.
-    //   * One string literal of N characters, through this function: 182 ms at
-    //     N=8000, 473 ms at 16000, 2256 ms at 32000, 15624 ms at 64000.
+    // RETRACTED, and quoted so the retraction is legible: this note used to
+    // close "Neither is capped, and neither is fixable without a growable
+    // string buffer the language does not have." That is true only of a
+    // growable `String` TYPE, which Nova still lacks. It is false in the sense
+    // the sentence was used: `Vec<Char>` plus `str_from_chars` composes into
+    // exactly such a buffer, both already shipped, and both were already
+    // called from this very file -- `Vec` at `vec_to_array`, `str_from_chars`
+    // at `span`. The fix needed no language change.
     //
-    // So this site becomes user-visible at roughly a 30 KB SINGLE STRING
-    // LITERAL and only fires on long individual strings, while `stringify`
-    // fires on EVERY DOCUMENT and is visible from about 16 KB of output.
-    // Neither is capped, and neither is fixable without a growable string
-    // buffer the language does not have.
+    // The measurements the old note carried described the interpolation form
+    // and are superseded; `buf_push_str` above carries the buffer's numbers.
+    // What did NOT change is `parse`'s cost, which was already effectively
+    // flat: 279, 282 and 344 ms for an array of 4000, 8000 and 16000
+    // one-character numbers.
     fn scan_str(mut self) -> String {
         if self.err.is_some() { return "" }
         if self.peek() != '"' {
@@ -600,7 +660,7 @@ impl P {
             return ""
         }
         self.bump()
-        let mut out = ""
+        let mut out: Vec<Char> = Vec::new()
         while true {
             if self.at_end() {
                 self.fail("unterminated string")
@@ -609,22 +669,22 @@ impl P {
             let c = self.peek()
             if c == '"' {
                 self.bump()
-                return out
+                return vec_chars_to_string(out)
             }
             if c == '\\' {
                 self.bump()
                 let piece = self.scan_escape()
                 if self.err.is_some() { return "" }
-                out = "${out}${piece}"
+                buf_push_str(out, piece)
             } else if char_to_int(c) < 32 {
                 self.fail("a control character must be escaped")
                 return ""
             } else {
                 self.bump()
-                out = "${out}${c}"
+                out.push(c)
             }
         }
-        out
+        vec_chars_to_string(out)
     }
 
     // What one escape decodes to, cursor on the character AFTER the backslash.
@@ -804,10 +864,12 @@ fn utf8_bytes(cp: Int) -> [Int] {
 // A `Vec` copied into the plain `[JsonValue]` that `Array` holds.
 //
 // `scan_array` collects into a `Vec` because it cannot know the element count
-// before it has parsed them, and this is the one-way conversion out. `Null` is
-// the repeat literal's filler -- every slot is overwritten below, so it never
-// survives, and `JsonValue` having a nullary variant is why this needs no
-// `Default` bound.
+// before it has parsed them. This used to be called "the one-way conversion
+// out"; it no longer is one -- `vec_chars_to_string`, added above `quote` for
+// the string buffer, drains a `Vec<Char>` the same way. `Null` is the repeat
+// literal's filler -- every slot is overwritten below, so it never survives,
+// and `JsonValue` having a nullary variant is why this needs no `Default`
+// bound.
 //
 // `unwrap_or(Null)` cannot take its default: `i` runs strictly below `v.len()`,
 // which is exactly the range `Vec::get` answers with `Some`.
