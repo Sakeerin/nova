@@ -2,15 +2,29 @@
 //
 // Nova arrays are heap references, so three lines close a loop. Before this
 // increment the recursive `stringify` met it with a stack overflow: fatal,
-// under a second, and carrying no message. The iterative form has no such
-// natural floor -- unguarded it grows the work list one net item per pop
-// forever, ending in an allocator abort that prints neither a `nova: panic:`
-// prefix nor a location. The guard turns that back into an immediate, named
-// failure, which is better than either.
+// under a second, and carrying no message -- MEASURED, by running this exact
+// program against the still-recursive form before this guard existed. The
+// iterative form has no such natural floor either: unguarded, the work list
+// grows one net item per pop with nothing to stop it. What that ends in is
+// REASONING, not something this fixture has measured -- an unguarded run of
+// this exact program was killed after 20 seconds still running, not run to
+// completion, so "an allocator abort that prints neither a `nova: panic:`
+// prefix nor a location" is the expected shape, not an observed one. The
+// guard turns the cyclic case back into an immediate, named failure, which
+// is better than either outcome, observed or not.
 //
 // The guard is on NESTING DEPTH and not on work-list length, deliberately: a
 // cycle grows depth without bound while a wide, shallow document grows only
 // length, and a length bound would refuse legitimate input.
+//
+// THIS FIXTURE IS A WEAK MUTATION DETECTOR FOR THE GUARD, ON PURPOSE LEFT
+// THAT WAY. A cyclic value is genuinely non-terminating once the guard is
+// gone, so deleting the guard turns this test into a hang rather than a
+// fast, named failure -- there is no assertion about a cyclic input that can
+// fail quickly, because the input itself never finishes. This fixture still
+// pins the cycle case, which is what the guard exists for; the deleted-guard
+// mutation is instead caught promptly by the sibling fixture
+// `json_render_guard.nova`, whose input is acyclic and finite either way.
 fn main() {
     let mut a: [JsonValue] = [Null]
     let v = Array(a)

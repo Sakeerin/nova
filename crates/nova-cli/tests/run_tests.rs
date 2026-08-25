@@ -8592,10 +8592,14 @@ fn json_render_guard_panics_with_a_named_message() {
     );
 }
 
-/// The depth guard's lower side: `MAX_RENDER_DEPTH - 1` (99999) must still
-/// render successfully. Pins that the bound is not below 99999 -- not the
-/// exact bound, which only this test together with
-/// `json_render_guard_panics_with_a_named_message` brackets.
+/// The depth guard's lower side: `MAX_RENDER_DEPTH` itself (100000) must
+/// still render successfully. Together with
+/// `json_render_guard_panics_with_a_named_message` (`MAX_RENDER_DEPTH + 1`,
+/// 100001, which panics), the pair brackets the bound exactly from both
+/// sides, so a mutation to the constant in either direction breaks one of
+/// them. (An earlier version of this test sat at `MAX_RENDER_DEPTH - 1`,
+/// 99999, which left the bound itself untested and did not catch a downward
+/// mutation to the constant; fixed to 100000 for that reason.)
 #[test]
 fn json_render_guard_under_run() {
     let expected =

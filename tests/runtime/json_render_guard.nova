@@ -18,12 +18,12 @@
 // by exit code, the moment the guard is gone.
 //
 // Measured against this build, with the guard in place: this panics
-// `stringify: nesting too deep or cyclic value` in about 2.2 seconds. With
-// the guard deleted, this value has no natural floor to stop it either --
-// it is finite, so it renders and exits 0 rather than hanging, and 100001
-// nested arrays around a leaf render to `2 * 100001 + 1 == 200003`
-// characters by the same arithmetic `json_render_deep.stdout` and
-// `json_render_guard_under.stdout` both pin.
+// `stringify: nesting too deep or cyclic value` in about 2 seconds. With
+// the guard deleted, this value still terminates on its own, because it is
+// finite: it renders and exits 0 rather than hanging the way a cyclic value
+// does once its guard is gone, and 100001 nested arrays around a leaf render
+// to `2 * 100001 + 1 == 200003` characters by the same arithmetic
+// `json_render_deep.stdout` and `json_render_guard_under.stdout` both pin.
 fn main() {
     let mut v = Number(1.0)
     let mut i = 0

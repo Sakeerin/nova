@@ -57,54 +57,97 @@ record Pending { v: JsonValue, d: Int }
 
 // The nesting depth past which `stringify` refuses to continue.
 //
-// This exists for CYCLES, not for depth. A cyclic `JsonValue` is constructible
-// in ordinary Nova because arrays are heap references, and with the work list
-// on the heap the pop-loop has no natural floor for one: it grows a net item
-// per pop until the allocator aborts, printing neither a `nova: panic:` prefix
-// nor a location. The recursive form this replaces died faster and just as
-// fatally, with no message either. A named panic is better than both, and it is
-// the best available, because `stringify` returns `String` and has no error
-// channel to report a cycle through.
+// This exists for CYCLES, but the guard is purely a depth cap and cannot
+// tell a cyclic value from a legitimate deep one -- `stringify`'s own header
+// discloses that the hard way, by counterexample. A cyclic `JsonValue` is
+// constructible in ordinary Nova because arrays are heap references, and
+// with the work list on the heap the pop-loop has no natural floor for one:
+// it grows a net item per pop with nothing to stop it. What that ends in is
+// REASONING, not a measurement here -- an unguarded run of
+// `json_stringify_cycle.nova` was killed after 20 seconds still running, not
+// run to completion, so "an allocator abort that prints neither a
+// `nova: panic:` prefix nor a location" is the expected shape (the same
+// shape `gc::alloc`'s `handle_alloc_error` produces elsewhere in this file),
+// not an observed one. The recursive form this replaces died faster and just
+// as fatally, with no message either -- THAT half is measured:
+// `json_stringify_cycle.nova` aborted by stack overflow when it still ran
+// through the recursive `stringify`, before this guard existed. A named
+// panic is better than both, and it is the best available, because
+// `stringify` returns `String` and has no error channel to report a cycle
+// through.
 //
 // GUARDED ON DEPTH, NOT ON WORK-LIST LENGTH. A cycle grows nesting depth
-// without bound; a wide, shallow document grows only length, and a length bound
-// would refuse legitimate input. 100_000 is far above any depth a caller is
-// likely to build deliberately -- the work list was measured rendering depth
-// 30000 -- and far above anything `parse` can hand over, since `parse` stops at
-// `MAX_DEPTH`.
+// without bound; a wide, shallow document grows only length, and a length
+// bound would refuse legitimate input. 100_000 is far above any depth a
+// caller is likely to build deliberately, and far above anything `parse` can
+// hand over, since `parse` stops at `MAX_DEPTH`. The bound itself is pinned,
+// not merely approached: `json_render_guard_under.nova` renders successfully
+// at exactly `MAX_RENDER_DEPTH` levels and `json_render_guard.nova` panics
+// one level past it -- superseding an earlier, unpinned "measured rendering
+// depth 30000" this comment used to cite here.
 //
-// The guard's cost is proportional to its bound: a cycle runs one iteration per
-// level before firing. That is milliseconds with the buffer this file now uses,
-// and was more than two minutes when the same walk accumulated by
-// interpolation. Check the accumulator before raising this constant.
+// The guard's cost is proportional to its bound: a cycle runs one iteration
+// per level before firing. This used to say that cost "is milliseconds with
+// the buffer this file now uses" -- false by three orders of magnitude:
+// measured against this build, both `json_render_guard.nova` and
+// `json_stringify_cycle.nova` fire at right around two seconds, not
+// milliseconds. This also used to compare that cost against "more than two
+// minutes when the same walk accumulated by interpolation" -- no such
+// version of this walk was ever built in this tree to measure; that
+// comparison described a design-time scratch probe, not a state this code
+// ever shipped in, and is dropped rather than repeated as if it still
+// applied.
 const MAX_RENDER_DEPTH: Int = 100_000
 
 // Render `v` as JSON text.
 //
-// TOTAL OVER THE VALUES IT RETURNS FROM. For every acyclic `JsonValue` there
-// is a rendering, and there is no error channel to report a failure with. Depth
-// is no longer a stack cost: the arms below push pending work onto a heap list
-// instead of recursing, so nesting is bounded by memory rather than by stack
-// size -- a budget larger by orders of magnitude, measured rendering depth
-// 30000 where the recursive form this replaces overflowed the stack between
-// 10000 and 16000.
+// This used to open "TOTAL OVER THE VALUES IT RETURNS FROM. For every
+// acyclic `JsonValue` there is a rendering, and there is no error channel to
+// report a failure with." That is FALSE, and the counterexample ships in
+// this tree: `json_render_guard.nova` builds an ACYCLIC value -- a fresh
+// array literal per level, no cycle -- at depth 100001, and it panics rather
+// than rendering, because the guard below tests nesting depth alone and
+// never inspects for a cycle. "Acyclic" does not rescue the claim.
 //
-// HEAP-BOUNDED IS NOT BOUNDED, and the residuals are named rather than left to
-// inference. A cyclic value never terminates on its own and is refused by
-// `MAX_RENDER_DEPTH` with a panic. Heap exhaustion still aborts the process
-// without a `JsonError`, because `gc::alloc` calls `handle_alloc_error` and no
-// alloc-error hook is installed. There is no collect-and-retry on that path.
-// And off Windows the collector is a no-op, so nothing is reclaimed until the
-// process exits -- which is where "bounded by the heap" is weakest.
+// THE HONEST FORM: a rendering exists for every value whose nesting depth is
+// at most `MAX_RENDER_DEPTH`, cyclic or not, and there is no error channel to
+// report a refusal with. Depth is no longer a stack cost -- the arms below
+// push pending work onto a heap list instead of recursing -- but nesting is
+// bounded by that DECLARED CAP, not by memory: this also used to say
+// "nesting is bounded by memory rather than by stack size", which is wrong
+// the same way. `json_render_guard_under.nova` pins the cap itself rendering
+// successfully at exactly `MAX_RENDER_DEPTH` levels, and `json_render_deep.nova`
+// pins a shallower value, 20000 levels, rendering too -- both well past
+// where the recursive form this replaces overflowed the stack, measured
+// between 10000 and 16000.
 //
-// `parse` is bounded differently, by a declared `MAX_DEPTH`, so a value this
-// function can render may be deeper than any input `parse` will accept. That
-// asymmetry is deliberate: `parse` consumes untrusted text, where a cap is a
-// feature, and this function renders values the program itself built, where
-// refusing to render what a caller constructed helps nobody.
+// THE RESIDUALS ARE NAMED RATHER THAN LEFT TO INFERENCE, and there are
+// three, not two. A cyclic value never terminates on its own and is refused
+// by `MAX_RENDER_DEPTH` with a panic. THE SAME CAP, by the same mechanism,
+// refuses a legitimate ACYCLIC value past `MAX_RENDER_DEPTH` too -- the
+// guard cannot and does not tell the two apart, which is exactly the
+// counterexample the opening paragraph retracts. And heap exhaustion still
+// aborts the process without a `JsonError`, because `gc::alloc` calls
+// `handle_alloc_error` and no alloc-error hook is installed; there is no
+// collect-and-retry on that path, and off Windows the collector is a no-op,
+// so nothing is reclaimed until the process exits.
 //
-// The accumulator cost these arms used to carry is gone; the roster of what
-// changed is at `scan_str`.
+// `parse` is bounded differently, by its own declared `MAX_DEPTH` -- the two
+// caps are independent numbers, chosen for independent reasons. `parse`
+// consumes untrusted text, where a cap is a feature in its own right. This
+// function's cap exists for the residual named above -- there is no error
+// channel to report a cycle through, and nesting depth alone cannot tell a
+// legitimate deep value from a cyclic one -- not because refusing a
+// caller's own construction is a feature here too.
+//
+// This header used to close saying "The numbers for all four accumulators
+// in this file, and why these two are the ones that matter, are at
+// `scan_str`." That was false twice over: the roster at `scan_str` is by
+// name, not by count, and this function's own accumulator numbers were
+// deleted in the same change that retired its two `out = "${out}..."` arms,
+// surviving nowhere in this file. The accumulator cost these arms used to
+// carry is simply gone; the roster of what changed -- by name, not count --
+// is at `scan_str`.
 pub fn stringify(v: JsonValue) -> String {
     let mut out: Vec<Char> = Vec::new()
     let mut stack: Vec<Work> = Vec::new()
@@ -114,68 +157,100 @@ pub fn stringify(v: JsonValue) -> String {
             None => out = out
             Some(w) => match w {
                 Chunk(s) => buf_push_str(out, s)
-                Value(p) => match p.v {
-                    Null => buf_push_str(out, "null")
-                    Bool(b) => buf_push_str(out, if b { "true" } else { "false" })
-                    Number(n) => buf_push_str(out, number_to_json(n))
-                    String(s) => buf_push_str(out, quote(s))
-                    Array(xs) => {
-                        if p.d + 1 > MAX_RENDER_DEPTH {
-                            panic("stringify: nesting too deep or cyclic value")
-                        }
-                        stack.push(Chunk("]"))
-                        let mut i = xs.len() - 1
-                        while i >= 0 {
-                            stack.push(Value(Pending { v: xs[i], d: p.d + 1 }))
-                            if i > 0 { stack.push(Chunk(",")) }
-                            i = i - 1
-                        }
-                        stack.push(Chunk("["))
+                Value(p) => {
+                    // HOISTED, out of the `Array` and `Object` arms below, where this
+                    // used to live as two textually identical blocks (one per arm).
+                    // Duplicated, deleting one left the other -- half a mutation the
+                    // plan specified was invisible to every fixture, because no
+                    // fixture exercised the `Object` arm's copy on its own. A single
+                    // check here makes a half-deletion structurally impossible rather
+                    // than merely detectable, and it prices the guard once per pop
+                    // instead of once per container pop.
+                    //
+                    // EQUIVALENT TO THE OLD PER-ARM CHECK, `p.d + 1 > MAX_RENDER_DEPTH`,
+                    // by derivation, not by assumption. Children are pushed with
+                    // `d = p.d + 1`, so the old check fired at a k-level container
+                    // chain's OWN pop when k > MAX_RENDER_DEPTH, i.e. the same k that
+                    // the chain's own leaf carries as its `d` once pushed and later
+                    // popped. Checking `p.d > MAX_RENDER_DEPTH` here, at every pop
+                    // rather than only at a container's, fires at that same leaf for
+                    // the same k -- one pop later than before, since the container
+                    // one level up no longer refuses to push it, but the threshold
+                    // itself does not move. Re-verified after hoisting, not merely
+                    // re-derived: `json_render_guard_under.nova` and
+                    // `json_render_guard.nova` still render at `MAX_RENDER_DEPTH` and
+                    // panic at `MAX_RENDER_DEPTH + 1` respectively, and the same pair
+                    // of depths was independently confirmed for an OBJECT chain (built
+                    // the same way, one key deep per level) by a scratch run against
+                    // this build, not shipped as a third fixture -- see this task's
+                    // fix-round report for the four measurements.
+                    if p.d > MAX_RENDER_DEPTH {
+                        panic("stringify: nesting too deep or cyclic value")
                     }
-                    Object(m) => {
-                        if p.d + 1 > MAX_RENDER_DEPTH {
-                            panic("stringify: nesting too deep or cyclic value")
-                        }
-                        let ks = m.keys()
-                        stack.push(Chunk("}"))
-                        let mut i = ks.len() - 1
-                        while i >= 0 {
-                            // The `None` arm is unreachable THROUGH `Map`'s OWN API: `ks`
-                            // is `m.keys()`, which returns exactly the occupied slots, and
-                            // nothing mutates `m` between that call and this lookup.
-                            //
-                            // This used to read "The `None` arm is UNREACHABLE", flatly.
-                            // That is wrong: `Map` exposes every field and Nova has no
-                            // field privacy, so a forged map with a live slot off its own
-                            // probe chain makes `keys()` return a key `get()` misses.
-                            // Measured -- `json_object_forged_map.nova` builds one and this
-                            // function renders `{"a":1,}` for it. So the arm is a real path
-                            // and the separator's position is load-bearing, not cosmetic:
-                            // it is pushed OUTSIDE this match, so a missed member leaves a
-                            // comma with no member after it, exactly as before this
-                            // function stopped recursing.
-                            //
-                            // Moving the push inside the `Some` arm would emit valid JSON
-                            // instead, which is a behaviour change dressed as a fix. It is
-                            // refused by that fixture's golden rather than by this comment.
-                            // Repairing the fallback is a separate change with its own
-                            // record; the other fallbacks in this file that were written
-                            // for the same reason degrade safely instead -- `bump` refuses
-                            // to advance, `span` returns the empty string, `utf8_bytes`
-                            // returns 0xFF precisely to force a downstream rejection --
-                            // which is the pattern this one departs from.
-                            match m.get(ks[i]) {
-                                Some(val) => {
-                                    stack.push(Value(Pending { v: val, d: p.d + 1 }))
-                                    stack.push(Chunk(":"))
-                                    stack.push(Chunk(quote(ks[i])))
-                                }
-                                None => out = out
+                    match p.v {
+                        Null => buf_push_str(out, "null")
+                        Bool(b) => buf_push_str(out, if b { "true" } else { "false" })
+                        Number(n) => buf_push_str(out, number_to_json(n))
+                        String(s) => buf_push_str(out, quote(s))
+                        Array(xs) => {
+                            stack.push(Chunk("]"))
+                            let mut i = xs.len() - 1
+                            while i >= 0 {
+                                stack.push(Value(Pending { v: xs[i], d: p.d + 1 }))
+                                if i > 0 { stack.push(Chunk(",")) }
+                                i = i - 1
                             }
-                            if i > 0 { stack.push(Chunk(",")) }
-                            i = i - 1
+                            stack.push(Chunk("["))
                         }
-                        stack.push(Chunk("{"))
+                        Object(m) => {
+                            let ks = m.keys()
+                            stack.push(Chunk("}"))
+                            let mut i = ks.len() - 1
+                            while i >= 0 {
+                                // The `None` arm is unreachable THROUGH `Map`'s OWN API: `ks`
+                                // is `m.keys()`, which returns exactly the occupied slots, and
+                                // nothing mutates `m` between that call and this lookup.
+                                //
+                                // This used to read "The `None` arm is UNREACHABLE", flatly.
+                                // That is wrong: `Map` exposes every field and Nova has no
+                                // field privacy, so a forged map with a live slot off its own
+                                // probe chain makes `keys()` return a key `get()` misses.
+                                // Measured -- `json_object_forged_map.nova` builds one and this
+                                // function renders `{"a":1,}` for it. So the arm is a real path
+                                // and the separator's position is load-bearing, not cosmetic:
+                                // it is pushed OUTSIDE this match, so a missed member leaves a
+                                // comma with no member after it, exactly as before this
+                                // function stopped recursing.
+                                //
+                                // Moving the push inside the `Some` arm would emit valid JSON
+                                // instead FOR THIS FIXTURE'S ARRANGEMENT, where the missed key
+                                // ("b") sits at `ks` position 1, not position 0 -- it is not
+                                // true in general. A miss AT position 0 emits the same string
+                                // either way: the separator there is gated on `i > 0`, which is
+                                // false for position 0 regardless of which arm the push sits
+                                // in, so that position contributes no comma under either version
+                                // and the two forms coincide. `json_object_forged_map.nova`'s
+                                // arrangement is what makes the two versions distinguishable at
+                                // all, and it is refused by that fixture's golden rather than by
+                                // this comment. Repairing the fallback is a separate change with
+                                // its own record; the other fallbacks in this file that were
+                                // written for the same reason degrade safely instead -- `bump`
+                                // refuses to advance, `span` returns the empty string,
+                                // `utf8_bytes` returns 0xFF precisely to force a downstream
+                                // rejection -- which is the pattern this one departs from.
+                                match m.get(ks[i]) {
+                                    Some(val) => {
+                                        stack.push(Value(Pending { v: val, d: p.d + 1 }))
+                                        stack.push(Chunk(":"))
+                                        stack.push(Chunk(quote(ks[i])))
+                                    }
+                                    None => out = out
+                                }
+                                if i > 0 { stack.push(Chunk(",")) }
+                                i = i - 1
+                            }
+                            stack.push(Chunk("{"))
+                        }
                     }
                 }
             }
@@ -725,8 +800,9 @@ impl P {
     // what changed. `quote` and this function each built one string literal by
     // interpolation; `stringify`'s `Array` and `Object` arms built the whole
     // rendered document that way. All of them now append into a `Vec<Char>`
-    // (`out` here and in `quote`, the work list's own `out` in `stringify`)
-    // drained once through `str_from_chars` instead, so none is quadratic in
+    // (`out` here and in `quote`, and `stringify`'s own separate output
+    // buffer, also named `out`, which is unrelated to its work list) drained
+    // once through `vec_chars_to_string` instead, so none is quadratic in
     // what it emits.
     //
     // This used to close saying `stringify`'s two arms "do not yet" -- that
@@ -736,10 +812,12 @@ impl P {
     // this file that still rebuilds a string by interpolation.
     //
     // Regrep before trusting that claim: `grep -n 'out = "${out}'` over this
-    // file must match nothing except text a comment quotes for illustration
-    // -- today that is the line in `buf_push_str`'s own header above that
-    // names the old idiom to explain why the buffer is linear where it was
-    // quadratic.
+    // file must match nothing except text a comment quotes for illustration.
+    // This sentence is one such match, naming the pattern literally, and it
+    // is not the only one -- `buf_push_str`'s own header and `stringify`'s
+    // both quote the retired idiom too. Read every match before trusting the
+    // claim; do not assume a fixed count, here or anywhere this comment is
+    // cited from.
     //
     // RETRACTED, and quoted so the retraction is legible: this note used to
     // close "Neither is capped, and neither is fixable without a growable

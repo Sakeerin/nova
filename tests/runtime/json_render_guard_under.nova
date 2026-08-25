@@ -1,23 +1,25 @@
-// The depth guard's LOWER side, pinned. `json_render_guard.nova` pins that
-// one level past `MAX_RENDER_DEPTH` panics; nothing before this fixture
-// pinned that legitimate input well within the bound still renders.
+// The depth guard's LOWER side, pinned exactly against `MAX_RENDER_DEPTH`.
+// `json_render_guard.nova` pins that `MAX_RENDER_DEPTH + 1` panics; this
+// pins that `MAX_RENDER_DEPTH` itself still renders. Together the two
+// bracket the bound from both sides -- 100000 renders, 100001 panics -- so a
+// mutation to `MAX_RENDER_DEPTH` in EITHER direction breaks one of the pair.
 //
-// This does NOT pin the exact bound -- it pins that the bound is not below
-// 99999, which is a weaker claim. A mutation that lowered
-// `MAX_RENDER_DEPTH` to, say, 100 would make this fixture fail without this
-// fixture ever having measured where between 100 and 100000 the real edge
-// sits. Only `json_render_guard.nova`, together with this one, pins the
-// edge itself, and only because the two together bracket it at
-// `MAX_RENDER_DEPTH` exactly (100001 panics, 99999 renders).
+// This file used to sit at depth 99999 (`MAX_RENDER_DEPTH - 1`) and called
+// that "one below the guard's panic threshold". It was not: the panic
+// threshold is `MAX_RENDER_DEPTH + 1` = 100001, so 99999 was TWO levels
+// below it, and the pair left `MAX_RENDER_DEPTH` itself (100000) untested.
+// Measured directly: with 99999 as the lower fixture, mutating
+// `MAX_RENDER_DEPTH` down to 99999 passed BOTH fixtures unmodified -- 99999
+// still rendered and 100001 still panicked -- so the pair's stated purpose,
+// bracketing the bound, was not met. Depth 100000 closes that gap; a
+// mutation lowering `MAX_RENDER_DEPTH` to 99999 now makes THIS fixture
+// panic instead of rendering.
 //
-// Depth chosen as `MAX_RENDER_DEPTH - 1` = 99999, one below the guard's
-// panic threshold, so the two fixtures bracket the same boundary from
-// opposite sides. Measured against this build: renders in about 2.1
-// seconds.
+// Measured against this build: renders in about 2 seconds.
 fn main() {
     let mut v = Number(1.0)
     let mut i = 0
-    while i < 99999 {
+    while i < 100000 {
         v = Array([v])
         i = i + 1
     }
