@@ -1,0 +1,20 @@
+// A depth no recursive `stringify` could render. Before this increment the
+// `Array` arm spent one native stack frame per level, so this value ended the
+// process instead of producing output -- measured, this build: depth 10000
+// rendered and 16000 overflowed the stack. There was no fixture exercising
+// deep nesting at all, because a fixture that crashed the process would fail
+// the suite by construction.
+//
+// The value is built BY LOOP, not by `parse`, and it has to be: `parse` caps
+// at `MAX_DEPTH`, so no parsed input can reach this depth. That asymmetry is
+// deliberate and is recorded at `stringify`'s header.
+fn main() {
+    let mut v = Number(1.0)
+    let mut i = 0
+    while i < 20000 {
+        v = Array([v])
+        i = i + 1
+    }
+    let s = stringify(v)
+    println("depth 20000 rendered ${s.len()} chars")
+}
