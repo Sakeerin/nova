@@ -8491,3 +8491,31 @@ fn json_traits_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn json_depth_leaf_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_depth_leaf.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_depth_leaf.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn json_depth_empty_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_depth_empty.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_depth_empty.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
