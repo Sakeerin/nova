@@ -286,6 +286,12 @@ fn splitmix64_finalize(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Seeded, finalized hash of a Nova string's bytes, as an `i64`.
+///
+/// Nova cannot walk a string's bytes itself (`String` has no length, indexing
+/// or iteration, and is not FFI-safe), so `std/core`'s `impl Hash for String`
+/// reaches this through the `str_hash` builtin.
+///
 /// Seeded FNV-1a over the bytes, then splitmix64's finalizer. The seed is
 /// per-process (see `str_hash_seed`) and the finalizer is what makes the seed
 /// reach the low bits `Map` selects buckets from; the reasoning and the
