@@ -123,7 +123,7 @@ pub trait Default { fn default() -> Self }
 // reasons:
 //
 //   - `hash % cap` can be *negative*: `str_hash` reinterprets an unsigned
-//     FNV-1a result as `Int`, and `mix64` spans the full `Int` range too, so a
+//     64-bit result as `Int`, and `mix64` spans the full `Int` range too, so a
 //     remainder inherits the sign. `&` with a positive mask is non-negative
 //     for every `Int`.
 //   - The high bits are not a usable second hash. A `hash >> 57`-style tag
@@ -584,7 +584,15 @@ impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1) } else { mix64(
 // codepoint. `char_to_int` is a compiler builtin because Nova has no `as`
 // casts and `Char` has no other conversion.
 impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self)) } }
-// FNV-1a over the bytes, in the runtime (see the module note above), with its
-// unsigned result reinterpreted as `Int` — so it is the impl most obviously
-// able to return a negative hash. See the masking rule on `Hash` above.
+// Seeded FNV-1a over the bytes then splitmix64's finalizer, in the runtime
+// (see the module note above), with its unsigned result reinterpreted as `Int`
+// — so it is the impl most obviously able to return a negative hash. See the
+// masking rule on `Hash` above.
+//
+// The seed is drawn once per process, so a given `String` hashes to one value
+// for the whole of a run and can hash to a different one in the next run of the
+// same program — not must, since two seeds may agree on one string. What
+// that buys and what it does not is documented at `nova_rt_str_hash` in the
+// runtime. `mix64`, which the `Int`, `Bool` and `Char` impls above use, is not
+// seeded, so those are stable across runs.
 impl Hash for String { fn hash(self) -> Int { str_hash(self) } }
