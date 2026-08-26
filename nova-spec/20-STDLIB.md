@@ -770,10 +770,15 @@ its 2026-08-25 amendment.
    `std/json`: every `Map<String, _>` in the language has this exposure, and
    `std/json` is where it happens to face untrusted input. A seed does need
    entropy, and the accurate statement about that is narrower than the draft's:
-   **no runtime function exposes entropy to Nova.** Nova code has no way to
-   obtain a random value, `std/crypto`'s `random_bytes`/`random_int` in §8 below
-   being unstarted declarations with no `ring` in `Cargo.lock` and no
-   `std/crypto/` directory. The draft claimed instead that "there is no
+   **no runtime function exposes entropy to Nova**, and the durable form of
+   that claim is the *check*, not the assertion. Nova reaches the runtime only
+   through a compiler-known `Builtin` paired with a `nova_rt_*` function and a
+   line in `symbols()`, so the question "can Nova obtain a random value?" is
+   answered by grepping those lists rather than by trusting this sentence —
+   which is a closed-world claim over a surface that grows, and which
+   `std/crypto` shipping would falsify by design. Today the answer is no:
+   `random_bytes`/`random_int` in §8 below are unstarted declarations, with no
+   `ring` in `Cargo.lock` and no `std/crypto/` directory. The draft claimed instead that "there is no
    randomness source anywhere in the runtime", citing no `rand` or `getrandom`
    dependency; **that is retracted.** It is true only of the `Cargo.toml`s and
    false of the lockfile this section consults for `ring` — `getrandom` reaches
