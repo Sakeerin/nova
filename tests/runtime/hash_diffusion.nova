@@ -1,0 +1,57 @@
+// What the finalizer buys, as an exact structural property rather than a
+// statistical one.
+//
+// `Map` selects buckets with `hash & (cap - 1)`, so only the LOW bits matter.
+// Bit 0 of an FNV-1a result is bit 0 of its starting value XOR the parity of
+// the input bytes' low bits. Every key below is built from letters with an
+// even ASCII code, so that parity is 0 for all of them and bit 0 of an
+// unfinalized hash is the same for every key -- which puts every key in a
+// bucket whose index has that same bit 0, reaching HALF the buckets and no
+// more. splitmix64's finalizer mixes high bits down into low ones, which is
+// the axis a starting value cannot reach, and the halving disappears.
+//
+// Measured against 60 random seeds, with keys built exactly as below:
+// unfinalized reached 32 of 64 buckets under every seed and its largest
+// bucket ran 66 to 76; finalized reached 64 of 64 under every seed with a
+// largest bucket of 40 to 53. So `reached` is a structural assertion, not a
+// threshold, and the bound on the largest bucket has room on both sides.
+//
+// The residual flake risk on `reached` is a bucket left empty by chance:
+// about 2 in 10^12 per run with these numbers. The bound of 60 on the largest
+// bucket sits 7 above the measured finalized maximum and 6 below the measured
+// unfinalized minimum.
+fn key_at(i: Int) -> String {
+    let alpha = ["b", "d", "f", "h", "j", "l", "n", "p", "r", "t", "v", "x"]
+    let mut n = i
+    let mut out = ""
+    let mut d = 0
+    while d < 6 {
+        out = "${out}${alpha[n % 12]}"
+        n = n / 12
+        d = d + 1
+    }
+    out
+}
+
+fn main() {
+    let cap = 64
+    let n = 1999
+    let mut counts = [0; cap]
+    let mut i = 0
+    while i < n {
+        let slot = key_at(i).hash() & (cap - 1)
+        counts[slot] = counts[slot] + 1
+        i = i + 1
+    }
+    let mut reached = 0
+    let mut largest = 0
+    let mut j = 0
+    while j < cap {
+        if counts[j] > 0 { reached = reached + 1 }
+        if counts[j] > largest { largest = counts[j] }
+        j = j + 1
+    }
+    println("keys ${n} into ${cap} buckets")
+    println("reached ${reached} of ${cap}")
+    println("largest under 60 ${largest < 60}")
+}
