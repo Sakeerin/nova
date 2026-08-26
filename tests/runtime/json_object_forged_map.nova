@@ -4,44 +4,78 @@
 // `stringify` appends the member separator BEFORE looking the value up, so a
 // key that `keys()` returns but `get()` misses leaves a comma with no member
 // after it. The natural work-stack rewrite moves that push inside the `Some`
-// arm -- the value must be looked up before it can be pushed -- and that
-// version emits `{"a":1}` here instead. Its output is the VALID JSON of the
-// two, which is exactly what makes the trap look like a fix rather than a
-// behaviour change. This golden is what refuses it.
+// arm, and that version emits `{"a":1}` here instead -- valid JSON, which is
+// exactly what makes the trap look like a fix rather than a behaviour change.
+// This golden is what refuses it.
 //
-// Reaching the `None` arm needs a FORGED map. It is unreachable through
-// `Map`'s own API, but `Map` exposes every field and Nova has no field
-// privacy, so a live slot placed off its own probe chain makes `keys()` return
-// a key `get()` misses. Layout at capacity 4: slot 0 holds "a", which
-// `find` reaches because "a" hashes to slot 0; slot 2 holds "b", which `find`
-// cannot reach because it starts at "b"'s own slot 1, meets state 0 there and
-// stops.
+// Reaching the `None` arm needs a FORGED map: unreachable through `Map`'s own
+// API, but `Map` exposes every field and Nova has no field privacy, so a live
+// slot placed off its own probe chain makes `keys()` return a key `get()`
+// misses.
 //
-// THE THREE PRECONDITION LINES ARE NOT DECORATION. They depend on where "a"
-// and "b" hash at capacity 4. If `str_hash` ever changes, they flip and this
-// fixture FAILS -- which is the point: it must not silently stop exercising the
-// separator while still passing.
+// THE LAYOUT IS COMPUTED, NOT ASSUMED. This file used to hard-code slot 0 for
+// the reachable key and slot 2 for the missed one, which held only while
+// `str_hash` was an unseeded constant-basis FNV-1a. It is now seeded
+// per-process, so the slots differ every run and the layout has to be searched
+// for. The three precondition lines below are not decoration: if no layout is
+// found, or if the reachable key stops being reachable, this fixture FAILS
+// rather than silently stopping exercising the separator.
+record Layout { hit: String, miss: String, hs: Int, ms: Int, ok: Bool }
+
+// Find a layout at capacity `cap`: `hit` live at its own home slot so `find`
+// reaches it, `miss` live at a LATER slot whose own home slot is empty so
+// `find` stops there and answers `None`. Later matters: `keys()` walks slots
+// ascending, so the missed member must not be at index 0.
+fn find_layout(cap: Int) -> Layout {
+    let cands = ["a", "b", "c", "d", "e", "f", "g", "h"]
+    let mut hi = 0
+    while hi < cands.len() {
+        let hs = cands[hi].hash() & (cap - 1)
+        let mut mi = 0
+        while mi < cands.len() {
+            if mi != hi {
+                let home = cands[mi].hash() & (cap - 1)
+                if home != hs {
+                    let mut slot = hs + 1
+                    while slot < cap {
+                        if slot != home {
+                            return Layout { hit: cands[hi], miss: cands[mi], hs: hs, ms: slot, ok: true }
+                        }
+                        slot = slot + 1
+                    }
+                }
+            }
+            mi = mi + 1
+        }
+        hi = hi + 1
+    }
+    Layout { hit: "", miss: "", hs: 0, ms: 0, ok: false }
+}
+
 fn main() {
-    let cap = 4
+    let cap = 8
+    let l = find_layout(cap)
+    println("layout found ${l.ok}")
+
     let mut st = [0; cap]
-    st[0] = 1
-    st[2] = 1
+    st[l.hs] = 1
+    st[l.ms] = 1
     let mut ks = [""; cap]
-    ks[0] = "a"
-    ks[2] = "b"
+    ks[l.hs] = l.hit
+    ks[l.ms] = l.miss
     let mut vs: [JsonValue] = [Null; cap]
-    vs[0] = Number(1.0)
-    vs[2] = Number(2.0)
+    vs[l.hs] = Number(1.0)
+    vs[l.ms] = Number(2.0)
     let forged: Map<String, JsonValue> = Map { len: 2, used: 2, keys: ks, vals: vs, state: st }
 
     println("keys ${forged.keys().len()}")
-    match forged.get("a") {
-        Some(_) => println("a reachable true")
-        None => println("a reachable false")
+    match forged.get(l.hit) {
+        Some(_) => println("hit reachable true")
+        None => println("hit reachable false")
     }
-    match forged.get("b") {
-        Some(_) => println("b reachable true")
-        None => println("b reachable false")
+    match forged.get(l.miss) {
+        Some(_) => println("miss reachable true")
+        None => println("miss reachable false")
     }
     println("render ${stringify(Object(forged))}")
 }

@@ -12,6 +12,8 @@
 //! All heap allocation routes through [`gc::alloc`], which reclaims
 //! unreachable objects.
 
+use std::sync::OnceLock;
+
 /// Byte-buffer intrinsics for `std/bytes`. `pub`, not private, for the same
 /// reason as [`fs`]: its own doc comment explains the boundary it implements
 /// (one representation, shared with `NovaStr`, distinguished only by
@@ -238,14 +240,66 @@ pub unsafe extern "C" fn nova_rt_str_cmp(a: *const NovaStr, b: *const NovaStr) -
     }
 }
 
-/// FNV-1a hash of a Nova string's bytes, as an `i64`.
+/// The per-process seed for [`nova_rt_str_hash`].
 ///
-/// Nova cannot walk a string's bytes itself (`String` has no length, indexing
-/// or iteration, and is not FFI-safe), so `std/core`'s `impl Hash for String`
-/// reaches this through the `str_hash` builtin. FNV-1a rather than something
-/// stronger because it is small, well known, and adequate for a hash map's
-/// bucket selection; it is *not* collision-resistant and must not be used for
-/// anything security-sensitive.
+/// ONE value for the whole process. Not per thread and not per call: a `Map`
+/// built under one seed and probed under another finds nothing, so a
+/// thread-local would corrupt a map shared across threads and reseeding per
+/// call would corrupt every map. `OnceLock` gives exactly that, and `gc.rs`
+/// already uses the same pattern.
+///
+/// `RandomState` is `std`'s own `HashMap` seed source, so this draws OS
+/// entropy with no new dependency and nothing above MSRV 1.78. Nova code
+/// cannot read this value: no builtin exposes it, and `collect_externs`
+/// refuses every `nova_`-prefixed `extern` name.
+fn str_hash_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(0);
+        h.finish()
+    })
+}
+
+/// splitmix64's finalizer — the same function `std/core`'s `mix64` computes.
+///
+/// `std/core` writes it in signed Nova with masked shifts, because Nova's `>>`
+/// on a negative `Int` sign-extends; on `u64` here the plain form is the same
+/// function. Its constants correspond: Nova's `-4658895280553007687` is
+/// `0xbf58476d1ce4e5b9` and `-7723592293110705685` is `0x94d049bb133111eb`.
+///
+/// This is LOAD-BEARING, not decoration. `Map` selects buckets with
+/// `hash & (cap - 1)` -- the low bits -- and FNV-1a's low bits barely depend on
+/// its starting value: bit 0 of an FNV-1a result is bit 0 of the basis XOR the
+/// parity of the input bytes' low bits, so changing the basis flips bit 0
+/// identically for both keys of a colliding pair and leaves the collision
+/// standing. Measured, seeding alone left 30 of a constructed 48-key attack in
+/// one bucket and moved only 66.7% of keys at capacity 8; with this finalizer
+/// the same attack falls to 3 and 87.3% of keys move, against an ideal of
+/// 87.5%. The spec's section 2 carries the method and the full figures.
+fn splitmix64_finalize(mut z: u64) -> u64 {
+    z ^= z >> 30;
+    z = z.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z ^= z >> 27;
+    z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Seeded FNV-1a over the bytes, then splitmix64's finalizer. The seed is
+/// per-process (see `str_hash_seed`) and the finalizer is what makes the seed
+/// reach the low bits `Map` selects buckets from; the reasoning and the
+/// measurements are at `splitmix64_finalize`. This used to be unseeded FNV-1a
+/// alone, described here as "adequate for a hash map's bucket selection" --
+/// true of an honest workload and false of an adversarial one, which is why it
+/// changed.
+///
+/// STILL NOT COLLISION-RESISTANT, and still not for anything
+/// security-sensitive. What the seed and finalizer buy is resistance to a
+/// PRECOMPUTED collision set: an attacker who cannot learn the seed cannot
+/// build one offline. An adversary who can observe timing and adapt is out of
+/// scope, and `mix64` -- the `Int`, `Bool` and `Char` impls -- is not seeded at
+/// all.
 ///
 /// The `u64 -> i64` reinterpretation at the end means the result may be
 /// negative, so a caller selecting buckets must mask (`hash & (cap - 1)`,
@@ -255,12 +309,12 @@ pub unsafe extern "C" fn nova_rt_str_cmp(a: *const NovaStr, b: *const NovaStr) -
 /// `s` must point to a valid `NovaStr`.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_str_hash(s: *const NovaStr) -> i64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut h: u64 = str_hash_seed();
     for b in as_str(s).as_bytes() {
         h ^= *b as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    h as i64
+    splitmix64_finalize(h) as i64
 }
 
 /// Number of Unicode scalar values in `s`.
