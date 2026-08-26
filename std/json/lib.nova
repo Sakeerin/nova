@@ -33,9 +33,27 @@ pub record JsonError { msg: String, at: Int }
 // 128` literal on a `u8` field in its `src/de.rs`, not a named constant, and
 // defeatable there through `disable_recursion_limit`. Read at `master` on
 // 2026-08-25 and cited as a precedent that makes 128 defensible, not as a
-// standard: Jackson's `StreamReadConstraints.maxNestingDepth()` defaults to
-// 1000, CPython has no JSON-specific constant and inherits the interpreter's
-// recursion limit, and Go's `encoding/json` caps nothing.
+// standard: implementations that declare a limit pick different numbers.
+//
+// EACH COMPARISON NOW CARRIES A FILE AND A READ DATE, and one of them changed
+// when it got one. This paragraph used to close "Jackson's
+// `StreamReadConstraints.maxNestingDepth()` defaults to 1000, CPython has no
+// JSON-specific constant and inherits the interpreter's recursion limit, and
+// Go's `encoding/json` caps nothing." The Go half is FALSE and is retracted:
+// `encoding/json` declares `const maxNestingDepth = 10000` in
+// `src/encoding/json/scanner.go` and enforces it in `pushParseState`, which
+// reports `exceeded max depth` (read at `master` on 2026-08-26). The other
+// two hold as read on 2026-08-26 -- Jackson's
+// `StreamReadConstraints.DEFAULT_MAX_DEPTH` is `1000`
+// (`src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java` on
+// branch `2.x`), and CPython's C accelerator declares no JSON-specific
+// constant and calls `_Py_EnterRecursiveCall` in `scan_once_unicode`
+// (`Modules/_json.c` at `main`), so the interpreter's recursion limit is what
+// bounds it. WHY THIS WAS THE ONE THAT WAS WRONG is worth keeping: the
+// `serde_json` claim above carried a file, a field and a read date, the Go
+// claim carried none of the three, and it sat in the same sentence as if it
+// had. The comparison the argument needs is unchanged and slightly stronger
+// with a fourth number in it.
 //
 // For scale rather than for derivation: this build was measured parsing depth
 // 5000 successfully and overflowing its stack at 6000, on an input of 12001
@@ -81,22 +99,55 @@ record Pending { v: JsonValue, d: Int }
 // bound would refuse legitimate input. 100_000 is far above any depth a
 // caller is likely to build deliberately, and far above anything `parse` can
 // hand over, since `parse` stops at `MAX_DEPTH`. The bound itself is pinned,
-// not merely approached: `json_render_guard_under.nova` renders successfully
-// at exactly `MAX_RENDER_DEPTH` levels and `json_render_guard.nova` panics
-// one level past it -- superseding an earlier, unpinned "measured rendering
-// depth 30000" this comment used to cite here.
+// not merely approached, FOR ONE SHAPE: `json_render_guard_under.nova`
+// renders successfully at exactly `MAX_RENDER_DEPTH` levels of arrays around
+// a leaf and `json_render_guard.nova` panics one level past it -- superseding
+// an earlier, unpinned "measured rendering depth 30000" this comment used to
+// cite here. A chain whose innermost container is EMPTY reaches its boundary
+// one level higher, and that shape is pinned by nothing; the counting rule
+// and its measured boundaries are at the guard itself.
 //
-// The guard's cost is proportional to its bound: a cycle runs one iteration
-// per level before firing. This used to say that cost "is milliseconds with
-// the buffer this file now uses" -- false by three orders of magnitude:
-// measured against this build, both `json_render_guard.nova` and
-// `json_stringify_cycle.nova` fire at right around two seconds, not
-// milliseconds. This also used to compare that cost against "more than two
-// minutes when the same walk accumulated by interpolation" -- no such
-// version of this walk was ever built in this tree to measure; that
-// comparison described a design-time scratch probe, not a state this code
-// ever shipped in, and is dropped rather than repeated as if it still
-// applied.
+// DEPTH AND WIDTH ARE NOT INDEPENDENT, which the paragraph above reads as if
+// they were. Choosing depth over length is still right for the reason given
+// -- a length bound refuses legitimate wide input and a depth bound does not
+// -- but "a wide, shallow document grows only length" says nothing about the
+// case this guard exists for. A cyclic value grows the work list by ABOUT
+// TWICE THE CONTAINER WIDTH PER LEVEL, so its cost is a product of the two
+// and not a function of the bound alone.
+//
+// THE GUARD'S COST GROWS WITH THE PRODUCT OF ITS BOUND AND THE CYCLE'S
+// WIDTH. This used to read "The guard's cost is proportional to its bound: a
+// cycle runs one iteration per level before firing" -- RETRACTED: that is
+// true only at width 1, which is the only width either cycle fixture builds.
+// Popping a container of width w pushes about `2w + 1` items (w children,
+// w - 1 separators, two brackets) and removes one, so the list gains about
+// 2w per level and nothing is reclaimed before the panic. Those pushes happen
+// at every level whatever the cycle's position, so both the peak work-list
+// size and the time to fire grow with `MAX_RENDER_DEPTH` TIMES the width; the
+// position within the container moves the constant, not the growth.
+//
+// MEASURED against this build, min of 3 after a warm-up, cyclic arrays that
+// fire the guard: width 1 (`json_stringify_cycle.nova`'s shape) 1.78 s;
+// width 3 with the cycle at the last member 4.71 s; width 10 at the last
+// member 14.24 s; width 10 at the FIRST member 7.14 s. Absolutes are
+// machine-specific -- an earlier session measured the width-1 case at about
+// 2 s -- and the width trend is the claim. This paragraph used to say the
+// cost "is milliseconds with the buffer this file now uses", which stays
+// RETRACTED as false by three orders of magnitude, and used to compare it
+// against "more than two minutes when the same walk accumulated by
+// interpolation", which stays retracted too: no such version of this walk
+// was ever built in this tree to measure, so that number described a
+// design-time scratch probe rather than a state this code ever shipped in.
+//
+// SO THE NAMED FAILURE IS REACHABLE FOR A NARROW CYCLE AND DEGRADES TOWARD
+// THE UNNAMED ONE AS WIDTH GROWS. That degradation is REASONING past width
+// 10, not a measurement: the work list's peak is the same allocator pressure
+// this guard was introduced to replace, so for a wide enough cycle the
+// process reaches `gc::alloc`'s `handle_alloc_error` -- printing neither a
+// `nova: panic:` prefix nor a location -- before it reaches this panic.
+// Nothing here measures where that crossover sits, and no fixture builds a
+// wide cycle, so the guard's promise of an immediate named failure is a
+// promise about narrow cycles.
 const MAX_RENDER_DEPTH: Int = 100_000
 
 // Render `v` as JSON text.
@@ -121,16 +172,35 @@ const MAX_RENDER_DEPTH: Int = 100_000
 // where the recursive form this replaces overflowed the stack, measured
 // between 10000 and 16000.
 //
-// THE RESIDUALS ARE NAMED RATHER THAN LEFT TO INFERENCE, and there are
-// three, not two. A cyclic value never terminates on its own and is refused
-// by `MAX_RENDER_DEPTH` with a panic. THE SAME CAP, by the same mechanism,
-// refuses a legitimate ACYCLIC value past `MAX_RENDER_DEPTH` too -- the
-// guard cannot and does not tell the two apart, which is exactly the
-// counterexample the opening paragraph retracts. And heap exhaustion still
-// aborts the process without a `JsonError`, because `gc::alloc` calls
-// `handle_alloc_error` and no alloc-error hook is installed; there is no
-// collect-and-retry on that path, and off Windows the collector is a no-op,
-// so nothing is reclaimed until the process exits.
+// "NESTING DEPTH" IN THAT SENTENCE IS DEPTH AS THE GUARD COUNTS IT, and it
+// does not count every shape the same way: a leaf costs a level and an empty
+// innermost container does not, so a chain of `MAX_RENDER_DEPTH + 1`
+// containers ending empty renders while one of `MAX_RENDER_DEPTH + 1` ending
+// in a leaf panics. The rule, the measured boundaries and which of the two
+// shapes any fixture pins are all at the guard itself, below.
+//
+// THE RESIDUALS ARE NAMED RATHER THAN LEFT TO INFERENCE, AND THE ROSTER IS
+// WHAT TO READ. This sentence used to continue "and there are three, not
+// two" -- a corrected count over a set a later increment can add to, sitting
+// in shipped code against this file's own stated preference for a roster with
+// no count. The count is dropped rather than corrected a second time, and the
+// last member below is what a count would have gone stale on immediately:
+//   - a cyclic value never terminates on its own and is refused by
+//     `MAX_RENDER_DEPTH` with a panic;
+//   - THE SAME CAP, by the same mechanism, refuses a legitimate ACYCLIC
+//     value past `MAX_RENDER_DEPTH` too -- the guard cannot and does not tell
+//     the two apart, which is exactly the counterexample the opening
+//     paragraph retracts;
+//   - heap exhaustion still aborts the process without a `JsonError`,
+//     because `gc::alloc` calls `handle_alloc_error` and no alloc-error hook
+//     is installed; there is no collect-and-retry on that path, and off
+//     Windows the collector is a no-op, so nothing is reclaimed until the
+//     process exits;
+//   - a WIDE cycle can reach that same allocator abort BEFORE it reaches the
+//     named panic, because the work list grows with depth times container
+//     width rather than with depth alone. `MAX_RENDER_DEPTH`'s own note
+//     carries the measurements and marks where reasoning takes over from
+//     them.
 //
 // `parse` is bounded differently, by its own declared `MAX_DEPTH` -- the two
 // caps are independent numbers, chosen for independent reasons. `parse`
@@ -167,23 +237,61 @@ pub fn stringify(v: JsonValue) -> String {
                     // than merely detectable, and it prices the guard once per pop
                     // instead of once per container pop.
                     //
-                    // EQUIVALENT TO THE OLD PER-ARM CHECK, `p.d + 1 > MAX_RENDER_DEPTH`,
-                    // by derivation, not by assumption. Children are pushed with
-                    // `d = p.d + 1`, so the old check fired at a k-level container
-                    // chain's OWN pop when k > MAX_RENDER_DEPTH, i.e. the same k that
-                    // the chain's own leaf carries as its `d` once pushed and later
-                    // popped. Checking `p.d > MAX_RENDER_DEPTH` here, at every pop
-                    // rather than only at a container's, fires at that same leaf for
-                    // the same k -- one pop later than before, since the container
-                    // one level up no longer refuses to push it, but the threshold
-                    // itself does not move. Re-verified after hoisting, not merely
-                    // re-derived: `json_render_guard_under.nova` and
-                    // `json_render_guard.nova` still render at `MAX_RENDER_DEPTH` and
-                    // panic at `MAX_RENDER_DEPTH + 1` respectively, and the same pair
-                    // of depths was independently confirmed for an OBJECT chain (built
-                    // the same way, one key deep per level) by a scratch run against
-                    // this build, not shipped as a third fixture -- see this task's
-                    // fix-round report for the four measurements.
+                    // EQUIVALENT TO THE OLD PER-ARM CHECK ON A CHAIN THAT ENDS IN A
+                    // LEAF, AND NOT IN GENERAL. This heading used to read "EQUIVALENT
+                    // TO THE OLD PER-ARM CHECK, `p.d + 1 > MAX_RENDER_DEPTH`, by
+                    // derivation, not by assumption", unqualified, over a derivation
+                    // that was already scoped to leaf-terminated chains in its own
+                    // words. RETRACTED as an unscoped claim: the two forms differ, by
+                    // exactly one level, on a chain whose innermost container is
+                    // EMPTY.
+                    //
+                    // The derivation, for a chain of k containers ending in a LEAF.
+                    // Children are pushed with `d = p.d + 1`, so the old check fired
+                    // at the innermost container's OWN pop when k > MAX_RENDER_DEPTH
+                    // -- the same k that chain's leaf carries as its `d` once pushed
+                    // and later popped. Checking `p.d > MAX_RENDER_DEPTH` here, at
+                    // every pop rather than only at a container's, fires at that same
+                    // leaf for the same k, one pop later than before, and the
+                    // threshold itself does not move.
+                    //
+                    // WHERE THE TWO DIVERGE. An empty innermost container pushes no
+                    // child at all, so there is no "one pop later" to arrive at: the
+                    // deepest `d` any pop sees is k - 1, and this check fires only
+                    // once k - 1 > MAX_RENDER_DEPTH. The old per-arm check ran at that
+                    // container's own pop and tested `p.d + 1`, so on the same chain
+                    // it fired at k > MAX_RENDER_DEPTH, as it did for the leaf shape.
+                    // The hoist therefore ADMITS one level more than the old form on
+                    // an empty-innermost chain, and no fewer on any shape: it can
+                    // newly accept a value and cannot newly refuse one.
+                    //
+                    // SO THIS CAP HAS THE SAME ASYMMETRIC COUNTING RULE `parse`'S
+                    // CAP HAS. A leaf costs a level; an empty innermost container does
+                    // not. MEASURED against this build, arrays one deep per level:
+                    // 100000 containers around a leaf render, 200001 characters,
+                    // exit 0, and 100001 panic; 100001 containers ending in an empty
+                    // array render, 200002 characters, exit 0, and 100002 panic. The
+                    // derivation applies to an empty innermost OBJECT identically,
+                    // since either empty container pushes no `Value` -- that half is
+                    // reasoning, and the measured pair above is arrays.
+                    //
+                    // THAT RULE IS PINNED IN ONE SHAPE ONLY, WHICH IS DISCLOSED
+                    // RATHER THAN FIXED. `parse` states its rule at `parse_value` and
+                    // pins both of its shapes, `json_depth_leaf.nova` and
+                    // `json_depth_empty.nova`. Here `json_render_guard_under.nova`
+                    // and `json_render_guard.nova` pin the leaf boundary and nothing
+                    // pins the empty-innermost one, so a change that moved it by a
+                    // level would pass the whole suite. No fixture is added for it:
+                    // an earlier ruling declined render fixtures on suite cost, each
+                    // of that pair already costing seconds, and that trade has not
+                    // changed.
+                    //
+                    // Re-verified after hoisting rather than only re-derived: the
+                    // leaf pair still renders at `MAX_RENDER_DEPTH` and panics one
+                    // level past it, and the same pair of depths was independently
+                    // confirmed for an OBJECT chain, built the same way one key deep
+                    // per level, by a scratch run against this build rather than
+                    // shipped as a third fixture.
                     if p.d > MAX_RENDER_DEPTH {
                         panic("stringify: nesting too deep or cyclic value")
                     }
@@ -238,6 +346,24 @@ pub fn stringify(v: JsonValue) -> String {
                                 // refuses to advance, `span` returns the empty string,
                                 // `utf8_bytes` returns 0xFF precisely to force a downstream
                                 // rejection -- which is the pattern this one departs from.
+                                //
+                                // KNOWN UNPINNED, NAMED HERE RATHER THAN FIXED WITH A
+                                // FIXTURE. Changing the `d: p.d + 1` below to `d: p.d`
+                                // leaves all fourteen `json_*` goldens byte-identical --
+                                // measured, by applying that mutation, rebuilding, and
+                                // re-running them. What it would break if wrong is
+                                // `MAX_RENDER_DEPTH` itself for object-nested values:
+                                // depth stops advancing through objects, so no object
+                                // chain reaches the guard at any length. Measured on the
+                                // mutant: an object chain of 100001 levels renders
+                                // 600007 characters and exits 0, where this build panics
+                                // on the same value. A cyclic value reached through
+                                // objects would then run to the allocator abort with no
+                                // message, which is what the guard exists to prevent.
+                                // What would catch it is a fixture nesting through
+                                // OBJECTS past the cap; the ruling that declined render
+                                // fixtures on suite cost is why there is none, and a
+                                // disclosed hole beats an undisclosed one.
                                 match m.get(ks[i]) {
                                     Some(val) => {
                                         stack.push(Value(Pending { v: val, d: p.d + 1 }))
@@ -755,6 +881,17 @@ impl P {
             }
             self.bump()
             self.skip_ws()
+            // KNOWN UNPINNED, NAMED HERE RATHER THAN FIXED WITH A FIXTURE.
+            // Changing this `d + 1` to `d` leaves all fourteen `json_*` goldens
+            // byte-identical -- measured, by applying that mutation, rebuilding
+            // and re-running them, not inferred from reading. What it would
+            // break if wrong is `MAX_DEPTH` in this direction: nesting through
+            // OBJECTS would stop counting, so an object-nested input could
+            // recurse arbitrarily deep and reach the stack overflow the cap
+            // exists to replace. It survives because both depth fixtures nest
+            // through ARRAYS -- `json_depth_leaf.nova` and
+            // `json_depth_empty.nova` build their inputs from `[` and `]` --
+            // which covers `scan_array`'s twin of this line and not this one.
             let v = self.parse_value(d + 1)
             if self.err.is_some() { return Null }
             m.insert(k, v)

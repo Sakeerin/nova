@@ -27,6 +27,14 @@ adversarially chosen object keys are a quadratic exposure that neither cap
 touches, whose governing decision was already taken in
 `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`.
 
+**Amended again 2026-08-26 (same branch, final fix wave): three statements of
+fact inside that amendment are corrected or scoped** — the render direction's
+boundaries are pinned in one shape only, the asymmetric counting rule belongs to
+both directions rather than to `parse` alone, and the guard's cost grows with the
+cycle's width as well as with the bound. A false Go comparison is corrected with
+the same date. **Again no decision changes**; the corrections are at the end of
+§8, after the 2026-08-25 amendment they qualify.
+
 ## Context
 
 `00-MASTER-SPEC.md` §3 lists Phase 2's standard-library build order, and it
@@ -662,6 +670,67 @@ deprecation cycle. It belongs to `std/collections`, since every
 where it meets untrusted input. The Consequences bullet below saying nothing
 here is a step toward that throughput number stands, and now has a second
 reason.
+
+### Second amendment, 2026-08-26 (same branch, final fix wave before merge)
+
+Three claims in the 2026-08-25 amendment above are corrected or scoped. No
+decision moves; all three are statements of fact that the whole-branch review
+found stated wider than the evidence.
+
+**"Both directions' boundaries are pinned now" is true of the parse direction
+and true of ONE SHAPE in the render direction.** The paragraph above pins the
+parse boundary with `json_depth_leaf.nova` and `json_depth_empty.nova` and the
+render boundary with `json_render_guard_under.nova` and
+`json_render_guard.nova` — but the render pair builds only the leaf-terminated
+shape, and the render cap turns out to have **the same asymmetric counting rule
+the parse cap has**. The shipped guard is one **pop-time** check on the depth an
+item carries, hoisted out of the two per-arm push-time checks the plan
+prescribed, and an empty innermost container pushes no child at all, so nothing
+on that shape ever carries the depth the guard would refuse. Measured against
+the shipped binary, arrays one deep per level: a chain ending in a leaf renders
+at 100000 containers (200001 characters, exit 0) and panics at 100001; a chain
+ending in an empty array renders at 100001 (200002 characters, exit 0) and
+panics at 100002. The empty-innermost boundary is pinned by nothing, so a change
+that moved it by a level would pass the whole suite. It stays unpinned by
+ruling — render fixtures cost seconds each and that trade has not changed — and
+is disclosed at the guard in `std/json/lib.nova` instead.
+
+**So "the parse-direction counting rule is asymmetric" scopes the rule too
+narrowly.** Both caps count the same way — a leaf costs a level, an empty
+innermost container does not — for the same underlying reason in each direction:
+in `parse` the empty-container fast paths return without re-entering
+`parse_value`, and in `stringify` an empty container pushes no `Value` onto the
+work list. What is parse-specific is only that **both** of its shapes have a
+fixture. The clause "and that is why there are two fixtures and not one" still
+explains the parse pair; it should not be read as saying the render direction
+has no such rule.
+
+**The guard's cost is not a function of its bound alone, and "an immediate,
+named, located failure" is a promise about narrow cycles.** The work list gains
+about `2w` items per level for a container of width `w` — `w` children, `w - 1`
+separators, two brackets, one item removed — so both its peak size and the time
+to fire grow with the bound **times the width**. Measured against the shipped
+binary, min of 3 after a warm-up, cyclic arrays that fire the guard: width 1,
+1.78 s; width 3 with the cycle at the last member, 4.71 s; width 10 at the last
+member, 14.24 s; width 10 at the first member, 7.14 s. Both cycle fixtures in
+the tree are width 1. The consequence, which is reasoning past width 10 rather
+than a measurement: that peak is the same allocator pressure the guard was
+introduced to replace, so a wide enough cycle reaches `handle_alloc_error` —
+neither a `nova: panic:` prefix nor a location — before it reaches the named
+panic. Nothing measures where the crossover sits.
+
+**And the Go comparison in the two-obstacles passage above is false.** It reads
+"Go's `encoding/json` caps nothing". `encoding/json` declares `const
+maxNestingDepth = 10000` in `src/encoding/json/scanner.go` and enforces it in
+`pushParseState`, which reports `exceeded max depth` — read at `master` on
+2026-08-26. It was the one comparison in that sentence carrying no file and no
+read date, beside a `serde_json` claim carrying both. The neighbours check out as
+read on 2026-08-26: Jackson's `StreamReadConstraints.DEFAULT_MAX_DEPTH` is
+`1000` (`src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java`,
+branch `2.x`), and CPython's C accelerator declares no JSON-specific constant and
+calls `_Py_EnterRecursiveCall` in `scan_once_unicode` (`Modules/_json.c` at
+`main`). The argument is unchanged: implementations that declare a limit pick
+different numbers, so 128 is a defensible precedent rather than a standard.
 
 ## Consequences
 

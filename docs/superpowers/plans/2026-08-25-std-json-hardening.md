@@ -10,6 +10,33 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-25-std-json-hardening-design.md`
 
+**AMENDED 2026-08-26, in the final fix wave, before merge.** This plan is a tracked file the branch
+adds, so it ships and a later increment can read it as precedent — and, like the spec, it sits in no
+per-commit review's scanned set, which is why these went unamended while the branch ran. The claims
+rostered here were falsified by what shipped or by a downstream retraction. The prescriptions stay as
+written, because they are the record of what was asked for; each carries a dated note at the point
+it appears:
+
+- the guard listing's cost claim, and the milliseconds and two-minutes numbers with it — after the
+  `MAX_RENDER_DEPTH` listing in Task 3 Step 4
+- the two push-time per-arm guard blocks, replaced before the branch ended by one pop-time check
+  that is **not** equivalent on every shape — after the `stringify` listing in Task 3 Step 5
+- "no randomness source exists anywhere in the runtime", and the new-intrinsic framing beside it —
+  after the disclosure block quote in Task 4 Step 4
+- `json_render_deep.nova` "would take about nine seconds before" the change — in *What no test
+  asserts*, at the end
+- the Go comparison inside the `MAX_DEPTH` listing in Task 2 Step 4, which was the one claim in its
+  sentence with no file and no read date, and the one that turned out false
+- and the `stringify` header prescribed in Task 3 Step 8, whose totality-over-acyclic-values claim
+  was retracted at the code inside the branch — after the listing there
+
+Two further shapes, flagged rather than amended because no claim in them is false. The Architecture
+line above says "the four accumulators write into it": a census of a growable set, which is the shape
+*Sentence-shape discipline* below forbids, and the shipped record replaced it with a roster carrying
+no count. And Task 4 Step 4's instruction to delete "A caller putting `std/json` on a socket must
+impose a depth limit above it" is an instruction to retract, not an assertion — it was checked in
+this wave and needs nothing.
+
 ## Global Constraints
 
 - `cargo build --locked --workspace` **before** `cargo test`. `--no-fail-fast`.
@@ -454,6 +481,14 @@ Place it with the file's other top-level declarations:
 const MAX_DEPTH: Int = 128
 ```
 
+**Dated note, 2026-08-26 (final fix wave).** The comment above prescribes "Go's `encoding/json` caps
+nothing". That is **false and is retracted**, at the code and here: `encoding/json` declares `const
+maxNestingDepth = 10000` in `src/encoding/json/scanner.go` and enforces it in `pushParseState`, which
+reports `exceeded max depth` — read at `master` on 2026-08-26. It was the one comparison in that
+sentence with no file, no version and no read date, sitting beside a `serde_json` claim that carried
+all three, and it is the one that broke. The shipped comment now dates all of them; the argument for
+128 is unchanged.
+
 - [ ] **Step 5: Thread the depth parameter**
 
 Four edits, all located by content.
@@ -801,6 +836,27 @@ record Pending { v: JsonValue, d: Int }
 const MAX_RENDER_DEPTH: Int = 100_000
 ```
 
+**Dated note, 2026-08-26 (final fix wave).** Three claims in the comment above did not survive the
+branch and are retracted here rather than left for a later increment to read as precedent.
+
+- "The guard's cost is proportional to its bound: a cycle runs one iteration per level before
+  firing" is true at width 1 and false in general. Popping a container of width w pushes about
+  2w + 1 items and removes one, so the work list gains about 2w per level: both the peak size and
+  the time to fire grow with the bound **times the container width**. Measured against the shipped
+  binary, min of 3 after a warm-up, cyclic arrays that fire the guard — width 1, 1.78 s; width 3
+  with the cycle at the last member, 4.71 s; width 10 at the last member, 14.24 s; width 10 at the
+  first member, 7.14 s. Both cycle fixtures this plan specifies are width 1, so nothing in the suite
+  exercises the width dependence. The consequence is that a wide enough cycle reaches the allocator
+  abort the guard exists to replace before it reaches the named panic — that step is reasoning, not
+  a measurement, and the code says so.
+- "That is milliseconds with the buffer this file now uses" was already retracted inside the branch
+  as false by three orders of magnitude: the guard fires in seconds.
+- "and was more than two minutes when the same walk accumulated by interpolation" describes a
+  design-time scratch probe rather than any state this code shipped in, and was dropped rather than
+  repeated.
+- "the work list was measured rendering depth 30000" was an unpinned measurement and is superseded
+  by the fixture pair that brackets the bound itself.
+
 - [ ] **Step 5: Rewrite `stringify`**
 
 Signature unchanged. **The separator push in the `Object` arm stays outside the `m.get` match** — see Step 1's fixture header for what moving it costs:
@@ -862,6 +918,22 @@ pub fn stringify(v: JsonValue) -> String {
 }
 ```
 
+**Dated note, 2026-08-26 (final fix wave).** The listing above puts `if p.d + 1 > MAX_RENDER_DEPTH`
+at the top of BOTH container arms — a push-time check, twice. That is not what shipped. Task 3's
+review found that the duplication made deleting one of the two blocks invisible to every fixture, so
+the two were hoisted into **one pop-time check**, `if p.d > MAX_RENDER_DEPTH`, above `match p.v`.
+
+The hoist is **not equivalent on every shape**, and the ruling that ordered it said it was. The
+push-time form fired for a chain of k containers when k > `MAX_RENDER_DEPTH` whatever the chain ended
+in; the pop-time form tests the depth an item carries, and an empty innermost container pushes no
+child, so the deepest `d` popped on that shape is k - 1. Measured against the shipped binary, arrays
+one deep per level: a chain ending in a leaf renders at 100000 containers (200001 characters, exit 0)
+and panics at 100001; a chain ending in an empty array renders at 100001 (200002 characters, exit 0)
+and panics at 100002. So the render cap has the same asymmetric counting rule `parse` has — a leaf
+costs a level, an empty innermost container does not. `parse` pins both of its shapes with the two
+fixtures Task 2 Step 1 specifies; this direction pins the leaf shape only, and the empty-innermost
+boundary is disclosed at the code as unpinned rather than fixed with a third render fixture.
+
 Why reverse: the list is LIFO, so to emit `[`, e0, `,`, e1, `]` the pushes run `]`, e1, `,`, e0, `[`. The separator for member `i` is pushed after member `i`'s own items and therefore pops before them, which is what puts it between members rather than after the last one.
 
 `match stack.pop()`'s `None` arm is unreachable — the loop condition is `stack.len() > 0` — and is written out because the match must be total. `out = out` is this file's existing idiom for exactly that.
@@ -916,6 +988,21 @@ Revert and rebuild after each.
 // The accumulator cost these arms used to carry is gone; the roster of what
 // changed is at `scan_str`.
 ```
+
+**Dated note, 2026-08-26 (final fix wave).** The header text prescribed above did not survive the
+branch, and three of its claims were retracted at the code during Task 3's second fix round. Kept
+here as the record of what was asked for, retracted here so it is not read as precedent.
+
+- "TOTAL OVER THE VALUES IT RETURNS FROM. For every acyclic `JsonValue` there is a rendering" is
+  **false**, and the counterexample ships in the same commit: `json_render_guard.nova` builds an
+  acyclic value past `MAX_RENDER_DEPTH` and it panics. The guard tests depth alone and never inspects
+  for a cycle, so "acyclic" does not rescue the claim — and it was already false when this plan was
+  written, since this same plan prescribes the cap.
+- "nesting is bounded by memory rather than by stack size" is wrong the same way: nesting is bounded
+  by the **declared cap**.
+- "measured rendering depth 30000" was an unpinned measurement, superseded by the two fixtures that
+  bracket the bound. What those two pin is the leaf shape; the empty-innermost shape reaches its
+  boundary one level higher and is pinned by nothing, which the code discloses at the guard.
 
 **The `Object` arm's unreachability argument** — its conclusion is now false as written. Correct it, quoting what it said:
 
@@ -1012,6 +1099,27 @@ Locate by content. Four things change and one is added.
 > anywhere in the runtime, so that work needs a new intrinsic first and
 > belongs to `std/collections`.
 
+**Dated note, 2026-08-26 (final fix wave).** Two of the block quote's claims were retracted while
+the branch ran, and the record that shipped says so; the prescription above is kept as written so a
+reader can see what was asked for.
+
+- "no randomness source exists anywhere in the runtime" is **false**. `getrandom` reaches
+  `Cargo.lock` by way of `rand` under `proptest`, and the runtime process already draws OS entropy
+  through `std` — every `std` `HashMap` it builds (`crates/nova-runtime/src/file.rs`) seeds a
+  `RandomState`. The barrier is exposure to Nova, not availability to the process.
+- "that work needs a new intrinsic first" **misdescribes a decision taken elsewhere**.
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` already records the `Map` exposure and
+  frames the remedy as a `Hasher`-shaped question, per-map hasher choice or a seed, reached through
+  the accumulating-`Hasher` migration it describes. The `std/collections` half of the sentence
+  survives, for the reason that every `Map<String, _>` has the exposure rather than the reason given
+  here.
+
+Also amended in this wave, past what this step prescribed: the shipped record's replacement claim
+that "Nova reaches the runtime only through a compiler-known `Builtin` paired with a `nova_rt_*`
+function and a line in `symbols()`" is itself false — an `extern "C"` declaration reaches the C
+runtime with none of the three, measured — and the record now says so rather than prescribing a grep
+that cannot see that route.
+
 Section 7 stays **open** regardless: `stringify_pretty` is still unshipped.
 
 - [ ] **Step 5: Amend the superseded plan and the stale fixture label**
@@ -1073,6 +1181,18 @@ Scan every file in that list plus this plan and the spec: no byte below 0x20 out
 ## What no test asserts, stated rather than implied
 
 **Asymptotics are not test-asserted, and this plan deliberately adds no timing assertion.** A Rust-side bound was considered — 9482 ms before, expected well under 100 ms after, so a 5 s assertion would leave roughly a 50x margin — and rejected: this suite runs its fixtures in parallel on three platforms under variable load, it has already had an intra-invocation flake investigated at length, and a wall-clock bound on a debug build is the shape that flakes. The asymptotic claim rests on Step 1 of Task 4 — a measurement recorded with its method, re-runnable — plus `json_render_deep.nova`, which completes in milliseconds after the change and would take about nine seconds before it.
+
+**Dated note, 2026-08-26 (final fix wave). The second half of the sentence immediately above is
+false, and the sentence is retracted as written**; this plan was its last surviving carrier — `CHANGELOG.md` retracts it in those
+words, and this file ships with the branch. `json_render_deep.nova` builds a **20 000-level** value,
+and before this increment such a value **ended the process**: the recursive `stringify` spent one
+native stack frame per level, and this build rendered depth 10 000 and overflowed its stack at
+16 000. There was no nine-second slow path at 20 000 levels to be slower than. Nine seconds was a
+different fixture and a different shape — the flat 16 000-element array, whose 32 KB of output took
+9482 ms net before the change and 247 ms after. The true statement about `json_render_deep.nova` is
+that a value which ended the process now renders, which is a stronger discriminator than any timing
+claim; and the nine-second figure was in any case a **predicted** number, which this plan's own Task
+4 brief forbade writing into a record.
 
 That is weaker than an assertion and is said so. It is not a fixture that discriminates only by hanging: it completes either way.
 

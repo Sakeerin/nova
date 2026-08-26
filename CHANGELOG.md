@@ -567,7 +567,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   precedent that makes 128 defensible, not as a standard. It is not one:
   Jackson's `StreamReadConstraints.maxNestingDepth()` defaults to 1000,
   CPython has no JSON-specific constant and inherits the interpreter's
-  recursion limit, and Go's `encoding/json` caps nothing. **The counting rule
+  recursion limit, and Go's `encoding/json` caps nothing.
+  **Corrected 2026-08-26, before merge: "Go's `encoding/json` caps nothing" is
+  false and is retracted.** It declares `const maxNestingDepth = 10000` in
+  `src/encoding/json/scanner.go` and enforces it in `pushParseState`, which
+  reports `exceeded max depth` — read at `master` on 2026-08-26. It was the one
+  comparison in that sentence with no file and no read date, next to a
+  `serde_json` claim that had both. The neighbours hold as read on 2026-08-26:
+  Jackson's `StreamReadConstraints.DEFAULT_MAX_DEPTH` is `1000`
+  (`src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java`, branch
+  `2.x`), and CPython's C accelerator declares no JSON-specific constant and
+  calls `_Py_EnterRecursiveCall` in `scan_once_unicode` (`Modules/_json.c` at
+  `main`). The argument for 128 is unchanged. **The counting rule
   is asymmetric**: a leaf costs a depth level, because `parse_value` is what
   tests the depth and a leaf is a `parse_value` call, while an empty
   innermost container costs none, because `scan_array`'s and `scan_object`'s
@@ -600,6 +611,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `json_stringify_cycle.nova` covering the cyclic case. The two caps are
   **independent numbers chosen for independent reasons**, and the module no
   longer states one depth property for both directions.
+  **Scoped 2026-08-26, before merge, on two counts.** First, that pair pins one
+  **shape**: this cap counts the way `MAX_DEPTH` does, a leaf costing a level and
+  an empty innermost container costing none, so measured against the shipped
+  binary a chain of arrays ending in a leaf renders at 100000 containers and
+  panics at 100001 while one ending in an empty array renders at 100001 (200002
+  characters) and panics at 100002. Nothing pins that second boundary, which is
+  disclosed at the guard rather than fixed with a third render fixture costing
+  seconds of suite time. Second, the named panic is a promise about **narrow**
+  cycles: the work list gains about `2w` items per level at container width `w`,
+  so both its peak and the time to fire grow with the bound times the width —
+  measured, min of 3 after a warm-up, 1.78 s at width 1 against 14.24 s at width
+  10 with the cycle at the last member — and past the widths measured the
+  reasoning is that the process meets the allocator abort this guard exists to
+  replace before it meets the panic. Both cycle fixtures are width 1.
 
 ### Changed
 
@@ -874,13 +899,31 @@ that already compiled.
   misdescription of a decision ADR 0005 had already taken. A seed does still
   need entropy, and the accurate statement is narrower than the one drafted
   here before: **no runtime function exposes entropy to Nova**, with the
-  durable form of that being the *check* rather than the assertion. Nova
-  reaches the runtime only through a compiler-known `Builtin` paired with a
-  `nova_rt_*` function and a line in `symbols()`, so grep those lists rather
-  than trust this sentence — it is a closed-world claim over a surface that
-  grows, and `std/crypto` shipping would falsify it by design. Today the
-  answer is no: `random_bytes`/`random_int` are unstarted declarations, with
-  no `ring` in `Cargo.lock` and no `std/crypto/` directory. The draft claimed instead that the *runtime* has no
+  durable form of that being the *check* rather than the assertion.
+  **Amended 2026-08-26, before merge: the check named here was itself a false
+  closed world.** It read "Nova reaches the runtime **only** through a
+  compiler-known `Builtin` paired with a `nova_rt_*` function and a line in
+  `symbols()`, so grep those lists rather than trust this sentence". The
+  **only** is false and the prescribed grep cannot see what it misses: an
+  `extern "C"` declaration in any `.nova` file is declared under its raw
+  symbol name with `Linkage::Import` by `declare_externs`
+  (`crates/nova-codegen-cranelift`) and satisfied by the JIT's dlsym fallback
+  under `nova run` or the system linker under `nova build`, with no `Builtin`
+  and no `symbols()` line involved. `collect_externs`
+  (`crates/nova-typeck`) refuses `main` and every `nova_`-prefixed name as
+  reserved (`E0900`, measured), so that route cannot alias a `nova_rt_*`
+  symbol — but it reaches the C runtime, which is where this question lands.
+  Measured 2026-08-26 on a debug build on Windows: `extern "C" { fn rand() ->
+  Int }` runs under `nova run` and prints 41 then 18467, and the same file
+  with `srand`/`time` built through `nova build` prints a `time(0)` that
+  advances between runs. So the answer is narrower than "no": through the
+  compiler's own surface Nova cannot obtain a random value —
+  `random_bytes`/`random_int` are unstarted declarations, with no `ring` in
+  `Cargo.lock` and no `std/crypto/` directory — while through the C runtime by
+  FFI a Nova program already can. No `std` module declares an `extern` today
+  (a grep under `std/` matches only prose), which is why `std/collections` has
+  no seed to hand a `Hasher`; the routes to re-check are `collect_externs`,
+  `declare_externs` and the `Builtin` table rather than this sentence. The draft claimed instead that the *runtime* has no
   entropy anywhere, citing the absence of a `rand` or `getrandom` dependency;
   that is retracted as well, being true only of the `Cargo.toml`s and false of
   the lockfile this file consults for `ring` — `getrandom` is in `Cargo.lock`

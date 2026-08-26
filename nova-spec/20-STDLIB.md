@@ -636,6 +636,21 @@ its 2026-08-25 amendment.
    `json_depth_empty.nova`, because a single fixture asserting "129 is
    rejected" would be true of one shape and false of the other.
 
+   **Scoped 2026-08-26, before merge: the rule is not parse-specific — only its
+   two-fixture coverage is.** `MAX_RENDER_DEPTH` counts the same way, for the
+   same reason in its own direction: the render walk tests the depth an item
+   carries, and an empty container pushes no value onto the work list, so
+   nothing on that shape carries the depth the guard would refuse. Measured
+   against the shipped binary, arrays one deep per level: a chain ending in a
+   leaf renders at 100000 containers, 200001 characters, and panics at 100001;
+   a chain ending in an empty array renders at 100001, 200002 characters, and
+   panics at 100002. The render direction pins the **leaf** shape only —
+   `json_render_guard_under.nova` and `json_render_guard.nova` — and the
+   empty-innermost boundary is pinned by nothing, so a change moving it by a
+   level would pass the whole suite. It stays unpinned by ruling, render
+   fixtures costing seconds each, and is disclosed at the guard in
+   `std/json/lib.nova`.
+
    **The render cap refuses more than what it exists for, and that is not a
    footnote.** It exists for cycles: a cyclic `JsonValue` is constructible in
    ordinary Nova, since arrays are heap references, and it has no rendering.
@@ -647,6 +662,20 @@ its 2026-08-25 amendment.
    is refused. `json_render_guard_under.nova` renders at exactly the cap and
    `json_render_deep.nova` renders 20 000 levels, both far past where the
    recursive form this replaces overflowed the stack.
+
+   **And the failure it gives is named for a narrow cycle, less so for a wide
+   one (2026-08-26).** The work list gains about `2w` items per level for a
+   container of width `w` — `w` children, `w - 1` separators, two brackets, one
+   item removed — so both its peak size and the time to fire grow with the cap
+   **times** the width, not with the cap alone. Measured, min of 3 after a
+   warm-up: a cyclic array of width 1 fires the guard in 1.78 s, width 3 with
+   the cycle at the last member in 4.71 s, width 10 at the last member in
+   14.24 s, width 10 at the first member in 7.14 s. Both cycle fixtures in the
+   tree are width 1. Past those widths it is reasoning rather than measurement:
+   that peak is the same allocator pressure the guard was introduced to replace,
+   so a wide enough cycle reaches `handle_alloc_error` — no `nova: panic:`
+   prefix, no location — before it reaches the panic, and nothing here measures
+   where the crossover sits.
 
    **The residuals, named rather than left to inference.** A cyclic value is
    refused by the cap; a legitimate acyclic value past the cap is refused by
@@ -771,14 +800,49 @@ its 2026-08-25 amendment.
    `std/json` is where it happens to face untrusted input. A seed does need
    entropy, and the accurate statement about that is narrower than the draft's:
    **no runtime function exposes entropy to Nova**, and the durable form of
-   that claim is the *check*, not the assertion. Nova reaches the runtime only
-   through a compiler-known `Builtin` paired with a `nova_rt_*` function and a
-   line in `symbols()`, so the question "can Nova obtain a random value?" is
-   answered by grepping those lists rather than by trusting this sentence —
-   which is a closed-world claim over a surface that grows, and which
-   `std/crypto` shipping would falsify by design. Today the answer is no:
-   `random_bytes`/`random_int` in §8 below are unstarted declarations, with no
-   `ring` in `Cargo.lock` and no `std/crypto/` directory. The draft claimed instead that "there is no
+   that claim is the *check*, not the assertion.
+
+   **AMENDED 2026-08-26: the check prescribed here was itself a false closed
+   world, and a roster of routes replaces it.** It read: "Nova reaches the
+   runtime **only** through a compiler-known `Builtin` paired with a
+   `nova_rt_*` function and a line in `symbols()`, so the question 'can Nova
+   obtain a random value?' is answered by grepping those lists rather than by
+   trusting this sentence — which is a closed-world claim over a surface that
+   grows, and which `std/crypto` shipping would falsify by design." The
+   **only** is false, and the grep it prescribes cannot see the route it
+   misses. Routes to check, each named with the code that decides what it
+   admits:
+
+   - a compiler-known `Builtin` paired with a `nova_rt_*` function and a
+     `symbols()` entry — `Builtin` in `crates/nova-resolver`, `symbols()` in
+     `crates/nova-runtime`; greppable, as the old sentence said;
+   - an `extern "C"` declaration in any `.nova` file.
+     `crates/nova-codegen-cranelift`'s `declare_externs` declares each one
+     under its **raw** symbol name with `Linkage::Import`, satisfied by the
+     JIT's dlsym fallback under `nova run` or by the system linker under `nova
+     build`. `crates/nova-typeck`'s `collect_externs` refuses `main` and every
+     `nova_`-prefixed name as reserved by the compiler (`E0900`, measured), so
+     this route cannot alias a `nova_rt_*` symbol — but it reaches **the C
+     runtime**, which is where the entropy question actually lands.
+
+   Measured 2026-08-26 against a debug build of this compiler on Windows:
+   `extern "C" { fn rand() -> Int }` compiles and runs under `nova run`,
+   printing 41 then 18467; pairing it with `srand` and `time` needs `nova
+   build` here, because the JIT could not resolve `time` (`E0902`), and the
+   built program prints a `time(0)` that advances between runs. Nova's
+   FFI-safe types are the scalars, which is all those three need.
+
+   **So the present-tense answer is narrower than "no".** Through the
+   compiler's own surface Nova cannot obtain a random value: `random_bytes`
+   and `random_int` in §8 below are unstarted declarations, with no `ring` in
+   `Cargo.lock` and no `std/crypto/` directory. Through the C runtime by FFI a
+   Nova program already can. No `std` module declares an `extern` at all today
+   — a grep for `extern` under `std/` matches only prose — which is why
+   `std/collections` has no seed to hand a `Hasher`, and what that module
+   needs is a decision about where a seed comes from and what it costs rather
+   than the discovery that no source exists. Whether this roster of routes is
+   complete is a question for `collect_externs`, `declare_externs` and the
+   `Builtin` table, not for this sentence. The draft claimed instead that "there is no
    randomness source anywhere in the runtime", citing no `rand` or `getrandom`
    dependency; **that is retracted.** It is true only of the `Cargo.toml`s and
    false of the lockfile this section consults for `ring` — `getrandom` reaches
