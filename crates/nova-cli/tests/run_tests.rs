@@ -8633,7 +8633,13 @@ fn hash_diffusion_run() {
 /// seeds colliding would defeat it, at a probability around 2^-64.
 #[test]
 fn str_hash_seed_varies_across_processes() {
-    let dir = std::env::temp_dir().join("nova-str-hash-seed-cross-process");
+    // Per-process directory: this branch's constraint that every fixture path
+    // be unique per process, for the same reason `build_and_run` above
+    // carries a pid (see its doc comment).
+    let dir = std::env::temp_dir().join(format!(
+        "nova-str-hash-seed-cross-process-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("seed.nova");
     std::fs::write(&file, "fn main() { println(\"${(\"alpha\").hash()}\") }\n").expect("write");
