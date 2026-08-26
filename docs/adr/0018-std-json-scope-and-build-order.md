@@ -16,11 +16,16 @@ reversed.** Both costs §8 discloses as deliberate and unfixed are now bounded o
 fixed — a declared depth cap in each direction, and one growable character
 buffer behind every accumulator §8 said could not have one. The decision §8
 recorded is left standing as written, with a dated amendment at the end of that
-section answering it passage by passage. Nothing else in this ADR changed: the
-build-order decision, the intrinsic, and the data-integrity rules all stand. A
-new disclosure that is **not** an amendment of anything here also lands in that
-amendment and in `20-STDLIB.md` §7 — adversarially chosen object keys are a
-quadratic exposure that neither cap touches.
+section answering it passage by passage, and the §8 heading carries a marker so
+a reader arriving from a link meets the correction before the count. The
+References entry pointing into §8 is corrected too, at the end of this file.
+**No decision in this ADR changed**: the build-order decision, the intrinsic,
+and the data-integrity rules all stand — §8's disclosure and the two pointers
+into it are the whole of what moved. One further item lands in that amendment
+and in `20-STDLIB.md` §7 without being an amendment of anything here:
+adversarially chosen object keys are a quadratic exposure that neither cap
+touches, whose governing decision was already taken in
+`docs/adr/0005-mutable-receivers-and-one-shot-hash.md`.
 
 ## Context
 
@@ -587,17 +592,28 @@ the minimum of five `nova run` invocations, minus the minimum of five
 program timed.
 
 So **the 32 KB document this section says renders in about twelve seconds now
-renders in about a quarter of a second**, and rendering is within a small factor
-of parsing rather than tens of times worse than it. That comparison crosses two
-measurement sessions, which is a real limitation and is stated rather than
-hidden: the before-numbers above were taken on 2026-08-23 with a ~180 ms compile
-baseline subtracted, the after-numbers on 2026-08-25 with a ~52 ms one, and the
-pre-change library can only be timed by reinstating it and rebuilding, which was
-not done. The baseline discrepancy is ~130 ms and the difference being claimed
-is over eleven seconds, so it cannot account for the change; a reader who wants
-one controlled A/B rather than two sessions should reinstate the pre-change
-`std/json/lib.nova`, rebuild — it is `include_str!`'d, so a stale binary reports
-the new code's numbers — and re-time both.
+renders in about a quarter of a second.** Rendering is within a small factor of
+parsing rather than tens of times worse than it.
+
+**The best before-evidence in the tree is not the table above.** It is
+`docs/superpowers/specs/2026-08-25-std-json-hardening-design.md`, which records
+the pre-change library measured **on this same build on 2026-08-25** at
+**231 / 1 239 / 9 482 ms net of a 129 ms compile baseline**, for exactly the
+three sizes timed after. Against that figure the render of 32 001 characters
+went from **9 482 ms net to 247 ms net — a reduction of about 9.2 seconds**, and
+that is the number to quote, because both halves come from one build. The
+2026-08-23 table above (236 / 1 309 / 11 622 ms, ~180 ms baseline) is the older
+**corroborating** measurement: same shape, same order of magnitude, a different
+session and a different baseline. An earlier draft of this amendment leaned on
+the 2026-08-23 figure and claimed a change of "over eleven seconds"; that
+overstates what one build supports and is corrected here to ~9.2 s.
+
+What still crosses sessions is only the *after* measurement's baseline, ~52 ms
+against the design document's 129 ms, and that gap cannot account for a
+multi-second change either way. A reader wanting a single controlled A/B in one
+sitting can reinstate the pre-change `std/json/lib.nova` and rebuild — it is
+`include_str!`'d, so a stale binary reports the new code's numbers — and re-time
+both halves; that was not done in the session that produced the after-numbers.
 
 **Do not restate any of this as a growth ratio per doubling.** The old numbers'
 own "5.5x then 8.9x" and any ratio computed from the new ones both mislead, in
@@ -613,8 +629,14 @@ arm paid rather than a reconstruction of it: that arm rebuilt the whole
 accumulator **twice** per element, once for the separator and once for the
 element, on top of the tree walk and the number formatting.
 
-**New in this increment, and not an amendment of anything above: adversarial
-object keys are a quadratic exposure that neither cap touches.** See the
+**Not an amendment of anything above, and not a new disclosure either:
+adversarial object keys are a quadratic exposure that neither cap touches.** The
+exposure itself is already on the record, in
+`docs/adr/0005-mutable-receivers-and-one-shot-hash.md`, which states that
+"**Hashes are not randomized per process**, so a `Map` is HashDoS-attackable by
+adversarial keys", that neither FNV-1a nor `mix64` is collision-resistant, and
+that this is "Acceptable for Phase 2.2a". What this increment adds is the
+**`std/json`-specific consequence** and a ruling about the gate. See the
 `20-STDLIB.md` §7 disclosure added the same day for the full statement. In
 short: `stringify`'s `Object` arm performs one `Map` lookup per member and
 `parse` one insert per key; `Map` selects buckets as `k.hash() & (cap - 1)` and
@@ -622,13 +644,24 @@ probes linearly (`std/collections/lib.nova`, `slot_of`); and `impl Hash for
 String` is `str_hash`, whose runtime doc comment
 (`crates/nova-runtime/src/lib.rs`, `nova_rt_str_hash`) says in terms that it "is
 *not* collision-resistant and must not be used for anything
-security-sensitive". Keys chosen to collide therefore make both directions
-quadratic in the number of keys, independently of `MAX_DEPTH`, of
-`MAX_RENDER_DEPTH` and of the buffer. **This section's own premise — the Phase 2
-gate puts this module in front of a socket — is therefore not satisfied by this
-increment: position 10's throughput gate on untrusted input is not claimable on
-the strength of it.** The Consequences bullet below saying nothing here is a
-step toward that throughput number stands, and now has a second reason.
+security-sensitive". Keys chosen to collide therefore make **both directions of
+the codec** quadratic in the number of keys, independently of `MAX_DEPTH`, of
+`MAX_RENDER_DEPTH` and of the buffer.
+
+**So this section's own premise is not satisfied by this increment: Phase 2's
+throughput gate is not claimable on untrusted input on the strength of it.** The
+gate needs positions 10 and 11 together — `examples/05-json-api` is this module
+behind an HTTP server that does not exist — so it is Phase 2's gate rather than
+either position's, and an earlier draft of this amendment that called it
+"position 10's throughput gate" is corrected. The remedy is the one ADR 0005
+names and not a new intrinsic: a `Hasher`-shaped question, per-map hasher choice
+or HashDoS resistance via a seed, reached through the accumulating-`Hasher`
+migration that ADR describes, which it records as a breaking change with a
+deprecation cycle. It belongs to `std/collections`, since every
+`Map<String, _>` in the language carries the exposure and `std/json` is only
+where it meets untrusted input. The Consequences bullet below saying nothing
+here is a step toward that throughput number stands, and now has a second
+reason.
 
 ## Consequences
 
