@@ -438,9 +438,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   panic, `stringify: nesting too deep or cyclic value`. So "exceeding it
   kills the process" is false of both, and "**A caller putting `std/json` on
   a socket must cap depth above it**" is retracted with it — the module
-  self-limits in the direction that reads untrusted text. (2) "**Neither is
-  fixable without a growable string buffer the language does not have**" is
-  retracted too: that is true only of a growable `String` **type**, which
+  self-limits in the direction that reads untrusted text. (2) "**and neither
+  is fixable without a growable string buffer the language does not have**"
+  is retracted too — quoted from mid-sentence above, which is why it opens on
+  a lower-case "and" rather than being tidied into a capital. That claim is
+  true only of a growable `String` **type**, which
   Nova still lacks, and false in the sense the sentence was used, because
   `Vec<Char>` plus `str_from_chars` composes into exactly such a buffer —
   both already shipped, and both already called from `std/json/lib.nova`
@@ -448,8 +450,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   needed no language change. The measured numbers above are superseded by
   the ones in the hardening entries below; quote those as absolutes rather
   than as the per-doubling ratios this paragraph gives, which understate a
-  quadratic because memcpy throughput rises with block size. Nine new
-  tests, 1048 → 1057: seven `json_*` `nova run` fixtures,
+  quadratic because memcpy throughput rises with block size. **End of the
+  2026-08-25 amendment; the 2026-08-23 entry resumes here, and everything
+  after this sentence is its text and carries its date** — including the test
+  count immediately below, which was current then and is not the tree's total
+  now.
+  Nine new tests, 1048 → 1057: seven `json_*` `nova run` fixtures,
   one for `Map::keys`, and one Rust unit test on the intrinsic. See
   `docs/adr/0018-std-json-scope-and-build-order.md` and `20-STDLIB.md` §7's
   2026-08-23 amendment. **This does not close Phase 2**: position 10
@@ -831,20 +837,45 @@ that already compiled.
   number of keys, independently of `MAX_DEPTH`, of `MAX_RENDER_DEPTH` and of
   the buffer, because neither cap counts keys and the buffer only makes
   emitting text linear. Depth is not the shape of this one; width is.
-  **Phase 2 position 10's throughput gate on untrusted input is therefore not
-  claimable on the strength of this increment** — that gate
-  (`00-MASTER-SPEC.md:245`) is `examples/05-json-api` serving 10k+ req/sec,
-  which means reading object keys somebody else chose, and a depth cap plus a
-  linear buffer do not answer a collision attack. A seeded hash would fix it
-  and needs **per-process entropy, which the runtime has nowhere to get**: no
-  `rand` or `getrandom` dependency in any `Cargo.toml`, no OS entropy call in
-  `crates/`, and `std/crypto`'s `random_bytes`/`random_int` still unstarted
-  declarations with no `ring` in `Cargo.lock` and no `std/crypto/` directory.
-  The workspace's one `DefaultHasher` (`crates/nova-driver`) fingerprints a
-  path deterministically and is not an entropy source. So that work needs a
-  **new intrinsic first**, and it belongs to `std/collections` rather than to
-  `std/json`: every `Map<String, _>` in the language has this exposure, and
-  `std/json` is only where it faces untrusted input.
+  **The governing decision is already recorded**, in
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`, which states that
+  "**Hashes are not randomized per process**, so a `Map` is HashDoS-attackable
+  by adversarial keys", that neither FNV-1a nor `mix64` is collision-resistant,
+  and that this is "Acceptable for Phase 2.2a". What is new here is not the
+  exposure but its **`std/json`-specific consequence** — one `Map` lookup per
+  member and one insert per key turn it into a quadratic in *both* directions
+  of the codec — and the gate ruling below.
+  **Phase 2's throughput gate is therefore not claimable on untrusted input on
+  the strength of this increment.** That gate (`00-MASTER-SPEC.md:245`) is
+  `examples/05-json-api` serving 10k+ req/sec, which needs positions 10 and 11
+  together — this module reading object keys somebody else chose, behind an
+  HTTP server that does not exist yet — and a depth cap plus a linear buffer
+  do not answer a collision attack.
+  **The remedy is the one ADR 0005 names, not a new intrinsic.** That ADR
+  frames it as a `Hasher`-shaped question: per-map hasher choice, or HashDoS
+  resistance via a seed, reached through the accumulating-`Hasher` migration
+  it describes — a breaking change with a deprecation cycle, and a
+  `std/collections` question rather than a `std/json` one, since every
+  `Map<String, _>` in the language has the same exposure and `std/json` is
+  only where it faces untrusted input. An earlier draft of this entry called
+  the remedy "a new intrinsic first"; that is **retracted** as a
+  misdescription of a decision ADR 0005 had already taken. A seed does still
+  need
+  entropy, and the accurate statement is narrower than the one drafted here
+  before: **no runtime function exposes entropy to Nova.** Nova code has no
+  way to obtain a random value — `std/crypto`'s `random_bytes`/`random_int`
+  are unstarted declarations, with no `ring` in `Cargo.lock` and no
+  `std/crypto/` directory. The draft claimed instead that the *runtime* has no
+  entropy anywhere, citing the absence of a `rand` or `getrandom` dependency;
+  that is retracted as well, being true only of the `Cargo.toml`s and false of
+  the lockfile this file consults for `ring` — `getrandom` is in `Cargo.lock`
+  by way of `rand` under `proptest`, and every `std` `HashMap` the runtime
+  builds (`crates/nova-runtime/src/file.rs`) already seeds a `RandomState`
+  from OS entropy. The barrier is exposure to Nova, not availability to the
+  process. Where a `DefaultHasher` appears in the workspace it hashes a path
+  deterministically for a cache-directory name, which is not an entropy
+  source; the durable check is the predicate rather than a count of such
+  sites, so grep for the constructor rather than trusting a tally here.
 - **`stringify` is still not total over nesting depth**, and the reason
   changed rather than went away. `MAX_RENDER_DEPTH` tests depth alone, so it
   refuses a **legitimate acyclic value** past the bound as well as a cyclic
@@ -859,10 +890,22 @@ that already compiled.
   across fixtures that run in parallel on three platforms under variable
   load, is the shape that flakes; this suite has already had one
   intra-invocation flake investigated at length. What the suite does carry is
-  `json_render_deep.nova`, which completes in milliseconds now and would have
-  taken about nine seconds before the change, and which discriminates by
-  completing rather than by hanging. The asymptotic claim itself rests on the
-  measurement above — recorded with its method, and re-runnable.
+  `json_render_deep.nova`, and its discriminator is stronger than any timing
+  claim: a 20 000-level value **ended the process** before this increment and
+  renders now. That is measured, not projected — the recursive form spent one
+  native stack frame per level, and this build rendered depth 10 000 and
+  overflowed its stack at 16 000, which is why no fixture exercised deep
+  nesting at all before (one that crashed the process would have failed the
+  suite by construction). An earlier draft of this bullet said the fixture
+  "completes in milliseconds now and would have taken about nine seconds
+  before the change", which was **false and is retracted**: nine seconds was
+  the flat 16 000-element array's figure, a different shape and a different
+  fixture, and at 20 000 levels there was no slow path to be nine seconds
+  slower than — the process died. That draft also called the fixture a
+  discriminator that works "by completing rather than by hanging", a
+  comparison that never existed, since the fixture is new in this increment.
+  The asymptotic claim itself rests on the measurement above — recorded with
+  its method, and re-runnable.
 - **Phase 2 is still not complete**, and nothing here moves its gate:
   `examples/05-json-api` and `docs/benchmarks/` do not exist, position 10
   `std/http` and position 12 `std/crypto` are unstarted, and `20-STDLIB.md`

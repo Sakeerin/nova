@@ -534,13 +534,15 @@ Result<JsonValue, JsonError>`, and both traits, with the signatures above.
 declaring — is `pub record JsonError { msg: String, at: Int }`. `stringify`
 is total **over values** — no `JsonValue` shape it cannot render, and no
 error channel to report one with — but **not over nesting depth**; the two
-unbounded costs recorded below are the qualification, and they matter to a
-reader deciding whether this module may face a socket. **(AMENDED 2026-08-25,
-branch `std-json-hardening`: `stringify` is still not total over nesting
-depth, and the reason has changed — a declared cap refuses a value past it,
-rather than the stack running out underneath it. Neither cost below is
-unbounded any more. Read the 2026-08-25 block further down for what replaced
-them, and for one exposure that no depth cap bounds.)** What `parse`
+**bounded** costs recorded below are the qualification, and they matter to a
+reader deciding whether this module may face a socket. This sentence read "the
+two **unbounded** costs recorded below" until 2026-08-25 (branch
+`std-json-hardening`), and the word is replaced rather than annotated, because
+this file states current behaviour: both costs are bounded now, one by a
+declared cap in each direction and one by a buffer. `stringify` is still not
+total over nesting depth — a declared cap refuses a value past it, instead of
+the stack running out underneath it — and the block further down records what
+replaced both costs, plus one exposure that no depth cap bounds. What `parse`
 implements, and what `tests/runtime/`'s `json_parse_values.nova`,
 `json_parse_strings.nova` and `json_parse_numbers.nova` execute, is this:
 all six `JsonValue` forms; one value per document, with trailing content
@@ -595,7 +597,8 @@ either one.
 this section disclosed are bounded now — one by a declared cap in each
 direction, the other by a growable character buffer this section said the
 language did not have — and a third exposure, which no depth cap bounds, is
-disclosed here for the first time.** What follows replaces the 2026-08-23 text
+recorded here for this module, its governing decision having been taken
+elsewhere.** What follows replaces the 2026-08-23 text
 at this position and quotes every claim it retracts, so the retraction is
 legible without a `git log`; note the consequence, which is that a correct
 retraction still *contains* the retracted sentence. Still recorded here rather
@@ -683,17 +686,33 @@ its 2026-08-25 amendment.
    program, that compile baseline being 51-62 ms across every program timed.
    For the single-literal direction, `buf_push_str`'s comment in
    `std/json/lib.nova` records the buffer flat at 132-142 ms across an
-   eightfold range of literal length where interpolation grew from 164 to
-   752 ms.
+   eightfold range of literal length, where interpolation grew from 164 to
+   752 ms — **those four figures are baseline-INCLUSIVE**, that comment saying
+   so in terms ("with a 129 ms compile baseline included"), so the buffer's own
+   cost there is roughly 3-13 ms and not 132-142. Do not read them against the
+   netted figures above without subtracting; unsubtracted, they would suggest
+   that pushing 8 000 characters costs more than rendering a whole 32 KB
+   document, which is an artefact of two conventions and not a measurement.
 
-   **Two honest limits on those numbers.** They cross measurement sessions: the
-   before-numbers above were taken on 2026-08-23 against a ~180 ms compile
-   baseline and these on 2026-08-25 against a ~52 ms one, and the pre-change
-   library can only be timed by reinstating it and rebuilding — it is
-   `include_str!`'d into the binary, so a stale binary reports the new code's
-   numbers — which was not done. A ~130 ms difference in baseline cannot
-   account for a change of over eleven seconds, which is why the comparison
-   stands, but it is two sessions and not one controlled A/B. And **do not
+   **The before-evidence to quote, and one honest limit.** The strongest
+   before-number in the tree is not the 2026-08-23 table this paragraph
+   supersedes: it is
+   `docs/superpowers/specs/2026-08-25-std-json-hardening-design.md`, which
+   records the pre-change library measured **on this same build on 2026-08-25**
+   at **231 / 1 239 / 9 482 ms net of a 129 ms baseline** for exactly these
+   three sizes. Against that, rendering 32 001 characters went from **9 482 ms
+   net to 247 ms net, a reduction of about 9.2 seconds** — the figure to cite,
+   since both halves come from one build. The 2026-08-23 numbers
+   (236 / 1 309 / 11 622 ms, ~180 ms baseline) are the older **corroborating**
+   measurement: same shape, same order of magnitude, different session and
+   different baseline. An earlier draft of this block leaned on those and
+   claimed "over eleven seconds"; corrected here to ~9.2 s, which is what one
+   build supports. What still crosses sessions is the after-measurement's own
+   baseline, ~52 ms against that document's 129 ms, and no baseline gap of that
+   size accounts for a multi-second change; a single controlled A/B in one
+   sitting would need the pre-change `std/json/lib.nova` reinstated and the
+   workspace rebuilt, since it is `include_str!`'d into the binary, and that
+   was not done in the session that produced the after-numbers. And **do not
    restate any of this as a ratio per doubling.** The old text's own "growing
    5.5x then 8.9x per doubling" understates a quadratic, because memcpy
    throughput rises with block size; a ratio computed from the new numbers
@@ -706,8 +725,19 @@ its 2026-08-25 amendment.
    and that is a **floor** under what the old `Array` arm paid rather than a
    reconstruction of it, since that arm rebuilt the whole accumulator twice per
    element, once for the separator and once for the element.
-3. **NEW, and bounded by neither cap: adversarially chosen object keys make
-   both directions quadratic in the number of keys.** `stringify`'s `Object`
+3. **Bounded by neither cap: adversarially chosen object keys make both
+   directions quadratic in the number of keys.** The exposure is **not new and
+   is not disclosed here for the first time** — an earlier draft of this item
+   claimed it was, wrongly.
+   `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` already records that
+   "**Hashes are not randomized per process**, so a `Map` is HashDoS-attackable
+   by adversarial keys", that neither FNV-1a nor `mix64` is collision-resistant,
+   and that this is "Acceptable for Phase 2.2a"; that ADR holds the governing
+   decision and this item does not reopen it. What **is** new here is the
+   `std/json`-specific consequence — the codec turns a `Map` exposure into a
+   quadratic in *both* of its directions — and the gate ruling below. Stated
+   now because a hardening increment invites exactly this question.
+   `stringify`'s `Object`
    arm performs one `Map` lookup per member and `parse` one insert per key.
    `Map` selects buckets as `k.hash() & (cap - 1)` and probes **linearly**
    (`std/collections/lib.nova`, `slot_of` and the probe loops in `insert` and
@@ -720,25 +750,41 @@ its 2026-08-25 amendment.
    buffer**, since neither cap counts keys and the buffer only makes emitting
    text linear. Depth is not the shape of this one; width is.
 
-   **So Phase 2 position 10's throughput gate on untrusted input is not
-   claimable on the strength of this increment.** That gate
-   (`00-MASTER-SPEC.md:245`) is `examples/05-json-api` serving 10k+ req/sec,
-   which means this module reading object keys somebody else chose. A depth cap
-   and a linear buffer do not answer a collision attack, and nothing here
-   should be read as saying they do.
+   **So Phase 2's throughput gate is not claimable on untrusted input on the
+   strength of this increment.** That gate (`00-MASTER-SPEC.md:245`) is
+   `examples/05-json-api` serving 10k+ req/sec, which needs positions **10 and
+   11 together** — this module reading object keys somebody else chose, behind
+   an HTTP server that does not exist yet — so it is Phase 2's gate rather than
+   either position's, and an earlier draft of this item that called it
+   "position 10's throughput gate" is corrected. A depth cap and a linear
+   buffer do not answer a collision attack, and nothing here should be read as
+   saying they do.
 
-   **What would fix it, and why it is not fixed here.** A seeded hash — one
-   whose bucket choice an attacker cannot precompute — needs per-process
-   entropy, and **there is no randomness source anywhere in the runtime**: no
-   `rand` or `getrandom` dependency in any `Cargo.toml`, no OS entropy call in
-   `crates/`, and `std/crypto`'s `random_bytes`/`random_int` in §8 below are
-   still unstarted declarations with no `ring` in `Cargo.lock` and no
-   `std/crypto/` directory. The one `DefaultHasher` in the workspace
-   (`crates/nova-driver`) fingerprints a path deterministically and is not an
-   entropy source. So that work needs a **new intrinsic first**, and it belongs
-   to `std/collections` (`00-MASTER-SPEC.md` §3 position 3) rather than to
+   **What would fix it, and why it is not fixed here.** The remedy is the one
+   ADR 0005 names, and an earlier draft of this item described it wrongly as
+   needing "a new intrinsic first". That ADR frames it as a `Hasher`-shaped
+   question — per-map hasher choice, or HashDoS resistance via a seed — reached
+   through the accumulating-`Hasher` migration it describes, which it records
+   as a breaking change with a deprecation cycle. It belongs to
+   `std/collections` (`00-MASTER-SPEC.md` §3 position 3) rather than to
    `std/json`: every `Map<String, _>` in the language has this exposure, and
-   `std/json` is where it happens to face untrusted input.
+   `std/json` is where it happens to face untrusted input. A seed does need
+   entropy, and the accurate statement about that is narrower than the draft's:
+   **no runtime function exposes entropy to Nova.** Nova code has no way to
+   obtain a random value, `std/crypto`'s `random_bytes`/`random_int` in §8 below
+   being unstarted declarations with no `ring` in `Cargo.lock` and no
+   `std/crypto/` directory. The draft claimed instead that "there is no
+   randomness source anywhere in the runtime", citing no `rand` or `getrandom`
+   dependency; **that is retracted.** It is true only of the `Cargo.toml`s and
+   false of the lockfile this section consults for `ring` — `getrandom` reaches
+   `Cargo.lock` by way of `rand` under `proptest` — and the runtime process
+   already draws OS entropy through `std` at no dependency cost, since every
+   `std` `HashMap` it builds (`crates/nova-runtime/src/file.rs`) seeds a
+   `RandomState`. The barrier is **exposure to Nova**, not availability to the
+   process. Where a `DefaultHasher` appears in this workspace it fingerprints a
+   path deterministically for a cache-directory name and is not an entropy
+   source; that is a predicate to re-check by grepping the constructor, not a
+   count of sites to trust from here.
 
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
