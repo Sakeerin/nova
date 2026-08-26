@@ -860,6 +860,59 @@ that already compiled.
   rebuilt the whole accumulator twice per element, once for the separator and
   once for the element.
 
+- **`str_hash` is seeded once per process and finalized, so a `String`'s hash
+  differs between runs of the same binary.** `nova_rt_str_hash`
+  (`crates/nova-runtime/src/lib.rs`) was unseeded FNV-1a over the bytes; it is
+  now FNV-1a whose offset basis is a per-process seed, followed by splitmix64's
+  finalizer — the same function `std/core`'s `mix64` computes. The seed is a
+  `OnceLock<u64>` initialised on first use from
+  `std::collections::hash_map::RandomState`, which is how Rust's own `HashMap`
+  seeds itself: **no new dependency**, nothing above MSRV 1.78, and no route
+  from Nova to the seed value. One value for the whole process, deliberately not
+  per thread and not per call, since a `Map` built under one seed and probed
+  under another finds nothing.
+  **No API changed, and nothing has to be edited to keep compiling.** `pub trait
+  Hash { fn hash(self) -> Int }` keeps its signature, no `impl Hash` was edited,
+  no intrinsic was added, and no `std` library source changed behaviour. That is
+  source compatibility, not behavioural compatibility — a program that read a
+  `String`'s hash and expected the same answer from a later run of the same
+  binary now gets a different one. What a caller can observe is
+  layout: **`Map::keys()` order can now differ between runs of one unchanged
+  binary when the keys are `String`s** — not must, since a different seed may
+  land on the same layout — so an observed order must not be treated as
+  reproducible. Sort, or assert per key. `Int`, `Bool` and `Char` keys hash
+  through `mix64`, which is not seeded, so their layout is unchanged and stable
+  across runs.
+  **Why the finalizer and not the seed alone**, which was the cheaper design and
+  was measured and rejected: `Map` selects buckets with `hash & (cap - 1)`, the
+  low bits, and FNV-1a's low bits barely depend on its basis — bit 0 of the
+  result is bit 0 of the basis XOR the parity of the input bytes' low bits, so
+  changing the basis flips bit 0 identically for both keys of a colliding pair
+  and leaves the collision standing. The absolute figures, **machine-specific in
+  their absolutes though not in their shape**: a constructed 48-key attack at
+  capacity 64 put all 48 in one bucket under the shipped hash and 30 in one
+  bucket under the best of four fresh seeds without the finalizer, against 3
+  with it, where an ideal keyed hash gives about 2; at capacity 256 with 192
+  keys, 192 then 28 then 3, ideal about 2. Diffusion, keys changing bucket when
+  the seed changes: 66.7% without the finalizer and 87.3% with it at capacity 8,
+  against an ideal of 87.5%; 66.7% and 93.5% at capacity 16, ideal 93.8%.
+  Independently, of 500 pairs colliding in the low 16 bits under the shipped
+  basis, 9 still collided under a different basis where chance alone predicts
+  0.01. Method and full figures are in
+  `docs/superpowers/specs/2026-08-26-map-hashdos-design.md` §2; the reasoning is
+  at `splitmix64_finalize` in the runtime. Re-run that harness rather than
+  trusting these numbers.
+  **Records amended rather than rewritten:**
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` gains a dated amendment
+  recording that its Migration-path closing paragraph — "replacing FNV-1a inside
+  `nova_rt_str_hash` ... and seeding either from a process-start value" — governs
+  this change, not its Consequences bullet reading "a seeded hasher is a
+  `Hasher`-shaped question, i.e. it is the migration below"; the broader reading
+  nearly produced a breaking change with a deprecation cycle for a change that
+  needed neither. `nova-spec/20-STDLIB.md` §7 and §12 and
+  `docs/adr/0018-std-json-scope-and-build-order.md` §8 carry dated amendments of
+  their own.
+
 ### Known limitations / follow-ups
 
 - **Adversarially chosen object keys make both `std/json` directions
@@ -937,6 +990,44 @@ that already compiled.
   deterministically for a cache-directory name, which is not an entropy
   source; the durable check is the predicate rather than a count of such
   sites, so grep for the constructor rather than trusting a tally here.
+- **Seeding `str_hash` narrowed the HashDoS exposure above; it did not close
+  it, and two statements in the entry above are now too broad.** Read this
+  before citing either. That entry says "`impl Hash for String` in `std/core`
+  is `str_hash`, FNV-1a" — accurate when written, and superseded by the
+  Changed entry above: it is seeded FNV-1a plus splitmix64's finalizer. And it
+  says "**Phase 2's throughput gate is therefore not claimable on untrusted
+  input on the strength of this increment**", which stays true of the
+  `std/json` increment it describes and is too broad as a standing statement.
+  What is claimable now: the gate **for string-keyed maps against a
+  precomputing attacker**, one who must build a colliding key set before it can
+  observe the process that will receive it.
+  **What stays exposed.** `mix64` is untouched, so **`Int`,
+  `Bool` and `Char` keys remain attackable by chosen keys** — their buckets are
+  still a function of the key alone. That is a decision rather than an
+  oversight: `tests/runtime/hash.stdout` pins `mix64`'s bucket histograms, its
+  complement-collision count and its canonical splitmix64 values as a
+  specification of the low-bit spreading `Map`'s masking depends on, and
+  seeding it would trade that specification for a partial win on a path
+  `std/json` does not take, its object keys being strings. **The result
+  is not cryptographic** — seeded, finalized FNV-1a is not SipHash and is not
+  collision-resistant, which ADR 0005's wording already said and still says
+  truly. And **an adversary who can observe timing and adapt is out of
+  scope**; what the change buys is precomputation resistance plus diffusion,
+  and even that lands near rather than at an ideal keyed hash — a constructed
+  48-key attack at capacity 64 leaves 3 keys in a bucket where an ideal gives
+  about 2, machine-specific in the absolute though not in the shape. Figures
+  and method are in the Changed entry above and in
+  `docs/superpowers/specs/2026-08-26-map-hashdos-design.md` §2 and §4.
+  **The resistance property itself is not test-asserted, and cannot be**:
+  building a colliding set requires the seed the design exists to keep unknown.
+  What is asserted is that the seed is live and varies across processes, that
+  hashing is stable within one, and that diffusion holds as a seed-independent
+  statistic. Anyone strengthening this should re-run the spec's §2 harness
+  rather than trust its numbers.
+  **A swappable seeded `Hasher` object is still unbuilt** and still needs the
+  accumulating-`Hasher` migration ADR 0005 records, with its deprecation cycle;
+  that is what the entry above was pointing at, and it remains the answer for
+  per-map hasher choice rather than for this.
 - **`stringify` is still not total over nesting depth**, and the reason
   changed rather than went away. `MAX_RENDER_DEPTH` tests depth alone, so it
   refuses a **legitimate acyclic value** past the bound as well as a cyclic
