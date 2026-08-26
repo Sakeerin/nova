@@ -117,10 +117,23 @@ impl<T> Iterator for VecIter<T> {
 //
 // Capacity is a power of two, so a bucket index is `hash & (cap - 1)` — never
 // `hash % cap`. A hash may be negative (`mix64` spans the whole `Int` range and
-// `str_hash` reinterprets an unsigned FNV-1a result), and `%` inherits that
+// `str_hash` reinterprets an unsigned 64-bit result), and `%` inherits that
 // sign while `&` with a positive mask does not. The high bits are not read at
 // all: Nova's `>>` is arithmetic with no `>>>`, so a negative hash
 // sign-extends. See the masking rule on `pub trait Hash` in std/core.
+//
+// A `String` key's hash is SEEDED ONCE PER PROCESS, so which bucket a given key
+// lands in is not a property of the program text: two runs of the same program,
+// inserting the same keys in the same order, build different tables. Nothing
+// about lookup, `len` or growth changes — every probe in a run uses the run's
+// own seed — but what a caller can OBSERVE about layout can vary run to run.
+// `keys()` order is the channel a caller is most likely to notice (see its own
+// note below); the `keys`, `vals` and `state` fields are reachable directly and
+// carry the same variation, which is what a fixture reading them is reading.
+// `Int`, `Bool` and `Char` keys go through `mix64`, which is not seeded, so
+// their layout is unchanged and stable across runs. The seeding lives in the
+// runtime at `nova_rt_str_hash`, which documents what it buys and what it does
+// not; `str_hash` is not collision-resistant either way.
 //
 // The three arrays are allocated together on the first insert, using the
 // inserted key and value as fillers, so no slot is ever uninitialized and no
@@ -315,6 +328,26 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // entry and can reorder them again on top of that. Naming only `grow`
     // would let a reader infer that a map which never grows preserves
     // insertion order, and that inference is false.
+    //
+    // FOR `String` KEYS THERE IS NOW A STRONGER STATEMENT, and it is a change
+    // in observable behaviour rather than a restatement of the above. The order
+    // used to be fixed by the key set and the insertion sequence together, so
+    // one unchanged binary run twice returned the same order both times; the
+    // per-process hash seed (see the record header above) means it CAN DIFFER
+    // BETWEEN RUNS of that same binary. Not must: a different seed may land on
+    // the same layout, and a one-key map has only one order to return. So a
+    // caller must not treat one observed order as reproducible, and a test or a
+    // golden that pins more than one `String` key's order is pinning a seed it
+    // does not control -- sort, or assert per key. `Int`, `Bool` and `Char` keys
+    // hash through `mix64`, which is not seeded, so for those the paragraph
+    // above still covers the whole of it.
+    //
+    // One consequence for the paragraph above: its `"e"`, `"c"`, `"a"` was
+    // measured when the hash was unseeded. What it demonstrates is intact and
+    // is the reason it is there -- no growth is needed to reorder, so a
+    // never-growing map does not preserve insertion order -- but that exact
+    // sequence is not reproducible now. Read it as an instance of the property,
+    // not as an order to expect from those three keys.
     pub fn keys(self) -> [K] {
         if self.len == 0 { return [] }
         let cap = self.state.len()
