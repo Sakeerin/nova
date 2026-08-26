@@ -42,8 +42,8 @@ pub record JsonError { msg: String, at: Int }
 // Go's `encoding/json` caps nothing." The Go half is FALSE and is retracted:
 // `encoding/json` declares `const maxNestingDepth = 10000` in
 // `src/encoding/json/scanner.go` and enforces it in `pushParseState`, which
-// reports `exceeded max depth` (read at `master` on 2026-08-26). The other
-// two hold as read on 2026-08-26 -- Jackson's
+// reports `exceeded max depth` (read at `master` on 2026-08-26). The others
+// hold as read on 2026-08-26 -- Jackson's
 // `StreamReadConstraints.DEFAULT_MAX_DEPTH` is `1000`
 // (`src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java` on
 // branch `2.x`), and CPython's C accelerator declares no JSON-specific
@@ -51,9 +51,9 @@ pub record JsonError { msg: String, at: Int }
 // (`Modules/_json.c` at `main`), so the interpreter's recursion limit is what
 // bounds it. WHY THIS WAS THE ONE THAT WAS WRONG is worth keeping: the
 // `serde_json` claim above carried a file, a field and a read date, the Go
-// claim carried none of the three, and it sat in the same sentence as if it
-// had. The comparison the argument needs is unchanged and slightly stronger
-// with a fourth number in it.
+// claim carried none of them, and it sat in the same sentence as if it had.
+// The comparison the argument needs is unchanged, and stronger for holding a
+// checked number where it used to hold an unchecked absence.
 //
 // For scale rather than for derivation: this build was measured parsing depth
 // 5000 successfully and overflowing its stack at 6000, on an input of 12001
@@ -118,7 +118,15 @@ record Pending { v: JsonValue, d: Int }
 // THE GUARD'S COST GROWS WITH THE PRODUCT OF ITS BOUND AND THE CYCLE'S
 // WIDTH. This used to read "The guard's cost is proportional to its bound: a
 // cycle runs one iteration per level before firing" -- RETRACTED: that is
-// true only at width 1, which is the only width either cycle fixture builds.
+// true only at width 1. `json_stringify_cycle.nova` builds a width-1 cycle and
+// no fixture in the tree builds a wider one; that is a predicate to re-check by
+// looking for a fixture that closes a cycle, not a tally to trust from here.
+// (This sentence said "the only width either cycle fixture builds" until
+// 2026-08-26, quantifying over two fixtures where only `json_stringify_cycle`
+// closes a cycle at all: `json_render_guard.nova`'s own header calls its value
+// acyclic, and so does `stringify`'s header here. A count over a set it had not
+// checked, written in the same wave that removed one from `stringify`'s
+// header.)
 // Popping a container of width w pushes about `2w + 1` items (w children,
 // w - 1 separators, two brackets) and removes one, so the list gains about
 // 2w per level and nothing is reclaimed before the panic. Those pushes happen
@@ -349,9 +357,16 @@ pub fn stringify(v: JsonValue) -> String {
                                 //
                                 // KNOWN UNPINNED, NAMED HERE RATHER THAN FIXED WITH A
                                 // FIXTURE. Changing the `d: p.d + 1` below to `d: p.d`
-                                // leaves all fourteen `json_*` goldens byte-identical --
-                                // measured, by applying that mutation, rebuilding, and
-                                // re-running them. What it would break if wrong is
+                                // leaves every `json_*` test passing -- goldens
+                                // byte-identical and the expected-failure assertions
+                                // still met -- measured, by applying that mutation,
+                                // rebuilding, and re-running them. (This said "all
+                                // fourteen `json_*` goldens" until 2026-08-26. That number
+                                // counted the FIXTURES; the expected-failure ones carry no
+                                // golden, so it named the wrong set. The substance held,
+                                // and the count is dropped rather than corrected -- the
+                                // predicate is every `json_*` test, which is re-runnable.)
+                                // What it would break if wrong is
                                 // `MAX_RENDER_DEPTH` itself for object-nested values:
                                 // depth stops advancing through objects, so no object
                                 // chain reaches the guard at any length. Measured on the
@@ -882,9 +897,14 @@ impl P {
             self.bump()
             self.skip_ws()
             // KNOWN UNPINNED, NAMED HERE RATHER THAN FIXED WITH A FIXTURE.
-            // Changing this `d + 1` to `d` leaves all fourteen `json_*` goldens
-            // byte-identical -- measured, by applying that mutation, rebuilding
-            // and re-running them, not inferred from reading. What it would
+            // Changing this `d + 1` to `d` leaves every `json_*` test passing,
+            // goldens byte-identical and the expected-failure assertions still
+            // met -- measured, by applying that mutation, rebuilding and
+            // re-running them, not inferred from reading. (This said "all
+            // fourteen `json_*` goldens" until 2026-08-26. That number counted
+            // the fixtures, and the expected-failure ones carry no golden, so it
+            // named the wrong set; the count is dropped rather than corrected.)
+            // What it would
             // break if wrong is `MAX_DEPTH` in this direction: nesting through
             // OBJECTS would stop counting, so an object-nested input could
             // recurse arbitrarily deep and reach the stack overflow the cap

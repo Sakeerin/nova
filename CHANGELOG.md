@@ -622,9 +622,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cycles: the work list gains about `2w` items per level at container width `w`,
   so both its peak and the time to fire grow with the bound times the width —
   measured, min of 3 after a warm-up, 1.78 s at width 1 against 14.24 s at width
-  10 with the cycle at the last member — and past the widths measured the
-  reasoning is that the process meets the allocator abort this guard exists to
-  replace before it meets the panic. Both cycle fixtures are width 1.
+  10 with the cycle at the last member, absolutes machine-specific and the growth
+  with width the claim — and past the widths measured the reasoning is that the
+  process meets the allocator abort this guard exists to replace before it meets
+  the panic. `json_stringify_cycle.nova` builds a width-1 cycle and no fixture
+  builds a wider one; this bullet said "both cycle fixtures" until 2026-08-26,
+  over a pair in which only that one closes a cycle.
 
 ### Changed
 

@@ -670,8 +670,13 @@ its 2026-08-25 amendment.
    **times** the width, not with the cap alone. Measured, min of 3 after a
    warm-up: a cyclic array of width 1 fires the guard in 1.78 s, width 3 with
    the cycle at the last member in 4.71 s, width 10 at the last member in
-   14.24 s, width 10 at the first member in 7.14 s. Both cycle fixtures in the
-   tree are width 1. Past those widths it is reasoning rather than measurement:
+   14.24 s, width 10 at the first member in 7.14 s. The absolutes are
+   machine-specific — an earlier session measured the width-1 case at about 2 s
+   — and the growth with width is the claim. `json_stringify_cycle.nova` builds
+   a width-1 cycle and no fixture builds a wider one, a predicate to re-check by
+   looking for a fixture that closes a cycle rather than a tally to trust; this
+   passage said "both cycle fixtures" until 2026-08-26, and only that one closes
+   a cycle. Past those widths it is reasoning rather than measurement:
    that peak is the same allocator pressure the guard was introduced to replace,
    so a wide enough cycle reaches `handle_alloc_error` — no `nova: panic:`
    prefix, no location — before it reaches the panic, and nothing here measures
