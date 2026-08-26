@@ -331,16 +331,21 @@ pub fn stringify(v: JsonValue) -> String {
                                 // That is wrong: `Map` exposes every field and Nova has no
                                 // field privacy, so a forged map with a live slot off its own
                                 // probe chain makes `keys()` return a key `get()` misses.
-                                // Measured -- `json_object_forged_map.nova` builds one and this
-                                // function renders `{"a":1,}` for it. So the arm is a real path
-                                // and the separator's position is load-bearing, not cosmetic:
+                                // Measured -- `json_object_forged_map.nova` builds one: a live
+                                // member whose key sits at a `ks` position greater than 0 but is
+                                // unreachable through `get`. Which key ends up there depends on
+                                // the per-process hash seed, so this comment names the
+                                // arrangement rather than the key. So the arm is a real path and
+                                // the separator's position is load-bearing, not cosmetic:
                                 // it is pushed OUTSIDE this match, so a missed member leaves a
                                 // comma with no member after it, exactly as before this
                                 // function stopped recursing.
                                 //
                                 // Moving the push inside the `Some` arm would emit valid JSON
                                 // instead FOR THIS FIXTURE'S ARRANGEMENT, where the missed key
-                                // ("b") sits at `ks` position 1, not position 0 -- it is not
+                                // sits at a `ks` position greater than 0 -- which key that is
+                                // depends on the per-process hash seed, so naming one here would
+                                // be true of most processes and false of some -- it is not
                                 // true in general. A miss AT position 0 emits the same string
                                 // either way: the separator there is gated on `i > 0`, which is
                                 // false for position 0 regardless of which arm the push sits
