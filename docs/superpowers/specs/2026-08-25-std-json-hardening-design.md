@@ -477,24 +477,48 @@ arrays one deep per level:
 
 So the render cap carries the **same asymmetric counting rule** §3.3 gives `parse` — a leaf costs a
 level, an empty innermost container does not — and the divergence runs one way only: the hoist can
-newly accept a value and cannot newly refuse one. §3.3 pins both parse shapes with two fixtures for
-exactly this reason. The render direction pins the leaf shape only, and the empty-innermost boundary
+newly accept a value and cannot newly refuse one. §3.3 pins both parse shapes for exactly this
+reason, with `json_depth_leaf.nova` and `json_depth_empty.nova`. The render direction pins the leaf shape only, and the empty-innermost boundary
 stays unpinned: the ruling that declined render fixtures on suite cost holds, so the rule is
 disclosed at the guard in `std/json/lib.nova` instead. A change that moved that boundary by a level
 would pass the whole suite.
+
+While on the subject of what pins this bound: §4.4's "well above the depth 30000 the work-stack form
+was measured rendering" is not false — 100_000 is above 30000 — but that figure was an unpinned
+design-time measurement, and the code superseded it with the fixture pair that brackets the bound
+itself. Cite the fixtures, not the 30000.
 
 ### 11.2 §7's entropy claim and its ownership argument are retracted
 
 §7 says "a seeded hash needs per-process entropy and **there is no randomness source anywhere in
 the runtime**. So the fix needs a new intrinsic first, and it belongs to `std/collections` rather
-than to this module." Both halves were retracted downstream during the branch, in
-`nova-spec/20-STDLIB.md` and `CHANGELOG.md`, and neither retraction reached this file.
+than to this module." What that sentence claims was retracted downstream during the branch, in
+`nova-spec/20-STDLIB.md` and `CHANGELOG.md`, and no retraction reached this file. Item by item,
+including the part that survives:
 
 - "there is no randomness source anywhere in the runtime" is **false**. `getrandom` reaches
   `Cargo.lock` by way of `rand` under `proptest`, and the runtime process already draws OS entropy
   through `std` at no dependency cost — every `std` `HashMap` it builds
-  (`crates/nova-runtime/src/file.rs`) seeds a `RandomState`. The barrier is **exposure to Nova**,
-  not availability to the process, and the durable form of that is a check rather than an assertion.
+  (`crates/nova-runtime/src/file.rs`) seeds a `RandomState`. What replaced it downstream was
+  "the barrier is **exposure to Nova**, not availability to the process", with the durable form of
+  that being a *check*: "Nova reaches the runtime **only** through a compiler-known `Builtin` paired
+  with a `nova_rt_*` function and a line in `symbols()`". **That replacement is retracted too, in
+  the same wave and in the records named above**, and this section must not be read as endorsing it.
+  The **only** is false. `declare_externs` (`crates/nova-codegen-cranelift`) declares every `extern`
+  under its **raw** symbol name with `Linkage::Import`, satisfied by the JIT's dlsym fallback under
+  `nova run` or by the system linker under `nova build`, so an ordinary `extern "C"` declaration
+  reaches the C runtime with no `Builtin`, no `nova_rt_*` function and no `symbols()` line — a route
+  the prescribed grep cannot see. Measured: `extern "C" { fn rand() -> Int }` runs under `nova run`
+  and prints 41 then 18467, and the same file with `srand`/`time` needs `nova build` here (the JIT
+  gave `E0902` for `time`) and then prints a `time(0)` that advances between runs. What the compiler
+  does refuse is an extern that would **alias** a runtime symbol: `collect_externs`
+  (`crates/nova-typeck`) rejects `main` and every `nova_`-prefixed name, measured as
+  `E0900: extern symbol ... is reserved by the compiler`. So the accurate present-tense statement is
+  narrow — through the compiler's own surface Nova cannot obtain a random value, while through the C
+  runtime by FFI a program already can, and no `std` module declares an `extern` today (a grep under
+  `std/` matches only prose), which is why `std/collections` has no seed to hand a `Hasher`. Whether
+  that roster of routes is complete is a question for `collect_externs`, `declare_externs` and the
+  `Builtin` table, not for a sentence here.
 - "the fix needs a new intrinsic first" **misdescribes a decision taken elsewhere**.
   `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` already records that hashes are not
   randomized per process and that a `Map` is HashDoS-attackable by adversarial keys, and it frames
@@ -513,8 +537,12 @@ linear, and it is still not safe to put in front of a hostile client — is unaf
 §4.4 says "**The guard's cost is proportional to its bound**, which constrains how high the bound
 may go: a cycle performs one iteration per level until it fires. With the linear buffer of section 5
 that is milliseconds at 100_000". The milliseconds figure was already retracted at the code as false
-by three orders of magnitude. The proportionality is retracted here: it holds at width 1, which is
-the width of both cycle fixtures and of nothing else. Popping a container of width w pushes about
+by three orders of magnitude. The proportionality is retracted here: it holds at width 1, the width
+of the cycle `json_stringify_cycle.nova` builds, and no fixture in the tree builds a wider one — a
+predicate to re-check by looking for a fixture that closes a cycle rather than a tally to trust from
+here. (This sentence said "the width of both cycle fixtures" until 2026-08-26, quantifying over two
+where only `json_stringify_cycle.nova` closes a cycle: `json_render_guard.nova` is acyclic by its own
+header and by §4.4's counterexample argument.) Popping a container of width w pushes about
 2w + 1 items — w children, w - 1 separators, two brackets — and removes one, so the work list gains
 about 2w per level and nothing is reclaimed before the panic. Both the peak work-list size and the
 time to fire therefore grow with the bound **times the width**; where in each container the cycle
@@ -522,7 +550,8 @@ continues moves the constant, not the growth.
 
 Measured against the shipped binary, min of 3 after a warm-up, cyclic arrays that fire the guard:
 width 1, 1.78 s; width 3 with the cycle at the last member, 4.71 s; width 10 at the last member,
-14.24 s; width 10 at the first member, 7.14 s.
+14.24 s; width 10 at the first member, 7.14 s. The absolutes are machine-specific — an earlier
+session measured the width-1 case at about 2 s — and the growth with width is the claim.
 
 **This qualifies §4.4's "immediate, named, located failure" and the "better failure, not the absence
 of one" framing that follows it.** The work list's peak is the same allocator pressure the guard was
@@ -545,8 +574,8 @@ C accelerator declares no JSON-specific constant and calls `_Py_EnterRecursiveCa
 `scan_once_unicode` (`Modules/_json.c` at `main`), so the interpreter's recursion limit is what
 bounds it — both read 2026-08-26.
 
-The argument 128 rests on is unchanged and slightly strengthened with a fourth number in it:
-implementations that declare a limit pick different ones, so 128 is a defensible precedent rather
-than a standard. The shape worth keeping is why this was the claim that broke — the dated sibling
+The argument 128 rests on is unchanged, and stronger for holding a checked number where it used to
+hold an unchecked absence: implementations that declare a limit pick different ones, so 128 is a
+defensible precedent rather than a standard. The shape worth keeping is why this was the claim that broke — the dated sibling
 survived scrutiny four times on this branch and the undated one was never checked by anyone until
 the whole-branch review asked who had read it.

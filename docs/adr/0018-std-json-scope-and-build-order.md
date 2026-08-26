@@ -27,13 +27,13 @@ adversarially chosen object keys are a quadratic exposure that neither cap
 touches, whose governing decision was already taken in
 `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`.
 
-**Amended again 2026-08-26 (same branch, final fix wave): three statements of
-fact inside that amendment are corrected or scoped** — the render direction's
+**Amended again 2026-08-26 (same branch, final fix wave): statements of fact
+inside that amendment are corrected or scoped** — the render direction's
 boundaries are pinned in one shape only, the asymmetric counting rule belongs to
-both directions rather than to `parse` alone, and the guard's cost grows with the
-cycle's width as well as with the bound. A false Go comparison is corrected with
-the same date. **Again no decision changes**; the corrections are at the end of
-§8, after the 2026-08-25 amendment they qualify.
+both directions rather than to `parse` alone, the guard's cost grows with the
+cycle's width as well as with the bound, and that amendment's Go comparison is
+flatly false rather than merely over-broad. **Again no decision changes**; the
+corrections are at the end of §8, after the 2026-08-25 amendment they qualify.
 
 ## Context
 
@@ -673,9 +673,14 @@ reason.
 
 ### Second amendment, 2026-08-26 (same branch, final fix wave before merge)
 
-Three claims in the 2026-08-25 amendment above are corrected or scoped. No
-decision moves; all three are statements of fact that the whole-branch review
-found stated wider than the evidence.
+Each item below corrects or scopes a statement of fact in the 2026-08-25
+amendment above; no decision moves. Most were stated wider than the evidence
+rather than wrong outright; the Go comparison was flatly false, and is marked as
+such where it appears. This paragraph carried a
+count of its own items until 2026-08-26, and the count was already wrong when it
+was written, the Go correction having joined the list after it; the roster is
+what to read, which is the same lesson the wave that wrote it was applying
+elsewhere.
 
 **"Both directions' boundaries are pinned now" is true of the parse direction
 and true of ONE SHAPE in the render direction.** The paragraph above pins the
@@ -712,8 +717,13 @@ separators, two brackets, one item removed — so both its peak size and the tim
 to fire grow with the bound **times the width**. Measured against the shipped
 binary, min of 3 after a warm-up, cyclic arrays that fire the guard: width 1,
 1.78 s; width 3 with the cycle at the last member, 4.71 s; width 10 at the last
-member, 14.24 s; width 10 at the first member, 7.14 s. Both cycle fixtures in
-the tree are width 1. The consequence, which is reasoning past width 10 rather
+member, 14.24 s; width 10 at the first member, 7.14 s. The absolutes are
+machine-specific — an earlier session measured the width-1 case at about 2 s —
+and the growth with width is the claim. `json_stringify_cycle.nova` builds a
+width-1 cycle and no fixture in the tree builds a wider one, which is a
+predicate to re-check rather than a tally to trust: this paragraph said "both
+cycle fixtures" until 2026-08-26, and only that one closes a cycle at all.
+The consequence, which is reasoning past width 10 rather
 than a measurement: that peak is the same allocator pressure the guard was
 introduced to replace, so a wide enough cycle reaches `handle_alloc_error` —
 neither a `nova: panic:` prefix nor a location — before it reaches the named

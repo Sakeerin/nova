@@ -836,8 +836,10 @@ record Pending { v: JsonValue, d: Int }
 const MAX_RENDER_DEPTH: Int = 100_000
 ```
 
-**Dated note, 2026-08-26 (final fix wave).** Three claims in the comment above did not survive the
-branch and are retracted here rather than left for a later increment to read as precedent.
+**Dated note, 2026-08-26 (final fix wave).** The claims rostered below did not survive the branch
+and are retracted here rather than left for a later increment to read as precedent. (This sentence
+carried a count of the roster below it until a bullet was added and the count stopped matching.
+Dropped rather than corrected, which is the rule the roster below exists to honour.)
 
 - "The guard's cost is proportional to its bound: a cycle runs one iteration per level before
   firing" is true at width 1 and false in general. Popping a container of width w pushes about
@@ -845,8 +847,14 @@ branch and are retracted here rather than left for a later increment to read as 
   the time to fire grow with the bound **times the container width**. Measured against the shipped
   binary, min of 3 after a warm-up, cyclic arrays that fire the guard — width 1, 1.78 s; width 3
   with the cycle at the last member, 4.71 s; width 10 at the last member, 14.24 s; width 10 at the
-  first member, 7.14 s. Both cycle fixtures this plan specifies are width 1, so nothing in the suite
-  exercises the width dependence. The consequence is that a wide enough cycle reaches the allocator
+  first member, 7.14 s. The absolutes are machine-specific — an earlier session measured the width-1
+  case at about 2 s — and the growth with width is the claim. The cyclic fixture this plan specifies,
+  `json_stringify_cycle.nova`, builds a width-1 cycle, and no fixture in the suite builds a wider one,
+  so nothing exercises the width dependence. (This sentence read "Both cycle fixtures this plan
+  specifies are width 1" until 2026-08-26. `json_stringify_cycle.nova` is the only fixture this plan
+  specifies that closes a cycle, and the render-guard fixtures it was being counted with —
+  `json_render_guard.nova` and `json_render_guard_under.nova` — were added during the branch, appear
+  nowhere in this plan, and are acyclic by their own headers.) The consequence is that a wide enough cycle reaches the allocator
   abort the guard exists to replace before it reaches the named panic — that step is reasoning, not
   a measurement, and the code says so.
 - "That is milliseconds with the buffer this file now uses" was already retracted inside the branch
@@ -930,8 +938,9 @@ child, so the deepest `d` popped on that shape is k - 1. Measured against the sh
 one deep per level: a chain ending in a leaf renders at 100000 containers (200001 characters, exit 0)
 and panics at 100001; a chain ending in an empty array renders at 100001 (200002 characters, exit 0)
 and panics at 100002. So the render cap has the same asymmetric counting rule `parse` has — a leaf
-costs a level, an empty innermost container does not. `parse` pins both of its shapes with the two
-fixtures Task 2 Step 1 specifies; this direction pins the leaf shape only, and the empty-innermost
+costs a level, an empty innermost container does not. `parse` pins both of its shapes with the
+fixtures Task 2 Step 1 specifies, `json_depth_leaf.nova` and `json_depth_empty.nova`; this direction
+pins the leaf shape only, and the empty-innermost
 boundary is disclosed at the code as unpinned rather than fixed with a third render fixture.
 
 Why reverse: the list is LIFO, so to emit `[`, e0, `,`, e1, `]` the pushes run `]`, e1, `,`, e0, `[`. The separator for member `i` is pushed after member `i`'s own items and therefore pops before them, which is what puts it between members rather than after the last one.
@@ -1175,6 +1184,17 @@ Scan every file in that list plus this plan and the spec: no byte below 0x20 out
 | 4 | reverse the reverse-push in the `Array` arm | 3 | `json_stringify.stdout`'s array element order |
 | 5 | move the `Object` separator inside the `Some` arm | 3 | `json_object_forged_map.stdout`'s last line |
 | 6 | delete the cycle guard | 3 | the cycle test's message assertion, promptly — not by suite timeout |
+
+**Dated note, 2026-08-26 (final fix wave).** Row 6 asked for something its own fixture cannot
+deliver: "the cycle test's message assertion, promptly — not by suite timeout". A cyclic value is
+genuinely non-terminating once the guard is gone, so deleting the guard turns
+`json_stringify_cycle.nova` into a **hang**, not a fast named failure — measured during Task 3, where
+the guard-deleted build had to be killed after 20 s still running. The fixture that discriminates
+promptly is `json_render_guard.nova`, added in a fix round: its value is acyclic and finite either
+way, so with the guard deleted it renders and exits 0 and the `.failure()` assertion fails at once.
+`json_stringify_cycle.nova`'s own header records the hang and points at that sibling; the sibling's
+header records why it discriminates promptly. The row is left as written because it is the record of
+what was asked for.
 
 **Rebuild between every mutation.** `std/json/lib.nova` is `include_str!`'d, so a stale binary tests the unmutated library and reports a false pass.
 
