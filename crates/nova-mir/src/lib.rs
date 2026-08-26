@@ -188,7 +188,9 @@ rt_funcs! {
     StrEq,
     /// `(str, str) -> i64` — lexicographic compare: -1, 0, or 1.
     StrCmp,
-    /// `(str) -> i64` — FNV-1a hash of the bytes (may be negative).
+    /// `(str) -> i64` — seeded, finalized hash of the bytes (may be negative).
+    /// Seeded FNV-1a then splitmix64's finalizer; the reasoning is at
+    /// `nova_rt_str_hash`.
     StrHash,
     /// `(str) -> i64` — count of Unicode scalar values.
     StrLenChars,

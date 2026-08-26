@@ -251,7 +251,8 @@ fn main() {
     let _ = t.insert(t8, 1008)
     println("churn tail len=${t.len()} used=${t.used} cap=${t.state.len()} state=${state_str(t)}")
 
-    // === Map<String, Int>: the runtime hash path (str_hash, FNV-1a) ===
+    // === Map<String, Int>: the runtime hash path (str_hash — seeded FNV-1a
+    // then splitmix64's finalizer, seeded once per process) ===
     let mut sm = Map::new()
     let _ = sm.insert("alpha", 1)
     let _ = sm.insert("beta", 2)
