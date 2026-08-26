@@ -470,3 +470,69 @@ touch `Hash`'s signature: replacing FNV-1a inside `nova_rt_str_hash`, replacing
 `mix64`'s constants or rounds, and seeding either from a process-start value.
 The one-shot shape fixes what a hash *is* (one `Int` per value), not how it is
 computed.
+
+### Amendment, 2026-08-26 — `str_hash` is seeded and finalized, and which sentence above governs that
+
+Nothing in the decision changes. `Hash` keeps `fn hash(self) -> Int`, the
+migration stays unstarted, its prerequisites stand as recorded, and the
+backend-independence requirement is untouched. What changed is the *computation*
+behind `impl Hash for String`: `nova_rt_str_hash` is now seeded FNV-1a over the
+bytes followed by splitmix64's finalizer, the seed drawn once per process from
+`std::collections::hash_map::RandomState` inside the runtime. No intrinsic was
+added, no `impl Hash` was edited and no Nova-side source changed, so nothing has
+to be recompiled differently or edited to keep compiling. That is a
+source-compatibility statement and not a behavioural one: a program that read a
+`String`'s hash, or `Map::keys()` order, and expected the same answer from a
+later run of the same binary now gets a different one. The runtime function
+documents its own reasoning and carries the measurements; they are not restated
+here.
+
+**Sentences in this section point opposite ways about whether that was
+permitted.** The Consequences bullet says:
+
+> **Hashes are not randomized per process**, so a `Map` is HashDoS-attackable by
+> adversarial keys. FNV-1a is not collision-resistant and neither is `mix64`.
+> Acceptable for Phase 2.2a; a seeded hasher is a `Hasher`-shaped question, i.e.
+> it is the migration below.
+
+The Migration path's closing paragraph says:
+
+> Cheaper changes that this decision does *not* foreclose, because none of them
+> touch `Hash`'s signature: replacing FNV-1a inside `nova_rt_str_hash`,
+> replacing `mix64`'s constants or rounds, and seeding either from a
+> process-start value.
+
+**The closing paragraph governs this change.** Both are true of different
+things, and the distinction is the object/function one: a **swappable seeded
+`Hasher` object** — per-map hasher choice, a seed a caller supplies or selects —
+is `Hasher`-shaped and does need the migration, because it needs somewhere to
+put the hasher in the signature. **Seeding or replacing the one-shot function**
+needs none of that, and the closing paragraph says so explicitly. This increment
+did the second.
+
+**Recorded because it nearly went the other way.** Read on its own, "a seeded
+hasher is a `Hasher`-shaped question, i.e. it is the migration below" says the
+seeding done here required a breaking change with a deprecation cycle, and a
+later increment reading these paragraphs as precedent may reach the same wrong
+conclusion. It is the narrower reading that is right: the bullet is about a
+hasher *object*, not about the seed as such. `nova-spec/20-STDLIB.md` §7 and
+`docs/adr/0018-std-json-scope-and-build-order.md` both named the migration as
+the remedy for the `Map` exposure on the strength of the broader reading, and
+both are corrected by their own dated amendments.
+
+**The Phase 2.2a disclosure narrows; it does not go away.** "**Hashes are not
+randomized per process**" is now **false for `String` keys** — they are
+randomized per process, which is the whole of this change — and **still true for
+`mix64`**, hence for `Int`, `Bool` and `Char` keys, whose buckets remain a
+function of the key alone and remain attackable by chosen keys. That half is
+load-bearing and is a decision rather than an oversight: `tests/runtime/hash.stdout`
+pins `mix64`'s histograms as a specification of the low-bit spreading `Map`'s
+masking depends on, and the exposed path is not the one `std/json` takes, whose
+object keys are strings.
+
+"FNV-1a is not collision-resistant and neither is `mix64`" **stays true as
+written.** Seeded, finalized FNV-1a is not a cryptographic hash and is not
+SipHash. What the change buys is resistance to a *precomputed* collision set —
+an attacker who cannot learn the seed cannot build one offline — plus the
+diffusion the runtime function records. An adversary who can observe timing and
+adapt is out of scope. No record should be read as claiming more.

@@ -657,7 +657,10 @@ the codec** quadratic in the number of keys, independently of `MAX_DEPTH`, of
 `MAX_RENDER_DEPTH` and of the buffer.
 
 **So this section's own premise is not satisfied by this increment: Phase 2's
-throughput gate is not claimable on untrusted input on the strength of it.** The
+throughput gate is not claimable on untrusted input on the strength of it.**
+NARROWED 2026-08-26 by a later increment — read the third amendment below before
+citing this sentence or the remedy it names; the sentence is now too broad rather
+than false, and the remedy named is the wrong one. The
 gate needs positions 10 and 11 together — `examples/05-json-api` is this module
 behind an HTTP server that does not exist — so it is Phase 2's gate rather than
 either position's, and an earlier draft of this amendment that called it
@@ -741,6 +744,49 @@ branch `2.x`), and CPython's C accelerator declares no JSON-specific constant an
 calls `_Py_EnterRecursiveCall` in `scan_once_unicode` (`Modules/_json.c` at
 `main`). The argument is unchanged: implementations that declare a limit pick
 different numbers, so 128 is a defensible precedent rather than a standard.
+
+### Third amendment, 2026-08-26 (branch `map-hashdos`, a separate later increment)
+
+Not the same wave as the two amendments above, which were this ADR's own branch
+finishing. This one comes from the increment that seeded `str_hash`, and what it
+touches in section 8's HashDoS paragraphs is headed below. No decision in this
+ADR moves, and nothing about `std/json` itself changes: the caps, the guard and
+the buffer are as recorded.
+
+**The gate claim narrows.** The sentence above reads "**So this section's own
+premise is not satisfied by this increment: Phase 2's throughput gate is not
+claimable on untrusted input on the strength of it.**" That remains an accurate
+statement about *this* increment — the JSON hardening did not and could not make
+it claimable. As a standing statement about the tree it is now too broad.
+`nova_rt_str_hash` is seeded once per process and finalized with splitmix64, so
+the gate is claimable **for string-keyed maps against a precomputing attacker**,
+one who must build a colliding key set before it can observe the process that
+will receive them. It is **not** claimed against an adversary who can observe
+timing and adapt, and **not** claimed for `Int`, `Bool` or `Char` keys, whose
+`mix64` path is unseeded and whose buckets are still a function of the key alone.
+`std/json`'s own exposure is the string-keyed one, object keys being strings.
+
+**The remedy this section names is not the remedy that shipped.** The paragraph
+above says "The remedy is the one ADR 0005 names and not a new intrinsic: a
+`Hasher`-shaped question, per-map hasher choice or HashDoS resistance via a seed,
+reached through the accumulating-`Hasher` migration that ADR describes, which it
+records as a breaking change with a deprecation cycle." The "not a new
+intrinsic" half was right and no intrinsic was added. The migration half was
+wrong, and it was wrong here in the same way it was wrong in
+`nova-spec/20-STDLIB.md` §7: ADR 0005's closing Migration-path paragraph
+permits "replacing FNV-1a inside `nova_rt_str_hash` ... and seeding either from a
+process-start value" precisely because none of that touches `Hash`'s signature.
+Only a swappable seeded `Hasher` **object** needs the migration. `fn hash(self)
+-> Int` is unchanged, no `impl Hash` was edited, no Nova library source changed,
+and there was no deprecation cycle. ADR 0005 now carries a dated amendment
+saying which of its conflicting sentences governs.
+
+**What stays true.** The quadratic shape this section describes is still the
+right shape for an attacker who can adapt, and the `std/collections` framing
+still holds — every `Map<String, _>` carried the exposure and `std/json` is
+where it met untrusted input, which is why the fix landed in the runtime rather
+than in this module. Seeded, finalized FNV-1a is not collision-resistant and is
+not cryptographic; the runtime function says so at itself.
 
 ## Consequences
 

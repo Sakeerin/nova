@@ -775,17 +775,22 @@ its 2026-08-25 amendment.
    arm performs one `Map` lookup per member and `parse` one insert per key.
    `Map` selects buckets as `k.hash() & (cap - 1)` and probes **linearly**
    (`std/collections/lib.nova`, `slot_of` and the probe loops in `insert` and
-   `find`), and `impl Hash for String` in `std/core` is `str_hash`, which is
-   FNV-1a and which the runtime documents at `nova_rt_str_hash`
+   `find`), and `impl Hash for String` in `std/core` is `str_hash`, which was
+   unseeded FNV-1a when this item was written and is, since 2026-08-26, seeded
+   FNV-1a followed by splitmix64's finalizer — the amendment at the end of this
+   item — and which the runtime documents at `nova_rt_str_hash`
    (`crates/nova-runtime/src/lib.rs`) as "*not* collision-resistant" and not to
-   "be used for anything security-sensitive". So keys chosen to collide grow
+   "be used for anything security-sensitive", which stays true of the seeded
+   form. So keys chosen to collide grow
    one probe chain and every lookup or insert walks it: quadratic in the number
    of keys, **independently of `MAX_DEPTH`, of `MAX_RENDER_DEPTH` and of the
    buffer**, since neither cap counts keys and the buffer only makes emitting
    text linear. Depth is not the shape of this one; width is.
 
    **So Phase 2's throughput gate is not claimable on untrusted input on the
-   strength of this increment.** That gate (`00-MASTER-SPEC.md:245`) is
+   strength of this increment.** NARROWED 2026-08-26 by a later increment — read
+   the amendment at the end of this item before citing this sentence, which is
+   now too broad rather than false. That gate (`00-MASTER-SPEC.md:245`) is
    `examples/05-json-api` serving 10k+ req/sec, which needs positions **10 and
    11 together** — this module reading object keys somebody else chose, behind
    an HTTP server that does not exist yet — so it is Phase 2's gate rather than
@@ -860,6 +865,47 @@ its 2026-08-25 amendment.
    source; that is a predicate to re-check by grepping the constructor, not a
    count of sites to trust from here.
 
+   **AMENDED 2026-08-26 (`map-hashdos`, a later increment): the gate claim
+   narrows, and the remedy this item names is not the remedy that shipped.**
+   The corrections are the ones headed below; no count is given because the
+   roster is what to read.
+
+   **The gate.** The sentence above reads "**So Phase 2's throughput gate is not
+   claimable on untrusted input on the strength of this increment**" — true of
+   the hardening increment it was written about, and too broad as a standing
+   statement now. What holds after `str_hash` became seeded and finalized:
+   the gate is claimable **for string-keyed maps against a precomputing
+   attacker**, one who must build a colliding key set before it can see the
+   process it will send them to. It is **not** claimed against an adversary who
+   can observe timing and adapt, and it is **not** claimed for `Int`, `Bool` or
+   `Char` keys at all, because `mix64` is unseeded and those keys' buckets are
+   still a function of the key alone. Anything stated more strongly than that is
+   wrong; so is dropping the sentence, since two of its three cases survive.
+
+   **The remedy.** "The remedy is the one ADR 0005 names ... reached through the
+   accumulating-`Hasher` migration it describes, which it records as a breaking
+   change with a deprecation cycle" describes the remedy for a **swappable
+   seeded `Hasher` object**, which is still unbuilt and still needs that
+   migration. It is not what this exposure needed. ADR 0005's own closing
+   paragraph permits "replacing FNV-1a inside `nova_rt_str_hash` ... and seeding
+   either from a process-start value" precisely because that touches no
+   signature, and that is the route taken: `pub trait Hash { fn hash(self) ->
+   Int }` is unchanged, no intrinsic was added, no `impl Hash` was edited, and
+   there was no deprecation cycle. ADR 0005 carries a dated amendment recording
+   which of its conflicting sentences governs. Reading the broader one as
+   foreclosing
+   the cheaper fix nearly produced the wrong increment here, which is why this
+   correction is recorded rather than quietly applied.
+
+   **On the entropy question the paragraphs above leave open:** the seed is a
+   `OnceLock<u64>` drawn inside the runtime from
+   `std::collections::hash_map::RandomState`, which is the source the amendment
+   above already identified as available to the process — "the runtime process
+   already draws OS entropy through `std` at no dependency cost". No new
+   dependency, nothing above MSRV 1.78, and no new route from Nova to entropy:
+   the FFI route to the C runtime that the roster above records was there before
+   this increment and is neither widened nor narrowed by it.
+
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
 implementation and `@derive(ToJson, FromJson)` still has none, exactly as
@@ -880,7 +926,9 @@ will hit it: `Map::keys(self) -> [K]` was added to `std/collections` (§12,
 `00-MASTER-SPEC.md` §3's position 3) by this position-11 increment, because
 `Object(Map<String, JsonValue>)` cannot be serialised without enumerating
 its keys. Its order is **table order, not insertion order**, and no caller
-should assume otherwise.
+should assume otherwise. Since 2026-08-26 that order can also differ between
+runs of one unchanged binary when the keys are `String`s, the hash being seeded
+per process — see §12's 2026-08-26 amendment.
 
 **The example block above does not compile, and only part of that is
 specific to this section.** The opening `module std.json` line does not
@@ -1338,6 +1386,26 @@ order can change what `keys()` returns. A `grow` reinserting every entry is
 a further reordering on top of that, not the only one. Stating only the
 `grow` case would let a reader infer that a map which never grows preserves
 insertion order; that inference is false.
+
+**AMENDED 2026-08-26: for `String` keys the statement above is no longer the
+strongest one.** When it was written, `keys()` order was fixed by the key set
+and the insertion sequence together, so one unchanged binary run twice returned
+the same order both times, and the measured `"e"`, `"c"`, `"a"` above was
+reproducible. `str_hash` is now seeded once per process, so for
+`String` keys the order **can differ between runs of one unchanged binary**. Not
+must: a different seed may land on the same layout, and a single-key map has one
+order either way. The consequence for callers is that an observed order must not
+be treated as reproducible — sort, or assert per key rather than on sequence —
+and it is the reason §7's fixtures build single-keyed objects. The method's own
+note in `std/collections/lib.nova` carries this too.
+
+That also scopes the measurement quoted above. `"e"`, `"c"`, `"a"` was measured
+under the unseeded hash; what it demonstrates survives and is why it is quoted —
+reordering needs no growth, so a never-growing map does not preserve insertion
+order — but the sequence itself is no longer reproducible, and should be read as
+an instance of the property rather than as an order to expect from those keys.
+The statement it supports, that order is not a function of the key set alone, is
+if anything more true than when it was written.
 
 **This is not §12's only deviation, and every other one is older than this
 increment** — the list is what follows, not a single item: `Vec::get` and
