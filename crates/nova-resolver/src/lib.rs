@@ -86,7 +86,12 @@ builtins! {
     /// scopes (see [`Builtin::STD_ONLY`]), so it never becomes a
     /// reserved word in user code.
     StrCmp,
-    /// `str_hash(s: String) -> Int` — FNV-1a over the string's bytes. Backs
+    /// `str_hash(s: String) -> Int` — seeded FNV-1a over the string's bytes,
+    /// then splitmix64's finalizer. The seed is per-process, so the same
+    /// string hashes differently in two runs; why the finalizer is needed and
+    /// what the pair does and does not buy are documented at
+    /// `nova_rt_str_hash` and `splitmix64_finalize` in `nova-runtime` rather
+    /// than restated here. Backs
     /// `std/core`'s `impl Hash for String`, and exists for the same reason
     /// [`Builtin::StrCmp`] does: Nova cannot walk a string's bytes (`String`
     /// has no length, indexing or iteration) and cannot reach the runtime

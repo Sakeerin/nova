@@ -1834,7 +1834,8 @@ fn hash_build_standalone() {
 /// - A **user record as a `Map` key and a `Set` element**, with its own `Hash`
 ///   and `Eq` impls — the case that proves a user type can flow through the
 ///   `K: Hash + Eq` bound at all, where only `Int` and `String` had been used.
-/// - `Map<String, Int>` for the runtime hash path (`str_hash`/FNV-1a) and
+/// - `Map<String, Int>` for the runtime hash path (`str_hash` — seeded FNV-1a
+///   then splitmix64's finalizer, per-process seed) and
 ///   **negative `Int` keys**, where `% cap` instead of `& (cap - 1)` would
 ///   produce a negative bucket index.
 /// - `Vec` across three growths (0 → 4 → 8 → 16) with `pop`, `set`, `clear`
