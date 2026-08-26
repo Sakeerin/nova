@@ -8613,3 +8613,48 @@ fn json_render_guard_under_run() {
         .success()
         .stdout(expected);
 }
+
+#[test]
+fn hash_diffusion_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/hash_diffusion.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/hash_diffusion.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The seed is per-process, so the same binary run twice must hash the same
+/// string differently. This is the test written for that property; it fails
+/// deterministically if the seed is replaced by a constant. Two independent
+/// seeds colliding would defeat it, at a probability around 2^-64.
+#[test]
+fn str_hash_seed_varies_across_processes() {
+    let dir = std::env::temp_dir().join("nova-str-hash-seed-cross-process");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("seed.nova");
+    std::fs::write(&file, "fn main() { println(\"${(\"alpha\").hash()}\") }\n").expect("write");
+    let exe = dir.join(format!("seed{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let run = || {
+        let out = Command::new(&exe).assert().success();
+        String::from_utf8_lossy(&out.get_output().stdout)
+            .trim()
+            .to_string()
+    };
+    let first = run();
+    let second = run();
+    assert_ne!(
+        first, second,
+        "str_hash must differ across processes; both runs printed {first}"
+    );
+}
