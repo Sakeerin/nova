@@ -5,7 +5,7 @@ empty array -> []
 empty object -> {}
 array of every scalar -> [null,true,false,0,-1.5,"a"]
 nested arrays -> [[1,[2,[3]]],[]]
-deeply nested array -> [[[[[1]]]]]
+chain of single-element arrays -> [[[[[1]]]]]
 single-key object -> {"a":1}
 object holding an array -> {"a":[1,2]}
 object holding an object -> {"a":{"b":2}}

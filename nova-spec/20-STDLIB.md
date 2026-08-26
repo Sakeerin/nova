@@ -535,7 +535,12 @@ declaring — is `pub record JsonError { msg: String, at: Int }`. `stringify`
 is total **over values** — no `JsonValue` shape it cannot render, and no
 error channel to report one with — but **not over nesting depth**; the two
 unbounded costs recorded below are the qualification, and they matter to a
-reader deciding whether this module may face a socket. What `parse`
+reader deciding whether this module may face a socket. **(AMENDED 2026-08-25,
+branch `std-json-hardening`: `stringify` is still not total over nesting
+depth, and the reason has changed — a declared cap refuses a value past it,
+rather than the stack running out underneath it. Neither cost below is
+unbounded any more. Read the 2026-08-25 block further down for what replaced
+them, and for one exposure that no depth cap bounds.)** What `parse`
 implements, and what `tests/runtime/`'s `json_parse_values.nova`,
 `json_parse_strings.nova` and `json_parse_numbers.nova` execute, is this:
 all six `JsonValue` forms; one value per document, with trailing content
@@ -586,39 +591,163 @@ channel; `Int::from_json` rejects a fractional `Number` and rejects a
 magnitude outside `i64::MIN..=i64::MAX`, rather than truncating or wrapping
 either one.
 
-**Two unbounded costs, recorded here because the Phase 2 gate puts this
-module in front of a socket.** Both are decisions, both are measured on a
-debug build of this compiler on Windows, and neither is a bug. Full
-reasoning in ADR 0018 §8.
+**AMENDED 2026-08-25 (branch `std-json-hardening`): the two unbounded costs
+this section disclosed are bounded now — one by a declared cap in each
+direction, the other by a growable character buffer this section said the
+language did not have — and a third exposure, which no depth cap bounds, is
+disclosed here for the first time.** What follows replaces the 2026-08-23 text
+at this position and quotes every claim it retracts, so the retraction is
+legible without a `git log`; note the consequence, which is that a correct
+retraction still *contains* the retracted sentence. Still recorded here rather
+than only at the code, for the reason that text gave: the Phase 2 gate puts this
+module in front of a socket. All numbers are from a debug build of this compiler
+on Windows. Full reasoning, and the decision this reverses, in ADR 0018 §8 with
+its 2026-08-25 amendment.
 
-1. **Nesting depth is unbounded in both directions, and exceeding it kills
-   the process.** `parse` and `stringify` each recurse with one native frame
-   per level, so a deeply nested input or value exhausts the stack. That is
-   a **hard abort, not a `JsonError`** — `parse` cannot return one from a
-   frame that no longer exists, and `stringify` has no error channel at all.
-   Measured: `parse` of `[` × 5000 then `1` then `]` × 5000 succeeds and the
-   same at 6000 dies; `stringify` of a value 8192 levels deep renders and
-   20000 dies. **Roughly 12 KB of input text is enough to abort the
-   process.** RFC 8259 section 9 permits a depth limit, so a cap would be
-   conforming; **none is imposed, deliberately**, because a stack-size
-   threshold is not a portable budget to derive one from and the API choice
-   a cap needs was outside this increment's scope. **A caller putting
-   `std/json` on a socket must impose a depth limit above it.** The exact
-   numbers are artefacts of this build; the unboundedness is not.
-2. **Four string accumulators are quadratic, and the dominant pair is
-   `stringify`'s.** `quote` and `scan_str` are quadratic in **one string
-   literal**; `stringify`'s `Array` and `Object` arms are quadratic in the
-   **whole rendered document**, so every document pays it. Measured with the
-   flat ~180 ms compile baseline subtracted: an array of 4 000 / 8 000 /
-   16 000 one-character numbers parses in 279 / 282 / 344 ms — effectively
-   flat — and renders in 236 / 1 309 / **11 622** ms, growing 5.5x then 8.9x
-   per doubling, so **a ~32 KB document takes about twelve seconds to
-   render**. One string literal costs 182 ms at 8 000 characters and 15 624
-   at 64 000. So `scan_str` becomes visible at roughly a **30 KB single
-   string literal**, and `stringify` from about **16 KB of output**. Absolute
-   numbers are debug-build numbers; the asymptotics are not. Nova has no
-   growable string buffer (`String` has no `+`, `E0013`), so neither is
-   fixable without a language change.
+1. **Nesting depth is bounded in both directions, and the two directions are
+   bounded differently.** RETRACTED: "Nesting depth is unbounded in both
+   directions, and exceeding it kills the process", and with it "**A caller
+   putting `std/json` on a socket must impose a depth limit above it.**"
+   Neither holds. `parse` declares `MAX_DEPTH = 128`, and RFC 8259 section 9
+   permits a depth limit, so this exercises that permission rather than merely
+   noting it; exceeding the cap is an **ordinary `JsonError`** carrying
+   `maximum nesting depth exceeded`, on the same channel as a syntax error and
+   deliberately indistinguishable in shape from one, so a caller that must tell
+   the two apart has to match on the message — a weak contract, named as one.
+   `stringify` **does not recurse at all**: it walks a work list on the heap,
+   and its own declared `MAX_RENDER_DEPTH = 100_000` is tested once per pop.
+   Exceeding *that* is a **panic**, `stringify: nesting too deep or cyclic
+   value`, not a `JsonError`, because `stringify` returns `String` and has no
+   error channel. A caller may still want a limit smaller than 128 for reasons
+   of its own; that is a choice now, not a repair. Declaring an input limit is
+   not novel in `std` either — `std/time` declares `MAX_SECS`, `MAX_MILLIS`,
+   `MAX_MICROS` and `MAX_NANOS` and clamps against them.
+
+   **The parse-direction counting rule is asymmetric.** A leaf costs a depth
+   level, because `parse_value` is what tests the depth and a leaf is a
+   `parse_value` call; an empty innermost container costs none, because
+   `scan_array`'s and `scan_object`'s empty-container fast paths return without
+   re-entering it. So **128 containers wrapping a leaf is accepted and 129 is
+   not, while 129 containers ending empty is accepted and 130 is not.** Both
+   boundaries are pinned by fixtures, `json_depth_leaf.nova` and
+   `json_depth_empty.nova`, because a single fixture asserting "129 is
+   rejected" would be true of one shape and false of the other.
+
+   **The render cap refuses more than what it exists for, and that is not a
+   footnote.** It exists for cycles: a cyclic `JsonValue` is constructible in
+   ordinary Nova, since arrays are heap references, and it has no rendering.
+   But the guard tests **depth alone** and cannot tell a cycle from a
+   legitimate deep value, so it refuses **legitimate acyclic values** past
+   `MAX_RENDER_DEPTH` as well. `stringify` is therefore not total over nesting
+   depth, and the counterexample ships in the tree: `json_render_guard.nova`
+   builds an acyclic value — a fresh array literal per level, no cycle — and it
+   is refused. `json_render_guard_under.nova` renders at exactly the cap and
+   `json_render_deep.nova` renders 20 000 levels, both far past where the
+   recursive form this replaces overflowed the stack.
+
+   **The residuals, named rather than left to inference.** A cyclic value is
+   refused by the cap; a legitimate acyclic value past the cap is refused by
+   the same cap through the same mechanism; and **heap exhaustion still aborts
+   the process without a `JsonError`**, because `gc::alloc` calls
+   `handle_alloc_error` and no alloc-error hook is installed. There is no
+   collect-and-retry on that path, and off Windows the collector is a no-op, so
+   nothing is reclaimed until the process exits.
+2. **The string accumulators are linear in what they emit. Read the roster, not
+   a count of it.** RETRACTED: "Nova has no growable string buffer (`String`
+   has no `+`, `E0013`), so neither is fixable without a language change."
+   That is true only of a growable `String` **type**, which Nova still lacks.
+   It is false in the sense the sentence was used: `Vec<Char>` plus
+   `str_from_chars` composes into exactly such a buffer, both already shipped,
+   and both already called from `std/json/lib.nova` itself — `Vec` at
+   `vec_to_array`, `str_from_chars` at `span`. The fix needed no language
+   change. Also retracted: "**Four** string accumulators are quadratic, and the
+   dominant pair is `stringify`'s" — a count is the part that goes stale when a
+   later increment adds an accumulator, so the roster is what to read. `quote`
+   and `scan_str` each build one string literal, and `stringify` has its own
+   output buffer, which is what replaced the whole-document rebuild its `Array`
+   and `Object` arms used to perform. Each of them appends into a `Vec<Char>`
+   and drains once through `vec_chars_to_string`, so none is quadratic in what
+   it emits. The mechanical check, which the module's own comment tells a
+   reader to run rather than trust: `grep -n 'out = "${out}' std/json/lib.nova`
+   must match nothing but text a comment quotes for illustration.
+
+   **Measured 2026-08-25, in absolutes rather than growth ratios.** An array of
+   4 000 / 8 000 / 16 000 one-character numbers — output of 8 001 / 16 001 /
+   32 001 characters — **renders in 108 / 126 / 247 ms** net and **parses in
+   112 / 121 / 164 ms** net. So the **~32 KB document that this section said
+   takes about twelve seconds to render takes about a quarter of a second**,
+   and rendering is now within a small factor of parsing instead of tens of
+   times worse. Method, since one cold invocation is not a measurement here:
+   two invocations discarded as warm-up, then the minimum of five `nova run`
+   invocations minus the minimum of five `nova check` invocations of the same
+   program, that compile baseline being 51-62 ms across every program timed.
+   For the single-literal direction, `buf_push_str`'s comment in
+   `std/json/lib.nova` records the buffer flat at 132-142 ms across an
+   eightfold range of literal length where interpolation grew from 164 to
+   752 ms.
+
+   **Two honest limits on those numbers.** They cross measurement sessions: the
+   before-numbers above were taken on 2026-08-23 against a ~180 ms compile
+   baseline and these on 2026-08-25 against a ~52 ms one, and the pre-change
+   library can only be timed by reinstating it and rebuilding — it is
+   `include_str!`'d into the binary, so a stale binary reports the new code's
+   numbers — which was not done. A ~130 ms difference in baseline cannot
+   account for a change of over eleven seconds, which is why the comparison
+   stands, but it is two sessions and not one controlled A/B. And **do not
+   restate any of this as a ratio per doubling.** The old text's own "growing
+   5.5x then 8.9x per doubling" understates a quadratic, because memcpy
+   throughput rises with block size; a ratio computed from the new numbers
+   understates the improvement in the other direction, because a fixed per-run
+   cost the netting does not remove flattens it at small N. What was measured
+   in the same session as the after-numbers, on the retired idiom itself: the
+   same text built in user space by rebuilding an accumulator with
+   interpolation once per element cost 26 / 62 / 155 ms net at those three
+   sizes — 6.0x the time for 4x the work, against 2.3x for the shipped path —
+   and that is a **floor** under what the old `Array` arm paid rather than a
+   reconstruction of it, since that arm rebuilt the whole accumulator twice per
+   element, once for the separator and once for the element.
+3. **NEW, and bounded by neither cap: adversarially chosen object keys make
+   both directions quadratic in the number of keys.** `stringify`'s `Object`
+   arm performs one `Map` lookup per member and `parse` one insert per key.
+   `Map` selects buckets as `k.hash() & (cap - 1)` and probes **linearly**
+   (`std/collections/lib.nova`, `slot_of` and the probe loops in `insert` and
+   `find`), and `impl Hash for String` in `std/core` is `str_hash`, which is
+   FNV-1a and which the runtime documents at `nova_rt_str_hash`
+   (`crates/nova-runtime/src/lib.rs`) as "*not* collision-resistant" and not to
+   "be used for anything security-sensitive". So keys chosen to collide grow
+   one probe chain and every lookup or insert walks it: quadratic in the number
+   of keys, **independently of `MAX_DEPTH`, of `MAX_RENDER_DEPTH` and of the
+   buffer**, since neither cap counts keys and the buffer only makes emitting
+   text linear. Depth is not the shape of this one; width is.
+
+   **So Phase 2 position 10's throughput gate on untrusted input is not
+   claimable on the strength of this increment.** That gate
+   (`00-MASTER-SPEC.md:245`) is `examples/05-json-api` serving 10k+ req/sec,
+   which means this module reading object keys somebody else chose. A depth cap
+   and a linear buffer do not answer a collision attack, and nothing here
+   should be read as saying they do.
+
+   **What would fix it, and why it is not fixed here.** A seeded hash — one
+   whose bucket choice an attacker cannot precompute — needs per-process
+   entropy, and **there is no randomness source anywhere in the runtime**: no
+   `rand` or `getrandom` dependency in any `Cargo.toml`, no OS entropy call in
+   `crates/`, and `std/crypto`'s `random_bytes`/`random_int` in §8 below are
+   still unstarted declarations with no `ring` in `Cargo.lock` and no
+   `std/crypto/` directory. The one `DefaultHasher` in the workspace
+   (`crates/nova-driver`) fingerprints a path deterministically and is not an
+   entropy source. So that work needs a **new intrinsic first**, and it belongs
+   to `std/collections` (`00-MASTER-SPEC.md` §3 position 3) rather than to
+   `std/json`: every `Map<String, _>` in the language has this exposure, and
+   `std/json` is where it happens to face untrusted input.
+
+**This section is not closed by that amendment either, and its declared surface
+needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
+implementation and `@derive(ToJson, FromJson)` still has none, exactly as
+recorded above — so the example block above is still unbuildable for the reasons
+given there. And `JsonValue`, `JsonError`, `ToJson`, `FromJson` and both
+`parse`/`stringify` signatures are **unchanged** by the hardening increment: the
+caps, the guard and the buffer are all interior. The declaration block at the
+head of this section still compiles verbatim.
 
 **One new intrinsic**, `str_to_float(s: String) -> Float`
 (`Builtin::STD_ONLY` **65 → 66**), the inverse of `float_fixed` and a
@@ -664,6 +793,20 @@ rather than mentions is line-anchored:
 citing any of these numbers from here; all are facts about the file at one
 date, and the plain count in particular moves whenever anyone writes
 *about* the markers rather than adding one.
+
+**AMENDED 2026-08-25 (branch `std-json-hardening`): the set moved again, twice
+over, exactly as the paragraph above predicts.** It had already moved before
+this increment touched the file, because a marker was added between 2026-08-23
+and now; and this increment adds two more line-anchored ones, both in §7 — the
+disclosure block above, and **this paragraph, which is itself a marker** — plus
+a mid-paragraph pointer in §7 that *mentions* the word without being one, and so
+moves the plain count by more than the marker count. No total is restated
+here on purpose: replacing a stale number with a fresh one reproduces exactly
+the hazard the paragraph above names. Run
+`grep -cE '^(\*\*|// )AMENDED' nova-spec/20-STDLIB.md` for the marker count and
+`grep -nE '^(\*\*|// )AMENDED' nova-spec/20-STDLIB.md` for the distribution.
+Both forms and the two-forms claim are unchanged; this increment invented no
+third one.
 
 **The `lib.nova` count moves 13 → 14.** §13's 2026-08-20
 (`std-sync-mutex`) amendment records "12 `STD_MODULES` entries plus

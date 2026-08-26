@@ -48,7 +48,14 @@ fn main() {
     // dispatch arm that stopped working would show up here as well as above.
     report("array of every scalar", "[null,true,false,0,-1.5,\"a\"]")
     report("nested arrays", "[[1,[2,[3]]],[]]")
-    report("deeply nested array", "[[[[[1]]]]]")
+    // Named for its SHAPE, not for a magnitude. This case used to be labelled
+    // "deeply nested array", which was misleading once `parse` gained a
+    // declared `MAX_DEPTH` of 128: five levels is nowhere near the cap, and the
+    // fixtures that do sit on it are `json_depth_leaf.nova` and
+    // `json_depth_empty.nova`. What this case exercises is a uniform chain of
+    // one-element arrays around a leaf, which is a different shape from the
+    // uneven nesting above it, not a deeper one.
+    report("chain of single-element arrays", "[[[[[1]]]]]")
     report("single-key object", "{\"a\":1}")
     report("object holding an array", "{\"a\":[1,2]}")
     report("object holding an object", "{\"a\":{\"b\":2}}")

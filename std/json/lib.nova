@@ -452,12 +452,19 @@ impl P {
     // since it was taken. Re-measure by deleting the guard rather than citing a
     // number from here.
     //
-    // Both halves of that predicate are load-bearing. Four more goldens in
-    // `json_parse_values.stdout` also stop short of the end -- the
-    // trailing-content cases -- and are UNCHANGED, because for them the
-    // trailing-content error IS the first failure, so there is nothing for the
-    // guard to keep. Reading the clause without its second half predicts 28
-    // rewritten lines rather than 24.
+    // Both halves of that predicate are load-bearing. The trailing-content
+    // goldens in `json_parse_values.stdout` also stop short of the end of the
+    // input, and they are UNCHANGED, because for them the trailing-content
+    // error IS the first failure, so there is nothing for the guard to keep.
+    // Reading the clause without its second half therefore OVER-PREDICTS the
+    // rewrite, by exactly that set of goldens.
+    //
+    // The two numbers this sentence used to end on are dropped rather than
+    // refreshed. It illustrated the over-prediction as one count against
+    // another, and the smaller of the two was the count the paragraph above
+    // replaced with a predicate -- so the larger had nothing left to be
+    // larger than, and citing either would reintroduce exactly the staleness
+    // that replacement removed. Delete the guard and re-measure both together.
     fn fail(mut self, m: String) {
         if self.err.is_none() {
             self.err = Some(JsonError { msg: m, at: self.pos })

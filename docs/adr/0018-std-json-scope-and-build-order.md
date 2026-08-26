@@ -10,6 +10,18 @@ one listed the directory, as ADR 0017 did.
 Accepted (2026-08-23). The `std/json` increment, branch `std-json`
 (`docs/superpowers/specs/2026-08-22-std-json-design.md`).
 
+**Amended 2026-08-25 (branch `std-json-hardening`,
+`docs/superpowers/specs/2026-08-25-std-json-hardening-design.md`): §8 is
+reversed.** Both costs §8 discloses as deliberate and unfixed are now bounded or
+fixed — a declared depth cap in each direction, and one growable character
+buffer behind every accumulator §8 said could not have one. The decision §8
+recorded is left standing as written, with a dated amendment at the end of that
+section answering it passage by passage. Nothing else in this ADR changed: the
+build-order decision, the intrinsic, and the data-integrity rules all stand. A
+new disclosure that is **not** an amendment of anything here also lands in that
+amendment and in `20-STDLIB.md` §7 — adversarially chosen object keys are a
+quadratic exposure that neither cap touches.
+
 ## Context
 
 `00-MASTER-SPEC.md` §3 lists Phase 2's standard-library build order, and it
@@ -456,6 +468,168 @@ string buffer the language does not have (`String` has no `+`, `E0013`), so
 neither is capped; this closes the "unmeasured" deferral the cost carried
 before.
 
+**AMENDED 2026-08-25 (branch `std-json-hardening`): this section recorded a
+decision that a later increment reversed, and the reversal is the interesting
+part.** Both disclosures above are superseded — one by a declared cap, one by a
+buffer that was said not to exist. The section is left as written at its own
+date and answered here passage by passage, because a reader who finds only the
+correction learns what is true without learning that it was once decided
+otherwise, on grounds worth reading.
+
+**The unbounded-depth passage is retracted in both directions, and the two
+directions are now bounded differently.** `parse` declares `MAX_DEPTH = 128` and
+tests it at `parse_value`'s entry, so exceeding it is an ordinary `JsonError`
+carrying `maximum nesting depth exceeded`, on the same channel as a syntax
+error. `stringify` does not recurse at all: it walks a work list on the heap,
+and its ceiling is its own declared `MAX_RENDER_DEPTH = 100_000`, tested once at
+pop time. So the table above describes neither direction now, and "one native
+frame per level in each" is false of both. What survives is the *shape* of the
+render-direction refusal: it is a `panic`, with the message `stringify: nesting
+too deep or cyclic value`, and not a `JsonError`, because `stringify` returns
+`String` and still has no error channel. The two numbers are independent, chosen
+for independent reasons — `parse` consumes text somebody else wrote, where a cap
+is a feature in its own right, while the render cap exists because nesting depth
+is the only signal available for a cycle — and they are therefore no longer one
+piece of reasoning that can be stated once for both directions.
+
+**The RFC line moves from the subjunctive to the indicative.** This section
+wrote that RFC 8259 §9 permits limits on nesting depth "so a cap **would be**
+conforming". A cap is imposed, so it **is** conforming: §9's permission is
+exercised rather than merely noted.
+
+**The two obstacles this section raised against a cap are quoted, and both are
+answered rather than overruled.** They were: "A stack-size artefact is not a
+budget a cap can be derived from, and a number taken from one machine's stack
+would be wrong on the next; a cap also needs an API choice this increment's
+scope did not include — which depth, and whether exceeding it is an ordinary
+`JsonError` or a failure a caller must distinguish from bad syntax."
+
+- The first is honoured, not contradicted. `MAX_DEPTH` is **not** derived from
+  this build's stack. It is a declared contract, taken from the budget
+  `serde_json` starts a deserializer with — a bare `remaining_depth: 128`
+  literal on a `u8` field in its `src/de.rs`, not a named constant there, and
+  defeatable there through `disable_recursion_limit` — read at `master` on
+  2026-08-25 and cited as a precedent that makes 128 defensible, not as a
+  standard. It is not one: Jackson's
+  `StreamReadConstraints.maxNestingDepth()` defaults to 1000, CPython has no
+  JSON-specific constant and inherits the interpreter's recursion limit, and
+  Go's `encoding/json` caps nothing. The measured stack thresholds in the table
+  above are still stack artefacts; they are no longer what the cap is made of.
+- The second is decided. Exceeding the cap is an **ordinary `JsonError`**,
+  deliberately indistinguishable in shape from bad syntax, so a caller that
+  must tell the two apart has to match on the message. That is a weak contract
+  and is named as one here and at the code, rather than left for a reader to
+  discover.
+
+**The obligation this section placed on the caller is discharged, and its
+sentence is quoted so the retraction is legible.** It read: "**A consumer of
+`std/json` on a socket needs a depth limit imposed above it, by its caller,
+until one exists here.**" One exists here. In the parse direction the module
+self-limits, at a declared number, reporting an ordinary error; a caller may
+still want a *smaller* limit than 128 for its own reasons, which is a choice
+rather than a repair. The clause "until one exists here" is what dates the
+sentence, and it has expired.
+
+**"No fixture pins either threshold and none can" was true of a stack threshold
+and stops applying to a declared constant.** A fixture that crashed the process
+would indeed fail the suite by construction; a fixture that reads a declared
+constant's boundary just passes. Both directions' boundaries are pinned now, by
+`json_depth_leaf.nova` and `json_depth_empty.nova` in the parse direction and by
+`json_render_guard_under.nova` and `json_render_guard.nova` in the render
+direction, with `json_render_deep.nova` and `json_stringify_cycle.nova` covering
+a legitimate deep value and a cyclic one.
+
+**The parse-direction counting rule is asymmetric, and that is why there are two
+fixtures and not one.** A leaf costs a depth level, because `parse_value` is
+what tests the depth and a leaf is a `parse_value` call; an empty innermost
+container does not, because the empty-container fast paths in `scan_array` and
+`scan_object` return without re-entering it. So **128 containers wrapping a leaf
+is accepted and 129 is not, while 129 containers ending empty is accepted and
+130 is not.** A single fixture asserting "129 is rejected" would be true of one
+shape and false of the other, which is the off-by-one the pair exists to make
+impossible.
+
+**`stringify` is still not total over nesting depth, and the reason changed.**
+The cap tests depth alone and cannot tell a cyclic value from a legitimate deep
+one, so it refuses **legitimate acyclic values** past `MAX_RENDER_DEPTH` as well
+as cyclic ones. A review of this increment found the opposite claim written at
+the code and retracted it there; it is not to be reintroduced here. The
+residuals are therefore: a cyclic value is refused by the cap; a legitimate
+acyclic value past the cap is refused by the same cap and by the same mechanism;
+and heap exhaustion still aborts the process without a `JsonError`, because
+`gc::alloc` calls `handle_alloc_error` with no alloc-error hook installed, with
+no collect-and-retry on that path and with the collector a no-op off Windows.
+
+**The accumulator passage's closing claim is retracted, in the same terms the
+code uses.** It closed: "Neither is fixable without a growable string buffer the
+language does not have (`String` has no `+`, `E0013`), so neither is capped."
+That is true only of a growable `String` **type**, which Nova still lacks. It is
+false in the sense the sentence was used: `Vec<Char>` plus `str_from_chars`
+composes into exactly such a buffer, both already shipped, and both already
+called from `std/json/lib.nova` itself — `Vec` at `vec_to_array`,
+`str_from_chars` at `span`. The fix needed no language change. Every accumulator
+this section counted now appends into a `Vec<Char>` and drains once through
+`vec_chars_to_string`: `quote`'s and `scan_str`'s, and `stringify`'s own output
+buffer, which replaces what the `Array` and `Object` arms used to do. The
+mechanical check, which the code's own comment tells a reader to run rather than
+trust: `grep -n 'out = "${out}' std/json/lib.nova` must match nothing but text a
+comment quotes for illustration.
+
+**The measured numbers above are superseded. Read the absolutes, not the
+per-doubling ratios.** Measured 2026-08-25 against this build, debug, Windows:
+an array of N one-character numbers, built by one array-repeat so that almost
+nothing but `stringify` is timed, rendered in **108 / 126 / 247 ms** net at
+N = 4 000 / 8 000 / 16 000 — output of 8 001 / 16 001 / 32 001 characters. The
+same sizes parsed in **112 / 121 / 164 ms** net. Method, because a single cold
+invocation is not a measurement here: two invocations discarded as warm-up, then
+the minimum of five `nova run` invocations, minus the minimum of five
+`nova check` invocations of the same program, which was 51-62 ms across every
+program timed.
+
+So **the 32 KB document this section says renders in about twelve seconds now
+renders in about a quarter of a second**, and rendering is within a small factor
+of parsing rather than tens of times worse than it. That comparison crosses two
+measurement sessions, which is a real limitation and is stated rather than
+hidden: the before-numbers above were taken on 2026-08-23 with a ~180 ms compile
+baseline subtracted, the after-numbers on 2026-08-25 with a ~52 ms one, and the
+pre-change library can only be timed by reinstating it and rebuilding, which was
+not done. The baseline discrepancy is ~130 ms and the difference being claimed
+is over eleven seconds, so it cannot account for the change; a reader who wants
+one controlled A/B rather than two sessions should reinstate the pre-change
+`std/json/lib.nova`, rebuild — it is `include_str!`'d, so a stale binary reports
+the new code's numbers — and re-time both.
+
+**Do not restate any of this as a growth ratio per doubling.** The old numbers'
+own "5.5x then 8.9x" and any ratio computed from the new ones both mislead, in
+opposite directions: memcpy throughput rises with block size, which damps the
+wall-clock ratio of a quadratic below what its asymptotics imply, while a fixed
+per-run cost that the netting does not remove flattens the ratio of a linear one
+at small N. What was measured about the retired idiom **in the same session as
+the after-numbers** is this: the same text built in user space by rebuilding an
+accumulator with interpolation once per element cost 26 / 62 / 155 ms net at the
+same three sizes — 6.0x for 4x the work, super-linear, where the shipped path
+cost 2.3x for the same 4x. That probe is a **floor** under what the old `Array`
+arm paid rather than a reconstruction of it: that arm rebuilt the whole
+accumulator **twice** per element, once for the separator and once for the
+element, on top of the tree walk and the number formatting.
+
+**New in this increment, and not an amendment of anything above: adversarial
+object keys are a quadratic exposure that neither cap touches.** See the
+`20-STDLIB.md` §7 disclosure added the same day for the full statement. In
+short: `stringify`'s `Object` arm performs one `Map` lookup per member and
+`parse` one insert per key; `Map` selects buckets as `k.hash() & (cap - 1)` and
+probes linearly (`std/collections/lib.nova`, `slot_of`); and `impl Hash for
+String` is `str_hash`, whose runtime doc comment
+(`crates/nova-runtime/src/lib.rs`, `nova_rt_str_hash`) says in terms that it "is
+*not* collision-resistant and must not be used for anything
+security-sensitive". Keys chosen to collide therefore make both directions
+quadratic in the number of keys, independently of `MAX_DEPTH`, of
+`MAX_RENDER_DEPTH` and of the buffer. **This section's own premise — the Phase 2
+gate puts this module in front of a socket — is therefore not satisfied by this
+increment: position 10's throughput gate on untrusted input is not claimable on
+the strength of it.** The Consequences bullet below saying nothing here is a
+step toward that throughput number stands, and now has a second reason.
+
 ## Consequences
 
 - **Phase 2 is not complete, and this increment does not close it.**
@@ -527,7 +701,18 @@ before.
   poisoned-parser record `P`, and the two codec rules with their reasoning
   at the impls; §8's two disclosures live at `stringify`'s header comment,
   `parse_value` (the depth reasoning, stated once for both directions) and
-  `scan_str` (the accumulator numbers, all four sites)
+  `scan_str` (the accumulator numbers, all four sites).
+  **AMENDED 2026-08-25 (branch `std-json-hardening`):** this pointer is stale
+  in both parentheses, for the reasons §8's amendment gives. The depth
+  reasoning is no longer stated once for both directions and cannot be: the
+  two directions are bounded by two different declared constants for two
+  different reasons, so `parse_value`'s comment covers `MAX_DEPTH` and the
+  counting rule while `stringify`'s header covers `MAX_RENDER_DEPTH`, the
+  cycle, and what the cap refuses that is not a cycle. And `scan_str` now
+  carries the accumulator **roster by name rather than by count**, since a
+  count of a set a later increment can add to is the shape that goes stale;
+  read the roster and re-run its grep instead of trusting a number from
+  here or from there.
 - `std/collections/lib.nova`: `Map::keys`, with the table-order and
   `[fill; n]` notes
 - `crates/nova-resolver/src/lib.rs`: `Builtin::StrToFloat` and its doc
