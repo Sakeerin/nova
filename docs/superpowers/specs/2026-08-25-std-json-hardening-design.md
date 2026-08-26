@@ -1,6 +1,9 @@
 # `std/json` hardening: a depth cap, an iterative `stringify`, and one buffer
 
-**Status:** approved 2026-08-25. Design only.
+**Status:** approved 2026-08-25. Design only. **AMENDED 2026-08-26 — see §11, which retracts
+claims in §3.1, §4.4 and §7.** The amendment is at the end rather than in place because this
+project keeps superseded design text and amends it; a future increment reads these paragraphs as
+precedent, and §9 predicted that nothing in the per-commit review flow would ever scan this file.
 
 **Goal.** Remove the two costs ADR 0018 section 8 recorded as known and deliberate — `parse`
 aborting the process on a deeply nested input, and the interpolation accumulators rebuilding their
@@ -61,7 +64,7 @@ field and no variant. No new intrinsic is added, so the 12-site checklist is not
 
 ## 3. The depth cap on `parse`
 
-### 3.1 The number, and why it is a contract rather than a measurement
+### 3.1 The number, and why it is a contract rather than a measurement (amended 2026-08-26, §11.4)
 
 `const MAX_DEPTH: Int = 128`.
 
@@ -207,7 +210,7 @@ That probe accumulated with interpolation, because `str_from_chars` is std-only 
 from a user module. So it proves **traversal order**, not the buffer drain of section 5. The drain
 is verified by this increment's own tests, not by that probe.
 
-### 4.4 The cycle guard
+### 4.4 The cycle guard (amended 2026-08-26, §11.1 and §11.3)
 
 `const MAX_RENDER_DEPTH: Int = 100_000`, checked as children are pushed; exceeding it calls
 `panic("stringify: nesting too deep or cyclic value")`.
@@ -354,7 +357,7 @@ fixture, and the cycle guard exists partly so this file never needs it.
 
 ---
 
-## 7. The third cost, disclosed rather than fixed
+## 7. The third cost, disclosed rather than fixed (amended 2026-08-26, §11.2)
 
 **`std/json` remains quadratic on adversarially chosen object keys, so Phase 2 position 10's
 throughput gate on untrusted input is not claimable at the end of this increment.**
@@ -439,3 +442,111 @@ and Nova has no field privacy, so a forged map with a live slot off its own prob
 `keys()` return a key `get()` misses — and the shipped `stringify` emits `{"a":1,}` for such a value
 today, measured. The comment becomes "unreachable through `Map`'s own API", and the arm is treated
 as a real path in section 4.2 rather than as a formality.
+
+---
+
+## 11. Amendments, 2026-08-26
+
+Written in the final fix wave of branch `std-json-hardening`, after the whole-branch review and
+before merge. Four claims above were falsified by what shipped or by what a downstream record
+retracted, and none of them was amended here while the branch ran: §9 said the plan and this spec
+sit in no per-commit scanned set, and that is what happened. The superseded text stays where it is
+and each item below quotes what it retracts.
+
+### 11.1 §4.4 states the guard at the wrong time, and the two forms are not equivalent
+
+§4.4 says `const MAX_RENDER_DEPTH: Int = 100_000`, "checked as children are pushed" — a push-time
+test, one per container arm, which is what the plan's listing prescribed as
+`if p.d + 1 > MAX_RENDER_DEPTH` at the top of both `Array` and `Object`. What shipped is **one
+pop-time test**, `if p.d > MAX_RENDER_DEPTH`, above `match p.v` and outside both arms. It was
+hoisted during Task 3, because two textually identical blocks made deleting one of them invisible
+to every fixture.
+
+**The hoist is not equivalent to what it replaced.** The push-time form fired for a chain of k
+containers when k > `MAX_RENDER_DEPTH`, whatever the chain ended in. The pop-time form tests the
+depth an item *carries*, and an empty innermost container pushes no child at all, so on that shape
+nothing ever carries k: the deepest `d` any pop sees is k - 1. Measured against the shipped binary,
+arrays one deep per level:
+
+| innermost | containers | result |
+|---|---|---|
+| a leaf | 100000 | renders, 200001 characters, exit 0 |
+| a leaf | 100001 | panics `stringify: nesting too deep or cyclic value`, exit 127 |
+| an empty array | 100001 | renders, 200002 characters, exit 0 |
+| an empty array | 100002 | panics, exit 127 |
+
+So the render cap carries the **same asymmetric counting rule** §3.3 gives `parse` — a leaf costs a
+level, an empty innermost container does not — and the divergence runs one way only: the hoist can
+newly accept a value and cannot newly refuse one. §3.3 pins both parse shapes with two fixtures for
+exactly this reason. The render direction pins the leaf shape only, and the empty-innermost boundary
+stays unpinned: the ruling that declined render fixtures on suite cost holds, so the rule is
+disclosed at the guard in `std/json/lib.nova` instead. A change that moved that boundary by a level
+would pass the whole suite.
+
+### 11.2 §7's entropy claim and its ownership argument are retracted
+
+§7 says "a seeded hash needs per-process entropy and **there is no randomness source anywhere in
+the runtime**. So the fix needs a new intrinsic first, and it belongs to `std/collections` rather
+than to this module." Both halves were retracted downstream during the branch, in
+`nova-spec/20-STDLIB.md` and `CHANGELOG.md`, and neither retraction reached this file.
+
+- "there is no randomness source anywhere in the runtime" is **false**. `getrandom` reaches
+  `Cargo.lock` by way of `rand` under `proptest`, and the runtime process already draws OS entropy
+  through `std` at no dependency cost — every `std` `HashMap` it builds
+  (`crates/nova-runtime/src/file.rs`) seeds a `RandomState`. The barrier is **exposure to Nova**,
+  not availability to the process, and the durable form of that is a check rather than an assertion.
+- "the fix needs a new intrinsic first" **misdescribes a decision taken elsewhere**.
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` already records that hashes are not
+  randomized per process and that a `Map` is HashDoS-attackable by adversarial keys, and it frames
+  the remedy as a `Hasher`-shaped question — per-map hasher choice, or HashDoS resistance via a seed
+  — reached through the accumulating-`Hasher` migration it describes, with a deprecation cycle. That
+  ADR holds the governing decision; this spec argued the point without citing it.
+- The `std/collections` half **survives, for a different reason than the one given**: every
+  `Map<String, _>` in the language has this exposure, and `std/json` is where it happens to face
+  untrusted input.
+
+§7's closing sentence — after this increment `std/json` is depth-bounded, its accumulators are
+linear, and it is still not safe to put in front of a hostile client — is unaffected.
+
+### 11.3 §4.4's cost claim is wrong by a factor of the container width
+
+§4.4 says "**The guard's cost is proportional to its bound**, which constrains how high the bound
+may go: a cycle performs one iteration per level until it fires. With the linear buffer of section 5
+that is milliseconds at 100_000". The milliseconds figure was already retracted at the code as false
+by three orders of magnitude. The proportionality is retracted here: it holds at width 1, which is
+the width of both cycle fixtures and of nothing else. Popping a container of width w pushes about
+2w + 1 items — w children, w - 1 separators, two brackets — and removes one, so the work list gains
+about 2w per level and nothing is reclaimed before the panic. Both the peak work-list size and the
+time to fire therefore grow with the bound **times the width**; where in each container the cycle
+continues moves the constant, not the growth.
+
+Measured against the shipped binary, min of 3 after a warm-up, cyclic arrays that fire the guard:
+width 1, 1.78 s; width 3 with the cycle at the last member, 4.71 s; width 10 at the last member,
+14.24 s; width 10 at the first member, 7.14 s.
+
+**This qualifies §4.4's "immediate, named, located failure" and the "better failure, not the absence
+of one" framing that follows it.** The work list's peak is the same allocator pressure the guard was
+introduced to replace, so for a wide enough cycle the process reaches `gc::alloc`'s
+`handle_alloc_error` — printing neither a `nova: panic:` prefix nor a location — before it reaches
+the panic. That last step is reasoning past width 10 rather than a measurement: nothing here
+measures where the crossover sits, and no fixture builds a wide cycle. The guard's promise of a
+named failure is a promise about narrow cycles.
+
+### 11.4 §3.1's Go citation was the unattributed one in its sentence, and it was the false one
+
+§3.1 says "Go's `encoding/json` imposes no cap at all", in the same sentence as a `serde_json`
+claim carrying a file, a field and a read date. Go's `encoding/json` **does** cap: it declares
+`const maxNestingDepth = 10000` in `src/encoding/json/scanner.go` and enforces it in
+`pushParseState`, which reports `exceeded max depth`. Read at `master` on 2026-08-26. The two
+neighbouring comparisons now carry read dates too: Jackson's
+`StreamReadConstraints.DEFAULT_MAX_DEPTH` is `1000`
+(`src/main/java/com/fasterxml/jackson/core/StreamReadConstraints.java`, branch `2.x`), and CPython's
+C accelerator declares no JSON-specific constant and calls `_Py_EnterRecursiveCall` in
+`scan_once_unicode` (`Modules/_json.c` at `main`), so the interpreter's recursion limit is what
+bounds it — both read 2026-08-26.
+
+The argument 128 rests on is unchanged and slightly strengthened with a fourth number in it:
+implementations that declare a limit pick different ones, so 128 is a defensible precedent rather
+than a standard. The shape worth keeping is why this was the claim that broke — the dated sibling
+survived scrutiny four times on this branch and the undated one was never checked by anyone until
+the whole-branch review asked who had read it.
