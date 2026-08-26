@@ -4,9 +4,9 @@
 // `stringify` appends the member separator BEFORE looking the value up, so a
 // key that `keys()` returns but `get()` misses leaves a comma with no member
 // after it. The natural work-stack rewrite moves that push inside the `Some`
-// arm, and that version emits `{"a":1}` here instead -- valid JSON, which is
-// exactly what makes the trap look like a fix rather than a behaviour change.
-// This golden is what refuses it.
+// arm, and that version drops the trailing comma instead -- valid JSON,
+// which is exactly what makes the trap look like a fix rather than a
+// behaviour change. This golden is what refuses it.
 //
 // Reaching the `None` arm needs a FORGED map: unreachable through `Map`'s own
 // API, but `Map` exposes every field and Nova has no field privacy, so a live
@@ -20,6 +20,25 @@
 // for. The three precondition lines below are not decoration: if no layout is
 // found, or if the reachable key stops being reachable, this fixture FAILS
 // rather than silently stopping exercising the separator.
+//
+// THE GOLDEN CANNOT NAME A WINNING KEY, and that is not an oversight: which
+// candidate `find_layout` returns is itself process-dependent. A candidate
+// whose own home slot is `cap - 1` can never be the missed key's carrier --
+// the search only ever looks at LATER slots for it (`keys()` walks ascending,
+// so the missed member cannot sit at index 0), and a home slot of `cap - 1`
+// leaves no later slot to place it at -- so the search falls through to the
+// next candidate instead. Measured across 40 sampled processes, `"a"` lands
+// on slot 7 in 3 of them, and on those `find_layout` correctly moves on to
+// `"b"` or `"c"`. A golden that hard-codes which key won is therefore flaky
+// by construction rather than by bad luck: roughly 1 run in 8 to 1 in 13
+// would land on such a process. What the golden asserts instead is a
+// comparison computed from whichever key actually won: `want` below is built
+// as the quoted winning key followed by `:1,` and a closing brace, WITH the
+// trailing comma before `}` on purpose, so `render matches expected true`
+// asserts exactly the dangling-comma property this fixture exists for, no
+// matter which candidate `find_layout` picked. A `stringify` that moved the
+// separator into the `Some` arm would render the winning member without that
+// comma, so the comparison would come out false regardless of which key won.
 record Layout { hit: String, miss: String, hs: Int, ms: Int, ok: Bool }
 
 // Find a layout at capacity `cap`: `hit` live at its own home slot so `find`
@@ -77,5 +96,6 @@ fn main() {
         Some(_) => println("miss reachable true")
         None => println("miss reachable false")
     }
-    println("render ${stringify(Object(forged))}")
+    let want = "{${stringify(String(l.hit))}:1,}"
+    println("render matches expected ${stringify(Object(forged)) == want}")
 }
