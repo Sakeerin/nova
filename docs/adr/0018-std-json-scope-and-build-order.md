@@ -394,7 +394,7 @@ and both are easy to get wrong:
   (`float_fixed(3.5, 0)` is `"4"`) and checking that text for a `.` would
   turn the fraction rule into the truncation it rejects.
 
-### 8. Two unbounded costs, both disclosed here rather than only at the code
+### 8. Two unbounded costs, both disclosed here rather than only at the code — AMENDED 2026-08-25: neither cost is unbounded now, and the caller obligation is discharged; read the amendment at the end of this section before citing anything in it
 
 The Phase 2 **gate** is `examples/05-json-api`, which means `std/json` in
 front of a socket, reading text somebody else chose. A reader deciding
