@@ -801,13 +801,25 @@ that already compiled.
   being 51-62 ms across every program timed. So the **~32 KB document the
   earlier entry says takes about twelve seconds to render takes about a
   quarter of a second**, and rendering is within a small factor of parsing
-  instead of tens of times worse. Two honest limits: the comparison crosses
-  measurement sessions, the earlier numbers having been taken against a
-  ~180 ms baseline and these against a ~52 ms one, with the pre-change library
-  timeable only by reinstating it and rebuilding, which was not done — a
-  ~130 ms baseline difference cannot account for a change of over eleven
-  seconds, which is why it stands, but it is two sessions and not one
-  controlled A/B. And **quote the absolutes, not a ratio per doubling**: the
+  instead of tens of times worse. **The before-evidence to quote is the
+  same-build one**, and this bullet cited the wrong measurement until
+  2026-08-25: `docs/superpowers/specs/2026-08-25-std-json-hardening-design.md`
+  records the pre-change library timed on **this same build on 2026-08-25** at
+  **231 / 1 239 / 9 482 ms net of a 129 ms baseline**, for exactly these three
+  sizes. So rendering 32 001 characters went from **9 482 ms net to 247 ms net,
+  a reduction of about 9.2 seconds**, with both halves from one build. The
+  2026-08-23 figures (236 / 1 309 / 11 622 ms, ~180 ms baseline) are the older
+  **corroborating** measurement: same shape, same order of magnitude, a
+  different session and a different baseline. This bullet's earlier text leaned
+  on those and claimed "a change of over eleven seconds"; that **overstated
+  what one build supports and is corrected to ~9.2 s**. What still crosses
+  sessions is only the after-measurement's own baseline, ~52 ms against that
+  document's 129 ms, and no gap of that size accounts for a multi-second change
+  either way; a single controlled A/B in one sitting would need the pre-change
+  `std/json/lib.nova` reinstated and the workspace rebuilt, since it is
+  `include_str!`'d into the binary, and that was not done in the session that
+  produced the after-numbers. And **quote the absolutes, not a ratio per
+  doubling**: the
   old entry's own "5.5x then 8.9x" understates a quadratic because memcpy
   throughput rises with block size, and a ratio from the new numbers
   understates the improvement because a fixed per-run cost the netting does
@@ -860,12 +872,15 @@ that already compiled.
   only where it faces untrusted input. An earlier draft of this entry called
   the remedy "a new intrinsic first"; that is **retracted** as a
   misdescription of a decision ADR 0005 had already taken. A seed does still
-  need
-  entropy, and the accurate statement is narrower than the one drafted here
-  before: **no runtime function exposes entropy to Nova.** Nova code has no
-  way to obtain a random value — `std/crypto`'s `random_bytes`/`random_int`
-  are unstarted declarations, with no `ring` in `Cargo.lock` and no
-  `std/crypto/` directory. The draft claimed instead that the *runtime* has no
+  need entropy, and the accurate statement is narrower than the one drafted
+  here before: **no runtime function exposes entropy to Nova**, with the
+  durable form of that being the *check* rather than the assertion. Nova
+  reaches the runtime only through a compiler-known `Builtin` paired with a
+  `nova_rt_*` function and a line in `symbols()`, so grep those lists rather
+  than trust this sentence — it is a closed-world claim over a surface that
+  grows, and `std/crypto` shipping would falsify it by design. Today the
+  answer is no: `random_bytes`/`random_int` are unstarted declarations, with
+  no `ring` in `Cargo.lock` and no `std/crypto/` directory. The draft claimed instead that the *runtime* has no
   entropy anywhere, citing the absence of a `rand` or `getrandom` dependency;
   that is retracted as well, being true only of the `Cargo.toml`s and false of
   the lockfile this file consults for `ring` — `getrandom` is in `Cargo.lock`
