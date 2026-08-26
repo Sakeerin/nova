@@ -2,4 +2,4 @@ layout found true
 keys 2
 hit reachable true
 miss reachable false
-render {"a":1,}
+render matches expected true
