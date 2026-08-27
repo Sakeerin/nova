@@ -554,3 +554,83 @@ process's seed and construct collisions for it, while an attacker who cannot
 observe the process still cannot build a colliding set before it starts, the seed
 being drawn per process. Precomputation resistance is the half that survives.
 Nothing here reopens the migration question, and `Hash`'s signature is unchanged.
+
+### Amendment, 2026-08-27 — the reason given for `str_hash` has gone stale; the builtin stands
+
+From the `hashdos-resistance-test` increment, later than the 2026-08-26
+amendment above and written by a different hand. **Nothing in the Decision
+moves.** `Hash` keeps `fn hash(self) -> Int`, `str_hash` stays a
+`Builtin::STD_ONLY` builtin backed by `nova_rt_str_hash`, the migration stays
+unstarted with its prerequisites as recorded, and no signature, impl, fixture or
+behaviour changes. What is corrected here is a *justification*, and only the
+first half of one.
+
+The Decision's supporting-pieces bullet says `str_hash` is backed by the runtime
+
+> because Nova cannot walk a string's bytes: `String` has no length, indexing or
+> iteration, and is not FFI-safe, so no `extern` can reach it either.
+
+**The first clause was true when written and is now stale.** `std/bytes` exposes
+`bytes_from_string`, `byte_at` and `to_ints`, reachable from a user module with
+no import at all — the registered fixture `tests/runtime/bytes_basics.nova`
+calls `bytes_from_string("hi")` as its first statement and is checked against a
+golden — and `std/strings` gives `String` a `len`, `chars`, `char_at` and
+`slice`. Nova can walk a `String`'s bytes. The arithmetic a hash needs also runs
+in Nova already: `mix64` in `std/core` computes splitmix64's finalizer in
+ordinary `Int` shift, xor and multiply.
+
+**Stale, not scoped.** The capability reaches `std/core` itself and not merely
+user modules: every member of `Builtin::STD_ONLY` is seeded into every std
+module's scope with no condition beyond `is_std_module`
+(`crates/nova-resolver/src/lib.rs`, `resolve_program`'s seeding pass), which is
+already why `std/core`'s own `impl Debug for String` calls `str_chars` above a
+comment recording that it is "already visible here with no import". An argument
+that the sentence stayed true because it was *scoped* to `$std.core` being the
+first `STD_MODULES` entry was made during that increment and withdrawn inside
+it: that array's order is documented as significant "only in that it fixes
+module indices", so position gates no capability.
+
+**The second clause stands unchanged.** `String` is still not FFI-safe and no
+`extern` reaches it.
+
+**This does not leave `str_hash` unjustified, and must not be read as proposing
+its removal.** The standing reason is duplication, not incapacity:
+`nova_rt_str_hash` is where this project's string hash lives, and an FNV-1a
+written in Nova would be a second copy of it to keep in step with the first.
+That cost is concrete rather than hypothetical now, because that function is
+seeded FNV-1a followed by splitmix64's finalizer over a per-process seed (the
+2026-08-26 amendment above), so a Nova copy would have to track the algorithm,
+its constants and the seed — and the one channel to the seed that amendment
+documents, inverting `("").hash()`, is recorded there as something to narrow
+rather than to build on.
+
+**`mix64` cuts the other way, and saying so is the point.** Splitmix64's
+finalizer *is* written in Nova, in `std/core` — the `mix64` bullet sits
+immediately above the `str_hash` one, and the paragraph below both spells out
+the two `Int` workarounds its Nova source needs. So the line this amendment
+draws is not "Nova cannot do hash arithmetic", which it plainly can, but that
+the string hash's byte loop and its seed have one home.
+Read the `str_hash` bullet as "the runtime owns this computation", not as "Nova
+is incapable of the arithmetic".
+
+**Recorded because the ruling went the other way first, and the sequence is the
+instructive part.** The increment that found this checked this ADR early —
+against test-assertability, per-process randomisation, precomputation resistance
+and seed readability — found nothing it asserts falsified, and ruled that no
+amendment was needed. That ruling was correct when it was made. The byte-walking
+claim became false later in the same increment, once the `std/bytes` and
+`std/strings` surface was established, and nobody returned to a ruling a later
+finding had invalidated. A check that examines the right things and is then
+overtaken is a different failure from a check never made, and only the first is
+invisible to a reader who sees the word "checked". That increment's design record
+carries the reversal, at
+`docs/superpowers/specs/2026-08-27-hashdos-resistance-test-design.md` section 11,
+items (a) and (e).
+
+The same stale wording appears elsewhere in the tree —
+`crates/nova-runtime/src/lib.rs` above `nova_rt_str_hash`, the
+`Builtin::StrHash` and `Builtin::StrLenChars` doc comments in
+`crates/nova-resolver/src/lib.rs`, and the `Hash` comment in `std/core/lib.nova`
+among them — stale there in the same way. That increment changed no product
+code, so those are flagged in its own records rather than edited here, and this
+amendment does not close them.
