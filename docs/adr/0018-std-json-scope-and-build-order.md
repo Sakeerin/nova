@@ -808,6 +808,38 @@ protects its `first == second` assertion, and protects it against whatever
 layout a run builds rather than against one measured set of pairs. Read each
 figure as an instance of its property under the hash of the day.
 
+### Fourth amendment, 2026-08-27 (branch `hashdos-resistance-test`, a separate later increment)
+
+From the increment that added a test for the resistance property, not from this
+ADR's own branch and not from the seeding increment that wrote the amendment
+above. **No decision in this ADR moves, and `std/json` itself is untouched** —
+the caps, the guard and the buffer are as recorded, and no signature changes.
+
+**The gate claim's SCOPE does not move; its EVIDENCE does.** The paragraph
+headed "**The gate claim narrows**" above defines the precomputing attacker as
+"one who must build a colliding key set before it can observe the process that
+will receive them", and
+`hashdos_precomputed_key_set_does_not_survive_a_new_process` in
+`crates/nova-cli/tests/run_tests.rs` now executes that definition rather than
+approximating it: one Nova process searches candidate keys for a set
+concentrating 32 of them in one bucket under its own seed, and a second,
+separately launched process — therefore a fresh seed — re-hashes that same set
+and is asserted to spread it. Until this increment the precomputing half rested
+on figures taken in a throwaway harness and written up in prose. The
+thresholds, their derived error rates, and the coverage that test does not give
+are in its own doc comment and are not restated here. Nothing here licenses a
+stronger reading of that paragraph.
+
+**Its exclusions stand unchanged, and neither of the things they exclude gains
+evidence here.** `Int`, `Bool` and `Char` keys are untouched, `mix64` still
+being unseeded. And the exclusion of "an adversary who can observe timing and
+adapt" is **still unaccompanied by any assertion added in this increment**: the
+searching phase calls `.hash()` directly, which requires code running inside
+the target process and is a stronger capability than observing timing from
+outside, so that phase is not an instance of the adversary the exclusion names.
+Whether anything else in the test suite bears on that exclusion is a question
+for the suite, not for this sentence.
+
 ## Consequences
 
 - **Phase 2 is not complete, and this increment does not close it.**

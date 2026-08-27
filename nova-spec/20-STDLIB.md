@@ -929,6 +929,33 @@ its 2026-08-25 amendment.
    behind it worth recovering. `nova_rt_str_hash` in the runtime documents the
    same thing at itself.
 
+   **FURTHER AMENDMENT 2026-08-27 (`hashdos-resistance-test`, a later
+   increment): the gate claim's SCOPE does not move; its EVIDENCE does.**
+   Nothing below licenses a stronger reading of the paragraph headed **The
+   gate.** above; it is the same claim with a test behind it.
+
+   That paragraph defines the precomputing attacker as "one who must build a
+   colliding key set before it can see the process it will send them to", and
+   `hashdos_precomputed_key_set_does_not_survive_a_new_process` in
+   `crates/nova-cli/tests/run_tests.rs` now executes that definition rather
+   than approximating it: one Nova process searches candidate keys for a set
+   concentrating 32 of them in one bucket under its own seed, and a second,
+   separately launched process — therefore a fresh seed — re-hashes that same
+   set and is asserted to spread it. Until this increment the precomputing half
+   rested on figures taken in a throwaway harness and written up in prose. The
+   thresholds, their derived error rates, and the coverage this test does not
+   give are in that test's own doc comment and are not restated here.
+
+   **The exclusions in that paragraph stand unchanged, and neither of the
+   things they exclude gains evidence here.** `Int`, `Bool` and `Char` keys are
+   untouched, `mix64` still being unseeded. And the exclusion of "an adversary
+   who can observe timing and adapt" is **still unaccompanied by any assertion
+   in this increment**: the searching phase calls `.hash()` directly, which
+   requires code running inside the target process and is a stronger capability
+   than observing timing from outside, so that phase is not an instance of the
+   adversary the exclusion names. Whether anything else in the test suite bears
+   on that exclusion is a question for the suite, not for this sentence.
+
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
 implementation and `@derive(ToJson, FromJson)` still has none, exactly as
