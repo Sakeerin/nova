@@ -8767,9 +8767,13 @@ fn main() {
 /// than argued: before this test the property rested on measurements taken
 /// in a throwaway harness and recorded in prose.
 ///
-/// Phase 1 is itself an adaptive attack succeeding — it concentrates 32 of
-/// 4000 candidate keys into one bucket — so the limit the records disclose
-/// is demonstrated here too.
+/// Phase 1 pins something in its own right: given direct access to the hash,
+/// finding a colliding key set is cheap — 32 keys share one bucket after a
+/// median of roughly 1300 candidates scanned, well inside the 4000 budget.
+/// That is NOT the limit the records disclose, and must not be read as
+/// demonstrating it. Their excluded adversary observes timing and adapts,
+/// whereas calling `.hash()` needs code running inside the target process,
+/// which is a stronger capability; the timing case is not exercised here.
 ///
 /// The thresholds are derived, not chosen to look generous. Phase 1's
 /// budget of 4000 is about 2.6 times the observed worst case: over 200
