@@ -777,9 +777,11 @@ wrong, and it was wrong here in the same way it was wrong in
 permits "replacing FNV-1a inside `nova_rt_str_hash` ... and seeding either from a
 process-start value" precisely because none of that touches `Hash`'s signature.
 Only a swappable seeded `Hasher` **object** needs the migration. `fn hash(self)
--> Int` is unchanged, no `impl Hash` was edited, no Nova library source changed,
-and there was no deprecation cycle. ADR 0005 now carries a dated amendment
-saying which of its conflicting sentences governs.
+-> Int` is unchanged, no `impl Hash` was edited, no Nova library source changed
+**behaviour** — the Nova-side edits in that increment are comments, in
+`std/core`, `std/collections` and `std/json` — and there was no deprecation
+cycle. ADR 0005 now carries a dated amendment saying which of its conflicting
+sentences governs.
 
 **What stays true.** The quadratic shape this section describes is still the
 right shape for an attacker who can adapt, and the `std/collections` framing
@@ -787,6 +789,24 @@ still holds — every `Map<String, _>` carried the exposure and `std/json` is
 where it met untrusted input, which is why the fix landed in the runtime rather
 than in this module. Seeded, finalized FNV-1a is not collision-resistant and is
 not cryptographic; the runtime function says so at itself.
+
+**Section 4's table-order measurements need the same scoping that increment
+applied in `nova-spec/20-STDLIB.md` §12 and at `Map` in
+`std/collections/lib.nova`.** The figures there were measured under the
+unseeded `str_hash`: `"a"`, `"c"`, `"e"` inserted into a fresh map coming back
+`"e"`, `"c"`, `"a"`; 2046 of the 15 600 ordered triples of distinct lowercase
+letters coming back exactly reversed; and 56 of the 3782 ordered pairs of
+single-character `[a-zA-Z0-9]` keys flipping slot order when a two-key object's
+keys are re-inserted in emitted order. With `str_hash` seeded once per process
+each of those is a per-process function of the seed, so none may be relied on
+run to run — not that each must differ, since two seeds may agree on a layout.
+What they were recorded to establish survives untouched, which is why they are
+kept rather than deleted: `keys()` order is not a function of the key set alone,
+the reordering needs no `grow`, and a two-key object can therefore flip across a
+render and a reparse. `json_round_trip.nova`'s single-key restriction still
+protects its `first == second` assertion, and protects it against whatever
+layout a run builds rather than against one measured set of pairs. Read each
+figure as an instance of its property under the hash of the day.
 
 ## Consequences
 

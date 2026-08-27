@@ -479,8 +479,10 @@ backend-independence requirement is untouched. What changed is the *computation*
 behind `impl Hash for String`: `nova_rt_str_hash` is now seeded FNV-1a over the
 bytes followed by splitmix64's finalizer, the seed drawn once per process from
 `std::collections::hash_map::RandomState` inside the runtime. No intrinsic was
-added, no `impl Hash` was edited and no Nova-side source changed, so nothing has
-to be recompiled differently or edited to keep compiling. That is a
+added, no `impl Hash` was edited, and no Nova-side source changed **behaviour** —
+the Nova-side edits in that increment are comments, in `std/core`,
+`std/collections` and `std/json` — so nothing has to be recompiled differently or
+edited to keep compiling. That is a
 source-compatibility statement and not a behavioural one: a program that read a
 `String`'s hash, or `Map::keys()` order, and expected the same answer from a
 later run of the same binary now gets a different one. The runtime function
@@ -536,3 +538,19 @@ SipHash. What the change buys is resistance to a *precomputed* collision set —
 an attacker who cannot learn the seed cannot build one offline — plus the
 diffusion the runtime function records. An adversary who can observe timing and
 adapt is out of scope. No record should be read as claiming more.
+
+**The seed is readable from Nova, and the channel is this decision's own shape
+rather than a defect in the seeding.** `("").hash()` returns splitmix64's
+finalizer applied to the raw seed, because FNV's loop body never runs on an empty
+string, and that finalizer is a bijection with a published inverse — so one call
+from ordinary Nova code recovers the seed exactly. Measured on the seeding
+increment's own tree: one `("").hash()` was inverted to a seed, and that seed
+then predicted two further hashes from the same process exactly. The channel is
+`fn hash(self) -> Int` handing a caller a whole 64-bit result in one call, which
+is what this ADR decided and which predates the seeding. That gives the
+out-of-scope sentence above a concrete mechanism rather than a category: an
+attacker who can obtain one `String` hash from a running process can recover that
+process's seed and construct collisions for it, while an attacker who cannot
+observe the process still cannot build a colliding set before it starts, the seed
+being drawn per process. Precomputation resistance is the half that survives.
+Nothing here reopens the migration question, and `Hash`'s signature is unchanged.

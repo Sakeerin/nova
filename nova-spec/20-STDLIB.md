@@ -902,9 +902,32 @@ its 2026-08-25 amendment.
    `std::collections::hash_map::RandomState`, which is the source the amendment
    above already identified as available to the process — "the runtime process
    already draws OS entropy through `std` at no dependency cost". No new
-   dependency, nothing above MSRV 1.78, and no new route from Nova to entropy:
-   the FFI route to the C runtime that the roster above records was there before
-   this increment and is neither widened nor narrowed by it.
+   dependency and nothing above MSRV 1.78.
+
+   **There IS a new route from Nova to entropy, and it is stated here rather
+   than denied.** An earlier draft of this paragraph read "no new route from Nova
+   to entropy", which is false: `str_hash` is the route. `("").hash()` returns
+   splitmix64's finalizer applied to the raw seed — FNV's loop body never runs on
+   an empty string — and that finalizer is a bijection with a published inverse,
+   so a single call from ordinary Nova code recovers the per-process seed
+   exactly. Measured on the seeding increment's own tree: one `("").hash()` was
+   inverted to a seed, and that seed then predicted two further hashes from the
+   same process exactly. The FFI route to the C runtime that the roster above
+   records is a different one, was there before this increment, and is neither
+   widened nor narrowed by it.
+
+   **Both halves of what that costs.** Precomputation resistance holds: the seed
+   is drawn per process, so an attacker cannot build a colliding key set offline
+   before the process that will receive it exists — to recover the seed it must
+   first obtain a hash *from the running process*. And the adaptive case is now
+   concrete rather than a category: an attacker who can obtain one `String` hash
+   from the process can recover the seed and construct collisions for that
+   process. That is the mechanism behind the out-of-scope sentence the records
+   already carry, not a new exposure. The channel is ADR 0005's one-shot
+   `fn hash(self) -> Int` handing back a whole 64-bit result in one call, which
+   predates the seeding; seeding did not open the channel, it made the value
+   behind it worth recovering. `nova_rt_str_hash` in the runtime documents the
+   same thing at itself.
 
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
@@ -1395,9 +1418,15 @@ reproducible. `str_hash` is now seeded once per process, so for
 `String` keys the order **can differ between runs of one unchanged binary**. Not
 must: a different seed may land on the same layout, and a single-key map has one
 order either way. The consequence for callers is that an observed order must not
-be treated as reproducible — sort, or assert per key rather than on sequence —
-and it is the reason §7's fixtures build single-keyed objects. The method's own
-note in `std/collections/lib.nova` carries this too.
+be treated as reproducible — sort, or assert per key rather than on sequence.
+The technique a fixture needs is to build one key, or to accept every ordering.
+`tests/runtime/json_parse_values.nova` takes the second road, building
+`{"a":[],"b":{}}` and passing both orderings to its own `either(...)` helper,
+while §7 fixtures such as `json_round_trip.nova` and `json_stringify.nova` take
+the first. Where those build a single key the reason is older than this
+increment: table order was not insertion order then either. The method's own
+note in
+`std/collections/lib.nova` carries this too.
 
 That also scopes the measurement quoted above. `"e"`, `"c"`, `"a"` was measured
 under the unseeded hash; what it demonstrates survives and is why it is quoted —
