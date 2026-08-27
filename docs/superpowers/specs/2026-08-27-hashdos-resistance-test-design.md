@@ -422,8 +422,19 @@ of an exact rational, which put it about 2 per cent high. **The reciprocal on th
 The `8.269e-11` mantissa beside it is right and is unchanged — the exact value
 is 8.26868630e-11 — and the published reciprocal is not the reciprocal of that
 mantissa at any rounding of it: 1/8.26869e-11 is 12,093,814,135 and 1/8.269e-11
-is 12,093,360,745, and 12,093,966,516 is neither. Where it did come from is not
-recorded and is not reconstructed here. The `at most 6` row is right on both of
+is 12,093,360,745, and 12,093,966,516 is neither.
+
+**Its origin was subsequently reconstructed and measured, 2026-08-27.** The
+derivation script accumulated the tail with an early-exit shortcut, breaking out
+of the summation once a term's log-probability fell below a threshold and a few
+terms had been taken. That dropped the remaining tail terms, yielding a union of
+8.268585816e-11 rather than the exact 8.2686863018e-11 — and the integer part of
+its reciprocal is 12,093,966,516, reproducing the published figure exactly. So
+the mantissa survived the truncation at four significant figures while the
+reciprocal did not, because inverting a small number amplifies a relative error
+that rounding had hidden. The lesson generalises past this row: a convergence
+shortcut in a tail sum is invisible in the quantity you print and visible in
+anything you derive from it. The `at most 6` row is right on both of
 its figures (exact 3.4750078e-05, reciprocal 28,776.91), so the defect is not
 uniform across the table: it has to be found per figure rather than inferred
 from one row to the next.
