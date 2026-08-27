@@ -59,6 +59,63 @@ instruct its replacement, which is what they were for and remains correct.
 
 The spec carries its own dated amendment. Neither document was edited in place.
 
+## Further note - 2026-08-27, from the `hashdos-resistance-test` increment
+
+**This note corrects the CORRECTION of one item in the amendment above. The
+item itself is not being corrected — it is being restored.** The item concerned
+is the one beginning **"A consequence nobody drew at planning time"**, whose
+claim is that a fixture "CAN recover it, construct a colliding key set, and
+assert the degradation directly".
+
+**Verdict stated before either quotation, so that no sentence below can be read
+the wrong way round: that amendment item is CORRECT, mechanism included, and
+the sentence that called its mechanism wrong is the false one.** The false
+sentence is not in this plan. It is in the design record for the follow-up
+increment, `docs/superpowers/specs/2026-08-27-hashdos-resistance-test-design.md`
+section 2, and it reads: "**The amendment's conclusion is right and its
+mechanism is wrong.** Recovering the seed does not let a Nova fixture predict a
+hash, because computing FNV-1a over a key needs that key's bytes and `std/core`
+records that '`String` has no length, indexing or iteration, so Nova cannot
+walk its bytes'". **That verdict and the reason given for it are what is
+retracted here.** That spec now carries its
+own dated correction saying the same thing about itself.
+
+Why the reason does not hold: `std/bytes` exposes `bytes_from_string`,
+`byte_at` and `to_ints`, and they are reachable from a user module with no
+import at all — the registered fixture `tests/runtime/bytes_basics.nova` calls
+`bytes_from_string("hi")` as its first statement and is checked against a
+golden. `std/strings` additionally gives `String` a `len`, `chars`, `char_at`
+and `slice`. So a Nova fixture can obtain a key's bytes. The arithmetic such a
+prediction needs also already runs in Nova: `std/core`'s `mix64` computes
+splitmix64's finalizer in ordinary Nova `Int` shift, xor and multiply. What
+fails is the impossibility argument, not the amendment item it was aimed at.
+
+`std/core`'s own sentence — `String` "has no length, indexing or iteration, so
+Nova cannot walk its bytes" — is **not** the false statement here. It is true
+where it stands, because it is scoped to `std/core`'s position: `$std.core` is
+the first `STD_MODULES` entry and `$std.bytes` and `$std.strings` come after
+it, so *that module* cannot walk bytes, which is exactly why `str_hash` has to
+be a builtin for it. The error was reading a statement about one module's
+position as a statement about the language. The same wording appears without
+that scoping in `crates/nova-resolver/src/lib.rs`, on the doc comments at
+`Builtin::StrHash` and `Builtin::StrLenChars`, where it reads as a claim about
+Nova; the `hashdos-resistance-test` increment changes no code, so that wording
+is flagged here rather than edited.
+
+**What shipped is a two-process test, and that is a preference rather than a
+necessity.** `hashdos_precomputed_key_set_does_not_survive_a_new_process` in
+`crates/nova-cli/tests/run_tests.rs` searches for a colliding set by calling
+`.hash()` — the runtime's real hash — in one process, and re-hashes that set in
+a second, separately launched process. It **searches** where the amendment item
+expected it to **derive**, and both routes were open. The reason for preferring
+the search is not that deriving was impossible: a reimplementation in Nova
+would pin a second copy of the algorithm and fail for the wrong reason if the
+two ever diverged. That test's own doc comment states the same framing at
+itself.
+
+Passages are anchored by content here, for the reason the note above this one
+gives.
+
 ## Global Constraints
 
 - `cargo build --locked --workspace` **before** `cargo test`. `--no-fail-fast`.
