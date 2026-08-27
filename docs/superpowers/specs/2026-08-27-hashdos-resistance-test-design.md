@@ -249,15 +249,34 @@ statement and is checked against a golden — and `std/strings` gives `String` a
 arithmetic a prediction needs also already runs in Nova: `std/core`'s `mix64`
 computes splitmix64's finalizer in ordinary Nova `Int` shift, xor and multiply.
 
-`std/core`'s quoted sentence is **not** the false one. It is true where it
-stands, being scoped to `std/core`'s position: `$std.core` is the first
-`STD_MODULES` entry and `$std.bytes` and `$std.strings` come after it, so *that
-module* cannot walk bytes, which is why `str_hash` has to be a builtin for it.
-Section 2 read a statement about one module's position as a statement about the
-language. The same wording appears without that scoping at
+`std/core`'s quoted sentence sits in a middle position, and both halves of that
+need stating so neither is read off the other. It is **not** the false one this
+item retracts; the retracted statement is section 2's, quoted above. And it is
+**not** accurate today either: it was true when written and has since gone
+**stale**. `std/core` itself can reach a string's bytes now, by the same route
+it already uses for a string's characters — `str_chars` and
+`bytes_from_string_intrinsic` are both `Builtin::STD_ONLY`, so both are seeded
+into every std module's scope, and `std/core` already calls `str_chars` at
+`impl Debug for String` above a comment recording that it is "already visible
+here with no import".
+
+**An earlier draft of this correction defended that sentence as *scoped* to
+`std/core`'s position in `STD_MODULES`. That defence is withdrawn.** The
+positional facts were right; the inference from them was not.
+`crates/nova-resolver/src/lib.rs` documents the array's order as significant
+"only in that it fixes module indices", and `import_std_module` binds each std
+module's public names into every *other* module's scope, so position does not
+gate the capability; whether it ever did is a question for that resolver code
+and its history, not for this sentence. Section 2's error was therefore reading
+a stale sentence
+as a current one, not misreading a scope — and this item's conclusion depends
+on neither reading, resting only on the byte surface existing.
+
+The same wording appears elsewhere in the tree — at
 `crates/nova-resolver/src/lib.rs`'s doc comments on `Builtin::StrHash` and
-`Builtin::StrLenChars`; this increment changed no code, so that is flagged
-rather than fixed. The merged plan carries the matching dated note.
+`Builtin::StrLenChars` among them — stale there in the same way; this increment
+changed no code, so that is flagged rather than fixed. The merged plan carries
+the matching dated note.
 
 ### b. Section 4's "Why one process cannot do both" gives a false reason
 
