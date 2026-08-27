@@ -676,9 +676,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restoring its own amendment's mechanism, which the design record for this
   increment had wrongly called impossible — Nova can walk a `String`'s bytes
   through `std/bytes` and `std/strings`, and `std/core`'s statement that it
-  cannot is scoped to `std/core`'s position in `STD_MODULES`.
-  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` needs no amendment,
-  checked rather than assumed: nothing it asserts is falsified here.
+  cannot was true when written and is now **stale, not scoped**: every member
+  of `Builtin::STD_ONLY` is seeded into every std module's scope with no
+  condition beyond `is_std_module`, so the byte surface reaches even
+  `std/core`, which makes that conclusion stronger rather than weaker. An
+  earlier draft of the note defended the sentence as scoped to `std/core`'s
+  position in `STD_MODULES`; that defence is withdrawn, and the plan's note
+  and the design record's closing section both carry the withdrawal.
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` **was** checked
+  rather than assumed — against test-assertability, per-process
+  randomisation, precomputation resistance and the readability of the seed —
+  and ruled to need no amendment. **That ruling was correct when it was made
+  and is reversed here.** It now gains a dated 2026-08-27 amendment, because
+  the byte-walking claim it uses to justify `str_hash` went stale later in
+  this same increment, once the `std/bytes` and `std/strings` facts were
+  established, and nobody returned to a ruling a later finding had
+  invalidated. The builtin itself stands — it is a one-shot primitive whose
+  algorithm and per-process seed live in the runtime, and a Nova copy would
+  have to track both — so only the reason is corrected. The sequence is
+  recorded rather than tidied away: a check that examined the right things and
+  was then overtaken is a different failure from a check never made, and only
+  the first one is invisible to a reader who sees the word "checked".
 
 ### Changed
 
