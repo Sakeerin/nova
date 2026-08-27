@@ -629,6 +629,57 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   builds a wider one; this bullet said "both cycle fixtures" until 2026-08-26,
   over a pair in which only that one closes a cycle.
 
+- **The HashDoS resistance property is now executed by a test instead of only
+  argued in prose.** `hashdos_precomputed_key_set_does_not_survive_a_new_process`
+  (`crates/nova-cli/tests/run_tests.rs`) builds a key set that collides under
+  one process's seed and asserts the same set spreads when re-hashed in a
+  second, separately launched process. One Nova program searches candidate keys
+  with `.hash()` until 32 of them share a bucket at capacity 64 and prints
+  their indices; the Rust test inlines those indices into a second Nova
+  program and runs it as its own process, which therefore draws a fresh seed,
+  and asserts the largest bucket holds at most 10 of the 32. The searching
+  phase also re-hashes the set it emits and checks those keys still share one
+  bucket under its own seed, so a filter that emitted 32 arbitrary keys cannot
+  make the comparison vacuous. Thresholds and their derived error rates are in
+  the test's own doc comment rather than restated here.
+  **This retracts a claim in the known-limitations bullet below beginning
+  "Seeding `str_hash` narrowed".** That bullet says "**The resistance property
+  itself is not test-asserted, and cannot be**: building a colliding set
+  requires the seed the design exists to keep unknown." Its first clause, "is
+  not test-asserted", was accurate when written and is **now false** — the
+  property is asserted. Its second clause, "and cannot be", was **false when
+  written**, and its stated reason with it: the route that works
+  needs no seed at all, because the runtime hashes on request, so a fixture
+  **searches** for a colliding set where that sentence assumed it would have to
+  **derive** one. The remainder of that bullet stands.
+  **The gate claim's scope did not move; only its evidence did.** It stays
+  claimable for string-keyed maps against a precomputing attacker — one who
+  must build a colliding key set before it can observe the process that will
+  receive it, which is exactly what the two phases operationalise — stays
+  **not** claimed against an adversary who can observe timing and adapt, and
+  stays **not** claimed for `Int`, `Bool` or `Char` keys, `mix64` being
+  unseeded. The searching phase is not evidence about the timing adversary
+  either: it calls `.hash()` directly, which requires code running inside the
+  target process and is a stronger capability than observing timing from
+  outside.
+  **What this test does not reliably cover is the splitmix64 finalizer.**
+  Without the finalizer the six bucket-selecting bits depend on `seed & 63`
+  alone, so dropping it is partly rather than wholly invisible here, and a
+  failure of this test must not be read as a dead seed without checking the
+  finalizer separately. `tests/runtime/hash_diffusion.nova` fails
+  deterministically when the finalizer is missing. The enumeration behind those
+  two sentences, with its figures, is in the test's doc comment.
+  **Records amended rather than rewritten:** `nova-spec/20-STDLIB.md` §7 and
+  `docs/adr/0018-std-json-scope-and-build-order.md` §8 gain dated amendments
+  recording the moved evidence and the unmoved scope, and
+  `docs/superpowers/plans/2026-08-26-map-hashdos.md` gains a dated note
+  restoring its own amendment's mechanism, which the design record for this
+  increment had wrongly called impossible — Nova can walk a `String`'s bytes
+  through `std/bytes` and `std/strings`, and `std/core`'s statement that it
+  cannot is scoped to `std/core`'s position in `STD_MODULES`.
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` needs no amendment,
+  checked rather than assumed: nothing it asserts is falsified here.
+
 ### Changed
 
 Filed here as well as under Added, because this changes the meaning of code
@@ -1052,7 +1103,12 @@ that already compiled.
   What is asserted is that the seed is live and varies across processes, that
   hashing is stable within one, and that diffusion holds as a seed-independent
   statistic. Anyone strengthening this should re-run the spec's §2 harness
-  rather than trust its numbers.
+  rather than trust its numbers. [Forward marker, 2026-08-27: the bolded
+  sentence immediately above is retracted in both halves by the Added entry
+  beginning "The HashDoS resistance property is now executed" — the property is
+  asserted now, and its "cannot be" was false when written. The wording here is
+  left byte-identical because that entry quotes it, and the assertions this
+  sentence goes on to list are all still in place.]
   **A swappable seeded `Hasher` object is still unbuilt** and still needs the
   accumulating-`Hasher` migration ADR 0005 records, with its deprecation cycle;
   that is what the entry above was pointing at, and it remains the answer for
