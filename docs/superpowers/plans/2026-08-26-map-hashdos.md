@@ -17,8 +17,8 @@ plan rewritten to match what shipped would erase the only thing a superseded
 plan is still good for. Statements in it that the finished increment falsified,
 with the correction each time:
 
-- **Line 96, the runtime doc comment this plan specified verbatim** - "cannot
-  read this value: no builtin exposes it". FALSE. `str_hash` is the builtin
+- **The runtime doc comment this plan specifies verbatim in Task 1** - the
+  line reading "cannot read this value: no builtin exposes it". FALSE. `str_hash` is the builtin
   that exposes it: `("").hash()` returns splitmix64's finalizer applied to the
   raw seed, because FNV's loop body never runs on an empty string, and that
   finalizer is invertible. Measured on the finished branch - a seed recovered
@@ -27,20 +27,21 @@ with the correction each time:
   over routes is not. Corrected wording lives at `nova_rt_str_hash` in
   `crates/nova-runtime/src/lib.rs`.
 - **A consequence nobody drew at planning time, and the more useful half.**
-  Line 564 says the resistance property "is not test-assertable: building a
-  colliding set requires the seed the design is trying to keep unknown." That
+  The closing note says the resistance property "is not test-assertable:
+  building a colliding set requires the seed the design is trying to keep
+  unknown." That
   premise is gone. Since the seed is recoverable in one call, a fixture CAN
   recover it, construct a colliding key set, and assert the degradation
   directly. Whoever strengthens this next should start there rather than
   re-deriving the analysis.
-- **Line 7, "no `.nova` library edit"** - FALSE. The increment edits comments
+- **The Architecture note above, "no `.nova` library edit"** - FALSE. The increment edits comments
   in `std/core`, `std/collections` and `std/json`. No behaviour changed, which
   is what the note meant and not what it said.
-- **Line 564, "machine-specific in their absolutes though not in their
-  shape"** - FALSE. The figures are deterministic integer arithmetic over given
+- **The closing note on the resistance property, "machine-specific in their
+  absolutes though not in their shape"** - FALSE. The figures are deterministic integer arithmetic over given
   bytes; they vary with the seed, not with the machine.
-- **The `largest under 60` bound at lines 381 and 390, and the mutation
-  expectation at 463 written against it.** The bound shipped and was then
+- **The `largest under 60` bound in Task 2's fixture body and golden, and
+  mutation 2's expectation written against it.** The bound shipped and was then
   changed to `< 64`. At 60 the assertion fails about one run in 6,100 - an
   undisclosed flake, while its sibling assertion's risk was derived. Measured
   over 300 seeds: the finalized largest bucket ranges 40 to 56 and the
@@ -52,8 +53,9 @@ with the correction each time:
   cross-process test rather than the diffusion fixture is what catches a dead
   seed.
 
-Lines 498 and 504 are NOT in this list. They quote wording in order to instruct
-its narrowing, which is what they were for and remains correct.
+Task 3's instructions to narrow the Phase 2.2a disclosure and to correct the
+resolver doc comment are NOT in this list. They quote stale wording in order to
+instruct its replacement, which is what they were for and remains correct.
 
 The spec carries its own dated amendment. Neither document was edited in place.
 
