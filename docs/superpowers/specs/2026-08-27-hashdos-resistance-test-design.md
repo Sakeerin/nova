@@ -221,3 +221,100 @@ record that this test and `hash_diffusion` answer different questions.
   next reader sees the threshold's justification without leaving the file.
 - The records in section 7 state the same scope they state today, with evidence
   added and nothing widened.
+
+## 11. Correction, 2026-08-27 — statements above that are wrong
+
+Written after the test shipped, at the review that closed the increment. **The
+body above is left as written**, in the convention the previous increment used:
+a design record keeps its original wording so the evidence of the error
+survives. Read the sections named below only with this one beside them.
+
+### a. Section 2's verdict on the merged plan's amendment is retracted
+
+**The statement being retracted belongs to this spec. The statement being
+restored belongs to the merged plan.** Section 2 above says of that plan's
+amendment: "**The amendment's conclusion is right and its mechanism is wrong.**
+Recovering the seed does not let a Nova fixture predict a hash, because
+computing FNV-1a over a key needs that key's bytes and `std/core` records that
+'`String` has no length, indexing or iteration, so Nova cannot walk its
+bytes'". **The "mechanism is wrong" verdict is retracted, and so is the reason
+given for it. The amendment's mechanism was viable, and the amendment was right
+on both halves rather than on one.**
+
+`std/bytes` exposes `bytes_from_string`, `byte_at` and `to_ints`, reachable
+from a user module with no import — the registered fixture
+`tests/runtime/bytes_basics.nova` calls `bytes_from_string("hi")` as its first
+statement and is checked against a golden — and `std/strings` gives `String` a
+`len`, `chars`, `char_at` and `slice`. Nova can obtain a key's bytes. The
+arithmetic a prediction needs also already runs in Nova: `std/core`'s `mix64`
+computes splitmix64's finalizer in ordinary Nova `Int` shift, xor and multiply.
+
+`std/core`'s quoted sentence is **not** the false one. It is true where it
+stands, being scoped to `std/core`'s position: `$std.core` is the first
+`STD_MODULES` entry and `$std.bytes` and `$std.strings` come after it, so *that
+module* cannot walk bytes, which is why `str_hash` has to be a builtin for it.
+Section 2 read a statement about one module's position as a statement about the
+language. The same wording appears without that scoping at
+`crates/nova-resolver/src/lib.rs`'s doc comments on `Builtin::StrHash` and
+`Builtin::StrLenChars`; this increment changed no code, so that is flagged
+rather than fixed. The merged plan carries the matching dated note.
+
+### b. Section 4's "Why one process cannot do both" gives a false reason
+
+That subsection reads "Nova cannot evaluate the hash for a seed other than its
+own, for the same reason it cannot compute the hash at all: no byte access to a
+`String`." **The reason is false for the same reason item (a) gives, and the
+two-process design nevertheless stands.** It stands on a different ground: both
+phases exercise the runtime's real hash, whereas computing the hash in Nova
+would pin a second copy of the algorithm and fail for the wrong reason if the
+two ever diverged. The shipped test's doc comment states it that way. So the
+design was preferable, not forced.
+
+### c. Section 3 overstates what phase 1 demonstrates
+
+Section 3 says of the searching phase: "This is an adaptive attack succeeding,
+so the limit the records already disclose becomes demonstrated rather than
+asserted." **That is too strong and is narrowed here.** The limit those records
+disclose is stated as "an adversary who can observe timing and adapt"
+(`nova-spec/20-STDLIB.md` section 7, `docs/adr/0018-std-json-scope-and-build-order.md`
+section 8). Phase 1 observes no timing: it calls `.hash()` directly, which
+requires code running inside the target process and is a stronger capability
+than observing timing from outside. **What phase 1 does pin is that given
+direct access to the hash, a colliding key set is cheap to find. It does not
+pin the timing adversary, and the records were amended to say so rather than to
+claim otherwise.** The shipped test's doc comment carries the same overstated
+framing — "so the limit the records disclose is demonstrated here too" — and
+this increment changed no code, so correcting that comment is outstanding.
+
+### d. Section 6's mutation-4 expectation is wrong
+
+Mutation 4 reads "Phase 2 is expected to still pass, because a seed change
+alone moves these keys". **Dropping the finalizer is only partly invisible to
+this test, not wholly.** Without the finalizer the six bucket-selecting bits
+depend on `seed & 63` alone, so the layout space collapses from 2^64 to the
+residue pairs; enumerated against the real hash over the real key strings, a
+minority of those pairs fail the bound and a smaller minority print the same
+largest-bucket value a dead seed produces. Figures and the enumeration method
+are in the shipped test's doc comment and are not duplicated here. **The usable
+statement is the one that mutation existed to produce, and it survives in
+stronger form: coverage of the finalizer here is partial and unreliable,
+`tests/runtime/hash_diffusion.nova` is the deterministic detector, and a
+failure of this test must not be read as a dead seed without checking the
+finalizer separately.**
+
+A better articulation of why the finalizer is needed also falls out, and is
+recorded here because the project has been making the weaker argument: the
+standing justification is that bit 0 of an FNV result is bit 0 of the basis
+XOR the input bytes' parity. The stronger true statement is that **all six
+bucket-selecting bits at capacity 64 are a function of six seed bits.**
+
+### e. Section 7's ADR 0005 item, ruled rather than left open
+
+Section 7 asks for a pointer in `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`
+"only if the amendment there asserts something this increment changes."
+**Ruled: no amendment. It was checked, not assumed.** That ADR's relevant
+wording is its Phase 2.2a disclosure that hashes are not randomized per
+process, plus the previous increment's amendment quoting that same sentence.
+Neither asserts anything about test-assertability or about precomputation
+resistance, so this increment falsifies nothing there, and a note that only
+announced a test's existence would be noise in a decision record.
