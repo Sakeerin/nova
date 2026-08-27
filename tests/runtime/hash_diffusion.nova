@@ -13,13 +13,41 @@
 // Measured against 60 random seeds, with keys built exactly as below:
 // unfinalized reached 32 of 64 buckets under every seed and its largest
 // bucket ran 66 to 76; finalized reached 64 of 64 under every seed with a
-// largest bucket of 40 to 53. So `reached` is a structural assertion, not a
-// threshold, and the bound on the largest bucket has room on both sides.
+// largest bucket of 40 to 53. A later sweep over 300 seeds widened the
+// finalized largest bucket to 40-56 and left the unfinalized range at 66-76.
+// So `reached` is a structural assertion, not a threshold, and the bound on
+// the largest bucket has room on both sides.
 //
-// The residual flake risk on `reached` is a bucket left empty by chance:
-// about 2 in 10^12 per run with these numbers. The bound of 60 on the largest
-// bucket sits 7 above the measured finalized maximum and 6 below the measured
-// unfinalized minimum.
+// EACH ASSERTION THIS FIXTURE PRINTS CARRIES A RISK, AND EACH RATE IS DERIVED
+// BELOW. Stating one rate beside a silent sibling invites the reader to read
+// the silence as zero, which is the defect this paragraph exists to close.
+// Bucket counts are not independent -- they sum to 1999 -- so these are
+// union-bound figures, which agree with the independent-product form to four
+// significant figures at these numbers.
+//
+//   * `reached 64 of 64` FLAKES if chance leaves a bucket empty. That is
+//     (63/64)^1999 per bucket over 64 buckets: about 1 in 7 * 10^11 per run.
+//   * `largest < 64` FLAKES if chance overfills one bucket. A bucket's count is
+//     Binomial(1999, 1/64) with mean 31.23, so the rate is that distribution's
+//     right tail from 64 up, over 64 buckets: about 1 in 110 000 per run.
+//   * `largest < 64` LETS A MUTATION ESCAPE if the unfinalized hash passes it.
+//     The unfinalized hash reaches 32 buckets, so its counts are
+//     Binomial(1999, 1/32) with mean 62.47, and the escape is the probability
+//     that all 32 stay under 64: about 1 in 1.1 * 10^8 per run.
+//
+// The bound read 60 before, whose flake rate is about 1 in 6100 -- eighteen
+// times worse -- against an escape rate of about 1 in 1.9 * 10^14. Moving to 64
+// buys that eighteen-fold flake reduction and pays for it with an escape that is
+// still about a thousand times rarer than the flake remaining at 64, and about
+// 18 000 times rarer than the flake it removes. 64 sits 8 above the widest
+// measured finalized maximum (56, over 300 seeds) and 2 below the lowest
+// measured unfinalized largest bucket (66).
+//
+// DO NOT RAISE IT PAST 66. At 66 the escape rate is about 1 in 660 000 against
+// a flake rate of about 1 in 520 000 -- the two have met -- and above 66 the
+// seed-only design section 2 of the spec rejected starts passing outright, at
+// which point this fixture stops distinguishing the shipped hash from the
+// rejected one, which is the whole reason it exists.
 fn key_at(i: Int) -> String {
     let alpha = ["b", "d", "f", "h", "j", "l", "n", "p", "r", "t", "v", "x"]
     let mut n = i
@@ -53,5 +81,5 @@ fn main() {
     }
     println("keys ${n} into ${cap} buckets")
     println("reached ${reached} of ${cap}")
-    println("largest under 60 ${largest < 60}")
+    println("largest under 64 ${largest < 64}")
 }

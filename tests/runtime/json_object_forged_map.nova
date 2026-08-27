@@ -17,9 +17,20 @@
 // the reachable key and slot 2 for the missed one, which held only while
 // `str_hash` was an unseeded constant-basis FNV-1a. It is now seeded
 // per-process, so the slots differ every run and the layout has to be searched
-// for. The three precondition lines below are not decoration: if no layout is
-// found, or if the reachable key stops being reachable, this fixture FAILS
-// rather than silently stopping exercising the separator.
+// for. The precondition lines below are not decoration: if no layout is found,
+// or if the reachable key stops being reachable, this fixture FAILS rather than
+// silently stopping exercising the separator.
+//
+// `layout found false` HAS A RATE, and it is derived here because the paragraph
+// below derives one for the winning key and a silent sibling reads as zero.
+// `find_layout` exhausts its eight candidates for about 1.5 seeds in 100 000.
+// The dominant term is every candidate's home slot landing in the top two,
+// `(2/8)^8` at capacity 8: a candidate whose home is `cap - 1` has no later
+// slot to place the missed key at, and one whose home is `cap - 2` has only
+// `cap - 1`, which the remaining candidates then occupy. On such a seed the
+// golden mismatches loudly, which is the designed behaviour and not a
+// regression in `stringify` -- so read `layout found false` as a seed the
+// search could not satisfy.
 //
 // THE GOLDEN CANNOT NAME A WINNING KEY, and that is not an oversight: which
 // candidate `find_layout` returns is itself process-dependent. A candidate
