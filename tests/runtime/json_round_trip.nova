@@ -30,7 +30,19 @@
 // the first again. NO `grow` IS INVOLVED: two entries never approach a cap-8
 // table's 3/4 threshold. So `first == second` would simply FAIL for 1.5% of
 // two-key objects; a golden pinning a hash ordering is the weaker of the two
-// reasons, not the whole one. The printed text was derived from `stringify`'s own
+// reasons, not the whole one.
+//
+// THE FIGURES ABOVE WERE MEASURED UNDER THE UNSEEDED `str_hash`: the 56 of
+// 3782, the 1.5% that follows from it, and `"p"` then `"h"` rendering
+// `{"h":1,"p":2}`. `str_hash` is now seeded once per process, so which pairs
+// flip is a function of the layout a run happens to build and none of them
+// may be relied on run to run -- not that each must differ, since two seeds may
+// agree on a layout. They are kept rather than deleted because what they
+// establish survives: a two-key object's rendered order can flip across a
+// render and a reparse with NO `grow` involved, so the one-key restriction is
+// what makes `first == second` a property of the codec rather than of the run.
+//
+// The printed text was derived from `stringify`'s own
 // rules and Rust's `f64` Display, not captured -- `0.0` renders `0`, `1.0`
 // renders `1`, and `quote` escapes `"` `\` LF TAB as `\"` `\\` `\n` `\t` while
 // leaving `q` alone and sending `0x01` to `\u0001`.
