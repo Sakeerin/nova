@@ -273,5 +273,23 @@ statement, and gives the correction.
    increment: seeding did not open the channel, it made the value behind it worth recovering.
    Narrowing that signature is an ADR-level question and is not proposed here.
 
+5. **§5's "What no test asserts, said plainly" — appended 2026-08-27 from the
+   `hashdos-resistance-test` increment, later than the four items above and by a different hand.**
+   **Verdict before the quotation: that sentence is false on both halves, and the increment just
+   named is what falsifies it.** It reads: "The resistance property itself is not test-assertable,
+   because building a colliding set requires the seed the test is trying to prove unknowable." The
+   first half, "not test-assertable", is **false**:
+   `hashdos_precomputed_key_set_does_not_survive_a_new_process` in
+   `crates/nova-cli/tests/run_tests.rs` asserts exactly that property, building a colliding set in
+   one process and showing it spread in a fresh one. The second half, the reason, is **false
+   independently and was false when written**: building a colliding set needs no seed at all,
+   because the runtime hashes on request, so a fixture **searches** with `.hash()` where this
+   sentence assumed it would have to **derive**. The full argument — including that Nova *can* walk
+   a `String`'s bytes through `std/bytes` and `std/strings`, so even the deriving route was open —
+   is in `docs/superpowers/specs/2026-08-27-hashdos-resistance-test-design.md` section 11 and is
+   not restated here. §5's neighbouring ruling that diffusion is assertable as a seed-independent
+   statistic stands, as does its warning against claiming any one test is the only thing catching
+   something.
+
 None of these changes §4's gate ruling, which the implementation kept: the throughput gate is
 claimable for string-keyed maps **against a precomputing attacker**, and not more.
