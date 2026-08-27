@@ -10,6 +10,20 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-27-hashdos-resistance-test-design.md`
 
+## Amendment - 2026-08-27, written after execution
+
+This plan is kept as written and amended here rather than corrected in place: a plan rewritten to match what shipped would erase the evidence that it was wrong, which is what a superseded plan is still good for. One item below is not a statement but an **instruction**, so flagging it is not enough — an instruction stays executable until something tells an executor not to execute it.
+
+**STEP 3'S INSTRUCTION MUST NOT BE FOLLOWED AS WRITTEN.** Step 3, headed "Correct the merged plan's amendment mechanism", directs the executor to "Add a further dated note (2026-08-27) recording that recovering the seed does not let a Nova fixture predict a hash, because computing FNV-1a over a key needs that key's bytes and `std/core` records that `String` has no length, indexing or iteration". **Do not write that.** The justification is false, so the note that step asks for would retract something true. `std/bytes` exposes `bytes_from_string`, `byte_at` and `to_ints`, reachable from a user module with no import at all — the registered fixture `tests/runtime/bytes_basics.nova` calls `bytes_from_string("hi")` as its first statement and is checked against a golden — and `std/strings` gives `String` a `len`, `chars`, `char_at` and `slice`. Nova can walk a `String`'s bytes, so the merged plan's amendment mechanism was viable.
+
+**What to write instead**, and what the executing increment did write: a note recording that the merged plan's amendment **stands**, and that the *correction* of it — in this plan's own spec, section 2 — is the thing that fails. That note is in `docs/superpowers/plans/2026-08-26-map-hashdos.md` under its 2026-08-27 heading, and the spec carries a matching dated correction as its own closing section. Step 3's other directions are unaffected and were followed: quote the retracted wording inside the retraction, keep each sentence unambiguous about which half is which, and anchor by content rather than by line number.
+
+**The same false justification appears elsewhere in this plan as statements rather than instructions, and the paragraph above retracts each of them rather than repeating it:** the note to executors headed "Why two processes and not one", which states it flatly, with "at all"; the Phase 1 doc comment this plan dictates verbatim; and the Phase 2 body comment beside the second build. The shipped tree does not carry that wording — Task 1's prose was corrected on this branch, at the commit whose subject is "correct two false justifications in the hashdos test's prose" — so this plan and the tree it produced disagree about a comment this plan dictated. Read the tree.
+
+**The two-process design still stands, on corrected grounds.** It is not forced by impossibility. Both phases exercise the runtime's real hash, whereas computing the hash in Nova would pin a second copy of the algorithm and fail for the wrong reason if the two ever diverged. `hashdos_precomputed_key_set_does_not_survive_a_new_process` in `crates/nova-cli/tests/run_tests.rs` states that framing at itself.
+
+Passages here are anchored by content and not by line number, for the reason the merged plan's own note gives: inserting an amendment at the head of a file moves every line number the amendment cites, so a line citation falsifies itself in the act of being written.
+
 ## Global Constraints
 
 - `cargo build --locked --workspace` BEFORE `cargo test`. `include_str!` embeds every `std/*/lib.nova` in the compiler, so a stale binary measures old text and reports a FALSE PASS.
