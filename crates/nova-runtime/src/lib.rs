@@ -249,9 +249,21 @@ pub unsafe extern "C" fn nova_rt_str_cmp(a: *const NovaStr, b: *const NovaStr) -
 /// already uses the same pattern.
 ///
 /// `RandomState` is `std`'s own `HashMap` seed source, so this draws OS
-/// entropy with no new dependency and nothing above MSRV 1.78. Nova code
-/// cannot read this value: no builtin exposes it, and `collect_externs`
-/// refuses every `nova_`-prefixed `extern` name.
+/// entropy with no new dependency and nothing above MSRV 1.78.
+///
+/// **Nova code CAN recover this value, exactly, in one call.** An earlier
+/// version of this comment said it could not, on the grounds that no builtin
+/// exposes it and that `collect_externs` refuses every `nova_`-prefixed
+/// `extern` name. The `collect_externs` half is true; the closed world over
+/// routes is not. `str_hash` is the builtin that exposes it: `("").hash()`
+/// runs FNV's loop body zero times, so it returns [`splitmix64_finalize`]
+/// applied to this raw seed, and that finalizer is a bijection with a
+/// published inverse. Measured on this tree -- `("").hash()` from an ordinary
+/// Nova program gave `-4152075758151904758`, inverting the finalizer gave the
+/// seed `0xa3881b6692503399`, and that seed predicted `("abc").hash()` and
+/// `("hello world").hash()` from the same process exactly; four processes gave
+/// four different values, so the seed is live. What that costs and what it
+/// does not is at [`nova_rt_str_hash`].
 fn str_hash_seed() -> u64 {
     static SEED: OnceLock<u64> = OnceLock::new();
     *SEED.get_or_init(|| {
@@ -302,10 +314,20 @@ fn splitmix64_finalize(mut z: u64) -> u64 {
 ///
 /// STILL NOT COLLISION-RESISTANT, and still not for anything
 /// security-sensitive. What the seed and finalizer buy is resistance to a
-/// PRECOMPUTED collision set: an attacker who cannot learn the seed cannot
-/// build one offline. An adversary who can observe timing and adapt is out of
-/// scope, and `mix64` -- the `Int`, `Bool` and `Char` impls -- is not seeded at
-/// all.
+/// PRECOMPUTED collision set: the seed is drawn per process, so a colliding key
+/// set cannot be built offline against a process that has not started yet, and
+/// recovering the seed means first obtaining a hash from the running process.
+/// `mix64` -- the `Int`, `Bool` and `Char` impls -- is not seeded at all.
+///
+/// An adversary who can observe the process and adapt is OUT OF SCOPE, and the
+/// route is concrete rather than a category: one string hash read out of this
+/// process recovers the seed, because `("").hash()` is the finalizer applied to
+/// the seed alone (see `str_hash_seed`), so an attacker who can obtain any
+/// `String` hash from a running process can construct collisions for it. The
+/// channel is ADR 0005's one-shot `fn hash(self) -> Int` returning a whole
+/// 64-bit result in one call, which predates the seeding: seeding did not open
+/// the channel, it made the value behind it worth recovering. Precomputation
+/// resistance is the half that survives.
 ///
 /// The `u64 -> i64` reinterpretation at the end means the result may be
 /// negative, so a caller selecting buckets must mask (`hash & (cap - 1)`,

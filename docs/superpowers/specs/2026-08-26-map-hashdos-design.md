@@ -221,3 +221,57 @@ amendment to it rather than as a decision overriding it.
   remember that a correct retraction therefore still contains it.
 - This spec and the plan that follows sit in **no per-commit review's scanned set**. Byte-scan them
   when written, and re-scan the whole branch-changed set as one population at final review.
+
+---
+
+## 8. Amendment, 2026-08-26 — statements above that what shipped falsified
+
+Added after implementation, at the fix round that closed the increment. **The body above is left as
+written**, because it is the authority the implementation argued from and editing it to match what
+shipped would erase the evidence that it was wrong. Each item below names the section, quotes the
+statement, and gives the correction.
+
+1. **§3 — "No Nova-side diff at all. `std/core`, `std/collections` and `std/json` are not edited",
+   and §7's "This increment edits no `.nova` library file".** Both false. The increment edits
+   `std/collections/lib.nova`, `std/core/lib.nova` and `std/json/lib.nova`. Every one of those edits
+   is a **comment** — the per-process seed recorded at `Map`, at `impl Hash for String`, and at
+   `std/json`'s object paths — so the source-compatibility conclusion the sentence was serving
+   stands, and the accurate form of it is "no Nova-side source changed *behaviour*". The
+   rebuild-first discipline §7 derives from `include_str!` therefore applies with more force than
+   §7 expected, not less: the increment does edit files that are compiled into the binary its own
+   fixtures run against.
+
+2. **§3 — the seed expression is incomplete.** It reads
+   `RandomState::new().build_hasher().finish()`. The shipped `str_hash_seed` writes one `u64` in
+   between: `build_hasher()`, then `h.write_u64(0)`, then `h.finish()`. Without that write,
+   `finish()` would hash an empty byte stream and so would still return a function of
+   `RandomState`'s random keys, i.e. still a per-process value — so this is a difference between
+   what was specified and what shipped rather than a defect in either, but a reader reimplementing
+   the seed from §3 alone would compute a different number.
+
+3. **§5's mutation-1 prediction is wrong.** It reads "fix the seed to the old constant basis (the
+   diffusion fixture and the cross-process test must both fail)". Only the cross-process test fails.
+   With the basis pinned to the old constant and the finalizer kept, `hash_diffusion.nova` **passes**
+   — the finalizer is what that fixture discriminates on, and it is still present. The plan written
+   from this spec corrected the prediction; this text did not, so the two disagreed until now. The
+   mutation that must fail is §5's second one, dropping the finalizer while keeping the seed.
+
+4. **§3 — "No entropy exposed to Nova. The seed is runtime-internal; no Nova program can read it."**
+   False, and this is the item worth reading twice. `("").hash()` returns splitmix64's finalizer
+   applied to the raw seed, because FNV's loop body never runs on an empty string, and that
+   finalizer is a bijection with a published inverse — so **one call from ordinary Nova code
+   recovers the seed exactly**. Measured on the implementing tree: one `("").hash()` inverted to a
+   seed, and that seed then predicted two further hashes from the same process exactly; four
+   processes gave four different values, so the seed is live. What §4 claims still holds on both
+   halves. **Precomputation resistance stands**: the seed is per process, so a colliding key set
+   cannot be built offline against a process that has not started, and recovering the seed requires
+   a hash *from the running process*. **The adaptive case is now concrete rather than a category**:
+   an attacker who can obtain one `String` hash from the process can recover its seed and construct
+   collisions for that process. §4's "does not defeat an adversary who can observe timing and adapt"
+   is the statement this is the mechanism for. The channel is ADR 0005's one-shot
+   `fn hash(self) -> Int` returning a whole 64-bit result in one call, which predates this
+   increment: seeding did not open the channel, it made the value behind it worth recovering.
+   Narrowing that signature is an ADR-level question and is not proposed here.
+
+None of these changes §4's gate ruling, which the implementation kept: the throughput gate is
+claimable for string-keyed maps **against a precomputing attacker**, and not more.
