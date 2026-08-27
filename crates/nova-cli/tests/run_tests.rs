@@ -8695,20 +8695,40 @@ fn main() {
         println("found false")
         return
     }
+    let mut picked = [0; WANT]
     let mut out = ""
     let mut n = 0
     let mut j = 0
     while j < BUDGET {
         let k = "k${j}"
         if (k.hash() & (CAP - 1)) == target {
+            picked[n] = j
             out = "${out}${j} "
             n = n + 1
             if n == WANT { break }
         }
         j = j + 1
     }
+    // Self-check: bucket the emitted set with phase 2's own arithmetic. Under this
+    // process's seed every picked key shares `target`, so this is the whole
+    // set size; if it is not, the set being handed to phase 2 is not the set
+    // phase 1 claims to have found.
+    let mut own = [0; CAP]
+    let mut m = 0
+    while m < n {
+        let k = "k${picked[m]}"
+        own[k.hash() & (CAP - 1)] = own[k.hash() & (CAP - 1)] + 1
+        m = m + 1
+    }
+    let mut conc = 0
+    let mut q = 0
+    while q < CAP {
+        if own[q] > conc { conc = own[q] }
+        q = q + 1
+    }
     println("found true")
     println("count ${n}")
+    println("concentration ${conc}")
     println("indices ${out}")
 }
 "#;
@@ -8760,6 +8780,12 @@ fn main() {
 /// the margin before a broken seed could pass is 22 keys — measured, by
 /// running both phases in one process.
 ///
+/// Phase 1 also re-hashes the 32 keys it emits and checks they still land in
+/// one bucket under its own seed, rather than trusting its own `count 32`
+/// report — a filter that emitted 32 arbitrary keys would satisfy that
+/// count without the set actually colliding, which would make phase 2's
+/// comparison prove nothing.
+///
 /// What this does NOT cover: the splitmix64 finalizer. Dropping it while
 /// keeping the seed leaves this test passing, because a seed change alone
 /// moves these keys. `hash_diffusion` is what fails for that.
@@ -8798,6 +8824,11 @@ fn hashdos_precomputed_key_set_does_not_survive_a_new_process() {
     assert!(
         found.contains("count 32"),
         "phase 1 must report exactly the set size it was asked for; it printed:\n{found}"
+    );
+    assert!(
+        found.contains("concentration 32"),
+        "phase 1's self-check must confirm the 32 keys it emitted actually share one \
+         bucket under its own seed, not merely that it emitted 32 of them; it printed:\n{found}"
     );
     let indices: Vec<&str> = found
         .lines()
