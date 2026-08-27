@@ -91,16 +91,37 @@ splitmix64's finalizer in ordinary Nova `Int` shift, xor and multiply. What
 fails is the impossibility argument, not the amendment item it was aimed at.
 
 `std/core`'s own sentence — `String` "has no length, indexing or iteration, so
-Nova cannot walk its bytes" — is **not** the false statement here. It is true
-where it stands, because it is scoped to `std/core`'s position: `$std.core` is
-the first `STD_MODULES` entry and `$std.bytes` and `$std.strings` come after
-it, so *that module* cannot walk bytes, which is exactly why `str_hash` has to
-be a builtin for it. The error was reading a statement about one module's
-position as a statement about the language. The same wording appears without
-that scoping in `crates/nova-resolver/src/lib.rs`, on the doc comments at
-`Builtin::StrHash` and `Builtin::StrLenChars`, where it reads as a claim about
-Nova; the `hashdos-resistance-test` increment changes no code, so that wording
-is flagged here rather than edited.
+Nova cannot walk its bytes" — sits in a middle position, and both halves of
+that need stating so neither is read off the other. It is **not** the false
+statement this note retracts; the retracted one is the spec's, quoted above.
+And it is **not** accurate today either: it was true when written and has since
+gone **stale**. So nothing here overrides that sentence, and nothing here
+defends it as still current.
+
+Stale rather than merely superseded somewhere else, because `std/core` itself
+can reach a string's bytes today — by the same route it already uses to reach a
+string's characters. `str_chars` and `bytes_from_string_intrinsic` are both
+`Builtin::STD_ONLY`, so both are seeded into every std module's scope, and
+`std/core` already calls `str_chars` at `impl Debug for String`, above a comment
+recording that it is "already visible here with no import".
+
+**An earlier draft of this note gave a different reason, and that reason is
+withdrawn.** It argued the sentence stayed true because it was *scoped* to
+`std/core`'s position — `$std.core` being the first `STD_MODULES` entry, with
+`$std.bytes` and `$std.strings` after it. The positional facts are right; the
+inference drawn from them is not. `crates/nova-resolver/src/lib.rs` documents
+that array's order as significant "only in that it fixes module indices", and
+`import_std_module` binds each std module's public names into every *other*
+module's scope, so position does not gate the capability. Whether it ever did
+is a question for that resolver code and its history, not for this sentence.
+The conclusion this note reaches does not rest on a mechanism of that kind,
+which is why dropping it costs the argument nothing.
+
+The same wording appears elsewhere in the tree — at
+`crates/nova-resolver/src/lib.rs`'s doc comments on `Builtin::StrHash` and
+`Builtin::StrLenChars` among them — stale there in the same way; the
+`hashdos-resistance-test` increment changes no code, so that wording is flagged
+here rather than edited.
 
 **What shipped is a two-process test, and that is a preference rather than a
 necessity.** `hashdos_precomputed_key_set_does_not_survive_a_new_process` in
