@@ -127,8 +127,8 @@ buckets:
 | threshold | false failure (flake) | margin against a dead seed |
 |---|---|---|
 | at most 6 | 3.475e-05, about 1 run in 28,777 | needs 7 in one bucket to pass wrongly |
-| **at most 10** | **8.269e-11, about 1 run in 12,093,966,516** | needs 11; a dead seed yields 32 |
-| at most 12 | 5.684e-14 | needs 13 |
+| **at most 10** | **8.269e-11, about 1 run in 12,093,819,544** | needs 11; a dead seed yields 32 |
+| at most 12 | 5.573e-14 | needs 13 |
 
 Simulating 3000 independent seed pairs end to end, the phase-2 largest bucket
 never exceeded 5 and sat at 4 or below in 99 per cent of pairs.
@@ -224,10 +224,19 @@ record that this test and `hash_diffusion` answer different questions.
 
 ## 11. Correction, 2026-08-27 — statements above that are wrong
 
-Written after the test shipped, at the review that closed the increment. **The
-body above is left as written**, in the convention the previous increment used:
-a design record keeps its original wording so the evidence of the error
-survives. Read the sections named below only with this one beside them.
+Written after the test shipped, at the review that closed the increment, and
+extended by the fix round that closed it for good; items (c), (e) and (f) carry
+that later material and each says where it begins. **The body above is left as
+written**, in the convention the previous increment used: a design record keeps
+its original wording so the evidence of the error survives. Read the sections
+named below only with this one beside them.
+
+**There is one exception to "left as written", and it is item (f).** Two
+arithmetic figures in section 5's threshold table are corrected in the table
+itself, because a reference number is used rather than read: a reader who
+copies a wrong one carries the error forward instead of noticing it. Item (f)
+records what those figures were, so the evidence survives there instead of in
+the table. Nothing else above is edited.
 
 ### a. Section 2's verdict on the merged plan's amendment is retracted
 
@@ -305,6 +314,26 @@ claim otherwise.** The shipped test's doc comment carries the same overstated
 framing — "so the limit the records disclose is demonstrated here too" — and
 this increment changed no code, so correcting that comment is outstanding.
 
+**Closed, at the fix round, later than the paragraph above: that comment WAS
+corrected on this branch, and the sentence ending the paragraph is now false in
+each of its three clauses — the comment no longer carries the framing, this
+increment did change that code, and nothing is outstanding.** It was corrected
+at the commit whose subject is "stop the hashdos
+test's comment claiming it demonstrates the timing limit", and the shipped
+`hashdos_precomputed_key_set_does_not_survive_a_new_process` no longer carries
+the overstated framing — read the test rather than the sentence above it. The
+"this increment changed no code" premise stopped holding at that commit: the
+increment changed no *product* code and still does not, but the fix round
+lifted that premise for this one comment, so the conclusion drawn from it fell
+with it. **The item is kept rather than deleted** because the overclaim's
+history is the useful part: the framing reached section 3 above, a shipped doc
+comment, and Task 2 Step 2 of this increment's plan, which still instructs an
+executor to write it into `nova-spec/20-STDLIB.md` and
+`docs/adr/0018-std-json-scope-and-build-order.md`. Those two records do not
+carry it — the executor declined that instruction — and the plan's head note
+now says not to follow it. Nothing in this item is outstanding work, and a
+reader who arrives to fix that doc comment will find it already fixed.
+
 ### d. Section 6's mutation-4 expectation is wrong
 
 Mutation 4 reads "Phase 2 is expected to still pass, because a seed change
@@ -337,3 +366,74 @@ process, plus the previous increment's amendment quoting that same sentence.
 Neither asserts anything about test-assertability or about precomputation
 resistance, so this increment falsifies nothing there, and a note that only
 announced a test's existence would be noise in a decision record.
+
+**Reversed, at the fix round, later than the ruling above: ADR 0005 now carries
+a dated 2026-08-27 amendment.** Two things above are wrong, and only one of them
+was wrong when it was written.
+
+The check behind the ruling looked at four things — test-assertability,
+per-process randomisation, precomputation resistance, and the readability of the
+seed — and was correct on all four at the time. **What it could not have
+examined is the sentence that makes an amendment necessary, because that sentence
+was not yet false when the check ran.** ADR 0005's Decision justifies `str_hash`
+"because Nova cannot walk a string's bytes: `String` has no length, indexing or
+iteration, and is not FFI-safe, so no `extern` can reach it either", and item (a)
+above is what falsified the first clause of that, later in this same increment.
+Nobody returned to the ruling.
+
+**The reason stated above is separately inaccurate about ADR 0005's contents, and
+that half was wrong when written.** Its 2026-08-26 amendment does assert
+something about precomputation resistance — that "an attacker who cannot learn
+the seed cannot build one offline", closing "Precomputation resistance is the
+half that survives" — and it documents the seed-readability channel as well.
+The defensible statement is the narrower one: this increment falsifies neither,
+and it moves the evidence for the first from prose to an executing assertion.
+That corrects the reason, not the outcome; the outcome is reversed on the
+separate ground above.
+
+**Keep the sequence, not only the outcome.** A check that examined the right
+things and was then overtaken by a finding in its own increment is a different
+failure from a check never made, and only the first one is invisible to a reader
+who sees the word "checked" and stops there. The amendment in ADR 0005 states
+that sequence at itself.
+
+`str_hash` is not thereby unjustified and ADR 0005's decision does not move. It
+remains a one-shot hash primitive whose algorithm lives in the runtime, and a
+Nova reimplementation would put a second copy of that algorithm — and now of
+the per-process seed — in the tree to keep in step with the first. Only the
+reason for the builtin is corrected.
+
+### f. Section 5's threshold table carried two wrong figures
+
+**Written at the fix round, later than items (a) to (e), and the one item that
+edits the body above.** Both are recomputed with Python's `fractions.Fraction`,
+which keeps `64 * P(Bin(32, 1/64) >= k)` an exact rational until the final
+rounding:
+
+| figure | was | is | exact value |
+|---|---|---|---|
+| `at most 12`, the union bound | 5.684e-14 | 5.573e-14 | 5.573419e-14 |
+| `at most 10`, the reciprocal | 1 run in 12,093,966,516 | 1 run in 12,093,819,544 | 12,093,819,543.57 |
+
+The two are wrong for different reasons, and only one reason is known. The
+`at most 12` union bound was accumulated as a floating-point right tail instead
+of an exact rational, which put it about 2 per cent high. **The reciprocal on the
+`at most 10` row has no such account, and is the more instructive of the two.**
+The `8.269e-11` mantissa beside it is right and is unchanged — the exact value
+is 8.26868630e-11 — and the published reciprocal is not the reciprocal of that
+mantissa at any rounding of it: 1/8.26869e-11 is 12,093,814,135 and 1/8.269e-11
+is 12,093,360,745, and 12,093,966,516 is neither. Where it did come from is not
+recorded and is not reconstructed here. The `at most 6` row is right on both of
+its figures (exact 3.4750078e-05, reciprocal 28,776.91), so the defect is not
+uniform across the table: it has to be found per figure rather than inferred
+from one row to the next.
+
+**Neither corrected figure is the bound the test uses.** The bound in use is
+10, an integer literal in the test's own `largest <= 10` assertion, and its
+mantissa was already correct. Both wrong values were grepped for across every
+tracked file and appear nowhere but the row each occupied and this item's own
+record of it, so nothing else carried them forward. The reason to record
+this at all is that a derived number is this increment's whole subject: an
+increment that replaces an argued security claim with a measured one cannot
+leave its own measurements approximate and expect to be believed about the
+ones that matter.
