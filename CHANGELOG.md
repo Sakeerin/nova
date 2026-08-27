@@ -867,10 +867,27 @@ that already compiled.
   finalizer — the same function `std/core`'s `mix64` computes. The seed is a
   `OnceLock<u64>` initialised on first use from
   `std::collections::hash_map::RandomState`, which is how Rust's own `HashMap`
-  seeds itself: **no new dependency**, nothing above MSRV 1.78, and no route
-  from Nova to the seed value. One value for the whole process, deliberately not
-  per thread and not per call, since a `Map` built under one seed and probed
-  under another finds nothing.
+  seeds itself: **no new dependency** and nothing above MSRV 1.78. One value for
+  the whole process, deliberately not per thread and not per call, since a `Map`
+  built under one seed and probed under another finds nothing.
+  **Nova code can recover that seed exactly, in one call**, and an earlier draft
+  of this entry claimed the opposite — it read "no route from Nova to the seed
+  value", which is false: `str_hash` is the route. `("").hash()` returns
+  splitmix64's finalizer applied to the raw seed, FNV's loop body never running
+  on an empty string, and that finalizer is a bijection with a published
+  inverse. Measured: one `("").hash()` was inverted to a seed, that seed then
+  predicted two further hashes from the same process exactly, and four processes
+  gave four different values. **Precomputation resistance still holds** — the
+  seed is drawn per process, so a colliding key set cannot be built offline
+  against a process that has not started, and recovering the seed means first
+  obtaining a hash *from the running process*. **The adaptive case is now
+  concrete rather than a category**: an attacker who can obtain one `String`
+  hash from the process can recover its seed and construct collisions for that
+  process. That is the mechanism behind the out-of-scope statement the
+  known-limitations bullet below already carries, not a separate exposure. The
+  channel is ADR 0005's one-shot `fn hash(self) -> Int` returning a whole
+  64-bit result in one call, which predates this increment: seeding did not open
+  it, it made the value behind it worth recovering.
   **No API changed, and nothing has to be edited to keep compiling.** `pub trait
   Hash { fn hash(self) -> Int }` keeps its signature, no `impl Hash` was edited,
   no intrinsic was added, and no `std` library source changed behaviour. That is
@@ -888,12 +905,16 @@ that already compiled.
   low bits, and FNV-1a's low bits barely depend on its basis — bit 0 of the
   result is bit 0 of the basis XOR the parity of the input bytes' low bits, so
   changing the basis flips bit 0 identically for both keys of a colliding pair
-  and leaves the collision standing. The absolute figures, **machine-specific in
-  their absolutes though not in their shape**: a constructed 48-key attack at
-  capacity 64 put all 48 in one bucket under the shipped hash and 30 in one
-  bucket under the best of four fresh seeds without the finalizer, against 3
-  with it, where an ideal keyed hash gives about 2; at capacity 256 with 192
-  keys, 192 then 28 then 3, ideal about 2. Diffusion, keys changing bucket when
+  and leaves the collision standing. The absolute figures, **seed-specific and
+  not machine-specific** — this is deterministic integer arithmetic over given
+  bytes, so a different seed moves them and a different machine does not: a
+  constructed 48-key attack at capacity 64 put all 48 in one bucket under the
+  shipped hash; without the finalizer, four fresh seeds left 30, 7, 6 and 16 in
+  one bucket, and those same four seeds with the finalizer left 3, 4, 4 and 3,
+  where an ideal keyed hash gives about 2. At capacity 256 with 192 keys: 192
+  under the shipped hash, then 28, 7, 9 and 21 without the finalizer against 3,
+  5, 4 and 4 with it, ideal about 2. Those columns are per seed, so the worst
+  pairing is 30 against 3 and no single number stands for either design. Diffusion, keys changing bucket when
   the seed changes: 66.7% without the finalizer and 87.3% with it at capacity 8,
   against an ideal of 87.5%; 66.7% and 93.5% at capacity 16, ideal 93.8%.
   Independently, of 500 pairs colliding in the low 16 bits under the shipped
@@ -925,7 +946,13 @@ that already compiled.
   `find`); and `impl Hash for String` in `std/core` is `str_hash`, FNV-1a,
   which the runtime documents at `nova_rt_str_hash`
   (`crates/nova-runtime/src/lib.rs`) as "*not* collision-resistant" and not to
-  "be used for anything security-sensitive". Keys chosen to collide therefore
+  "be used for anything security-sensitive". [Forward marker, 2026-08-26: the
+  algorithm named in that sentence is superseded — `str_hash` is now seeded
+  FNV-1a followed by splitmix64's finalizer, recorded in the Changed entry
+  above and in the bullet below beginning "Seeding `str_hash` narrowed"; the
+  wording here is left byte-identical because that bullet quotes it, and the
+  "not collision-resistant" caution it carries still holds.] Keys chosen to
+  collide therefore
   grow one probe chain that every lookup and insert walks — quadratic in the
   number of keys, independently of `MAX_DEPTH`, of `MAX_RENDER_DEPTH` and of
   the buffer, because neither cap counts keys and the buffer only makes
@@ -1014,8 +1041,10 @@ that already compiled.
   truly. And **an adversary who can observe timing and adapt is out of
   scope**; what the change buys is precomputation resistance plus diffusion,
   and even that lands near rather than at an ideal keyed hash — a constructed
-  48-key attack at capacity 64 leaves 3 keys in a bucket where an ideal gives
-  about 2, machine-specific in the absolute though not in the shape. Figures
+  48-key attack at capacity 64 left 3, 4, 4 and 3 keys in a bucket across the
+  four seeds measured, where an ideal gives about 2; seed-specific in the
+  absolute and not machine-specific, this being deterministic integer
+  arithmetic over given bytes. Figures
   and method are in the Changed entry above and in
   `docs/superpowers/specs/2026-08-26-map-hashdos-design.md` §2 and §4.
   **The resistance property itself is not test-asserted, and cannot be**:
