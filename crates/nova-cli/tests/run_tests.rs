@@ -8667,9 +8667,12 @@ fn str_hash_seed_varies_across_processes() {
 }
 
 /// Phase 1: search candidate keys for a set that collides under THIS
-/// process's seed. Nova cannot compute a hash itself — `std/core` records
-/// that `String` has no length, indexing or iteration — so this searches
-/// with `.hash()` rather than deriving anything from the seed.
+/// process's seed. This searches with `.hash()`, the runtime's real hash
+/// builtin, rather than reimplementing the algorithm in Nova and predicting
+/// collisions from the seed directly — `std/bytes`/`std/strings` give Nova
+/// enough to walk a String's bytes, so a reimplementation is possible, but
+/// it would pin a second copy of the algorithm and fail for the wrong
+/// reason if the two ever diverged.
 ///
 /// Two passes rather than a bucket-of-lists, because Nova's array
 /// construction has a repeat form and a list form and no nested growable
@@ -8786,9 +8789,16 @@ fn main() {
 /// count without the set actually colliding, which would make phase 2's
 /// comparison prove nothing.
 ///
-/// What this does NOT cover: the splitmix64 finalizer. Dropping it while
-/// keeping the seed leaves this test passing, because a seed change alone
-/// moves these keys. `hash_diffusion` is what fails for that.
+/// What this does NOT reliably cover: the splitmix64 finalizer. Without it,
+/// the six bucket-selecting bits depend only on `seed & 63` — 64 possible
+/// layouts, not 2^64 — so dropping the finalizer is largely, but not
+/// wholly, invisible to this test: enumerating all 4096 residue pairs
+/// against these keys, the bound fails about one run in ten (416 of 4096),
+/// and about 6.25% of pairs still print `largest bucket 32 of 32`, the same
+/// value a dead seed produces — a failure here must not be read as a dead
+/// seed without checking the finalizer separately.
+/// `tests/runtime/hash_diffusion.nova` fails deterministically when the
+/// finalizer is missing.
 ///
 /// This builds and runs Nova binaries, so it joins the population the
 /// `0xc0000005` flake draws from. That cost is stated rather than hidden.
@@ -8843,8 +8853,11 @@ fn hashdos_precomputed_key_set_does_not_survive_a_new_process() {
     );
 
     // Phase 2, in a SEPARATE process, therefore under a different seed.
-    // Nova cannot evaluate the hash for a seed other than its own, so a
-    // second real process is what supplies the second seed.
+    // A second real process supplies that second seed while both phases
+    // still exercise the runtime's real hash builtin, rather than
+    // reimplementing the algorithm in Nova with a chosen seed parameter —
+    // that would pin a second copy of the algorithm and fail for the wrong
+    // reason if the two ever diverged.
     let src = PHASE2_TEMPLATE.replace("__INDICES__", &indices.join(", "));
     let spread = build_and_capture("phase2", &src);
     assert!(
