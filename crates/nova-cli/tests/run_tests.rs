@@ -8665,3 +8665,170 @@ fn str_hash_seed_varies_across_processes() {
         "str_hash must differ across processes; both runs printed {first}"
     );
 }
+
+/// Phase 1: search candidate keys for a set that collides under THIS
+/// process's seed. Nova cannot compute a hash itself — `std/core` records
+/// that `String` has no length, indexing or iteration — so this searches
+/// with `.hash()` rather than deriving anything from the seed.
+///
+/// Two passes rather than a bucket-of-lists, because Nova's array
+/// construction has a repeat form and a list form and no nested growable
+/// structure worth building here. The first pass stops at the 32nd key in
+/// some bucket; the second collects that bucket's first 32 indices, which
+/// are exactly the keys the first pass counted.
+const PHASE1_SRC: &str = r#"const CAP: Int = 64
+const WANT: Int = 32
+const BUDGET: Int = 4000
+
+fn main() {
+    let mut counts = [0; CAP]
+    let mut target = -1
+    let mut i = 0
+    while i < BUDGET {
+        let k = "k${i}"
+        let b = k.hash() & (CAP - 1)
+        counts[b] = counts[b] + 1
+        if counts[b] >= WANT { target = b; break }
+        i = i + 1
+    }
+    if target < 0 {
+        println("found false")
+        return
+    }
+    let mut out = ""
+    let mut n = 0
+    let mut j = 0
+    while j < BUDGET {
+        let k = "k${j}"
+        if (k.hash() & (CAP - 1)) == target {
+            out = "${out}${j} "
+            n = n + 1
+            if n == WANT { break }
+        }
+        j = j + 1
+    }
+    println("found true")
+    println("count ${n}")
+    println("indices ${out}")
+}
+"#;
+
+/// Phase 2: re-hash phase 1's set in a FRESH process, therefore under a
+/// fresh seed. `__INDICES__` is replaced by the comma-separated indices
+/// phase 1 printed. Keys are `"k" + index` by construction, so an index
+/// transfers the key exactly.
+const PHASE2_TEMPLATE: &str = r#"const CAP: Int = 64
+
+fn main() {
+    let idx = [__INDICES__]
+    let mut counts = [0; CAP]
+    let mut i = 0
+    while i < idx.len() {
+        let k = "k${idx[i]}"
+        let b = k.hash() & (CAP - 1)
+        counts[b] = counts[b] + 1
+        i = i + 1
+    }
+    let mut largest = 0
+    let mut j = 0
+    while j < CAP {
+        if counts[j] > largest { largest = counts[j] }
+        j = j + 1
+    }
+    println("keys ${idx.len()} largest ${largest}")
+}
+"#;
+
+/// A key set built to collide under one process's seed must NOT collide in
+/// a fresh process. This is precomputation resistance, executing rather
+/// than argued: before this test the property rested on measurements taken
+/// in a throwaway harness and recorded in prose.
+///
+/// Phase 1 is itself an adaptive attack succeeding — it concentrates 32 of
+/// 4000 candidate keys into one bucket — so the limit the records disclose
+/// is demonstrated here too.
+///
+/// The thresholds are derived, not chosen to look generous. Phase 1's
+/// budget of 4000 is about 2.6 times the observed worst case: over 200
+/// random seeds a bucket reached 32 keys after a median of 1319 candidates,
+/// 1463 at the 95th percentile and 1508 at the worst, succeeding for every
+/// one of those seeds. Phase 2's bound of 10 comes from the binomial right
+/// tail for 32 keys in 64 buckets unioned over the buckets: a false failure
+/// runs about 8.3e-11, roughly one run in twelve billion, against an
+/// observed maximum of 5 and a 99th percentile of 4 over 3000 simulated
+/// seed pairs. If the seeding were dead the largest bucket would be 32, so
+/// the margin before a broken seed could pass is 22 keys — measured, by
+/// running both phases in one process.
+///
+/// What this does NOT cover: the splitmix64 finalizer. Dropping it while
+/// keeping the seed leaves this test passing, because a seed change alone
+/// moves these keys. `hash_diffusion` is what fails for that.
+///
+/// This builds and runs Nova binaries, so it joins the population the
+/// `0xc0000005` flake draws from. That cost is stated rather than hidden.
+#[test]
+fn hashdos_precomputed_key_set_does_not_survive_a_new_process() {
+    let dir = std::env::temp_dir().join(format!("nova-hashdos-resist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let build_and_capture = |name: &str, src: &str| -> String {
+        let file = dir.join(format!("{name}.nova"));
+        std::fs::write(&file, src).expect("write nova source");
+        let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        nova()
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&exe)
+            .assert()
+            .success();
+        let out = Command::new(&exe).assert().success();
+        String::from_utf8_lossy(&out.get_output().stdout)
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string()
+    };
+
+    // Phase 1, in its own process.
+    let found = build_and_capture("phase1", PHASE1_SRC);
+    assert!(
+        found.contains("found true"),
+        "phase 1 must find 32 keys in one bucket within its budget; it printed:\n{found}"
+    );
+    assert!(
+        found.contains("count 32"),
+        "phase 1 must report exactly the set size it was asked for; it printed:\n{found}"
+    );
+    let indices: Vec<&str> = found
+        .lines()
+        .find_map(|l| l.strip_prefix("indices "))
+        .expect("phase 1 prints an `indices` line")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        indices.len(),
+        32,
+        "phase 1's index line must carry the whole set; it printed:\n{found}"
+    );
+
+    // Phase 2, in a SEPARATE process, therefore under a different seed.
+    // Nova cannot evaluate the hash for a seed other than its own, so a
+    // second real process is what supplies the second seed.
+    let src = PHASE2_TEMPLATE.replace("__INDICES__", &indices.join(", "));
+    let spread = build_and_capture("phase2", &src);
+    assert!(
+        spread.starts_with("keys 32 largest "),
+        "phase 2 must report the set size and the largest bucket; it printed:\n{spread}"
+    );
+    let largest: usize = spread
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("phase 2's last field is the largest bucket count");
+    assert!(
+        largest <= 10,
+        "a set precomputed under another seed must not still collide: largest bucket {largest} \
+         of 32 keys, bound 10. A dead seed yields 32. Phase 1 printed:\n{found}\n\
+         Phase 2 printed:\n{spread}"
+    );
+}
