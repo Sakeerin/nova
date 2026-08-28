@@ -85,8 +85,13 @@ impl<T, E> Result<T, E> {
 // user-visible `extern` was not an option either).
 
 // `Hash` reaches the runtime the same way, through two more std-only
-// builtins: `str_hash` (`String` has no length, indexing or iteration, so
-// Nova cannot walk its bytes) and `char_to_int` (Nova has no `as` casts and
+// builtins: `str_hash` (no primitive walks a `String`, so an operation over
+// its bytes has to be a builtin -- an absence about the primitive layer, NOT
+// about what Nova code can reach, since `std/bytes` and `std/strings` build
+// byte and char access on builtins of this kind and this module walks a
+// string itself at `impl Debug for String` below; an earlier wording here
+// read as the wider claim and was quoted as one, which ADR 0005's 2026-08-27
+// amendment records) and `char_to_int` (Nova has no `as` casts and
 // no other `Char` -> `Int` conversion). `char_to_int` is the one builtin that
 // is *not* a runtime call — `Char` and `Int` are the same machine class, so
 // nova-mir lowers it to a register move. See ADR 0005 section 2 for why

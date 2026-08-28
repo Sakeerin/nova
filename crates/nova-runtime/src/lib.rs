@@ -300,9 +300,18 @@ fn splitmix64_finalize(mut z: u64) -> u64 {
 
 /// Seeded, finalized hash of a Nova string's bytes, as an `i64`.
 ///
-/// Nova cannot walk a string's bytes itself (`String` has no length, indexing
-/// or iteration, and is not FFI-safe), so `std/core`'s `impl Hash for String`
-/// reaches this through the `str_hash` builtin.
+/// `std/core`'s `impl Hash for String` reaches this through the `str_hash`
+/// builtin. An earlier version of this comment justified that by saying Nova
+/// cannot walk a string's bytes itself, on the grounds that `String` has no
+/// length, indexing or iteration and is not FFI-safe. The FFI-safety half is
+/// true. The byte-walking half was true when written and is now **stale**:
+/// `std/bytes` and `std/strings` are `Builtin::STD_ONLY`, which the resolver
+/// seeds into every std module's scope, so a string's bytes and chars are
+/// reachable -- `std/core` itself walks one at its `impl Debug for String`.
+/// The reason that survives does not rest on impossibility: the hash lives in
+/// one place, and reimplementing FNV-1a in Nova would pin a second copy of it
+/// free to diverge from this one. ADR 0005's 2026-08-27 amendment records the
+/// same correction against the same sentence.
 ///
 /// Seeded FNV-1a over the bytes, then splitmix64's finalizer. The seed is
 /// per-process (see `str_hash_seed`) and the finalizer is what makes the seed
