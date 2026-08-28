@@ -274,6 +274,46 @@ fn str_hash_seed() -> u64 {
     })
 }
 
+/// The per-process seed for `Int`, `Bool` and `Char` hashing.
+///
+/// A SEPARATE draw from [`str_hash_seed`], deliberately. If the two shared a
+/// value then `(0).hash()` would equal `("").hash()` exactly, since both
+/// reduce to [`splitmix64_finalize`] applied to the seed, and recovering
+/// either would recover both. Two `RandomState::new()` calls give two
+/// independent keys.
+///
+/// One value for the whole process, for the same reason `str_hash_seed` gives:
+/// a `Map` built under one seed and probed under another finds nothing.
+fn int_hash_seed() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(0);
+        h.finish()
+    })
+}
+
+/// The per-process seed `std/core`'s `Int`, `Bool` and `Char` hashing XORs
+/// into its input before `mix64` runs.
+///
+/// **Nova code can recover this value in one call**: `(0).hash()` is
+/// `mix64(0 ^ seed)`, which is `mix64(seed)`, and `mix64` is an invertible
+/// bijection. That is the same shape `("").hash()` already has for the string
+/// seed, it follows from ADR 0005's one-shot `Hash` returning a plain `Int`,
+/// and the gate claim already declines the adaptive attacker for whom it
+/// matters. What the seed buys is precomputation resistance.
+///
+/// Nullary and takes no pointer, so it needs no `unsafe`; `C-unwind` follows
+/// `nova_rt_time_now_nanos`, the closest existing function in shape, so an
+/// unwind out of `get_or_init` is defined rather than undefined. Note
+/// `nova_rt_str_hash` uses plain `"C"` while also reaching a `OnceLock`; that
+/// difference is pre-existing and is not changed here.
+#[no_mangle]
+pub extern "C-unwind" fn nova_rt_int_hash_seed() -> i64 {
+    int_hash_seed() as i64
+}
+
 /// splitmix64's finalizer — the same function `std/core`'s `mix64` computes.
 ///
 /// `std/core` writes it in signed Nova with masked shifts, because Nova's `>>`
@@ -768,6 +808,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             bytes::nova_rt_bytes_from_ints as *const u8,
         ),
         ("nova_rt_bytes_eq", bytes::nova_rt_bytes_eq as *const u8),
+        ("nova_rt_int_hash_seed", nova_rt_int_hash_seed as *const u8),
         (
             "nova_rt_time_now_nanos",
             time::nova_rt_time_now_nanos as *const u8,
@@ -881,6 +922,26 @@ mod tests {
             // Must not panic and must be stable.
             assert_eq!(nova_rt_str_hash(e), nova_rt_str_hash(make_str("")));
         }
+    }
+
+    #[test]
+    fn int_hash_seed_is_stable_within_a_process() {
+        // Whatever the value is, every call in one process must agree: a `Map`
+        // built under one seed and probed under another finds nothing.
+        let first = nova_rt_int_hash_seed();
+        for _ in 0..64 {
+            assert_eq!(nova_rt_int_hash_seed(), first);
+        }
+    }
+
+    #[test]
+    fn int_and_str_hash_seeds_are_drawn_separately() {
+        // If these shared a draw, `(0).hash()` would equal `("").hash()` exactly
+        // in Nova, and recovering either seed would recover both. Two independent
+        // `RandomState::new()` calls are what prevent that. Equality here is
+        // possible by chance at about 2^-64, which is the same order this
+        // project already accepts for the cross-process string test.
+        assert_ne!(int_hash_seed(), str_hash_seed());
     }
 
     #[test]
