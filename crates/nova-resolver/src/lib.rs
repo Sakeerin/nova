@@ -93,10 +93,14 @@ builtins! {
     /// `nova_rt_str_hash` and `splitmix64_finalize` in `nova-runtime` rather
     /// than restated here. Backs
     /// `std/core`'s `impl Hash for String`, and exists for the same reason
-    /// [`Builtin::StrCmp`] does: Nova cannot walk a string's bytes (`String`
-    /// has no length, indexing or iteration) and cannot reach the runtime
-    /// through an `extern` either (`String` is not FFI-safe). Std-only, so
-    /// `str_hash` is not a reserved word in user code.
+    /// [`Builtin::StrCmp`] does: no primitive walks a `String`, so every
+    /// operation over its bytes is a builtin like this one, and an `extern`
+    /// cannot stand in because `String` is not FFI-safe. That is a statement
+    /// about the primitive layer, not about what Nova code can reach --
+    /// `std/bytes` and `std/strings` build byte and char access on builtins
+    /// of this kind, and ADR 0005's 2026-08-27 amendment records where an
+    /// earlier wording read as the wider claim. Std-only, so `str_hash` is
+    /// not a reserved word in user code.
     StrHash,
     /// `char_to_int(c: Char) -> Int` — a `Char`'s Unicode scalar value. The
     /// only way any std module can compare or classify a `Char` numerically:
@@ -112,10 +116,12 @@ builtins! {
     /// not a reserved word in user code.
     CharToInt,
     /// `str_len_chars(s: String) -> Int` — the number of Unicode scalar
-    /// values in `s`. Backs `std/strings`' `String::len`. Nova cannot walk a
-    /// string (`String` has no length, indexing or iteration) and cannot
-    /// reach the runtime through an `extern` either (`String` is not
-    /// FFI-safe). Separate from `str_chars` so a length query allocates
+    /// values in `s`. Backs `std/strings`' `String::len`. No primitive walks
+    /// a `String`, so a length query has to be a builtin, and an `extern`
+    /// cannot stand in because `String` is not FFI-safe. Note this builtin is
+    /// part of what supplies the capability it names as absent, so read the
+    /// absence as one about primitives and not about `String` as user code
+    /// sees it. Separate from `str_chars` so a length query allocates
     /// nothing. Std-only, so it is not a reserved word in user code.
     StrLenChars,
     /// `str_chars(s: String) -> [Char]` — the string's Unicode scalar values
@@ -652,9 +658,10 @@ builtins! {
     NetAccept,
     /// `bytes_len(b: Bytes) -> Int` — the byte length. Not a character
     /// count: `Bytes` has no encoding. Backs `std/bytes`'s `Bytes::len`.
-    /// Nova cannot read a `Bytes` value's own header (no length, indexing or
-    /// iteration on it, same as `String`), so this reaches the runtime the
-    /// same way `str_len_chars` does. Std-only.
+    /// No primitive reads a `Bytes` value's own header, exactly as none walks
+    /// a `String`, so this reaches the runtime the same way `str_len_chars`
+    /// does -- and as there, the absence is one about primitives rather than
+    /// about what `std/bytes` then offers on top of them. Std-only.
     BytesLen,
     /// `bytes_from_string_intrinsic(s: String) -> Bytes` — a `Bytes` holding
     /// `s`'s UTF-8 bytes. Backs the free function `bytes_from_string` in
