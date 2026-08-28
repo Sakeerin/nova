@@ -964,13 +964,21 @@ fn supertrait_default_body_dispatches_at_monomorphization() {
     );
 }
 
-/// The two std-only builtins behind `Hash` lower differently on purpose:
-/// `str_hash` becomes a runtime call, `char_to_int` becomes no call at all —
-/// `Char` and `Int` are both `MirTy::I64`, so the conversion is a register
-/// move (`lower_call`'s `None` arm). Pinned here because nothing else
-/// distinguishes "lowered to a move" from "lowered to a call that the linker
-/// happens to resolve": the end-to-end fixture would pass either way, and the
-/// difference is a permanent runtime ABI symbol.
+/// Two of the std-only builtins behind `Hash` lower to a runtime call and one
+/// lowers to nothing: `str_hash` and `int_hash_seed` become calls, while
+/// `char_to_int` becomes no call at all — `Char` and `Int` are both
+/// `MirTy::I64`, so the conversion is a register move (`lower_call`'s `None`
+/// arm). Pinned here because nothing else distinguishes "lowered to a move"
+/// from "lowered to a call that the linker happens to resolve": the end-to-end
+/// fixture would pass either way, and the difference is a permanent runtime ABI
+/// symbol.
+///
+/// So `Char.Hash.hash` is not call-free as a whole. `impl Hash for Char` is
+/// `mix64(char_to_int(self) ^ int_hash_seed())`, which reaches the runtime once
+/// — for the seed draw, not for the conversion. The `assert_eq!` on the whole
+/// call vector below is what keeps the move half pinned: it fails if
+/// `char_to_int` ever starts lowering to a call, which checking only for
+/// `StrHash`'s absence would not.
 #[test]
 fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     use nova_mir::{RtFunc, Stmt};
@@ -997,10 +1005,10 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
         "`impl Hash for String` reaches the runtime exactly once"
     );
     let char_hash = find("Char.Hash.hash");
-    assert!(
-        rt_calls(char_hash).is_empty(),
-        "`impl Hash for Char` must reach no runtime function: {:?}",
-        rt_calls(char_hash)
+    assert_eq!(
+        rt_calls(char_hash),
+        vec![RtFunc::IntHashSeed],
+        "`impl Hash for Char` reaches the runtime only for the seed draw"
     );
     assert!(
         char_hash

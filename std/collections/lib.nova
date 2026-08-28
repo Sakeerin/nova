@@ -122,8 +122,11 @@ impl<T> Iterator for VecIter<T> {
 // all: Nova's `>>` is arithmetic with no `>>>`, so a negative hash
 // sign-extends. See the masking rule on `pub trait Hash` in std/core.
 //
-// A `String` key's hash is SEEDED ONCE PER PROCESS, so which bucket a given key
-// lands in is not a property of the program text: two runs of the same program,
+// A `String`, `Int`, `Bool` or `Char` key's hash is SEEDED ONCE PER PROCESS —
+// `String` from `nova_rt_str_hash`'s draw and the other three from
+// `nova_rt_int_hash_seed`'s, which is a separate draw — so which bucket a given
+// key lands in is not a property of the program text: two runs of the same
+// program,
 // inserting the same keys in the same order, build different tables. Lookup and
 // `len` do not change — every probe in a run uses the run's own seed, and `len`
 // counts live entries whatever the layout — but what a caller can OBSERVE about
@@ -136,24 +139,31 @@ impl<T> Iterator for VecIter<T> {
 // which counts tombstones as well as occupied slots, and an insert that reuses a
 // tombstone leaves `used` where it was while one taking a fresh slot raises it
 // (see "A reused tombstone was already counted in `used`" below). Which of the
-// two happens depends on the probe path, so a `String`-keyed map that holds
-// tombstones can reach a different capacity on different runs of the same
+// two happens depends on the probe path, so a map with a seeded key type that
+// holds tombstones can reach a different capacity on different runs of the same
 // program. Checked in `tests/runtime/collections.nova`, which a grep for
 // `state.len()` across `tests/runtime/*.nova` matches and no sibling does: its
 // `String`-keyed maps `sm` and `sb` never remove anything, so `sb`'s printed
-// `cap=64` follows from its 30 insertions alone, and every `.remove(` in that
-// file passes an `Int` or a `Key`. Re-run that grep rather than trusting this
-// sentence. So this is a hazard for a fixture that removes from a
-// `String`-keyed map and then prints a capacity, not a break in one written so
-// far.
+// `cap=64` follows from its 30 insertions alone; every `.remove(` in that file
+// passes an `Int` or a `Key`; and its `Key` impl is `self.id`, which reaches no
+// seeded hash. Re-run that grep rather than trusting this sentence.
 //
-// `Int`, `Bool` and `Char` keys go through `mix64`, which is not seeded, so
-// their layout is unchanged and stable across runs. A key of a user type is
-// stable only while its own `Hash` impl never reaches a `String`: one
-// `str_hash` call anywhere inside that impl carries the per-process seed into
-// the result, and the layout varies with it. The seeding lives in the
-// runtime at `nova_rt_str_hash`, which documents what it buys and what it does
-// not; `str_hash` is not collision-resistant either way.
+// The `Int` case there survives for a narrower reason than the `Key` one, and
+// it is worth stating because the reason is not "`Int` is unseeded" any more.
+// Its `Map<Int, Int>` removes one key and then reinserts that same key while
+// printing a capacity. The table holds exactly one tombstone at that point —
+// the removed key's own former slot, which lies on that key's own probe path —
+// so `insert`'s `first_free` is that slot at every seed, the reinsert reuses
+// it, and `used` and the capacity cannot move. A fixture that removed one key
+// and then inserted a DIFFERENT one before printing a capacity would have no
+// such argument.
+//
+// A key of a user type is stable only while its own `Hash` impl reaches no
+// seeded hash: one `str_hash` call, or one `.hash()` on an `Int`, `Bool` or
+// `Char` field, anywhere inside that impl carries a per-process seed into the
+// result, and the layout varies with it. The seeding lives in the runtime at
+// `nova_rt_str_hash` and `nova_rt_int_hash_seed`, which document what it buys
+// and what it does not; neither hash is collision-resistant either way.
 //
 // The three arrays are allocated together on the first insert, using the
 // inserted key and value as fillers, so no slot is ever uninitialized and no
@@ -349,18 +359,20 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // would let a reader infer that a map which never grows preserves
     // insertion order, and that inference is false.
     //
-    // FOR `String` KEYS THERE IS NOW A STRONGER STATEMENT, and it is a change
-    // in observable behaviour rather than a restatement of the above. The order
-    // used to be fixed by the key set and the insertion sequence together, so
-    // one unchanged binary run twice returned the same order both times; the
-    // per-process hash seed (see the record header above) means it CAN DIFFER
-    // BETWEEN RUNS of that same binary. Not must: a different seed may land on
-    // the same layout, and a one-key map has only one order to return. So a
-    // caller must not treat one observed order as reproducible, and a test or a
-    // golden that pins more than one `String` key's order is pinning a seed it
-    // does not control -- sort, or assert per key. `Int`, `Bool` and `Char` keys
-    // hash through `mix64`, which is not seeded, so for those the paragraph
-    // above still covers the whole of it.
+    // FOR A SEEDED KEY TYPE THERE IS NOW A STRONGER STATEMENT, and it is a
+    // change in observable behaviour rather than a restatement of the above.
+    // The order used to be fixed by the key set and the insertion sequence
+    // together, so one unchanged binary run twice returned the same order both
+    // times; the per-process hash seed (see the record header above) means it
+    // CAN DIFFER BETWEEN RUNS of that same binary. Not must: a different seed
+    // may land on the same layout, and a one-key map has only one order to
+    // return. So a caller must not treat one observed order as reproducible,
+    // and a test or a golden that pins more than one key's order is pinning a
+    // seed it does not control -- sort, or assert per key. This covers `String`
+    // keys and, since `int_hash_seed` reached the primitive impls, `Int`, `Bool`
+    // and `Char` keys as well. What is left outside it is a user `Hash` impl
+    // that reaches no seeded hash, for which the paragraph above covers the
+    // whole of it.
     //
     // One consequence for the paragraph above: its `"e"`, `"c"`, `"a"` was
     // measured when the hash was unseeded. What it demonstrates is intact and

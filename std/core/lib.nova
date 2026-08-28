@@ -577,6 +577,28 @@ impl Default for String { fn default() -> String { "" } }
 //     `mix64(x) == mix64(-1 - x)` — identical hashes, not merely congruent
 //     ones, so each pair shared a bucket at *every* capacity and no resize
 //     could ever separate them. Pinned by `tests/runtime/hash.nova`.
+//
+// NOT SEEDED, and that is a decision rather than an oversight. The
+// per-process seed is XORed into the *input* by the `Int`, `Bool` and `Char`
+// `Hash` impls below, before this function runs, so `mix64` itself stays
+// bit-identical to canonical splitmix64's finalizer and the canonical vectors
+// in `tests/runtime/hash.nova` keep testing the same function they always
+// tested.
+//
+// The masks stay load-bearing for exactly the reason given above, because
+// seeding does not rescue an unmasked finalizer. XOR with a constant commutes
+// with complement — `(!k) ^ s == !(k ^ s)` — so an unmasked stage 1 still maps
+// `k ^ s` and `!(k ^ s)` to one value, and the pair `k`, `!k` still folds
+// together whatever the seed is.
+//
+// Module-private, and it stays that way: ADR 0005 records the privacy as a
+// decision, since this is an implementation detail of the primitive impls
+// rather than a published utility and publishing it would make its exact
+// definition a compatibility surface, and the same ADR reserves the freedom to
+// replace these constants or rounds. So `tests/runtime/hash.nova` cannot call
+// this function at all; it recovers the seed from `(0).hash()` and cancels it,
+// carrying its own inverse of the arithmetic below. If these constants ever
+// change, that inverse changes with them.
 fn mix64(x: Int) -> Int {
     let a = x ^ ((x >> 30) & 17179869183)
     let b = a * -4658895280553007687
@@ -585,12 +607,26 @@ fn mix64(x: Int) -> Int {
     d ^ ((d >> 31) & 8589934591)
 }
 
-impl Hash for Int    { fn hash(self) -> Int { mix64(self) } }
-impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1) } else { mix64(0) } } }
+// The per-process seed goes into `mix64`'s INPUT, not its output, and that is
+// load-bearing rather than stylistic. `Map` selects buckets with
+// `hash & (cap - 1)`, so post-XOR — `mix64(x) ^ int_hash_seed()` — would leave
+// the low bits as `(mix64(x) & mask) XOR (seed & mask)`, which *permutes*
+// buckets and leaves every colliding pair still colliding. It would look like
+// seeding and buy nothing.
+//
+// What pre-XOR buys is precomputation resistance: a key set built to collide
+// against one process, or offline, does not collide here. What it does not
+// claim, and how Nova code can recover the seed in one call, is at
+// `int_hash_seed` in the resolver and `nova_rt_int_hash_seed` in the runtime.
+// A consequence worth stating where the reader meets it: an `Int`, `Bool` or
+// `Char` hashes to one value for the whole of a run and can hash to a
+// different one in the next run of the same program.
+impl Hash for Int    { fn hash(self) -> Int { mix64(self ^ int_hash_seed()) } }
+impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1 ^ int_hash_seed()) } else { mix64(0 ^ int_hash_seed()) } } }
 // Hashes the Unicode scalar value, so it agrees with `Hash for Int` on that
 // codepoint. `char_to_int` is a compiler builtin because Nova has no `as`
 // casts and `Char` has no other conversion.
-impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self)) } }
+impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self) ^ int_hash_seed()) } }
 // Seeded FNV-1a over the bytes then splitmix64's finalizer, in the runtime
 // (see the module note above), with its unsigned result reinterpreted as `Int`
 // — so it is the impl most obviously able to return a negative hash. See the
@@ -600,6 +636,7 @@ impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self)) } }
 // for the whole of a run and can hash to a different one in the next run of the
 // same program — not must, since two seeds may agree on one string. What
 // that buys and what it does not is documented at `nova_rt_str_hash` in the
-// runtime. `mix64`, which the `Int`, `Bool` and `Char` impls above use, is not
-// seeded, so those are stable across runs.
+// runtime. The `Int`, `Bool` and `Char` impls above are seeded too, from a
+// separate draw (`int_hash_seed`), so they are not stable across runs either;
+// what stays unseeded is `mix64`, which those impls XOR the seed in *ahead* of.
 impl Hash for String { fn hash(self) -> Int { str_hash(self) } }

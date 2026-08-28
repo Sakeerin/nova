@@ -7,11 +7,110 @@
 // an `Int` hash are spread, because `Map` selects buckets with
 // `hash & (cap - 1)`: a weakly-mixed hash is not merely ugly there, it
 // collapses whole key families onto one bucket.
+//
+// SEEDED, WHICH IS WHY SOME LINES BELOW ARE BOUNDS RATHER THAN VALUES.
+// `std/core`'s `Int`, `Bool` and `Char` impls XOR a per-process seed into
+// `mix64`'s input, so any statistic over a fixed key set is a random variable
+// unless the seed cancels. Each line here is either seed-invariant by
+// construction or a bound whose exact false-failure probability is below, and
+// the fixture's whole flake budget sits around one run in a billion.
+//
+// A NOTE ON HOW NOT TO CHECK THIS FILE. Standing a literal `0` in for the seed
+// call reproduces the unseeded output by construction, since `x ^ 0 == x`, so
+// such a probe cannot tell "invariant over every seed" from "identical at seed
+// 0". Two lines were misclassified that way while this split was being planned.
+// Reason about whether the seed cancels, or sample many seeds.
+//
+// THE DERIVED BOUNDS, exact rather than sampled.
+//
+//   * `keys -64..63 reach >= 76 of 256 buckets`. 128 keys into 256 buckets:
+//     `P(exactly j occupied) = C(256,j) * Surj(128,j) / 256^128`, whose
+//     probabilities sum to 1.000000 and whose expectation is 100.88.
+//     `P(distinct < 76)` is 2.37e-11, about one run in 42 billion. 20,000
+//     simulated seeds gave a minimum of 85, nine above the bound.
+//   * `Int hashes of 0..255 that are negative in 80..176`. Under a uniform seed
+//     the sign bit over a fixed key is a fair coin, so the count is
+//     `Binomial(256, 1/2)` with mean 128, and outside 80..176 is 8.41e-10,
+//     about one run in 1.19 billion. The observed range over 1000 seeds was
+//     100 to 153.
+//   * `buckets reached >= 6`. 64 keys into 8 buckets, exact occupancy again:
+//     `P(used < 6)` is 4.836243e-12, about one run in 207 billion.
+//
+// WHY `buckets reached` IS A BOUND RATHER THAN `8 of 8`. Unseeded that count
+// was a constant and the constant was 8. Seeded it is a random variable, and
+// `P(some bucket empty)` is 1.554270e-03 — about one run in 643, ten times
+// worse than the largest-bucket bound this file rejects by name just below,
+// and the same order as an undisclosed flake a previous increment had to
+// remove. `used >= 7` would be 2.825296e-07, one run in 3,539,451, still three
+// orders looser than the loosest bound here; `used >= 6` sits in the same band
+// as the other two, so 6 is the bound. Nothing real is lost: what the line
+// guards is that hashing is not the identity, and
+// `fn hash(self) -> Int { self }` puts all 64 multiples of 8 in bucket 0,
+// reaching 1. A constant hash also reaches 1.
+//
+// WHY THE TWO `&7` HISTOGRAMS ARE GONE RATHER THAN REPLACED. They pinned exact
+// bucket counts, which the seed randomises. The obvious replacement is a
+// largest-bucket bound, as `tests/runtime/hash_diffusion.nova` uses, and it is
+// a trap: for 256 keys in 8 buckets that count is `Binomial(256, 1/8)` with
+// mean 32, and unioned over the buckets even `largest < 56` flakes at
+// 1.62e-04, about one run in 6,169. Eight buckets is too few for a tight bound
+// at this key count. What the histograms guarded is that hashing is not the
+// identity, and `buckets reached >= 6` asserts that directly.
+//
+// THE LOW-BIT COVERAGE THAT LEAVES, since both histograms and the loosening of
+// `buckets reached` land together. This file no longer has an 8-bucket view of
+// low bits at all, and the `counts` loop that fed the first histogram went with
+// it for want of a consumer. What covers low bits instead is stronger, not
+// weaker: `keys -64..63 reach >= 76 of 256` masks eight low bits over 128 keys
+// spanning both signs, where the histograms sampled three bits over one sign.
+//
+// `complement collisions over 0..63: 0` IS NOW A THEOREM, NOT A MEASUREMENT.
+// The pairs are `x` and `-1-x`; `mix64` is injective; and
+// `mix64(x ^ s) == mix64((-1-x) ^ s)` would need `x ^ s == (-1-x) ^ s`, hence
+// `x == -1-x`, which no `Int` satisfies. So this line reads 0 at every seed
+// rather than at the seeds someone sampled.
 
 fn hash_of<T: Hash>(x: T) -> Int { x.hash() }
 
+// The per-process seed, recovered so the canonical vectors can cancel it.
+//
+// `(0).hash()` is `mix64(0 ^ s)`, which is `mix64(s)`, and `mix64` is a
+// bijection — so one call plus this inverse yields `s` exactly. That recovery
+// is a documented consequence of ADR 0005's one-shot `Hash` returning a plain
+// `Int`, not a hole this fixture opens: the same disclosure already records
+// that `("").hash()` recovers the string seed. Nothing exercised either
+// channel, so this fixture demonstrates the `Int` one rather than leaving it
+// asserted.
+//
+// Why the inverse is written out here instead of calling `mix64`: ADR 0005
+// makes `mix64` module-private to `std/core` on purpose — an implementation
+// detail of the primitive impls rather than a published utility, since
+// publishing it would make its exact definition a compatibility surface — and
+// the same ADR reserves the freedom to replace its constants or rounds. A
+// fixture cannot reach a non-`pub` std item, and adding `pub` to reach it would
+// spend that freedom.
+//
+// THE MAINTENANCE COST, named because it is the real one: if `mix64`'s
+// constants ever change, this inverse changes with them. The two multiplies are
+// by the modular inverses of `mix64`'s constants mod 2^64 —
+// `0x96de1b173f119089` and `0x319642b2d24d8ec3`, written as signed decimals for
+// the same reason `mix64`'s own constants are. Each stage `z ^ lsr(z, k)`
+// inverts as `z ^ lsr(z, k) ^ lsr(z, 2k) ^ …` until the shift reaches 64, and
+// because Nova's `>>` is arithmetic every `lsr(x, k)` is written
+// `(x >> k) & (2^(64-k) - 1)` — which is where the six mask constants come
+// from, three of them already appearing in `mix64` itself.
+fn mix64_inv(z: Int) -> Int {
+    let d = z ^ ((z >> 31) & 8589934591) ^ ((z >> 62) & 3)
+    let c = d * 3573116690164977347
+    let b = c ^ ((c >> 27) & 137438953471) ^ ((c >> 54) & 1023)
+    let a = b * -7575587736534282103
+    a ^ ((a >> 30) & 17179869183) ^ ((a >> 60) & 15)
+}
+
 fn main() {
-    // Deterministic, and distinguishing, for each of the four impls.
+    // Deterministic within a run, and distinguishing, for each of the four
+    // impls. Deterministic across runs for none of them: the seed is drawn
+    // once per process, so `same=` compares two calls under one seed.
     println("Int    same=${(7).hash() == (7).hash()} diff=${(7).hash() != (8).hash()}")
     println("Bool   same=${(true).hash() == (true).hash()} diff=${(true).hash() != (false).hash()}")
     println("Char   same=${('a').hash() == ('a').hash()} diff=${('a').hash() != ('b').hash()}")
@@ -23,28 +122,15 @@ fn main() {
 
     // `Hash for Char` hashes the codepoint, so it agrees with `Hash for Int`
     // on that codepoint ('a' is 97). This is what proves `char_to_int`
-    // yielded the codepoint rather than an unrelated register.
+    // yielded the codepoint rather than an unrelated register. Both impls XOR
+    // the same seed into the same input, so the agreement is exact at every
+    // seed — and seeding one impl and not the other breaks this line.
     println("char/int agree ${('a').hash() == (97).hash()} ${('\0').hash() == (0).hash()}")
-
-    // Low-bit spread over 256 consecutive keys: 8 buckets, ~32 each.
-    let mut counts = [0; 8]
-    let mut i = 0
-    while i < 256 {
-        let b = (i).hash() & 7
-        counts[b] = counts[b] + 1
-        i = i + 1
-    }
-    print("keys 0..255 &7:")
-    let mut c = 0
-    while c < 8 {
-        print(" ${counts[c]}")
-        c = c + 1
-    }
-    println("")
 
     // The case identity hashing gets catastrophically wrong: 64 keys that are
     // all multiples of 8. `fn hash(self) -> Int { self }` puts every one of
-    // them in bucket 0 of an 8-bucket table.
+    // them in bucket 0 of an 8-bucket table, and a constant hash does too.
+    // The bound is 6 of 8 for the reason derived in the header.
     let mut mcounts = [0; 8]
     let mut used = 0
     let mut k = 0
@@ -54,21 +140,14 @@ fn main() {
         mcounts[b] = mcounts[b] + 1
         k = k + 1
     }
-    print("multiples of 8 &7:")
-    let mut d = 0
-    while d < 8 {
-        print(" ${mcounts[d]}")
-        d = d + 1
-    }
-    println("")
-    println("buckets reached ${used} of 8 (identity hashing would reach 1)")
+    println("buckets reached >= 6: ${used >= 6} (identity hashing would reach 1)")
 
     // CANONICAL VECTORS. `mix64` is the splitmix64 finalizer, which has
     // published test vectors: splitmix64 seeded at 0 emits the finalizer
     // applied to successive multiples of the gamma constant
     // 0x9E3779B97F4A7C15. Two of those pairs pin all three of `mix64`'s shift
-    // masks at once — which nothing else in this fixture does, see the scope
-    // note on the complement pairs below.
+    // masks at once — and after the golden split they are the only pin left on
+    // the second mask, see the scope note on the complement pairs below.
     //
     //   x1 = 0x9E3779B97F4A7C15 -> 0xE220A8397B1DCDAF   pins masks 1 and 3
     //   x3 = 0xDAA66D2C7DDF743F -> 0x06C45D188009454F   pins masks 1 and 2
@@ -78,16 +157,25 @@ fn main() {
     // stage-3 input is), so both are needed. Written as signed decimals
     // because `Int` has no unsigned literals and the lexer's hex path parses
     // as i64, so `0x9e37…` does not lex.
-    println("splitmix64 canonical x1=${(-7046029254386353131).hash() == -2152535657050944081} x3=${(-2691343689449507777).hash() == 487617019471545679}")
+    //
+    // They can no longer be asserted as `(x1).hash()`: that route XORs the
+    // seed in, and `mix64(x1 ^ s)` is not the canonical output for `x1` at any
+    // seed but zero. XORing the recovered seed into the input cancels it
+    // exactly — `.hash()` is `mix64(k ^ s)` and `(x1 ^ s) ^ s == x1` — so both
+    // halves print `true` at every seed. Verified over 20,000 seeds while this
+    // was designed, and the whole point of `mix64_inv` above.
+    let s = mix64_inv((0).hash())
+    println("splitmix64 canonical x1=${((-7046029254386353131) ^ s).hash() == -2152535657050944081} x3=${((-2691343689449507777) ^ s).hash() == 487617019471545679}")
 
     // COMPLEMENT PAIRS. This is the regression that matters most, and the one
-    // every histogram above is blind to because they all sample a single sign.
-    // Nova's `>>` is arithmetic, and arithmetic shift commutes with complement,
-    // so an unmasked `x ^ (x >> k)` returns the same value for `x` and for
-    // `!x == -1 - x`. Every later stage is a function of that, so an unmasked
-    // mix64 folded 2-to-1: `mix64(x) == mix64(-1 - x)` *identically*, meaning
-    // each pair shares a bucket at every capacity and no resize can separate
-    // them.
+    // every bucket-spread line above is blind to because they all sample a
+    // single sign. Nova's `>>` is arithmetic, and arithmetic shift commutes
+    // with complement, so an unmasked `x ^ (x >> k)` returns the same value for
+    // `x` and for `!x == -1 - x`. XOR with a constant seed commutes with
+    // complement too — `(!k) ^ s == !(k ^ s)` — so seeding does not rescue an
+    // unmasked stage 1: every later stage is a function of its output, and an
+    // unmasked mix64 folds 2-to-1 with identical hashes, meaning each pair
+    // shares a bucket at every capacity and no resize can separate them.
     //
     // Scope, because this is easy to overstate: the two lines below pin the
     // FIRST mask, `(x >> 30) & 17179869183` — the only one whose absence makes
@@ -95,12 +183,19 @@ fn main() {
     // Masking a shift by `k` alters only bits at positions >= 64 - k, and a
     // multiply carries low bits upward, never high bits down, so dropping the
     // third mask cannot move `hash & 255` at all; dropping the second leaves
-    // stage 1 intact, so complement pairs no longer collide. What does catch
-    // those two: without the second mask the both-signs bucket count below
-    // moves 100 -> 107, and without the third the negative-hash count moves
-    // 132 -> 0 (an unmasked final shift makes every hash non-negative, since
-    // the sign bit XORs with its own copy). Those two plus the canonical
-    // vectors above cover all three masks; these two lines alone do not.
+    // stage 1 intact, so complement pairs no longer collide.
+    //
+    // WHAT CATCHES THOSE TWO CHANGED WITH THE GOLDEN SPLIT, and the change is
+    // a loss on one of them. Before the seed reached these impls, the
+    // both-signs bucket count was an exact 100 that moved to 107 without the
+    // second mask, and the negative-hash count an exact 132 that moved to 0
+    // without the third; both are bounds now. Mask 3 keeps a second pin, since
+    // 0 falls outside `80..176`. Mask 2 does not: 107 sits comfortably inside
+    // `>= 76`, so the bucket count no longer pins it, and no looser statistic
+    // recovers it either — a mixer missing mask 2 still reaches 107 of 256
+    // buckets, which no bound wide enough to avoid flaking can distinguish
+    // from a healthy 100. Mask 2 now rests on the canonical vectors alone,
+    // which is why they are still asserted here rather than dropped.
     println("h(0) != h(-1): ${(0).hash() != (-1).hash()}")
     let mut folded = 0
     let mut p = 0
@@ -113,6 +208,9 @@ fn main() {
     // Keys spanning BOTH signs, over 256 buckets. 128 distinct keys into 256
     // buckets uniformly is ~101 distinct buckets; the unmasked mixer reached
     // only 58, because 64 of the 128 keys were complement pairs of the others.
+    // The bound is 76 for the reason derived in the header, and it is
+    // load-bearing rather than decorative: an unmasked stage 1 leaves at most
+    // 64 distinct hashes over these 128 keys, so it fails this line too.
     let mut seen = [0; 256]
     let mut distinct = 0
     let mut q = -64
@@ -122,7 +220,7 @@ fn main() {
         seen[b] = 1
         q = q + 1
     }
-    println("keys -64..63 reach ${distinct} of 256 buckets (unmasked reached 58)")
+    println("keys -64..63 reach >= 76 of 256 buckets: ${distinct >= 76} (unmasked reached 58)")
 
     // A hash spans the full Int range, both signs — so `hash % cap` could
     // produce a negative index and `hash >> k` is not a usable tag. Bucket
@@ -133,5 +231,5 @@ fn main() {
         if (n).hash() < 0 { neg = neg + 1 }
         n = n + 1
     }
-    println("Int hashes of 0..255 that are negative: ${neg} (masking is mandatory)")
+    println("Int hashes of 0..255 that are negative in 80..176: ${(neg >= 80) && (neg <= 176)} (masking is mandatory)")
 }

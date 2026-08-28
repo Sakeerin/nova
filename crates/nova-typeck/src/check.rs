@@ -15383,7 +15383,7 @@ mod tests {
                 ),
                 Builtin::IntHashSeed => (
                     (vec![], Ty::Int),
-                    "`int_hash_seed()` for `std/core`'s `Int`, `Bool` and `Char` `Hash` impls",
+                    "`int_hash_seed()` in `std/core`'s `Int`, `Bool` and `Char` `Hash` impls",
                 ),
                 Builtin::TimeNowNanos => (
                     (vec![], Ty::Int),
