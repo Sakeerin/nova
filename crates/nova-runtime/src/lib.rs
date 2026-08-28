@@ -276,11 +276,27 @@ fn str_hash_seed() -> u64 {
 
 /// The per-process seed for `Int`, `Bool` and `Char` hashing.
 ///
-/// A SEPARATE draw from [`str_hash_seed`], deliberately. If the two shared a
-/// value then `(0).hash()` would equal `("").hash()` exactly, since both
-/// reduce to [`splitmix64_finalize`] applied to the seed, and recovering
-/// either would recover both. Two `RandomState::new()` calls give two
-/// independent keys.
+/// A SEPARATE call from [`str_hash_seed`], deliberately. Were the two one
+/// value, `(0).hash()` would equal `("").hash()` exactly, since both reduce to
+/// [`splitmix64_finalize`] applied to the seed.
+///
+/// What the separate call buys is that the two seeds DIFFER, effectively
+/// certainly. It does not buy independence, and an earlier version of this
+/// comment claimed "two independent keys", which is false.
+/// `RandomState::new()` caches one 128-bit OS draw per THREAD and hands out
+/// `(k0, k1)` from it, storing `(k0 + 1, k1)` on each call — so two calls on a
+/// thread share `k1` exactly and differ in `k0` by the number of calls between
+/// them. `std`'s own comment says that increment exists to vary `HashMap`
+/// iteration order, not to make keys independent. Each seed here is then
+/// SipHash-1-3 over the same one-word message under those related keys, and the
+/// two differ because those outputs do. (Whichever thread first reaches each
+/// `OnceLock` supplies its draw, and neither initialiser pins a thread, so the
+/// two can also come from two separate OS draws.)
+///
+/// Whether recovering one seed yields the other therefore rests on SipHash's
+/// behaviour under a RELATED KEY, not on independence. This increment does not
+/// verify that, and `int_and_str_hash_seeds_are_drawn_separately` does not test
+/// it: that test pins only that the two differ.
 ///
 /// One value for the whole process, for the same reason `str_hash_seed` gives:
 /// a `Map` built under one seed and probed under another finds nothing.
@@ -294,21 +310,56 @@ fn int_hash_seed() -> u64 {
     })
 }
 
-/// The per-process seed `std/core`'s `Int`, `Bool` and `Char` hashing XORs
-/// into its input before `mix64` runs.
+/// The per-process seed for `std/core`'s `Int`, `Bool` and `Char` hashing, to
+/// be XORed into the input before `mix64` runs.
 ///
-/// **Nova code can recover this value in one call**: `(0).hash()` is
-/// `mix64(0 ^ seed)`, which is `mix64(seed)`, and `mix64` is an invertible
-/// bijection. That is the same shape `("").hash()` already has for the string
-/// seed, it follows from ADR 0005's one-shot `Hash` returning a plain `Int`,
-/// and the gate claim already declines the adaptive attacker for whom it
-/// matters. What the seed buys is precomputation resistance.
+/// **Nova code can recover this value in one call**, once those three `Hash`
+/// impls XOR it in: `(0).hash()` is `mix64(0 ^ seed)`, which is `mix64(seed)`,
+/// and `mix64` is an invertible bijection. That is the same shape `("").hash()`
+/// already has for the string seed, it follows from ADR 0005's one-shot `Hash`
+/// returning a plain `Int`, and the gate claim already declines the adaptive
+/// attacker for whom it matters. What the seed buys is precomputation
+/// resistance. **As of this commit `std/core` calls `mix64` unseeded and does
+/// not call this at all, so `(0).hash()` is still a fixed constant that
+/// recovers nothing; the commit that seeds those impls should delete this
+/// sentence.**
 ///
-/// Nullary and takes no pointer, so it needs no `unsafe`; `C-unwind` follows
-/// `nova_rt_time_now_nanos`, the closest existing function in shape, so an
-/// unwind out of `get_or_init` is defined rather than undefined. Note
-/// `nova_rt_str_hash` uses plain `"C"` while also reaching a `OnceLock`; that
-/// difference is pre-existing and is not changed here.
+/// Nullary and takes no pointer, so it needs no `unsafe`. `C-unwind` matches
+/// the majority of same-shape exports — non-`unsafe`, nullary, returning
+/// `i64`. Enumerated: `log`'s `nova_rt_log_config_level` and
+/// `nova_rt_log_config_to_stderr`, and `time`'s `nova_rt_time_now_nanos` and
+/// `nova_rt_time_now_epoch_nanos` all use it, against
+/// [`nova_rt_test_selector`], which carries this exact signature and uses plain
+/// `"C"`. Four of those five, so a majority and not a unique closest match —
+/// an earlier version of this comment called `nova_rt_time_now_nanos` "the
+/// closest existing function in shape", which was a tie described as a
+/// superlative. What `C-unwind` buys is that an unwind out of `get_or_init` is
+/// defined rather than undefined, and `get_or_init` runs `RandomState::new`,
+/// which reaches the OS for entropy.
+///
+/// This is NOT the inference [`nova_rt_float_fixed`] prohibits. That comment
+/// forbids reaching for `C-unwind` by pattern-matching the async intrinsics, a
+/// different family; the neighbours cited here are the nullary clock and config
+/// readers, and they are the family this belongs to.
+///
+/// The tension the two precedents leave is real and is NOT resolved here.
+/// `nova_rt_float_fixed`'s comment paraphrases [`crate::task`]'s rule as
+/// "anything reachable from a generated call site must abort rather than
+/// attempt to unwind", which is broader than what `task`'s module docs
+/// actually state — there the constraint is on generated POLL functions, whose
+/// frames carry no landing pads. Under the broader reading this function would
+/// take plain `"C"`, since a `Hash` impl called from an `async fn` body puts
+/// its call site inside a generated poll function. The four same-shape
+/// neighbours above are reachable from generated call sites too and use
+/// `C-unwind` regardless, so this follows established practice rather than
+/// settling which reading is right. What keeps it inside `task`'s actual rule
+/// is that nothing here panics deliberately: after the first initialisation
+/// the body is a `OnceLock` read, and the one panic path is `RandomState::new`
+/// failing to draw OS entropy on that first call.
+///
+/// Separately, [`nova_rt_str_hash`] uses plain `"C"` while also reaching a
+/// `OnceLock`; it differs in shape by taking a pointer, and that difference is
+/// pre-existing and is not changed here.
 #[no_mangle]
 pub extern "C-unwind" fn nova_rt_int_hash_seed() -> i64 {
     int_hash_seed() as i64
@@ -936,12 +987,26 @@ mod tests {
 
     #[test]
     fn int_and_str_hash_seeds_are_drawn_separately() {
-        // If these shared a draw, `(0).hash()` would equal `("").hash()` exactly
-        // in Nova, and recovering either seed would recover both. Two independent
-        // `RandomState::new()` calls are what prevent that. Equality here is
-        // possible by chance at about 2^-64, which is the same order this
-        // project already accepts for the cross-process string test.
+        // Were these one value, `(0).hash()` would equal `("").hash()` exactly
+        // in Nova. This pins that they differ, which is what the separate
+        // `RandomState::new()` call buys. It does NOT pin that recovering one
+        // fails to yield the other: the two calls share `k1` and differ in `k0`
+        // by the calls between them, so that question is about SipHash under a
+        // related key and is untested here. See `int_hash_seed`'s doc comment.
+        // Equality is possible by chance at about 2^-64, which is the same
+        // order this project already accepts for the cross-process string test.
         assert_ne!(int_hash_seed(), str_hash_seed());
+        // The line above compares the two PRIVATE helpers, so on its own it
+        // would still pass if the export returned the string seed -- the other
+        // test in this pair calls the export but compares it only against
+        // itself. These two pin the export: the first rules out its returning
+        // the string seed, and the second pins it to the int seed, which is
+        // the wiring this intrinsic exists to get right. The second is the
+        // stronger claim and implies the first given the assert above; both
+        // are here because the `!=` names the specific confusion worth
+        // excluding if the `==` is ever weakened.
+        assert_ne!(nova_rt_int_hash_seed() as u64, str_hash_seed());
+        assert_eq!(nova_rt_int_hash_seed() as u64, int_hash_seed());
     }
 
     #[test]
