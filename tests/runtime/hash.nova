@@ -43,8 +43,8 @@
 // and the same order as an undisclosed flake a previous increment had to
 // remove. `used >= 7` would be 2.825296e-07, one run in 3,539,451, still three
 // orders looser than the loosest bound here; `used >= 6` sits in the same band
-// as the other two, so 6 is the bound. Nothing real is lost: what the line
-// guards is that hashing is not the identity, and
+// as the bounds listed above, so 6 is the bound. Nothing real is lost: what
+// the line guards is that hashing is not the identity, and
 // `fn hash(self) -> Int { self }` puts all 64 multiples of 8 in bucket 0,
 // reaching 1. A constant hash also reaches 1.
 //
@@ -58,11 +58,16 @@
 // identity, and `buckets reached >= 6` asserts that directly.
 //
 // THE LOW-BIT COVERAGE THAT LEAVES, since both histograms and the loosening of
-// `buckets reached` land together. This file no longer has an 8-bucket view of
-// low bits at all, and the `counts` loop that fed the first histogram went with
-// it for want of a consumer. What covers low bits instead is stronger, not
-// weaker: `keys -64..63 reach >= 76 of 256` masks eight low bits over 128 keys
-// spanning both signs, where the histograms sampled three bits over one sign.
+// `buckets reached` land together. Nothing in this file constrains the 8-bucket
+// DISTRIBUTION any more — only its support. `buckets reached >= 6` still masks
+// three low bits over 64 keys and still asserts they do not collapse onto a
+// handful of buckets, but it says nothing about how evenly they spread, which
+// is the part the histograms pinned. So the `mcounts` loop behind that line is
+// LIVE and must stay; what went for want of a consumer is the separate `counts`
+// loop that fed the deleted `keys 0..255 &7` histogram. What covers low bits
+// instead is stronger, not weaker: `keys -64..63 reach >= 76 of 256` masks
+// eight low bits over 128 keys spanning both signs, where the histograms
+// sampled three bits over one sign.
 //
 // `complement collisions over 0..63: 0` IS NOW A THEOREM, NOT A MEASUREMENT.
 // The pairs are `x` and `-1-x`; `mix64` is injective; and

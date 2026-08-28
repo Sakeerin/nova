@@ -1757,23 +1757,27 @@ fn std_core_under_gc_stress() {
 /// being wrong, and the **low** bits of an `Int` hash must be spread because
 /// `Map` will select buckets with `hash & (cap - 1)`.
 ///
-/// `Int`, `Bool` and `Char` hashing is seeded per process, so the fixture
-/// asserts nothing that varies with the seed. What it prints is relations
-/// between hashes drawn under one seed, two derived bounds, the complement
-/// theorem, and `mix64`'s published canonical vectors reached by recovering the
-/// seed and cancelling it. Every derivation is in the fixture's own header,
-/// including the exact false-failure probability of each bound.
+/// `Int`, `Bool` and `Char` hashing is seeded per process, so every line in the
+/// fixture is either seed-invariant by construction or a bound whose exact
+/// false-failure probability is derived — the dichotomy `hash.nova`'s own header
+/// states, and the reason not to call the whole golden seed-invariant. What it
+/// prints is relations between hashes drawn under one seed, the derived bounds,
+/// the complement theorem, and `mix64`'s published canonical vectors reached by
+/// recovering the seed and cancelling it. Every derivation is in the fixture's
+/// header, each bound's probability with it.
 ///
 /// An earlier version of this paragraph read "The expected bucket histograms in
 /// the fixture were computed independently from splitmix64's finalizer, so they
 /// are an oracle rather than a recording of whatever the implementation happened
 /// to print." Those histograms are gone — the seed randomises the exact counts
 /// they pinned — but the oracle property is not, and that is the half worth
-/// keeping. The two bounds come from the occupancy and binomial distributions
-/// rather than from a run, the complement line is a theorem about `mix64` being
-/// injective, and the canonical vectors are published splitmix64 values. What
-/// changed is that a bound admits a range where a histogram admitted one value,
-/// so a mutant can land inside one; the fixture's scope note says which.
+/// keeping. The bounds come from exact distributions rather than from a run —
+/// occupancy for the `keys -64..63 reach` and `buckets reached` lines, the
+/// binomial for the negative-hash count — the complement line is a theorem
+/// about `mix64` being injective, and the canonical vectors are published
+/// splitmix64 values. What changed is that a bound admits a range where a
+/// histogram admitted one value, so a mutant can land inside one; the
+/// fixture's scope note says which.
 ///
 /// The fixture also carries the complement-pair regression. Because Nova's
 /// `>>` is arithmetic, an unmasked `x ^ (x >> k)` yields the same value for
@@ -1805,9 +1809,14 @@ fn hash_run() {
 /// buckets". That justification no longer holds: `Int` hashing is seeded per
 /// process, so two processes disagree about buckets whatever compiled them, and
 /// this test runs in a different process from `hash_run` regardless. What the
-/// comparison still catches is a backend that mixes differently, because the
-/// canonical vectors and the complement count are exact and the two bounds sit
-/// far from what a broken mixer produces.
+/// comparison still catches is a backend that mixes differently, and it is the
+/// exact lines that catch it: the canonical vectors and the complement count.
+/// The bounds are not part of that argument, and this is measured rather than
+/// argued: built with `mix64`'s second mask dropped, the fixture satisfies
+/// every bound and every relational line it prints, and only the canonical
+/// vectors go false. So a broken mixer does not in general sit far from those
+/// bounds — which is also what `hash.nova`'s scope note concludes when it says
+/// mask 2 rests on the canonical vectors alone.
 #[test]
 fn hash_build_standalone() {
     let out = build_and_run("tests/runtime/hash.nova", "hash");
@@ -9021,10 +9030,19 @@ fn main() {
 /// covers the other's path.
 ///
 /// The bound and its derivation are the `String` test's: `Binomial(32, 1/64)`
-/// for one bucket, unioned over the 64 buckets, gives 8.2686863018e-11 for a
-/// largest bucket above 10 — about one run in 12,093,819,544. If the seeding
+/// for one bucket, unioned over the 64 buckets, gives 8.2686863021e-11 for a
+/// largest bucket above 10 — about one run in twelve billion. If the seeding
 /// were dead the largest bucket would be 32, so the margin before a broken seed
 /// could pass is 22 keys.
+///
+/// That mantissa was wrong here until it was recomputed: it read
+/// `8.2686863018e-11`, which diverges from the true value at its tenth digit.
+/// The reciprocal beside it was right, which is how the wrong digit survived —
+/// each half of one derivation was checked against the other rather than
+/// against a recomputation, and the previous increment's instance of this had
+/// the halves the other way round. Hence the reciprocal is now in words: one
+/// exact figure recomputed with `fractions.Fraction`, and nothing beside it
+/// precise enough to drift out of step with it.
 ///
 /// The search budget is derived rather than chosen to look generous, and it was
 /// simulated for `Int` keys specifically rather than carried over. Over 400
@@ -9040,8 +9058,12 @@ fn main() {
 /// set actually colliding, which would make phase 2's comparison prove nothing.
 ///
 /// What this pins that the golden fixture cannot: `tests/runtime/hash.nova` runs
-/// in one process and so sees one seed, which is why its own lines are all
-/// seed-invariant. Two processes are what make the seed observable at all.
+/// in one process and so sees one seed, and one seed is indistinguishable from a
+/// seed that never varies. So no assertion in that fixture — neither the
+/// seed-invariant lines nor the bounds — can detect a dead or constant seed;
+/// only a second process can, which is what this test supplies. Measured, not
+/// argued: under a runtime patched to return a fixed seed, this test failed at
+/// `largest bucket 32 of 32` while the golden fixture passed unchanged.
 /// It is also where the PRE-XOR shape earns its keep. Post-XOR
 /// (`mix64(x) ^ seed`) leaves the low bits as
 /// `(mix64(x) & mask) XOR (seed & mask)`, which permutes buckets without
