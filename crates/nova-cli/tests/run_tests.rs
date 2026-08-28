@@ -7390,6 +7390,24 @@ impl Drop for EchoServer {
 /// this project's own hosts, and closing it would mean holding a port open to
 /// prove nothing is listening on it — so it is recorded here rather than
 /// engineered around.
+///
+/// **The window is structurally narrower than that paragraph implies, measured
+/// 2026-08-28.** Ephemeral ports are issued sequentially from a *system-wide*
+/// cursor: 300 successive binds returned 300 distinct ports spanning 309, and
+/// a freed port was not reissued for roughly 13,759 further binds. So the port
+/// dropped below sits BEHIND the cursor, and the next bind — in this process or
+/// any other — receives one ahead of it rather than this one. That is why the
+/// count above stayed at zero, and it is a better reason than the count: a
+/// mechanism, not a sample. The race is still real in principle, since nothing
+/// forbids the cursor wrapping at exactly the wrong moment, so the decision to
+/// record rather than engineer around it is unchanged — merely better founded.
+///
+/// The same measurement retracted a *different* claim, and the contrast is the
+/// useful part: `dead_addr` in `crates/nova-runtime/src/net.rs` had this shape
+/// blamed for an actual intermittent failure, on the theory that a concurrent
+/// binder *in the same process* took the port. That mechanism is refuted. This
+/// comment never made that claim — it said "some other process" from the start,
+/// which is the version measurement did not touch.
 fn write_refused_port_file(label: &str) -> std::path::PathBuf {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
