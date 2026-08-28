@@ -744,23 +744,27 @@ builtins! {
     /// `Bytes` equality is reached only through the `Eq` trait's `eq` method,
     /// so `binary_result_ty` needs no `Ty::Bytes` arm for `==`/`!=`. Std-only.
     BytesEq,
-    /// `int_hash_seed() -> Int` — the per-process seed `std/core`'s `Int`,
-    /// `Bool` and `Char` hashing XORs into its input before `mix64` runs, as
-    /// `nova_rt_int_hash_seed` draws it. What it buys is precomputation
-    /// resistance: a colliding key set cannot be built offline against a
-    /// process that has not started yet.
+    /// `int_hash_seed() -> Int` — the per-process seed for `std/core`'s `Int`,
+    /// `Bool` and `Char` hashing, to be XORed into the input before `mix64`
+    /// runs, as `nova_rt_int_hash_seed` draws it. What it buys is
+    /// precomputation resistance: a colliding key set cannot be built offline
+    /// against a process that has not started yet. **As of this commit
+    /// `std/core` calls `mix64` unseeded and calls this builtin nowhere; the
+    /// commit that seeds those three impls should delete this sentence.**
     ///
-    /// A SEPARATE draw from the seed [`Builtin::StrHash`] carries. Were the two
-    /// one value, `(0).hash()` would equal `("").hash()` exactly — both reduce
-    /// to the same finalizer applied to the seed alone — and recovering either
-    /// would recover both.
+    /// A SEPARATE call from the one behind [`Builtin::StrHash`]'s seed. Were
+    /// the two one value, `(0).hash()` would equal `("").hash()` exactly, since
+    /// both reduce to the same finalizer applied to the seed alone. That the
+    /// two differ is what the separate call buys; whether recovering one yields
+    /// the other is a question about the draw's internals, answered at
+    /// `int_hash_seed` in `nova-runtime` and not settled there either.
     ///
-    /// **Nova code can recover this value in one call**: `(0).hash()` is
-    /// `mix64(0 ^ seed)`, which is `mix64(seed)`, and `mix64` is an invertible
-    /// bijection. That is the same shape `("").hash()` already has for the
-    /// string seed, it follows from ADR 0005's one-shot `Hash` returning a
-    /// plain `Int`, and the gate claim already declines the adaptive attacker
-    /// for whom it matters. Std-only.
+    /// **Nova code can recover this value in one call**, once those three
+    /// `Hash` impls XOR it in: `(0).hash()` is `mix64(0 ^ seed)`, which is
+    /// `mix64(seed)`, and `mix64` is an invertible bijection. That is the same
+    /// shape `("").hash()` already has for the string seed, it follows from ADR
+    /// 0005's one-shot `Hash` returning a plain `Int`, and the gate claim
+    /// already declines the adaptive attacker for whom it matters. Std-only.
     IntHashSeed,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
     /// process epoch, monotonic and never negative.
