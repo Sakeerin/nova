@@ -12,8 +12,9 @@
 // `std/core`'s `Int`, `Bool` and `Char` impls XOR a per-process seed into
 // `mix64`'s input, so any statistic over a fixed key set is a random variable
 // unless the seed cancels. Each line here is either seed-invariant by
-// construction or a bound whose exact false-failure probability is below, and
-// the fixture's whole flake budget sits around one run in a billion.
+// construction or a bound whose false-failure probability is derived below, and
+// the bounds listed below together put the fixture's whole flake budget at
+// around one run in a billion at worst — a sum over them, so an upper bound.
 //
 // A NOTE ON HOW NOT TO CHECK THIS FILE. Standing a literal `0` in for the seed
 // call reproduces the unseeded output by construction, since `x ^ 0 == x`, so
@@ -21,7 +22,20 @@
 // 0". Two lines were misclassified that way while this split was being planned.
 // Reason about whether the seed cancels, or sample many seeds.
 //
-// THE DERIVED BOUNDS, exact rather than sampled.
+// THE DERIVED BOUNDS, closed-form rather than sampled.
+//
+// WHAT "CLOSED-FORM" BUYS AND WHAT IT DOES NOT, because "exact" would overstate
+// it. Each figure below is computed in closed form rather than measured, and
+// each is exact for a model in which the hashes involved are independent and
+// uniform. They are not independent: every one of them is a
+// deterministic function of a single 64-bit seed, so at most 2^64 outcomes stand
+// where the model for the 128-key line alone has 256^128, and the model
+// therefore cannot be the true joint distribution. The model describes the
+// mixer a good finalizer is meant to approximate, which is the thing these
+// lines exist to check — so read each figure as exact for the model and as an
+// estimate for the run. Where a figure is additionally a sum over
+// non-disjoint events it is an upper bound, and it is labelled Bonferroni where
+// that applies.
 //
 //   * `keys -64..63 reach >= 76 of 256 buckets`. 128 keys into 256 buckets:
 //     `P(exactly j occupied) = C(256,j) * Surj(128,j) / 256^128`, whose
@@ -52,10 +66,12 @@
 // bucket counts, which the seed randomises. The obvious replacement is a
 // largest-bucket bound, as `tests/runtime/hash_diffusion.nova` uses, and it is
 // a trap: for 256 keys in 8 buckets that count is `Binomial(256, 1/8)` with
-// mean 32, and unioned over the buckets even `largest < 56` flakes at
-// 1.62e-04, about one run in 6,169. Eight buckets is too few for a tight bound
-// at this key count. What the histograms guarded is that hashing is not the
-// identity, and `buckets reached >= 6` asserts that directly.
+// mean 32, and the per-bucket tail summed over the buckets puts even
+// `largest < 56` at 1.62e-04 — a Bonferroni upper bound, since the per-bucket
+// events are not disjoint, so about one run in 6,169 at worst. Eight buckets is
+// too few for a tight bound at this key count. What the histograms guarded is
+// that hashing is not the identity, and `buckets reached >= 6` asserts that
+// directly.
 //
 // THE LOW-BIT COVERAGE THAT LEAVES, since both histograms and the loosening of
 // `buckets reached` land together. Nothing in this file constrains the 8-bucket
