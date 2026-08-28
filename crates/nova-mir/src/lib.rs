@@ -455,6 +455,9 @@ rt_funcs! {
     BytesFromInts,
     /// `(bytes, bytes) -> i8` — byte-for-byte equality.
     BytesEq,
+    /// `() -> i64` — the per-process seed for `Int`, `Bool` and `Char` hashing,
+    /// drawn separately from the string hash's own seed.
+    IntHashSeed,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
     /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
@@ -550,6 +553,7 @@ impl RtFunc {
             RtFunc::BytesToInts => "nova_rt_bytes_to_ints",
             RtFunc::BytesFromInts => "nova_rt_bytes_from_ints",
             RtFunc::BytesEq => "nova_rt_bytes_eq",
+            RtFunc::IntHashSeed => "nova_rt_int_hash_seed",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
             RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
             RtFunc::LogConfigLevel => "nova_rt_log_config_level",
@@ -724,6 +728,7 @@ impl RtFunc {
             RtFunc::BytesToInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesFromInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
+            RtFunc::IntHashSeed => (vec![], MirTy::I64),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
             RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
             RtFunc::LogConfigLevel => (vec![], MirTy::I64),
