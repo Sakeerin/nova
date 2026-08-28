@@ -93,9 +93,12 @@ builtins! {
     /// `nova_rt_str_hash` and `splitmix64_finalize` in `nova-runtime` rather
     /// than restated here. Backs
     /// `std/core`'s `impl Hash for String`, and exists for the same reason
-    /// [`Builtin::StrCmp`] does: no primitive walks a `String`, so every
-    /// operation over its bytes is a builtin like this one, and an `extern`
-    /// cannot stand in because `String` is not FFI-safe. That is a statement
+    /// [`Builtin::StrCmp`] does: no primitive walks a `String`, so a NAMED
+    /// operation over its bytes needs a builtin like this one, and an
+    /// `extern` cannot stand in because `String` is not FFI-safe. Named is
+    /// the operative word -- `==` reaches `nova_rt_str_eq` as a pure operator
+    /// lowering introducing no name at all, as [`Builtin::StrCmp`]'s own doc
+    /// comment sets out just above. That is a statement
     /// about the primitive layer, not about what Nova code can reach --
     /// `std/bytes` and `std/strings` build byte and char access on builtins
     /// of this kind, and ADR 0005's 2026-08-27 amendment records where an

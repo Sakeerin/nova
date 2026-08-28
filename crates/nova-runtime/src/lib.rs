@@ -304,10 +304,16 @@ fn splitmix64_finalize(mut z: u64) -> u64 {
 /// builtin. An earlier version of this comment justified that by saying Nova
 /// cannot walk a string's bytes itself, on the grounds that `String` has no
 /// length, indexing or iteration and is not FFI-safe. The FFI-safety half is
-/// true. The byte-walking half was true when written and is now **stale**:
-/// `std/bytes` and `std/strings` are `Builtin::STD_ONLY`, which the resolver
-/// seeds into every std module's scope, so a string's bytes and chars are
-/// reachable -- `std/core` itself walks one at its `impl Debug for String`.
+/// true. The byte-walking half was true when written and is now **stale**,
+/// by two separate routes rather than the one an earlier draft of this
+/// paragraph named. The byte and char BUILTINS -- `str_chars`,
+/// `bytes_from_string_intrinsic`, `bytes_at` -- are `Builtin::STD_ONLY`
+/// members, and the resolver seeds every member of that array into every std
+/// module's scope, which is how `std/core` comes to walk a string at its own
+/// `impl Debug for String`. Separately, `std/bytes` and `std/strings` are
+/// `STD_MODULES` entries whose public items reach other modules through
+/// `import_std_module`. `STD_ONLY` holds builtins, not modules; conflating
+/// the two is what that earlier draft did.
 /// The reason that survives does not rest on impossibility: the hash lives in
 /// one place, and reimplementing FNV-1a in Nova would pin a second copy of it
 /// free to diverge from this one. ADR 0005's 2026-08-27 amendment records the

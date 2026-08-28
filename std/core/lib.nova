@@ -85,8 +85,10 @@ impl<T, E> Result<T, E> {
 // user-visible `extern` was not an option either).
 
 // `Hash` reaches the runtime the same way, through two more std-only
-// builtins: `str_hash` (no primitive walks a `String`, so an operation over
-// its bytes has to be a builtin -- an absence about the primitive layer, NOT
+// builtins: `str_hash` (no primitive walks a `String`, so a NAMED operation
+// over its bytes needs a builtin -- `==` reaches the runtime as a plain
+// operator lowering and introduces no name, so it is not one; an absence
+// about the primitive layer, NOT
 // about what Nova code can reach, since `std/bytes` and `std/strings` build
 // byte and char access on builtins of this kind and this module walks a
 // string itself at `impl Debug for String` below; an earlier wording here
