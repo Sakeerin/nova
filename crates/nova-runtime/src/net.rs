@@ -2259,9 +2259,54 @@ mod tests {
         assert_ne!(read_status, OK, "a read on a closed fd must fail");
     }
 
+    /// Instrumented rather than fixed, deliberately. This test fails
+    /// intermittently and its cause is NOT known: the bind-then-drop story
+    /// [`dead_addr`]'s comment records was refuted by measurement, so a retry
+    /// here would suppress the evidence the next occurrence is supposed to
+    /// leave behind. On an unexpected status it captures three facts, and the
+    /// third is the one that discriminates:
+    ///
+    /// - the address dialled, so the port is in the failure output;
+    /// - the status actually returned, since `OK` means something accepted;
+    /// - **whether that port is re-bindable right now.** If the re-bind FAILS,
+    ///   something genuinely holds the port and theft is confirmed. If it
+    ///   SUCCEEDS, nothing holds it, which points at the status mapping or
+    ///   something transient rather than at a thief.
+    ///
+    /// A limit of this instrumentation, stated rather than left to be
+    /// discovered: [`connect_status_for_test`] returns a status and drops the
+    /// fd, so the failure path cannot interrogate the peer -- it can say that
+    /// someone answered, not who. Widening that helper's signature to find out
+    /// was judged the larger change.
     #[test]
     fn connecting_to_a_closed_port_is_connection_refused() {
-        assert_eq!(connect_status_for_test(&dead_addr()), CONNECTION_REFUSED);
+        let addr = dead_addr();
+        let status = connect_status_for_test(&addr);
+        if status != CONNECTION_REFUSED {
+            let rebind = match std::net::TcpListener::bind(&addr) {
+                Ok(listener) => {
+                    drop(listener);
+                    String::from("SUCCEEDED -- nothing holds it now, so this is NOT port theft")
+                }
+                Err(e) => format!("FAILED ({e}) -- something holds it, so theft IS confirmed here"),
+            };
+            let lines = [
+                format!(
+                    "connect returned {status}, expected CONNECTION_REFUSED ({CONNECTION_REFUSED})"
+                ),
+                format!("  address dialled:       {addr}"),
+                format!("  re-bind of that port:  {rebind}"),
+                String::from("This flake's cause is UNKNOWN; the bind-then-drop explanation is"),
+                String::from("refuted by measurement. Record this output; do not add a retry."),
+            ];
+            panic!(
+                "{}",
+                lines.join(
+                    "
+"
+                )
+            );
+        }
     }
 
     /// Two live connections must not collide: connecting a second time while
