@@ -2207,6 +2207,34 @@ mod tests {
     /// the port, then drop the listener so the port is closed again. The
     /// kernel refuses a connection to a closed port rather than hanging, on
     /// all three CI platforms.
+    ///
+    /// **The bind-then-drop shape here was long recorded as the cause of
+    /// `connecting_to_a_closed_port_is_connection_refused`'s intermittent
+    /// failure. That diagnosis is REFUTED, measured 2026-08-28.** The story
+    /// was that a concurrent binder takes the port between the `drop` and the
+    /// caller's `connect`. Measured on Windows: ephemeral ports are handed out
+    /// SEQUENTIALLY from a system-wide cursor -- 300 successive binds returned
+    /// 300 distinct ports spanning 309 -- and a freed port is not reissued
+    /// until roughly 13,759 further binds have happened. The window here is
+    /// microseconds and a few binds wide, so the cursor cannot come back
+    /// around inside it. A direct probe agreed: bind, drop, then try to
+    /// re-take the same port, 0 steals in 12,000 attempts at each of 0, 4 and
+    /// 16 concurrent binders in-process.
+    ///
+    /// What that does NOT establish, so nobody reads more into it than was
+    /// measured: theft by a DIFFERENT process is untested. That probe was
+    /// broken -- it used a one-second connect timeout while refusal on that
+    /// machine takes a consistent 2.0 seconds, so every attempt timed out and
+    /// it reported zeros for both outcomes, which is evidence the probe never
+    /// ran rather than evidence about the race.
+    ///
+    /// So the failure is real and its cause is UNKNOWN again. It joins the
+    /// `0xc0000005` family in that respect rather than being the one flake
+    /// here with an answer. Instrument the next occurrence -- capture what is
+    /// listening on that port when the connect succeeds -- rather than fixing
+    /// ahead of a mechanism; three attempts to name that other flake's cause
+    /// were each wrong, and this is now the second diagnosis retracted on
+    /// measurement.
     fn dead_addr() -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
@@ -3504,7 +3532,14 @@ mod tests {
     ///
     /// That second entry is the correction. This paragraph concluded that the
     /// window "is the pre-existing flake [`dead_addr`]'s own comment records,
-    /// **not a new one**" while enumerating only [`dead_addr`] -- and the
+    /// **not a new one**" while enumerating only [`dead_addr`]. Two things in
+    /// that quoted conclusion were wrong, and only one was corrected here at
+    /// the time. The attribution was also wrong: [`dead_addr`]'s comment did
+    /// not record a flake at all -- it claimed the mechanism WORKS on all
+    /// three CI platforms. The record lived in
+    /// `docs/superpowers/specs/2026-08-23-std-net-listener-design.md`. That
+    /// comment now carries the flake, along with the measurement that refutes
+    /// the mechanism both records named. And the
     /// calibration shipped in the same increment as that conclusion, inside
     /// the very test this comment documents. It is the same *kind* of window,
     /// and it is a second instance of the bind-then-drop shape the design

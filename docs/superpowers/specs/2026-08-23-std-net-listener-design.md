@@ -259,6 +259,40 @@ primitive that parks rather than spins, proved by wake *order* rather than by el
 > elapsed time" but "assert no tight upper bound on it" — and here order is available and needs no
 > bound at all, which is the actual reason to prefer it.
 
+
+## Amendment - 2026-08-28: the `dead_addr()` mechanism this document names is refuted
+
+This document states that `connecting_to_a_closed_port_is_connection_refused`
+fails because `dead_addr()` binds `127.0.0.1:0`, drops the listener, and a
+concurrent bind steals the port. **Measured, that mechanism cannot fire.**
+
+Ephemeral ports on Windows are handed out SEQUENTIALLY from a system-wide
+cursor: 300 successive binds returned 300 distinct ports spanning 309, and a
+freed port was not reissued until about 13,759 further binds. The window
+between `dead_addr()`'s `drop` and its caller's `connect` is microseconds and a
+handful of binds wide, so the cursor cannot return inside it. A direct probe
+agreed -- bind, drop, attempt to re-take the same port: 0 steals in 12,000
+attempts, at each of 0, 4 and 16 concurrent in-process binders.
+
+What is NOT established, stated so this correction is not read as more than it
+is: theft by a DIFFERENT process is untested. That probe was broken. It used a
+one-second connect timeout while refusal on the measuring machine takes a
+consistent 2.0 seconds, so every attempt timed out and it returned zero for
+both outcomes -- evidence the probe never ran, not evidence about the race.
+
+The failure itself is real and was observed as `assert_eq!` finding 0 where
+CONNECTION_REFUSED (7) was expected. **Its cause is UNKNOWN again.** It joins
+the `0xc0000005` family in that respect rather than being the one flake in this
+repository with an answer, and the standing instruction for that family applies
+here too: instrument the next occurrence -- capture what is listening on the
+port when the connect succeeds -- rather than fixing ahead of a mechanism.
+
+Two further corrections to what this document says about it. The line citation
+`net.rs:1571-1576` is stale; the helper has moved. And the surrounding advice
+to keep a fixture's listener alive for its whole life is still good practice
+for a fixture that needs a LIVE port, so nothing here argues against it -- it
+simply is not a fix for a race that does not occur.
+
 **Port 0 is required, not preferred.** A fixed port collides when test binaries run concurrently.
 The existing `dead_addr()` flake (`net.rs:1571-1576`) is that failure: it binds `127.0.0.1:0` and
 then **drops the listener**, so a concurrent bind can steal the port. This fixture keeps its

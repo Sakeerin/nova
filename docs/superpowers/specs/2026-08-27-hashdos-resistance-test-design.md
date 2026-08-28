@@ -448,3 +448,24 @@ this at all is that a derived number is this increment's whole subject: an
 increment that replaces an argued security claim with a measured one cannot
 leave its own measurements approximate and expect to be believed about the
 ones that matter.
+
+### g. Section 8's `dead_addr()` hazard names a refuted mechanism
+
+Section 8 says `net::tests::connecting_to_a_closed_port_is_connection_refused`
+"fails when a concurrent binder takes the ephemeral port `dead_addr()` frees",
+and this document's hazard list presented that as the flake with a known cause,
+in contrast to the `0xc0000005` family.
+
+**Measured 2026-08-28, the in-process mechanism cannot fire.** Ephemeral ports
+are issued sequentially from a system-wide cursor (300 binds, 300 distinct
+ports, span 309) and a freed port is not reissued for about 13,759 binds, while
+the window here is microseconds wide; a direct probe found 0 steals in 12,000
+attempts at 0, 4 and 16 concurrent in-process binders.
+
+Cross-process theft is untested rather than refuted -- that probe used a
+one-second timeout against a 2.0-second refusal latency and returned zeros for
+both outcomes, so it never ran. The flake is real; **its cause is unknown
+again**, so the contrast this section drew with the `0xc0000005` family no
+longer holds and both should be treated the same way: instrument the next
+occurrence rather than fix ahead of a mechanism.
+

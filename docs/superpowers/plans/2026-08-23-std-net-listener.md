@@ -10,6 +10,35 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-23-std-net-listener-design.md`
 
+
+## Amendment - 2026-08-28: this plan's `dead_addr()` mechanism is refuted
+
+Two places below explain a decision by citing `dead_addr()`'s bind-then-drop
+shape as a live race: the note on keeping a far end alive ("dropping it is the
+`dead_addr()` mistake in miniature"), and the dictated fixture comment stating
+that "a concurrent bind can steal the port".
+
+**The IN-PROCESS mechanism is refuted by measurement.** Ephemeral ports are
+issued sequentially from a system-wide cursor -- 300 successive binds gave 300
+distinct ports spanning 309 -- and a freed port is not reissued for about
+13,759 further binds, so a concurrent binder cannot take it inside a
+microsecond window. A direct probe found 0 steals in 12,000 attempts at each of
+0, 4 and 16 concurrent in-process binders.
+
+**Cross-process theft is a different claim and is NOT refuted; it is untested.**
+The probe for it was broken -- a one-second connect timeout against a machine
+where refusal takes a consistent 2.0 seconds -- so it returned zeros for both
+outcomes, which is evidence it never ran. `write_refused_port_file` in
+`crates/nova-cli/tests/run_tests.rs` states that cross-process version
+correctly, with its own measurement and with the reason closing it is not worth
+the cost, and needs no correction.
+
+The advice these two passages support is unaffected: holding a fixture's
+listener for its whole life is good practice regardless, and this plan's
+fixture does it. What changes is the justification, not the instruction. The
+full correction is the 2026-08-28 amendment in
+`docs/superpowers/specs/2026-08-23-std-net-listener-design.md`.
+
 ## Global Constraints
 
 - `cargo build --locked --workspace` **before** `cargo test`. `--no-fail-fast`.
