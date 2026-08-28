@@ -269,15 +269,22 @@ fn main() {
     println("str rehash len=${sb.len()} cap=${sb.state.len()} mismatches=${sbad} absent=${sb.contains_key("nope")}")
 
     // === Negative Int keys: where `hash % cap` would index out the bottom ===
-    // `mix64` spans the whole `Int` range, so many of these keys hash negative;
+    // `mix64` spans the whole `Int` range, so some of these keys hash negative;
     // `hash & (cap - 1)` is non-negative for every `Int` while `%` inherits the
-    // sign. The count is a hand-checkable constant, computed independently from
-    // canonical splitmix64 rather than read off a run.
+    // sign. `mismatches=0` is the property that matters — a key which hashes
+    // negative still round-trips through `Map` — and it holds whatever the seed
+    // is, since every probe in a run uses that run's own seed.
+    //
+    // This line used to carry a `negative hashes=` field pinning how many of
+    // the 16 keys hashed negative. `Int` hashing is seeded per process now, so
+    // that count is `Binomial(16, 1/2)` rather than a constant, and no bound
+    // over 16 keys is tight enough to keep: even `1..15` flakes at one run in
+    // 32,768 per process, and three separate tests read this one golden in
+    // three separate processes. The statistic that negative hashes occur at all
+    // lives in `tests/runtime/hash.nova`, over 256 keys and as a bound.
     let mut nm = Map::new()
-    let mut neg_hashes = 0
     for i in 0..16 {
         let k = i - 8
-        if k.hash() < 0 { neg_hashes = neg_hashes + 1 }
         let _ = nm.insert(k, k * 3)
     }
     let mut nbad = 0
@@ -285,7 +292,7 @@ fn main() {
         let k = i - 8
         if nm.get(k).unwrap_or(12345) != k * 3 { nbad = nbad + 1 }
     }
-    println("neg keys len=${nm.len()} cap=${nm.state.len()} negative hashes=${neg_hashes} mismatches=${nbad}")
+    println("neg keys len=${nm.len()} cap=${nm.state.len()} mismatches=${nbad}")
 
     // === Set: dedup, both is_empty branches, and a record element ===
     let mut s = Set::new()

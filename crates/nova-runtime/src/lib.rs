@@ -313,19 +313,17 @@ fn int_hash_seed() -> u64 {
     })
 }
 
-/// The per-process seed for `std/core`'s `Int`, `Bool` and `Char` hashing, to
-/// be XORed into the input before `mix64` runs.
+/// The per-process seed for `std/core`'s `Int`, `Bool` and `Char` hashing,
+/// XORed into the input before `mix64` runs.
 ///
-/// **Nova code can recover this value in one call**, once those three `Hash`
-/// impls XOR it in: `(0).hash()` is `mix64(0 ^ seed)`, which is `mix64(seed)`,
-/// and `mix64` is an invertible bijection. That is the same shape `("").hash()`
+/// **Nova code can recover this value in one call**, since those `Hash` impls
+/// XOR it in: `(0).hash()` is `mix64(0 ^ seed)`, which is `mix64(seed)`, and
+/// `mix64` is an invertible bijection. That is the same shape `("").hash()`
 /// already has for the string seed, it follows from ADR 0005's one-shot `Hash`
 /// returning a plain `Int`, and the gate claim already declines the adaptive
 /// attacker for whom it matters. What the seed buys is precomputation
-/// resistance. **As of this commit `std/core` calls `mix64` unseeded and does
-/// not call this at all, so `(0).hash()` is still a fixed constant that
-/// recovers nothing; the commit that seeds those impls should delete this
-/// sentence.**
+/// resistance. `tests/runtime/hash.nova` performs that recovery, to cancel the
+/// seed when it asserts `mix64`'s canonical vectors.
 ///
 /// Nullary and takes no pointer, so it needs no `unsafe`. Plain `"C"`, not
 /// `"C-unwind"`: every caller is a compiled Nova frame — `std/core`'s three
@@ -418,7 +416,12 @@ fn splitmix64_finalize(mut z: u64) -> u64 {
 /// PRECOMPUTED collision set: the seed is drawn per process, so a colliding key
 /// set cannot be built offline against a process that has not started yet, and
 /// recovering the seed means first obtaining a hash from the running process.
-/// `mix64` -- the `Int`, `Bool` and `Char` impls -- is not seeded at all.
+/// This paragraph used to close "`mix64` -- the `Int`, `Bool` and `Char` impls
+/// -- is not seeded at all." That is no longer true: those impls XOR
+/// [`nova_rt_int_hash_seed`]'s separate per-process draw into `mix64`'s input,
+/// so they carry the same precomputation resistance and the same recoverable
+/// seed as this one does. `mix64` itself is still unseeded, which is a
+/// different statement -- the seeding is in the impls that call it.
 ///
 /// An adversary who can observe the process and adapt is OUT OF SCOPE, and the
 /// route is concrete rather than a category: one string hash read out of this

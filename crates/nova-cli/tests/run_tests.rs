@@ -1755,18 +1755,34 @@ fn std_core_under_gc_stress() {
 /// two's-complement constants must actually wrap rather than trap, the
 /// `char_to_int` builtin lowers to a register move that no type could catch
 /// being wrong, and the **low** bits of an `Int` hash must be spread because
-/// `Map` will select buckets with `hash & (cap - 1)`. The expected bucket
-/// histograms in the fixture were computed independently from splitmix64's
-/// finalizer, so they are an oracle rather than a recording of whatever the
-/// implementation happened to print.
+/// `Map` will select buckets with `hash & (cap - 1)`.
+///
+/// `Int`, `Bool` and `Char` hashing is seeded per process, so the fixture
+/// asserts nothing that varies with the seed. What it prints is relations
+/// between hashes drawn under one seed, two derived bounds, the complement
+/// theorem, and `mix64`'s published canonical vectors reached by recovering the
+/// seed and cancelling it. Every derivation is in the fixture's own header,
+/// including the exact false-failure probability of each bound.
+///
+/// An earlier version of this paragraph read "The expected bucket histograms in
+/// the fixture were computed independently from splitmix64's finalizer, so they
+/// are an oracle rather than a recording of whatever the implementation happened
+/// to print." Those histograms are gone — the seed randomises the exact counts
+/// they pinned — but the oracle property is not, and that is the half worth
+/// keeping. The two bounds come from the occupancy and binomial distributions
+/// rather than from a run, the complement line is a theorem about `mix64` being
+/// injective, and the canonical vectors are published splitmix64 values. What
+/// changed is that a bound admits a range where a histogram admitted one value,
+/// so a mutant can land inside one; the fixture's scope note says which.
 ///
 /// The fixture also carries the complement-pair regression. Because Nova's
 /// `>>` is arithmetic, an unmasked `x ^ (x >> k)` yields the same value for
 /// `x` and `-1 - x`, which made `mix64` fold 2-to-1 with *identical* hashes —
 /// pairs that share a bucket at every capacity, so no resize separates them.
-/// Every single-sign sample (consecutive keys, multiples of 8, all-negative)
-/// looked textbook-uniform through it, which is exactly why
-/// `h(0) != h(-1)` and the both-signs bucket count are in there.
+/// Seeding does not rescue that, because XOR with a constant commutes with
+/// complement too. A single-sign sample looks textbook-uniform through it,
+/// which is exactly why `h(0) != h(-1)`, the complement count and the
+/// both-signs bucket bound are all in there.
 #[test]
 fn hash_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/hash.stdout"))
@@ -1780,9 +1796,18 @@ fn hash_run() {
         .stdout(expected);
 }
 
-/// The same fixture through the object-file backend: a hash must not depend on
-/// which backend compiled it, or a `Map` built by one and read by the other
-/// would disagree about buckets.
+/// The same fixture through the object-file backend: every assertion in it must
+/// hold whichever backend compiled it, or the two are computing different hash
+/// arithmetic.
+///
+/// This comment used to read "a hash must not depend on which backend compiled
+/// it, or a `Map` built by one and read by the other would disagree about
+/// buckets". That justification no longer holds: `Int` hashing is seeded per
+/// process, so two processes disagree about buckets whatever compiled them, and
+/// this test runs in a different process from `hash_run` regardless. What the
+/// comparison still catches is a backend that mixes differently, because the
+/// canonical vectors and the complement count are exact and the two bounds sit
+/// far from what a broken mixer produces.
 #[test]
 fn hash_build_standalone() {
     let out = build_and_run("tests/runtime/hash.nova", "hash");
@@ -8896,5 +8921,211 @@ fn hashdos_precomputed_key_set_does_not_survive_a_new_process() {
         "a set precomputed under another seed must not still collide: largest bucket {largest} \
          of 32 keys, bound 10. A dead seed yields 32. Phase 1 printed:\n{found}\n\
          Phase 2 printed:\n{spread}"
+    );
+}
+
+/// Phase 1 of the `Int`-key equivalent: search `Int` keys for a set that
+/// collides under THIS process's seed. The key IS the index, so nothing has to
+/// be reconstructed from it the way the `String` search rebuilds `"k${i}"`.
+///
+/// Two passes rather than a bucket-of-lists, for the same reason the `String`
+/// search gives: Nova's array construction has a repeat form and a list form
+/// and no nested growable structure worth building here. The first pass stops
+/// at the 32nd key in some bucket; the second collects that bucket's first 32
+/// keys, which are exactly the keys the first pass counted.
+const INT_PHASE1_SRC: &str = r#"const CAP: Int = 64
+const WANT: Int = 32
+const BUDGET: Int = 4000
+
+fn main() {
+    let mut counts = [0; CAP]
+    let mut target = -1
+    let mut i = 0
+    while i < BUDGET {
+        let b = (i).hash() & (CAP - 1)
+        counts[b] = counts[b] + 1
+        if counts[b] >= WANT { target = b; break }
+        i = i + 1
+    }
+    if target < 0 {
+        println("found false")
+        return
+    }
+    let mut picked = [0; WANT]
+    let mut out = ""
+    let mut n = 0
+    let mut j = 0
+    while j < BUDGET {
+        if ((j).hash() & (CAP - 1)) == target {
+            picked[n] = j
+            out = "${out}${j} "
+            n = n + 1
+            if n == WANT { break }
+        }
+        j = j + 1
+    }
+    // Self-check: bucket the emitted set with phase 2's own arithmetic. Under
+    // this process's seed every picked key shares `target`, so this is the whole
+    // set size; if it is not, the set being handed to phase 2 is not the set
+    // phase 1 claims to have found.
+    let mut own = [0; CAP]
+    let mut m = 0
+    while m < n {
+        let k = picked[m]
+        own[k.hash() & (CAP - 1)] = own[k.hash() & (CAP - 1)] + 1
+        m = m + 1
+    }
+    let mut conc = 0
+    let mut q = 0
+    while q < CAP {
+        if own[q] > conc { conc = own[q] }
+        q = q + 1
+    }
+    println("found true")
+    println("count ${n}")
+    println("concentration ${conc}")
+    println("keys ${out}")
+}
+"#;
+
+/// Phase 2 of the `Int`-key equivalent: re-hash phase 1's set in a FRESH
+/// process, therefore under a fresh seed. `__KEYS__` is replaced by the
+/// comma-separated keys phase 1 printed.
+const INT_PHASE2_TEMPLATE: &str = r#"const CAP: Int = 64
+
+fn main() {
+    let ks = [__KEYS__]
+    let mut counts = [0; CAP]
+    let mut i = 0
+    while i < ks.len() {
+        let k = ks[i]
+        let b = k.hash() & (CAP - 1)
+        counts[b] = counts[b] + 1
+        i = i + 1
+    }
+    let mut largest = 0
+    let mut j = 0
+    while j < CAP {
+        if counts[j] > largest { largest = counts[j] }
+        j = j + 1
+    }
+    println("keys ${ks.len()} largest ${largest}")
+}
+"#;
+
+/// An `Int` key set built to collide under one process's seed must NOT collide
+/// in a fresh process. `hashdos_precomputed_key_set_does_not_survive_a_new_process`
+/// asserts the same property for `String` keys through `nova_rt_str_hash`'s
+/// seed; this one goes through `nova_rt_int_hash_seed`, which is a separate
+/// draw feeding `std/core`'s `Int`, `Bool` and `Char` impls, so neither test
+/// covers the other's path.
+///
+/// The bound and its derivation are the `String` test's: `Binomial(32, 1/64)`
+/// for one bucket, unioned over the 64 buckets, gives 8.2686863018e-11 for a
+/// largest bucket above 10 — about one run in 12,093,819,544. If the seeding
+/// were dead the largest bucket would be 32, so the margin before a broken seed
+/// could pass is 22 keys.
+///
+/// The search budget is derived rather than chosen to look generous, and it was
+/// simulated for `Int` keys specifically rather than carried over. Over 400
+/// seed pairs modelling `mix64(k ^ seed)`, a bucket reached 32 keys after a
+/// median of 1320 candidates, 1468 at the 95th percentile and 1615 at the
+/// worst, succeeding for every one of those seeds — so 4000 is about 2.5 times
+/// the observed worst case. Phase 2's largest bucket over the same 400 pairs ran
+/// 1 to 5, with a 99th percentile of 4, against the bound of 10.
+///
+/// Phase 1 also re-hashes the 32 keys it emits and checks they still land in one
+/// bucket under its own seed, rather than trusting its own `count 32` report — a
+/// filter that emitted 32 arbitrary keys would satisfy that count without the
+/// set actually colliding, which would make phase 2's comparison prove nothing.
+///
+/// What this pins that the golden fixture cannot: `tests/runtime/hash.nova` runs
+/// in one process and so sees one seed, which is why its own lines are all
+/// seed-invariant. Two processes are what make the seed observable at all.
+/// It is also where the PRE-XOR shape earns its keep. Post-XOR
+/// (`mix64(x) ^ seed`) leaves the low bits as
+/// `(mix64(x) & mask) XOR (seed & mask)`, which permutes buckets without
+/// separating any colliding pair, so a set found by phase 1 stays wholly
+/// collided in phase 2 and the bound fails.
+///
+/// Rust's `format!` cannot build the phase-2 source: Nova's `${i}` interpolation
+/// makes `format!` read `{i}` as a named capture and fail E0425, so this uses a
+/// raw-string template and `str::replace`, as the `String` test does. The Nova
+/// source is written from Rust rather than a shell heredoc, which has silently
+/// eaten a backslash on this project.
+///
+/// This builds and runs Nova binaries, so it joins the population the
+/// `0xc0000005` flake draws from. That cost is stated rather than hidden.
+#[test]
+fn hashdos_precomputed_int_key_set_does_not_survive_a_new_process() {
+    let dir = std::env::temp_dir().join(format!("nova-hashdos-int-resist-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let build_and_capture = |name: &str, src: &str| -> String {
+        let file = dir.join(format!("{name}.nova"));
+        std::fs::write(&file, src).expect("write nova source");
+        let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        nova()
+            .arg("build")
+            .arg(&file)
+            .arg("-o")
+            .arg(&exe)
+            .assert()
+            .success();
+        let out = Command::new(&exe).assert().success();
+        String::from_utf8_lossy(&out.get_output().stdout)
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string()
+    };
+
+    // Phase 1, in its own process.
+    let found = build_and_capture("int_phase1", INT_PHASE1_SRC);
+    assert!(
+        found.contains("found true"),
+        "phase 1 must find 32 Int keys in one bucket within its budget; it printed:\n{found}"
+    );
+    assert!(
+        found.contains("count 32"),
+        "phase 1 must report exactly the set size it was asked for; it printed:\n{found}"
+    );
+    assert!(
+        found.contains("concentration 32"),
+        "phase 1's self-check must confirm the 32 keys it emitted actually share one \
+         bucket under its own seed, not merely that it emitted 32 of them; it printed:\n{found}"
+    );
+    let keys: Vec<&str> = found
+        .lines()
+        .find_map(|l| l.strip_prefix("keys "))
+        .expect("phase 1 prints a `keys` line")
+        .split_whitespace()
+        .collect();
+    assert_eq!(
+        keys.len(),
+        32,
+        "phase 1's key line must carry the whole set; it printed:\n{found}"
+    );
+
+    // Phase 2, in a SEPARATE process, therefore under a different seed. A
+    // second real process supplies that second seed while both phases still
+    // exercise `std/core`'s real `Hash for Int`, rather than reimplementing
+    // `mix64` in Nova with a chosen seed parameter — that would pin a second
+    // copy of the mixer and fail for the wrong reason if the two ever diverged.
+    let src = INT_PHASE2_TEMPLATE.replace("__KEYS__", &keys.join(", "));
+    let spread = build_and_capture("int_phase2", &src);
+    assert!(
+        spread.starts_with("keys 32 largest "),
+        "phase 2 must report the set size and the largest bucket; it printed:\n{spread}"
+    );
+    let largest: usize = spread
+        .rsplit(' ')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("phase 2's last field is the largest bucket count");
+    assert!(
+        largest <= 10,
+        "an Int key set precomputed under another seed must not still collide: largest \
+         bucket {largest} of 32 keys, bound 10. A dead seed yields 32. Phase 1 printed:\n\
+         {found}\nPhase 2 printed:\n{spread}"
     );
 }

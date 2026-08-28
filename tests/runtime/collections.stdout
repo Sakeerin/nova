@@ -38,7 +38,7 @@ after rehash removed 0=false 2=false 3=false 4=false 5=false
 churn tail len=4 used=4 cap=16 state=0100001110000000
 str len=3 alpha=1 beta=2 empty key=0 gamma=-1
 str rehash len=30 cap=64 mismatches=0 absent=false
-neg keys len=16 cap=32 negative hashes=9 mismatches=0
+neg keys len=16 cap=32 mismatches=0
 set fresh len=0 empty=true
 set len=4 added=4 empty=false has3=true has4=false
 set remove=true again=false len=3 has0=false
