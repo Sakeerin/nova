@@ -70,6 +70,8 @@ Passages here are anchored by content and not by line number, for the reason the
 
 Nothing else is touched. In particular no file under `std/` is expected to change; if you find yourself editing one, stop and say why.
 
+**Amended 2026-08-28: the sentence above is false as shipped, and the table it closes is short.** The increment also amended `docs/superpowers/specs/2026-08-26-map-hashdos-design.md`, `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`, its own governing spec and this plan itself. Its claim about `std/` did hold -- no file under `std/` changed. What it got wrong was quantifying over everything else, which is the same bare-closed-world shape this plan's own Global Constraints forbid, written into the plan that forbids it. A later increment corrected the stale byte-access wording in `nova-runtime` and `nova-resolver`; those are code files this plan correctly did not touch, and are named here only so a reader tracing the table is not surprised to find them in the history.
+
 ---
 
 ## Task 1: The cross-process resistance test
