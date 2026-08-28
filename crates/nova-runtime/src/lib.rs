@@ -287,16 +287,19 @@ fn str_hash_seed() -> u64 {
 /// `(k0, k1)` from it, storing `(k0 + 1, k1)` on each call — so two calls on a
 /// thread share `k1` exactly and differ in `k0` by the number of calls between
 /// them. `std`'s own comment says that increment exists to vary `HashMap`
-/// iteration order, not to make keys independent. Each seed here is then
-/// SipHash-1-3 over the same one-word message under those related keys, and the
-/// two differ because those outputs do. (Whichever thread first reaches each
-/// `OnceLock` supplies its draw, and neither initialiser pins a thread, so the
-/// two can also come from two separate OS draws.)
+/// iteration order, not to make keys independent. Each seed here is then the
+/// same keyed hash over the same one-word message under those related keys, and
+/// the two differ because those outputs do. The variant is deliberately not
+/// named: `std` documents `DefaultHasher`'s algorithm as unspecified and free
+/// to change, so naming it would go stale on a `std` upgrade, and the argument
+/// holds for any keyed hash. (Whichever thread first reaches each `OnceLock`
+/// supplies its draw, and neither initialiser pins a thread, so the two can
+/// also come from two separate OS draws.)
 ///
-/// Whether recovering one seed yields the other therefore rests on SipHash's
-/// behaviour under a RELATED KEY, not on independence. This increment does not
-/// verify that, and `int_and_str_hash_seeds_are_drawn_separately` does not test
-/// it: that test pins only that the two differ.
+/// Whether recovering one seed yields the other therefore rests on that keyed
+/// hash's behaviour under a RELATED KEY, not on independence. This increment
+/// does not verify that, and `int_and_str_hash_seeds_are_drawn_separately` does
+/// not test it: that test pins only that the two differ.
 ///
 /// One value for the whole process, for the same reason `str_hash_seed` gives:
 /// a `Map` built under one seed and probed under another finds nothing.
@@ -324,44 +327,36 @@ fn int_hash_seed() -> u64 {
 /// recovers nothing; the commit that seeds those impls should delete this
 /// sentence.**
 ///
-/// Nullary and takes no pointer, so it needs no `unsafe`. `C-unwind` matches
-/// the majority of same-shape exports — non-`unsafe`, nullary, returning
-/// `i64`. Enumerated: `log`'s `nova_rt_log_config_level` and
-/// `nova_rt_log_config_to_stderr`, and `time`'s `nova_rt_time_now_nanos` and
-/// `nova_rt_time_now_epoch_nanos` all use it, against
-/// [`nova_rt_test_selector`], which carries this exact signature and uses plain
-/// `"C"`. Four of those five, so a majority and not a unique closest match —
-/// an earlier version of this comment called `nova_rt_time_now_nanos` "the
-/// closest existing function in shape", which was a tie described as a
-/// superlative. What `C-unwind` buys is that an unwind out of `get_or_init` is
-/// defined rather than undefined, and `get_or_init` runs `RandomState::new`,
-/// which reaches the OS for entropy.
+/// Nullary and takes no pointer, so it needs no `unsafe`. Plain `"C"`, not
+/// `"C-unwind"`: every caller is a compiled Nova frame — `std/core`'s three
+/// `Hash` impls, reached from user code — and [`crate::task::PollFn`]'s doc
+/// closes its constraint block by saying the permission `"C-unwind"` grants
+/// exists for that module's Rust-side entry points, not for compiled Nova
+/// frames. `task`'s `abort_with` states the general form in its own doc: a
+/// generated frame carries no landing pads, no drop glue and no unwind table,
+/// so an unwind that passed through one would have to be resolved against a
+/// frame the unwinder has no description of.
 ///
-/// This is NOT the inference [`nova_rt_float_fixed`] prohibits. That comment
-/// forbids reaching for `C-unwind` by pattern-matching the async intrinsics, a
-/// different family; the neighbours cited here are the nullary clock and config
-/// readers, and they are the family this belongs to.
+/// The panic that would do it is real rather than hypothetical. `get_or_init`
+/// runs `RandomState::new`, which draws OS entropy on the first call, and `std`
+/// panics when that draw fails — unconditionally on Linux and on the
+/// `getrandom`/`getentropy` platforms, and under a `debug_assert` on current
+/// Windows. `(0).hash()` inside an `async fn` body puts that first call inside
+/// a generated poll function. Plain `"C"` escalates such an unwind to `panic in
+/// a function that cannot unwind` and aborts, making the prohibited case
+/// structurally impossible instead of resting on the panic not happening.
 ///
-/// The tension the two precedents leave is real and is NOT resolved here.
-/// `nova_rt_float_fixed`'s comment paraphrases [`crate::task`]'s rule as
-/// "anything reachable from a generated call site must abort rather than
-/// attempt to unwind", which is broader than what `task`'s module docs
-/// actually state — there the constraint is on generated POLL functions, whose
-/// frames carry no landing pads. Under the broader reading this function would
-/// take plain `"C"`, since a `Hash` impl called from an `async fn` body puts
-/// its call site inside a generated poll function. The four same-shape
-/// neighbours above are reachable from generated call sites too and use
-/// `C-unwind` regardless, so this follows established practice rather than
-/// settling which reading is right. What keeps it inside `task`'s actual rule
-/// is that nothing here panics deliberately: after the first initialisation
-/// the body is a `OnceLock` read, and the one panic path is `RandomState::new`
-/// failing to draw OS entropy on that first call.
-///
-/// Separately, [`nova_rt_str_hash`] uses plain `"C"` while also reaching a
-/// `OnceLock`; it differs in shape by taking a pointer, and that difference is
-/// pre-existing and is not changed here.
+/// [`nova_rt_str_hash`] is the precedent this follows: it makes the same
+/// `RandomState::new` draw through the same `OnceLock` and is plain `"C"` too.
+/// The nullary readers in `log` and `time` use `"C-unwind"` at this same
+/// signature; that divergence is pre-existing, is not resolved here, and their
+/// panic profiles differ from this one's. Earlier versions of this comment
+/// specified `"C-unwind"` by reasoning from those readers' shape, which is the
+/// inference [`nova_rt_float_fixed`]'s doc warns against — a neighbouring
+/// family's ABI is not an argument — and one of them went further and asserted
+/// that `task`'s rule was narrower than the module states. It is not.
 #[no_mangle]
-pub extern "C-unwind" fn nova_rt_int_hash_seed() -> i64 {
+pub extern "C" fn nova_rt_int_hash_seed() -> i64 {
     int_hash_seed() as i64
 }
 
