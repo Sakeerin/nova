@@ -13,6 +13,14 @@ An in-place correction would leave no trace that the label was ever unreliable.
 Item (f)'s account of the earlier reciprocal error, including the reconstructed
 early-exit cause, is not in question and is not touched.
 
+This document now carries two correction locations, covering different things.
+`## 11. Correction, 2026-08-27` records what the design above it got wrong,
+item by item, and item (f) is where the figure this section corrects still
+stands. This section corrects one figure inside that correction; it is dated
+later and is unnumbered because it postdates the numbering. Item (f) carries a
+pointer forward to here, so a reader who goes to section 11 for what this spec
+got wrong does not meet the wrong figure unflagged.
+
 ### The figure
 
 Item (f) states the `at most 10` threshold's union bound twice. Its paragraph
@@ -557,6 +565,14 @@ this at all is that a derived number is this increment's whole subject: an
 increment that replaces an argued security claim with a measured one cannot
 leave its own measurements approximate and expect to be believed about the
 ones that matter.
+
+**Superseded in part, 2026-08-29.** The eleven-figure form in the paragraph
+above — "the exact 8.2686863018e-11" — belongs to the independence model, not
+to the union bound this row's label names; that union bound is
+8.2686863021e-11. See **Amendment - 2026-08-29 — item (f)'s eleven-figure union
+bound**, immediately after this document's header, which also records why the
+two figures' reciprocals agree and what that costs a check of one figure
+against another derived from it.
 
 ### g. Section 8's `dead_addr()` hazard names a refuted mechanism
 
