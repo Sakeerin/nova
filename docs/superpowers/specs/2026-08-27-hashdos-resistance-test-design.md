@@ -4,6 +4,115 @@
 **Base:** `main` at `515145b` (584 commits, no merge commits, 1075 passed / 0 failed / 8 ignored across 44 targets on Windows; CI gate per leg: ubuntu 1067/0/1, macos 1068/0/0, windows 1075/0/8)
 **Governs:** ADR 0005 (one-shot `Hash`), ADR 0018 section 4, `nova-spec/20-STDLIB.md` section 7
 
+## Amendment - 2026-08-29 — item (f)'s eleven-figure union bound
+
+Recorded rather than corrected in place, so both figures stay in this file: a
+grep for either lands here, and the record that a figure labelled "the exact"
+value was wrong survives, which this derivation's history makes worth keeping.
+An in-place correction would leave no trace that the label was ever unreliable.
+Item (f)'s account of the earlier reciprocal error, including the reconstructed
+early-exit cause, is not in question and is not touched.
+
+### The figure
+
+Item (f) states the `at most 10` threshold's union bound twice. Its paragraph
+on that row's reciprocal says "the exact value is 8.26868630e-11" — correct at
+nine significant figures, and also what the other model below rounds to at
+nine, so it does not distinguish them. Its next paragraph, reconstructing the
+early-exit origin, says "rather than the exact 8.2686863018e-11" — that
+eleven-figure string belongs to the other model.
+
+Recomputed here rather than taken from anywhere: by two independent routes that
+agree on one exact rational, rendered through `Decimal` and never through a
+float. With `P` the single-bucket tail `P(Binomial(32, 1/64) >= 11)`:
+
+| quantity | at eleven significant figures | reciprocal |
+|---|---|---|
+| `64 * P`, the sum this label names | 8.2686863021e-11 | 12,093,819,543.57 |
+| `1 - (1-P)^64`, an independence model | 8.2686863018e-11 | 12,093,819,544.07 |
+
+The two agree at ten significant figures and part at the eleventh. Eleven is
+therefore the precision this argument uses, and no more is published here — the
+same reason the shipped test comment gives for stating its own reciprocal in
+words.
+
+The shipped figure matches the independence model at every printed digit, and
+an eleven-figure match is not coincidence: an exactly computed probability was
+relabelled as a union bound upstream. The figure is right for the model that
+was computed and wrong for the model the words describe.
+`docs/superpowers/plans/2026-08-28-seeded-mix64.md` carries the same
+eleven-figure string in its Task 2 Step 4, copied from here, and is governed by
+that plan's own amendment.
+
+### Why every check passed, which is the transferable part
+
+Both reciprocals round to 12,093,819,544, so the mantissa and the reciprocal
+printed beside it were mutually consistent — both correct, for the same
+unlabelled model. Cross-checking one against the other could not have detected
+this. What catches the class is recomputing the quantity THE LABEL NAMES.
+
+The two rounds this passage now records are mirror images of each other. In the
+round item (f) already describes, a truncated tail sum was invisible in the
+mantissa and visible in the reciprocal derived from it, so the pair DISAGREEING
+is what exposed it. In this round the pair AGREED, because both halves came
+from one computation of a model the label did not name. So agreement between a
+figure and a second figure derived from it is not a check on the label, and
+disagreement is not the only failure signature to watch for. A doc comment on
+`hashdos_precomputed_int_key_set_does_not_survive_a_new_process` in
+`crates/nova-cli/tests/run_tests.rs` gave the cause as each half of one
+derivation having been checked against the other rather than against a
+recomputation; that account was retracted there, because both halves were in
+fact correct.
+
+### Neither figure is the probability of the failure event
+
+`64 * P` is a Bonferroni sum over 64 per-bucket events that are not disjoint,
+so it is an upper bound on the probability that the largest bucket exceeds 10
+rather than that probability; the independence form assumes an independence the
+events do not have. What is computed exactly is the BOUND, not the probability,
+and the true probability lies below it. So this amendment does not swap one
+figure labelled "the exact" value for another: the union bound is exactly
+8.2686863021e-11 at eleven significant figures, and it bounds the failure
+probability from above.
+
+The same reading applies to the other derived probabilities here — the
+threshold table's `at most 6` and `at most 12` rows, and item (f)'s
+recomputations of that table — rather than to the medians and percentiles
+beside them, which are measurements. Each of those probabilities is exact only
+for a model in which the hashes involved are independent and uniform. They are
+not independent: each is a deterministic function of a single per-process seed.
+So read each of them as exact for the model, an estimate for the run, and an
+upper bound wherever it sums non-disjoint events. What these figures are is
+computed rather than sampled: finite exact summations over rationals, binomial
+tails here, so no sampling error enters and "closed form" is not the right
+phrase for them either.
+
+### The same conflation elsewhere in this document, reported and left standing
+
+Section 5 carries it in a milder form, and these sites are named rather than
+corrected because each states its method beside the figure. Its **Phase 2
+threshold** paragraph says "The false-failure rate is the binomial right tail
+unioned over the buckets"; the threshold table's second column is headed "false
+failure (flake)"; and **Why 10 rather than a tighter bound** says choosing 10
+"buys a flake rate around 1 in 12 billion". In each the quantity is a union
+over non-disjoint per-bucket events, so it bounds the rate rather than being
+it.
+
+The figures there are right. Recomputed the same way: `at most 6` is
+3.4750078e-05 with reciprocal 28,776.91, and `at most 12` is 5.573419e-14 —
+matching the threshold table's own `at most 6` and `at most 12` rows, and item
+(f)'s corrected row, at the precision each of those prints.
+
+### Why this was worth an amendment rather than a note
+
+The eleven-figure form is the one that propagated: into the successor
+increment's plan, into a briefing file, and from there into a tracked doc
+comment, where a review caught it. The more precise-looking figure was the
+wrong one, and its apparent precision is what made it worth copying. Leaving a
+known-wrong figure labelled "the exact" value in the root record is how the
+next increment copies it again — this derivation has now produced a wrong
+published figure twice.
+
 ## 1. What is unpinned today
 
 `nova_rt_str_hash` is seeded FNV-1a followed by splitmix64's finalizer. The guards
