@@ -658,7 +658,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   receive it, which is exactly what the two phases operationalise — stays
   **not** claimed against an adversary who can observe timing and adapt, and
   stays **not** claimed for `Int`, `Bool` or `Char` keys, `mix64` being
-  unseeded. The searching phase is not evidence about the timing adversary
+  unseeded.
+  [Forward marker, 2026-08-28: the exclusion of `Int`, `Bool` and `Char` keys
+  is closed by the Changed
+  entry beginning "`std/core`'s `Int`, `Bool` and `Char` hashing is seeded
+  once per process too". Those keys are seeded now, from a draw separate
+  from `str_hash`'s, and the gate claim covers them on the same
+  precomputing-attacker terms. The exclusion of the timing-adaptive adversary,
+  in this same sentence, is unchanged. The wording here is left byte-identical
+  because ADR 0005's 2026-08-28 amendment quotes it.]
+  The searching phase is not evidence about the timing adversary
   either: it calls `.hash()` directly, which requires code running inside the
   target process and is a stronger capability than observing timing from
   outside.
@@ -969,6 +978,14 @@ that already compiled.
   reproducible. Sort, or assert per key. `Int`, `Bool` and `Char` keys hash
   through `mix64`, which is not seeded, so their layout is unchanged and stable
   across runs.
+  [Forward marker, 2026-08-28: that sentence is now false, and it is retracted
+  by the Changed entry below beginning "`std/core`'s `Int`, `Bool` and `Char`
+  hashing is seeded once per process too". Those impls XOR a separate
+  per-process seed into `mix64`'s input, so an `Int`-, `Bool`- or
+  `Char`-keyed layout moves between runs exactly as a `String`-keyed one
+  does. `mix64` itself is still not seeded, which is a different statement.
+  The wording here is left byte-identical because that entry and ADR 0005's
+  2026-08-28 amendment both quote it.]
   **Why the finalizer and not the seed alone**, which was the cheaper design and
   was measured and rejected: `Map` selects buckets with `hash & (cap - 1)`, the
   low bits, and FNV-1a's low bits barely depend on its basis — bit 0 of the
@@ -1002,6 +1019,91 @@ that already compiled.
   needed neither. `nova-spec/20-STDLIB.md` §7 and §12 and
   `docs/adr/0018-std-json-scope-and-build-order.md` §8 carry dated amendments of
   their own.
+
+- **`std/core`'s `Int`, `Bool` and `Char` hashing is seeded once per process
+  too, so those hashes — and a `Map`'s `keys()` order over such keys — differ
+  between runs of the same binary.** Each of those impls now computes
+  `mix64(key ^ int_hash_seed())`. The seed is a `OnceLock<u64>` drawn inside the
+  runtime from `std::collections::hash_map::RandomState` by a call separate from
+  the string seed's, so the two differ: **no new dependency** and nothing above
+  MSRV 1.78. It goes into `mix64`'s **input**, not its output, and that is
+  load-bearing rather than stylistic — `Map` selects buckets with
+  `hash & (cap - 1)`, so `mix64(x) ^ seed` would leave the consulted bits as
+  `(mix64(x) & mask)` XOR `(seed & mask)`, a permutation of the buckets that
+  leaves every colliding pair still colliding. It would look like seeding and
+  buy nothing.
+  **`mix64` itself is deliberately untouched, and what that preserves is a
+  freedom.** ADR 0005 makes it module-private on purpose, since publishing it
+  would make its exact definition a compatibility surface, and reserves the
+  right to replace "`mix64`'s constants or rounds". A ruling to publish it, so
+  that the golden fixture could call it directly, was made during this
+  increment and **retracted on those grounds**; the reserved freedom is still
+  reserved rather than spent, and seeding the mixer in place would have been the
+  other way to spend it.
+  **One new intrinsic**, `int_hash_seed` (`Builtin::STD_ONLY`), backed by
+  `nova_rt_int_hash_seed` — plain `extern "C"` and not `"C-unwind"`, for the
+  reason that export's doc comment gives. `pub trait Hash { fn hash(self) ->
+  Int }` keeps its signature and nothing has to be edited to keep compiling,
+  `std` being embedded with `include_str!` and recompiled on every `nova`
+  invocation. The `impl Hash` blocks for `Int`, `Bool` and `Char` did change,
+  which is where
+  the observable difference comes from.
+  **Nova code can recover this seed too, in one call.** `(0).hash()` is
+  `mix64(0 ^ seed)`, hence `mix64(seed)`, and `mix64` is a bijection.
+  `tests/runtime/hash.nova` now carries a `mix64_inv` and performs that
+  recovery, so the channel is demonstrated by a test rather than only stated —
+  it has to be, because cancelling the seed is how that fixture reaches
+  `mix64`'s canonical splitmix64 vectors without calling a module-private
+  function. The consequence takes the shape the entry above records for
+  `("").hash()`: an attacker who can obtain one primitive hash from a running
+  process recovers that process's seed and can construct collisions for it,
+  while an attacker who cannot observe the process still cannot build a
+  colliding set before it starts. **Precomputation resistance is the half that
+  survives**, and it is asserted rather than argued, by
+  `hashdos_precomputed_int_key_set_does_not_survive_a_new_process`
+  (`crates/nova-cli/tests/run_tests.rs`), whose threshold and derived bound are
+  in its own doc comment. The `Int`, `Bool` and `Char` path is **exactly as
+  strong as the `String` path and no stronger**: the timing-adaptive adversary
+  stays out of scope and the hash stays non-cryptographic.
+  **What moved in the goldens, and which way each moved.**
+  `tests/runtime/hash.stdout` lost its two `&7` histograms outright — they
+  pinned exact bucket counts, which the seed randomises, and the obvious
+  replacement, a largest-bucket bound, is a trap at eight buckets. Where an
+  exact count used to print, a derived bound prints now on the `buckets
+  reached` line, at 6 of 8; on the `keys -64..63 reach` line, at 76 of 256; and
+  on the negative-hash count over the keys 0 to 255, confined to `80..176`. One
+  exact count did not move at all and its standing changed instead: the
+  complement-collision count still reads `0`, and it is now a theorem holding
+  at every seed rather than a measurement over sampled ones. The golden's
+  `splitmix64 canonical x1=true x3=true` line is byte-identical to its
+  pre-increment form. `tests/runtime/collections.nova` dropped a printed count
+  of how many of 16 `Int` keys hash negative, which under seeding is
+  `Binomial(16, 1/2)`, and which `collections_run`,
+  `collections_build_standalone` and `collections_under_gc_stress` would each
+  have had to agree on in a separately launched process. Every derivation is in
+  `tests/runtime/hash.nova`'s header rather than restated here, including what
+  the figures are and are not: each is exact for a model in which the hashes are
+  independent and uniform, they are not independent — every one is a
+  deterministic function of a single 64-bit seed — so each is an estimate for
+  the run, and any figure summing non-disjoint events is a Bonferroni upper
+  bound within that model.
+  **A probe that cannot check this, recorded because it was used.**
+  Standing a literal `0` in for the seed call reproduces the unseeded output by
+  construction, since `x ^ 0 == x`, so such a probe cannot tell "invariant at
+  every seed" from "equal at seed 0". Two golden lines were misclassified that
+  way while the split was being planned. Reason about whether the seed cancels,
+  or sample many seeds.
+  **Records amended rather than rewritten:**
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md` gains a dated amendment
+  closing its Phase 2.2a disclosure for `Int`, `Bool` and `Char`, recording that
+  the earlier decision to leave them attackable was right when written and that
+  this increment took the other side, and recording that its `mix64` privacy
+  decision and its reserved freedom were tested and held. `nova-spec/20-STDLIB.md`
+  §7 and §12, `docs/adr/0018-std-json-scope-and-build-order.md` §8 and
+  `nova-spec/13-RUNTIME.md` §7 gain dated amendments of their own. The bullets in
+  this file whose gate wording this falsifies carry forward markers to here,
+  with their wording left byte-identical because the governing amendment quotes
+  them.
 
 ### Known limitations / follow-ups
 
@@ -1104,7 +1206,20 @@ that already compiled.
   complement-collision count and its canonical splitmix64 values as a
   specification of the low-bit spreading `Map`'s masking depends on, and
   seeding it would trade that specification for a partial win on a path
-  `std/json` does not take, its object keys being strings. **The result
+  `std/json` does not take, its object keys being strings.
+  [Forward marker, 2026-08-28: both halves of that are overtaken by the
+  Changed entry above beginning "`std/core`'s `Int`, `Bool` and `Char`
+  hashing is seeded once per process too". Those keys are seeded now, so a
+  bucket is a function of the key and the process's seed rather than of the
+  key alone, and an attacker who cannot read a hash out of the running
+  process can no longer build a colliding set for it.
+  `tests/runtime/hash.stdout` prints no histograms at all any more: the two
+  `&7` lines were deleted and three exact counts became derived bounds. The
+  decision this sentence records was right when it was written, and this
+  increment took the other side of it, having established that the
+  specification did not have to be spent in order to seed the impls. The
+  wording here is left byte-identical because ADR 0005's 2026-08-28
+  amendment quotes it.] **The result
   is not cryptographic** — seeded, finalized FNV-1a is not SipHash and is not
   collision-resistant, which ADR 0005's wording already said and still says
   truly. And **an adversary who can observe timing and adapt is out of
@@ -1168,6 +1283,21 @@ that already compiled.
   `@derive(ToJson, FromJson)` remain unimplemented. `JsonValue`, `JsonError`,
   `ToJson`, `FromJson` and both `parse`/`stringify` signatures are unchanged
   by this increment; the caps, the guard and the buffer are all interior.
+
+- **`nova_rt_log_config_level`, `nova_rt_log_config_to_stderr`,
+  `nova_rt_time_now_nanos` and `nova_rt_time_now_epoch_nanos` use
+  `extern "C-unwind"` while being reachable from compiled Nova frames, and
+  whether that is right is open rather than settled.** This increment gave its
+  own new export, `nova_rt_int_hash_seed`, plain `extern "C"`, on the reasoning
+  that `crate::task::PollFn`'s doc reserves the `"C-unwind"` permission for that
+  module's Rust-side entry points rather than for compiled Nova frames, and that
+  a generated Nova frame carries no landing pads, no drop glue and no unwind
+  table for an unwinder to resolve an unwind against. By that reasoning each
+  export named above is the same question with a different panic profile — what
+  can panic inside each differs, and none of them was examined here. The
+  divergence predates this increment, no export named above was changed by it,
+  and it wants a decision recorded somewhere other than a doc comment. Nothing
+  in this increment supplies one, and this entry does not decide it either.
 
 ## [0.2.0-alpha.1] - 2026-08-16
 

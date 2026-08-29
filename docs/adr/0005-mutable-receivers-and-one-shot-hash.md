@@ -634,3 +634,179 @@ The same stale wording appears elsewhere in the tree —
 among them — stale there in the same way. That increment changed no product
 code, so those are flagged in its own records rather than edited here, and this
 amendment does not close them.
+
+### Amendment, 2026-08-28 — the disclosure closes for `Int`, `Bool` and `Char`; `mix64` is untouched
+
+From the `seeded-mix64` increment, later than both amendments above and written
+by a different hand. **Nothing in the Decision moves.** `Hash` keeps
+`fn hash(self) -> Int`, the migration stays unstarted with its prerequisites as
+recorded, the backend-independence requirement stands, `Hash for Float` is still
+absent, and `mix64` and `char_to_int` keep the shapes the supporting-pieces
+bullets give them. What changed is the *computation* behind the impls the
+Decision names for `Int`, `Bool` and `Char`, and not the one it names for
+`String`: each of those three computes `mix64(key ^ int_hash_seed())`, over a
+per-process seed drawn inside the runtime from
+`std::collections::hash_map::RandomState`, by a call separate from the one the
+2026-08-26 amendment's `str_hash` seed uses.
+
+What separates this from that amendment is worth naming, because its wording
+leaned on both halves. **An intrinsic was added**: `int_hash_seed`, a
+`Builtin::STD_ONLY` builtin backed by `nova_rt_int_hash_seed`, where that
+amendment could say "No intrinsic was added". And **`impl Hash` blocks were
+edited**, where that amendment could say none was. Neither costs a user anything
+to keep compiling — `std` is embedded in the compiler with `include_str!` and
+recompiled on every `nova` invocation, and `pub trait Hash { fn hash(self) ->
+Int }` is untouched — so this stays a source-compatibility statement and not a
+behavioural one. A program that read an `Int`, `Bool` or `Char` hash, or a
+`Map`'s `keys()` order over such keys, and expected the same answer from a later
+run of the same binary now gets a different one.
+
+**The seed goes into `mix64`'s INPUT, and the placement is load-bearing rather
+than stylistic.** The Consequences bullet above requires bucket selection to be
+`hash & (cap - 1)`, so a post-XOR `mix64(x) ^ seed` would leave the consulted
+bits as `(mix64(x) & mask)` XOR `(seed & mask)` — a permutation of the buckets
+that leaves every colliding pair still colliding. It would look like seeding and
+buy nothing. `hashdos_precomputed_int_key_set_does_not_survive_a_new_process`
+(`crates/nova-cli/tests/run_tests.rs`) executes that distinction rather than
+arguing it: one Nova process searches for a 32-key set sharing a bucket under
+its own seed, and a second, separately launched process re-hashes that same set
+and is asserted to spread it. Its threshold, that threshold's derived bound, and
+the coverage it does not give are in its own doc comment and are not restated
+here.
+
+#### The paragraph headed "The Phase 2.2a disclosure narrows" is amended as a whole
+
+Every clause of it turns over together, so patching one would leave the rest
+standing. Its wording keeps its place and this subsection governs it. Of
+"**Hashes are not randomized per process**" it says the disclosure is
+
+> now **false for `String` keys** ... and **still true for `mix64`**, hence for
+> `Int`, `Bool` and `Char` keys, whose buckets remain a function of the key
+> alone and remain attackable by chosen keys. That half is load-bearing and is
+> a decision rather than an oversight: `tests/runtime/hash.stdout` pins
+> `mix64`'s histograms as a specification of the low-bit spreading `Map`'s
+> masking depends on, and the exposed path is not the one `std/json` takes,
+> whose object keys are strings.
+
+Clause by clause:
+
+- **"still true for `mix64`" is still true, and no longer carries the
+  consequence drawn from it.** `mix64` is the function this ADR describes, bit
+  for bit; the seeding sits in the impls that call it. So "hence for
+  `Int`, `Bool` and `Char` keys" no longer follows, and the Phase 2.2a
+  disclosure is now false for those three as well as for `String`. What stays
+  unrandomized is a module-private mixer, not a key type.
+- **"whose buckets remain a function of the key alone" is false.** A key's
+  bucket is a function of the key and of this process's seed. It is fixed for
+  the whole of one run and can differ in the next run of the same binary — not
+  must, since two seeds may agree on one key.
+- **"remain attackable by chosen keys" now splits the way the 2026-08-26
+  amendment records it splitting for `String`.** An attacker who cannot read a
+  hash out of the running process can no longer build a colliding set for it;
+  one who can read a single primitive hash out of it still can, for the reason
+  the seed-recovery subsection below gives.
+- **"a decision rather than an oversight" was a decision, and this increment
+  took the other side of it.** It was right when it was written: the histograms
+  it names were real evidence, and trading a specification for a partial win on
+  a path `std/json` does not take was a defensible call on the information then
+  available. What this increment established is that the trade was not forced —
+  the fixture keeps its oracle property under bounds derived from distributions,
+  so the specification did not have to be spent in order to seed the impls, and
+  `mix64` itself did not have to be touched. Read the earlier sentence as the
+  position this increment argued against rather than as a mistake in the record.
+- **The histograms it cites as its reason are deleted.**
+  `tests/runtime/hash.nova` printed two `&7` histograms and prints neither now.
+  Its `buckets reached` line prints a bound where it printed a count, bounded
+  below at 6 of 8 over the 64 multiples of 8; so does its `keys -64..63 reach`
+  line, bounded below at 76 of 256 buckets over 128 keys spanning both signs;
+  and so does its negative-hash count over the keys 0 to 255, confined to
+  `80..176`. One exact count did not move at all and its standing changed
+  instead: the complement-collision count still reads `0`, and it is now a
+  theorem rather than a measurement over sampled seeds, since `mix64` is
+  injective and `x ^ s == (-1-x) ^ s` would need `x == -1-x`, which no `Int`
+  satisfies.
+  `tests/runtime/collections.nova` separately dropped a printed count of how
+  many of 16 `Int` keys hash negative, which under seeding is
+  `Binomial(16, 1/2)`, and which `collections_run`,
+  `collections_build_standalone` and `collections_under_gc_stress` would each
+  have had to agree on in a separately launched process.
+
+#### "Hashes must be backend-independent" keeps its requirement and loses its example
+
+That bullet says `tests/runtime/hash.nova` runs under both backends against the
+same fixture,
+
+> whose expected bucket histograms were computed independently from splitmix64's
+> finalizer rather than recorded from a run.
+
+**The requirement is untouched and the histograms are gone.** The fixture still
+runs under the JIT and the object backend against one golden, and the property
+that sentence exists to assert — that the golden is an oracle rather than a
+recording of what the implementation happened to print — is intact by a
+different route: each replacement bound is computed from a distribution by
+finite exact summation over rationals, inclusion-exclusion across an occupancy
+distribution or a binomial tail, rather than read off a run. So is the flake
+budget the fixture header sums from them.
+
+The header qualifies those figures twice over, and this bullet should be read
+with both qualifications. Each such figure is **exact for a model** in which
+the hashes involved are independent and uniform, and they are not independent —
+every one of them is a deterministic function of a single 64-bit seed. So read
+each figure as exact for the model and as an estimate for the run. And any
+figure that sums non-disjoint events is an upper bound within that model, which
+the header labels Bonferroni where that applies. The derivations, with the
+figure for each line, are in `tests/runtime/hash.nova`'s header and are not
+restated here.
+
+The complement-pair and both-signs regressions this bullet points at are still
+in that fixture, and the header records what the golden split cost them: the
+both-signs bucket count that used to move under a missing second shift mask is
+now a bound wide enough to admit that mutant's value, which is why the canonical
+splitmix64 vectors are still asserted there rather than dropped.
+
+#### The privacy decision and the reserved freedom were tested and held
+
+The Consequences bullet on composite `Hash` says a combiner cannot call `mix64`,
+"which is module-private to `std/core` on purpose — it is an implementation
+detail of the primitive impls, not a published utility, and publishing it would
+make its exact definition a compatibility surface", and the Migration path's
+closing paragraph reserves "replacing `mix64`'s constants or rounds". During this
+increment a ruling to publish `mix64`, so that the fixture could call it
+directly, was made and then **retracted on exactly those grounds**. `mix64`
+is still module-private, and the freedom to replace its constants or rounds is
+still reserved rather than spent. The canonical splitmix64 vectors stayed in the
+fixture by another route: it recovers the seed, XORs it into each vector's input
+so that `.hash()` cancels it, and carries its own inverse of `mix64`'s
+arithmetic to do the recovery. The cost is that the inverse has to change if
+those constants ever do, which the fixture names at itself.
+
+#### The seed-recovery disclosure gains its second half
+
+The subsection above records that `("").hash()` recovers the string seed exactly
+in one call. **The `Int` seed has the same channel**, stated here rather than
+left to be inferred: `(0).hash()` is `mix64(0 ^ seed)`, which is `mix64(seed)`,
+and `mix64` is a bijection, so one call plus an inverse yields the seed exactly.
+That is no longer only asserted — `tests/runtime/hash.nova` carries a `mix64_inv`
+and performs the recovery, because cancelling the seed is how it reaches the
+canonical vectors at all.
+
+The consequence takes the shape that subsection already uses. An attacker who
+can obtain one `Int`, `Bool` or `Char` hash from a running process can recover
+that process's seed and construct collisions for it; an attacker who cannot
+observe the process still cannot build a colliding set before it starts, the
+seed being drawn per process. Precomputation resistance is the half that
+survives. The channel is not a defect in the seeding: it is
+`fn hash(self) -> Int` handing a caller a whole 64-bit result in one call, which
+is what this ADR decided and which predates both seedings. **So the `Int`,
+`Bool` and `Char` path is exactly as strong as the `String` path and no
+stronger**, and no record should be read as claiming otherwise. The two seeds
+are separate draws, which buys that they differ; whether recovering one yields
+the other is a question about the keyed hash `RandomState` supplies under a
+related key, and this increment does not answer it. `int_hash_seed`'s doc
+comment in `crates/nova-runtime/src/lib.rs` carries that argument and the
+measurement behind it.
+
+"FNV-1a is not collision-resistant and neither is `mix64`" **stays true as
+written**, and so does the sentence that an adversary who can observe timing and
+adapt is out of scope. Neither is claimed against here. Nothing in this
+amendment reopens the migration question, and `Hash`'s signature is unchanged.
