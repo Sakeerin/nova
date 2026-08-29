@@ -1757,13 +1757,16 @@ fn std_core_under_gc_stress() {
 /// being wrong, and the **low** bits of an `Int` hash must be spread because
 /// `Map` will select buckets with `hash & (cap - 1)`.
 ///
-/// `Int`, `Bool` and `Char` hashing is seeded per process, so every line in the
-/// fixture is either seed-invariant by construction or a bound whose
-/// false-failure probability is derived in closed form — the dichotomy
-/// `hash.nova`'s own header states, and the reason not to call the whole golden
-/// seed-invariant. What it
+/// `Int`, `Bool` and `Char` hashing is seeded per process, so each `Int`, `Bool`
+/// or `Char` line in the fixture is either seed-invariant by construction or a
+/// bound whose false-failure probability is derived rather than sampled — the
+/// dichotomy `hash.nova`'s own header states, and the reason not to call the
+/// whole golden seed-invariant. The two `String` lines are a third case, not
+/// covered by that pair: they go through `nova_rt_str_hash`'s own seed, and
+/// seeded FNV-1a followed by a finalizer is not injective, so their `diff=true`
+/// halves are seed-dependent at a magnitude around 2^-64. What the fixture
 /// prints is relations between hashes drawn under one seed, the derived bounds,
-/// the complement theorem, and `mix64`'s published canonical vectors reached by
+/// the complement theorems, and `mix64`'s published canonical vectors reached by
 /// recovering the seed and cancelling it. Every derivation is in the fixture's
 /// header, each bound's probability with it.
 ///
@@ -1772,7 +1775,7 @@ fn std_core_under_gc_stress() {
 /// are an oracle rather than a recording of whatever the implementation happened
 /// to print." Those histograms are gone — the seed randomises the exact counts
 /// they pinned — but the oracle property is not, and that is the half worth
-/// keeping. The bounds come from closed-form distributions rather than from a
+/// keeping. The bounds are computed from distributions rather than read off a
 /// run — occupancy for the `keys -64..63 reach` and `buckets reached` lines, the
 /// binomial for the negative-hash count — the complement line is a theorem
 /// about `mix64` being injective, and the canonical vectors are published
@@ -1816,7 +1819,11 @@ fn hash_run() {
 /// bounds". Two earlier versions of this sentence quantified over that group and
 /// both were false: first "the two bounds sit far from what a broken mixer
 /// produces", then "the bounds are not part of that argument". The second was
-/// generalised from mask 2, which is the one mask the bounds are blind to.
+/// generalised from mask 2, which is the one mask the bounds are blind to. The
+/// roster that replaced them was in turn incomplete — it credited mask 1 to the
+/// canonical vectors and the `keys -64..63` bound and named the complement count
+/// only to say mask 2 was blind to it, which drops a credit the first of those
+/// two sentences had actually made.
 ///
 /// Measured by dropping each of `mix64`'s three shift masks in turn and running
 /// the fixture in 30 separate processes per mask, 90 runs in all:
@@ -1826,14 +1833,23 @@ fn hash_run() {
 ///   with the seed, because a mutated `mix64` breaks `mix64_inv`'s seed recovery
 ///   for some seeds and not others — so the line's verdict is stable while its
 ///   text is not.
-/// - The `keys -64..63 reach` bound also catches mask 1, 30 of 30. That key set
-///   is closed under `k -> -1-k`, so an unmasked stage 1 leaves at most 64
-///   distinct hashes over its 128 keys, and 64 is below the bound at every seed.
+/// - The two complement lines — `complement collisions over 0..63` and
+///   `h(0) != h(-1)` — catch mask 1, 30 of 30, and they are mask 1's strongest
+///   pin because they are theorems rather than measurements. Arithmetic shift
+///   commutes with complement and `(!k) ^ s == !(k ^ s)`, so an unmasked stage 1
+///   is exactly 2-to-1 under `x <-> -1-x` and every later stage is a function of
+///   it: the count reads 64 against a golden of 0, and `h(0) != h(-1)` reads
+///   false, at every seed rather than at almost every seed. `hash.nova`'s scope
+///   note says the same thing from the fixture's side.
+/// - The `keys -64..63 reach` bound also catches mask 1, 30 of 30, by the same
+///   algebra: that key set is closed under `k -> -1-k`, so an unmasked stage 1
+///   leaves at most 64 distinct hashes over its 128 keys, below the bound at
+///   every seed.
 /// - The negative-count bound also catches mask 3, 30 of 30. An unmasked final
 ///   shift XORs the sign bit with its own copy, so every hash is non-negative
 ///   and the count is 0, below the range at every seed.
 /// - The `buckets reached` bound catches none of the three. Mask 2 is invisible
-///   to every bound in the fixture and to the complement count, 30 of 30, so it
+///   to every bound in the fixture and to both complement lines, 30 of 30, so it
 ///   rests on the canonical vectors — which is what `hash.nova`'s scope note
 ///   says.
 #[test]
@@ -9050,37 +9066,47 @@ fn main() {
 /// covers the other's path.
 ///
 /// The bound and its derivation are the `String` test's: `Binomial(32, 1/64)`
-/// for one bucket, summed over the 64 buckets, is exactly 8.2686863021e-11 —
-/// about one run in twelve billion. That is an UPPER BOUND on the probability of
-/// a largest bucket above 10, not that probability. The 64 per-bucket events are
-/// not disjoint, so summing them is Bonferroni; what is exact here is the bound,
-/// not the quantity it bounds. If the seeding were dead the largest bucket would
-/// be 32, so the margin before a broken seed could pass is 22 keys.
+/// for one bucket, summed over the 64 buckets, is `8.2686863021e-11` to eleven
+/// significant figures — about one run in twelve billion. That sum is an UPPER
+/// BOUND on the probability of a largest bucket above 10, not that probability:
+/// the 64 per-bucket events are not disjoint, so summing them is Bonferroni, and
+/// what the computation gives exactly is the bound rather than the quantity it
+/// bounds. If the seeding were dead the largest bucket would be 32, so the
+/// margin before a broken seed could pass is 22 keys.
 ///
-/// That figure was wrong here until it was recomputed, and it was NOT a typo.
-/// It read `8.2686863018e-11`, which is the exact value of `1 - (1-P)^64`, where
-/// `P` is the single-bucket tail — the failure probability under an INDEPENDENCE
-/// assumption, which is a different model from the sum this label describes.
-/// Computed exactly with `fractions.Fraction`:
+/// That figure was wrong here until it was recomputed, and it was NOT a typo. It
+/// read `8.2686863018e-11`, which is what `1 - (1-P)^64` rounds to at eleven
+/// figures, where `P` is the single-bucket tail — the failure probability under
+/// an INDEPENDENCE assumption, a different model from the sum this label
+/// describes. To eleven figures, from an exact rational rendered with `Decimal`:
+/// `P` is `1.2919822347e-12`, the independence form is `8.2686863018e-11`, and
+/// the sum `64 * P` is `8.2686863021e-11`. Eleven is the precision the argument
+/// needs and no more, because that is where the two models part — at ten
+/// figures they agree.
 ///
-///     P                      = 1.29198223470295155765e-12
-///     1 - (1-P)^64           = 8.26868630176237480121e-11
-///     64 * P, the sum above  = 8.26868630209888996898e-11
-///
-/// So an exactly-computed figure carried the wrong derivation's name, which is
-/// also why every consistency check passed rather than why one was skipped:
-/// `1/(64*P)` is 12,093,819,543.57 and `1/(1-(1-P)^64)` is 12,093,819,544.07,
-/// and both round to the 12,093,819,544 that shipped beside it. The reciprocal
-/// agreed because it came from the same computation, so cross-checking the two
-/// figures could never have caught this. What catches this class is recomputing
-/// the quantity the LABEL names. The reciprocal is in words now for that reason:
-/// a second exact figure derived from the first adds no check, only another
-/// thing to keep in step.
+/// So an exact figure carried the wrong derivation's name, which is also why
+/// every consistency check passed rather than why one was skipped: `1/(64*P)` is
+/// 12,093,819,543.57 and `1/(1-(1-P)^64)` is 12,093,819,544.07, and both round
+/// to the 12,093,819,544 that shipped beside it. The reciprocal agreed because
+/// it came from the same computation, so cross-checking the two figures could
+/// never have caught this. What catches this class is recomputing the quantity
+/// the LABEL names. The reciprocal is in words now for that reason: a second
+/// exact figure derived from the first adds no check, only another thing to keep
+/// in step.
 ///
 /// An earlier version of this paragraph gave the cause as "each half of one
 /// derivation was checked against the other rather than against a
 /// recomputation". That has the mechanism backwards — both halves were correct,
 /// for the same unlabelled model.
+///
+/// And the same defect had a THIRD instance, in this paragraph, until it was
+/// recomputed. It displayed the three quantities at twenty-one figures under the
+/// heading "Computed exactly with `fractions.Fraction`", but those digit strings
+/// are what printing the exact values through a binary64 produces: they diverge
+/// from the true expansions at the sixteenth and seventeenth figures. A block
+/// labelled exact carried digits no exact computation yields. All three
+/// instances have one shape — publishing more precision than the argument uses,
+/// so that a figure and its label can drift apart unnoticed.
 ///
 /// The search budget is derived rather than chosen to look generous, and it was
 /// simulated for `Int` keys specifically rather than carried over. Over 400

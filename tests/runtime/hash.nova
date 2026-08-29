@@ -11,10 +11,17 @@
 // SEEDED, WHICH IS WHY SOME LINES BELOW ARE BOUNDS RATHER THAN VALUES.
 // `std/core`'s `Int`, `Bool` and `Char` impls XOR a per-process seed into
 // `mix64`'s input, so any statistic over a fixed key set is a random variable
-// unless the seed cancels. Each line here is either seed-invariant by
-// construction or a bound whose false-failure probability is derived below, and
-// the bounds listed below together put the fixture's whole flake budget at
-// around one run in a billion at worst — a sum over them, so an upper bound.
+// unless the seed cancels. Each `Int`, `Bool` and `Char` line here is either
+// seed-invariant by construction or a bound whose false-failure probability is
+// derived below. The two `String` lines are a third case: `str_hash` carries its
+// own per-process seed and seeded FNV-1a with a finalizer is not injective, so
+// their `diff=` halves are seed-dependent at a magnitude around 2^-64 — far
+// below every figure below and left unbounded on purpose.
+//
+// Summing the bounds below puts this fixture's whole flake budget at about one
+// run in 1,150,179,830. That is a Bonferroni bound WITHIN THE MODEL described
+// next, not a bound on the run: the summands are not disjoint events, and the
+// model is not the true joint distribution.
 //
 // A NOTE ON HOW NOT TO CHECK THIS FILE. Standing a literal `0` in for the seed
 // call reproduces the unseeded output by construction, since `x ^ 0 == x`, so
@@ -22,20 +29,23 @@
 // 0". Two lines were misclassified that way while this split was being planned.
 // Reason about whether the seed cancels, or sample many seeds.
 //
-// THE DERIVED BOUNDS, closed-form rather than sampled.
+// THE DERIVED BOUNDS, computed rather than sampled.
 //
-// WHAT "CLOSED-FORM" BUYS AND WHAT IT DOES NOT, because "exact" would overstate
-// it. Each figure below is computed in closed form rather than measured, and
-// each is exact for a model in which the hashes involved are independent and
-// uniform. They are not independent: every one of them is a
+// WHAT "COMPUTED" BUYS AND WHAT IT DOES NOT, because "exact" alone would
+// overstate it. Each figure below comes from a finite exact summation over
+// rationals — inclusion-exclusion across the occupancy distribution, or a
+// binomial tail — rather than from a simulation, so no sampling error enters,
+// and none is a closed form. What does enter is
+// a model: each figure is exact for a model in which the hashes involved are
+// independent and uniform. They are not independent. Every one of them is a
 // deterministic function of a single 64-bit seed, so at most 2^64 outcomes stand
 // where the model for the 128-key line alone has 256^128, and the model
-// therefore cannot be the true joint distribution. The model describes the
-// mixer a good finalizer is meant to approximate, which is the thing these
+// therefore cannot be the true joint distribution. What the model describes is
+// the mixer a good finalizer is meant to approximate, which is the thing these
 // lines exist to check — so read each figure as exact for the model and as an
-// estimate for the run. Where a figure is additionally a sum over
-// non-disjoint events it is an upper bound, and it is labelled Bonferroni where
-// that applies.
+// estimate for the run. Any figure that is additionally a sum over non-disjoint
+// events is an upper bound within that model, and is labelled Bonferroni: the
+// flake budget above, and the rejected largest-bucket figure below.
 //
 //   * `keys -64..63 reach >= 76 of 256 buckets`. 128 keys into 256 buckets:
 //     `P(exactly j occupied) = C(256,j) * Surj(128,j) / 256^128`, whose
@@ -201,6 +211,12 @@ fn main() {
     // Scope, because this is easy to overstate: the two lines below pin the
     // FIRST mask, `(x >> 30) & 17179869183` — the only one whose absence makes
     // stage 1 itself 2-to-1 under `x <-> !x`. They are blind to the other two.
+    // What they are not is statistical. Both are theorems and hold at EVERY
+    // seed, not at almost every seed: with mask 1 gone the count below reads 64
+    // against a golden of 0 and `h(0) != h(-1)` reads false, whatever the seed
+    // is. That makes them mask 1's strongest pin, ahead of the `keys -64..63`
+    // bound, which catches mask 1 too but as a bound. Measured for all three
+    // masks from the object-file side; see `hash_build_standalone`'s roster.
     // Masking a shift by `k` alters only bits at positions >= 64 - k, and a
     // multiply carries low bits upward, never high bits down, so dropping the
     // third mask cannot move `hash & 255` at all; dropping the second leaves
