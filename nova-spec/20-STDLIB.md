@@ -956,6 +956,50 @@ its 2026-08-25 amendment.
    adversary the exclusion names. Whether anything else in the test suite bears
    on that exclusion is a question for the suite, not for this sentence.
 
+   **FURTHER AMENDMENT 2026-08-28 (`seeded-mix64`, a later increment): the gate
+   claim's exclusion of `Int`, `Bool` and `Char` keys closes; its exclusion of
+   the timing-adaptive adversary and its refusal of a cryptographic claim stand
+   exactly as they read.** The governing record is
+   `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`'s 2026-08-28
+   amendment, and it wins wherever this restatement and it diverge.
+
+   **What closes.** This item excludes `Int`, `Bool` and `Char` keys in two
+   places, and both are now false. The paragraph headed **The gate.** says the
+   gate is "**not** claimed for `Int`, `Bool` or `Char` keys at all, because
+   `mix64` is unseeded and those keys' buckets are still a function of the key
+   alone", and the
+   2026-08-27 amendment above restates it as "`Int`, `Bool` and `Char` keys are
+   untouched, `mix64` still being unseeded". `std/core`'s primitive `Hash`
+   impls for those types compute `mix64(key ^ int_hash_seed())` over a
+   per-process seed drawn in the runtime by a call separate from the string
+   seed's, XORed into `mix64`'s **input** rather than its output — because
+   `Map` consults the low bits, so a post-XOR would permute buckets without
+   separating any colliding pair, looking like seeding and buying nothing.
+   `mix64` itself is unchanged; what was unseeded and stays so is that
+   module-private mixer, not a key type. The narrowed claim is pinned by
+   `hashdos_precomputed_int_key_set_does_not_survive_a_new_process`
+   (`crates/nova-cli/tests/run_tests.rs`), which builds a 32-key `Int` set
+   colliding under one process's seed and asserts that a second, separately
+   launched process spreads it — the same two-phase shape as the string test
+   the 2026-08-27 amendment names, through a different seed.
+
+   **What does not close, and its wording is unchanged on purpose.** The gate
+   stays **not** claimed against "an adversary who can observe timing and
+   adapt", and the result stays non-cryptographic. Both exclusions apply to the
+   `Int`, `Bool` and `Char` path on the same terms as to the string path:
+   `(0).hash()` is `mix64(seed)` and `mix64` is a bijection, so one call from
+   ordinary Nova code recovers the int seed exactly, the way `("").hash()`
+   recovers the string seed, and `tests/runtime/hash.nova` now performs that
+   recovery rather than leaving it asserted. So that path is exactly as strong
+   as the string path and no stronger. What the seeding buys is precomputation
+   resistance; a version of this item stating only the improvement would be
+   wrong.
+
+   **One paragraph below this item narrows too.** The `Map::keys` note records
+   that its order "can also differ between runs of one unchanged binary when
+   the keys are `String`s"; §12's amendment chain carries the widened form, and
+   that paragraph points at it.
+
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
 implementation and `@derive(ToJson, FromJson)` still has none, exactly as
@@ -978,7 +1022,10 @@ will hit it: `Map::keys(self) -> [K]` was added to `std/collections` (§12,
 its keys. Its order is **table order, not insertion order**, and no caller
 should assume otherwise. Since 2026-08-26 that order can also differ between
 runs of one unchanged binary when the keys are `String`s, the hash being seeded
-per process — see §12's 2026-08-26 amendment.
+per process — see §12's 2026-08-26 amendment. NARROWED 2026-08-28: that
+scoping to `String` is now too narrow — `Int`, `Bool` and `Char` keys are
+seeded too, from a separate draw. See §12's 2026-08-28 further amendment
+for the widened form.
 
 **The example block above does not compile, and only part of that is
 specific to this section.** The opening `module std.json` line does not
@@ -1462,6 +1509,28 @@ order — but the sequence itself is no longer reproducible, and should be read 
 an instance of the property rather than as an order to expect from those keys.
 The statement it supports, that order is not a function of the key set alone, is
 if anything more true than when it was written.
+
+**FURTHER AMENDMENT 2026-08-28 (`seeded-mix64`): the amendment above is scoped
+to `String` keys, and that scoping is now too narrow.** It reads "for `String`
+keys the order **can differ between runs of one unchanged binary**". The same
+now holds for `Int`, `Bool` and `Char` keys: `std/core` XORs a per-process seed
+into `mix64`'s input in its primitive `Hash` impls for those types, from a draw
+separate from `str_hash`'s. So the amendment above covers `String` keys and, since
+`int_hash_seed` reached the primitive impls, `Int`, `Bool` and `Char` keys as
+well; what is left outside it is a user `Hash` impl that reaches no seeded hash,
+for which the paragraph before it covers the whole of the case. Everything the
+amendment says about the consequence carries over word for word — not must,
+since a different seed may land on the same layout and a single-key map has one
+order either way; an observed order must not be treated as reproducible; sort,
+or assert per key rather than on sequence.
+
+That also settles which record was ahead of which. The amendment above closes
+"The method's own note in `std/collections/lib.nova` carries this too", and that
+note now states the wider form at the method, naming `String`, `Int`, `Bool` and
+`Char` and naming the user-impl case as what falls outside. The note was brought
+up to date by the increment that seeded the impls; this paragraph brings §12
+level with it. The governing decision is
+`docs/adr/0005-mutable-receivers-and-one-shot-hash.md`'s 2026-08-28 amendment.
 
 **This is not §12's only deviation, and every other one is older than this
 increment** — the list is what follows, not a single item: `Vec::get` and
