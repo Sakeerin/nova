@@ -4,6 +4,234 @@
 **Base:** `main` at `0031620` (608 commits, no merge commits, 1076 passed / 0 failed / 8 ignored across 44 targets on Windows)
 **Governs:** ADR 0005 (one-shot `Hash`), ADR 0018 sections 3 and 4, `nova-spec/20-STDLIB.md` section 7
 
+## Amendment - 2026-08-29, after the Task 1 and Task 2 audits
+
+Recorded rather than corrected in place, as this project does with plans and
+specs: what a design got wrong is part of its record. The sections below keep
+their wording and this section governs wherever the two disagree. Every
+quotation is of text still standing in this file, located with the `#`, `*`,
+`>` and `///` gutters flattened as well as line by line. Sites are named by
+section and quotation rather than by line number, because a document that cites
+its own lines invalidates itself the moment anything above the citation shifts
+— and inserting this section shifted every line below it. The plan this spec
+drives carries its own dated section for the same audits, and where an entry
+below has a sibling site there it says so.
+
+**A. Section 3.3's ratio is quoted from the favourable end of its own range.**
+It reads "it costs about 15 ns, roughly a 30 per cent increase on a 35–48 ns
+`Int` hash". The derivation is stated, which is the good part, but 15/48 is 31
+per cent and 15/35 is 43 per cent, so "roughly 30 per cent" holds only at the
+slowest baseline in the range the same sentence quotes. Read it as roughly 30
+to 45 per cent.
+
+**B. Section 3.3's two draws do not "remove that".** The sentence reads "Two
+draws cost one extra `OnceLock` and remove that", where "that" is leaking
+either seed leaking both. Two draws do not remove it.
+
+`RandomState::new()` caches one 128-bit OS draw per THREAD in a `thread_local!`
+cell, hands out `(k0, k1)`, and stores back `(k0 + 1, k1)`, so two calls on one
+thread share `k1` exactly and differ in `k0` by the number of calls between
+them; `std`'s own comment says that increment exists to vary `HashMap`
+iteration order rather than to make keys independent. Whichever thread first
+reaches each `OnceLock` supplies its draw and neither initialiser pins a
+thread, so the two seeds can also come from two separate OS draws; the
+shared-`k1` case arises only when one thread initialises both.
+
+What the second draw buys is that the two seeds DIFFER, effectively certainly —
+which does remove the exact-equality of `(0).hash()` and `("").hash()` that the
+paragraph opens with. Whether recovering one yields the other rests on the
+keyed hash's behaviour under a RELATED KEY, and this increment does not verify
+that. The shipped argument is `int_hash_seed`'s doc comment in
+`crates/nova-runtime/src/lib.rs`; follow it rather than this summary. The plan
+carried the same claim in the stronger form "two independent keys", at both of
+its own sites, and its own amendment retracts it there and names them.
+
+**C. Section 5's opening count is false; read the sentence with it deleted.**
+Section 5 opens "`tests/runtime/hash.stdout` holds eleven assertion lines".
+Read it as "holds the assertion lines classified below". Eleven is the number
+of bullets and table rows in sections 5.1 through 5.3, not of lines in the
+file, because one bullet collapses the `same=true diff=true` relations for
+`Int`, `Bool`, `Char`, `String` and the empty-string pair into a single item.
+The roster reaches every line; only the number is false. Deleted rather than
+replaced, because a corrected count reintroduces the same failure the next time
+a line is added or removed — and Task 2 removed the two `&7` histograms, so a
+reader who subtracts them from eleven arrives at a smaller number than the
+golden holds. The plan carries the same sentence in its Task 2 Step 3 and is
+governed the same way there.
+
+**D. The canonical-vector line is misclassified, and the premise is
+load-bearing at each of the sites named here.** They are section 3.1, which
+says the line "therefore keeps testing the same function it tests today"; that
+section's closing sentence; section 5.1's roster entry, which files the line
+under what survives untouched "because `mix64` is not touched"; and section
+11's criterion for that same line. The plan carries the same premise at its own
+sites, which its amendment names.
+
+The fixture line does not call `mix64`. It called `.hash()`, and once the impls
+are seeded that expression is `mix64(x1 ^ seed)`, which equals the pinned
+constant only at seed 0. Leaving `mix64` untouched preserves the function and
+not the assertion.
+
+What shipped, in `tests/runtime/hash.nova`: the fixture recovers the seed and
+cancels it. It carries its own `mix64_inv`, sets `let s =
+mix64_inv((0).hash())` and asserts `((-7046029254386353131) ^ s).hash()`
+against the pinned constant. Since `(x1 ^ s) ^ s` is `x1`, both halves print
+`true` at every seed and the golden line survives byte-identical — for a reason
+this spec does not state: not that `mix64` was left alone, but that `mix64` is
+a bijection and `(0).hash()` is `mix64(seed)`, so ordinary Nova can recover the
+seed and cancel it before asserting. The inverse is written out in the fixture
+because ADR 0005 makes `mix64` module-private to `std/core` on purpose, so a
+fixture cannot call it.
+
+Section 3.1's closing sentence reads "Seeding `mix64` in place would have
+destroyed that assertion, which is the strongest one in the fixture", and both
+halves need amending. The assertion was destroyed by the route the design did
+take as well, and rewritten rather than preserved; both routes required the
+line to change, so this was never a reason to prefer one. And "the strongest
+one in the fixture" is an unqualified superlative over a growable set. The
+shipped fixture distributes that strength per mask instead: it records the
+complement-pair lines as mask 1's strongest pin, ahead of the `keys -64..63`
+bound, and records mask 2 as resting on the canonical vectors alone after the
+golden split, which is why those vectors are still asserted rather than
+dropped.
+
+Section 11's criterion — "`splitmix64 canonical x1/x3` passes unchanged,
+testing an unmodified `mix64`" — stands as written: the golden line is
+byte-identical and `mix64` is unmodified. Its stated reason does not. Flagged
+precisely because a reader who checks the criterion and finds it satisfied
+would conclude the reasoning behind it was sound.
+
+How the misclassification was reached is the reusable part. The design was
+verified by compiling the three seeded impls with a literal `0` standing in for
+the seed call and finding the golden byte-identical. At seed 0 the XOR is the
+identity, so that probe reproduces the old output BY CONSTRUCTION: it cannot
+distinguish "invariant over every seed" from "identical at seed 0". The lines
+section 5.1 files as invariant that really are invariant are so for reasons
+this one does not have: `bound` and `char/int agree` compare two hashes that
+both carry the seed, so it cancels; the `Int`, `Bool` and `Char`
+`same=`/`diff=` halves and `h(0) != h(-1)` follow from `mix64` being injective
+at every seed; and the complement-collision count is section 5.2's theorem.
+Neither reason covers this line, and neither covers `buckets reached 8 of 8`,
+which entry E takes up. (The two `String` relations are a third case the
+shipped fixture header sets out: `str_hash` carries its own seed, so their
+`diff=` halves are seed-dependent at a magnitude around 2^-64 and are left
+unbounded on purpose.) This one was classified from the probe instead of from
+the route its expression takes. The shipped fixture header states the trap
+under "A NOTE ON HOW NOT TO CHECK THIS FILE".
+
+**E. `buckets reached 8 of 8` is a random variable, not an invariant.** Section
+5.1 files it under what survives untouched on the evidence "measured min 8 and
+max 8 across 1000 seeds", and section 5.3 leans on it: "`buckets reached 8 of
+8` from 5.1 asserts that directly and is invariant".
+
+The statistic counts distinct buckets among the 64 multiples of 8 masked into 8
+buckets. Recomputed here from the exact occupancy distribution over rationals,
+`P(some bucket empty)` is 1.554270e-03, about one run in 643 per process; both
+`hash_run` and `hash_build_standalone` read that golden, in separate processes,
+which is about one run in 322 across the suite. "Measured min 8 and max 8
+across 1000 seeds" is not evidence of invariance: at that rate 1000 draws show
+no failure about 21 per cent of the time.
+
+What makes this more than an arithmetic slip is that three sentences earlier
+the same paragraph refuses a largest-bucket bound because "even `largest < 56`
+flakes at **1.62e-04, about 1 run in 6,169**" — a figure this amendment
+recomputes as right. So the flake section 5 retained is about nine and a half
+times more frequent than the one it rejects by name, and it was retained with
+no disclosure.
+
+What shipped is a bound: `buckets reached >= 6: true (identity hashing would
+reach 1)`, whose false-failure probability is 4.836243e-12, in the same band as
+this section's other two derived bounds at 2.37e-11 and 8.41e-10. A bound of at
+least 7 was rejected at 2.825296e-07, three orders looser than the loosest
+bound already there. Nothing real is lost dropping from 8 to 6: what the line
+guards is that hashing is not the identity, and `fn hash(self) -> Int { self }`
+puts all 64 multiples of 8 in bucket 0, reaching 1, as does a constant hash.
+The shipped fixture header derives all of it, and also records what the
+loosening costs — nothing in that file constrains the 8-bucket distribution any
+more, only its support, so `keys -64..63 reach >= 76 of 256` is what covers low
+bits instead.
+
+**F. Section 5.3's replacement text is governed by what shipped.** Its table
+prescribes "assert **>= 76**" and "assert **80..176**", and the two histograms
+"**dropped**". The shipped golden lines are `keys -64..63 reach >= 76 of 256
+buckets: true (unmasked reached 58)` and `Int hashes of 0..255 that are
+negative in 80..176: true (masking is mandatory)` — the bound moved into the
+printed text and the line prints a boolean rather than the count, which is what
+makes the parenthetical contrasts the table asks to keep still meaningful. Both
+histograms are gone. Beyond that table, the shipped golden also carries
+`buckets reached >= 6`, a further seed-dependent line that neither this section
+nor the plan's Step 3 lists as one; entry E governs it.
+
+Together with entry C this changes what a reader should expect the golden to
+hold. Subtracting the two dropped histograms from the false count of eleven
+gives fewer lines than the golden holds, because the count was of roster items
+rather than of lines. The shipped file is the authority on its own contents.
+
+**G. Section 8's list of records to amend did not reach the files named here.**
+It names `nova-spec/20-STDLIB.md` section 7 with `docs/adr/0018`, ADR 0005,
+`std/core/lib.nova`, `tests/runtime/hash.nova`, `CHANGELOG.md` and
+`nova-spec/13-RUNTIME.md`. Task 2 had to change each of these, and none appears
+in this list or in any file list in the plan:
+
+- `tests/runtime/collections.nova` with its `.stdout`. The fixture printed how
+  many of the 16 `Int` keys `-8..7` hash negative and the golden pinned it at
+  9. Seeded, that count is `Binomial(16, 1/2)`, so `P(exactly 9)` is 715/4096,
+  about 0.174561; `collections_run`, `collections_build_standalone` and
+  `collections_under_gc_stress` each read that one golden in its own process,
+  so all three printing 9 has probability about 0.005319 and the collections
+  gate would pass about one run in 188. Sixteen keys is too few for any bound —
+  even the widest, 1 through 15, misses at one run in 32,768 per process, worse
+  than the largest-bucket bound section 5.3 rejects by name. The field was
+  deleted.
+- `crates/nova-mir/tests/lower_tests.rs`.
+  `hash_builtins_lower_to_a_runtime_call_and_a_move` asserted that `impl Hash
+  for Char` reaches no runtime function. `int_hash_seed` lowers to a runtime
+  call, so that assertion fails at every seed, deterministically. It was
+  narrowed rather than deleted, to an equality against
+  `vec![RtFunc::IntHashSeed]`, since the property its doc comment names — that
+  `char_to_int` lowers to a register move — is untouched, and asserting the
+  whole call vector is what keeps that half pinned.
+- `std/collections/lib.nova`. Its record header exempted these keys from
+  per-process variation — "`Int`, `Bool` and `Char` keys go through `mix64`,
+  which is not seeded, so their layout is unchanged and stable across runs" —
+  and its note on `keys()` order confined the stronger statement to `String`
+  keys on the same ground. This increment falsifies both, and the shipped
+  paragraphs now turn on whether a key type is seeded rather than on which one
+  it is.
+
+Section 8's closing instruction to enumerate mechanically rather than work from
+its list was the right instruction, and this is what it would have caught. Why
+these were missed is worth more than the corrections: every sweep in this
+increment scoped the golden question to the fixture whose subject is hashing,
+and these pin hash-derived values incidentally. The files missing from this
+spec's list and the plan's were found by sweeping for prose that ASSERTS the
+old behaviour, not by reasoning about which files the change touches — a file
+list built from "what does this code change" cannot reach a file that only
+DESCRIBES the behaviour, and on this increment that was the larger set.
+
+**H. "Exact probability" names a model, not the run.** Section 5.3 says the
+negative count "has exact probability **8.41e-10**", says `largest < 56`
+"flakes at **1.62e-04**", and section 11's criterion asks that the bounds
+appear "with their exact probabilities" in the fixture's header. Each figure is
+exact for a model in which the hashes involved are independent and uniform.
+They are not independent: every one is a deterministic function of a single
+64-bit seed, so at most 2^64 outcomes stand where the model for the 128-key
+line alone has 256^128, and the model therefore cannot be the true joint
+distribution. Read each figure as exact for the model and an estimate for the
+run.
+
+Separately, 1.62e-04 is a sum over the 8 per-bucket tails, which are not
+disjoint events, so it is a Bonferroni upper bound on the flake probability
+rather than that probability. The shipped fixture labels it as one and carries
+the model caveat in its header. What the shipped figures are is computed rather
+than sampled — finite exact summations, inclusion-exclusion over an occupancy
+distribution or a binomial tail — so no sampling error enters and "closed form"
+would not be the right phrase for them either. The plan carries the same two
+shapes at its Step 3 table header and its Step 4 derivation, and the root
+record for the eleven-figure form of the cross-process bound is
+`docs/superpowers/specs/2026-08-27-hashdos-resistance-test-design.md`, amended
+today.
+
 ## 1. The exclusion this closes, and the two it does not
 
 `nova_rt_str_hash` is seeded per process and finalized with splitmix64, and a
