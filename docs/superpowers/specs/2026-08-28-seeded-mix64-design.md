@@ -9,13 +9,19 @@
 Recorded rather than corrected in place, as this project does with plans and
 specs: what a design got wrong is part of its record. The sections below keep
 their wording and this section governs wherever the two disagree. Every
-quotation is of text still standing in this file, located with the `#`, `*`,
-`>` and `///` gutters flattened as well as line by line. Sites are named by
-section and quotation rather than by line number, because a document that cites
-its own lines invalidates itself the moment anything above the citation shifts
-— and inserting this section shifted every line below it. The plan this spec
-drives carries its own dated section for the same audits, and where an entry
-below has a sibling site there it says so.
+quotation is verbatim from the source named beside it, allowing for the line
+breaks this file's own wrapping introduces inside a quoted span. Most come from
+this file's own body; entries D, E and F also quote `tests/runtime/hash.nova`
+and its golden, entry B quotes the plan, and entry G quotes
+`std/collections/lib.nova` from the revision Task 2 replaced, so that one is
+findable in no current file. Sites in this file were located with a sweep that
+strips `#`, `*`, `>` and `///` gutters and collapses newlines, run separately
+from a line-oriented sweep. They are named by section and quotation rather than
+by line number, because a document that cites its own lines invalidates itself
+the moment anything above the citation shifts — and inserting this section
+shifted every line below it. The plan this spec drives carries its own dated
+section for the same audits, and where an entry below has a sibling site there
+it says so.
 
 **A. Section 3.3's ratio is quoted from the favourable end of its own range.**
 It reads "it costs about 15 ns, roughly a 30 per cent increase on a 35–48 ns
@@ -128,9 +134,9 @@ The statistic counts distinct buckets among the 64 multiples of 8 masked into 8
 buckets. Recomputed here from the exact occupancy distribution over rationals,
 `P(some bucket empty)` is 1.554270e-03, about one run in 643 per process; both
 `hash_run` and `hash_build_standalone` read that golden, in separate processes,
-which is about one run in 322 across the suite. "Measured min 8 and max 8
-across 1000 seeds" is not evidence of invariance: at that rate 1000 draws show
-no failure about 21 per cent of the time.
+which is about one run in 322 across the suite. The evidence given, "measured
+min 8 and max 8 across 1000 seeds", is not evidence of invariance: at that rate
+1000 draws show no failure about 21 per cent of the time.
 
 What makes this more than an arithmetic slip is that three sentences earlier
 the same paragraph refuses a largest-bucket bound because "even `largest < 56`
@@ -142,14 +148,15 @@ no disclosure.
 What shipped is a bound: `buckets reached >= 6: true (identity hashing would
 reach 1)`, whose false-failure probability is 4.836243e-12, in the same band as
 this section's other two derived bounds at 2.37e-11 and 8.41e-10. A bound of at
-least 7 was rejected at 2.825296e-07, three orders looser than the loosest
-bound already there. Nothing real is lost dropping from 8 to 6: what the line
-guards is that hashing is not the identity, and `fn hash(self) -> Int { self }`
-puts all 64 multiples of 8 in bucket 0, reaching 1, as does a constant hash.
-The shipped fixture header derives all of it, and also records what the
-loosening costs — nothing in that file constrains the 8-bucket distribution any
-more, only its support, so `keys -64..63 reach >= 76 of 256` is what covers low
-bits instead.
+least 7 was rejected at 2.825296e-07, about 336 times the loosest bound already
+there, which is two and a half orders rather than the three the shipped fixture
+header states. Nothing real is lost dropping from 8 to 6: what the line guards
+is that hashing is not the identity, and `fn hash(self) -> Int { self }` puts
+all 64 multiples of 8 in bucket 0, reaching 1, as does a constant hash. The
+shipped fixture header derives all of it, and also records what the loosening
+costs — nothing in that file constrains the 8-bucket distribution any more,
+only its support, so `keys -64..63 reach >= 76 of 256` is what covers low bits
+instead.
 
 **F. Section 5.3's replacement text is governed by what shipped.** Its table
 prescribes "assert **>= 76**" and "assert **80..176**", and the two histograms
@@ -179,10 +186,19 @@ in this list or in any file list in the plan:
   about 0.174561; `collections_run`, `collections_build_standalone` and
   `collections_under_gc_stress` each read that one golden in its own process,
   so all three printing 9 has probability about 0.005319 and the collections
-  gate would pass about one run in 188. Sixteen keys is too few for any bound —
-  even the widest, 1 through 15, misses at one run in 32,768 per process, worse
-  than the largest-bucket bound section 5.3 rejects by name. The field was
-  deleted.
+  gate would pass about one run in 188. Sixteen keys is too few for any bound:
+  even the widest, 1 through 15, misses at one run in 32,768 per process, and
+  at one run in 10,923 over the three processes that read that golden — about
+  105,000 times the fixture's whole flake budget of one run in 1,150,179,830,
+  which is the comparison that decides it. An earlier version of this entry,
+  and the briefing it came from, argued instead that 1 through 15 was "worse
+  than the largest-bucket bound section 5.3 rejects by name". That is false,
+  and false in the direction that flatters the deleted field: recomputed, the
+  rejected largest-bucket bound is 1.620911e-04, which fires about 5.31 times
+  as often as 1 through 15 per process and about 1.77 times as often as its
+  three-process figure, so 1 through 15 is the tighter of the two rather than
+  the looser. The ruling to delete the field stands; only that argument for it
+  falls. The field was deleted.
 - `crates/nova-mir/tests/lower_tests.rs`.
   `hash_builtins_lower_to_a_runtime_call_and_a_move` asserted that `impl Hash
   for Char` reaches no runtime function. `int_hash_seed` lowers to a runtime
@@ -210,15 +226,15 @@ list built from "what does this code change" cannot reach a file that only
 DESCRIBES the behaviour, and on this increment that was the larger set.
 
 **H. "Exact probability" names a model, not the run.** Section 5.3 says the
-negative count "has exact probability **8.41e-10**", says `largest < 56`
-"flakes at **1.62e-04**", and section 11's criterion asks that the bounds
-appear "with their exact probabilities" in the fixture's header. Each figure is
-exact for a model in which the hashes involved are independent and uniform.
-They are not independent: every one is a deterministic function of a single
-64-bit seed, so at most 2^64 outcomes stand where the model for the 128-key
-line alone has 256^128, and the model therefore cannot be the true joint
-distribution. Read each figure as exact for the model and an estimate for the
-run.
+negative count "has exact probability **8.41e-10, about 1 run in 1.19
+billion**", says `largest < 56` "flakes at **1.62e-04, about 1 run in 6,169**",
+and section 11's criterion asks that the bounds appear "with their exact
+probabilities" in the fixture's header. Each figure is exact for a model in
+which the hashes involved are independent and uniform. They are not
+independent: every one is a deterministic function of a single 64-bit seed, so
+at most 2^64 outcomes stand where the model for the 128-key line alone has
+256^128, and the model therefore cannot be the true joint distribution. Read
+each figure as exact for the model and an estimate for the run.
 
 Separately, 1.62e-04 is a sum over the 8 per-bucket tails, which are not
 disjoint events, so it is a Bonferroni upper bound on the flake probability
