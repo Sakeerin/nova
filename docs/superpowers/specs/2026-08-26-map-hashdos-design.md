@@ -194,6 +194,18 @@ per call rather than once (every `Map` fixture must fail).
   the one-shot function is permitted by its own closing paragraph, and only a swappable `Hasher`
   object needs the migration. Its Phase 2.2a disclosure that hashes are not randomized per process
   becomes false for `String` and stays true for `mix64`.
+  [Forward marker, 2026-08-30: the last clause describes an amendment this
+  increment went on to make correctly, so it is an accurate record rather than a
+  false claim — but the half it left standing has since fallen. The 2026-08-28
+  `seeded-mix64` increment made the disclosure false for `Int`, `Bool` and `Char`
+  as well, those impls now computing `mix64(key ^ int_hash_seed())`; `mix64`
+  itself remains unseeded and module-private, which is the distinction that
+  sentence turned on and which is why "stays true for `mix64`" is still true of
+  the function while no longer true of the key types. The earlier decision to
+  leave those three attackable was right when it was written and this increment
+  took the other side of it. **ADR 0005's 2026-08-28 amendment governs.** The
+  wording here is left byte-identical and superseded by this marker rather than
+  edited.]
 - **`crates/nova-resolver/src/lib.rs`** — the doc comment on `Builtin::StrHash` describes `str_hash`
   as "FNV-1a over the string's bytes", which this change falsifies.
 - **`crates/nova-runtime/src/lib.rs`** — `nova_rt_str_hash`'s own doc comment, including its
