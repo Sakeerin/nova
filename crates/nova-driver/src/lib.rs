@@ -969,6 +969,111 @@ mod async_end_to_end {
         );
     }
 
+    /// **`std/core`'s `mix64` and the runtime's `splitmix64_finalize` compute the
+    /// same function, and until these two probes nothing asserted it.** The
+    /// records have said it for some time -- ADR 0005 describes `mix64` as the
+    /// splitmix64 finalizer written in signed Nova with masked shifts, and the
+    /// runtime's own doc comment says the constants correspond -- but each side
+    /// was only ever pinned against *published* splitmix64 vectors, separately.
+    /// Two implementations can both match a published vector at two points and
+    /// still disagree elsewhere; nothing compared them to each other.
+    ///
+    /// The comparison is possible without inverting anything because the seed is
+    /// a process-global `OnceLock` in `nova-runtime`, and `nova-driver` takes
+    /// that crate as a dev-dependency of the *same instance* -- so
+    /// `nova_rt_int_hash_seed()` here returns the very value the JIT-compiled
+    /// code XORed in. Whichever side reaches the `OnceLock` first initialises
+    /// it; order does not matter.
+    ///
+    /// One probe per test is the module's rule, so the many-key form has to
+    /// arrive as a single `Int`: the Nova body XOR-accumulates `(k).hash()` over
+    /// 128 keys spanning both signs, and the assertion recomputes that fold from
+    /// `splitmix64_finalize`. A constant or a shift drifting on either side
+    /// changes the fold with overwhelming probability -- a mask mutation alters
+    /// roughly half of all inputs, so surviving 128 keys is a `2^-128`-order
+    /// event rather than a coincidence to worry about.
+    ///
+    /// Both signs on purpose. Nova's `>>` is arithmetic and `mix64` masks each
+    /// shift to emulate a logical one, so a dropped mask is visible only on
+    /// inputs whose sign bit is set -- and the seed makes the *hashed* value's
+    /// sign unpredictable from the key's, which is why the range is chosen
+    /// rather than the mask relied upon.
+    ///
+    /// **What these two probes cover that nothing else did, counted rather than
+    /// reasoned.** Both mutations below were applied and the whole workspace
+    /// suite run for each, and the failures enumerated:
+    ///
+    /// - The runtime's `splitmix64_finalize` first constant, last nibble `9` to
+    ///   `b`: **two failures across the suite, and they are these two probes.**
+    ///   Nothing else noticed. `nova_rt_str_hash` routes through that function,
+    ///   but every test of it asserts a relation -- same key same hash, different
+    ///   keys different hashes -- and a relation survives any bijective change.
+    /// - Nova's `mix64` first constant, `-4658895280553007687` to
+    ///   `...685`: four failures -- `hash_run`, `hash_build_standalone` and these
+    ///   two. The golden's `splitmix64 canonical x1/x3` line reads `false`
+    ///   `false`, which is the published-vector check doing its job.
+    ///
+    /// So Nova-side drift already had a witness and Rust-side drift had none.
+    /// That asymmetry is the whole reason these exist; the fold's own margin is
+    /// secondary.
+    ///
+    /// `Bool` and `Char` get no probe of their own, deliberately. All three
+    /// impls call this one `mix64`, differing only in what they feed it, and
+    /// `tests/runtime/hash.stdout`'s `char/int agree` line already pins that
+    /// agreement -- so a `Bool` or `Char` probe would cost a full compile and
+    /// JIT for nothing this fold does not already establish.
+    #[test]
+    fn mix64_agrees_with_the_runtime_finalizer_over_keys_of_both_signs() {
+        let out = run_async_fn(
+            "async fn fold() -> Int {\n\
+            \x20 let mut acc = 0\n\
+            \x20 let mut k = -64\n\
+            \x20 while k < 64 {\n\
+            \x20   acc = acc ^ (k).hash()\n\
+            \x20   k = k + 1\n\
+            \x20 }\n\
+            \x20 acc\n\
+             }\n\
+             fn main() { let x = fold() }",
+            "fold",
+            &[],
+        );
+        let seed = nova_runtime::nova_rt_int_hash_seed() as u64;
+        let want = (-64i64..64).fold(0i64, |acc, k| {
+            acc ^ nova_runtime::splitmix64_finalize((k as u64) ^ seed) as i64
+        });
+        assert_eq!(
+            out, want,
+            "Nova's `mix64` and the runtime's `splitmix64_finalize` disagree \
+             somewhere in the keys -64..63. Both are the splitmix64 finalizer \
+             and the records say so; one of them has drifted. The single-key \
+             probe names a specific input."
+        );
+    }
+
+    /// The same tie at one key, kept for diagnosis rather than for coverage.
+    /// When the fold above fails it reports two folded totals, which say nothing
+    /// about *where*; this one fails with a concrete input and two concrete
+    /// hashes. `-1` is chosen because every one of `mix64`'s three masked shifts
+    /// sign-extends on it before the seed is applied, so a dropped mask is most
+    /// likely to show here.
+    #[test]
+    fn mix64_agrees_with_the_runtime_finalizer_at_a_single_key() {
+        let out = run_async_fn(
+            "async fn one() -> Int { (-1).hash() }\n\
+             fn main() { let x = one() }",
+            "one",
+            &[],
+        );
+        let seed = nova_runtime::nova_rt_int_hash_seed() as u64;
+        let want = nova_runtime::splitmix64_finalize((-1i64 as u64) ^ seed) as i64;
+        assert_eq!(
+            out, want,
+            "`(-1).hash()` in Nova and `splitmix64_finalize(-1 ^ seed)` in the \
+             runtime must agree: got {out:#x}, want {want:#x}"
+        );
+    }
+
     /// Arguments reach the WRAPPER, not `poll` -- so a wrapper that forgets to
     /// copy them into their state slots leaves the body reading the allocator's
     /// zeroes. At `Float`, which also proves the seeding store and the body's
