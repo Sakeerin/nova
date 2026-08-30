@@ -525,6 +525,17 @@ including the part that survives:
   the remedy as a `Hasher`-shaped question — per-map hasher choice, or HashDoS resistance via a seed
   — reached through the accumulating-`Hasher` migration it describes, with a deprecation cycle. That
   ADR holds the governing decision; this spec argued the point without citing it.
+  [Forward marker, 2026-08-30: the description of ADR 0005 above was accurate when
+  written and is now out of date, which is a different thing from wrong. That ADR
+  no longer records simply that hashes are not randomized per process: its
+  2026-08-26 amendment made the disclosure false for `String` keys, and its
+  2026-08-28 amendment made it false for `Int`, `Bool` and `Char` too, those three
+  impls now computing `mix64(key ^ int_hash_seed())`. The remedy also turned out
+  not to need the `Hasher`-shaped migration this paragraph points at — that was
+  the tension the 2026-08-26 amendment resolved, in favour of ADR 0005's own
+  closing paragraph. **ADR 0005's 2026-08-28 amendment is the governing record.**
+  The wording here is left byte-identical and superseded by this marker rather
+  than edited, which is what this project does with a dated design record.]
 - The `std/collections` half **survives, for a different reason than the one given**: every
   `Map<String, _>` in the language has this exposure, and `std/json` is where it happens to face
   untrusted input.
