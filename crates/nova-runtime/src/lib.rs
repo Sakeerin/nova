@@ -374,7 +374,20 @@ pub extern "C" fn nova_rt_int_hash_seed() -> i64 {
 /// one bucket and moved only 66.7% of keys at capacity 8; with this finalizer
 /// the same attack falls to 3 and 87.3% of keys move, against an ideal of
 /// 87.5%. The spec's section 2 carries the method and the full figures.
-fn splitmix64_finalize(mut z: u64) -> u64 {
+///
+/// `pub` for one reason: `nova-driver`'s `async_end_to_end` tests tie this
+/// function to `std/core`'s `mix64` by running Nova's `.hash()` through the
+/// real pipeline and comparing against this one, over a seed both sides read
+/// from the same process-global `OnceLock`. The records have long said the two
+/// compute the same function and nothing asserted it.
+///
+/// **This is Rust-internal visibility and creates no Nova surface**, which is
+/// what distinguishes it from ADR 0005's prohibition on publishing `mix64`.
+/// That prohibition is about Nova's namespace: publishing `mix64` would make
+/// its exact definition a compatibility surface and forecloses the freedom ADR
+/// 0005 reserves to replace its constants or rounds. Nothing here reaches a
+/// Nova program, and `mix64` stays module-private.
+pub fn splitmix64_finalize(mut z: u64) -> u64 {
     z ^= z >> 30;
     z = z.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z ^= z >> 27;
