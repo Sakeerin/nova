@@ -149,8 +149,9 @@ What shipped is a bound: `buckets reached >= 6: true (identity hashing would
 reach 1)`, whose false-failure probability is 4.836243e-12, in the same band as
 this section's other two derived bounds at 2.37e-11 and 8.41e-10. A bound of at
 least 7 was rejected at 2.825296e-07, about 336 times the loosest bound already
-there, which is two and a half orders rather than the three the shipped fixture
-header states. Nothing real is lost dropping from 8 to 6: what the line guards
+there, which is two and a half orders. The shipped fixture header said three
+and has since been corrected to match, so there is no longer a divergence to
+reconcile. Nothing real is lost dropping from 8 to 6: what the line guards
 is that hashing is not the identity, and `fn hash(self) -> Int { self }` puts
 all 64 multiples of 8 in bucket 0, reaching 1, as does a constant hash. The
 shipped fixture header derives all of it, and also records what the loosening
@@ -194,7 +195,7 @@ in this list or in any file list in the plan:
   how this entry first got the factor wrong. Per process, 1 in 32,768 is about
   35,100 times the whole flake budget `tests/runtime/hash.nova`'s header sums
   for itself. Per suite run — the three processes reading the collections
-  golden against the two reading `hash.stdout` — it is about 52,600. Both
+  golden against the two reading `hash.stdout` — it is about 53,000. Both
   factors are computed from the exact sum of that header's three bounds; the
   header publishes the budget as about one run in a billion per process, one
   significant figure being all its own argument needs, so recomputing from that
@@ -203,7 +204,7 @@ in this list or in any file list in the plan:
   in 1,150,179,830", which set the collections figure's three-process rate
   against a per-process budget; that is retracted for the mixed basis and not
   for its arithmetic, which was right for what it computed. The ruling does not
-  turn on the basis: at 35,100 or at 52,600, sixteen keys cannot carry a bound.
+  turn on the basis: at 35,100 or at 53,000, sixteen keys cannot carry a bound.
   An earlier version of this entry,
   and the briefing it came from, argued instead that 1 through 15 was "worse
   than the largest-bucket bound section 5.3 rejects by name". That is false,

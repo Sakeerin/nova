@@ -988,8 +988,9 @@ mod tests {
         // Were these one value, `(0).hash()` would equal `("").hash()` exactly
         // in Nova. This pins that they differ, which is what the separate
         // `RandomState::new()` call buys. It does NOT pin that recovering one
-        // fails to yield the other: the two calls share `k1` and differ in `k0`
-        // by the calls between them, so that question is about a keyed hash
+        // fails to yield the other: two calls on one thread share `k1` and differ
+        // in `k0` by the calls between them, and these two may instead come from
+        // separate draws, so that question is about a keyed hash
         // under a related key and is untested here. The variant is deliberately
         // not named, for the reason `int_hash_seed`'s doc comment gives: `std`
         // documents `DefaultHasher`'s algorithm as unspecified, and the
