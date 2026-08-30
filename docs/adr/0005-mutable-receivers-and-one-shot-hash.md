@@ -676,8 +676,15 @@ here.
 
 #### The paragraph headed "The Phase 2.2a disclosure narrows" is amended as a whole
 
-Every clause of it turns over together, so patching one would leave the rest
-standing. Its wording keeps its place and this subsection governs it. Of
+Its clauses do not all turn over the same way, and the clause-by-clause list
+below says which does what: one survives and loses only the inference drawn
+from it, the others turn over. The paragraph is amended whole rather than clause
+by clause because patching any single clause would leave the others standing.
+This increment's commit message states the stronger form, that the paragraph
+"turns over in every clause at once"; that is retracted here, and it cannot be
+corrected where it stands, a commit message being immutable. The first bullet
+below is the clause it is wrong about. The paragraph's wording keeps its place
+and this subsection governs it. Of
 "**Hashes are not randomized per process**" it says the disclosure is
 
 > now **false for `String` keys** ... and **still true for `mix64`**, hence for
@@ -782,15 +789,17 @@ those constants ever do, which the fixture names at itself.
 
 #### The seed-recovery disclosure gains its second half
 
-The subsection above records that `("").hash()` recovers the string seed exactly
-in one call. **The `Int` seed has the same channel**, stated here rather than
-left to be inferred: `(0).hash()` is `mix64(0 ^ seed)`, which is `mix64(seed)`,
+The 2026-08-26 amendment above — not the privacy-decision subsection
+immediately preceding this one — records that `("").hash()` recovers the string
+seed exactly in one call. **The `Int` seed has the same channel**, stated here
+rather than left to be inferred: `(0).hash()` is `mix64(0 ^ seed)`, which is
+`mix64(seed)`,
 and `mix64` is a bijection, so one call plus an inverse yields the seed exactly.
 That is no longer only asserted — `tests/runtime/hash.nova` carries a `mix64_inv`
 and performs the recovery, because cancelling the seed is how it reaches the
 canonical vectors at all.
 
-The consequence takes the shape that subsection already uses. An attacker who
+The consequence takes the shape that amendment already uses. An attacker who
 can obtain one `Int`, `Bool` or `Char` hash from a running process can recover
 that process's seed and construct collisions for it; an attacker who cannot
 observe the process still cannot build a colliding set before it starts, the
@@ -800,11 +809,19 @@ survives. The channel is not a defect in the seeding: it is
 is what this ADR decided and which predates both seedings. **So the `Int`,
 `Bool` and `Char` path is exactly as strong as the `String` path and no
 stronger**, and no record should be read as claiming otherwise. The two seeds
-are separate draws, which buys that they differ; whether recovering one yields
-the other is a question about the keyed hash `RandomState` supplies under a
-related key, and this increment does not answer it. `int_hash_seed`'s doc
-comment in `crates/nova-runtime/src/lib.rs` carries that argument and the
-measurement behind it.
+are separate draws, which buys that they differ **effectively certainly** —
+equality is possible by chance at about 2^-64 — rather than that they are
+independent; whether recovering one yields the other is a question about the
+keyed hash `RandomState` supplies under a related key, and this increment does
+not answer it. `int_hash_seed`'s doc comment in
+`crates/nova-runtime/src/lib.rs` carries that argument, read off `std`'s own
+source — how `RandomState::new` hands out `(k0, k1)` from a single cached draw,
+so that two calls share `k1` and differ in `k0` — and states outright that this
+increment does not verify the related-key question and that
+`int_and_str_hash_seeds_are_drawn_separately` does not test it. No measurement
+stands behind that argument. The measured seed figures nearby, in
+`str_hash_seed`'s comment, are about the string seed and bear on
+recoverability, not on the related-key question.
 
 "FNV-1a is not collision-resistant and neither is `mix64`" **stays true as
 written**, and so does the sentence that an adversary who can observe timing and

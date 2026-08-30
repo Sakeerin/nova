@@ -19,7 +19,15 @@
 // below every figure below and left unbounded on purpose.
 //
 // Summing the bounds below puts this fixture's whole flake budget at about one
-// run in 1,150,179,830. That is a Bonferroni bound WITHIN THE MODEL described
+// run in a billion, PER PROCESS OF THIS FIXTURE. One significant figure is all
+// the argument needs, and the total is deliberately not carried further: the
+// summands are published at three, three and seven figures, so adding up what
+// is printed beside them cannot reproduce a total stated to ten — it diverges
+// from the true sum in the fifth figure. For the suite-level rate, note that
+// `hash.stdout` is compared by two tests, `hash_run` and
+// `hash_build_standalone`, each running this fixture in its own process, so the
+// rate per suite run is about twice the per-process one. And the sum is a
+// Bonferroni bound WITHIN THE MODEL described
 // next, not a bound on the run: the summands are not disjoint events, and the
 // model is not the true joint distribution.
 //
@@ -62,15 +70,14 @@
 //
 // WHY `buckets reached` IS A BOUND RATHER THAN `8 of 8`. Unseeded that count
 // was a constant and the constant was 8. Seeded it is a random variable, and
-// `P(some bucket empty)` is 1.554270e-03 — about one run in 643, ten times
-// worse than the largest-bucket bound this file rejects by name just below,
-// and the same order as an undisclosed flake a previous increment had to
-// remove. `used >= 7` would be 2.825296e-07, one run in 3,539,451, still three
-// orders looser than the loosest bound here; `used >= 6` sits in the same band
-// as the bounds listed above, so 6 is the bound. Nothing real is lost: what
-// the line guards is that hashing is not the identity, and
-// `fn hash(self) -> Int { self }` puts all 64 multiples of 8 in bucket 0,
-// reaching 1. A constant hash also reaches 1.
+// `P(some bucket empty)` is 1.554270e-03 — about one run in 643, nine and a
+// half times worse than the largest-bucket bound this file rejects by name just
+// below. `used >= 7` would be 2.825296e-07, one run in 3,539,451, still a
+// factor of 336 looser than the loosest bound here — two and a half orders;
+// `used >= 6` sits in the same band as the bounds listed above, so 6 is the
+// bound. Nothing real is lost: what the line guards is that hashing is not the
+// identity, and `fn hash(self) -> Int { self }` puts all 64 multiples of 8 in
+// bucket 0, reaching 1. A constant hash also reaches 1.
 //
 // WHY THE TWO `&7` HISTOGRAMS ARE GONE RATHER THAN REPLACED. They pinned exact
 // bucket counts, which the seed randomises. The obvious replacement is a
@@ -78,10 +85,11 @@
 // a trap: for 256 keys in 8 buckets that count is `Binomial(256, 1/8)` with
 // mean 32, and the per-bucket tail summed over the buckets puts even
 // `largest < 56` at 1.62e-04 — a Bonferroni upper bound, since the per-bucket
-// events are not disjoint, so about one run in 6,169 at worst. Eight buckets is
-// too few for a tight bound at this key count. What the histograms guarded is
-// that hashing is not the identity, and `buckets reached >= 6` asserts that
-// directly.
+// events are not disjoint, so about one run in 6,169 at worst. That is the same
+// order as the undisclosed flake the previous increment had to remove, which
+// fired about one run in 6,100. Eight buckets is too few for a tight bound at
+// this key count. What the histograms guarded is that hashing is not the
+// identity, and `buckets reached >= 6` asserts that directly.
 //
 // THE LOW-BIT COVERAGE THAT LEAVES, since both histograms and the loosening of
 // `buckets reached` land together. Nothing in this file constrains the 8-bucket

@@ -989,8 +989,11 @@ mod tests {
         // in Nova. This pins that they differ, which is what the separate
         // `RandomState::new()` call buys. It does NOT pin that recovering one
         // fails to yield the other: the two calls share `k1` and differ in `k0`
-        // by the calls between them, so that question is about SipHash under a
-        // related key and is untested here. See `int_hash_seed`'s doc comment.
+        // by the calls between them, so that question is about a keyed hash
+        // under a related key and is untested here. The variant is deliberately
+        // not named, for the reason `int_hash_seed`'s doc comment gives: `std`
+        // documents `DefaultHasher`'s algorithm as unspecified, and the
+        // related-key argument holds for any keyed hash. See that comment.
         // Equality is possible by chance at about 2^-64, which is the same
         // order this project already accepts for the cross-process string test.
         assert_ne!(int_hash_seed(), str_hash_seed());

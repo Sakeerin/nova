@@ -858,12 +858,13 @@ function of the key alone", and the fourth amendment above restates that
 exclusion as "`Int`, `Bool` and `Char` keys are untouched, `mix64` still being
 unseeded". Both are now false. `std/core`'s primitive impls for `Int`, `Bool`
 and `Char` compute `mix64(key ^ int_hash_seed())` over a per-process seed drawn
-in the runtime by a call separate from `nova_rt_str_hash`'s, XORed into
-`mix64`'s **input** rather than its output, because `Map` consults the low bits
-and a post-XOR would
-permute buckets without separating any colliding pair. `mix64` itself is
-unchanged: what was unseeded and stays so is a module-private mixer rather than a
-key type. The narrowed claim is pinned by
+in the runtime by a call separate from the string seed's — that separate
+`RandomState::new()` call sits in the private `str_hash_seed`, which
+`nova_rt_str_hash` calls — XORed into `mix64`'s **input** rather than its
+output, because `Map` consults the low bits and a post-XOR would permute
+buckets without separating any colliding pair. `mix64` itself is unchanged:
+what was unseeded and stays so is a module-private mixer rather than a key
+type. The narrowed claim is pinned by
 `hashdos_precomputed_int_key_set_does_not_survive_a_new_process` in
 `crates/nova-cli/tests/run_tests.rs`, which is the two-phase shape the fourth
 amendment describes for `String` keys, run through the other seed.
@@ -881,13 +882,17 @@ Nova code yields the running process's int seed exactly. Precomputation
 resistance is the half that survives, and that path is exactly as strong as the
 string path and no stronger.
 
-**Section 4's table-order measurements need no further scoping.** Its figures
-are the `"a"`, `"c"`, `"e"` ordering, the 2046 of 15 600 ordered triples of
+**Section 4's table-order measurements need no further scoping.** Every figure
+in that section is measured over `String` keys, `std/json`'s object keys being
+strings: the order a fresh map RETURNS for the insertions `"a"`, `"c"`, `"e"`,
+which is `"e"`, `"c"`, `"a"` — the output rather than the input, which is how
+`nova-spec/20-STDLIB.md` §12 names it as well — the cap-8 table and the 3/4
+threshold that ordering happens under, the 2046 of 15 600 ordered triples of
 distinct lowercase letters, and the 56 of 3782 ordered pairs of
-single-character `[a-zA-Z0-9]` keys — all of them over `String` keys,
-`std/json`'s object keys being strings — so the third amendment's scoping of
-them to the hash of the day is what it was. What widens is
-the general `Map` statement rather than this module's instance of it: a
+single-character `[a-zA-Z0-9]` keys, all 56 of them stable 2-cycles. So the
+third amendment's scoping of them to the hash of the day is what it was. What
+widens is the general `Map` statement rather than this module's instance of
+it: a
 `Map<Int, _>`, `Map<Bool, _>` or `Map<Char, _>` now has the run-to-run layout
 freedom a `Map<String, _>` has had since 2026-08-26. `nova-spec/20-STDLIB.md` §12
 carries that, and `Map::keys`' own note in `std/collections/lib.nova` carries it

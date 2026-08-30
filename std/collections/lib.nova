@@ -126,14 +126,13 @@ impl<T> Iterator for VecIter<T> {
 // `String` from `nova_rt_str_hash`'s draw and the other three from
 // `nova_rt_int_hash_seed`'s, which is a separate draw — so which bucket a given
 // key lands in is not a property of the program text: two runs of the same
-// program,
-// inserting the same keys in the same order, build different tables. Lookup and
-// `len` do not change — every probe in a run uses the run's own seed, and `len`
-// counts live entries whatever the layout — but what a caller can OBSERVE about
-// layout can vary run to run. `keys()` order is the channel a caller is most
-// likely to notice (see its own note below); the `keys`, `vals` and `state`
-// fields are reachable directly and carry the same variation, which is what a
-// fixture reading them is reading.
+// program, inserting the same keys in the same order, build different tables.
+// Lookup and `len` do not change — every probe in a run uses the run's own
+// seed, and `len` counts live entries whatever the layout — but what a caller
+// can OBSERVE about layout can vary run to run. `keys()` order is the channel
+// a caller is most likely to notice (see its own note below); the `keys`,
+// `vals` and `state` fields are reachable directly and carry the same
+// variation, which is what a fixture reading them is reading.
 //
 // GROWTH IS NOT ON THAT UNCHANGED LIST. The trigger in `insert` reads `used`,
 // which counts tombstones as well as occupied slots, and an insert that reuses a

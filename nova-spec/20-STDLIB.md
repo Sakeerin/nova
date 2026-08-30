@@ -967,10 +967,10 @@ its 2026-08-25 amendment.
    places, and both are now false. The paragraph headed **The gate.** says the
    gate is "**not** claimed for `Int`, `Bool` or `Char` keys at all, because
    `mix64` is unseeded and those keys' buckets are still a function of the key
-   alone", and the
-   2026-08-27 amendment above restates it as "`Int`, `Bool` and `Char` keys are
-   untouched, `mix64` still being unseeded". `std/core`'s primitive `Hash`
-   impls for those types compute `mix64(key ^ int_hash_seed())` over a
+   alone", and the 2026-08-27 amendment above restates it as "`Int`, `Bool` and
+   `Char` keys are untouched, `mix64` still being unseeded". `std/core`'s
+   primitive `Hash` impls for those types compute
+   `mix64(key ^ int_hash_seed())` over a
    per-process seed drawn in the runtime by a call separate from the string
    seed's, XORed into `mix64`'s **input** rather than its output — because
    `Map` consults the low bits, so a post-XOR would permute buckets without
