@@ -178,6 +178,18 @@ Not changed, and the records must keep saying so:
   `Int`, `Bool` or `Char` keys because `mix64` is unseeded. What changes is the
   claim's **evidence**, from external measurement to an executing assertion.
   Nothing here licenses widening it.
+  [Forward marker, 2026-08-29: the exclusion of `Int`, `Bool` and `Char` keys is
+  now false. It is closed by the `seeded-mix64` increment, and
+  `docs/adr/0005-mutable-receivers-and-one-shot-hash.md`'s 2026-08-28 amendment
+  is the governing record. Those three impls compute
+  `mix64(key ^ int_hash_seed())`, XORing a per-process seed into `mix64`'s
+  input, so such a key's bucket is a function of the key and of the process's
+  seed, and the gate claim covers those keys on the same precomputing-attacker
+  terms as string keys. The exclusion of the adaptive adversary, in this same
+  sentence, is unchanged, and so is the refusal of a cryptographic claim below.
+  The wording here is left byte-identical and superseded by this marker rather
+  than edited. The next bullet is **not** marked, because it is still true: the
+  seeding sits in the impls that call `mix64`, not in `mix64`.]
 - `mix64` stays unseeded and untouched.
 - The hash stays non-cryptographic. "FNV-1a is not collision-resistant" stays
   true.

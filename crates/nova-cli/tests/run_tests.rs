@@ -1777,10 +1777,10 @@ fn std_core_under_gc_stress() {
 /// they pinned — but the oracle property is not, and that is the half worth
 /// keeping. The bounds are computed from distributions rather than read off a
 /// run — occupancy for the `keys -64..63 reach` and `buckets reached` lines, the
-/// binomial for the negative-hash count — the complement line is a theorem
-/// about `mix64` being injective, and the canonical vectors are published
-/// splitmix64 values. What changed is that a bound admits a range where a
-/// histogram admitted one value, so a mutant can land inside one; the
+/// binomial for the negative-hash count — the two complement lines are
+/// theorems about `mix64` being injective, and the canonical vectors are
+/// published splitmix64 values. What changed is that a bound admits a range
+/// where a histogram admitted one value, so a mutant can land inside one; the
 /// fixture's scope note says which.
 ///
 /// The fixture also carries the complement-pair regression. Because Nova's
