@@ -677,9 +677,10 @@ here.
 #### The paragraph headed "The Phase 2.2a disclosure narrows" is amended as a whole
 
 Its clauses do not all turn over the same way, and the clause-by-clause list
-below says which does what: one survives and loses only the inference drawn
-from it, the others turn over. The paragraph is amended whole rather than clause
-by clause because patching any single clause would leave the others standing.
+below says which does what -- one survives having lost only the inference drawn
+from it, one splits, one was a decision this increment took the other side of,
+and the rest are false. The paragraph is amended whole rather than clause by
+clause because patching any single clause would leave the others standing.
 This increment's commit message states the stronger form, that the paragraph
 "turns over in every clause at once"; that is retracted here, and it cannot be
 corrected where it stands, a commit message being immutable. The first bullet
@@ -815,8 +816,10 @@ independent; whether recovering one yields the other is a question about the
 keyed hash `RandomState` supplies under a related key, and this increment does
 not answer it. `int_hash_seed`'s doc comment in
 `crates/nova-runtime/src/lib.rs` carries that argument, read off `std`'s own
-source — how `RandomState::new` hands out `(k0, k1)` from a single cached draw,
-so that two calls share `k1` and differ in `k0` — and states outright that this
+source — how `RandomState::new` hands out `(k0, k1)` from a draw cached per
+THREAD, so that two calls on one thread share `k1` and differ in `k0`, while
+these two seeds may instead come from two separate draws, neither `OnceLock`
+initialiser pinning a thread — and states outright that this
 increment does not verify the related-key question and that
 `int_and_str_hash_seeds_are_drawn_separately` does not test it. No measurement
 stands behind that argument. The measured seed figures nearby, in
