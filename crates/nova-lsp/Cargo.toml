@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Language Server Protocol implementation for Nova"
 
+[lib]
+# Not a benchmark target: `cargo bench` would otherwise build this under
+# libtest's harness, which rejects criterion's `--output-format`. The
+# workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false
+
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
 nova-lexer = { path = "../nova-lexer" }

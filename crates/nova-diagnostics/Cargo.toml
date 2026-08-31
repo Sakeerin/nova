@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Error reporting infrastructure for the Nova compiler"
 
+[lib]
+# Not a benchmark target: `cargo bench` would otherwise build this under
+# libtest's harness, which rejects criterion's `--output-format`. The
+# workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false
+
 [dependencies]
 codespan-reporting = { workspace = true }
 ariadne = { workspace = true }
