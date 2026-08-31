@@ -47,8 +47,25 @@ pub(crate) fn epoch() -> Instant {
 /// subtraction, and `sleep` treats a non-positive duration as an immediate
 /// wake -- so a wrap would turn a very long sleep into no sleep at all. A
 /// clamp keeps a useless answer from becoming a wrong one.
+///
+/// **`saturating_duration_since` rather than `elapsed`, and the difference is
+/// not stylistic.** `Instant::elapsed` is `Instant::now() - *self`, and `Sub`
+/// currently saturates to zero -- but `std`'s own documentation says of that
+/// saturation, in terms, that "future versions may reintroduce the panic in
+/// some circumstances". `saturating_duration_since` is the operation whose
+/// contract *is* the saturation, so writing it makes this function's
+/// panic-freedom a property of this code rather than one on loan from a `std`
+/// behaviour `std` has reserved the right to revoke.
+///
+/// That matters here more than it would elsewhere, because this function is
+/// reachable from a generated poll frame: `std/time`'s `Instant::now()` calls
+/// it, and an `async fn` body may call that. Its export
+/// [`nova_rt_time_now_nanos`] is `extern "C-unwind"`, which permits an unwind
+/// to pass through rather than abort -- and a generated poll frame carries no
+/// landing pads. With no panic to permit, that ABI grants nothing; the point of
+/// this line is to keep it that way by construction instead of by dependence.
 pub(crate) fn now_nanos() -> i64 {
-    i64::try_from(epoch().elapsed().as_nanos()).unwrap_or(i64::MAX)
+    i64::try_from(Instant::now().saturating_duration_since(epoch()).as_nanos()).unwrap_or(i64::MAX)
 }
 
 #[no_mangle]
