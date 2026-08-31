@@ -1326,6 +1326,24 @@ that already compiled.
   divergence predates this increment, no export named above was changed by it,
   and it wants a decision recorded somewhere other than a doc comment. Nothing
   in this increment supplies one, and this entry does not decide it either.
+  [Examined, 2026-08-30: **the hazard the paragraph above anticipates does not
+  exist for any of the four, so the ABI question is moot rather than open.** Each
+  was read for its panic paths. `nova_rt_time_now_epoch_nanos` handles both arms
+  of `duration_since` and clamps its conversion, so nothing in it can panic.
+  `nova_rt_log_config_level` and `nova_rt_log_config_to_stderr` reduce to a
+  `Cell` read behind `thread_local!`, whose `with` fails only during or after
+  that thread-local's destruction at thread exit -- reasoning, not measurement,
+  but Nova code does not run at thread exit. `nova_rt_time_now_nanos` was the one
+  real finding and is fixed rather than argued about: it reached `Instant::elapsed`,
+  whose saturation `std` documents while reserving the right to "reintroduce the
+  panic in some circumstances", so its panic-freedom was on loan. It now calls
+  `saturating_duration_since`, whose contract *is* the saturation, moving the
+  property into this repository's own code. **No ABI was changed**, because with
+  no panic to permit the `"C-unwind"` grant confers nothing. The tripwire, for
+  whoever adds to these: a panicking path introduced into `log`'s config reader
+  or either time helper would make that grant live, and the question in this
+  paragraph would become real -- it is moot on the current bodies, not on the
+  signature.]
 
 ## [0.2.0-alpha.1] - 2026-08-16
 
