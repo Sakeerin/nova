@@ -8,6 +8,10 @@ repository.workspace = true
 description = "GC and async runtime for Nova (linked into compiled binaries)"
 
 [lib]
+# Not a benchmark target: `cargo bench` would otherwise build this under
+# libtest's harness, which rejects criterion's `--output-format`. The
+# workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false
 # rlib: linked into the nova CLI for the JIT path (`nova run`).
 # staticlib: linked into standalone executables by `nova build`.
 crate-type = ["rlib", "staticlib"]
