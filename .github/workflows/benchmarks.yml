@@ -12,12 +12,32 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Runs the workspace's `[[bench]]` targets. Every crate's lib and bin
+      # carries `bench = false`, without which `cargo bench` builds them under
+      # libtest's harness and that harness rejects `--output-format`.
       - name: Run benchmarks
         run: cargo bench --workspace -- --output-format bencher | tee output.txt
-      - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: cargo
-          output-file-path: output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
+      # A `benchmark-action/github-action-benchmark` step stood here with
+      # `auto-push: true`. It never ran, because the step above failed first for
+      # the reason named above; once that was fixed, the store step failed on
+      # its own account:
+      #
+      #     fatal: couldn't find remote ref gh-pages
+      #
+      # It is removed rather than reconfigured. Turning it into a no-publish
+      # step means setting `auto-push: false`, and whether that alone stops the
+      # gh-pages fetch is undocumented -- and unverifiable here, because this
+      # workflow triggers only on pushes to `main`, so a guess could not be
+      # tested before landing.
+      #
+      # TO RESTORE IT, when there is something worth tracking: create an empty
+      # `gh-pages` branch, re-add the step, and note that `auto-push: true`
+      # publishes the numbers wherever that branch is served from. Two things
+      # make it worth more then than now -- more than the single benchmark this
+      # workspace currently has, and the `docs/benchmarks/` methodology the
+      # Phase 2 gate in `nova-spec/00-MASTER-SPEC.md` requires and which does
+      # not yet exist.
+      #
+      # What this job still catches without it: a benchmark that stops
+      # compiling, stops running, or stops emitting a parseable measurement.
+      # That is the whole of what it has ever been able to catch.
