@@ -25,6 +25,19 @@
 // **Header names are lower-cased and the original casing is not kept.** HTTP
 // field names are case-insensitive, so a `Map` keyed on the raw casing would
 // answer `get("content-length")` differently depending on what the peer sent.
+//
+// **Two limitations below share one cause: this module reads exactly one
+// request's worth of bytes per connection turn and trusts `Content-Length`
+// to say where that ends.**
+//
+// - `Content-Length` is the only framing v1 understands. Chunked
+//   transfer-encoding is neither supported nor detected, so a chunked
+//   request's body is left on the connection and is misread as the next
+//   request.
+// - Bytes already read past the current request's body are discarded, so a
+//   pipelined request is lost and its connection deadlocks rather than
+//   merely going unsupported. See `read_request`'s own doc comment for the
+//   exact wording this needs.
 
 // The request method. `Unknown` carries the raw token rather than discarding
 // it: a request may carry any method a peer invents, and the parser must not
@@ -350,4 +363,163 @@ fn reason_phrase(status: Int) -> String {
     if status < 400 { return "Redirection" }
     if status < 500 { return "Client Error" }
     "Server Error"
+}
+
+// The transport half: reading a request off a connection and writing a
+// response back onto one, honouring keep-alive. `std/net`'s `TcpStream` is
+// the only socket type either function below touches, through the `Read` and
+// `Write` impls that module defines for it -- this module still never opens
+// one itself.
+
+// Read one request from `conn`, honouring keep-alive: the caller loops, and
+// this reads exactly one request's head and body, leaving anything after it
+// on the connection.
+//
+// **This accumulates the head with `Bytes::concat`, which is O(n) per call**,
+// so building an n-byte head out of k reads is O(n*k). Bounded by
+// `max_head_bytes` at 8 KiB that is not worth a rope or a growable buffer;
+// it is noted here so a reader knows it was weighed rather than missed.
+//
+// **One socket wait per task.** Staging two I/O waits in one poll ends the
+// process (`stage_park` in `crates/nova-runtime/src/task.rs`), so a task
+// parked in `accept` cannot also be here. A server needs one task accepting
+// and one per connection -- see `std/net`'s `accept` doc comment.
+//
+// **A pipelined second request deadlocks the connection; it is not merely
+// unsupported.** This function reads into a local buffer and returns
+// `body.slice(0, want)`, so any bytes already pulled off the socket past the
+// end of the current request's body are discarded when it returns. A client
+// that writes a second request before reading the first response -- which
+// HTTP/1.1 permits -- has that second request's bytes eaten here. The server
+// then waits on its next `read` for a request that has already arrived, while
+// the client waits for a response that will never come: both sides block
+// forever, which is a different and worse claim than "request 2 is ignored".
+//
+// **`tests/runtime/http_keepalive.nova` does not exercise this case.** Its
+// client `await`s each reply before writing the next request, so it never
+// pipelines the two requests it sends. That fixture passing is evidence this
+// function's ordinary keep-alive path works; it is not evidence the pipelined
+// path is safe, and a reader should not conclude otherwise from seeing it
+// green.
+pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, HttpError> {
+    let mut buf = bytes_from_string("")
+    let mut head: Option<Request> = None
+    while head.is_none() {
+        let chunk = match conn.read(4096).await {
+            Ok(b) => b
+            Err(e) => return Err(HttpError { kind: Transport, message: e.message })
+        }
+        if chunk.len() == 0 {
+            return Err(HttpError { kind: Transport, message: "connection closed mid-head" })
+        }
+        buf = buf.concat(chunk)
+        // One arm, not two: `parse_request_head` already returns
+        // `Option<Request>`, so the loop assigns it straight through. It is
+        // also the form the language permits -- `Ok(Some(r))` is
+        // `E0900: nested patterns inside variants are not supported yet`.
+        match parse_request_head(buf, limits) {
+            Ok(maybe) => head = maybe
+            Err(e) => return Err(e)
+        }
+    }
+    let req = match head {
+        Some(r) => r
+        None => return Err(HttpError { kind: BadRequestLine, message: "no head after parsing" })
+    }
+
+    // The head's own length, so the body can be split off what was already
+    // read. `parse_offsets` is cheap and the buffer is unchanged, so re-reading
+    // `body_start` costs less than threading it out of `parse_request_head`
+    // and widening that function's return type for one caller.
+    let t = parse_offsets(buf)
+    let body_start = t[t.len() - 1]
+
+    let want = content_length_of(req)
+    if want > limits.max_body_bytes {
+        return Err(HttpError { kind: BodyTooLarge, message: "Content-Length over max_body_bytes" })
+    }
+    let mut body = buf.slice(body_start, buf.len())
+    while body.len() < want {
+        let chunk = match conn.read(4096).await {
+            Ok(b) => b
+            Err(e) => return Err(HttpError { kind: Transport, message: e.message })
+        }
+        if chunk.len() == 0 {
+            return Err(HttpError { kind: Transport, message: "connection closed mid-body" })
+        }
+        body = body.concat(chunk)
+        if body.len() > limits.max_body_bytes {
+            return Err(HttpError { kind: BodyTooLarge, message: "body over max_body_bytes" })
+        }
+    }
+
+    Ok(Request { method: req.method, path: req.path, headers: req.headers, body: body.slice(0, want) })
+}
+
+// `Content-Length`, or `0` when it is absent or not a number.
+//
+// **`Content-Length` is the only body framing v1 understands.** A request
+// without one is treated as bodiless; chunked transfer-encoding is out of
+// scope and is not detected, so a chunked request's body is left on the
+// connection and will be misread as the next request. That is a known
+// limitation of v1 rather than a defect to work around here -- it is recorded
+// in the design spec's section 10 and in this module's header.
+fn content_length_of(req: Request) -> Int {
+    match req.headers.get("content-length") {
+        Some(v) => digits_to_int(v.trim())
+        None => 0
+    }
+}
+
+// A decimal string as an `Int`, or `0` on anything unexpected. Nova has no
+// `String`-to-number conversion, so this walks the characters.
+fn digits_to_int(s: String) -> Int {
+    let cs = s.chars()
+    if cs.len() == 0 { return 0 }
+    let mut n = 0
+    let mut i = 0
+    while i < cs.len() {
+        let d = char_digit(cs[i])
+        if d < 0 { return 0 }
+        n = n * 10 + d
+        i = i + 1
+    }
+    n
+}
+
+fn char_digit(c: Char) -> Int {
+    if c == '0' { return 0 }
+    if c == '1' { return 1 }
+    if c == '2' { return 2 }
+    if c == '3' { return 3 }
+    if c == '4' { return 4 }
+    if c == '5' { return 5 }
+    if c == '6' { return 6 }
+    if c == '7' { return 7 }
+    if c == '8' { return 8 }
+    if c == '9' { return 9 }
+    0 - 1
+}
+
+// Write `resp` to `conn`, looping until every byte is out.
+//
+// **`std/net`'s `write` is one non-blocking attempt, not a `write_all`**, and
+// it returns the count it managed -- so a caller that ignored the count would
+// silently truncate a response under back-pressure. Returns the total written,
+// which equals the response's length on success.
+pub async fn write_response(conn: TcpStream, resp: Response) -> Result<Int, IoError> {
+    let wire = resp.to_bytes()
+    let total = wire.len()
+    let mut sent = 0
+    while sent < total {
+        let n = match conn.write(wire.slice(sent, total)).await {
+            Ok(n) => n
+            Err(e) => return Err(e)
+        }
+        if n <= 0 {
+            return Err(IoError { kind: Other, message: "write made no progress" })
+        }
+        sent = sent + n
+    }
+    Ok(total)
 }
