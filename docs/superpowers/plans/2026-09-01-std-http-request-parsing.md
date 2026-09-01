@@ -1162,11 +1162,37 @@ pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>,
     Ok(Some(Request { method: method, path: path, headers: headers, body: bytes_from_string("") }))
 }
 
-// The bytes `buf[start .. start+len]` as text. Invalid UTF-8 becomes the empty
-// string rather than an error: a request line or header that is not UTF-8 is
-// already rejected by the parser's own token rules, so this is unreachable for
-// a head that got this far, and threading a `Result` through every field for
-// it would buy nothing.
+// The bytes `buf[start .. start+len]` as text.
+//
+// **Three of this function's four call sites cannot see invalid UTF-8, and one
+// can.** Measured against the locked `httparse` 1.10.1 rather than reasoned
+// from its byte maps, which mislead on their own:
+//
+// - **Method** is matched by `is_method_token` against an ASCII-only
+//   `TOKEN_MAP`, and httparse hands it back as `&str`.
+// - **Path** looks unsafe from the byte map alone -- `URI_MAP` is
+//   `byte_map!(b'!'..=0x7e | 0x80..=0xFF)`, so it accepts the high range -- but
+//   `parse_uri` then converts with a CHECKED `str::from_utf8` and returns
+//   `Err(Error::Token)` on failure, so a non-UTF-8 path is rejected as a
+//   malformed request line and never reaches here. Note that httparse's own
+//   SAFETY comment above that conversion claims token bytes are "therefore
+//   also utf-8", which its own `URI_MAP` contradicts; the checked conversion is
+//   what actually holds.
+// - **Header name** is `Header.name: &str`, which httparse documents as valid
+//   ASCII-US.
+// - **Header value** is `Header.value: &[u8]`, and httparse documents why:
+//   "the specification allows for values that may not be" ASCII. This is the
+//   one site that can receive legal, undecodable bytes.
+//
+// So this function stays infallible and is used for the three safe sites. The
+// header value goes through a fallible sibling instead, because silently
+// substituting the empty string there would discard real request data with no
+// signal -- which contradicts the reasoning `http_error_kind_of` above gives
+// for mapping an unknown code to a diagnosable kind rather than dropping it.
+//
+// Do not make the three safe sites fallible for symmetry, and do not collapse
+// the two functions into one: the asymmetry is the finding, and flattening it
+// loses the information.
 fn text_at(buf: Bytes, start: Int, len: Int) -> String {
     match buf.slice(start, start + len).to_string() {
         Some(s) => s
