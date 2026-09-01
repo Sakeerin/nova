@@ -1,0 +1,15 @@
+len 16
+status 0
+method 0 4
+path 5 6
+minor 1
+headers 2
+h0 name 22 4 value 28 9
+h1 name 39 3 value 44 1
+body_start 49
+method text POST
+path text /hello
+h0 name text Host
+h0 value text a.example
+body text body
+host lookup a.example

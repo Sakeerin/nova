@@ -1,0 +1,4 @@
+bad-request-line status -3 len 1
+bad-version status -3 len 1
+bad-header status -4 len 1
+empty-is-partial status 1 len 1

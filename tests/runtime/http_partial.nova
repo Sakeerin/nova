@@ -1,0 +1,33 @@
+// A head split across two reads: status 1 on the first call, 0 on the second,
+// and -- the part that matters -- offsets identical to the unsplit case.
+//
+// A parser that restarted, or that measured offsets against the second chunk
+// rather than the whole buffer, would still return status 0 on the second
+// call and would still look correct to a test that only checked the status.
+//
+// The design spec's mutation 3 -- returning status 0 on partial input -- must
+// fail this fixture.
+
+fn main() {
+    let whole = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\n\r\n")
+    let first = whole.slice(0, 20)
+
+    let a = parse_offsets(first)
+    println("first status ${a[0]}")
+    println("first len ${a.len()}")
+
+    let b = parse_offsets(whole)
+    let c = parse_offsets(whole)
+    println("second status ${b[0]}")
+    println("second len ${b.len()}")
+    println("unsplit len ${c.len()}")
+
+    let mut same = true
+    let mut i = 0
+    while i < b.len() {
+        if b[i] != c[i] { same = false }
+        i = i + 1
+    }
+    println("offsets identical ${same}")
+    println("body_start ${b[b.len() - 1]}")
+}

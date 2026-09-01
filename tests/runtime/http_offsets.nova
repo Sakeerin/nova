@@ -1,0 +1,87 @@
+// Pins the exact offset array `http_parse_request` returns, field by field.
+//
+// This is a wire contract between `crates/nova-runtime/src/http.rs` and
+// `std/http/lib.nova`, and a disagreement about field order yields plausible
+// garbage rather than an error -- so it is pinned from both sides. The Rust
+// side is `parses_a_request_with_two_headers` in that module's own tests; this
+// is the Nova side, and it reads the array through `parse_offsets` because
+// `http_parse_request` itself is `STD_ONLY`.
+//
+// The request's CRLFs come from in-Nova `\r\n` escapes rather than from
+// literal bytes in this file: HTTP is CRLF-delimited, this working copy is
+// CRLF, and byte-exactness here is load-bearing, so git's line-ending
+// handling is given nothing to rewrite.
+//
+// The design spec's mutation 1 -- swapping `name_start` and `value_start` in
+// the encoding -- must fail this fixture. If it fails only the round-trip
+// fixture, this one is not pinning what it claims.
+//
+// **The method and the path have deliberately DIFFERENT lengths** -- `POST` is
+// four bytes and `/hello` is six. An earlier draft used `GET` and `/hi`, both
+// three, which left one transposition invisible: a bug swapping the
+// `method_len` and `path_len` writes would have read 3 at both slots and
+// passed. Every other field in this table is pairwise distinct here, so that
+// pair was the one gap. Keep them different lengths if you ever change this
+// request.
+//
+// This request also differs from the one the Rust-side test in
+// `crates/nova-runtime/src/http.rs` uses, which is deliberate rather than
+// drift: two sides pinning the same encoding over two different inputs catch
+// strictly more than two sides pinning one input twice.
+//
+// The final block calls `parse_request_head` rather than `parse_offsets`. It
+// pins case-insensitive header lookup: the request above sends the header as
+// `Host:`, so `parse_request_head`'s `.to_lower()` must run for
+// `headers.get("host")` to find it. The design spec's mutation 4 -- dropping
+// that `.to_lower()` -- must fail this assertion.
+
+fn main() {
+    let req = bytes_from_string("POST /hello HTTP/1.1\r\nHost: a.example\r\nX-K: v\r\n\r\nbody")
+    let t = parse_offsets(req)
+    println("len ${t.len()}")
+    println("status ${t[0]}")
+    println("method ${t[1]} ${t[2]}")
+    println("path ${t[3]} ${t[4]}")
+    println("minor ${t[5]}")
+    println("headers ${t[6]}")
+    println("h0 name ${t[7]} ${t[8]} value ${t[9]} ${t[10]}")
+    println("h1 name ${t[11]} ${t[12]} value ${t[13]} ${t[14]}")
+    println("body_start ${t[15]}")
+    // The offsets are only meaningful against the caller's own buffer, so
+    // read the bytes back out through them rather than trusting the numbers
+    // alone: a consistent-but-wrong table would pass the lines above.
+    match req.slice(t[1], t[1] + t[2]).to_string() {
+        Some(s) => println("method text ${s}")
+        None => println("method text <non-utf8>")
+    }
+    // Read the path back through its OWN offsets. This is the pair the
+    // method/path length coincidence used to hide: with both three bytes,
+    // transposed length writes read the same number at both slots. Reading
+    // the bytes out catches it even if the numbers agree.
+    match req.slice(t[3], t[3] + t[4]).to_string() {
+        Some(s) => println("path text ${s}")
+        None => println("path text <non-utf8>")
+    }
+    match req.slice(t[7], t[7] + t[8]).to_string() {
+        Some(s) => println("h0 name text ${s}")
+        None => println("h0 name text <non-utf8>")
+    }
+    match req.slice(t[9], t[9] + t[10]).to_string() {
+        Some(s) => println("h0 value text ${s}")
+        None => println("h0 value text <non-utf8>")
+    }
+    match req.slice(t[15], req.len()).to_string() {
+        Some(s) => println("body text ${s}")
+        None => println("body text <non-utf8>")
+    }
+    match parse_request_head(req, Limits::default()) {
+        Ok(opt) => match opt {
+            Some(r) => match r.headers.get("host") {
+                Some(v) => println("host lookup ${v}")
+                None => println("host lookup <missing>")
+            }
+            None => println("head unexpectedly incomplete")
+        }
+        Err(_) => println("head unexpectedly rejected")
+    }
+}

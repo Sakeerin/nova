@@ -9215,3 +9215,70 @@ fn hashdos_precomputed_int_key_set_does_not_survive_a_new_process() {
          {found}\nPhase 2 printed:\n{spread}"
     );
 }
+
+/// The offset table `http_parse_request` returns, pinned field by field from
+/// the Nova side. See `tests/runtime/http_offsets.nova`'s own header for why
+/// it is pinned from both sides and what mutation it exists to kill.
+#[test]
+fn http_offsets_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_offsets.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_offsets.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// A head split across two `parse_offsets` calls: partial on the first,
+/// complete on the second, with offsets identical to parsing the whole buffer
+/// in one call. See `tests/runtime/http_partial.nova`'s own header for the
+/// parser bug this is built to catch.
+#[test]
+fn http_partial_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_partial.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_partial.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// One case per malformed-input shape the parser rejects, each asserting the
+/// status is negative and the array has length 1. See
+/// `tests/runtime/http_malformed.nova`'s own header for why this fixture is
+/// what holds the Rust-side and Nova-side error-kind numberings together.
+#[test]
+fn http_malformed_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_malformed.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_malformed.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Each of `std/http`'s limits at its boundary and one past it: the runtime's
+/// two hard walls (head bytes, header count), and a caller's own tighter
+/// `Limits`. See `tests/runtime/http_limits.nova`'s own header for why both
+/// enforcement points need their own coverage.
+#[test]
+fn http_limits_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_limits.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_limits.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

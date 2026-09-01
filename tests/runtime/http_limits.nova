@@ -1,0 +1,67 @@
+// Each limit at its boundary and one past it.
+//
+// The two head limits are enforced twice, on purpose, and this fixture covers
+// both: the runtime compiles in a hard wall (8 KiB and 100) that no caller can
+// loosen, and `Limits` lets a caller tighten it on the Nova side. A fixture
+// that only exercised the hard wall would leave the Nova-side check unpinned,
+// and one that only exercised `Limits` would leave the wall unpinned.
+
+fn head_of(header_count: Int) -> Bytes {
+    let mut s = "GET / HTTP/1.1\r\n"
+    let mut i = 0
+    while i < header_count {
+        s = "${s}H${i}: v\r\n"
+        i = i + 1
+    }
+    bytes_from_string("${s}\r\n")
+}
+
+fn main() {
+    // The runtime's hard header wall: 100 in, 101 out.
+    let at = parse_offsets(head_of(100))
+    println("100 headers status ${at[0]} count ${at[6]}")
+    let past = parse_offsets(head_of(101))
+    println("101 headers status ${past[0]} len ${past.len()}")
+
+    // The runtime's hard byte wall: a head over 8192 bytes is rejected before
+    // parsing begins.
+    let big = bytes_from_string("GET /${"x".repeat(8192)} HTTP/1.1\r\n\r\n")
+    let over = parse_offsets(big)
+    println("oversize status ${over[0]} len ${over.len()}")
+
+    // A caller's own tighter ceilings, checked on this side.
+    //
+    // `max_head_bytes` is 16 rather than 32 deliberately: `head_of(2)` is
+    // measured at exactly 32 bytes, and the check is `len > max_head_bytes`,
+    // so a ceiling of 32 would NOT fire and this case would fall through to
+    // the header-count check -- printing the same kind as the case below it
+    // and testing nothing of its own.
+    let tight = Limits { max_head_bytes: 16, max_header_count: 1, max_body_bytes: 16 }
+    match parse_request_head(head_of(2), tight) {
+        Ok(_) => println("tight head: unexpectedly accepted")
+        Err(e) => println("tight head kind ${kind_name(e.kind)}")
+    }
+    let roomy = Limits { max_head_bytes: 8192, max_header_count: 1, max_body_bytes: 16 }
+    match parse_request_head(head_of(2), roomy) {
+        Ok(_) => println("tight headers: unexpectedly accepted")
+        Err(e) => println("tight headers kind ${kind_name(e.kind)}")
+    }
+    match parse_request_head(head_of(1), roomy) {
+        Ok(r) => println("at the caller ceiling: accepted")
+        Err(e) => println("at the caller ceiling: rejected ${kind_name(e.kind)}")
+    }
+}
+
+fn kind_name(k: HttpErrorKind) -> String {
+    match k {
+        HeadTooLarge => "HeadTooLarge"
+        TooManyHeaders => "TooManyHeaders"
+        BadRequestLine => "BadRequestLine"
+        BadHeader => "BadHeader"
+        BadNewline => "BadNewline"
+        IncompleteHeadFields => "IncompleteHeadFields"
+        SliceOutOfBuffer => "SliceOutOfBuffer"
+        BodyTooLarge => "BodyTooLarge"
+        Transport => "Transport"
+    }
+}

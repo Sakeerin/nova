@@ -1,0 +1,19 @@
+// One case per error kind the parser can report, asserting both halves of the
+// contract: the status is negative, and the array has length 1 so nothing
+// plausible-looking is readable behind it.
+//
+// The kinds are numbered in `crates/nova-runtime/src/http.rs` and re-declared
+// in `std/http`'s `http_error_kind_of`. Those are independent copies of one
+// numbering, so this fixture is where they are held together.
+
+fn report(label: String, src: String) {
+    let t = parse_offsets(bytes_from_string(src))
+    println("${label} status ${t[0]} len ${t.len()}")
+}
+
+fn main() {
+    report("bad-request-line", "GET\r\n\r\n")
+    report("bad-version", "GET / HTTP/9.9\r\n\r\n")
+    report("bad-header", "GET / HTTP/1.1\r\nBad Header: v\r\n\r\n")
+    report("empty-is-partial", "")
+}

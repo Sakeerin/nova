@@ -1,0 +1,191 @@
+// Nova standard library -- HTTP/1.1, server side.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
+// The transport is `std/net`: this module parses and serialises, and never
+// opens a socket itself.
+//
+// **What v1 is, against `nova-spec/20-STDLIB.md` section 6.** That section
+// specifies a router (`Server::new().get(path, handler)`) over
+// `pub type Handler = async fn(Request) -> Response`. That alias does not
+// parse -- measured, `P0001: expected type (in type alias), found async` --
+// so v1 ships no router and no client. It loses less than it sounds: handler
+// code sits inside the caller's own accept loop, which is already an async
+// context, so it may `await` freely. A router would have *added* a constraint.
+// See docs/adr/0019-offset-table-intrinsic-boundary.md and that section's own
+// dated amendment.
+//
+// **Parsing is one intrinsic and it returns offsets, not values.**
+// `http_parse_request` hands back a flat `[Int]` table of byte offsets into
+// the caller's own buffer -- no copies, no Rust-side state, nothing to
+// release. `parse_offsets` below is a thin `pub` wrapper over it, the same
+// shape `std/bytes`'s `bytes_from_ints` uses, so a fixture can pin the raw
+// encoding; ordinary callers want `parse_request_head`.
+//
+// **Header names are lower-cased and the original casing is not kept.** HTTP
+// field names are case-insensitive, so a `Map` keyed on the raw casing would
+// answer `get("content-length")` differently depending on what the peer sent.
+
+// The request method. `Unknown` carries the raw token rather than discarding
+// it: a request may carry any method a peer invents, and the parser must not
+// abort on one it does not know.
+//
+// Named `Unknown` rather than `nova-spec/20-STDLIB.md` section 6's `Other`,
+// deliberately. `Other` is already an `IoErrorKind` variant in `std/io`, every
+// std module is glob-imported into every module, and whether two std modules
+// may export one variant name is not established on this tree. This increment
+// is not the place to find out.
+pub type Method =
+    | Get
+    | Post
+    | Put
+    | Delete
+    | Patch
+    | Head
+    | Options
+    | Unknown(String)
+
+// Why a request head was rejected.
+//
+// **This type is one half of a wire contract.** The other half is the `ERR_*`
+// constants in `crates/nova-runtime/src/http.rs`, which produce these codes.
+// The two are independent copies of one numbering -- the shape that has
+// already produced a miscompile in this project -- so
+// `tests/runtime/http_malformed.nova` pins them together, per kind.
+pub type HttpErrorKind =
+    | HeadTooLarge
+    | TooManyHeaders
+    | BadRequestLine
+    | BadHeader
+    | BadNewline
+    | IncompleteHeadFields
+    | SliceOutOfBuffer
+    | BodyTooLarge
+    | Transport
+
+pub record HttpError {
+    pub kind: HttpErrorKind
+    pub message: String
+}
+
+// Map a parse status to its kind. The argument is the **negated** status the
+// intrinsic returned, so a status of `-3` arrives here as `3`.
+//
+// An unrecognised code is `BadRequestLine` rather than a panic: a status this
+// function does not know is a runtime bug, and mapping it to a diagnosable
+// kind keeps an error flowing instead of ending the process -- the same call
+// `std/io`'s `io_error_kind_of` makes for the same reason.
+pub fn http_error_kind_of(code: Int) -> HttpErrorKind {
+    if code == 1 { return HeadTooLarge }
+    if code == 2 { return TooManyHeaders }
+    if code == 3 { return BadRequestLine }
+    if code == 4 { return BadHeader }
+    if code == 5 { return BadNewline }
+    if code == 6 { return IncompleteHeadFields }
+    if code == 7 { return SliceOutOfBuffer }
+    BadRequestLine
+}
+
+// Caller-chosen ceilings.
+//
+// **`max_head_bytes` and `max_header_count` may only tighten, never loosen.**
+// The runtime compiles in its own hard wall (8 KiB and 100, in
+// `crates/nova-runtime/src/http.rs`) and checks it before allocating anything
+// on the Nova side, because the intrinsic takes one argument and there is
+// nowhere for a caller's limit to arrive. The two fields here are checked on
+// this side, in addition. `max_body_bytes` is this side's alone: the intrinsic
+// returns `body_start` and never looks at the body.
+pub record Limits {
+    pub max_head_bytes: Int
+    pub max_header_count: Int
+    pub max_body_bytes: Int
+}
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits { max_head_bytes: 8192, max_header_count: 100, max_body_bytes: 1048576 }
+    }
+}
+
+// A parsed request. `body` is the bytes after the head, already bounded by
+// `Content-Length` and by `Limits::max_body_bytes`.
+pub record Request {
+    pub method: Method
+    pub path: String
+    pub headers: Map<String, String>
+    pub body: Bytes
+}
+
+// The raw offset table for `buf`, exactly as
+// `crates/nova-runtime/src/http.rs` encodes it.
+//
+// **Element 0 is a status and a caller must read it first.** `0` is a complete
+// head, `1` is a partial one (read more bytes and call again), and a negative
+// value is the negation of an error kind. On any non-zero status **the array
+// has length 1**, so a caller who skips the check indexes out of bounds rather
+// than reading a plausible-looking offset. That is deliberate.
+//
+// Exposed so `tests/runtime/http_offsets.nova` can pin the encoding from this
+// side; ordinary callers want `parse_request_head`.
+pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }
+
+// Decode a complete head out of `buf`, or report that more bytes are needed.
+//
+// `Ok(None)` means the head is incomplete: read more and call again with the
+// longer buffer. `Ok(Some(req))` is a complete head, with `body` empty --
+// `read_request` fills that in once it knows `Content-Length`.
+pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>, HttpError> {
+    if buf.len() > limits.max_head_bytes {
+        return Err(HttpError { kind: HeadTooLarge, message: "request head over max_head_bytes" })
+    }
+    let t = parse_offsets(buf)
+    let status = t[0]
+    if status == 1 { return Ok(None) }
+    if status < 0 {
+        let kind = http_error_kind_of(0 - status)
+        return Err(HttpError { kind: kind, message: "request head rejected by the parser" })
+    }
+    let n = t[6]
+    if n > limits.max_header_count {
+        return Err(HttpError { kind: TooManyHeaders, message: "header count over max_header_count" })
+    }
+    let method = method_from(text_at(buf, t[1], t[2]))
+    let path = text_at(buf, t[3], t[4])
+    let mut headers: Map<String, String> = Map::new()
+    let mut i = 0
+    while i < n {
+        let at = 7 + 4 * i
+        // Lower-cased because HTTP field names are case-insensitive. Full
+        // Unicode lowercasing has nothing to bite on here: `httparse`
+        // validates a name as an HTTP token, which is ASCII-only, so this
+        // sees only ASCII.
+        let name = text_at(buf, t[at], t[at + 1]).to_lower()
+        let value = text_at(buf, t[at + 2], t[at + 3])
+        headers.insert(name, value)
+        i = i + 1
+    }
+    Ok(Some(Request { method: method, path: path, headers: headers, body: bytes_from_string("") }))
+}
+
+// The bytes `buf[start .. start+len]` as text. Invalid UTF-8 becomes the empty
+// string rather than an error: a request line or header that is not UTF-8 is
+// already rejected by the parser's own token rules, so this is unreachable for
+// a head that got this far, and threading a `Result` through every field for
+// it would buy nothing.
+fn text_at(buf: Bytes, start: Int, len: Int) -> String {
+    match buf.slice(start, start + len).to_string() {
+        Some(s) => s
+        None => ""
+    }
+}
+
+fn method_from(token: String) -> Method {
+    if token == "GET" { return Get }
+    if token == "POST" { return Post }
+    if token == "PUT" { return Put }
+    if token == "DELETE" { return Delete }
+    if token == "PATCH" { return Patch }
+    if token == "HEAD" { return Head }
+    if token == "OPTIONS" { return Options }
+    Unknown(token)
+}

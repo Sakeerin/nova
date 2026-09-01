@@ -1497,7 +1497,7 @@ pub fn resolve_program(
 /// stays a single self-contained executable. Each name is `$std.*`, not a
 /// valid identifier, so it can never collide with a user module name or be
 /// named in an `import`.
-pub const STD_MODULES: [(&str, &str); 13] = [
+pub const STD_MODULES: [(&str, &str); 14] = [
     ("$std.core", include_str!("../../../std/core/lib.nova")),
     ("$std.bytes", include_str!("../../../std/bytes/lib.nova")),
     ("$std.io", include_str!("../../../std/io/lib.nova")),
@@ -1517,6 +1517,7 @@ pub const STD_MODULES: [(&str, &str); 13] = [
     ("$std.time", include_str!("../../../std/time/lib.nova")),
     ("$std.json", include_str!("../../../std/json/lib.nova")),
     ("$std.log", include_str!("../../../std/log/lib.nova")),
+    ("$std.http", include_str!("../../../std/http/lib.nova")),
 ];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
