@@ -21,6 +21,13 @@ nova-diagnostics = { path = "../nova-diagnostics" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 
+# `http.rs`'s request-head parser. This is hyper's own HTTP/1 parser, taken
+# on its own: standalone, zero-copy, no async and no runtime, so it parks no
+# task and registers no waker. The design spec's section 2 records why hyper
+# itself cannot drive this project's server and why its parsing internals can
+# still be used. `httparse` has no dependencies of its own.
+httparse = "1.10"
+
 # `poll.rs`'s platform shim: `select`'s `fd_set` has a different bit-mask
 # layout on Linux (glibc, 64-bit words) than on macOS (Darwin, 32-bit words),
 # and hand-rolling both correctly with no way to run the macOS arm locally
