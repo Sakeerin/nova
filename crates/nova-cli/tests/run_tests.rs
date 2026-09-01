@@ -9302,3 +9302,23 @@ fn http_serialise_run() {
         .success()
         .stdout(expected);
 }
+
+/// Keep-alive over one accepted connection: two requests, both parsed and
+/// answered without a second `accept`. Both ends are Nova, in two tasks of
+/// one process, the same shape `net_listener_accept_run` uses -- see
+/// `tests/runtime/http_keepalive.nova`'s own header for why that means no
+/// port file. That fixture's client awaits each reply before sending the next
+/// request, so it never pipelines; see `read_request`'s doc comment in
+/// `std/http/lib.nova` for the pipelined-request case this does not cover.
+#[test]
+fn http_keepalive_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_keepalive.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_keepalive.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

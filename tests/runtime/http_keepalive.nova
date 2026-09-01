@@ -1,0 +1,83 @@
+// Two requests on one connection, both parsed, both answered -- the property
+// the Phase 2 gate depends on, since reconnecting per request would dominate
+// a throughput number.
+//
+// Both ends are Nova, in two tasks of one process, following
+// `tests/runtime/net_listener_accept.nova`: bind `127.0.0.1:0`, read the
+// kernel's choice back with `local_port`, and hand it to a spawned client as
+// an ordinary argument. No port file, so no port-file path to collide on.
+//
+// The client's requests carry their CRLFs as in-Nova `\r\n` escapes, the same
+// decision every fixture in this group makes.
+
+async fn client(port: Int) {
+    let s = match connect("127.0.0.1:${port}").await {
+        Ok(s) => s
+        Err(e) => panic("client connect: ${e.message}")
+    }
+    // Both calls need `.await`: `send_and_report` is an `async fn`, and
+    // calling one without `.await` only builds its `Future` -- it never runs
+    // the body (`std/io/lib.nova`'s header states this plainly). Measured
+    // directly: dropping `.await` here sends nothing, so `client` falls
+    // straight through to `close()` and the server's first `read` sees a
+    // connection already closed rather than a request.
+    send_and_report(s, "GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "first").await
+    send_and_report(s, "GET /two HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "second").await
+    let _ = s.close().await
+}
+
+async fn send_and_report(s: TcpStream, req: String, label: String) {
+    let _ = match s.write(bytes_from_string(req)).await {
+        Ok(n) => n
+        Err(e) => panic("client write: ${e.message}")
+    }
+    let reply = match s.read(512).await {
+        Ok(b) => b
+        Err(e) => panic("client read: ${e.message}")
+    }
+    match reply.to_string() {
+        Some(t) => println("client ${label}: got ${t.len()} bytes, 200 ${t.contains("200 OK")}")
+        None => println("client ${label}: <non-utf8>")
+    }
+}
+
+async fn main() {
+    let l = match bind("127.0.0.1:0") {
+        Ok(l) => l
+        Err(e) => panic("bind: ${e.message}")
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => panic("local_port: ${e.message}")
+    }
+    let h = spawn(client(port))
+
+    let conn = match l.accept().await {
+        Ok(c) => c
+        Err(e) => panic("accept: ${e.message}")
+    }
+    // Keep-alive: two requests, one connection, one accept.
+    let mut i = 0
+    while i < 2 {
+        match read_request(conn, Limits::default()).await {
+            Ok(req) => {
+                println("server: ${req.path} host ${header_or(req, "host", "<missing>")}")
+                let _ = write_response(conn, Response::text(200, "ok ${req.path}")).await
+            }
+            Err(e) => println("server: rejected")
+        }
+        i = i + 1
+    }
+    let _ = conn.close().await
+
+    h.join().await
+    let _ = l.close().await
+    println("server: done")
+}
+
+fn header_or(req: Request, name: String, fallback: String) -> String {
+    match req.headers.get(name) {
+        Some(v) => v
+        None => fallback
+    }
+}
