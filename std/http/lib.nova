@@ -431,6 +431,13 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
     // read. `parse_offsets` is cheap and the buffer is unchanged, so re-reading
     // `body_start` costs less than threading it out of `parse_request_head`
     // and widening that function's return type for one caller.
+    //
+    // Indexed straight to the last element with no status check first --
+    // safe here specifically because reaching this line already required
+    // `parse_request_head(buf, limits)` above to return `Ok(Some(_))` on
+    // this same, unmutated `buf`, which happens only at status `0`; see
+    // `parse_offsets`'s own doc comment for the check a caller in general
+    // must make first.
     let t = parse_offsets(buf)
     let body_start = t[t.len() - 1]
 
@@ -439,6 +446,27 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
         return Err(HttpError { kind: BodyTooLarge, message: "Content-Length over max_body_bytes" })
     }
     let mut body = buf.slice(body_start, buf.len())
+    // **The head's "not worth engineering around" conclusion above does not
+    // transfer here.** `max_body_bytes` defaults to 1 MiB, not 8 KiB, and the
+    // same per-call-O(n) `concat` accumulation is work amplification on
+    // attacker-controlled input at that size, not a rounding error.
+    // Assembling a body at the 1 MiB cap out of 4096-byte reads takes up to
+    // 256 concatenations, and because each one copies everything accumulated
+    // so far plus the new chunk, the bytes actually moved are triangular in
+    // the chunk count: about 134,742,016 bytes copied to assemble 1,048,576 --
+    // a ~128x amplification -- costing roughly 230 microseconds in GC
+    // allocations alone at this project's own measured ~900 ns each
+    // (`docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
+    // section 7), against the ~100 microsecond/request budget a 10k req/sec
+    // gate implies on a single-threaded executor. `Read::read` may legally
+    // hand back far fewer bytes than the `4096` asked for, so a peer that
+    // sends the same body in smaller pieces makes this worse, not better --
+    // 1024-byte reads mean up to 1024 concatenations, about 537,395,200 bytes
+    // copied, a ~512x amplification. Bounded, so not unlimited, but a lever
+    // between 128x and 512x that attacker-controlled input can pull is a real
+    // cost, recorded here rather than fixed: no loop restructuring, no
+    // different read size, and no intrinsic are part of this change -- that
+    // choice is recorded for the whole-branch review.
     while body.len() < want {
         let chunk = match conn.read(4096).await {
             Ok(b) => b
@@ -473,6 +501,15 @@ fn content_length_of(req: Request) -> Int {
 
 // A decimal string as an `Int`, or `0` on anything unexpected. Nova has no
 // `String`-to-number conversion, so this walks the characters.
+//
+// No overflow guard: a pathologically long digit string can wrap `n`
+// negative. Checked, not just assumed harmless -- the consequence is
+// absorbed downstream, not here. `read_request`'s `want > limits.max_body_bytes`
+// check does not catch a negative `want` (a negative number is never greater
+// than a positive limit), but `Bytes::slice` clamps a negative bound to `0`
+// (`crates/nova-runtime/src/bytes.rs`'s `nova_rt_bytes_slice`), so that
+// function's own `body.slice(0, want)` returns an empty body instead of
+// misbehaving.
 fn digits_to_int(s: String) -> Int {
     let cs = s.chars()
     if cs.len() == 0 { return 0 }
