@@ -16,7 +16,7 @@ Every task's requirements implicitly include this section.
 
 - `cargo build --locked --workspace` **before** `cargo test`. A test run that follows a failed build proves nothing.
 - `cargo test --workspace --no-fail-fast`. `--no-fail-fast` is mandatory.
-- **Never pipe cargo output through `head`/`tail` before summing.** There are 44 test targets; sum **every** `test result:` line. Baseline on this branch: **1081 passed / 0 failed / 8 ignored** (1076 passed on Windows).
+- **Never pipe cargo output through `head`/`tail` before summing.** There are 44 test targets; sum **every** `test result:` line. Baseline on this branch, measured locally on Windows: **1081 passed / 0 failed / 8 ignored**. A 1076 figure for Windows circulates in this project's notes; a local run of this branch reports 1081, so do not reconcile your sum against 1076. Whether CI's Windows job counts a different population is open and this plan does not rest on it -- **report your own sum and let it stand on its own.**
 - No `reason = "..."` in any lint attribute. MSRV is 1.78 (`Cargo.toml`'s `workspace.package.rust-version`) and `reason` postdates it.
 - `cargo clippy --all-targets -- -D warnings` must pass on **both** ubuntu and windows.
 - `cargo fmt --all -- --check`. Note: `cargo fmt --all` writes LF into this CRLF working copy — after running it, check `git diff --numstat` and confirm the change count matches what you meant.
@@ -208,7 +208,10 @@ mod tests {
         // Header 1: `X-K: v`
         assert_eq!((t[11], t[12]), (35, 3), "name `X-K`");
         assert_eq!((t[13], t[14]), (40, 1), "value `v`");
-        assert_eq!(t[15], 43, "body_start, just past the terminating CRLF CRLF");
+        // 45, not 43: the terminating CRLF CRLF begins at 41, so the head
+        // ends at 45. Computed from the request bytes, and cross-checked by
+        // the next assertion, which fails on any other value.
+        assert_eq!(t[15], 45, "body_start, just past the terminating CRLF CRLF");
         assert_eq!(&src[t[15] as usize..], b"body");
     }
 
@@ -514,7 +517,12 @@ pub unsafe extern "C" fn nova_rt_http_parse_request(b: *const NovaStr) -> *mut u
         *words.add(6) = i64::from(minor);
         *words.add(7) = n as i64;
         for (i, h) in headers.iter().enumerate() {
-            let at = 8 + 4 * i;
+            // 7 + 4*i, not 8 + 4*i: header `i`'s `name_start` is ELEMENT
+            // 7 + 4*i, and the writes below add the 1-word count header.
+            // An earlier draft of this plan had 8 here, which wrote
+            // `name_start` into `name_len`'s slot and pushed `value_len`
+            // into `body_start`'s. Task 1's own tests caught it.
+            let at = 7 + 4 * i;
             let (Some(name_start), Some(value_start)) = (
                 offset_within(buf, h.name.as_bytes()),
                 offset_within(buf, h.value),
@@ -905,7 +913,7 @@ minor 1
 headers 2
 h0 name 18 4 value 24 9
 h1 name 35 3 value 40 1
-body_start 43
+body_start 45
 method text GET
 h0 name text Host
 h0 value text a.example
@@ -1271,7 +1279,13 @@ fn main() {
     println("oversize status ${over[0]} len ${over.len()}")
 
     // A caller's own tighter ceilings, checked on this side.
-    let tight = Limits { max_head_bytes: 32, max_header_count: 1, max_body_bytes: 16 }
+    //
+    // `max_head_bytes` is 16 rather than 32 deliberately: `head_of(2)` is
+    // measured at exactly 32 bytes, and the check is `len > max_head_bytes`,
+    // so a ceiling of 32 would NOT fire and this case would fall through to
+    // the header-count check -- printing the same kind as the case below it
+    // and testing nothing of its own.
+    let tight = Limits { max_head_bytes: 16, max_header_count: 1, max_body_bytes: 16 }
     match parse_request_head(head_of(2), tight) {
         Ok(_) => println("tight head: unexpectedly accepted")
         Err(e) => println("tight head kind ${kind_name(e.kind)}")
@@ -1302,7 +1316,7 @@ fn kind_name(k: HttpErrorKind) -> String {
 }
 ```
 
-The golden `tests/runtime/http_limits.stdout` follows the same rule as Step 6: run it, read the real output, confirm each line says what the comment claims, then write the observed values. `at the caller ceiling: accepted` is the line that proves the ceiling is inclusive rather than exclusive.
+The golden `tests/runtime/http_limits.stdout` follows the same rule as Step 6: run it, read the real output, confirm each line says what the comment claims, then write the observed values. `at the caller ceiling: accepted` is the line that proves the ceiling is inclusive rather than exclusive -- `head_of(1)` is 25 bytes with one header, and `max_header_count: 1` admits it because the check is `>` rather than `>=`. The three `head_of` lengths were measured on this tree: `head_of(1)` 25, `head_of(2)` 32, `head_of(100)` 808, `head_of(101)` 817 -- so the two header-ceiling cases sit far below the 8192 byte wall and genuinely test the header wall rather than it.
 
 Note `match parse_request_head(head_of(1), roomy) { Ok(r) => ... }` binds `r` and does not use it. If that draws a warning or an error, bind `_` instead.
 
@@ -1375,21 +1389,26 @@ Create `tests/runtime/http_serialise.nova` with the Write tool:
 fn main() {
     let raw = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\nContent-Length: 0\r\n\r\n")
     match parse_request_head(raw, Limits::default()) {
-        Ok(Some(req)) => {
-            println("path ${req.path}")
-            println("host ${header_or(req, "host", "<missing>")}")
-            println("content-length ${header_or(req, "content-length", "<missing>")}")
-            // Sent as `Host:`, looked up as `host`: HTTP field names are
-            // case-insensitive and this module lower-cases on insert.
-            let resp = Response::text(200, "hi")
-            let wire = resp.to_bytes()
-            let expected = bytes_from_string("HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nhi")
-            println("wire matches ${wire.eq(expected)}")
-            println("wire len ${wire.len()}")
-            let nf = Response::not_found().to_bytes()
-            println("not_found len ${nf.len()}")
+        // Two levels of `match`, not one: `Ok(Some(req))` is
+        // `E0900: nested patterns inside variants are not supported yet`.
+        // Measured on this tree; no std module uses a nested pattern either.
+        Ok(maybe) => match maybe {
+            Some(req) => {
+                println("path ${req.path}")
+                println("host ${header_or(req, "host", "<missing>")}")
+                println("content-length ${header_or(req, "content-length", "<missing>")}")
+                // Sent as `Host:`, looked up as `host`: HTTP field names are
+                // case-insensitive and this module lower-cases on insert.
+                let resp = Response::text(200, "hi")
+                let wire = resp.to_bytes()
+                let expected = bytes_from_string("HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: text/plain; charset=utf-8\r\n\r\nhi")
+                println("wire matches ${wire.eq(expected)}")
+                println("wire len ${wire.len()}")
+                let nf = Response::not_found().to_bytes()
+                println("not_found len ${nf.len()}")
+            }
+            None => println("unexpectedly partial")
         }
-        Ok(None) => println("unexpectedly partial")
         Err(e) => println("unexpectedly rejected")
     }
 }
@@ -1409,11 +1428,13 @@ path /hi
 host a.example
 content-length 0
 wire matches true
-wire len 85
-not_found len 76
+wire len 81
+not_found len 95
 ```
 
-**The two byte counts are placeholders for a measurement, not for a guess.** Write them as above, run the fixture, and replace both with what the implementation actually produces once `wire matches true` holds. If `wire matches` is `false`, the disagreement is between `to_bytes` and the `expected` string in the fixture, and one of the two is wrong — find out which before touching the golden.
+**The two byte counts were computed from the response bytes, not guessed, and they are still to be confirmed by running.** 81 is the status line (17 bytes), plus the content-length header (19), plus the content-type header (41), plus the blank line that ends the head (2), plus the two-byte body. The fixture's own `expected` string is that same 81 bytes, which is an independent check on the figure. 95 is the same arithmetic with a longer status line (24 bytes, for `404 Not Found`) and a nine-byte body. Both counts are header-order independent, which matters because `Map` iteration order varies per process.
+
+Run the fixture and confirm both. **If a count disagrees, find out which side is wrong before touching the golden** — an earlier draft of this plan carried 85 and 76 here, and a golden edited to match whatever the code emitted would have hidden that rather than caught it. If `wire matches` is `false`, the disagreement is between `to_bytes` and the `expected` string, and one of the two is wrong.
 
 - [ ] **Step 2: Register the fixture and run it to verify it fails**
 
@@ -1652,7 +1673,11 @@ fn header_or(req: Request, name: String, fallback: String) -> String {
 }
 ```
 
-The golden `tests/runtime/http_keepalive.stdout` must be written **after** measuring, because the interleaving of the client's and server's lines is scheduling-dependent and this fixture must not be flaky. Run it several times; if the line order varies between runs, restructure so it cannot — for instance by having the client collect its two results and print them after `join`, or by printing only from one side. **Say in your report which shape you settled on and how many runs you observed before settling.** A fixture whose golden depends on a scheduling race is worse than no fixture.
+The golden `tests/runtime/http_keepalive.stdout` must be written **after** measuring, never guessed, because the interleaving of the client's and server's lines is what a golden pins and a fixture whose golden depends on a scheduling race is worse than no fixture.
+
+**This exact shape was probed before the plan reached you, and it is stable.** A stand-in version — real loopback sockets, two Nova tasks, one accepted connection, two request/response round trips, `write_all` looping on the returned count — produced byte-identical output on five consecutive runs, in the order: server read, server wrote, client report, twice, then the closing line. That is what a single-threaded cooperative executor with two wake sources should do, and it is what it did.
+
+Five runs is evidence, not proof, and the known Windows flake is a separate matter. So: run it at least five times, write the golden from what you observe, and **report how many runs you observed and whether the order held.** If the order does vary, restructure so it cannot — have the client collect its two results and print them after `join`, or print from one side only — and say which shape you settled on.
 
 - [ ] **Step 2: Register the fixture and run it to verify it fails**
 
@@ -1688,9 +1713,12 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
             return Err(HttpError { kind: Transport, message: "connection closed mid-head" })
         }
         buf = buf.concat(chunk)
+        // One arm, not two: `parse_request_head` already returns
+        // `Option<Request>`, so the loop assigns it straight through. It is
+        // also the form the language permits -- `Ok(Some(r))` is
+        // `E0900: nested patterns inside variants are not supported yet`.
         match parse_request_head(buf, limits) {
-            Ok(Some(r)) => head = Some(r)
-            Ok(None) => head = None
+            Ok(maybe) => head = maybe
             Err(e) => return Err(e)
         }
     }
@@ -1880,7 +1908,13 @@ hyper = { version = "1", features = ["full"] }
 
 Record what shipped instead: `httparse = "1.10"` in `crates/nova-runtime`, with no dependencies of its own, and a pointer to ADR 0019 for why. Whether the `hyper` line stays as an aspiration for the client half is your call — if you keep it, say what it is still for; if you replace it, say what was replaced and why.
 
-**Also record, without fixing, the example-numbering drift** this increment noticed: section 3's tree names `03-http-server`, while `examples/` holds `03-producer-consumer`. And `nova-spec/60-EXAMPLES.md` section 9 specifies a per-example README that `03-producer-consumer` does not have. Neither is this increment's to fix; both are its to record. Put the note where a reader of the tree will find it.
+**Also record, without fixing, two pieces of example drift** this increment noticed. Both were measured on this tree rather than recalled, and both are stated over the whole population rather than the one example that first drew attention.
+
+First, the numbering: `nova-spec/00-MASTER-SPEC.md` section 3's tree names `03-http-server`, and `nova-spec/60-EXAMPLES.md` section 3 names it too, while `examples/` holds `03-producer-consumer`. **The drift is in two spec files, not one** -- a note added to only the master spec would leave the other saying the same wrong thing.
+
+Second, the READMEs: `nova-spec/60-EXAMPLES.md` section 9 gives a per-example README template, and **no example in `examples/` has one** -- not `01-hello-world`, not `02-fibonacci`, not `03-producer-consumer`. An earlier draft of this plan named only the third, which was true of it and misleading about the other two.
+
+Neither is this increment's to fix; both are its to record. Put the note where a reader of the tree will find it.
 
 - [ ] **Step 4: Add the CHANGELOG entry**
 

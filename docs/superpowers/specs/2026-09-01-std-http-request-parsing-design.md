@@ -328,9 +328,13 @@ Mutations that must fail, run and reported rather than predicted:
   a single value, and the next such intrinsic should find the reasoning.
 - **`CHANGELOG.md`** under `[Unreleased]`.
 - **The example-numbering drift**, which is not this increment's to fix but is
-  its to record: `00-MASTER-SPEC.md` §3's tree names `03-http-server`, while
-  `examples/` holds `03-producer-consumer`. `60-EXAMPLES.md` §9 also specifies a
-  per-example README that `03-producer-consumer` does not have.
+  its to record, and both are measured rather than recalled:
+  `00-MASTER-SPEC.md` §3's tree names `03-http-server` and `60-EXAMPLES.md` §3
+  names it too, while `examples/` holds `03-producer-consumer` -- the drift sits
+  in two spec files, not one. And `60-EXAMPLES.md` §9 gives a per-example README
+  template that **no** example satisfies: neither `01-hello-world`, nor
+  `02-fibonacci`, nor `03-producer-consumer` has one. This paragraph previously
+  named only the third, which was true of it and misleading about the other two.
 
 ---
 
