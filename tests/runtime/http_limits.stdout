@@ -1,0 +1,6 @@
+100 headers status 0 count 100
+101 headers status -2 len 1
+oversize status -1 len 1
+tight head kind HeadTooLarge
+tight headers kind TooManyHeaders
+at the caller ceiling: accepted
