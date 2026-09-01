@@ -47,11 +47,20 @@ pub type Method =
 
 // Why a request head was rejected.
 //
-// **This type is one half of a wire contract.** The other half is the `ERR_*`
-// constants in `crates/nova-runtime/src/http.rs`, which produce these codes.
-// The two are independent copies of one numbering -- the shape that has
-// already produced a miscompile in this project -- so
-// `tests/runtime/http_malformed.nova` pins them together, per kind.
+// **This type is one half of a wire contract, for its first seven kinds.**
+// The other half is the `ERR_*` constants in
+// `crates/nova-runtime/src/http.rs`, which produce those seven codes. The two
+// are independent copies of one numbering -- the shape that has already
+// produced a miscompile in this project -- so `tests/runtime/http_malformed.nova`
+// pins together the ones `http_error_kind_of` actually maps; see that
+// function's own doc comment for exactly which those are, since "per kind"
+// would overclaim -- not every one of the seven is currently reachable from
+// a fixture through this type.
+//
+// `InvalidUtf8`, `BodyTooLarge` and `Transport` have no runtime counterpart
+// and no `ERR_*` code: `std/http` reports all three itself, so none of them
+// needs to stay in sync with the intrinsic's own numbering the way the first
+// seven do.
 pub type HttpErrorKind =
     | HeadTooLarge
     | TooManyHeaders
@@ -60,6 +69,7 @@ pub type HttpErrorKind =
     | BadNewline
     | IncompleteHeadFields
     | SliceOutOfBuffer
+    | InvalidUtf8
     | BodyTooLarge
     | Transport
 
@@ -75,6 +85,26 @@ pub record HttpError {
 // function does not know is a runtime bug, and mapping it to a diagnosable
 // kind keeps an error flowing instead of ending the process -- the same call
 // `std/io`'s `io_error_kind_of` makes for the same reason.
+//
+// **Which of the seven codes a Nova fixture actually drives through this
+// function, and which do not.** `BadRequestLine`, `BadHeader` and
+// `BadNewline` (3, 4, 5) do: `tests/runtime/http_malformed.nova` feeds each
+// one's triggering input to `parse_request_head` under `Limits::default()`
+// and asserts the mapped kind on the `Err` it returns. `HeadTooLarge` and
+// `TooManyHeaders` (1, 2) are different: their own raw negative status is
+// observed directly through `parse_offsets` in `tests/runtime/http_limits.nova`,
+// but every `parse_request_head` call in that fixture supplies a `Limits` at
+// or below the runtime's own ceiling, so `parse_request_head`'s two
+// Nova-side checks (just below) return a literal `HeadTooLarge` or
+// `TooManyHeaders` before ever reaching `status < 0` there -- this
+// function's own arms for 1 and 2 are real code, reachable by a caller whose
+// `Limits` is looser than the runtime's wall, but no fixture currently
+// drives them. `IncompleteHeadFields` (6) and `SliceOutOfBuffer` (7) are
+// undemonstrated by any fixture, and differ from each other at their Rust
+// call sites: `SliceOutOfBuffer`'s (`offset_within` in
+// `crates/nova-runtime/src/http.rs`) argues from httparse's zero-copy
+// contract that it cannot fire in practice and checks anyway, while
+// `IncompleteHeadFields`'s call site carries no such argument either way.
 pub fn http_error_kind_of(code: Int) -> HttpErrorKind {
     if code == 1 { return HeadTooLarge }
     if code == 2 { return TooManyHeaders }
@@ -160,22 +190,70 @@ pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>,
         // validates a name as an HTTP token, which is ASCII-only, so this
         // sees only ASCII.
         let name = text_at(buf, t[at], t[at + 1]).to_lower()
-        let value = text_at(buf, t[at + 2], t[at + 3])
+        let mut value = ""
+        match text_at_utf8(buf, t[at + 2], t[at + 3]) {
+            Ok(s) => value = s
+            Err(e) => return Err(e)
+        }
         headers.insert(name, value)
         i = i + 1
     }
     Ok(Some(Request { method: method, path: path, headers: headers, body: bytes_from_string("") }))
 }
 
-// The bytes `buf[start .. start+len]` as text. Invalid UTF-8 becomes the empty
-// string rather than an error: a request line or header that is not UTF-8 is
-// already rejected by the parser's own token rules, so this is unreachable for
-// a head that got this far, and threading a `Result` through every field for
-// it would buy nothing.
+// The bytes `buf[start .. start+len]` as text, defaulting to the empty
+// string if they are not valid UTF-8.
+//
+// Safe for the method, the path, and a header's name -- but not for a
+// header's value, which is why that fourth call site uses `text_at_utf8`
+// below instead of this function. Checked directly against the locked
+// `httparse` 1.10.1 source (`crates/nova-runtime`'s `Cargo.lock` entry)
+// rather than assumed:
+//
+// - The method is matched against literal `"GET "`/`"POST "` or, failing
+//   that, `parse_token`'s `is_method_token`, which is backed by `TOKEN_MAP`
+//   -- ASCII-only -- so it cannot be anything but ASCII.
+// - A header's name is matched against `TOKEN_MAP` the same way
+//   (`is_header_name_token`), so the same argument applies.
+// - The path looks like it should be the same risk as a header's value --
+//   `parse_uri` scans it against `URI_MAP`, which (like `HEADER_VALUE_MAP`
+//   below) admits `0x80..=0xFF` -- but `parse_uri` then validates the whole
+//   scanned slice with `str::from_utf8` and fails the *entire request line*
+//   (`Error::Token`) if that fails. So `httparse::Request::path` is
+//   `Option<&str>`, not bytes, and a `Complete` parse cannot have produced
+//   an invalid one. Measured, not assumed: a lone `0x80` byte placed in the
+//   path (no valid UTF-8 continuation) was tried against this parser
+//   directly, and it rejected the whole request line as `BadRequestLine`
+//   rather than completing with an undecodable path -- this function's
+//   `None` branch is not reachable from that call site.
 fn text_at(buf: Bytes, start: Int, len: Int) -> String {
     match buf.slice(start, start + len).to_string() {
         Some(s) => s
         None => ""
+    }
+}
+
+// The bytes `buf[start .. start+len]` as text, or `InvalidUtf8` if they are
+// not valid UTF-8.
+//
+// Used only for a header's value -- the one call site `text_at`'s doc
+// comment, just above, does not cover. `httparse::Header::value` is `&[u8]`,
+// not `&str`: httparse's own doc comment on that field says a value "may
+// not" be ASCII and stores it as bytes with no UTF-8 check anywhere, unlike
+// the method, path and header-name sites, which are already `&str` by the
+// time this module sees them. A byte outside ASCII is legal there under
+// HTTP's obs-text allowance (`HEADER_VALUE_MAP` admits `0x80..=0xFF`, the
+// same range `URI_MAP` admits), and such a byte need not be valid UTF-8 on
+// its own -- measured directly: a request whose entire header value is one
+// literal `0x80` byte parses to `status = 0` like any other request, with a
+// value offset pointing at a byte `to_string` reports as not UTF-8.
+// Silently substituting "" there would discard real request data with no
+// signal, which is what an earlier version of this module did at every call
+// site alike. See `tests/runtime/http_malformed.nova`'s non-UTF-8 case.
+fn text_at_utf8(buf: Bytes, start: Int, len: Int) -> Result<String, HttpError> {
+    match buf.slice(start, start + len).to_string() {
+        Some(s) => Ok(s)
+        None => Err(HttpError { kind: InvalidUtf8, message: "header value is not valid UTF-8" })
     }
 }
 
