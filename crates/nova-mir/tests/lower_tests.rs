@@ -1020,6 +1020,81 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     );
 }
 
+/// `http_parse_request` is `STD_ONLY` and, unlike every other builtin pinned
+/// in this file, has no real caller anywhere in the tree yet: `std/http`, the
+/// module that will call it, does not exist until a later increment. A
+/// synthetic module stands in for it here via `resolve_program`'s `extra_std`
+/// parameter — the same mechanism `nova test` uses to give ordinary test
+/// fixtures `std/test`'s helpers — so the wrapper's `pub fn` is glob-imported
+/// into `main` exactly as a real `STD_MODULES` entry would be, with no
+/// `import` needed. The point pinned is the same as `IntHashSeed`'s above: a
+/// Nova call reaches its runtime function exactly once.
+#[test]
+fn http_parse_request_lowers_to_a_runtime_call() {
+    use nova_mir::{RtFunc, Stmt};
+    use nova_resolver::{resolve_program, ModuleSource, STD_MODULES};
+
+    let wrapper_src = "pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }\n";
+    let file_id = FileId::DUMMY;
+    let (tokens, lex_errors) = lex(
+        "fn main() {\n\
+             let buf = bytes_from_string(\"x\")\n\
+             let offsets = parse_offsets(buf)\n\
+             println(\"${offsets.len()}\")\n\
+         }",
+        file_id,
+    );
+    assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+    let (ast, parse_errors) = parse(&tokens, file_id);
+    assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+    let ast = ast.expect("no AST");
+
+    let sources = [ModuleSource {
+        name: "main".to_string(),
+        file: &ast,
+    }];
+    let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+    let resolved = resolve_program(
+        &sources,
+        &std_files,
+        Some((("$test.http_stub", wrapper_src), FileId::DUMMY)),
+    );
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "resolve: {:?}",
+        resolved.diagnostics
+    );
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck: {:?}",
+        checked.diagnostics
+    );
+    let mir = lower_module(&checked.module).expect("MIR lowering failed");
+
+    let find = |prefix: &str| {
+        mir.functions
+            .iter()
+            .find(|f| f.name.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}*`: {:?}", function_names(&mir)))
+    };
+    let rt_calls = |f: &nova_mir::Function| -> Vec<RtFunc> {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .filter_map(|s| match s {
+                Stmt::CallRuntime { func, .. } => Some(*func),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        rt_calls(find("parse_offsets")),
+        vec![RtFunc::HttpParseRequest],
+        "a Nova call to `http_parse_request` reaches `RtFunc::HttpParseRequest` exactly once"
+    );
+}
+
 /// How many resume states `<name>`'s poll function dispatches between; 1 when
 /// its entry block is not a tag dispatch at all, which is what an await-free
 /// body gets.

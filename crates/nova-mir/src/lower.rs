@@ -744,6 +744,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::BytesFromInts => Lowering::Runtime(RtFunc::BytesFromInts),
                     Builtin::BytesEq => Lowering::Runtime(RtFunc::BytesEq),
                     Builtin::IntHashSeed => Lowering::Runtime(RtFunc::IntHashSeed),
+                    Builtin::HttpParseRequest => Lowering::Runtime(RtFunc::HttpParseRequest),
                     Builtin::TimeNowNanos => Lowering::Runtime(RtFunc::TimeNowNanos),
                     Builtin::TimeNowEpochNanos => Lowering::Runtime(RtFunc::TimeNowEpochNanos),
                     Builtin::LogConfigLevel => Lowering::Runtime(RtFunc::LogConfigLevel),
