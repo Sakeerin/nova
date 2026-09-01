@@ -1186,7 +1186,13 @@ fn method_from(token: String) -> Method {
 }
 ```
 
-Then register it. In `crates/nova-resolver/src/lib.rs` at `:1484`, the length annotation goes `[(&str, &str); 13]` to `; 14`, and the entry joins the array after `$std.net` (the module it depends on for transport, though this task adds no transport call yet):
+Then register it. In `crates/nova-resolver/src/lib.rs` at `:1484`, the length annotation goes `[(&str, &str); 13]` to `; 14`, and the entry joins the array after `$std.net`.
+
+**Place it last for readability, not because the order is load-bearing — it is not, and this was measured.** The glob-import pass runs *after* every module's items have been collected: `resolve_program` calls `import_std_module` in a loop over all std modules as its last step (`crates/nova-resolver/src/lib.rs:1479`), and that function's own doc comment records that this "also runs std-into-std", which is what lets `std/collections` use `Option` with no import. So `std/http` sees `Map`, `TcpStream`, `String::to_lower` and the rest regardless of where its entry sits.
+
+Order matters for exactly one thing: `import_std_module` merges with `entry().or_insert()`, so if two std modules exported the same name the earlier entry would win, silently and with no diagnostic. A collision check was run before this plan: every name `std/http` exports was compared against a corpus of every top-level `pub record`/`fn`/`type`/`trait`/`const` and every sum-type variant across `std/*/lib.nova`, and there is none. That is also why `Method`'s catch-all arm is `Unknown` rather than the spec's `Other`, which `std/io` already exports.
+
+No consumer hardcodes the module count — `crates/nova-driver/src/lib.rs:604` and `crates/nova-resolver/src/lib.rs:1297` both derive one `FileId` per entry by iterating, and the resolver test at `:2665` loops `1..=STD_MODULES.len()`. Only the length annotation has to move with the element:
 
 ```rust
     ("$std.http", include_str!("../../../std/http/lib.nova")),
