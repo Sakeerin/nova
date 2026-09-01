@@ -9249,10 +9249,13 @@ fn http_partial_run() {
         .stdout(expected);
 }
 
-/// One case per malformed-input shape the parser rejects, each asserting the
-/// status is negative and the array has length 1. See
-/// `tests/runtime/http_malformed.nova`'s own header for why this fixture is
-/// what holds the Rust-side and Nova-side error-kind numberings together.
+/// Two views of rejected or undecodable input: `parse_offsets`'s raw
+/// negative status (asserting it is negative and the array has length 1),
+/// and `parse_request_head`'s mapped `HttpErrorKind` for the subset of
+/// kinds that view can actually reach. See
+/// `tests/runtime/http_malformed.nova`'s own header for exactly which kinds
+/// that subset is -- this fixture is what holds the Rust-side and Nova-side
+/// numberings together for those, not for every kind either side defines.
 #[test]
 fn http_malformed_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_malformed.stdout"))

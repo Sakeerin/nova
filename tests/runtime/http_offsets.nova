@@ -29,11 +29,36 @@
 // drift: two sides pinning the same encoding over two different inputs catch
 // strictly more than two sides pinning one input twice.
 //
-// The final block calls `parse_request_head` rather than `parse_offsets`. It
-// pins case-insensitive header lookup: the request above sends the header as
-// `Host:`, so `parse_request_head`'s `.to_lower()` must run for
-// `headers.get("host")` to find it. The design spec's mutation 4 -- dropping
-// that `.to_lower()` -- must fail this assertion.
+// The next two blocks call `parse_request_head` rather than `parse_offsets`.
+// The first pins case-insensitive header lookup: the request above sends
+// the header as `Host:`, so `parse_request_head`'s `.to_lower()` must run
+// for `headers.get("host")` to find it. The design spec's mutation 4 --
+// dropping that `.to_lower()` -- must fail this assertion. The same block
+// also asserts `r.method` and `r.path`: `parse_offsets`, above, pins the raw
+// `t[1..4]` offsets, but nothing reads them back through `method_from`'s
+// seven comparisons and its `Unknown(String)` fallback without this.
+//
+// The block after that sends a second, separate request whose method is not
+// one of the seven `method_from` recognises, to pin `Unknown`'s payload too
+// -- a transposed arm (`PUT` returning `Patch`, say) or a broken fallback
+// would not be caught by the first block, whose method is a recognised one.
+// `PURGE` is a real, if non-standard, HTTP extension method (a cache
+// invalidation verb some CDNs use), chosen over an arbitrary invented token
+// so the case reads as something that actually reaches a server rather than
+// a string picked only because `method_from` doesn't know it.
+
+fn method_name(m: Method) -> String {
+    match m {
+        Get => "Get"
+        Post => "Post"
+        Put => "Put"
+        Delete => "Delete"
+        Patch => "Patch"
+        Head => "Head"
+        Options => "Options"
+        Unknown(token) => "Unknown(${token})"
+    }
+}
 
 fn main() {
     let req = bytes_from_string("POST /hello HTTP/1.1\r\nHost: a.example\r\nX-K: v\r\n\r\nbody")
@@ -76,12 +101,24 @@ fn main() {
     }
     match parse_request_head(req, Limits::default()) {
         Ok(opt) => match opt {
-            Some(r) => match r.headers.get("host") {
-                Some(v) => println("host lookup ${v}")
-                None => println("host lookup <missing>")
+            Some(r) => {
+                println("method ${method_name(r.method)} path ${r.path}")
+                match r.headers.get("host") {
+                    Some(v) => println("host lookup ${v}")
+                    None => println("host lookup <missing>")
+                }
             }
             None => println("head unexpectedly incomplete")
         }
         Err(_) => println("head unexpectedly rejected")
+    }
+
+    let req2 = bytes_from_string("PURGE /cache HTTP/1.1\r\n\r\n")
+    match parse_request_head(req2, Limits::default()) {
+        Ok(opt) => match opt {
+            Some(r) => println("method2 ${method_name(r.method)} path2 ${r.path}")
+            None => println("head2 unexpectedly incomplete")
+        }
+        Err(_) => println("head2 unexpectedly rejected")
     }
 }

@@ -12,4 +12,6 @@ path text /hello
 h0 name text Host
 h0 value text a.example
 body text body
+method Post path /hello
 host lookup a.example
+method2 Unknown(PURGE) path2 /cache

@@ -61,6 +61,7 @@ fn kind_name(k: HttpErrorKind) -> String {
         BadNewline => "BadNewline"
         IncompleteHeadFields => "IncompleteHeadFields"
         SliceOutOfBuffer => "SliceOutOfBuffer"
+        InvalidUtf8 => "InvalidUtf8"
         BodyTooLarge => "BodyTooLarge"
         Transport => "Transport"
     }

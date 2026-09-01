@@ -1,19 +1,84 @@
-// One case per error kind the parser can report, asserting both halves of the
-// contract: the status is negative, and the array has length 1 so nothing
-// plausible-looking is readable behind it.
+// Input the runtime parser rejects, and input the parser accepts but Nova's
+// own decode step cannot -- asserted two different ways, since one function
+// alone cannot hold both halves of the wire contract together.
 //
-// The kinds are numbered in `crates/nova-runtime/src/http.rs` and re-declared
-// in `std/http`'s `http_error_kind_of`. Those are independent copies of one
-// numbering, so this fixture is where they are held together.
+// `report` reads `parse_offsets`'s raw negative status directly: it asserts
+// the status is negative and the array has length 1, which is the half of
+// the contract that keeps a caller who skips the status check from reading
+// a plausible offset instead of an error. It does NOT exercise
+// `http_error_kind_of` -- `parse_offsets` returns the runtime's raw code
+// with nothing mapping it to a `HttpErrorKind` on this path.
+//
+// `report_head_error` closes that gap: it calls `parse_request_head` under
+// `Limits::default()` and asserts the *mapped* kind on the `Err` it
+// returns, which is the only place `http_error_kind_of` itself gets
+// exercised anywhere in this suite. Three of its seven runtime-numbered
+// kinds are reachable this way -- `BadRequestLine`, `BadHeader` and
+// `BadNewline` -- and this fixture is what holds the runtime's numbering
+// and `http_error_kind_of`'s copy of it together for those three.
+// `HeadTooLarge` and `TooManyHeaders` are exercised only as raw
+// `parse_offsets` statuses, by `tests/runtime/http_limits.nova`, never
+// through `http_error_kind_of`; `IncompleteHeadFields` and
+// `SliceOutOfBuffer` are exercised by neither fixture. See
+// `http_error_kind_of`'s own doc comment in `std/http/lib.nova` for the full
+// account of which of the seven kinds are reachable from Nova and which are
+// not currently demonstrated -- "one case per error kind" would overclaim
+// here, since this fixture reaches three of the seven, not all of them.
+//
+// The last case is a different kind of malformation: input the runtime
+// parser *accepts* (`status = 0`), where a byte Nova must still decode into
+// a `String` is not valid UTF-8. `text_at_utf8`'s own doc comment in
+// `std/http/lib.nova` has the full argument, checked directly against the
+// locked `httparse` 1.10.1 source, for why a header's value is the one of
+// the four method/path/header-name/header-value fields this can happen at:
+// httparse stores a header's value as raw bytes rather than a
+// pre-validated `&str`, unlike the other three.
 
 fn report(label: String, src: String) {
     let t = parse_offsets(bytes_from_string(src))
     println("${label} status ${t[0]} len ${t.len()}")
 }
 
+fn kind_name(k: HttpErrorKind) -> String {
+    match k {
+        HeadTooLarge => "HeadTooLarge"
+        TooManyHeaders => "TooManyHeaders"
+        BadRequestLine => "BadRequestLine"
+        BadHeader => "BadHeader"
+        BadNewline => "BadNewline"
+        IncompleteHeadFields => "IncompleteHeadFields"
+        SliceOutOfBuffer => "SliceOutOfBuffer"
+        InvalidUtf8 => "InvalidUtf8"
+        BodyTooLarge => "BodyTooLarge"
+        Transport => "Transport"
+    }
+}
+
+fn report_head_error(label: String, buf: Bytes) {
+    match parse_request_head(buf, Limits::default()) {
+        Ok(_) => println("${label} unexpectedly accepted")
+        Err(e) => println("${label} kind ${kind_name(e.kind)}")
+    }
+}
+
 fn main() {
     report("bad-request-line", "GET\r\n\r\n")
     report("bad-version", "GET / HTTP/9.9\r\n\r\n")
     report("bad-header", "GET / HTTP/1.1\r\nBad Header: v\r\n\r\n")
+    report("stray-cr", "\rGET / HTTP/1.1\r\n\r\n")
     report("empty-is-partial", "")
+
+    report_head_error("bad-request-line", bytes_from_string("GET\r\n\r\n"))
+    report_head_error("bad-header", bytes_from_string("GET / HTTP/1.1\r\nBad Header: v\r\n\r\n"))
+    report_head_error("stray-cr", bytes_from_string("\rGET / HTTP/1.1\r\n\r\n"))
+
+    // A header value that is legal to httparse and not valid UTF-8: a lone
+    // `0x80` byte, which begins no valid UTF-8 sequence on its own. Built
+    // with `bytes_from_ints` rather than a string literal, since a source
+    // file's own text must itself be valid UTF-8.
+    let non_utf8_value =
+        bytes_from_string("GET / HTTP/1.1\r\nX-V: ")
+            .concat(bytes_from_ints([128]))
+            .concat(bytes_from_string("\r\n\r\n"))
+    report_head_error("non-utf8-header-value", non_utf8_value)
 }
