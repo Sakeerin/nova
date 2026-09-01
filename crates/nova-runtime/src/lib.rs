@@ -39,6 +39,12 @@ mod file;
 /// beside them, the same way this crate's other modules build on `task`.
 pub mod fs;
 mod gc;
+/// The request-head parser for `std/http`. Private, like [`file`], [`net`],
+/// [`poll`] and [`time`]: nothing outside this crate names `http::` directly
+/// -- the `nova_rt_http_parse_request` symbol reaches the JIT and linked
+/// binaries through its `#[no_mangle]` C name and through [`symbols`], which
+/// needs only this module's *items* public, not the module path itself.
+mod http;
 /// The three standard streams' intrinsics for `std/io`. `pub`, not private,
 /// for the same reason as [`fs`] and [`bytes`]: its own doc comment explains
 /// the boundary it implements. Branch `read-write-stdio`'s Task 1 added this
@@ -871,6 +877,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("nova_rt_bytes_eq", bytes::nova_rt_bytes_eq as *const u8),
         ("nova_rt_int_hash_seed", nova_rt_int_hash_seed as *const u8),
+        (
+            "nova_rt_http_parse_request",
+            http::nova_rt_http_parse_request as *const u8,
+        ),
         (
             "nova_rt_time_now_nanos",
             time::nova_rt_time_now_nanos as *const u8,
