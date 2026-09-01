@@ -1689,8 +1689,12 @@ async fn client(port: Int) {
         Ok(s) => s
         Err(e) => panic("client connect: ${e.message}")
     }
-    send_and_report(s, "GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "first")
-    send_and_report(s, "GET /two HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "second")
+    // Both calls are `.await`ed. `send_and_report` is an `async fn`, so
+    // calling it without awaiting builds a future and never drives it: the
+    // client would send nothing and the server's first read would see EOF.
+    // An earlier draft of this plan omitted both `.await`s.
+    send_and_report(s, "GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "first").await
+    send_and_report(s, "GET /two HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "second").await
     let _ = s.close().await
 }
 
