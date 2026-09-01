@@ -458,6 +458,9 @@ rt_funcs! {
     /// `() -> i64` — the per-process seed for `Int`, `Bool` and `Char` hashing,
     /// drawn separately from the string hash's own seed.
     IntHashSeed,
+    /// `(bytes) -> ptr` — a Nova `[Int]` offset table for an HTTP/1.1 request
+    /// head. Element 0 is a status; a non-zero status yields a length-1 array.
+    HttpParseRequest,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
     /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
@@ -554,6 +557,7 @@ impl RtFunc {
             RtFunc::BytesFromInts => "nova_rt_bytes_from_ints",
             RtFunc::BytesEq => "nova_rt_bytes_eq",
             RtFunc::IntHashSeed => "nova_rt_int_hash_seed",
+            RtFunc::HttpParseRequest => "nova_rt_http_parse_request",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
             RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
             RtFunc::LogConfigLevel => "nova_rt_log_config_level",
@@ -729,6 +733,7 @@ impl RtFunc {
             RtFunc::BytesFromInts => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::IntHashSeed => (vec![], MirTy::I64),
+            RtFunc::HttpParseRequest => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
             RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
             RtFunc::LogConfigLevel => (vec![], MirTy::I64),

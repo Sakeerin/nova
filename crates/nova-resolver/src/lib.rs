@@ -766,6 +766,20 @@ builtins! {
     /// `tests/runtime/hash.nova` performs that recovery, to cancel the seed
     /// when it asserts `mix64`'s canonical vectors. Std-only.
     IntHashSeed,
+    /// `http_parse_request(buf: Bytes) -> [Int]` — an HTTP/1.1 request head
+    /// parsed into a flat table of byte offsets into `buf` itself. Copies
+    /// nothing, allocates nothing on the Rust heap, and holds no state between
+    /// calls, so `std/http` has nothing to release and nothing to leak per
+    /// request.
+    ///
+    /// Element 0 is a status: `0` complete, `1` partial (read more and call
+    /// again), negative for an error. **On any non-zero status the array has
+    /// length 1**, so a caller who skips the status check indexes out of
+    /// bounds rather than reading a plausible-looking offset. The full
+    /// encoding lives on `nova_rt_http_parse_request` in
+    /// `crates/nova-runtime/src/http.rs`, which is the half that writes it.
+    /// Std-only.
+    HttpParseRequest,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
     /// process epoch, monotonic and never negative.
     ///
@@ -872,6 +886,7 @@ impl Builtin {
             Builtin::BytesFromInts => "bytes_from_ints_intrinsic",
             Builtin::BytesEq => "bytes_eq",
             Builtin::IntHashSeed => "int_hash_seed",
+            Builtin::HttpParseRequest => "http_parse_request",
             Builtin::TimeNowNanos => "time_now_nanos",
             Builtin::TimeNowEpochNanos => "time_now_epoch_nanos",
             Builtin::LogConfigLevel => "log_config_level",
@@ -904,7 +919,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 70] = [
+    pub const STD_ONLY: [Builtin; 71] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -970,6 +985,7 @@ impl Builtin {
         Builtin::BytesFromInts,
         Builtin::BytesEq,
         Builtin::IntHashSeed,
+        Builtin::HttpParseRequest,
         Builtin::TimeNowNanos,
         Builtin::TimeNowEpochNanos,
         Builtin::LogConfigLevel,

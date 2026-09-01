@@ -3971,6 +3971,7 @@ impl<'a> Checker<'a> {
             | Builtin::BytesFromInts
             | Builtin::BytesEq
             | Builtin::IntHashSeed
+            | Builtin::HttpParseRequest
             | Builtin::TimeNowNanos
             | Builtin::TimeNowEpochNanos
             | Builtin::LogConfigLevel
@@ -7272,6 +7273,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::BytesFromInts => (vec![Ty::Array(Box::new(Ty::Int))], Ty::Bytes),
         Builtin::BytesEq => (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
         Builtin::IntHashSeed => (vec![], Ty::Int),
+        Builtin::HttpParseRequest => (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
         Builtin::TimeNowNanos => (vec![], Ty::Int),
         Builtin::TimeNowEpochNanos => (vec![], Ty::Int),
         Builtin::LogConfigLevel => (vec![], Ty::Int),
@@ -15384,6 +15386,10 @@ mod tests {
                 Builtin::IntHashSeed => (
                     (vec![], Ty::Int),
                     "`int_hash_seed()` in `std/core`'s `Int`, `Bool` and `Char` `Hash` impls",
+                ),
+                Builtin::HttpParseRequest => (
+                    (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
+                    "`http_parse_request(buf)` in `std/http`'s `parse_offsets`",
                 ),
                 Builtin::TimeNowNanos => (
                     (vec![], Ty::Int),
