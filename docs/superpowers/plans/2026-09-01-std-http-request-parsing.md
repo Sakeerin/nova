@@ -1659,6 +1659,14 @@ Byte-scan every file written. Then commit with subject `feat(std/http): serialis
 
 **`Bytes::concat` is O(n) per call**, so accumulating a head one read at a time is O(n squared) in the head's length. Bounded by `max_head_bytes` at 8 KiB that is not worth engineering around; say so at the loop rather than leaving a reader to wonder whether it was noticed.
 
+**A pipelined second request is silently consumed and dropped, and the consequence is a deadlock rather than an absence.** `read_request` reads into a local buffer and returns `body.slice(0, want)`, so any bytes it already pulled from the socket past the end of the current request's body are discarded when the function returns. A client that writes request 2 without waiting for response 1 — which HTTP/1.1 permits — has those bytes eaten. The server then waits for a request that has already arrived while the client waits for a response that will never come.
+
+Pipelining is out of scope by the design spec's own section 1, but **"out of scope" and "deadlocks the connection" are different claims, and only the second one is true here.** Requirements:
+
+- Say it plainly at `read_request`, in those terms. Do not write that pipelining is "unsupported" and stop there.
+- **State that the keep-alive fixture cannot catch it**, and why: its client `await`s each reply before sending the next request, so it never pipelines. A reader who sees a keep-alive fixture passing should not conclude this case is covered.
+- Do **not** fix it by changing `read_request`'s signature to hand leftovers back. That is a spec-level API change and is out of scope for this task.
+
 - [ ] **Step 1: Write the failing keep-alive fixture**
 
 Create `tests/runtime/http_keepalive.nova` with the Write tool. Both ends are Nova, in two tasks of one process — the same shape `tests/runtime/net_listener_accept.nova` uses, which binds `127.0.0.1:0` and passes the kernel's chosen port to a spawned client as an ordinary argument. **Read that fixture first and follow it**; it needs no port file and therefore has no port-file path to collide on.
@@ -1895,7 +1903,10 @@ pub async fn write_response(conn: TcpStream, resp: Response) -> Result<Int, IoEr
 }
 ```
 
-Also add to the module header, beside the existing notes, one paragraph recording that `Content-Length` is the only framing v1 understands and that chunked encoding is neither supported nor detected.
+Also add to the module header, beside the existing notes, one paragraph recording two limitations together, because they share a cause — v1 reads exactly one request's worth of bytes and trusts `Content-Length` to say where it ends:
+
+- `Content-Length` is the only framing v1 understands. Chunked transfer-encoding is neither supported nor detected, so a chunked request's body is left on the connection and will be misread as the next request.
+- Bytes read past the current request's body are discarded, so a pipelined request is lost and its connection deadlocks. See the requirement at `read_request` above for the exact wording this needs.
 
 `Option::is_none` and `Option::is_some` are used above, and both are measured present on this tree (`std/core/lib.nova:12` and `:16`, where `is_none` is `!self.is_some()`). `Bytes::eq` likewise exists, through `impl Eq for Bytes` at `std/bytes/lib.nova:115`, and is what Task 4's fixture compares wire bytes with.
 
