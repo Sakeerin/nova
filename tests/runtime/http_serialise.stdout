@@ -3,4 +3,5 @@ host a.example
 content-length 0
 wire matches true
 wire len 81
+ok wire matches true
 not_found len 95

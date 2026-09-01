@@ -30,22 +30,57 @@ fn main() {
                 // often as `true` when this compared the whole buffer against
                 // one fixed ordering with a single `.eq()`. `matches` below
                 // checks the parts a header order cannot change instead: the
-                // exact status line, the exact tail (the blank line and the
-                // body), the exact total length, and that both complete
-                // header lines occur somewhere between them. Those four
-                // pieces' lengths already sum to the whole (17 + 19 + 41 + 2
-                // + 2 = 81), so there is no room left for anything other than
-                // the two header lines in whichever order they landed.
+                // exact status line, the exact tail, that both complete
+                // header lines occur somewhere between them, and the exact
+                // total length. All five terms are needed, not just the
+                // first four: `contains` does not care what else is in the
+                // buffer and the two edge `.eq()`s only look at the
+                // fixed-size ends, so without `length_ok` those four would
+                // still pass if `wire` carried extra bytes somewhere in the
+                // middle alongside the two real header lines.
+                //
+                // `tail` is six bytes, not four: `"\r\n\r\nhi"` is the blank
+                // line and the body, but its own leading `\r\n` belongs to
+                // whichever header line lands last. `to_bytes` writes each
+                // header line's own trailing CRLF and then appends one more
+                // CRLF for the blank line, so the last header's CRLF and the
+                // blank line's CRLF sit back to back -- `tail` captures both.
+                // `length_ok` below accounts for that by subtracting 2 from
+                // the two header lines' own lengths: they are 19 and 41 bytes
+                // name-to-CRLF inclusive, but one of those two CRLFs is
+                // already charged to `tail`, not to the header line itself.
+                //
+                // This has zero slack only for this exact response -- these
+                // two header values and this two-byte body. If
+                // `Response::text`'s headers or the body text here ever
+                // change, `head_line`, `tail`, the two header-line literals
+                // below, and `length_ok`'s arithmetic all need re-deriving
+                // together, not just the golden.
                 let head_line = bytes_from_string("HTTP/1.1 200 OK\r\n")
                 let tail = bytes_from_string("\r\n\r\nhi")
+                let length_header_line = bytes_from_string("content-length: 2\r\n")
+                let type_header_line = bytes_from_string("content-type: text/plain; charset=utf-8\r\n")
                 let starts_right = wire.slice(0, head_line.len()).eq(head_line)
                 let ends_right = wire.slice(wire.len() - tail.len(), wire.len()).eq(tail)
-                let has_length_header = wire.contains(bytes_from_string("content-length: 2\r\n"))
-                let has_type_header =
-                    wire.contains(bytes_from_string("content-type: text/plain; charset=utf-8\r\n"))
-                let matches = starts_right && ends_right && has_length_header && has_type_header
+                let has_length_header = wire.contains(length_header_line)
+                let has_type_header = wire.contains(type_header_line)
+                let expected_len = head_line.len() + length_header_line.len() + type_header_line.len() + tail.len() - 2
+                let length_ok = wire.len() == expected_len
+                let matches = starts_right && ends_right && has_length_header && has_type_header && length_ok
                 println("wire matches ${matches}")
                 println("wire len ${wire.len()}")
+
+                // `Response::ok` sets exactly one header, so -- unlike
+                // `Response::text` above -- there is no second header to land
+                // in a different order, and a plain whole-buffer `.eq()` is
+                // exhaustive on its own with no parts-checking needed. This
+                // is the fixture's one byte-exact check on a full response;
+                // `Response::text` above cannot have one, for the reason
+                // explained there.
+                let ok_wire = Response::ok(bytes_from_string("hi")).to_bytes()
+                let ok_expected = bytes_from_string("HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi")
+                println("ok wire matches ${ok_wire.eq(ok_expected)}")
+
                 let nf = Response::not_found().to_bytes()
                 println("not_found len ${nf.len()}")
             }
