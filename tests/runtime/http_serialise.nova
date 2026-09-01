@@ -1,0 +1,63 @@
+// Round trip: parse a request, build a response, and compare the serialised
+// bytes to a golden.
+//
+// The golden is the response text with its CRLFs written as `\r\n` escapes in
+// this file, the same decision every fixture in this group makes: HTTP is
+// CRLF-delimited, this working copy is CRLF, and byte-exactness is
+// load-bearing here, so git's line-ending handling is given nothing to
+// rewrite. The printed output below is ordinary LF text.
+
+fn main() {
+    let raw = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\nContent-Length: 0\r\n\r\n")
+    match parse_request_head(raw, Limits::default()) {
+        // Two levels of `match`, not one: `Ok(Some(req))` is
+        // `E0900: nested patterns inside variants are not supported yet`.
+        // Measured on this tree; no std module uses a nested pattern either.
+        Ok(maybe) => match maybe {
+            Some(req) => {
+                println("path ${req.path}")
+                println("host ${header_or(req, "host", "<missing>")}")
+                println("content-length ${header_or(req, "content-length", "<missing>")}")
+                // Sent as `Host:`, looked up as `host`: HTTP field names are
+                // case-insensitive and this module lower-cases on insert.
+                let resp = Response::text(200, "hi")
+                let wire = resp.to_bytes()
+                // `Response::text` sets two headers, and two headers' relative
+                // order on the wire is `Map`'s per-process bucket order (see
+                // `Response`'s own doc comment in std/http/lib.nova) --
+                // measured directly: repeated runs of this fixture, as plain
+                // separate processes, printed `wire matches false` about as
+                // often as `true` when this compared the whole buffer against
+                // one fixed ordering with a single `.eq()`. `matches` below
+                // checks the parts a header order cannot change instead: the
+                // exact status line, the exact tail (the blank line and the
+                // body), the exact total length, and that both complete
+                // header lines occur somewhere between them. Those four
+                // pieces' lengths already sum to the whole (17 + 19 + 41 + 2
+                // + 2 = 81), so there is no room left for anything other than
+                // the two header lines in whichever order they landed.
+                let head_line = bytes_from_string("HTTP/1.1 200 OK\r\n")
+                let tail = bytes_from_string("\r\n\r\nhi")
+                let starts_right = wire.slice(0, head_line.len()).eq(head_line)
+                let ends_right = wire.slice(wire.len() - tail.len(), wire.len()).eq(tail)
+                let has_length_header = wire.contains(bytes_from_string("content-length: 2\r\n"))
+                let has_type_header =
+                    wire.contains(bytes_from_string("content-type: text/plain; charset=utf-8\r\n"))
+                let matches = starts_right && ends_right && has_length_header && has_type_header
+                println("wire matches ${matches}")
+                println("wire len ${wire.len()}")
+                let nf = Response::not_found().to_bytes()
+                println("not_found len ${nf.len()}")
+            }
+            None => println("unexpectedly partial")
+        }
+        Err(e) => println("unexpectedly rejected")
+    }
+}
+
+fn header_or(req: Request, name: String, fallback: String) -> String {
+    match req.headers.get(name) {
+        Some(v) => v
+        None => fallback
+    }
+}

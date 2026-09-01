@@ -1,0 +1,6 @@
+path /hi
+host a.example
+content-length 0
+wire matches true
+wire len 81
+not_found len 95
