@@ -867,9 +867,22 @@ Create `tests/runtime/http_offsets.nova`. Use the **Write tool** — the `\r\n` 
 // The design spec's mutation 1 -- swapping `name_start` and `value_start` in
 // the encoding -- must fail this fixture. If it fails only the round-trip
 // fixture, this one is not pinning what it claims.
+//
+// **The method and the path have deliberately DIFFERENT lengths** -- `POST` is
+// four bytes and `/hello` is six. An earlier draft used `GET` and `/hi`, both
+// three, which left one transposition invisible: a bug swapping the
+// `method_len` and `path_len` writes would have read 3 at both slots and
+// passed. Every other field in this table is pairwise distinct here, so that
+// pair was the one gap. Keep them different lengths if you ever change this
+// request.
+//
+// This request also differs from the one the Rust-side test in
+// `crates/nova-runtime/src/http.rs` uses, which is deliberate rather than
+// drift: two sides pinning the same encoding over two different inputs catch
+// strictly more than two sides pinning one input twice.
 
 fn main() {
-    let req = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\nX-K: v\r\n\r\nbody")
+    let req = bytes_from_string("POST /hello HTTP/1.1\r\nHost: a.example\r\nX-K: v\r\n\r\nbody")
     let t = parse_offsets(req)
     println("len ${t.len()}")
     println("status ${t[0]}")
@@ -886,6 +899,14 @@ fn main() {
     match req.slice(t[1], t[1] + t[2]).to_string() {
         Some(s) => println("method text ${s}")
         None => println("method text <non-utf8>")
+    }
+    // Read the path back through its OWN offsets. This is the pair the
+    // method/path length coincidence used to hide: with both three bytes,
+    // transposed length writes read the same number at both slots. Reading
+    // the bytes out catches it even if the numbers agree.
+    match req.slice(t[3], t[3] + t[4]).to_string() {
+        Some(s) => println("path text ${s}")
+        None => println("path text <non-utf8>")
     }
     match req.slice(t[7], t[7] + t[8]).to_string() {
         Some(s) => println("h0 name text ${s}")
@@ -907,14 +928,15 @@ And `tests/runtime/http_offsets.stdout`:
 ```text
 len 16
 status 0
-method 0 3
-path 4 3
+method 0 4
+path 5 6
 minor 1
 headers 2
-h0 name 18 4 value 24 9
-h1 name 35 3 value 40 1
-body_start 45
-method text GET
+h0 name 22 4 value 28 9
+h1 name 39 3 value 44 1
+body_start 49
+method text POST
+path text /hello
 h0 name text Host
 h0 value text a.example
 body text body
