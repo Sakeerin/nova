@@ -9285,3 +9285,20 @@ fn http_limits_run() {
         .success()
         .stdout(expected);
 }
+
+/// Parses a request, builds a `Response`, and serialises it: the round trip
+/// this module's request half and response half must agree on. See
+/// `tests/runtime/http_serialise.nova`'s own header for why the golden checks
+/// the wire's parts rather than one `.eq()` over the whole buffer.
+#[test]
+fn http_serialise_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_serialise.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_serialise.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

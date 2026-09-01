@@ -267,3 +267,87 @@ fn method_from(token: String) -> Method {
     if token == "OPTIONS" { return Options }
     Unknown(token)
 }
+
+// A response to serialise onto a connection.
+//
+// **Header order on the wire is `headers`' iteration order**, which is a
+// `Map`'s bucket order and therefore varies per process: `impl Hash for
+// String` is seeded per process, which is exactly the property that makes a
+// `Map` keyed on attacker-supplied header names resist a precomputed
+// collision set. HTTP does not require a header order, so nothing here
+// depends on it -- but that same seeding means a whole-response `.eq()`
+// against one fixed byte sequence cannot be a stable test, not merely an
+// inconvenient one to write: which of two headers comes first changes from
+// run to run. Measured, not just argued from the seeding --
+// `tests/runtime/http_serialise.nova` compared the whole buffer against one
+// fixed ordering first, and printed `wire matches false` about as often as
+// `true` across repeated separate runs. It checks the parts a header order
+// cannot move instead: the exact status line, the exact tail (the blank line
+// and the body), and that each expected header line occurs somewhere
+// between them.
+pub record Response {
+    pub status: Int
+    pub headers: Map<String, String>
+    pub body: Bytes
+}
+
+impl Response {
+    // `200 OK` carrying `body`, with `content-length` set from it.
+    pub fn ok(body: Bytes) -> Response {
+        let mut h: Map<String, String> = Map::new()
+        h.insert("content-length", "${body.len()}")
+        Response { status: 200, headers: h, body: body }
+    }
+
+    // `status` carrying `s` as UTF-8 text.
+    pub fn text(status: Int, s: String) -> Response {
+        let body = bytes_from_string(s)
+        let mut h: Map<String, String> = Map::new()
+        h.insert("content-length", "${body.len()}")
+        h.insert("content-type", "text/plain; charset=utf-8")
+        Response { status: status, headers: h, body: body }
+    }
+
+    pub fn not_found() -> Response { Response::text(404, "not found") }
+
+    // The response as it goes on the wire.
+    //
+    // No intrinsic backs this: a response is a status line, a header block and
+    // a body, which Nova builds with string interpolation and `Bytes::concat`.
+    // That is the design's decision rather than a gap -- see
+    // docs/adr/0019-offset-table-intrinsic-boundary.md.
+    pub fn to_bytes(self) -> Bytes {
+        let mut head = "HTTP/1.1 ${self.status} ${reason_phrase(self.status)}\r\n"
+        let names = self.headers.keys()
+        let mut i = 0
+        while i < names.len() {
+            let k = names[i]
+            match self.headers.get(k) {
+                Some(v) => head = "${head}${k}: ${v}\r\n"
+                None => head = head
+            }
+            i = i + 1
+        }
+        bytes_from_string("${head}\r\n").concat(self.body)
+    }
+}
+
+// The reason phrase for a status code. Unknown codes get the class's own
+// phrase rather than an empty string: HTTP/1.1 lets a client ignore the
+// phrase entirely, so a plausible one costs nothing and reads better in a
+// packet capture than a blank.
+fn reason_phrase(status: Int) -> String {
+    if status == 200 { return "OK" }
+    if status == 201 { return "Created" }
+    if status == 204 { return "No Content" }
+    if status == 400 { return "Bad Request" }
+    if status == 404 { return "Not Found" }
+    if status == 405 { return "Method Not Allowed" }
+    if status == 413 { return "Payload Too Large" }
+    if status == 500 { return "Internal Server Error" }
+    if status < 200 { return "Informational" }
+    if status < 300 { return "Success" }
+    if status < 400 { return "Redirection" }
+    if status < 500 { return "Client Error" }
+    "Server Error"
+}
