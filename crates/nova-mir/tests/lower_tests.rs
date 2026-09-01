@@ -1020,26 +1020,47 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     );
 }
 
-/// `http_parse_request` is `STD_ONLY` and, unlike every other builtin pinned
-/// in this file, has no real caller anywhere in the tree yet: `std/http`, the
-/// module that will call it, does not exist until a later increment. A
-/// synthetic module stands in for it here via `resolve_program`'s `extra_std`
+/// `http_parse_request` is `STD_ONLY`. It has no real Nova caller in the
+/// tree right now: `std/http`, the module that will call it, does not exist
+/// yet. That is a property of today, not a permanent one — the next task
+/// adds `std/http`, and from that point on `main` below has a real function
+/// it could resolve through instead of this file's stub. A synthetic module
+/// stands in for the caller here via `resolve_program`'s `extra_std`
 /// parameter — the same mechanism `nova test` uses to give ordinary test
 /// fixtures `std/test`'s helpers — so the wrapper's `pub fn` is glob-imported
 /// into `main` exactly as a real `STD_MODULES` entry would be, with no
-/// `import` needed. The point pinned is the same as `IntHashSeed`'s above: a
-/// Nova call reaches its runtime function exactly once.
+/// `import` needed.
+///
+/// The wrapper is deliberately NOT named `parse_offsets`, even though that
+/// is the name the real `std/http` wrapper will carry once it exists.
+/// `import_std_module` (`crates/nova-resolver/src/lib.rs`) merges every std
+/// module's exports into every other module's scope with
+/// `scope.values.entry(n.clone()).or_insert(*r)` — first writer wins,
+/// silently, and nothing on this path reports a collision — and
+/// `resolve_program`'s `std_entries` chains `extra_std` after `STD_MODULES`
+/// unconditionally, no matter where a later `std/http` entry sits in that
+/// array. So the moment `std/http` exists, its own `parse_offsets` reaches
+/// `main`'s scope first, this stub's same-named export is silently dropped,
+/// `main`'s call resolves to the real function instead of this stub, and
+/// this test keeps passing — for a reason that has nothing to do with the
+/// paragraph above it, with no failure and nothing forcing a revisit.
+/// Whatever this wrapper is named, it has to be a name no real `std/http`
+/// export would plausibly use.
+///
+/// The point pinned is the same as `IntHashSeed`'s above: a Nova call
+/// reaches its runtime function exactly once.
 #[test]
 fn http_parse_request_lowers_to_a_runtime_call() {
     use nova_mir::{RtFunc, Stmt};
     use nova_resolver::{resolve_program, ModuleSource, STD_MODULES};
 
-    let wrapper_src = "pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }\n";
+    let wrapper_src =
+        "pub fn lower_tests_http_parse_request_stub(buf: Bytes) -> [Int] { http_parse_request(buf) }\n";
     let file_id = FileId::DUMMY;
     let (tokens, lex_errors) = lex(
         "fn main() {\n\
              let buf = bytes_from_string(\"x\")\n\
-             let offsets = parse_offsets(buf)\n\
+             let offsets = lower_tests_http_parse_request_stub(buf)\n\
              println(\"${offsets.len()}\")\n\
          }",
         file_id,
@@ -1089,7 +1110,7 @@ fn http_parse_request_lowers_to_a_runtime_call() {
             .collect()
     };
     assert_eq!(
-        rt_calls(find("parse_offsets")),
+        rt_calls(find("lower_tests_http_parse_request_stub")),
         vec![RtFunc::HttpParseRequest],
         "a Nova call to `http_parse_request` reaches `RtFunc::HttpParseRequest` exactly once"
     );
