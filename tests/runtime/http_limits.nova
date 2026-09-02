@@ -1,4 +1,10 @@
-// Each limit at its boundary and one past it.
+// `max_head_bytes` and `max_header_count`, each at its boundary and one past
+// it. `max_body_bytes` is NOT covered here: this fixture calls only
+// `parse_offsets` and `parse_request_head`, and neither reads a body, so
+// there is nothing of that limit for this file to exercise. Its boundary
+// and one-past-it cases live in `tests/runtime/http_keepalive.nova` instead,
+// against `read_request`, which does read one -- see that file's own
+// header.
 //
 // The two head limits are enforced twice, on purpose, and this fixture covers
 // both: the runtime compiles in a hard wall (8 KiB and 100) that no caller can

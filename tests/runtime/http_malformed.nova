@@ -25,14 +25,24 @@
 // not currently demonstrated -- "one case per error kind" would overclaim
 // here, since this fixture reaches three of the seven, not all of them.
 //
-// The last case is a different kind of malformation: input the runtime
-// parser *accepts* (`status = 0`), where a byte Nova must still decode into
-// a `String` is not valid UTF-8. `text_at_utf8`'s own doc comment in
-// `std/http/lib.nova` has the full argument, checked directly against the
-// locked `httparse` 1.10.1 source, for why a header's value is the one of
-// the four method/path/header-name/header-value fields this can happen at:
-// httparse stores a header's value as raw bytes rather than a
-// pre-validated `&str`, unlike the other three.
+// The last two cases are both malformations the runtime parser *accepts*
+// (`status = 0`) that Nova's own decode step rejects, rather than ones
+// `httparse` itself refuses.
+//
+// The first is a byte that must decode into a `String` and is not valid
+// UTF-8. `text_at_utf8`'s own doc comment in `std/http/lib.nova` has the
+// full argument, checked directly against the locked `httparse` 1.10.1
+// source, for why a header's value is the one of the four
+// method/path/header-name/header-value fields this can happen at: httparse
+// stores a header's value as raw bytes rather than a pre-validated `&str`,
+// unlike the other three.
+//
+// The second is a repeated `Content-Length` header -- syntactically legal
+// to httparse, which places no limit on how many headers share a name, and
+// rejected by `parse_request_head`'s own header loop instead (FIX 1 of the
+// whole-branch review): RFC 9112 section 6.3 treats this as invalid framing,
+// and `Map::insert` would otherwise silently keep only the last value with
+// no signal that the first was discarded.
 
 fn report(label: String, src: String) {
     let t = parse_offsets(bytes_from_string(src))
@@ -81,4 +91,15 @@ fn main() {
             .concat(bytes_from_ints([128]))
             .concat(bytes_from_string("\r\n\r\n"))
     report_head_error("non-utf8-header-value", non_utf8_value)
+
+    // Two `Content-Length` headers, same value -- `httparse` accepts this
+    // (it does not police repeated names), and `parse_request_head` rejects
+    // it anyway. RFC 9112 section 6.3 permits treating any repeat as invalid
+    // framing regardless of whether the values agree; see that function's
+    // own comment in `std/http/lib.nova` for why this fixture's case does
+    // not bother constructing one with differing values too.
+    report_head_error(
+        "duplicate-content-length",
+        bytes_from_string("GET / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n")
+    )
 }

@@ -7,3 +7,4 @@ bad-request-line kind BadRequestLine
 bad-header kind BadHeader
 stray-cr kind BadNewline
 non-utf8-header-value kind InvalidUtf8
+duplicate-content-length kind BadHeader

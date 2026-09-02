@@ -5,3 +5,5 @@ wire matches true
 wire len 81
 ok wire matches true
 not_found len 95
+evil header dropped true
+evil wire keeps content-length true

@@ -1,6 +1,12 @@
-// Two requests on one connection, both parsed, both answered -- the property
-// the Phase 2 gate depends on, since reconnecting per request would dominate
-// a throughput number.
+// Five requests on one connection, all parsed, all answered -- keep-alive,
+// the property the Phase 2 gate depends on since reconnecting per request
+// would dominate a throughput number, plus the `read_request` body-path
+// coverage the whole-branch review found missing. This file is the only one
+// in this group that calls `read_request` at all, and before this review its
+// own two requests both declared `Content-Length: 0`, so `want` was always
+// `0` and the body-read loop, a real `Content-Length`, `max_body_bytes`'s
+// boundary and one-past-it cases, and an invalid `Content-Length` value were
+// all unexercised by the suite.
 //
 // Both ends are Nova, in two tasks of one process, following
 // `tests/runtime/net_listener_accept.nova`: bind `127.0.0.1:0`, read the
@@ -9,6 +15,33 @@
 //
 // The client's requests carry their CRLFs as in-Nova `\r\n` escapes, the same
 // decision every fixture in this group makes.
+//
+// Requests, in order:
+// 1. and 2. `Content-Length: 0`, unchanged from before this review: the
+//    baseline keep-alive round trip.
+// 3. A real, non-zero body -- `Content-Length: 5` and five body bytes --
+//    against a `Limits` whose `max_body_bytes` is exactly 5: design spec
+//    section 11 criterion 4's boundary case for that limit. The head and
+//    the body are written as two separate writes with a sleep between them,
+//    so the server's body-read loop genuinely has to park after reading
+//    only the head and resume once the body arrives, rather than receiving
+//    everything in the single read that completes the head the way a
+//    request this small otherwise would -- every other fixture in this
+//    suite declares `Content-Length: 0` and so never enters that loop at
+//    all.
+// 4. `Content-Length: 5x`, an invalid value that FIX 1 of the whole-branch
+//    review turned into a rejection (`BadHeader`) rather than a
+//    silently-defaulted `0`. Sent with no body bytes at all, since the
+//    rejection happens before `read_request` ever tries to read one.
+// 5. The same declared and actual body as request 3, against a `Limits`
+//    whose `max_body_bytes` is 4 -- one less than declared: criterion 4's
+//    one-past-it case, and what drives `BodyTooLarge`. Placed last
+//    deliberately: this request's bytes arrive as a single write and in
+//    practice land in the one read that also completes its head, so
+//    `BodyTooLarge`'s early return never leaves anything unread on the
+//    socket -- but putting the one case whose early return skips reading
+//    the declared body last means there is no later request here for an
+//    unread trailing byte to desync, however unlikely that is.
 
 async fn client(port: Int) {
     let s = match connect("127.0.0.1:${port}").await {
@@ -21,15 +54,47 @@ async fn client(port: Int) {
     // directly: dropping `.await` here sends nothing, so `client` falls
     // straight through to `close()` and the server's first `read` sees a
     // connection already closed rather than a request.
-    send_and_report(s, "GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "first").await
-    send_and_report(s, "GET /two HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "second").await
+    send_and_report(s, "GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "first", "200 OK").await
+    send_and_report(s, "GET /two HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\n\r\n", "second", "200 OK").await
+    send_body_request(s, "third").await
+    send_and_report(s, "GET /bad-length HTTP/1.1\r\nHost: h\r\nContent-Length: 5x\r\n\r\n", "fourth", "400").await
+    send_and_report(s, "POST /too-big HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello", "fifth", "413").await
     let _ = s.close().await
 }
 
-async fn send_and_report(s: TcpStream, req: String, label: String) {
+async fn send_and_report(s: TcpStream, req: String, label: String, marker: String) {
     let _ = match s.write(bytes_from_string(req)).await {
         Ok(n) => n
         Err(e) => panic("client write: ${e.message}")
+    }
+    let reply = match s.read(512).await {
+        Ok(b) => b
+        Err(e) => panic("client read: ${e.message}")
+    }
+    match reply.to_string() {
+        Some(t) => println("client ${label}: got ${t.len()} bytes, ${marker} ${t.contains(marker)}")
+        None => println("client ${label}: <non-utf8>")
+    }
+}
+
+// Writes a request's head and its five-byte body as two separate writes,
+// with a sleep between them, so the server's body-read loop
+// (`read_request` in `std/http/lib.nova`) genuinely has to park waiting for
+// more bytes and resume once they arrive. A `sleep` is a deadline, one of
+// the executor's two real wake sources, so this is a real ordering
+// guarantee and not a race: the server cannot receive the body before the
+// client sends it, and the client does not send it until after the sleep
+// returns.
+async fn send_body_request(s: TcpStream, label: String) {
+    let head = "POST /body HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n"
+    let _ = match s.write(bytes_from_string(head)).await {
+        Ok(n) => n
+        Err(e) => panic("client write head: ${e.message}")
+    }
+    sleep(Duration::from_millis(20)).await
+    let _ = match s.write(bytes_from_string("hello")).await {
+        Ok(n) => n
+        Err(e) => panic("client write body: ${e.message}")
     }
     let reply = match s.read(512).await {
         Ok(b) => b
@@ -56,7 +121,8 @@ async fn main() {
         Ok(c) => c
         Err(e) => panic("accept: ${e.message}")
     }
-    // Keep-alive: two requests, one connection, one accept.
+
+    // Requests 1 and 2: the original keep-alive round trip, unchanged.
     let mut i = 0
     while i < 2 {
         match read_request(conn, Limits::default()).await {
@@ -68,8 +134,56 @@ async fn main() {
         }
         i = i + 1
     }
-    let _ = conn.close().await
 
+    // Request 3: a real, non-zero body at exactly `max_body_bytes` -- design
+    // spec section 11 criterion 4's boundary case, and the case that puts
+    // the body-read loop itself under test (see `send_body_request` above).
+    let body_limits = Limits { max_head_bytes: 8192, max_header_count: 100, max_body_bytes: 5 }
+    match read_request(conn, body_limits).await {
+        Ok(req) => {
+            match req.body.to_string() {
+                Some(t) => println("server: ${req.path} body ${t} len ${req.body.len()}")
+                None => println("server: ${req.path} body <non-utf8> len ${req.body.len()}")
+            }
+            let _ = write_response(conn, Response::text(200, "ok ${req.path}")).await
+        }
+        Err(e) => {
+            println("server: body request rejected ${kind_name(e.kind)}")
+            let _ = write_response(conn, Response::text(400, "bad request")).await
+        }
+    }
+
+    // Request 4: an invalid `Content-Length` value -- FIX 1 of the
+    // whole-branch review, which turned this from a silently-accepted
+    // bodiless request into a rejection.
+    match read_request(conn, Limits::default()).await {
+        Ok(req) => {
+            println("server: bad-length request unexpectedly accepted")
+            let _ = write_response(conn, Response::text(200, "ok")).await
+        }
+        Err(e) => {
+            println("server: bad-length rejected ${kind_name(e.kind)}")
+            let _ = write_response(conn, Response::text(400, "bad request")).await
+        }
+    }
+
+    // Request 5: the same declared and actual body as request 3, one byte
+    // over a caller's own `max_body_bytes` -- criterion 4's one-past-it
+    // case, and what drives `BodyTooLarge`. Last on this connection
+    // deliberately: see this file's own header for why.
+    let tight_body = Limits { max_head_bytes: 8192, max_header_count: 100, max_body_bytes: 4 }
+    match read_request(conn, tight_body).await {
+        Ok(req) => {
+            println("server: too-big request unexpectedly accepted")
+            let _ = write_response(conn, Response::text(200, "ok")).await
+        }
+        Err(e) => {
+            println("server: too-big rejected ${kind_name(e.kind)}")
+            let _ = write_response(conn, Response::text(413, "too large")).await
+        }
+    }
+
+    let _ = conn.close().await
     h.join().await
     let _ = l.close().await
     println("server: done")
@@ -79,5 +193,20 @@ fn header_or(req: Request, name: String, fallback: String) -> String {
     match req.headers.get(name) {
         Some(v) => v
         None => fallback
+    }
+}
+
+fn kind_name(k: HttpErrorKind) -> String {
+    match k {
+        HeadTooLarge => "HeadTooLarge"
+        TooManyHeaders => "TooManyHeaders"
+        BadRequestLine => "BadRequestLine"
+        BadHeader => "BadHeader"
+        BadNewline => "BadNewline"
+        IncompleteHeadFields => "IncompleteHeadFields"
+        SliceOutOfBuffer => "SliceOutOfBuffer"
+        InvalidUtf8 => "InvalidUtf8"
+        BodyTooLarge => "BodyTooLarge"
+        Transport => "Transport"
     }
 }
