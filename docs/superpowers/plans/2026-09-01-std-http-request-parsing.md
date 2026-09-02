@@ -90,11 +90,13 @@ Two facts about site 6 and site 12 that decide how you verify this work:
 | `std/http/lib.nova` | `Method`, `Request`, `Response`, `Limits`, `HttpError`, the offset-table decoder, response serialisation, and `read_request`/`write_response` |
 | `tests/runtime/http_offsets.nova` + `.stdout` | pins the exact offset array for a known request, field by field |
 | `tests/runtime/http_partial.nova` + `.stdout` | a head split across two reads: status 1 then 0, offsets identical to the unsplit case |
-| `tests/runtime/http_malformed.nova` + `.stdout` | one case per error kind, asserting the negative status and that the array has length 1 |
+| `tests/runtime/http_malformed.nova` + `.stdout` | a case per error kind the parser can be made to report, asserting the negative status and that the array has length 1. **Not every kind: see the note under this table.** |
 | `tests/runtime/http_limits.nova` + `.stdout` | each limit at its boundary and one past it |
 | `tests/runtime/http_serialise.nova` + `.stdout` | parse a request, serialise a response, compare bytes to a golden |
 | `tests/runtime/http_keepalive.nova` + `.stdout` | two requests on one connection, both parsed, both ends in Nova |
 | `docs/adr/0019-offset-table-intrinsic-boundary.md` | the new ADR spec section 9 requires |
+
+**On "per error kind" and "each limit", corrected after the whole-branch review.** Neither row above is a promise that every kind or every limit is driven. Measured on the shipped tree: `http_malformed` drives kinds 3, 4 and 5 through `http_error_kind_of`; kinds 1 and 2 have their raw status observed by `http_limits` but their mapping arms unreached, because every `parse_request_head` call there passes a `Limits` at or below the runtime ceiling so the Nova-side literal checks fire first; kinds 6 and 7 are undemonstrated, and differ from each other -- 7's Rust call site argues from httparse's zero-copy contract that it cannot fire and checks anyway, 6's carries no argument either way. And `max_body_bytes` had **no** boundary case at all until the branch's final fix wave added one, so the whole body path of `read_request` was unexecuted; the design spec's own section 11 criterion 4 was asserted as met in three shipped artifacts while it was not. `std/http/lib.nova`'s comment above `http_error_kind_of` is the source of truth for the kind split.
 
 **Modified:** `crates/nova-runtime/Cargo.toml`, `Cargo.lock`, `crates/nova-runtime/src/lib.rs`, `crates/nova-resolver/src/lib.rs`, `crates/nova-typeck/src/check.rs`, `crates/nova-mir/src/lib.rs`, `crates/nova-mir/src/lower.rs`, `crates/nova-mir/tests/lower_tests.rs`, `crates/nova-cli/tests/run_tests.rs`, `nova-spec/20-STDLIB.md`, `nova-spec/00-MASTER-SPEC.md`, `CHANGELOG.md`.
 
@@ -1289,7 +1291,7 @@ body_start 37
 Create `tests/runtime/http_malformed.nova` with the Write tool. It asserts, per case, both the negative status and that the array has length 1 — the length is the half that keeps a caller who skips the status check from reading a plausible offset.
 
 ```nova
-// One case per error kind the parser can report, asserting both halves of the
+// A case per error kind this fixture can make the parser report, asserting both halves of the
 // contract: the status is negative, and the array has length 1 so nothing
 // plausible-looking is readable behind it.
 //
