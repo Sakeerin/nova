@@ -120,8 +120,20 @@ The foundation. No stdlib until this is solid.
 ### 2.4 — `std/net` + `std/http` + `std/json`
 - TCP/UDP over the Tokio wrapper; HTTP server (hyper internals) then client;
   a codec-based, type-safe JSON parser/serializer in Nova.
+  **Split into three separate increments rather than shipped as this one
+  bundle, and the HTTP half revised — see
+  `docs/adr/0018-std-json-scope-and-build-order.md` and
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`.** `std/net` shipped
+  alone with the I/O poller; `std/json` shipped alone, ahead of `std/http`;
+  `std/http`'s server half then shipped alone too, over `httparse` rather
+  than hyper — hyper cannot drive the server on this runtime, for the three
+  reasons ADR 0019 measures. The router and the HTTP client are not yet
+  built.
 - **Gate:** `examples/05-json-api` responds correctly to requests (functional
-  first), then the **10k+ req/sec** benchmark → `docs/benchmarks/`.
+  first), then the **10k+ req/sec** benchmark → `docs/benchmarks/`. Neither
+  half of that gate is reached yet: `examples/05-json-api` and
+  `docs/benchmarks/` still do not exist, though `std/http` and `std/json`
+  no longer block writing them.
 
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.

@@ -318,7 +318,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   internals at runtime layer" — a Rust dependency and runtime surface this
   workspace does not have — while position 11 is a "custom parser" that
   `20-STDLIB.md` §7 writes entirely in Nova. **Position 10 stays unstarted
-  and unblocked**; nothing here makes it harder. `20-STDLIB.md` §7's
+  and unblocked**; nothing here makes it harder.
+  [Forward marker, 2026-09-01: position 10 is no longer unstarted, and
+  "use hyper internals at runtime layer" is no longer what it used. See the
+  Added entry below beginning "`std/http`, a fourteenth `STD_MODULES`
+  entry" and `docs/adr/0019-offset-table-intrinsic-boundary.md`. The wording
+  here is left byte-identical and superseded by this marker rather than
+  edited, this file's own convention: a shipped entry keeps what it claimed
+  at the time.]
+  `20-STDLIB.md` §7's
   `pub type JsonValue = | Null | Bool(Bool) | Number(Float) |
   String(String) | Array([JsonValue]) | Object(Map<String, JsonValue>)`
   compiles **verbatim**, shadowing variant names included — measured, not
@@ -461,7 +469,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   2026-08-23 amendment. **This does not close Phase 2**: position 10
   `std/http` and position 12 `std/crypto` are both unstarted, and the Phase
   2 gate still needs `examples/05-json-api` and `docs/benchmarks/`, neither
-  of which exists. **It also splits `docs/phase-2-plan.md` §2.4**, which
+  of which exists.
+  [Forward marker, 2026-09-01: position 10 `std/http`'s server half has
+  since shipped — see the Added entry below beginning "`std/http`, a
+  fourteenth `STD_MODULES` entry". Position 12 `std/crypto` is the one of
+  the two named here still unstarted; naming both together as "unstarted"
+  is now wrong, naming `std/crypto` alone is not. `examples/05-json-api`
+  and `docs/benchmarks/` still do not exist, so the Phase 2 gate named here
+  is still not reached. Left byte-identical above, per this file's
+  convention.]
+  **It also splits `docs/phase-2-plan.md` §2.4**, which
   bundles `std/net` + `std/http` + `std/json` as one increment: `std/net`
   shipped alone with the I/O poller, `std/json` ships alone here and ahead
   of `std/http`, and nothing is left of the bundle as a unit. That plan
@@ -709,6 +726,73 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recorded rather than tidied away: a check that examined the right things and
   was then overtaken is a different failure from a check never made, and only
   the first one is invisible to a reader who sees the word "checked".
+- **`std/http`, a fourteenth `STD_MODULES` entry** (`"$std.http"`,
+  `STD_MODULES` 13 → 14, the array's last entry), the server half of Phase 2
+  position 10 — request-head parsing and response serialisation over
+  `std/net`'s already-shipped TCP transport, with no router: `Method`,
+  `Request`, `Response`, `Limits`, `HttpError`, `read_request`,
+  `write_response`, `parse_offsets`. See
+  `docs/adr/0019-offset-table-intrinsic-boundary.md` for the design
+  reasoning this entry only summarises.
+  One new intrinsic, `http_parse_request(buf: Bytes) -> [Int]`
+  (`Builtin::STD_ONLY` 70 → 71), parsing an HTTP/1.1 request head into a
+  flat table of **byte offsets into the caller's own buffer** — status
+  first, then method/path/version, header count, one quadruple of offsets
+  per header, and `body_start`. On any non-zero status the array has length
+  1, so a caller who skips the status check indexes out of bounds rather
+  than reading a plausible-looking offset — deliberate. One new dependency,
+  `httparse` 1.10.1, with no dependencies of its own; `Cargo.lock` changes
+  by exactly two hunks, `httparse`'s own package block and `nova-runtime`'s
+  dependency list gaining it.
+  **Hyper does not drive the server.** `nova-spec/00-MASTER-SPEC.md`'s
+  Phase 2 list said "use hyper internals at runtime layer"; hyper's own
+  executor and connection driver cannot run here, for three measured
+  reasons: this runtime's executor cannot be re-entered
+  (`IN_BLOCK_ON`, pinned by `run_aborts_when_an_async_fn_calls_block_on`);
+  there are no wakers (`task.rs` names a deadline and another task's
+  completion as the executor's only two wake sources, both scheduled by the
+  executor itself); and `docs/adr/0009-async-execution-model.md` makes
+  single-threading a correctness requirement, so hyper cannot have its own
+  thread. What survives is the spec's own distinction — hyper's
+  *internals*, which is `httparse` — narrowed accordingly at
+  `00-MASTER-SPEC.md:240`, with `:416`'s dependency table now recording
+  `httparse` where `hyper` stood.
+  **Not in this increment:** the client (`get`, `post`, `Response::json`),
+  the router (`Server`, `Handler`, `Middleware`, path params), HTTPS,
+  HTTP/2, chunked transfer-encoding, and request pipelining — a pipelined
+  second request is silently consumed and dropped, and the connection
+  deadlocks, which is a sharper claim than "unsupported."
+  **Keep-alive is in**: `read_request`/`write_response` loop over one
+  connection, pinned by `tests/runtime/http_keepalive.nova`. Header names
+  are lower-cased on insert and the original casing is not preserved;
+  `Content-Length` is the only body framing, and a request without one is
+  treated as bodiless. `Method` gains an `Unknown(String)` arm carrying the
+  raw token, named `Unknown` rather than the spec's `Other` because
+  `std/io` already exports an `Other` variant and every `STD_MODULES` entry
+  is glob-imported into every other module. `write_response` returns
+  `Result<Int, IoError>`, not the spec's `Result<(), IoError>`, because
+  `std/net`'s `write` is one attempt returning a count and discarding it
+  would hide a truncated write.
+  **Two costs recorded as open risks, not smoothed over.** Eager header
+  materialisation costs roughly 20 GC allocations per request at this
+  project's measured ~900 ns each — about 18 µs, roughly 18% of one core at
+  10k req/sec before parsing, I/O or the handler run. The escape hatch does
+  not disturb the intrinsic: keep the offset table and materialise a header
+  only on lookup, moving only `Request`'s internals. Separately,
+  `read_request`'s body loop accumulates with `Bytes::concat`, which copies
+  everything accumulated so far on every call — up to a measured ~128x
+  amplification assembling a 1 MiB body from 4096-byte reads, worse at
+  smaller read sizes. Bounded by `max_body_bytes`, but real work
+  amplification on attacker-controlled input; recorded in full at
+  `read_request`'s own doc comment and in
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`. **No claim is made
+  that the Phase 2 gate is reached.** This increment makes it measurable,
+  which it was not before.
+  Six new fixtures (`http_offsets`, `http_partial`, `http_malformed`,
+  `http_limits`, `http_serialise`, `http_keepalive`), eleven new Rust unit
+  tests on the intrinsic, and one MIR lowering test —
+  `http_parse_request_lowers_to_a_runtime_call`
+  (`crates/nova-mir/tests/lower_tests.rs`). Eighteen new tests, 1081 → 1099.
 
 ### Changed
 
@@ -1304,6 +1388,16 @@ that already compiled.
   `@derive(ToJson, FromJson)` remain unimplemented. `JsonValue`, `JsonError`,
   `ToJson`, `FromJson` and both `parse`/`stringify` signatures are unchanged
   by this increment; the caps, the guard and the buffer are all interior.
+  [Forward marker, 2026-09-01: position 10 `std/http` is no longer
+  unstarted — its server half ships, see the Added entry below beginning
+  "`std/http`, a fourteenth `STD_MODULES` entry" and
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`. Position 12
+  `std/crypto` remains the one Phase 2 module group this tree has not
+  started; `examples/05-json-api` and `docs/benchmarks/` still do not
+  exist, so Phase 2's gate is still not reached, for a narrower reason than
+  when this bullet was written. `20-STDLIB.md` §7's own openness is
+  unaffected by this note. Left byte-identical above, per this file's
+  convention.]
 
 - **The `C-unwind` exports in `nova-runtime` that are nullary and return `i64`
   — `nova_rt_log_config_level`, `nova_rt_log_config_to_stderr`,
@@ -2971,6 +3065,17 @@ code that already compiled. Full detail is in the `### Added` entries above.
   builtins, while the `Formatter` builder in `nova-spec/20-STDLIB.md` §3 is not
   delivered. The Phase 2 gate needs `examples/05-json-api` and
   `docs/benchmarks/`, neither of which exists yet.
+  [Forward marker, 2026-09-01: of the six named "Unstarted" above, `std/http`
+  has since shipped its server half — see this file's own later Added entry
+  beginning "`std/http`, a fourteenth `STD_MODULES` entry" and
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`. `std/crypto` is the one
+  of the six this marker can still confirm unstarted. The status of
+  `std/time`, `std/log` and `std/sync` named alongside it is not re-verified
+  here — each has its own later Added entry in this file to check instead of
+  this sentence. `examples/05-json-api` and `docs/benchmarks/` still do not
+  exist, so the Phase 2 gate this bullet names is still not reached. Left
+  byte-identical above, per this file's own convention for a released,
+  dated section.]
 - Precise GC stack bounds remain Windows-only: `gc::stack_base` returns `None`
   everywhere else, so collection is skipped there (leak-until-exit). The eight
   `#[cfg(windows)]` root tests that exercise a real conservative scan stay

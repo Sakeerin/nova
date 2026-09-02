@@ -41,6 +41,18 @@ built. **Hyper HTTP and Ring crypto are not** — `std/http` and `std/crypto` ar
 unstarted, and the workspace depends on neither crate. No third-party collector is
 used either — the GC is hand-written (3.1).
 
+**AMENDED 2026-09-01 (branch `std-http-parsing`): `std/http` is no longer
+unstarted, and "Hyper HTTP" above was never quite the right label for what it
+would ship as.** The server half — request-head parsing plus response
+serialisation — ships over one intrinsic and `httparse` 1.10.1, not over
+hyper: hyper's own executor and connection driver cannot run on this runtime
+for three measured reasons (`docs/adr/0019-offset-table-intrinsic-boundary.md`).
+So the diagram box above is best read as "HTTP parsing (`httparse`)" going
+forward rather than "Hyper HTTP" — a box this increment fills differently
+than the label predicted, not one it leaves empty. `std/crypto` is the one
+box in that diagram still unbuilt and the workspace still depends on neither
+`hyper` nor `ring`.
+
 ---
 
 ## 2. Memory Layout
@@ -475,6 +487,22 @@ or `std/`. `std/json` is Nova source over exactly one new runtime entry point,
 `nova_rt_str_to_float`, and adds no JSON-specific one. So this section's advice is
 unchanged: read `symbols()`.
 
+**AMENDED 2026-09-01 (branch `std-http-parsing`): `std/http` is no longer
+unstarted either, and `nova_rt_http_serve` still does not exist — under that
+name or any other shape resembling it.** The server half ships: request-head
+parsing over one intrinsic, `nova_rt_http_parse_request`
+(`crates/nova-runtime/src/http.rs`), plus response serialisation over none at
+all (`docs/adr/0019-offset-table-intrinsic-boundary.md`). That intrinsic
+parses a request head into an offset table; it does not "serve" anything —
+no accept loop, no connection lifecycle, no handler dispatch reaches the
+runtime at all, all of that being Nova-side `std/http` and `std/net` code
+calling ordinary `read`/`write`. So the earlier paragraph's own point about
+`nova_rt_http_serve` is, if anything, stronger now than when it was
+speculative: grepped again, it still does not exist in any form, and the
+shape this increment shipped instead makes clear it never will under that
+name. `std/json` is unaffected by this note; see the amendment above for its
+own status.
+
 Each runtime function does have a stable C ABI signature and is documented at its
 definition, as this section originally said.
 
@@ -512,3 +540,17 @@ The first two exist. **The last two do not** (noted 2026-08-22, branch
 `spec-runtime-async-truth`): there is no stress or benchmark harness in the repo, and two
 of the three benchmark subjects are unstarted modules. `NOVA_GC_STRESS` (3.3) is the one
 stress mechanism that does exist, and it targets root scanning rather than task counts.
+
+**AMENDED 2026-09-01 (branch `std-http-parsing`): neither benchmark subject
+named above is an unstarted module any more, and the harness gap is the part
+that still holds.** `std/json` shipped on 2026-08-23
+(`docs/adr/0018-std-json-scope-and-build-order.md`) and `std/http`'s server
+half ships on this branch (`docs/adr/0019-offset-table-intrinsic-boundary.md`),
+so "two of the three benchmark subjects are unstarted modules" is no longer
+true of any of the three — allocation throughput was always benchmarkable,
+being Phase 1 infrastructure. What the 2026-08-22 note actually established,
+and what is still true, is the harness gap: there is still no stress or
+benchmark harness in this repo, `examples/05-json-api` still does not exist,
+and `docs/benchmarks/` still does not exist. A module existing is not the
+same claim as a benchmark of it existing, and this correction narrows to
+exactly the first.

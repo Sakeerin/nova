@@ -237,7 +237,7 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
 7. `std/task` (async runtime — wrap Tokio in Rust runtime crate, expose Nova API)
 8. `std/sync` (Mutex, channel, atomic)
 9. `std/net` (TCP, UDP)
-10. `std/http` (server first, then client; use hyper internals at runtime layer)
+10. `std/http` (server first, then client; use hyper's HTTP/1 **parsing** internals — `httparse` — at the runtime layer; hyper's own executor and connection driver are unavailable on this runtime for three measured reasons, see `docs/adr/0019-offset-table-intrinsic-boundary.md`)
 11. `std/json` (custom parser, type-safe codec via traits)
 12. `std/crypto` (wrap `ring` at runtime)
 13. `std/test` (test runner — `nova test`)
@@ -413,7 +413,7 @@ walrus = "0.22"
 
 # Runtime
 tokio = { version = "1", features = ["full"] }
-hyper = { version = "1", features = ["full"] }
+httparse = "1.10"        # std/http parsing; hyper's own runtime is unavailable here, see docs/adr/0019
 ring = "0.17"
 
 # Tooling
@@ -467,3 +467,26 @@ When starting fresh:
 ```
 
 Do not ask the user for approval between steps. Commit frequently. If blocked, write a SCRATCHPAD.md note and continue with the next independent task.
+
+---
+
+## 9. Recorded Drift Against `examples/` (added 2026-09-01, branch `std-http-parsing`)
+
+Not a locked decision and not a rewrite of Section 2 above, which stays as
+originally written — two facts about the tree noticed while building
+`std/http`, measured against `examples/` rather than recalled, and recorded
+here because neither is this increment's to fix.
+
+**The third example's number and name have drifted from Section 2's tree.**
+Section 2 above names `examples/03-http-server/`, and
+`nova-spec/60-EXAMPLES.md` §3 names it too — the drift is in **two** spec
+files, not one. `examples/` on disk holds `03-producer-consumer` instead.
+Neither file is corrected by this note; a reader who needs the current
+mapping should read `examples/` itself rather than either spec's tree.
+
+**No example on disk has the README `60-EXAMPLES.md` §9 requires.** That
+section's per-example template applies to every entry, and none of
+`examples/01-hello-world`, `examples/02-fibonacci` or
+`examples/03-producer-consumer` has a `README.md` at all — checked directly
+(`ls examples/*/README.md` matches nothing), not assumed from one example
+and generalised to the rest.

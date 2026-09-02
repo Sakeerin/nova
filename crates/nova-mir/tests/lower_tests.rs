@@ -1020,32 +1020,42 @@ fn hash_builtins_lower_to_a_runtime_call_and_a_move() {
     );
 }
 
-/// `http_parse_request` is `STD_ONLY`. It has no real Nova caller in the
-/// tree right now: `std/http`, the module that will call it, does not exist
-/// yet. That is a property of today, not a permanent one — the next task
-/// adds `std/http`, and from that point on `main` below has a real function
-/// it could resolve through instead of this file's stub. A synthetic module
+/// `http_parse_request` is `STD_ONLY`. When this test was written it had no
+/// real Nova caller in the tree: `std/http`, the module that would call it,
+/// did not exist yet. That was a property of the day this test was written,
+/// not a permanent one, and it has since ended — `std/http` now ships
+/// (`std/http/lib.nova`, a later task in this same plan), with its own
+/// `parse_offsets` wrapping this same intrinsic under a different name. This
+/// file's stub is kept anyway, deliberately, rather than switched to resolve
+/// through the real module: a synthetic single-function module isolates this
+/// test from every unrelated change to `std/http`'s much larger surface, and
+/// the naming-collision risk the next paragraph warns about is exactly why
+/// the stub below was never named `parse_offsets`. A synthetic module
 /// stands in for the caller here via `resolve_program`'s `extra_std`
 /// parameter — the same mechanism `nova test` uses to give ordinary test
 /// fixtures `std/test`'s helpers — so the wrapper's `pub fn` is glob-imported
 /// into `main` exactly as a real `STD_MODULES` entry would be, with no
 /// `import` needed.
 ///
-/// The wrapper is deliberately NOT named `parse_offsets`, even though that
-/// is the name the real `std/http` wrapper will carry once it exists.
-/// `import_std_module` (`crates/nova-resolver/src/lib.rs`) merges every std
-/// module's exports into every other module's scope with
+/// The wrapper is deliberately NOT named `parse_offsets`, which is the name
+/// the real `std/http` wrapper does in fact carry, now that it exists
+/// (`std/http/lib.nova`). `import_std_module`
+/// (`crates/nova-resolver/src/lib.rs`) merges every std module's exports
+/// into every other module's scope with
 /// `scope.values.entry(n.clone()).or_insert(*r)` — first writer wins,
 /// silently, and nothing on this path reports a collision — and
 /// `resolve_program`'s `std_entries` chains `extra_std` after `STD_MODULES`
-/// unconditionally, no matter where a later `std/http` entry sits in that
-/// array. So the moment `std/http` exists, its own `parse_offsets` reaches
-/// `main`'s scope first, this stub's same-named export is silently dropped,
-/// `main`'s call resolves to the real function instead of this stub, and
-/// this test keeps passing — for a reason that has nothing to do with the
-/// paragraph above it, with no failure and nothing forcing a revisit.
-/// Whatever this wrapper is named, it has to be a name no real `std/http`
-/// export would plausibly use.
+/// unconditionally, no matter where the real `std/http` entry sits in that
+/// array. Had this stub been named `parse_offsets` too, `std/http`'s own
+/// export would reach `main`'s scope first, this stub's same-named export
+/// would be silently dropped, `main`'s call would resolve to the real
+/// function instead of this stub, and this test would keep passing — for a
+/// reason that has nothing to do with the paragraph above it, with no
+/// failure and nothing forcing a revisit. Naming the stub
+/// `lower_tests_http_parse_request_stub` instead avoided that collision
+/// before it could happen; the mechanism above is why the choice mattered,
+/// not merely a caution. Whatever this wrapper is named, it has to be a
+/// name no real `std/http` export would plausibly use.
 ///
 /// The point pinned is the same as `IntHashSeed`'s above: a Nova call
 /// reaches its runtime function exactly once.

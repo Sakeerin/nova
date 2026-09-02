@@ -426,6 +426,36 @@ impl Write for File { ... }
 
 ## 6. `std/http` (server + client)
 
+**AMENDED 2026-09-01 (branch `std-http-parsing`): the code block below is
+written in a Nova that does not exist, and v1 ships a narrower surface than
+this section specifies.** `[u8]` is `E0001: cannot find type u8` — the byte
+type is `Bytes` — and `pub type Handler = async fn(Request) -> Response` is
+`P0001: expected type (in type alias), found async`, so neither the
+`Request`/`Response` records nor the `Server`/`Handler` machinery below can
+parse as written. What shipped instead, over `std/net` and one runtime
+intrinsic (`docs/adr/0019-offset-table-intrinsic-boundary.md`), is the server
+half with no router: `Method`, `Request`, `Response`, `Limits`, `HttpError`,
+`read_request`, `write_response`, and `parse_offsets`. Not in v1: the client
+(`get`, `post`, `Response::json`), the router (`Server`, `Handler`,
+`Middleware`, path params), HTTPS, HTTP/2, chunked transfer-encoding, and
+request pipelining. Keep-alive *is* in v1 — the caller loops
+`read_request`/`write_response` over one connection. Header names are
+lower-cased on insert; the original casing is not preserved.
+`Content-Length` is the only body framing the parser understands. `Method`
+gains an `Unknown(String)` arm this section does not have, carrying the raw
+method token, and it is named `Unknown` rather than this section's `Other`
+because `std/io` already exports an `Other` variant and every `STD_MODULES`
+entry is glob-imported into every other module.
+
+This section's own design assumed away something this tree now
+demonstrates: **function types and closures both compile and run, capture
+included** — `fn(Int) -> Int` as a parameter type, called, and a closure
+over an enclosing binding, both verified against the compiler before v1
+relied on either. That is what makes a future router possible without a
+compiler change, provided its handlers stay synchronous; the async handler
+type above is still `P0001`, and this amendment claims nothing more than
+that one blocker is gone.
+
 ```nova
 module std.http
 
@@ -1089,6 +1119,24 @@ and unblocked. Position **12 `std/crypto`**, §8 below, is unstarted (no
 exist, and benchmark methodology in `docs/benchmarks/`, which does not
 exist either. **Phase 2 is not complete.**
 
+**AMENDED 2026-09-01 (branch `std-http-parsing`): both paragraphs above are
+one link further along than they knew, and one of the two claims in the
+second no longer holds.** The `lib.nova` count continues the chain rather
+than editing it: `$std.http` makes it **13 → 14** `STD_MODULES` entries,
+**14 → 15** files on disk with `STD_TEST_MODULE`, measured directly
+(`find std -name lib.nova`) rather than incremented on paper. **Position 10
+`std/http` is no longer unstarted.** Its server half ships — request-head
+parsing over one intrinsic and response serialisation over none — see
+`docs/adr/0019-offset-table-intrinsic-boundary.md` and §6 above's own dated
+amendment for what shipped and what did not (the router, the client, HTTPS,
+HTTP/2, chunked encoding, and pipelining). **Position 12 `std/crypto` is
+the one Phase 2 module group this tree still has not started** — a sentence
+naming "the two missing module groups" together is wrong now; naming
+`std/crypto` alone is not. Phase 2's gate still needs `examples/05-json-api`
+and `docs/benchmarks/`, neither of which exists, so **Phase 2 is still not
+complete** — true for a different reason than it was when the paragraph
+above it was written.
+
 ---
 
 ## 8. `std/crypto`
@@ -1303,8 +1351,8 @@ which declares a `module` line at all. This is not a
 `std/log` deviation; it is a pre-existing gap in this document that
 predates this increment and reaches every one of `nova-spec`'s dotted
 `module std.x` headers — `module std.core` (§2, :47), `std.fmt` (§3,
-:146), `std.io` (§4, :219), `std.fs` (§5, :332), `std.http` (§6, :430),
-`std.json` (§7, :488), `std.crypto` (§8), `std.time` (§9), `std.log`
+:146), `std.io` (§4, :219), `std.fs` (§5, :332), `std.http` (§6, :460),
+`std.json` (§7, :518), `std.crypto` (§8), `std.time` (§9), `std.log`
 (§10, above), `std.test` (§11), `std.collections` (§12), `std.sync` and
 `std.task` (§13), and `std.net` (§16) — thirteen numbered sections in
 all. A reader who checks only this section would otherwise conclude
@@ -1321,6 +1369,23 @@ convention treats as a grep hint rather than a promise: these four are
 intra-file pointers, in the very file the branch edited, that were exact
 before the edit, so keeping them exact after it is the editor's job and
 mechanically checkable, not a matter of judgment.)
+
+(A second such re-measurement, 2026-09-01, branch `std-http-parsing`: this
+branch's own §6 amendment inserts text above `module std.http`, moving two
+of the four pointers again — `std.http` from `:430` to `:460`, `std.json`
+from `:488` to `:518` — while `std.io` and `std.fs` above them, sitting
+before the insertion, are untouched. Corrected in place above, the same way
+the `std-fmt` branch's edit was, and for the same reason: these are
+intra-file pointers in the file being edited, not a claim about the world
+frozen at a date. Separately, and not an intra-file pointer: the paragraph
+above this one counts "eleven std module sources" and "the ten in
+`STD_MODULES`" — true when `std/log` was the increment adding its own
+section, now stale twice over. `find std -name lib.nova` returns **fifteen**
+files today, fourteen of them `STD_MODULES` entries — `$std.http` the most
+recent addition — plus `std/test`, held out of the array for the reason
+already given. Recorded here rather than corrected there, consistent with
+this section's own "recorded rather than fixed" choice for the thirteen
+header names in the same paragraph.)
 
 ---
 

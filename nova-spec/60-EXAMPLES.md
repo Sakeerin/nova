@@ -79,6 +79,13 @@ async fn main() {
 
 **Gate:** `curl http://localhost:3000/` returns `Hello from Nova!`. Process exits cleanly on SIGTERM.
 
+**Recorded 2026-09-01 (branch `std-http-parsing`), not fixed here: this
+example's number and name have drifted from what `examples/` holds.** Both
+this section and `00-MASTER-SPEC.md` §2's tree name `03-http-server` — the
+drift is in two spec files, not one — while `examples/` on disk holds
+`03-producer-consumer` instead. Measured directly (`ls examples/`), not
+recalled.
+
 ---
 
 ## 4. `04-todo-cli` (Phase 2 gate)
@@ -353,6 +360,13 @@ nova run
 ## Notes
 <Anything tricky, links to relevant spec sections>
 ```
+
+**Recorded 2026-09-01 (branch `std-http-parsing`), not fixed here: no
+example on disk has this README yet.** Checked directly against every entry
+under `examples/` rather than assumed from one — `01-hello-world`,
+`02-fibonacci` and `03-producer-consumer` each lack a `README.md` entirely.
+An earlier draft of the `std/http` design work named only the third of
+these, which was true of it and misleading about the other two.
 
 ---
 
