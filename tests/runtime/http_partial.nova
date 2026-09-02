@@ -1,12 +1,31 @@
-// A head split across two reads: status 1 on the first call, 0 on the second,
-// and -- the part that matters -- offsets identical to the unsplit case.
+// A head split across two reads: status 1 on the first call, 0 on the
+// second. The second call passes the same complete buffer `read_request`
+// would have built by concatenating every chunk it read, so this also pins
+// that a once-partial parse succeeds once given the whole thing.
 //
 // A parser that restarted, or that measured offsets against the second chunk
 // rather than the whole buffer, would still return status 0 on the second
 // call and would still look correct to a test that only checked the status.
 //
 // The design spec's mutation 3 -- returning status 0 on partial input -- must
-// fail this fixture.
+// fail this fixture, on `a`'s status below.
+//
+// **What the "repeat parse" check does and does not show.** `b` and `c`
+// both call `parse_offsets` on the identical `whole` buffer -- the same
+// call, twice -- so a match pins that the parser holds no state across
+// calls: calling it twice on one input does not mutate anything that could
+// change a third answer. That is a real property, and design spec section 8
+// now carries its own amendment on this exact point after the whole-branch
+// review: it is NOT a check that a split parse's offsets match the unsplit
+// case, which is what this fixture's own header used to claim. That
+// property -- "offsets identical to the unsplit case" -- is unfalsifiable
+// under this parser's own design: `http_parse_request` is a pure function
+// of its buffer argument with no state held between calls (design spec
+// section 4), so there is no way to construct a genuine "parsed after being
+// split" case and a genuine "parsed as a whole" case that could ever differ
+// for the same complete buffer -- both are the same call on the same bytes,
+// by construction, regardless of how this fixture is written. Nothing below
+// distinguishes them because nothing could.
 
 fn main() {
     let whole = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\n\r\n")
@@ -28,6 +47,6 @@ fn main() {
         if b[i] != c[i] { same = false }
         i = i + 1
     }
-    println("offsets identical ${same}")
+    println("repeat parse identical ${same}")
     println("body_start ${b[b.len() - 1]}")
 }

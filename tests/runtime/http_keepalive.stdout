@@ -1,5 +1,11 @@
 server: /one host h
-client first: got 86 bytes, 200 true
+client first: got 86 bytes, 200 OK true
 server: /two host h
-client second: got 86 bytes, 200 true
+client second: got 86 bytes, 200 OK true
+server: /body body hello len 5
+client third: got 87 bytes, 200 true
+server: bad-length rejected BadHeader
+client fourth: got 100 bytes, 400 true
+server: too-big rejected BodyTooLarge
+client fifth: got 103 bytes, 413 true
 server: done

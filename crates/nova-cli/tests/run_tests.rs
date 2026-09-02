@@ -9233,9 +9233,13 @@ fn http_offsets_run() {
 }
 
 /// A head split across two `parse_offsets` calls: partial on the first,
-/// complete on the second, with offsets identical to parsing the whole buffer
-/// in one call. See `tests/runtime/http_partial.nova`'s own header for the
-/// parser bug this is built to catch.
+/// complete on the second. Also checks that two calls on the identical
+/// complete buffer agree, which pins statelessness but is NOT a check that a
+/// split parse matches the unsplit case -- see
+/// `tests/runtime/http_partial.nova`'s own header for why design spec
+/// section 8 now records that property as unfalsifiable under this parser's
+/// design, and for the parser bug the split/complete check here is built to
+/// catch.
 #[test]
 fn http_partial_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_partial.stdout"))
@@ -9269,10 +9273,14 @@ fn http_malformed_run() {
         .stdout(expected);
 }
 
-/// Each of `std/http`'s limits at its boundary and one past it: the runtime's
-/// two hard walls (head bytes, header count), and a caller's own tighter
-/// `Limits`. See `tests/runtime/http_limits.nova`'s own header for why both
-/// enforcement points need their own coverage.
+/// `max_head_bytes` and `max_header_count`, each at its boundary and one past
+/// it: the runtime's two hard walls (head bytes, header count), and a
+/// caller's own tighter `Limits`. Does NOT cover `max_body_bytes` -- this
+/// fixture calls `parse_offsets` and `parse_request_head`, and neither reads
+/// a body; that limit's boundary and one-past-it cases live in
+/// `http_keepalive_run` instead. See `tests/runtime/http_limits.nova`'s own
+/// header for why the two head-limit enforcement points each need their own
+/// coverage.
 #[test]
 fn http_limits_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_limits.stdout"))
@@ -9287,7 +9295,9 @@ fn http_limits_run() {
 }
 
 /// Parses a request, builds a `Response`, and serialises it: the round trip
-/// this module's request half and response half must agree on. See
+/// this module's request half and response half must agree on. Also checks
+/// that `to_bytes` drops a header carrying an embedded CRLF rather than
+/// letting it split the response (FIX 5 of the whole-branch review). See
 /// `tests/runtime/http_serialise.nova`'s own header for why the golden checks
 /// the wire's parts rather than one `.eq()` over the whole buffer.
 #[test]
@@ -9303,13 +9313,19 @@ fn http_serialise_run() {
         .stdout(expected);
 }
 
-/// Keep-alive over one accepted connection: two requests, both parsed and
+/// Keep-alive over one accepted connection: five requests, all parsed and
 /// answered without a second `accept`. Both ends are Nova, in two tasks of
 /// one process, the same shape `net_listener_accept_run` uses -- see
 /// `tests/runtime/http_keepalive.nova`'s own header for why that means no
-/// port file. That fixture's client awaits each reply before sending the next
-/// request, so it never pipelines; see `read_request`'s doc comment in
-/// `std/http/lib.nova` for the pipelined-request case this does not cover.
+/// port file. Beyond the original two-request round trip, this is also
+/// where `max_body_bytes` gets its boundary and one-past-it coverage (design
+/// spec section 11 criterion 4) and where `read_request`'s body-read loop,
+/// a real `Content-Length`, and an invalid `Content-Length` value are
+/// exercised -- every other `std/http` fixture only ever declares
+/// `Content-Length: 0`. That fixture's client awaits each reply before
+/// sending the next request, so it never pipelines; see `read_request`'s doc
+/// comment in `std/http/lib.nova` for the pipelined-request case this does
+/// not cover.
 #[test]
 fn http_keepalive_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/http_keepalive.stdout"))

@@ -780,9 +780,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not disturb the intrinsic: keep the offset table and materialise a header
   only on lookup, moving only `Request`'s internals. Separately,
   `read_request`'s body loop accumulates with `Bytes::concat`, which copies
-  everything accumulated so far on every call — up to a measured ~128x
-  amplification assembling a 1 MiB body from 4096-byte reads, worse at
-  smaller read sizes. Bounded by `max_body_bytes`, but real work
+  everything accumulated so far on every call — a measured ~128x
+  amplification assembling a 1 MiB body from 4096-byte reads (a floor, not a
+  ceiling: a peer returning fewer bytes per read than asked only raises it),
+  worse still at smaller read sizes. Bounded by `max_body_bytes`, but real work
   amplification on attacker-controlled input; recorded in full at
   `read_request`'s own doc comment and in
   `docs/adr/0019-offset-table-intrinsic-boundary.md`. **No claim is made

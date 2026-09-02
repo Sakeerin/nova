@@ -10,6 +10,22 @@ Accepted (2026-09-01). The `std/http` request-parsing increment, branch
 `std-http-parsing`
 (`docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`).
 
+**Amended 2026-09-02 (same branch, final fix wave): two corrections in
+section 5, and one new consequence, none reversing a decision.** Section 5's
+body-accumulation figures stated their bound in the wrong direction -- "up
+to 256 concatenations" reads as a ceiling, and it is a floor, since a peer
+handing back fewer bytes than asked for on any read only raises the count,
+never lowers it. Separately, `read_request`'s body loop no longer reads a
+fixed 4096 bytes per call: it now asks for exactly what is still wanted,
+which removes the amplification from the common case while leaving the
+worst case section 5 describes unchanged. Both are dated notes at the end of
+section 5, not rewrites of the paragraph they correct, following this file's
+own citation of the project's convention in its Consequences section below.
+And a consequence neither this ADR nor the design spec named before this
+review: neither `read` call in `read_request` carries a timeout. That is now
+its own bullet in Consequences; the design spec carries the same disclosure
+in its own section 6.
+
 ## Context
 
 `std/http` is Phase 2 position 10 of the thirteen listed in
@@ -216,6 +232,22 @@ recorded here as well because a reader who reads only the design spec's
 cost section would otherwise conclude eager header materialisation is the
 whole of the cost picture.
 
+**2026-09-02 dated note, from the whole-branch review, correcting the two
+paragraphs above rather than rewriting them.** Both "up to 256
+concatenations" and "up to 1024 concatenations" state a floor as if it were
+a ceiling: they hold only if every read returns exactly the chunk size
+named, and `Read::read` may legally return fewer bytes than asked for on any
+call, which raises the concatenation count and the bytes copied and never
+lowers either. Separately, `read_request`'s body loop was changed to read
+exactly `want - body.len()` bytes on each call rather than a fixed 4096, so
+the two paragraphs above now describe only the worst case, not the typical
+one: a peer able to deliver the remaining body in one read now costs this
+loop exactly one concatenation, regardless of `want`. The worst case is
+unchanged, for the same reason the bound was always a floor — a peer that
+dribbles the body a few bytes at a time still forces one concatenation per
+read no matter how many bytes this loop asks for. See `read_request`'s own
+doc comment in `std/http/lib.nova` for the current, corrected account.
+
 ### 6. `Map<String, String>` inherits the per-process seeded string hash
 
 `Request.headers` and `Response.headers` are `Map<String, String>`. Header
@@ -269,6 +301,21 @@ can observe timing and adapt, and not claimed as cryptographic.
   position 12 `std/crypto` is the one Phase 2 module group this tree still
   has not started. Nothing here claims the 10k+ req/sec gate is reached;
   §5 above records two open costs against it instead.
+- **2026-09-02, whole-branch review: neither `read` call in `read_request`
+  carries a timeout, and nothing before this review said so.** Both calls
+  (`std/http/lib.nova`) park with no deadline — `crates/nova-runtime/src/net.rs`'s
+  `poll_read` stages `Interest::Read` with a `None` deadline argument — so a
+  peer that connects and sends nothing holds the task handling it parked
+  forever, which on this project's single-threaded executor is the cheapest
+  available denial-of-service against this server. `std/net`'s
+  `TcpStream::read_timeout` (`std/net/lib.nova:89`) already exists and
+  documents EOF semantics identical to plain `read`'s; it was not used here.
+  The design spec's own limits table (§6) has always been entirely
+  byte-valued, so no task in this increment was ever asked for a temporal
+  bound — recorded here as a gap in the increment's own spec, which now
+  carries the same disclosure in that section, not an oversight the code
+  silently carried. `Limits` gains no field for this as part of the record;
+  implementing a timeout is later work.
 - **Counts.** `STD_MODULES` **13 → 14** (`$std.http`, the array's last
   entry); `Builtin::STD_ONLY` **70 → 71** (`http_parse_request`);
   `RESERVED_TYPE_NAMES` unchanged at **7** — `Method`, `Request`,

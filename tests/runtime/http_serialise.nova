@@ -6,6 +6,16 @@
 // CRLF-delimited, this working copy is CRLF, and byte-exactness is
 // load-bearing here, so git's line-ending handling is given nothing to
 // rewrite. The printed output below is ordinary LF text.
+//
+// The last section below is a different concern from the round trip above:
+// response splitting. A header value carrying an embedded CRLF must not
+// reach the wire, since it could terminate the current header line early and
+// forge further header lines -- or even a second status line -- into what a
+// peer reads as one response. See `is_crlf_free`'s own doc comment in
+// `std/http/lib.nova` for why `to_bytes` is the layer that refuses this
+// (FIX 5 of the whole-branch review) and why a request-derived value could
+// never reach it this way: only a handler building a header from untrusted
+// data can.
 
 fn main() {
     let raw = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\nContent-Length: 0\r\n\r\n")
@@ -88,6 +98,19 @@ fn main() {
         }
         Err(e) => println("unexpectedly rejected")
     }
+
+    // Response splitting: a header value carrying an embedded CRLF, built
+    // directly rather than parsed from a request -- see this file's own
+    // header for why a request-derived value could never reach `to_bytes`
+    // this way. The malicious header is dropped; the legitimate one next to
+    // it is not.
+    let mut evil: Map<String, String> = Map::new()
+    evil.insert("content-length", "0")
+    evil.insert("x-evil", "safe\r\nX-Injected: yes")
+    let evil_resp = Response { status: 200, headers: evil, body: bytes_from_string("") }
+    let evil_wire = evil_resp.to_bytes()
+    println("evil header dropped ${!evil_wire.contains(bytes_from_string("X-Injected"))}")
+    println("evil wire keeps content-length ${evil_wire.contains(bytes_from_string("content-length: 0"))}")
 }
 
 fn header_or(req: Request, name: String, fallback: String) -> String {

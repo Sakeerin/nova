@@ -38,6 +38,15 @@
 //   pipelined request is lost and its connection deadlocks rather than
 //   merely going unsupported. See `read_request`'s own doc comment for the
 //   exact wording this needs.
+//
+// **A third limitation, with a different cause.** Neither `conn.read` call
+// in `read_request` below carries a timeout, so a peer that connects and
+// then sends nothing -- or sends a partial head or body and stops -- holds
+// the task serving it parked forever. `std/net::TcpStream::read_timeout`
+// already exists (`std/net/lib.nova`) and was not used here; see
+// `read_request`'s own doc comment for the reasoning, and
+// docs/adr/0019-offset-table-intrinsic-boundary.md's Consequences section
+// for the same gap recorded against that ADR.
 
 // The request method. `Unknown` carries the raw token rather than discarding
 // it: a request may carry any method a peer invents, and the parser must not
@@ -178,6 +187,14 @@ pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }
 // longer buffer. `Ok(Some(req))` is a complete head, with `body` empty --
 // `read_request` fills that in once it knows `Content-Length`.
 pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>, HttpError> {
+    // Measures the accumulated read buffer, not the head's own exact length:
+    // when called from `read_request`, `buf` may hold a few bytes past the
+    // head's end if the read that completed it also pulled in the start of
+    // the body, so a legal head can be rejected slightly before its own
+    // exact byte count if the peer's writes happen to land that way. The
+    // design spec's own words license exactly this ("bounds the buffer a
+    // client can force before the head completes"), not an exact bound on
+    // the head alone.
     if buf.len() > limits.max_head_bytes {
         return Err(HttpError { kind: HeadTooLarge, message: "request head over max_head_bytes" })
     }
@@ -207,6 +224,19 @@ pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>,
         match text_at_utf8(buf, t[at + 2], t[at + 3]) {
             Ok(s) => value = s
             Err(e) => return Err(e)
+        }
+        // A second `Content-Length` header is rejected outright rather than
+        // silently overwritten by `insert` below. RFC 9112 section 6.3 treats
+        // multiple `Content-Length` fields with differing values as invalid
+        // framing; this takes the simpler and stricter position of rejecting
+        // any repeat, matching or not, rather than keeping the first value
+        // and comparing it against every later one -- there is exactly one
+        // value available to compare against here regardless, since this
+        // loop (like `Map::insert`) only ever sees the latest one once a
+        // name repeats, so "compare instead of reject" would need its own
+        // separate bookkeeping to buy anything.
+        if name == "content-length" && headers.contains_key(name) {
+            return Err(HttpError { kind: BadHeader, message: "duplicate Content-Length header" })
         }
         headers.insert(name, value)
         i = i + 1
@@ -336,13 +366,45 @@ impl Response {
         while i < names.len() {
             let k = names[i]
             match self.headers.get(k) {
-                Some(v) => head = "${head}${k}: ${v}\r\n"
+                // A header whose name or value carries a CR or LF is
+                // skipped rather than emitted: see `is_crlf_free`'s own doc
+                // comment for why this is the right layer to refuse it.
+                Some(v) => {
+                    if is_crlf_free(k) && is_crlf_free(v) {
+                        head = "${head}${k}: ${v}\r\n"
+                    }
+                }
                 None => head = head
             }
             i = i + 1
         }
         bytes_from_string("${head}\r\n").concat(self.body)
     }
+}
+
+// Whether `s` contains no CR and no LF, and so is safe to place verbatim in
+// one header line.
+//
+// **Response splitting is a real vulnerability class, and a stdlib
+// serialiser is the right layer to refuse it rather than every caller
+// separately.** A header name or value carrying an embedded CRLF can
+// terminate the line `to_bytes` is building early and forge arbitrary
+// further header lines -- or even a second status line -- into what the
+// peer reads as one response. Request-derived strings cannot carry either
+// byte: `httparse` itself terminates the request line and every header
+// value at CRLF, so the reachable case is a handler that writes body-derived
+// or otherwise untrusted data straight into a response header, exactly
+// `examples/05-json-api`'s shape.
+//
+// `to_bytes` above skips (does not emit) any header whose name or value
+// fails this check, rather than emitting it verbatim or panicking, and its
+// own `Bytes`-returning signature is unchanged for that -- becoming
+// fallible here was judged out of scope for this fix. A caller that must
+// know whether a header was dropped needs to check its own data before
+// handing it to `Response`; silently dropping is still strictly safer than
+// the alternative of emitting it.
+fn is_crlf_free(s: String) -> Bool {
+    !s.contains("\r") && !s.contains("\n")
 }
 
 // The reason phrase for a status code. Unknown codes get the class's own
@@ -384,6 +446,22 @@ fn reason_phrase(status: Int) -> String {
 // process (`stage_park` in `crates/nova-runtime/src/task.rs`), so a task
 // parked in `accept` cannot also be here. A server needs one task accepting
 // and one per connection -- see `std/net`'s `accept` doc comment.
+//
+// **Neither `conn.read` call below carries a timeout, and that is a live
+// denial-of-service, not a hygiene gap.** Both park with no deadline
+// (`crates/nova-runtime/src/net.rs`'s `poll_read` calls
+// `stage_io_park(socket, Interest::Read, None)` -- the trailing `None` is
+// the deadline argument). A peer that connects and sends nothing, or sends a
+// partial head or body and then goes silent, holds this task parked
+// forever, and on the single-threaded executor this project runs, one such
+// connection costs one socket and one task, indefinitely, for the price of
+// a single `connect`. `std/net`'s `TcpStream::read_timeout`
+// (`std/net/lib.nova`) already exists and documents EOF semantics identical
+// to plain `read`'s; it was not used here. That is recorded as a gap in
+// this increment's own spec, not an oversight this code silently carries --
+// section 6's limits table is entirely byte-valued, so no task in this
+// increment was ever asked for a temporal bound. Implementing one is later
+// work; disclosing its absence is not.
 //
 // **A pipelined second request deadlocks the connection; it is not merely
 // unsupported.** This function reads into a local buffer and returns
@@ -441,7 +519,10 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
     let t = parse_offsets(buf)
     let body_start = t[t.len() - 1]
 
-    let want = content_length_of(req)
+    let want = match content_length_of(req, limits.max_body_bytes) {
+        Ok(n) => n
+        Err(e) => return Err(e)
+    }
     if want > limits.max_body_bytes {
         return Err(HttpError { kind: BodyTooLarge, message: "Content-Length over max_body_bytes" })
     }
@@ -450,25 +531,54 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
     // transfer here.** `max_body_bytes` defaults to 1 MiB, not 8 KiB, and the
     // same per-call-O(n) `concat` accumulation is work amplification on
     // attacker-controlled input at that size, not a rounding error.
-    // Assembling a body at the 1 MiB cap out of 4096-byte reads takes up to
-    // 256 concatenations, and because each one copies everything accumulated
-    // so far plus the new chunk, the bytes actually moved are triangular in
-    // the chunk count: about 134,742,016 bytes copied to assemble 1,048,576 --
-    // a ~128x amplification -- costing roughly 230 microseconds in GC
+    //
+    // **Each read below asks for exactly `want - body.len()` bytes, not a
+    // fixed chunk size, which changes the common case but not the worst
+    // one.** A peer able to deliver the whole remainder in one read now
+    // costs this loop exactly one concatenation, regardless of `want` --
+    // previously, a fixed 4096-byte ask meant even a peer that had already
+    // sent the entire body cost exactly 256 concatenations to drain at the 1
+    // MiB default (not "up to" -- with the whole body already available,
+    // every read but the last returned the full 4096 bytes asked for), since
+    // this loop could only take 4096 bytes at a time regardless of how much
+    // more was already there to read. `Read::read` may still legally hand
+    // back fewer bytes than asked for on any call, so the worst case is
+    // exactly what it was before: a peer that sends the
+    // body `k` bytes at a time forces about `want / k` reads and
+    // concatenations, and because each concatenation copies everything
+    // accumulated so far plus the new chunk, the bytes actually moved are
+    // triangular in the read count -- about 134,742,016 bytes copied to
+    // assemble a 1,048,576-byte body at 4096 bytes per read (a ~128x
+    // amplification), or about 537,395,200 bytes at 1024 bytes per read
+    // (~512x). **Both figures are floors, not ceilings**: they hold only if
+    // the peer hands back exactly that many bytes on every read, and since
+    // `Read::read` may legally return fewer, a slower or more adversarial
+    // peer only raises the read count and the bytes copied -- never lowers
+    // them. At the worse of the two, that is roughly 230 microseconds in GC
     // allocations alone at this project's own measured ~900 ns each
     // (`docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
     // section 7), against the ~100 microsecond/request budget a 10k req/sec
-    // gate implies on a single-threaded executor. `Read::read` may legally
-    // hand back far fewer bytes than the `4096` asked for, so a peer that
-    // sends the same body in smaller pieces makes this worse, not better --
-    // 1024-byte reads mean up to 1024 concatenations, about 537,395,200 bytes
-    // copied, a ~512x amplification. Bounded, so not unlimited, but a lever
-    // between 128x and 512x that attacker-controlled input can pull is a real
-    // cost, recorded here rather than fixed: no loop restructuring, no
-    // different read size, and no intrinsic are part of this change -- that
-    // choice is recorded for the whole-branch review.
+    // gate implies on a single-threaded executor. Bounded, so not unlimited,
+    // but a lever attacker-controlled input can still pull on the worst-case
+    // path, recorded here rather than eliminated: no restructuring beyond
+    // sizing each read to what is still wanted, and no intrinsic, are part
+    // of this change -- that choice is recorded for the whole-branch review.
+    //
+    // **The `body.len() > limits.max_body_bytes` check this loop used to run
+    // on every iteration is gone, not merely untriggered.** It could only
+    // ever fire on overshoot -- reading more than `want` bytes in one call,
+    // which needed the old fixed 4096-byte ask to happen at all -- and when
+    // it did fire on a legitimate request it was a false rejection: with the
+    // defaults, any declared length in `(1044481, 1048576]` plus one
+    // trailing byte pulled into the same read pushed `body.len()` past
+    // `max_body_bytes` while `want` itself was still under it. Reading
+    // exactly `want - body.len()` bytes below means `body.len()` can never
+    // exceed `want`, and `want` is already checked against
+    // `limits.max_body_bytes` above before this loop starts, so the
+    // allocation this loop builds is bounded exactly now, not
+    // approximately -- there is no overshoot left for that check to catch.
     while body.len() < want {
-        let chunk = match conn.read(4096).await {
+        let chunk = match conn.read(want - body.len()).await {
             Ok(b) => b
             Err(e) => return Err(HttpError { kind: Transport, message: e.message })
         }
@@ -476,15 +586,12 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
             return Err(HttpError { kind: Transport, message: "connection closed mid-body" })
         }
         body = body.concat(chunk)
-        if body.len() > limits.max_body_bytes {
-            return Err(HttpError { kind: BodyTooLarge, message: "body over max_body_bytes" })
-        }
     }
 
     Ok(Request { method: req.method, path: req.path, headers: req.headers, body: body.slice(0, want) })
 }
 
-// `Content-Length`, or `0` when it is absent or not a number.
+// `Content-Length`, or `Ok(0)` when the header is absent.
 //
 // **`Content-Length` is the only body framing v1 understands.** A request
 // without one is treated as bodiless; chunked transfer-encoding is out of
@@ -492,36 +599,71 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
 // connection and will be misread as the next request. That is a known
 // limitation of v1 rather than a defect to work around here -- it is recorded
 // in the design spec's section 10 and in this module's header.
-fn content_length_of(req: Request) -> Int {
+//
+// **Returns `Err(BadHeader)` when the header is present but is not a
+// non-empty run of decimal digits, rather than defaulting it to `0`.** RFC
+// 9112 section 6.3 requires rejecting such a message outright: treating
+// `"5x"`, `"abc"` or `""` as `0` would accept the request with an empty body
+// while the peer still has the declared bytes queued to send, which desyncs
+// the connection exactly like the chunked-encoding and pipelining cases this
+// module's own header already documents -- the undelivered bytes sit on the
+// socket, and `read_request`'s next call parses them as the start of a new
+// request. This was checked once and found NOT to be absorbed downstream:
+// `Bytes::slice` clamping a negative bound to `0` (which is what the old,
+// silently-defaulting version of this function relied on) only kept a
+// negative `want` from corrupting memory safety -- it said nothing about the
+// connection-framing consequence above, which is the one that actually
+// matters here and is what this function now prevents directly.
+//
+// `max` is `limits.max_body_bytes`, threaded through to `digits_to_int` so a
+// pathologically long digit string cannot wrap its accumulator negative; see
+// that function's own doc comment.
+fn content_length_of(req: Request, max: Int) -> Result<Int, HttpError> {
     match req.headers.get("content-length") {
-        Some(v) => digits_to_int(v.trim())
-        None => 0
+        Some(v) => match digits_to_int(v.trim(), max) {
+            Some(n) => Ok(n)
+            None => Err(HttpError { kind: BadHeader, message: "Content-Length is not a valid non-negative integer" })
+        }
+        None => Ok(0)
     }
 }
 
-// A decimal string as an `Int`, or `0` on anything unexpected. Nova has no
-// `String`-to-number conversion, so this walks the characters.
+// A non-empty run of decimal digits as an `Int`, or `None` if `s` is empty
+// or contains anything else. Nova has no `String`-to-number conversion, so
+// this walks the characters.
 //
-// No overflow guard: a pathologically long digit string can wrap `n`
-// negative. Checked, not just assumed harmless -- the consequence is
-// absorbed downstream, not here. `read_request`'s `want > limits.max_body_bytes`
-// check does not catch a negative `want` (a negative number is never greater
-// than a positive limit), but `Bytes::slice` clamps a negative bound to `0`
-// (`crates/nova-runtime/src/bytes.rs`'s `nova_rt_bytes_slice`), so that
-// function's own `body.slice(0, want)` returns an empty body instead of
-// misbehaving.
-fn digits_to_int(s: String) -> Int {
+// **Capped at `max`, rather than accumulating without bound.** `Int` wraps
+// on overflow (measured elsewhere in this project), so a pathologically
+// long digit string could otherwise wrap the accumulator negative. The
+// value this returns eventually reaches exactly one comparison against
+// `max` itself: `content_length_of` passes it straight through as `want`,
+// and `read_request` checks `want > limits.max_body_bytes`, the same `max`
+// passed in here. So once the running total exceeds `max` the exact value
+// stops mattering, it is already "too large," and returning as soon as
+// that is known keeps the total from ever growing large enough to wrap.
+// This is narrower than a general overflow check, and is sufficient only
+// because of that comparison-only usage; it is not a general-purpose
+// decimal parser. One consequence of stopping early: a value
+// that is both longer than `max` warrants and would eventually prove
+// invalid past that point (digits followed by a stray non-digit) is
+// reported as a valid, too-large number rather than a malformed one, since
+// scanning stops the moment the running total is confirmed to exceed `max`
+// and the remaining characters are never inspected. The caller rejects the
+// request either way -- as `BodyTooLarge` instead of `BadHeader` in that one
+// edge case -- so this does not change whether the request is accepted.
+fn digits_to_int(s: String, max: Int) -> Option<Int> {
     let cs = s.chars()
-    if cs.len() == 0 { return 0 }
+    if cs.len() == 0 { return None }
     let mut n = 0
     let mut i = 0
     while i < cs.len() {
         let d = char_digit(cs[i])
-        if d < 0 { return 0 }
+        if d < 0 { return None }
         n = n * 10 + d
+        if n > max { return Some(n) }
         i = i + 1
     }
-    n
+    Some(n)
 }
 
 fn char_digit(c: Char) -> Int {
