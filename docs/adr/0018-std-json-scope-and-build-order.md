@@ -35,6 +35,11 @@ cycle's width as well as with the bound, and that amendment's Go comparison is
 flatly false rather than merely over-broad. **Again no decision changes**; the
 corrections are at the end of §8, after the 2026-08-25 amendment they qualify.
 
+**Amended 2026-09-01 (branch `std-http-parsing`, a separate later increment):
+the Consequences bullet naming position 10 unstarted is now stale.** No
+decision in this ADR moves — the correction is at the Consequences section
+itself, below, where the stale sentence lives.
+
 ## Context
 
 `00-MASTER-SPEC.md` §3 lists Phase 2's standard-library build order, and it
@@ -909,6 +914,18 @@ at the method.
   benchmark methodology documented in `docs/benchmarks/`, which does not
   exist. Nothing here is a step toward the throughput number that gate
   names.
+  [Forward marker, 2026-09-01, branch `std-http-parsing`: position 10 is no
+  longer unstarted. Its server half ships — request-head parsing over one
+  intrinsic, response serialisation over none — see
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`. Position 12
+  `std/crypto` is the one of the two named here that is still unstarted; a
+  sentence naming both together as "the two missing module groups" is wrong
+  now, and naming `std/crypto` alone is the correction, not a revised count.
+  `examples/05-json-api` and `docs/benchmarks/` still do not exist, so Phase
+  2's gate is still not reached. The wording here is left as written and
+  superseded by this marker rather than edited, the convention this
+  project's CHANGELOG already uses: a shipped record keeps what it claimed
+  at the time.]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both
