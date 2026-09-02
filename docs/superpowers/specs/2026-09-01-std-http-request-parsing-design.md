@@ -257,6 +257,17 @@ each has a distinct error kind rather than an abort:
 | max header count | 100 | bounds the offset table and the `Map` |
 | max body bytes | 1 MiB | bounds one allocation |
 
+**AMENDED 2026-09-01 (branch `std-http-parsing`, after the whole-branch
+review): this table is entirely byte-valued and has no temporal bound, and
+that omission was not deliberate.** Because no limit here bounds *time*, no
+task was ever asked for one, and `read_request` ships with no read timeout: a
+peer that connects and sends one byte holds a task forever, which on a
+single-threaded executor is the cheapest denial of service available against
+this server. `std/net` already ships the mitigation -- `TcpStream::read_timeout`
+-- and `std/http` uses neither it nor a `Limits` field for it. Recorded here
+rather than fixed: adding it is a later increment, and the gap being *silent*
+was the defect worth closing now.
+
 **No limit may be enforced by panicking.** The parse intrinsic runs on a
 compiled Nova frame's call stack, and `crate::task::PollFn`'s doc reserves the
 `"C-unwind"` permission for the runtime's Rust-side entry points rather than for
@@ -302,6 +313,30 @@ No claim is made here that 10k req/sec is reached. This increment makes it
 - Malformed input for each error kind, asserting the negative status and that
   the array has length 1.
 - Each limit at its boundary and one past it.
+
+**AMENDED 2026-09-01 (branch `std-http-parsing`, after the whole-branch
+review): two of the bullets above ask for things this document's own design
+makes untestable, and saying so here is better than leaving each fixture to
+discover it.**
+
+The partial-input bullet asks for offsets "identical to the unsplit case".
+Section 4's parser is stateless and re-reads the whole buffer on every call,
+so it **cannot** return different offsets for the same bytes -- the property
+is unfalsifiable rather than merely easy to satisfy. What a fixture can pin,
+and what `tests/runtime/http_partial.nova` does pin, is that a short buffer
+yields `status = 1` with a length-1 array and the completed buffer yields the
+full table. The stronger-sounding requirement adds nothing.
+
+The malformed-input bullet asks for a case per error kind. Two kinds cannot
+have one: `SliceOutOfBuffer` is checked against a violation of httparse's
+zero-copy contract, which its own doc argues cannot occur, and
+`IncompleteHeadFields` requires a parse that reports Complete while missing a
+head field. Both are defensive by construction. A third pair, `HeadTooLarge`
+and `TooManyHeaders`, is reachable through the mapping only by a caller whose
+`Limits` is *looser* than the runtime's compiled-in wall, which no fixture
+constructs. So the honest form of this requirement is: a case per kind a
+fixture can make the parser report, plus a stated argument for each kind it
+cannot.
 - Keep-alive: two requests on one connection, both parsed.
 
 Mutations that must fail, run and reported rather than predicted:
