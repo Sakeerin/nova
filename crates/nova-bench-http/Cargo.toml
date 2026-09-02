@@ -1,0 +1,21 @@
+[package]
+name = "nova-bench-http"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Keep-alive HTTP load generator for benchmarking Nova's std/http (no dependencies)"
+
+[[bin]]
+name = "nova-bench-http"
+path = "src/main.rs"
+# Not a benchmark target: `cargo bench --workspace -- --output-format bencher`
+# would otherwise build this under libtest's harness, which rejects criterion's
+# `--output-format`. The workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false
+
+[dependencies]
+# Deliberately empty. `std::net` and `std::thread` are sufficient, and the
+# previous increment had to justify `httparse` as its single new dependency --
+# test tooling is a poor place to spend that argument again.
