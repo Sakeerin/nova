@@ -709,6 +709,18 @@ async fn main() {
 
 Append to `crates/nova-cli/tests/run_tests.rs`. The spawn-and-pipe shape follows the existing `run_with_a_broken_pipe` helper in that file — read it first (`std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))` with piped stdio) and match its style.
 
+> **Amended 2026-09-03, after Task 2 ran.** The test below does not catch
+> Step 5's Mutation 1, and Mutation 1 is the step that exists to prove it
+> would. Every assertion here reads the generator's own self-reported
+> `RESULT` line, so a `run_load` that fabricates a plausible `Report`
+> without opening a socket satisfies all of them. Step 5's contingency --
+> strengthen the test before reverting -- is what fired, and what shipped
+> adds a negative control: the generator is also run against a port
+> nothing is listening on, and that run must fail. Against the
+> strengthened test the mutation fails as intended. Read
+> `crates/nova-cli/tests/run_tests.rs` for the shipped test rather than
+> transcribing the block below.
+
 ```rust
 /// The benchmark's two halves still work together: the Nova server starts,
 /// prints its port, and `nova-bench-http` drives keep-alive requests against
