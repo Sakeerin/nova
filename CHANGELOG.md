@@ -812,7 +812,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/benchmarks/http-fixed-response.md` is one dated observation against
   it.
   **The first recorded run:** self-test ceiling `rps=92923.6`
-  (`connections=200 duration=30s warmup=5s`, `errors=0`), Nova figure
+  (driven at `--connections 200 --duration 30 --warmup 5`, reporting
+  `connections=200` and `errors=0`; the `RESULT` line carries neither the
+  duration nor the warmup, so both must be recorded beside it), Nova figure
   `rps=11940.0` against `docs/benchmarks/server.nova` under identical
   settings (`errors=0`), a ratio of about 0.128 — the generator had headroom
   to spare and was not the binding constraint on this run, read alongside
