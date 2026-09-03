@@ -640,7 +640,22 @@ fn content_length_of(req: Request, max: Int) -> Result<Int, HttpError> {
 // and `read_request` checks `want > limits.max_body_bytes`, the same `max`
 // passed in here. So once the running total exceeds `max` the exact value
 // stops mattering, it is already "too large," and returning as soon as
-// that is known keeps the total from ever growing large enough to wrap.
+// that is known bounds the accumulator.
+//
+// **What that bound actually is, since the guarantee is conditional and an
+// earlier version of this comment stated it flatly.** Every iteration that
+// continues leaves `n <= max`, so the largest value `n` can reach is
+// `max * 10 + 9`. That cannot wrap while `max` stays below roughly
+// `Int::MAX / 10`. At the default `max_body_bytes` of 1 MiB the accumulator
+// tops out around ten million, so the margin is enormous -- but the
+// condition is on `max`, not on this function, and `max_body_bytes` is the
+// one ceiling here with no backstop underneath it: the runtime hard-walls
+// `max_head_bytes` and `max_header_count` before allocating, and never sees
+// the body at all. A caller passing a `max_body_bytes` near `Int::MAX`
+// would wrap this accumulator, and nothing clamps it. That value is
+// absurd -- hundreds of petabytes -- which is why this is a scoping note
+// rather than a check.
+//
 // This is narrower than a general overflow check, and is sufficient only
 // because of that comparison-only usage; it is not a general-purpose
 // decimal parser. One consequence of stopping early: a value
