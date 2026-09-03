@@ -208,9 +208,14 @@ is passed.
 **ALSO AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): these amendments
 inserted lines at the top of section 3, so every line below them in this file
 moved down, and line-number citations into this section written before this
-date now point that far above what they meant.** The shift, measured against
-`5be3a4f`, is 44 lines: 19 from the amendment above and 25 from this note,
-which is itself why the durable form of a citation here is not a number. The
+date now point above what they meant.** No line count is given for the shift,
+and that is deliberate rather than lazy: a stated offset is falsified by the
+next edit to this section, including edits to this note. Two attempts at a
+figure here were each true only until the paragraph containing them was
+written or revised. What follows instead is a translation from each stale
+anchor to something that does not move — a list position and the module it
+names — which is itself the reason the durable form of a citation here is not
+a number. The
 Phase 2 gate that was at line 245 is the `**Gate:**` line under Phase 2 below;
 the Phase 2 build-order entries that were at lines 238, 240 and 241 are
 positions 8, 10 and 11 of the numbered list under the same heading —
