@@ -926,6 +926,18 @@ at the method.
   superseded by this marker rather than edited, the convention this
   project's CHANGELOG already uses: a shipped record keeps what it claimed
   at the time.]
+  [Forward marker, 2026-09-03, branch `phase-2-gate-benchmark`, a separate
+  later increment: `docs/benchmarks/` now exists. It holds the measurement
+  procedure (`README.md`) and one dated observation
+  (`http-fixed-response.md`): 11,940.0 req/sec against `std/http`'s
+  read-and-parse path, excluding response serialisation, which numerically
+  clears the gate's absolute 10k+ criterion on one host and one run, the
+  Cranelift backend rather than the optimising LLVM one. `examples/05-json-api`
+  still does not exist, so Phase 2's gate is still not reached and no claim
+  is made here that it is; the ratio against Bun that `60-EXAMPLES.md` §5
+  also asks for remains entirely unmeasured. The wording above is left as
+  written, superseded by this marker rather than edited, the same
+  convention the marker above follows.]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both

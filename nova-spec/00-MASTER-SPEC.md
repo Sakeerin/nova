@@ -186,6 +186,25 @@ nova/
 
 Execute phases sequentially. Each phase has gating criteria — do not advance until met.
 
+**AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): Phase 2's gate below
+is specified twice, with two criteria that are not equivalent.** This
+section's own Phase 2 gate (line 245) reads "`examples/05-json-api` serves
+10k+ req/sec on benchmark hardware"; `nova-spec/60-EXAMPLES.md` §5's own
+gate for the same example reads "Benchmark vs Bun on same hardware shows
+≥ 1.0x req/sec ratio." An absolute 10k and a ratio against Bun can disagree
+in either direction — 10k could be reached while the ratio fails, or the
+ratio could clear 1.0 well under 10k if Bun itself is slower on the same
+machine. This increment measures only the absolute figure, on one host, one
+run: `docs/benchmarks/README.md` documents the procedure and
+`docs/benchmarks/http-fixed-response.md` records 11,940.0 req/sec against
+`std/http`'s read-and-parse path, excluding response serialisation, on the
+Cranelift backend rather than the optimising LLVM one, which numerically
+clears the criterion stated below. The ratio against Bun that §5 also asks
+for is entirely unmeasured, and `examples/05-json-api` itself still does not
+exist (`nova-spec/60-EXAMPLES.md` §5 carries its own dated amendment on what
+that example would need). No claim is made here that Phase 2's gate, below,
+is passed.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
