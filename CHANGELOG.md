@@ -808,8 +808,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and reused for every write, so the number this procedure produces
   **excludes response serialisation** — a ceiling for a real server that
   serialises a response per request, not a simulation of one that does.
-  `docs/benchmarks/README.md` is the procedure; `docs/benchmarks/
-  http-fixed-response.md` is one dated observation against it.
+  `docs/benchmarks/README.md` is the procedure;
+  `docs/benchmarks/http-fixed-response.md` is one dated observation against
+  it.
   **The first recorded run:** self-test ceiling `rps=92923.6`
   (`connections=200 duration=30s warmup=5s`, `errors=0`), Nova figure
   `rps=11940.0` against `docs/benchmarks/server.nova` under identical
