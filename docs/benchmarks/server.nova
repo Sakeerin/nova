@@ -1,0 +1,67 @@
+// The Nova server under benchmark. Not an example, and deliberately not named
+// `03-http-server`: that number and name have drifted from what `examples/`
+// holds, the drift is recorded as open in `nova-spec/00-MASTER-SPEC.md` and
+// `nova-spec/60-EXAMPLES.md`, and taking the reserved name for something the
+// spec does not describe would half-resolve it. See
+// `docs/superpowers/specs/2026-09-02-phase-2-gate-benchmark-design.md` section 3.
+//
+// **The response bytes are built ONCE, outside the accept loop, and reused.**
+// `Response::to_bytes` allocates, and hoisting it isolates the read-and-parse
+// path -- which is where the roughly 18 microseconds per request of eager
+// header materialisation that `std/http`'s design spec discloses actually
+// lives. So any number taken against this server EXCLUDES response
+// serialisation: it is a ceiling for a real server rather than a simulation of
+// one. `docs/benchmarks/README.md` states that beside the figure.
+//
+// **This server never exits.** `block_on` cannot return while a task is parked,
+// and the accept loop parks forever, so the benchmark procedure kills the
+// process. There is no shutdown path and its absence is not an oversight.
+//
+// **It logs nothing per request.** Per-request output at these rates would
+// become the bottleneck we accidentally measured.
+//
+// One task accepts and one task serves each connection, which is forced rather
+// than chosen: staging two socket waits in a single poll aborts the process
+// (`stage_park` in `crates/nova-runtime/src/task.rs`), so the task parked in
+// `accept` cannot also read a connection.
+
+async fn serve(conn: TcpStream, wire: Bytes) {
+    // Keep-alive: one connection, requests until the peer stops or errs.
+    while true {
+        match read_request(conn, Limits::default()).await {
+            Ok(req) => {
+                match conn.write(wire).await {
+                    Ok(n) => n
+                    Err(e) => break
+                }
+            }
+            Err(e) => break
+        }
+    }
+    let _ = conn.close().await
+}
+
+async fn main() {
+    let l = match bind("127.0.0.1:0") {
+        Ok(l) => l
+        Err(e) => panic("bind: ${e.message}")
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => panic("local_port: ${e.message}")
+    }
+    // The one line this server prints. The benchmark procedure reads it by eye
+    // and the smoke test parses it from stdout, so its shape is load-bearing.
+    println("listening on 127.0.0.1:${port}")
+
+    let wire = Response::text(200, "{\"ok\":true}").to_bytes()
+
+    while true {
+        match l.accept().await {
+            Ok(conn) => {
+                let h = spawn(serve(conn, wire))
+            }
+            Err(e) => break
+        }
+    }
+}
