@@ -9338,3 +9338,141 @@ fn http_keepalive_run() {
         .success()
         .stdout(expected);
 }
+
+/// The benchmark's two halves still work together: the Nova server starts,
+/// prints its port, and `nova-bench-http` drives keep-alive requests against
+/// it with no errors.
+///
+/// **This asserts no throughput number**, so it cannot flake on timing. One
+/// connection for one second is enough to prove the halves connect; the real
+/// measurement is taken by hand, per `docs/benchmarks/README.md`.
+///
+/// It is a normal test rather than `#[ignore]`d on purpose: CI's Test job has
+/// an advisory step that runs exactly the ignored tests, so a load test placed
+/// there would run on every push inside a step whose failures are tolerated and
+/// therefore unread.
+///
+/// Uses `nova run` rather than a built binary because this checks correctness,
+/// not throughput -- JIT warmup is irrelevant here, and a separate build step
+/// would only add moving parts. Task 3's procedure builds a native binary
+/// instead, and `docs/benchmarks/README.md` says why.
+///
+/// **Also runs the generator once more against a port nothing is listening
+/// on, and asserts that run fails.** Measured directly (task-2-brief.md Step
+/// 5): a `run_load` mutated to fabricate a plausible `Report` without opening
+/// any socket satisfies every assertion above it, since those only read the
+/// generator's own self-reported `RESULT` line. This negative control is what
+/// turns that mutation into a failure -- a generator actually driving
+/// connections must see every one of them refused against a dead port, and
+/// one that does not touch the network cannot tell a dead port from a live
+/// server.
+#[test]
+fn bench_http_server_and_generator_agree() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    // No call in this file has resolved a binary belonging to another crate
+    // before now -- every other `cargo_bin(` call here names "nova", which is
+    // nova-cli's own binary and gets `CARGO_BIN_EXE_nova` set by cargo
+    // automatically for this test binary. Cargo does not set
+    // `CARGO_BIN_EXE_nova-bench-http` here, since that binary belongs to a
+    // different package; `cargo_bin` then falls back to looking directly in
+    // the shared `target/debug` directory, and if it is not there it panics
+    // on its own rather than returning a bad path. That fallback panic names
+    // no fix, so the path is checked here first with a message that does:
+    // `cargo test --workspace` builds every member's binaries before running
+    // any test, but `cargo test -p nova-cli` does not, and would otherwise
+    // leave this failing on a confusing panic instead of a clear one.
+    let generator = assert_cmd::cargo::cargo_bin("nova-bench-http");
+    assert!(
+        generator.exists(),
+        "nova-bench-http binary not found at {generator:?} -- run \
+         `cargo build --locked --workspace` first"
+    );
+
+    let mut server = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
+        .arg("run")
+        .arg(repo_root().join("docs/benchmarks/server.nova"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the benchmark server");
+
+    // The port line is the first thing the server prints, so this read blocks
+    // only until it arrives -- and if the program fails to compile, the stream
+    // closes and `next()` yields `None`, which fails with a clear message
+    // rather than hanging.
+    let stdout = server.stdout.take().expect("stdout was piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.ok())
+        .unwrap_or_default();
+    let port = first
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim().parse::<u16>().ok());
+
+    let port = match port {
+        Some(p) => p,
+        None => {
+            let _ = server.kill();
+            panic!("server did not print a parseable port line; got {first:?}");
+        }
+    };
+
+    let out = std::process::Command::new(generator)
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{port}"))
+        .args(["--connections", "1", "--duration", "1", "--warmup", "0"])
+        .output()
+        .expect("run nova-bench-http");
+
+    let _ = server.kill();
+    let _ = server.wait();
+
+    let report = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "generator failed: {}\nstderr: {}",
+        report,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let result = report
+        .lines()
+        .find(|l| l.starts_with("RESULT "))
+        .unwrap_or_else(|| panic!("no RESULT line in generator output: {report:?}"));
+    assert!(
+        result.contains(" errors=0 "),
+        "generator reported errors: {result}"
+    );
+    let requests: u64 = result
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("requests="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(requests >= 1, "no request completed: {result}");
+
+    // Negative control -- see this test's own doc comment for why it exists.
+    // A fresh listener is bound and dropped immediately for the sole purpose
+    // of getting a port guaranteed to be refusing connections: dropping
+    // closes it right away, and no lingering TIME_WAIT applies to a socket
+    // that never accepted one.
+    let dead_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        l.local_addr().expect("read the bound port").port()
+    };
+    let dead = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova-bench-http"))
+        .arg("--addr")
+        .arg(format!("127.0.0.1:{dead_port}"))
+        .args(["--connections", "1", "--duration", "1", "--warmup", "0"])
+        .output()
+        .expect("run nova-bench-http against a dead port");
+    assert!(
+        !dead.status.success(),
+        "nova-bench-http reported success against a port nothing is listening on \
+         (stdout: {}, stderr: {})",
+        String::from_utf8_lossy(&dead.stdout),
+        String::from_utf8_lossy(&dead.stderr)
+    );
+}
