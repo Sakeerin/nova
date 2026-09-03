@@ -206,6 +206,30 @@ Expected: a compile error naming `head_end`, `content_length`, `response_len` an
 
 Prepend to `crates/nova-bench-http/src/main.rs`, above the test module:
 
+> **Corrected 2026-09-03, after Task 1 ran.** Two things about the block
+> below, both found by executing it rather than by reading it.
+>
+> **`content_length` was wrong here, and is fixed below.** It read
+> `let (name, value) = line.split_once(':')?;` inside the loop. `?` on an
+> `Option` returns from the whole function, and the first line scanned is
+> always the status line, which carries no colon -- so `content_length`
+> returned `None` before reaching any header, and `response_len`'s
+> `.unwrap_or(0)` then treated every body as empty. That is the desync this
+> task exists to prevent, moved from reading the wrong count to always
+> computing the wrong one. The tests in Step 2 caught it: the
+> case-insensitive positive match failed, and so did both `response_len`
+> tests, the pipelining guard among them.
+>
+> **`worker` below is INCOMPLETE, and deliberately not re-copied here.**
+> Task 1's review found that its `stream.read` has no timeout, so a peer
+> that accepts and then stalls -- rather than closing -- hangs the run past
+> `--duration` with no diagnostic and no `RESULT` line, because a blocked
+> worker never reaches its `stop` check and `run_load` then joins it. What
+> shipped arms a read and a write timeout on the connection and threads the
+> value through `worker` and `run_load` so a test can pass a short one.
+> **Read `crates/nova-bench-http/src/main.rs` for the current shape rather
+> than transcribing the block below**, which is kept as the plan it was.
+
 ```rust
 //! Keep-alive HTTP load generator for Nova's `std/http`.
 //!
@@ -257,7 +281,13 @@ fn head_end(buf: &[u8]) -> Option<usize> {
 fn content_length(head: &[u8]) -> Option<usize> {
     let text = std::str::from_utf8(head).ok()?;
     for line in text.split("\r\n") {
-        let (name, value) = line.split_once(':')?;
+        // A line with no `:` (the status line, or a trailing blank line) is
+        // simply not a header -- skip it rather than treating its absence as
+        // "no Content-Length anywhere", which would stop the scan before it
+        // ever reaches the real header.
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
         if name.trim().eq_ignore_ascii_case("content-length") {
             let v = value.trim();
             if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
