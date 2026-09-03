@@ -9371,24 +9371,19 @@ fn bench_http_server_and_generator_agree() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    // No call in this file has resolved a binary belonging to another crate
-    // before now -- every other `cargo_bin(` call here names "nova", which is
-    // nova-cli's own binary and gets `CARGO_BIN_EXE_nova` set by cargo
-    // automatically for this test binary. Cargo does not set
-    // `CARGO_BIN_EXE_nova-bench-http` here, since that binary belongs to a
-    // different package; `cargo_bin` then falls back to looking directly in
-    // the shared `target/debug` directory, and if it is not there it panics
-    // on its own rather than returning a bad path. That fallback panic names
-    // no fix, so the path is checked here first with a message that does:
-    // `cargo test --workspace` builds every member's binaries before running
-    // any test, but `cargo test -p nova-cli` does not, and would otherwise
-    // leave this failing on a confusing panic instead of a clear one.
+    // `assert_cmd::cargo::cargo_bin("nova-bench-http")` resolves a binary
+    // belonging to a different crate; every other `cargo_bin(` call in this
+    // file names nova-cli's own binary. If `nova-bench-http` has never been
+    // built, `cargo_bin` panics on its own rather than handing back a bad
+    // path -- checked against the installed assert_cmd (2.2.1) source rather
+    // than assumed: `legacy_cargo_bin` looks in the shared `target/debug`
+    // directory and returns `None` only once its own `.exists()` check fails,
+    // so `cargo_bin` never returns a path that isn't there. That panic's own
+    // wording ("move it to an integration test") misdirects here, though: the
+    // real cause is that `cargo test -p nova-cli` does not build other
+    // workspace members' binaries the way `cargo test --workspace` does, so
+    // the fix is `cargo build --locked --workspace` first.
     let generator = assert_cmd::cargo::cargo_bin("nova-bench-http");
-    assert!(
-        generator.exists(),
-        "nova-bench-http binary not found at {generator:?} -- run \
-         `cargo build --locked --workspace` first"
-    );
 
     let mut server = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
         .arg("run")
@@ -9457,7 +9452,14 @@ fn bench_http_server_and_generator_agree() {
     // A fresh listener is bound and dropped immediately for the sole purpose
     // of getting a port guaranteed to be refusing connections: dropping
     // closes it right away, and no lingering TIME_WAIT applies to a socket
-    // that never accepted one.
+    // that never accepted one. This has a narrow TOCTOU window -- another
+    // bind anywhere on the system, including the other ephemeral
+    // `TcpListener::bind("127.0.0.1:0")` sites elsewhere in this file, could
+    // claim the freed port before `nova-bench-http` connects to it. Holding
+    // the listener open instead would close that window but turn the target
+    // into a STALLED peer rather than a dead one, which would cost this test
+    // a ten-second wait for `nova-bench-http`'s write timeout instead of a
+    // fast failure -- worse on balance than the window it would close.
     let dead_port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         l.local_addr().expect("read the bound port").port()
