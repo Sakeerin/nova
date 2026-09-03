@@ -31,6 +31,18 @@ use std::time::{Duration, Instant};
 /// many requests each, not N requests.
 const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: nova-bench\r\n\r\n";
 
+/// Per-read and per-write socket timeout for every connection.
+///
+/// Ten seconds cannot fire against a healthy server: the `--self-test`
+/// ceiling measured tens of thousands of requests per second per connection,
+/// so one request-response round trip normally completes in microseconds.
+/// What it guards against is a target that accepts a connection and then
+/// stalls mid-response rather than closing it -- without this, `stream.read`
+/// blocks forever, the worker never reaches its `stop` check, and `run_load`
+/// hangs past `--duration` with no diagnostic and no `RESULT` line. Ten
+/// seconds converts that unbounded hang into one counted error.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Byte offset just past a complete `CRLF CRLF`, or `None`.
 ///
 /// A split terminator is not an end: returning an offset for `"...\r\n\r"`
@@ -152,12 +164,22 @@ struct Report {
 /// A connection that cannot be established at all is one error and no requests,
 /// rather than a panic: `main` decides whether the whole run is a failure, and
 /// it needs the count to decide.
-fn worker(addr: &str, stop: &AtomicBool) -> (u64, u64) {
+fn worker(addr: &str, stop: &AtomicBool, timeout: Duration) -> (u64, u64) {
     let mut stream = match TcpStream::connect(addr) {
         Ok(s) => s,
         Err(_) => return (0, 1),
     };
     if stream.set_nodelay(true).is_err() {
+        return (0, 1);
+    }
+    // A peer that accepts and then stalls -- rather than closing -- must
+    // surface as a counted error, not an unbounded block. The `Err(_)` arm
+    // already in the read loop below counts and returns on a timeout, so the
+    // loop itself needs no change; only arming the timeout does.
+    if stream.set_read_timeout(Some(timeout)).is_err() {
+        return (0, 1);
+    }
+    if stream.set_write_timeout(Some(timeout)).is_err() {
         return (0, 1);
     }
     let mut requests = 0u64;
@@ -193,14 +215,14 @@ fn worker(addr: &str, stop: &AtomicBool) -> (u64, u64) {
     (requests, errors)
 }
 
-fn run_load(addr: &str, connections: usize, duration: Duration) -> Report {
+fn run_load(addr: &str, connections: usize, duration: Duration, timeout: Duration) -> Report {
     let stop = Arc::new(AtomicBool::new(false));
     let start = Instant::now();
     let handles: Vec<_> = (0..connections)
         .map(|_| {
             let stop = Arc::clone(&stop);
             let addr = addr.to_string();
-            std::thread::spawn(move || worker(&addr, &stop))
+            std::thread::spawn(move || worker(&addr, &stop, timeout))
         })
         .collect();
     std::thread::sleep(duration);
@@ -297,7 +319,7 @@ fn main() {
     };
 
     if !cfg.warmup.is_zero() {
-        let w = run_load(&addr, cfg.connections, cfg.warmup);
+        let w = run_load(&addr, cfg.connections, cfg.warmup, IO_TIMEOUT);
         if w.requests == 0 {
             // A warmup that completed no request means nothing is answering.
             // Reporting 0 req/sec here would read as a valid measurement.
@@ -310,7 +332,7 @@ fn main() {
         }
     }
 
-    let r = run_load(&addr, cfg.connections, cfg.duration);
+    let r = run_load(&addr, cfg.connections, cfg.duration, IO_TIMEOUT);
     if r.requests == 0 {
         eprintln!("nova-bench-http: measurement completed no requests against {addr}");
         std::process::exit(1);
@@ -409,5 +431,43 @@ mod tests {
     fn self_test_needs_no_addr_and_plain_mode_does() {
         assert!(Config::from_args(["--self-test"].iter().map(|s| s.to_string())).is_ok());
         assert!(Config::from_args(std::iter::empty()).is_err());
+    }
+
+    #[test]
+    fn a_stalled_connection_times_out_rather_than_hanging_forever() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let addr = listener
+            .local_addr()
+            .expect("read the bound port")
+            .to_string();
+        std::thread::spawn(move || {
+            let Ok((_conn, _)) = listener.accept() else {
+                return;
+            };
+            // Hold the connection open without writing a response or
+            // dropping it: dropping would close the socket, and the worker
+            // would then see `Ok(0)` (a clean close) rather than a timeout.
+            // Parking forever keeps `_conn` alive for as long as this thread
+            // runs; nothing joins this thread, so it is detached exactly
+            // like `spawn_self_test_server`'s per-connection threads, and
+            // the process exits at the end of the test binary regardless of
+            // how long the park lasts.
+            loop {
+                std::thread::park();
+            }
+        });
+        let stop = AtomicBool::new(false);
+        let start = Instant::now();
+        let (requests, errors) = worker(&addr, &stop, Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        assert_eq!(requests, 0);
+        assert!(
+            errors > 0,
+            "a stalled connection must count as an error, not hang silently"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the read timeout should fire in well under 3s; took {elapsed:?} instead"
+        );
     }
 }
