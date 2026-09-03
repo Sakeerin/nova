@@ -167,28 +167,28 @@ async fn main() {
 written in a Nova that does not exist, and its own benchmark methodology
 does not run on this project's development host.** Measurably absent from
 the language, each needed by the listing below: `@derive` (used here as
-`@derive(ToJson, FromJson, Clone)`) is not implemented — `nova-spec/
-20-STDLIB.md:548` calls it "a compiler builtin (Phase 2)", deferred rather
-than shipped; `Map` has `keys()` and no
-`values()` (`std/collections/lib.nova`), and the listing below calls
-`users.values()`; the language has no String-to-number conversion reachable
-from user code — `req.params.get("id").parse::<Int>()` below needs one, and
-the one conversion of that shape that exists, `str_to_float`, is
-`STD_ONLY`, reachable only from within `std/` modules, not from a program
-shaped like this one; the `Handler` type this listing's `http.Server.get`/
-`.post` need is `P0001` — `nova-spec/20-STDLIB.md:504`'s `pub type Handler =
-async fn(Request) -> Response` does not parse; and there is no `?` operator
-and no turbofish, both used twice below (`req.body_json::<User>()?`,
-`req.params.get("id").parse::<Int>()?`). Its `BENCHMARK.md` destination
-below is unsatisfiable until this example exists — `examples/` holds
-`01-hello-world`, `02-fibonacci` and `03-producer-consumer`, no
-`05-json-api` — so the measured number this gate asks for lives in
-`docs/benchmarks/` instead. Its own benchmark methodology,
-`wrk -t8 -c200 -d30s`, does not run on this project's Windows development
-host either: of `wrk`, `oha`, `bombardier`, `hey`, `ab`, `k6` and `vegeta`,
-none is installed there, and `wrk` itself is POSIX-only.
-`crates/nova-bench-http` and `docs/benchmarks/` exist because of that gap —
-see `docs/benchmarks/README.md` for the procedure used instead and
+`@derive(ToJson, FromJson, Clone)`) is not implemented —
+`nova-spec/20-STDLIB.md:548` calls it "a compiler builtin (Phase 2)",
+deferred rather than shipped; `Map` has `keys()` and no `values()`
+(`std/collections/lib.nova`), and the listing below calls `users.values()`;
+the language has no String-to-number conversion reachable from user code —
+`req.params.get("id").parse::<Int>()` below needs one, and the one
+conversion of that shape that exists, `str_to_float`, is `STD_ONLY`,
+reachable only from within `std/` modules, not from a program shaped like
+this one; the `Handler` type this listing's `http.Server.get`/`.post` need
+is `P0001` — `nova-spec/20-STDLIB.md:504`'s own
+`pub type Handler = async fn(Request) -> Response` does not parse; and
+there is no `?` operator and no turbofish, both used twice below
+(`req.body_json::<User>()?`, `req.params.get("id").parse::<Int>()?`). Its
+`BENCHMARK.md` destination below is unsatisfiable until this example
+exists — `examples/` holds `01-hello-world`, `02-fibonacci` and
+`03-producer-consumer`, no `05-json-api` — so the measured number this gate
+asks for lives in `docs/benchmarks/` instead. Its own benchmark
+methodology, `wrk -t8 -c200 -d30s`, does not run on this project's Windows
+development host either: of `wrk`, `oha`, `bombardier`, `hey`, `ab`, `k6`
+and `vegeta`, none is installed there, and `wrk` itself is POSIX-only.
+`crates/nova-bench-http` and `docs/benchmarks/` exist because of that
+gap — see `docs/benchmarks/README.md` for the procedure used instead and
 `docs/benchmarks/http-fixed-response.md` for the one number it has
 produced. The listing below stays as written, as the aspiration it always
 was.
