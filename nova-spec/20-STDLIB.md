@@ -1137,6 +1137,22 @@ and `docs/benchmarks/`, neither of which exists, so **Phase 2 is still not
 complete** — true for a different reason than it was when the paragraph
 above it was written.
 
+**AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`, a separate later
+increment): the `docs/benchmarks/` clause in both paragraphs above is now
+false.** `docs/benchmarks/` exists — `README.md` documents the measurement
+procedure and `http-fixed-response.md` records one dated run: 11,940.0
+req/sec against `std/http`'s read-and-parse path, excluding response
+serialisation, against a 92,923.6 req/sec self-test ceiling. That figure
+numerically clears the gate's absolute 10k+ criterion
+(`00-MASTER-SPEC.md:245`) on one host, one run, the Cranelift backend rather
+than the optimising LLVM one. `examples/05-json-api` still does not exist
+and position 12 `std/crypto` is still the one Phase 2 module group this tree
+has not started, so **Phase 2 is still not complete** — narrower now than
+either paragraph above states, since the destination half of the gate's
+methodology clause was the only part stale here. The ratio against Bun that
+`nova-spec/60-EXAMPLES.md` §5 also asks for remains entirely unmeasured, and
+no claim is made that the gate itself is passed.
+
 ---
 
 ## 8. `std/crypto`

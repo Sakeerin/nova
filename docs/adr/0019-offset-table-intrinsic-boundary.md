@@ -26,6 +26,12 @@ review: neither `read` call in `read_request` carries a timeout. That is now
 its own bullet in Consequences; the design spec carries the same disclosure
 in its own section 6.
 
+**Amended 2026-09-03 (branch `phase-2-gate-benchmark`, a separate later
+increment): `docs/benchmarks/` now exists, which two sentences below still
+deny.** No decision in this ADR moves. The corrections are inline, at the
+Context section and at the Consequences bullet naming position 10, where the
+stale sentences live.
+
 ## Context
 
 `std/http` is Phase 2 position 10 of the thirteen listed in
@@ -45,6 +51,12 @@ piece everything else waits on, an HTTP/1.1 server that can parse a request
 and write a response, did not exist either. This increment supplies that
 piece: request-head parsing, backed by one runtime intrinsic, and response
 serialisation, backed by none.
+
+[Amended 2026-09-03, branch `phase-2-gate-benchmark`: `docs/benchmarks/` now
+exists — its procedure is `docs/benchmarks/README.md` and its first recorded
+number is `docs/benchmarks/http-fixed-response.md`, 11,940.0 req/sec against
+`std/http`'s read-and-parse path. `examples/05-json-api` still does not
+exist, so the gate itself is still unwritten regardless.]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
@@ -301,6 +313,11 @@ can observe timing and adapt, and not claimed as cryptographic.
   position 12 `std/crypto` is the one Phase 2 module group this tree still
   has not started. Nothing here claims the 10k+ req/sec gate is reached;
   §5 above records two open costs against it instead.
+  [Amended 2026-09-03, branch `phase-2-gate-benchmark`: `docs/benchmarks/`
+  now exists — see the Status section above. `examples/05-json-api` still
+  does not exist and nothing here claims the 10k+ req/sec gate is reached;
+  see `docs/benchmarks/http-fixed-response.md` for the measured figure and
+  what it does and does not establish.]
 - **2026-09-02, whole-branch review: neither `read` call in `read_request`
   carries a timeout, and nothing before this review said so.** Both calls
   (`std/http/lib.nova`) park with no deadline — `crates/nova-runtime/src/net.rs`'s

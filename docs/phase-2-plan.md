@@ -135,6 +135,20 @@ The foundation. No stdlib until this is solid.
   `docs/benchmarks/` still do not exist, though `std/http` and `std/json`
   no longer block writing them.
 
+**AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): the second half of
+that gate is no longer undocumented.** `docs/benchmarks/` now exists:
+`crates/nova-bench-http` (a dependency-free load generator) plus
+`docs/benchmarks/README.md` (the procedure) and
+`docs/benchmarks/http-fixed-response.md` (one dated run) measure
+`std/http`'s read-and-parse path at 11,940.0 req/sec against a 92,923.6
+req/sec self-test ceiling, excluding response serialisation, on the
+Cranelift backend rather than the optimising LLVM one. That figure
+numerically clears the gate's absolute 10k+ criterion. `examples/05-json-api`
+still does not exist, so the first half of the gate is still not reached,
+and no claim is made that the Phase 2 gate as a whole is passed — the ratio
+against Bun that `nova-spec/60-EXAMPLES.md` §5 also asks for remains
+entirely unmeasured.
+
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
 - Fold in the drift cleanup: chumsky 0.10, `salsa` scaffolding, `fuzz/` targets

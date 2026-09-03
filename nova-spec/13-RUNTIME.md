@@ -554,3 +554,23 @@ benchmark harness in this repo, `examples/05-json-api` still does not exist,
 and `docs/benchmarks/` still does not exist. A module existing is not the
 same claim as a benchmark of it existing, and this correction narrows to
 exactly the first.
+
+**AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): the benchmark half
+of the harness-gap sentence above is now false; the stress half is not.** A
+benchmark harness exists now — `crates/nova-bench-http`, a dependency-free
+load generator, plus the procedure and dated observation in
+`docs/benchmarks/` (`README.md` and `http-fixed-response.md`) — so "there is
+still no stress or benchmark harness in this repo" no longer holds of the
+benchmark half. No stress harness of the kind the original roster named
+("spawn 10k tasks, verify no leaks") exists; `NOVA_GC_STRESS` (3.3) remains
+the one stress mechanism this tree has, and it targets root scanning rather
+than task counts, exactly as recorded above. `docs/benchmarks/` now exists,
+which falsifies the sentence's third clause on its own; `examples/05-json-api`
+still does not, so the sentence's second clause still holds.
+`docs/benchmarks/http-fixed-response.md` records one measured figure,
+11,940.0 req/sec against `std/http`'s read-and-parse path, which numerically
+clears the Phase 2 gate's absolute 10k+ criterion (`00-MASTER-SPEC.md:245`)
+on one host and one run — no claim is made that the gate itself is passed,
+since `examples/05-json-api` remains unwritten and the gate's other
+criterion, a ratio against Bun (`60-EXAMPLES.md` §5), is entirely
+unmeasured.

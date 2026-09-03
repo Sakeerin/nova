@@ -794,6 +794,51 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tests on the intrinsic, and one MIR lowering test —
   `http_parse_request_lowers_to_a_runtime_call`
   (`crates/nova-mir/tests/lower_tests.rs`). Eighteen new tests, 1081 → 1099.
+- **`crates/nova-bench-http`, a dependency-free keep-alive HTTP/1.1 load
+  generator (`std::net` and `std::thread` only, no dependencies), and
+  `docs/benchmarks/`, the Phase 2 gate's measurement procedure plus its
+  first recorded number.** The generator drives keep-alive HTTP/1.1 against
+  a target and prints a machine-readable `RESULT` line; its `--self-test`
+  mode drives the same load against a trivial fixed-response server built
+  into the same binary, which is how the procedure gets the generator's own
+  ceiling with nothing external installed — mandatory calibration, not
+  optional context, since a Nova figure without it cannot be told apart from
+  the generator's own limit. `docs/benchmarks/server.nova` answers every
+  request with the same fixed JSON body, built once outside its accept loop
+  and reused for every write, so the number this procedure produces
+  **excludes response serialisation** — a ceiling for a real server that
+  serialises a response per request, not a simulation of one that does.
+  `docs/benchmarks/README.md` is the procedure; `docs/benchmarks/
+  http-fixed-response.md` is one dated observation against it.
+  **The first recorded run:** self-test ceiling `rps=92923.6`
+  (`connections=200 duration=30s warmup=5s`, `errors=0`), Nova figure
+  `rps=11940.0` against `docs/benchmarks/server.nova` under identical
+  settings (`errors=0`), a ratio of about 0.128 — the generator had headroom
+  to spare and was not the binding constraint on this run, read alongside
+  `docs/adr/0009-async-execution-model.md`'s single-threading requirement
+  rather than as a multiple-slower comparison, since the self-test server is
+  one OS thread per connection across the host while
+  `docs/benchmarks/server.nova` is 200 tasks cooperatively scheduled on the
+  one thread the collector's thread-local heap requires. Only
+  release-`nova` plus the Cranelift backend is measurable on this host:
+  `clang`, `llc`, `clang-17`, `llc-17`, `clang++` and `lld` are all absent
+  from its `PATH`, so `nova build --release`'s optimising LLVM path cannot
+  run there at all, and that figure stays entirely unmeasured.
+  **11,940.0 numerically clears the 10k+ absolute criterion**
+  `00-MASTER-SPEC.md:245` states for Phase 2's gate. Where this figure
+  landed is the finding this increment set out to produce. **No claim is
+  made that the Phase 2 gate is passed**: this is one host and one run; it
+  is the Cranelift backend rather than the optimising LLVM one; it excludes
+  response serialisation; the gate's other stated criterion — a ratio of at
+  least 1.0 against Bun (`nova-spec/60-EXAMPLES.md` §5) — is entirely
+  unmeasured; and the gate names `examples/05-json-api`, which does not
+  exist and cannot be written as the spec currently states it (see that
+  section's own dated amendment). `nova-spec/00-MASTER-SPEC.md` §3,
+  `nova-spec/13-RUNTIME.md` §10, `nova-spec/20-STDLIB.md` §7,
+  `docs/adr/0018-std-json-scope-and-build-order.md`,
+  `docs/adr/0019-offset-table-intrinsic-boundary.md` and
+  `docs/phase-2-plan.md` each carry a dated amendment recording this; none
+  is rewritten.
 
 ### Changed
 
