@@ -28,6 +28,14 @@ tracing = { workspace = true }
 # still be used. `httparse` has no dependencies of its own.
 httparse = "1.10"
 
+# The Phase 2 build order names `ring` for `std/crypto`
+# (`nova-spec/00-MASTER-SPEC.md` section 3). Chosen over the RustCrypto
+# family because it is what the spec names, needs one dependency argument
+# rather than four, and adds fewer new lockfile entries: `ring`, `untrusted`,
+# `wasi` and `getrandom` 0.2.x, where the alternative adds roughly a dozen.
+# Its own MSRV is 1.66, under this workspace's 1.78 floor.
+ring = "0.17"
+
 # `poll.rs`'s platform shim: `select`'s `fd_set` has a different bit-mask
 # layout on Linux (glibc, 64-bit words) than on macOS (Darwin, 32-bit words),
 # and hand-rolling both correctly with no way to run the macOS arm locally

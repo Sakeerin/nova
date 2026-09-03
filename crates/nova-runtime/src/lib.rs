@@ -22,6 +22,14 @@ use std::sync::OnceLock;
 /// byte surface beside this module's first four intrinsics, the same way
 /// this crate's other modules build on `task`.
 pub mod bytes;
+/// SHA-256, SHA-512, HMAC-SHA-256 and its constant-time check, plus random
+/// bytes and a bounded random integer, for `std/crypto`. Private, like
+/// [`file`], [`http`], [`net`], [`poll`] and [`log`]: nothing outside this
+/// crate names `crypto::` directly -- the three `nova_rt_crypto_*` symbols
+/// reach the JIT and linked binaries through their `#[no_mangle]` C names and
+/// through [`symbols`], which needs only this module's *items* public, not
+/// the module path itself.
+mod crypto;
 /// The open-file table and its five intrinsics for `std/fs`'s `File`.
 /// Private, not `pub` like [`fs`]/[`bytes`]/[`io`]: nothing outside this
 /// crate names `file::` directly — the five `nova_rt_file_*` symbols reach
@@ -880,6 +888,18 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_http_parse_request",
             http::nova_rt_http_parse_request as *const u8,
+        ),
+        (
+            "nova_rt_crypto_hash",
+            crypto::nova_rt_crypto_hash as *const u8,
+        ),
+        (
+            "nova_rt_crypto_random_bytes",
+            crypto::nova_rt_crypto_random_bytes as *const u8,
+        ),
+        (
+            "nova_rt_crypto_random_int",
+            crypto::nova_rt_crypto_random_int as *const u8,
         ),
         (
             "nova_rt_time_now_nanos",
