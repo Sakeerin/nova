@@ -9372,13 +9372,14 @@ fn bench_http_server_and_generator_agree() {
     use std::process::Stdio;
 
     // `assert_cmd::cargo::cargo_bin("nova-bench-http")` resolves a binary
-    // belonging to a different crate; every other `cargo_bin(` call in this
-    // file names nova-cli's own binary. If `nova-bench-http` has never been
-    // built, `cargo_bin` panics on its own rather than handing back a bad
-    // path -- checked against the installed assert_cmd (2.2.1) source rather
-    // than assumed: `legacy_cargo_bin` looks in the shared `target/debug`
-    // directory and returns `None` only once its own `.exists()` check fails,
-    // so `cargo_bin` never returns a path that isn't there. That panic
+    // belonging to a different crate, which is what makes the failure mode
+    // below worth spelling out. If `nova-bench-http` has never been built,
+    // `cargo_bin` panics on its own rather than handing back a bad path --
+    // checked against the installed assert_cmd (2.2.1) source rather than
+    // assumed: `legacy_cargo_bin` looks in the shared `target/debug`
+    // directory and returns `None` when its own `.exists()` check fails (and
+    // earlier, if it cannot resolve a target directory at all), so
+    // `cargo_bin` never returns a path that isn't there. That panic
     // misdirects here, though. It reports `CARGO_BIN_EXE_nova-bench-http` as
     // unset and then lists the binary names it does have -- just "nova" --
     // because `missing_cargo_bin` takes that branch whenever any
@@ -9461,9 +9462,13 @@ fn bench_http_server_and_generator_agree() {
     // `TcpListener::bind("127.0.0.1:0")` sites elsewhere in this file, could
     // claim the freed port before `nova-bench-http` connects to it. Holding
     // the listener open instead would close that window but turn the target
-    // into a STALLED peer rather than a dead one, which would cost this test
-    // a ten-second wait for `nova-bench-http`'s write timeout instead of a
-    // fast failure -- worse on balance than the window it would close.
+    // into a STALLED peer rather than a dead one: the connect and the request
+    // write would both succeed, and the generator would sit in `read` until
+    // its ten-second READ timeout fired, costing this test that wait instead
+    // of a fast failure -- worse on balance than the window it would close.
+    // (Not the write timeout: `nova-bench-http`'s own comment at that call
+    // records that a request this small cannot block on write at all, so a
+    // misbehaving peer is caught on the read side.)
     let dead_port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         l.local_addr().expect("read the bound port").port()
