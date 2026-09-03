@@ -55,8 +55,12 @@ serialisation, backed by none.
 [Amended 2026-09-03, branch `phase-2-gate-benchmark`: `docs/benchmarks/` now
 exists — its procedure is `docs/benchmarks/README.md` and its first recorded
 number is `docs/benchmarks/http-fixed-response.md`, 11,940.0 req/sec against
-`std/http`'s read-and-parse path. `examples/05-json-api` still does not
-exist, so the gate itself is still unwritten regardless.]
+`std/http`'s read-and-parse path, on one host and one run, excluding response
+serialisation, on the Cranelift backend rather than the optimising LLVM one,
+and against a one-header bodyless request; see
+`docs/benchmarks/http-fixed-response.md` and `docs/benchmarks/README.md` for
+what that figure does and does not cover. `examples/05-json-api` still does
+not exist, so the gate itself is still unwritten regardless.]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a

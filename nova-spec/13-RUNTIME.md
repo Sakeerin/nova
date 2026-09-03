@@ -568,9 +568,12 @@ than task counts, exactly as recorded above. `docs/benchmarks/` now exists,
 which falsifies the sentence's third clause on its own; `examples/05-json-api`
 still does not, so the sentence's second clause still holds.
 `docs/benchmarks/http-fixed-response.md` records one measured figure,
-11,940.0 req/sec against `std/http`'s read-and-parse path, which numerically
-clears the Phase 2 gate's absolute 10k+ criterion (`00-MASTER-SPEC.md:245`)
-on one host and one run — no claim is made that the gate itself is passed,
-since `examples/05-json-api` remains unwritten and the gate's other
-criterion, a ratio against Bun (`60-EXAMPLES.md` §5), is entirely
-unmeasured.
+11,940.0 req/sec against `std/http`'s read-and-parse path — excluding
+response serialisation, and taken on the Cranelift backend rather than the
+optimising LLVM one, which cannot run on that host — and it numerically
+clears the absolute 10k+ criterion in `00-MASTER-SPEC.md` §3's Phase 2 gate,
+on one host and one run. See `docs/benchmarks/http-fixed-response.md` and
+`docs/benchmarks/README.md` for what that figure does and does not cover. No
+claim is made that the gate itself is passed, since `examples/05-json-api`
+remains unwritten and the gate's other criterion, a ratio against Bun
+(`60-EXAMPLES.md` §5), is entirely unmeasured.

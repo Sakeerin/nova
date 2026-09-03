@@ -826,7 +826,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from its `PATH`, so `nova build --release`'s optimising LLVM path cannot
   run there at all, and that figure stays entirely unmeasured.
   **11,940.0 numerically clears the 10k+ absolute criterion**
-  `00-MASTER-SPEC.md:245` states for Phase 2's gate. Where this figure
+  `nova-spec/00-MASTER-SPEC.md` §3's Phase 2 gate states. Where this figure
   landed is the finding this increment set out to produce. **No claim is
   made that the Phase 2 gate is passed**: this is one host and one run; it
   is the Cranelift backend rather than the optimising LLVM one; it excludes

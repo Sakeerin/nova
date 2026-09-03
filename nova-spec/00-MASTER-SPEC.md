@@ -188,7 +188,7 @@ Execute phases sequentially. Each phase has gating criteria — do not advance u
 
 **AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): Phase 2's gate below
 is specified twice, with two criteria that are not equivalent.** This
-section's own Phase 2 gate (line 245) reads "`examples/05-json-api` serves
+section's own Phase 2 gate, below, reads "`examples/05-json-api` serves
 10k+ req/sec on benchmark hardware"; `nova-spec/60-EXAMPLES.md` §5's own
 gate for the same example reads "Benchmark vs Bun on same hardware shows
 ≥ 1.0x req/sec ratio." An absolute 10k and a ratio against Bun can disagree
@@ -204,6 +204,31 @@ for is entirely unmeasured, and `examples/05-json-api` itself still does not
 exist (`nova-spec/60-EXAMPLES.md` §5 carries its own dated amendment on what
 that example would need). No claim is made here that Phase 2's gate, below,
 is passed.
+
+**ALSO AMENDED 2026-09-03 (branch `phase-2-gate-benchmark`): these amendments
+inserted lines at the top of section 3, so every line below them in this file
+moved down, and line-number citations into this section written before this
+date now point that far above what they meant.** The shift, measured against
+`5be3a4f`, is 44 lines: 19 from the amendment above and 25 from this note,
+which is itself why the durable form of a citation here is not a number. The
+Phase 2 gate that was at line 245 is the `**Gate:**` line under Phase 2 below;
+the Phase 2 build-order entries that were at lines 238, 240 and 240–241 are
+positions 8, 10 and 11 of the numbered list under the same heading.
+Citations of `00-MASTER-SPEC.md:238`, `:240`, `:240-241` and `:245` appear in
+`CHANGELOG.md`, `nova-spec/20-STDLIB.md`,
+`docs/adr/0016-std-sync-partial-close.md`,
+`docs/adr/0017-std-sync-channel-shape.md`,
+`docs/adr/0018-std-json-scope-and-build-order.md`,
+`docs/adr/0019-offset-table-intrinsic-boundary.md`, and earlier specs and
+plans under `docs/superpowers/`. Each of those sits in a dated record this
+project amends rather than rewrites, so every one is left exactly as written
+and this note is what makes the shift discoverable — at the place a reader
+following a stale citation arrives. **Cite this section by heading, not by
+line number.** A line number in a file that gets amended is the same class of
+fragile pointer as a branch-local commit hash: it dangles while still reading
+as precise, and replacing one stale number with a fresh one only restarts the
+countdown. That is why the citations this increment wrote for itself name the
+section rather than a line.
 
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
