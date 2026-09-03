@@ -1143,8 +1143,8 @@ false.** `docs/benchmarks/` exists — `README.md` documents the measurement
 procedure and `http-fixed-response.md` records one dated run: 11,940.0
 req/sec against `std/http`'s read-and-parse path, excluding response
 serialisation, against a 92,923.6 req/sec self-test ceiling. That figure
-numerically clears the gate's absolute 10k+ criterion
-(`00-MASTER-SPEC.md:245`) on one host, one run, the Cranelift backend rather
+numerically clears the absolute 10k+ criterion in `00-MASTER-SPEC.md` §3's
+Phase 2 gate, on one host, one run, the Cranelift backend rather
 than the optimising LLVM one. `examples/05-json-api` still does not exist
 and position 12 `std/crypto` is still the one Phase 2 module group this tree
 has not started, so **Phase 2 is still not complete** — narrower now than

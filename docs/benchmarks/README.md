@@ -36,6 +36,51 @@ that serializes a response per request, not a simulation of one that does.
 Measuring the delta a real per-request serialization step would cost is a
 natural follow-up; nobody has done it as part of this increment.
 
+### The request side, and three costs it leaves at their floor
+
+The generator sends one fixed request, 36 bytes (`REQUEST` in
+`crates/nova-bench-http/src/main.rs`): the request line `GET / HTTP/1.1`, one
+header `Host: nova-bench`, and the blank line that ends the head. No body.
+Three costs `std/http` documents in its own source are consequently exercised
+at or near their minimum, and each narrows what a figure from here covers:
+
+- **Header materialisation runs at its one-header minimum.** `std/http`'s
+  design spec
+  (`docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
+  section 7) puts eager materialisation at about 18 microseconds per request
+  -- a figure its own sentence scopes to a request **with ten headers**, and
+  which is per-header arithmetic (20 GC allocations for ten headers' strings,
+  at that spec's measured ~900 ns each), so it scales with the header count.
+  At one header this run pays roughly a tenth of it, so the per-request
+  header cost here is near its floor rather
+  than representative. `docs/benchmarks/server.nova`'s own header records the
+  consequence: that spec nominated the first benchmark as what would confirm
+  or refute its 18 microsecond figure, and this benchmark does neither.
+- **The request-body read loop is never entered at all.** The request declares
+  no `Content-Length`, so `read_request`'s `want` is 0 and its
+  `while body.len() < want` loop (`std/http/lib.nova`) runs zero iterations.
+  That loop accumulates with `Bytes::concat`, and its own comment records the
+  bytes copied as triangular in the read count -- around a 128x amplification
+  to assemble a 1 MiB body 4096 bytes at a time, stated there as a floor
+  rather than a ceiling, and as "a lever attacker-controlled input can still
+  pull on the worst-case path". The behaviour `std/http` flags as
+  attacker-controlled therefore sits entirely outside this measurement.
+- **Head accumulation runs at its best case.** `read_request` accumulates the
+  head with the same per-call-O(n) `concat`, which its doc comment records as
+  O(n*k) in the read count `k`. A 36-byte request arrives in one segment, so
+  `k` is 1: one concatenation, the cheapest `k` this path has.
+
+So **"this measures `std/http`'s read-and-parse path" is broader than what
+actually ran.** What ran is the single-read, one-header, empty-body corner of
+that path. The example the gate names does carry bodies --
+`nova-spec/60-EXAMPLES.md` section 5's listing has a
+`.post("/users", ...)` handler whose first line is
+`req.body_json::<User>()?`, even though the `wrk` line in the same section
+drives `GET /users`. So a body-carrying measurement is the obvious next one,
+and nobody has taken it.
+None of that makes the number soft -- it is a real measurement of a real path,
+taken with `errors=0`. The point is to say precisely which path.
+
 ## Build configuration
 
 Two independent choices decide what a throughput figure actually measures:
@@ -60,13 +105,18 @@ is the fast Cranelift backend."
 |---|---|---|
 | debug | Cranelift | measurable, misleading -- a debug runtime depresses everything |
 | **release** | **Cranelift** | **measurable here, and what this procedure reports** |
-| debug | LLVM | unmeasurable on this host |
-| release | LLVM | unmeasurable on this host |
+| debug | LLVM | unmeasurable here -- no `clang`/`llc` this procedure can discover |
+| release | LLVM | unmeasurable here -- no `clang`/`llc` this procedure can discover |
 
 `clang`, `llc`, `clang-17`, `llc-17`, `clang++` and `lld` are all absent from
-the PATH on the host that took the recorded run, so the LLVM backend cannot
-run there at all -- there is no build on that machine in which `nova build
---release`'s optimizing path is measurable. That leaves release-`nova` plus
+the PATH on the host that took the recorded run, **and this procedure sets
+neither `NOVA_CLANG` nor `NOVA_LLC`** -- the two environment variables
+`compile_ir_to_object` (`crates/nova-driver/src/link.rs`) consults for an
+off-PATH `clang` or `llc` before it bails with "no LLVM toolchain found for
+`--release`". So the LLVM path is unmeasurable *under this procedure on that
+host*, for want of a toolchain it can discover, rather than unmeasurable in
+principle: pointing either variable at an installed LLVM is what would make
+that path measurable, and nobody has done it. That leaves release-`nova` plus
 Cranelift as the only cell in the table both measurable and honest to report
 there, and it is what the commands below build.
 
@@ -133,6 +183,14 @@ hash still reads as precise while pointing nowhere. Recording the base commit
 that *is* already an ancestor of `main`, plus which named pieces sit on top
 of it, survives that rewrite; a bare hash from the branch does not.
 
+**The `RESULT` line does not carry the settings that define the run, so
+record them beside it.** It prints `mode`, `addr`, `connections`, `requests`,
+`errors`, `elapsed_ms`, `rps`, `conn_min` and `conn_max`. Of the three
+settings that shape a run, only `--connections` appears there; `--duration`
+and `--warmup` leave no trace in the line at all. A pasted `RESULT` line is
+therefore not self-describing, and whoever appends an observation must write
+the invoking command's flags alongside it, as `http-fixed-response.md` does.
+
 **That calibration is mandatory, not advisory.** A Nova figure without its
 self-test ceiling beside it is not a measurement: a reading of, say, 5,000
 requests per second could be Nova's limit or the generator's own limit on
@@ -189,6 +247,23 @@ less. Read any ratio close to 1.0 with that thumb on the scale already
 pressing in its favor; it is not a reason to distrust a ratio that comes out
 small.
 
+**`rps` divides by a window that includes thread spawn and join, and the two
+recorded runs differ in how much of that they carry.** `run_load` takes its
+`start` before spawning the workers and reads `elapsed` after joining them,
+so `elapsed_ms` is spawn plus `--duration` plus join, not `--duration`
+itself. In the recorded runs that gap is 44 ms for the Nova figure and about
+3.15 seconds for the self-test ceiling (`elapsed_ms=30044` against
+`elapsed_ms=33153`, both taken at `--duration 30`): starting and stopping 200
+generator threads costs more when a 200-thread server in the same process is
+contending for the same cores. Both reported figures are therefore slightly
+understated, the ceiling considerably more so than the Nova number, and
+re-normalising both to their `--duration` window lowers the ratio rather than
+raising it -- the same direction the contention asymmetry above already
+pushes, so nothing above changes. This procedure reports the one ratio
+computed from the `RESULT` lines as printed; a reader who divides `requests`
+by `--duration` instead arrives at a slightly smaller figure, and this
+paragraph is why.
+
 ## Where the gate is specified inconsistently
 
 Three things below were found while designing this measurement and are
@@ -236,10 +311,21 @@ different measurement window.
 - **No read timeout.** `read_request` parks with no deadline
   (`std/http/lib.nova:450` discloses this directly, alongside why: the
   server's byte-valued limits never impose a temporal one). `std/net`'s own
-  `TcpStream::read_timeout` exists and is not used here. A connection the
-  generator's own `--duration` window abandons mid-request holds its task
-  until the server process is killed -- fine for a bounded run taken by
-  hand, not fine for a service left running.
+  `TcpStream::read_timeout` exists and is not used here. What that costs, in
+  that source's own terms: a peer that connects and sends nothing, or sends a
+  partial head and then goes silent, holds one task and one socket parked
+  indefinitely for the price of a single `connect`. **This generator is not
+  such a peer**, and no run recorded here stranded a task: every exit path in
+  `worker` (`crates/nova-bench-http/src/main.rs`) returns and so drops that
+  connection's `TcpStream`, and `run_load` joins every worker before the
+  `RESULT` line prints, so by the time a run reports, all of its connections
+  have closed. A parked read then wakes on the FIN with a zero-length chunk,
+  which `read_request` turns into `Err` ("connection closed mid-head") and
+  `serve`'s own `Err(e) => break` arm closes on. An earlier
+  draft of this bullet illustrated the property with a connection the
+  `--duration` window abandons mid-request, which is not something this
+  generator can produce. The property itself stands: fine for a bounded run
+  taken by hand, not fine for a service left running.
 - **The server does not exit.** `block_on` cannot return while a task is
   parked, and the accept loop parks forever waiting on the next connection.
   Step 6 kills the process; there is no shutdown path to wait for instead,
