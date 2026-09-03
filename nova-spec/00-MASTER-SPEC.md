@@ -212,9 +212,14 @@ date now point that far above what they meant.** The shift, measured against
 `5be3a4f`, is 44 lines: 19 from the amendment above and 25 from this note,
 which is itself why the durable form of a citation here is not a number. The
 Phase 2 gate that was at line 245 is the `**Gate:**` line under Phase 2 below;
-the Phase 2 build-order entries that were at lines 238, 240 and 240–241 are
-positions 8, 10 and 11 of the numbered list under the same heading.
-Citations of `00-MASTER-SPEC.md:238`, `:240`, `:240-241` and `:245` appear in
+the Phase 2 build-order entries that were at lines 238, 240 and 241 are
+positions 8, 10 and 11 of the numbered list under the same heading —
+`std/sync`, `std/http` and `std/json` respectively. So the compound form
+`:240-241` names positions 10 and 11 *together*, which is how the documents
+using it read it: they cite the pair to contrast `std/http` with `std/json`,
+and losing `std/http` from that pair loses the contrast they were drawing.
+Citations of `00-MASTER-SPEC.md:238`, `:240`, `:241`, `:240-241` and `:245`
+appear in
 `CHANGELOG.md`, `nova-spec/20-STDLIB.md`,
 `docs/adr/0016-std-sync-partial-close.md`,
 `docs/adr/0017-std-sync-channel-shape.md`,
