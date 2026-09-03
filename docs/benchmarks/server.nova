@@ -27,11 +27,55 @@
 
 async fn serve(conn: TcpStream, wire: Bytes) {
     // Keep-alive: one connection, requests until the peer stops or errs.
+    let total = wire.len()
     while true {
         match read_request(conn, Limits::default()).await {
             Ok(req) => {
                 match conn.write(wire).await {
-                    Ok(n) => n
+                    Ok(n) => {
+                        // `std/net`'s `write` is one non-blocking attempt, not
+                        // a `write_all` loop (`write_stream`'s own doc comment
+                        // in `std/net/lib.nova` says so): a short write needs
+                        // a retry. `write_response` in `std/http/lib.nova`
+                        // carries the same retry loop, over
+                        // `wire.slice(sent, total)` -- writing `wire` whole
+                        // first here, rather than going through
+                        // `write_response`, is what keeps the common case
+                        // allocation-free, since `wire` is pre-serialised once
+                        // outside the accept loop and only a short write ever
+                        // reaches the slicing below.
+                        //
+                        // Unexercised by this project's suite: a response
+                        // this small does not get a short write on loopback,
+                        // so nothing here drives this loop. It is written for
+                        // correctness under Task 3's real load, not pinned by
+                        // a fixture.
+                        if n < total {
+                            let mut sent = n
+                            let mut write_ok = true
+                            while sent < total {
+                                match conn.write(wire.slice(sent, total)).await {
+                                    Ok(m) => {
+                                        // No progress must not be retried
+                                        // forever -- that hangs rather than
+                                        // fails.
+                                        if m <= 0 {
+                                            write_ok = false
+                                            break
+                                        }
+                                        sent = sent + m
+                                    }
+                                    Err(e) => {
+                                        write_ok = false
+                                        break
+                                    }
+                                }
+                            }
+                            if !write_ok {
+                                break
+                            }
+                        }
+                    }
                     Err(e) => break
                 }
             }
