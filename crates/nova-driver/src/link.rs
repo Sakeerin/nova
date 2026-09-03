@@ -115,8 +115,15 @@ fn find_runtime_lib() -> Result<PathBuf> {
 
 /// System libraries the Rust-built runtime staticlib depends on
 /// (from `rustc --print native-static-libs` for this toolchain).
+///
+/// `bcrypt.lib` and `advapi32.lib` were added alongside `std/crypto`:
+/// `getrandom` (pulled in transitively by `ring`) resolves its Windows
+/// entropy source, `BCryptGenRandom`, through the former, with the latter
+/// backing `SystemFunction036` as its fallback on older Windows versions.
 #[cfg(windows)]
-const MSVC_LIBS: [&str; 6] = [
+const MSVC_LIBS: [&str; 8] = [
+    "bcrypt.lib",
+    "advapi32.lib",
     "kernel32.lib",
     "ntdll.lib",
     "userenv.lib",

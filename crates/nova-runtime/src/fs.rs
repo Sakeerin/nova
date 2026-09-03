@@ -21,9 +21,11 @@
 //! the per-task table just adds one layer of indirection to reach it, keyed
 //! by `slot_index`.
 //!
-//! `stash` itself is `pub(crate)`: `crates/nova-runtime/src/io.rs` is a
-//! second consumer, stashing the three standard streams' payloads and write
-//! byte counts through this identical slot table rather than a second one.
+//! `stash` itself is `pub(crate)`: `std/fs` is not its only consumer.
+//! `crates/nova-runtime/src/io.rs` stashes the three standard streams'
+//! payloads and write byte counts through this identical slot table, and
+//! `crates/nova-runtime/src/crypto.rs` stashes digests, HMAC tags and random
+//! bytes the same way, rather than either module owning a second one.
 //! `take` stays private (final review, M4) -- `io.rs`'s own production code
 //! only ever stashes, and its tests reach `take` through the test-only
 //! `take_for_test` instead of `take` itself being widened for their sake.
@@ -265,9 +267,11 @@ fn with_slot<R>(slot: Slot, f: impl FnOnce(&mut usize) -> R) -> R {
 /// slot, otherwise the released pointer) makes discarding its result safe
 /// here: there is nothing to free by hand either way.
 ///
-/// `pub(crate)`, not private: `crate::io` is a second consumer, stashing the
-/// standard streams' read payloads and write byte counts through this same
-/// function rather than reproducing its root-balancing logic a second time.
+/// `pub(crate)`, not private: `std/fs` is not this function's only consumer.
+/// `crate::io` also stashes the standard streams' read payloads and write
+/// byte counts through it, and `crate::crypto` stashes digests, HMAC tags
+/// and random bytes the same way, rather than either module reproducing its
+/// root-balancing logic for itself.
 pub(crate) fn stash(slot: Slot, ptr: *mut NovaStr) {
     take(slot);
     gc::add_root(ptr as *mut u8);
