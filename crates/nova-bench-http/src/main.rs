@@ -33,9 +33,13 @@ const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: nova-bench\r\n\r\n";
 
 /// Per-read and per-write socket timeout for every connection.
 ///
-/// Ten seconds cannot fire against a healthy server: the `--self-test`
-/// ceiling measured tens of thousands of requests per second per connection,
-/// so one request-response round trip normally completes in microseconds.
+/// Ten seconds cannot fire against a healthy server: measured against the
+/// in-process `--self-test` server, one request-response round trip runs in
+/// tens of microseconds -- roughly 80 at four connections -- which leaves
+/// about five orders of magnitude of margin. Read the `RESULT` line's `rps`
+/// as the AGGREGATE across connections, not a per-connection rate: taking it
+/// for one connection's throughput overstates that by the connection count,
+/// and an earlier draft of this comment did exactly that.
 /// What it guards against is a target that accepts a connection and then
 /// stalls mid-response rather than closing it -- without this, `stream.read`
 /// blocks forever, the worker never reaches its `stop` check, and `run_load`
@@ -179,6 +183,14 @@ fn worker(addr: &str, stop: &AtomicBool, timeout: Duration) -> (u64, u64) {
     if stream.set_read_timeout(Some(timeout)).is_err() {
         return (0, 1);
     }
+    // The write timeout is defence in depth rather than a driven path, and NO
+    // test exercises it. This worker keeps one request outstanding at a time
+    // and `REQUEST` is far smaller than any send buffer, so `write_all` here
+    // cannot block however badly the peer misbehaves -- there is no honest way
+    // to drive it from this generator's own request-response alternation. It
+    // is armed for a change that writes more per turn, pipelining being the
+    // obvious one, where a peer that stops reading would otherwise block a run
+    // the way a stalled read did before the read timeout existed.
     if stream.set_write_timeout(Some(timeout)).is_err() {
         return (0, 1);
     }
