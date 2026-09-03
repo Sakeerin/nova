@@ -9378,11 +9378,15 @@ fn bench_http_server_and_generator_agree() {
     // path -- checked against the installed assert_cmd (2.2.1) source rather
     // than assumed: `legacy_cargo_bin` looks in the shared `target/debug`
     // directory and returns `None` only once its own `.exists()` check fails,
-    // so `cargo_bin` never returns a path that isn't there. That panic's own
-    // wording ("move it to an integration test") misdirects here, though: the
-    // real cause is that `cargo test -p nova-cli` does not build other
-    // workspace members' binaries the way `cargo test --workspace` does, so
-    // the fix is `cargo build --locked --workspace` first.
+    // so `cargo_bin` never returns a path that isn't there. That panic
+    // misdirects here, though. It reports `CARGO_BIN_EXE_nova-bench-http` as
+    // unset and then lists the binary names it does have -- just "nova" --
+    // because `missing_cargo_bin` takes that branch whenever any
+    // `CARGO_BIN_EXE_` variable is set, which one always is for this
+    // integration test. So it points at a variable when the real cause is
+    // that `cargo test -p nova-cli` does not build other workspace members'
+    // binaries the way `cargo test --workspace` does, and the fix is
+    // `cargo build --locked --workspace` first.
     let generator = assert_cmd::cargo::cargo_bin("nova-bench-http");
 
     let mut server = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
