@@ -13,6 +13,11 @@ path = "src/main.rs"
 # Not a benchmark target: `cargo bench --workspace -- --output-format bencher`
 # would otherwise build this under libtest's harness, which rejects criterion's
 # `--output-format`. The workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+# That sentence is about `cargo bench` targets, and it is worth spelling out in
+# this manifest of all of them: `nova-bench-http` is a hand-driven load
+# generator, run from `docs/benchmarks/README.md`'s procedure, not a
+# `cargo bench` target -- its name makes it the crate a reader is most likely to
+# mistake for one.
 bench = false
 
 [dependencies]

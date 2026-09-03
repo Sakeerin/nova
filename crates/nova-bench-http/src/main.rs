@@ -183,14 +183,21 @@ fn worker(addr: &str, stop: &AtomicBool, timeout: Duration) -> (u64, u64) {
     if stream.set_read_timeout(Some(timeout)).is_err() {
         return (0, 1);
     }
-    // The write timeout is defence in depth rather than a driven path, and NO
-    // test exercises it. This worker keeps one request outstanding at a time
-    // and `REQUEST` is far smaller than any send buffer, so `write_all` here
-    // cannot block however badly the peer misbehaves -- there is no honest way
-    // to drive it from this generator's own request-response alternation. It
-    // is armed for a change that writes more per turn, pipelining being the
-    // obvious one, where a peer that stops reading would otherwise block a run
-    // the way a stalled read did before the read timeout existed.
+    // **This timeout is reachable, and NO test in this project's suite
+    // exercises it.** "One request outstanding at a time" is not a property
+    // this worker can guarantee on its own: it depends on the peer *reading*
+    // what it is sent. A peer that writes responses without ever reading the
+    // requests leaves them piling up in its own receive buffer, and once that
+    // buffer is full, TCP backpressure reaches this `write_all` and it
+    // blocks. That peer is the design spec's mutation 2 -- "make the server
+    // write a response without reading the request" -- and running that
+    // mutation during this increment's Task 2 drove exactly this call: the
+    // smoke test failed on `errors=1` with `elapsed_ms=10071` for a
+    // `--duration 1` run, which is this ten-second timeout firing and turning
+    // an unbounded block into one counted error, the same job the read
+    // timeout above does for a stalled read. Removing this call would turn
+    // that back into a hang. It also covers a change that writes more per
+    // turn, pipelining being the obvious one.
     if stream.set_write_timeout(Some(timeout)).is_err() {
         return (0, 1);
     }

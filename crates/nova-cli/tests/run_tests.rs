@@ -9357,9 +9357,26 @@ fn http_keepalive_run() {
 /// would only add moving parts. Task 3's procedure builds a native binary
 /// instead, and `docs/benchmarks/README.md` says why.
 ///
+/// **Also runs the generator in `--self-test` mode.** Nothing reached
+/// `spawn_self_test_server` before this invocation was added:
+/// `nova-bench-http`'s own `self_test_needs_no_addr_and_plain_mode_does`
+/// parses the flag into a bool and stops there, and this test ran target mode
+/// twice. Meanwhile `docs/benchmarks/README.md` calls that calibration
+/// mandatory rather than advisory, and every ratio recorded in
+/// `docs/benchmarks/` is computed against a self-test ceiling -- so the mode
+/// could have rotted with a green suite. What this invocation pins is that
+/// the mode runs end to end: its in-process fixed-response server starts,
+/// answers, and the run completes with no errors. Like the target run it
+/// asserts no throughput number. Confirmed by mutation rather than assumed --
+/// making the self-test server accept a connection and then drop it without
+/// answering fails this test on the `--self-test failed` assertion below.
+/// `--self-test` needs no external server, which is the entire point of the
+/// mode, so this adds no moving parts.
+///
 /// **Also runs the generator once more against a port nothing is listening
-/// on, and asserts that run fails.** Measured directly (task-2-brief.md Step
-/// 5): a `run_load` mutated to fabricate a plausible `Report` without opening
+/// on, and asserts that run fails.** Measured directly during this
+/// increment's Task 2 rather than reasoned: a `run_load` mutated to
+/// fabricate a plausible `Report` without opening
 /// any socket satisfies every assertion above it, since those only read the
 /// generator's own self-reported `RESULT` line. This negative control is what
 /// turns that mutation into a failure -- a generator actually driving
@@ -9453,6 +9470,41 @@ fn bench_http_server_and_generator_agree() {
         .unwrap_or(0);
     assert!(requests >= 1, "no request completed: {result}");
 
+    // `--self-test` -- see this test's own doc comment for why it is here.
+    // No `--addr`: the mode binds its own in-process fixed-response server.
+    // The assertions are the target run's, minus any throughput number.
+    let selftest = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova-bench-http"))
+        .arg("--self-test")
+        .args(["--connections", "1", "--duration", "1", "--warmup", "0"])
+        .output()
+        .expect("run nova-bench-http --self-test");
+    let selftest_report = String::from_utf8_lossy(&selftest.stdout).to_string();
+    assert!(
+        selftest.status.success(),
+        "--self-test failed: {}\nstderr: {}",
+        selftest_report,
+        String::from_utf8_lossy(&selftest.stderr)
+    );
+    let selftest_result = selftest_report
+        .lines()
+        .find(|l| l.starts_with("RESULT "))
+        .unwrap_or_else(|| {
+            panic!("no RESULT line in --self-test output: {selftest_report:?}");
+        });
+    assert!(
+        selftest_result.contains(" errors=0 "),
+        "--self-test reported errors: {selftest_result}"
+    );
+    let selftest_requests: u64 = selftest_result
+        .split_whitespace()
+        .find_map(|f| f.strip_prefix("requests="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        selftest_requests >= 1,
+        "--self-test completed no request: {selftest_result}"
+    );
+
     // Negative control -- see this test's own doc comment for why it exists.
     // A fresh listener is bound and dropped immediately for the sole purpose
     // of getting a port guaranteed to be refusing connections: dropping
@@ -9466,9 +9518,15 @@ fn bench_http_server_and_generator_agree() {
     // write would both succeed, and the generator would sit in `read` until
     // its ten-second READ timeout fired, costing this test that wait instead
     // of a fast failure -- worse on balance than the window it would close.
-    // (Not the write timeout: `nova-bench-http`'s own comment at that call
-    // records that a request this small cannot block on write at all, so a
-    // misbehaving peer is caught on the read side.)
+    // (Not the write timeout, and specifically because of the peer shape
+    // this alternative would have: the worker writes one request and then
+    // waits for its response, so against a peer that accepts and never
+    // answers, exactly one 36-byte request is ever written. The connect and
+    // that single write both succeed, and the wait lands on the READ
+    // timeout. A peer that *answers without reading* is the different shape
+    // that does reach the write timeout -- it keeps the worker writing until
+    // the peer's own receive buffer fills -- and `nova-bench-http`'s comment
+    // at `set_write_timeout` records that case.)
     let dead_port = {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         l.local_addr().expect("read the bound port").port()
