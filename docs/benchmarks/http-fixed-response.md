@@ -68,8 +68,12 @@ Both runs reported `errors=0`.
 ## Ratio, and what it means here
 
 11940.0 / 92923.6 ≈ 0.128 -- the Nova figure landed at roughly 12.8% of the
-self-test ceiling, or put the other way, the ceiling was roughly 7.8 times
-the Nova figure.
+self-test ceiling, which is a statement about how much headroom the load
+generator had and not a comparison of the two servers; or put the other way,
+the ceiling was roughly 7.8 times the Nova figure. The qualification is
+attached to the number rather than left to the paragraphs below because this
+figure is the one most likely to be quoted on its own, and quoted bare it
+says something this run cannot support.
 
 That is not close to 1.0, so per `README.md`'s "Reading the ratio" section,
 this is the case where the generator had headroom to spare: it was not the
