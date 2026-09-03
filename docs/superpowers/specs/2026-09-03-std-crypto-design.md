@@ -9,10 +9,10 @@ Position 12 of Phase 2's build order, `std/crypto`, is the one module group
 this tree has not started. This increment starts it, and covers deliberately
 less than `nova-spec/20-STDLIB.md` section 8 declares.
 
-**This document was verified claim by claim against its cited sources before
-being committed, and that pass changed it substantially.** Where a correction
-matters to a reader, the corrected claim carries the reason rather than
-quietly replacing the wrong one.
+**Every factual claim here was checked against its cited source before this
+document was committed**, by agents reading those sources independently. What
+that pass changed is recorded in the commit message rather than narrated
+below, so that what follows states only what is true.
 
 ---
 
@@ -114,26 +114,28 @@ than this increment's, and the resolution is to ship what the named backing
 provides and amend section 8 — the same treatment the gate's two
 non-equivalent criteria received.
 
-**The dependency cost, and the number that matters.** An earlier draft of
-this section compared total transitive graphs, 19 packages against 21, and
-concluded `ring` was "a materially larger ask" than `httparse`. Both halves
-were wrong. The quantity a dependency argument is about is **new
-`Cargo.lock` entries**, and this workspace's lockfile already holds most of
-`ring`'s graph — `cc`, `cfg-if`, `libc`, `shlex`, `windows-sys`,
-`windows-targets`, `find-msvc-tools` and the `windows_*` set are all present.
+**The dependency cost, and which quantity to count.** A total transitive
+graph is the wrong measure for a dependency argument, because most of a
+graph may already be in the tree. Counted as **new `Cargo.lock` entries**,
+this workspace already holds `cc`, `cfg-if`, `libc`, `shlex`, `windows-sys`,
+`windows-targets`, `find-msvc-tools` and the `windows_*` set.
 
 - **`ring` adds four entries:** `ring`, `untrusted`, `wasi`, and
   `getrandom` 0.2.x — that last because `ring` requires `getrandom` 0.2.10
-  and the lockfile carries only 0.3.4, which is semver-incompatible.
+  while the lockfile carries only 0.3.4, which is semver-incompatible.
 - **The declined alternative** — `sha2` plus `hmac` plus `blake3` plus
-  `getrandom` — **adds thirteen:** `sha2`, `hmac`, `blake3`, `digest`,
-  `generic-array`, `typenum`, `block-buffer`, `crypto-common`, `cpufeatures`,
-  `arrayref`, `arrayvec`, `constant_time_eq` and `subtle`.
+  `getrandom` — **adds roughly a dozen**, among them `sha2`, `hmac`,
+  `blake3`, `digest`, `generic-array`, `typenum`, `block-buffer`,
+  `crypto-common`, `cpufeatures`, `arrayvec`, `constant_time_eq` and
+  `subtle`. **Re-derive that set rather than quoting this list**: a probe of
+  it resolved `cpufeatures` at two versions, and a naive walk of blake3's
+  graph includes `arrayref`, which the probe did not.
 
-So `ring` is the *smaller* addition by a factor of three, on top of being the
-backing the spec names in two places and needing one dependency argument
-rather than four. The RustCrypto path would additionally ship a BLAKE3 that
-this host has no second implementation available to verify against.
+So `ring` is the smaller addition, by something like a factor of three, on
+top of being the backing the spec names in two places and needing one
+dependency argument rather than four. The RustCrypto path would additionally
+ship a BLAKE3 that this host has no second implementation available to
+verify against.
 
 ---
 
@@ -175,17 +177,20 @@ failure path for any input this surface can produce. The bound is the input
 being a `Bytes` the caller already holds; a length that could not be
 allocated would have failed before reaching here.
 
-**`hmac_sha256_verify` is not in section 8, and is shipped anyway — but not
-for the reason an earlier draft gave.** That draft claimed Nova has no way to
-compare two `Bytes`, so a caller must hand-roll a loop. **That is false.**
-`impl Eq for Bytes` ships today in `std/bytes/lib.nova`, so `.eq()` is
-available and exact. What is true, and is the actual hazard:
+**`hmac_sha256_verify` is not in section 8, and is shipped anyway.** A
+caller can already compare two `Bytes` exactly: `impl Eq for Bytes` ships in
+`std/bytes/lib.nova`, so `.eq()` is available. The hazard is not that
+checking a tag is impossible but that the available way leaks:
 
 - The `==` **operator** is unavailable — `a == b` on two `Bytes` fails with
   `error[E0013]: equality operators are not defined for Bytes (operator
   traits arrive later in Phase 1)` — so a caller reaches for `.eq()`.
 - **`.eq()` is not constant-time.** It bottoms out in Rust slice equality,
-  which compares lengths and then short-circuits on the first differing byte.
+  which returns early when the lengths differ -- leaking the length -- and
+  then, because `u8` is `BytewiseEq`, dispatches to the specialised
+  `equal_same_length` that calls `memcmp`. (The per-byte short-circuiting
+  loop in `core::slice::cmp` is the GENERIC impl, which `u8` does not take.)
+  `memcmp` carries no constant-time guarantee.
 
 So the danger is not that checking a tag is awkward. It is that the obvious,
 convenient, correct-looking way to check one leaks timing, and nothing in the
@@ -238,19 +243,27 @@ pub unsafe extern "C" fn nova_rt_crypto_random_int(min: i64, max: i64) -> i64;
 
 **`nova_rt_crypto_hash` has no error range**, and that is deliberate rather
 than an omission: section 6 assigns it no kinds, because none of its four
-operations can fail. Its status carries only "ok" and "tag mismatch". An
-earlier draft wrote "negative = error kind" on all three signatures, which
-contradicted section 6 by implying kinds that do not exist.
+operations can fail. Its status carries only "ok" and "tag mismatch", and a
+negative value from it would be a runtime invariant violation rather than an
+error kind to map.
 
-These three are `unsafe extern "C"` because each takes a `*const NovaStr`
-and dereferences it, following `nova_rt_http_parse_request`, which does the
-same. **No rule about when intrinsics are plain versus `unsafe` is asserted
-here**, because an earlier draft asserted one twice over and was wrong both
-times: `nova_rt_int_to_str(v: i64)`, `nova_rt_alloc(size: i64)` and
+**Why each is `unsafe extern "C"`, stated per function rather than
+collectively**, since only one of the three takes a pointer:
+
+- `nova_rt_crypto_hash` takes three `*const NovaStr` and dereferences them,
+  following `nova_rt_http_parse_request`, which does the same.
+- The two random intrinsics take no pointer, and are marked for the reason
+  this crate already records on the same-shaped `nova_rt_file_close` and
+  `nova_rt_file_read`: "No pointer argument, so no dereference precondition;
+  marked `unsafe extern "C"` for uniformity with this crate's other
+  JIT-registered symbols."
+
+**No general rule about plain versus `unsafe` holds here**, and none is
+asserted: `nova_rt_int_to_str(v: i64)`, `nova_rt_alloc(size: i64)` and
 `nova_rt_check_bounds(index: i64, len: i64)` are plain `extern "C"` and take
-arguments, so "nullary" is not the criterion; and `nova_rt_file_close(fd: i64)`
-and `nova_rt_file_read(fd: i64, max: i64)` are `unsafe` and take no pointer,
-so "takes a pointer" is not it either.
+arguments, so "nullary" is not the criterion; `nova_rt_file_close(fd: i64)`
+and `nova_rt_file_read(fd: i64, max: i64)` are `unsafe` and take none, so
+"takes a pointer" is not it either.
 
 **Why status-plus-slot rather than a direct return.** Both conventions exist
 in this runtime. `std/fs` and `std/net` return a status `Int` and stash the
@@ -259,23 +272,22 @@ with `decode_count(fs_take_bytes())` for an integer; `decode_count` lives in
 `std/io`. `nova_rt_http_parse_request` instead returns a GC-allocated `[Int]`
 directly, carrying its status in element 0.
 
-ADR 0019 earned that structured return on two grounds, and **neither is
-allocation count**: one FFI crossing for the whole request instead of two per
-header, and leak-freedom, since Nova has no destructors and a per-request
-handle-table entry "would leak at the request rate". The roughly twenty
-allocations per request that ADR mentions are a cost the shipped code **still
-pays**, not something the table removed. An earlier draft of this section
-misattributed the table's justification to that figure.
+ADR 0019 argues for that structured return on grounds of FFI-crossing count
+and leak-freedom — one crossing for the whole request instead of two per
+header, and no Rust-side state to release, since Nova has no destructors and
+a per-request handle-table entry "would leak at the request rate".
+**Allocation count is not among its grounds**: the roughly twenty
+allocations per request that ADR mentions are a cost the shipped code still
+pays, in the section that discloses it as an open escape hatch.
 
 Status-plus-slot is chosen here because it gives one channel carrying all
 three shapes this module needs — digest bytes, a boolean, and an error — and
 because the `fs_` prefix on the take functions is already documented in the
 source as historical rather than filesystem-specific, so nothing new is
-invented. It costs a second FFI crossing per call. An FFI crossing is
-recorded elsewhere in this project at roughly 15 nanoseconds, but that figure
-was measured for a different call shape and is **not** re-measured here; the
-claim being relied on is only that a crossing is orders of magnitude cheaper
-than hashing, which does not need a precise figure.
+invented. It costs a second FFI crossing per call. No figure for that is
+quoted here: the claim being relied on is only that a crossing is far cheaper
+than hashing a buffer, which does not need one, and any number would be
+carried over from a different call shape.
 
 **`op` selects the operation**, with `key` and `tag` passed as empty `Bytes`
 where they do not apply. An empty `Bytes` is representable — `gc_bytes(&[])`
@@ -304,17 +316,15 @@ still panic without matching any of those patterns — so the commitment is
 keys, nonces and tokens run to tens of bytes, so the cap is generous by
 orders of magnitude for every intended use.
 
-**The reason for a cap is platform-dependent, and an earlier draft got it
-wrong.** That draft said ADR 0002 makes the collector a leaking allocator, so
-an unbounded request leaks permanently. ADR 0002 is **Superseded** as of
-2026-07-23 by a conservative mark-and-sweep collector in
-`crates/nova-runtime/src/gc.rs`, under which unreachable objects are
-reclaimed. The nuance that survives: precise stack bounds are implemented on
-Windows today, and **other platforms fall back to the original
-leak-until-exit behaviour** until their stack-bounds query is added. So an
-unbounded request is collectible on Windows and a permanent leak on Linux and
-macOS — which is a reason for the cap on the platforms CI runs, stated
-accurately rather than as a blanket claim about the allocator.
+**The reason for a cap is platform-dependent.** ADR 0002, titled for a
+leaking allocator, is **Superseded** as of 2026-07-23 by a conservative
+mark-and-sweep collector in `crates/nova-runtime/src/gc.rs`, under which
+unreachable objects are reclaimed — so read that ADR's status, not its title.
+Precise stack bounds are implemented on Windows today, and **other platforms
+fall back to the original leak-until-exit behaviour** until their
+stack-bounds query is added. So an unbounded request is collectible on
+Windows and a permanent leak on Linux and macOS, two of the three platforms
+CI runs.
 
 ---
 
@@ -372,15 +382,15 @@ raw bytes as input**, unit-tested in Rust with crafted draws including one
 that falls in the biased tail and must be rejected. Without that split,
 "unbiased" would be a claimed but unpinned property.
 
-**An earlier draft overstated this as "untestable against a live entropy
-source", which is false.** For a 64-bit draw and a span S, the rejection
-probability is `(2^64 mod S) / 2^64`, which the *caller's range* controls: a
-span of `2^62 + 1` rejects roughly a quarter of live draws, and a span just
-over `2^63` roughly half. So a live-source test at a wide span reaches the
-branch within a handful of draws. That test is worth adding alongside the
-crafted-input one — it exercises the composition the pure function cannot —
-and the honest statement is that a live source cannot be made to reject on
-demand, nor at all for the narrow ranges callers actually use.
+**The branch is not, however, unreachable from a live source.** For a
+64-bit draw and a span S the rejection probability is `(2^64 mod S) / 2^64`,
+which the caller's range controls. Computed: a span of `2^62 + 1` rejects
+exactly a quarter of draws, and `2^63 + 1` exactly half, so a live-source
+test at such a span reaches the branch within a few draws. For the narrow
+ranges callers actually use it is unreachable in practice — a span of ten
+rejects with probability about 3 in 10^19. So a wide-span live test is worth
+adding alongside the crafted-input one, since it exercises the composition
+of source and reduction that the pure function alone cannot.
 
 **What the random functions can be asserted to do:** return exactly the
 requested length for a range of lengths; return empty for zero; produce
@@ -429,16 +439,24 @@ convention this project states in its own words in
 `docs/adr/0018-std-json-scope-and-build-order.md`, that wording is "left as
 written and superseded by this marker rather than edited".
 
-- **`nova-spec/20-STDLIB.md`'s entropy paragraph.** This is the record the
-  increment falsifies by design, and an earlier draft of this list omitted
-  it. That passage carries the standing claim **"no runtime function exposes
-  entropy to Nova"**, and continues: "Through the compiler's own surface Nova
-  cannot obtain a random value: `random_bytes` and `random_int` in section 8
-  below are unstarted declarations, with no `ring` in `Cargo.lock` and no
-  `std/crypto/` directory." Every clause of that changes. The same passage
-  already carries a retraction predicting exactly this — it notes that its
-  earlier closed-world claim was one "which `std/crypto` shipping would
-  falsify by design" — so the amendment closes a loop that paragraph opened.
+- **`nova-spec/20-STDLIB.md`'s entropy paragraph**, which is the record this
+  increment bears on most directly and the easiest to amend wrongly. Read the
+  whole passage before writing the marker, because its headline and its later
+  lines disagree by design.
+  Its **headline** claim is "no runtime function exposes entropy to Nova".
+  **That was already falsified before this increment**, and the same passage
+  says so further down: "There IS a new route from Nova to entropy, and it is
+  stated here rather than denied ... `str_hash` is the route", since
+  `("").hash()` recovers the per-process seed through an invertible
+  finalizer. So `std/crypto` is **not** the first breach of it, and a marker
+  crediting it with that would be a new false claim.
+  What this increment does falsify is the passage's present-tense inventory:
+  "`random_bytes` and `random_int` in §8 below are unstarted declarations,
+  with no `ring` in `Cargo.lock` and no `std/crypto/` directory" — three
+  clauses, all three of which change. What it adds beyond the existing route
+  is a **deliberate, per-call entropy surface**, as distinct from a seed
+  recoverable as a side effect of hashing, and that distinction is the
+  amendment's content.
 - **`nova-spec/20-STDLIB.md` section 8** — that its listing is written in
   types this language does not have, naming which and what each fails with;
   that `blake3` cannot come from the backing the same section names; that
@@ -501,22 +519,22 @@ AEAD; BLAKE3; streaming or incremental hashing; SHA-384 and SHA-512/256,
 which the backing provides but section 8 does not declare; any
 key-derivation function; and anything TLS-adjacent.
 
-**The three Phase 2 gate examples are also out of scope, and an earlier draft
-described them wrongly.** It called them "now-unblocked". Two of the three
-are recorded in this tree as unwritable as specified: the 2026-09-02
-gate-benchmark design spec measured that `examples/05-json-api` needs a
-router whose `Handler` type is `P0001`, `@derive`, `?`, turbofish,
-`Map::values()` and a String-to-number conversion, none of which exist, and
-that `03-http-server` is "milder but still unwritable". `std/http` shipping
-removed one blocker; it did not unblock them.
+**The three Phase 2 gate examples are also out of scope, and are not
+"unblocked".** Two of the three are recorded in this tree as unwritable as
+specified: the 2026-09-02 gate-benchmark design spec measured that
+`examples/05-json-api` needs a router whose `Handler` type is `P0001`,
+`@derive`, `?`, turbofish, `Map::values()` and a String-to-number
+conversion — none of which this language has — and that `03-http-server` is
+"milder but still unwritable". `std/http` shipping removed one of their
+blockers; it did not remove the rest.
 
 **Nothing here changes the hash seeding `std/collections` already uses.**
 That seeding is per-process and derives from Rust's own `RandomState`, which
 draws from an OS-backed source; there are separate seeds for string and
 integer hashing rather than one, and this module's entropy would add nothing
-to either. An earlier note in `nova-spec/20-STDLIB.md` saying
-`std/collections` "has no seed to hand a `Hasher`" predates the seeded-mix64
-work and is stale; correcting it is not in this increment's scope, and it is
-recorded here so the next reader does not act on it. Note that this is a
-different passage from the entropy paragraph in section 8's list, which **is**
-in scope.
+to either. A note in `nova-spec/20-STDLIB.md` saying `std/collections`
+"has no seed to hand a `Hasher`" predates the seeded-mix64 work and is stale.
+It sits **inside** the same entropy passage section 8 lists for amendment, so
+an amender is going to meet it: the marker should correct the entropy
+inventory and may note this clause as separately stale, without claiming this
+increment is what falsified it.
