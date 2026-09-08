@@ -247,6 +247,27 @@ operations can fail. Its status carries only "ok" and "tag mismatch", and a
 negative value from it would be a runtime invariant violation rather than an
 error kind to map.
 
+**AMENDED 2026-09-08 (branch `std-crypto-hashes-hmac-random`): "cannot fail"
+is stated unconditionally here and it needs a scope.** Three of the four
+operations route through a `ring` entry point that ends in an `.unwrap()` —
+`ring::digest::digest`, `ring::hmac::Key::new` and `ring::hmac::sign` each
+unwrap an `InputTooLongError`. That error needs an input near 2^61 bytes, so
+**no input a Nova program can construct reaches it** and every conclusion
+this document draws from "cannot fail" still holds. What does not hold is the
+unqualified form: the operations cannot fail *for reachable inputs*, on a
+bound that is `ring`'s rather than this tree's. `ring::hmac::verify`, which
+the tag check uses, is the clean one — it returns a `Result` and unwraps
+nothing, which matters because section 5's constant-time argument rests on
+exactly that function. **This marker governs every other place this document
+states the claim**: section 5's "The four hash operations cannot fail, so
+their status is never negative" bullet, its **Panic discipline** paragraph —
+whose disclosed blind spot is this module's own indexing and arithmetic, and
+which should also have said the scan reads only the module's own source and
+never the dependency it calls into — and section 6's "The four hash functions
+raise no kinds". The shipped comments in
+`crates/nova-runtime/src/crypto.rs` carry the scoped wording; the wording
+above is left as written and superseded by this marker rather than edited.
+
 **Why each is `unsafe extern "C"`, stated per function rather than
 collectively**, since only one of the three takes a pointer:
 
@@ -301,7 +322,9 @@ already produces one.
 - **The four hash operations cannot fail, so their status is never
   negative**, and the Nova wrapper has no error branch. That asymmetry with
   the two random intrinsics is documented and pinned by a runtime test rather
-  than papered over by inventing fallible signatures.
+  than papered over by inventing fallible signatures. *(Scoped by this
+  section's 2026-09-08 amendment: "cannot fail" holds for any input a Nova
+  program can construct, on a bound that is `ring`'s.)*
 
 **Panic discipline.** No panic may cross a generated poll boundary. The
 concrete commitment is the one `std/http`'s intrinsic already makes and
@@ -343,7 +366,9 @@ mapper mirrors `std/http`'s `http_error_kind_of`:
 `random_bytes(0)` is valid and returns an empty `Bytes`. `random_int(5, 5)`
 is valid and returns 5 — a degenerate range needs no randomness and is not an
 error. The four hash functions raise no kinds, which is why their intrinsic
-has no error range.
+has no error range. *(Scoped by section 5's 2026-09-08 amendment: they raise
+no kinds for any input a Nova program can construct, on a bound that is
+`ring`'s.)*
 
 **The overflow that sent `random_int` to the Rust side.** Computing
 `max - min + 1` overflows a 64-bit signed integer for a wide range, and `min`

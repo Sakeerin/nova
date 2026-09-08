@@ -42,8 +42,9 @@ fn crypto_error_kind_of(status: Int) -> CryptoErrorKind {
         3 => RequestTooLarge
         4 => InvalidRange
         // `Int` cannot be matched exhaustively, so a wildcard arm must
-        // exist. It is unreachable for the four kinds
-        // `crates/nova-runtime/src/crypto.rs` currently defines.
+        // exist. It is unreachable for the kinds
+        // `crates/nova-runtime/src/crypto.rs` currently defines, and exists
+        // so that set can grow without this function failing to compile.
         _ => InvalidRange
     }
 }

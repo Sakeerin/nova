@@ -791,7 +791,14 @@ builtins! {
     /// operations, `0` means success, with the digest waiting in
     /// [`Builtin::FsTakeBytes`]. For the tag check, `0` means the tag
     /// matched and `1` means it did not — an answer, not an error. **No
-    /// negative range at all**: none of `crypto_hash`'s operations can fail.
+    /// negative range at all**: none of `crypto_hash`'s operations can fail
+    /// for any input a Nova program can construct. That scope is deliberate
+    /// rather than hedging — the digest, HMAC-key and HMAC-sign paths each
+    /// end in an `.unwrap()` inside `ring`, on an input-length error needing
+    /// roughly 2^61 bytes, so the bound is `ring`'s and not this tree's; the
+    /// tag check's `ring::hmac::verify` returns a `Result` and unwraps
+    /// nothing. `crates/nova-runtime/src/crypto.rs`'s `ERR_*` block states
+    /// this at length.
     /// Runtime symbol `nova_rt_crypto_hash`
     /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoHash,
@@ -816,9 +823,13 @@ builtins! {
     /// with the value waiting in the same [`Builtin::FsTakeBytes`] slot that
     /// [`Builtin::CryptoHash`] and [`Builtin::CryptoRandomBytes`] use,
     /// decoded on the Nova side as `decode_count(fs_take_bytes())`;
-    /// otherwise **negative**, naming one of `crypto.rs`'s `ERR_*` kinds —
-    /// an inverted range, or the entropy source itself failing. Runtime
-    /// symbol `nova_rt_crypto_random_int`
+    /// otherwise **negative**, naming one of `crypto.rs`'s `ERR_*` kinds.
+    /// Three conditions reach that range, not two: an inverted range
+    /// (`ERR_INVALID_RANGE`), the entropy source itself failing, and the
+    /// bounded rejection loop running out of attempts without landing above
+    /// the biased tail — the last two share `ERR_ENTROPY_UNAVAILABLE`, so a
+    /// caller cannot tell them apart. Runtime symbol
+    /// `nova_rt_crypto_random_int`
     /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoRandomInt,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
