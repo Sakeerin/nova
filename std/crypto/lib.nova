@@ -1,0 +1,106 @@
+// `std/crypto`: hashes, HMAC and random, over three runtime intrinsics.
+//
+// **Digest lengths are documented, not typed.** `nova-spec/20-STDLIB.md`
+// section 8 declares these as `[u8; 32]` and `[u8; 64]`; neither is
+// writable, because `u8` does not name a type and a fixed-length array type
+// does not parse. So a digest is a `Bytes` whose length is stated in a
+// comment, and nothing can force a caller to hold exactly 32 bytes.
+//
+// **What this module does not provide**, each recorded in section 8's dated
+// amendment: BLAKE3, which the `ring` backing the same section names does
+// not implement; AEAD; and any streaming or incremental hasher, so a caller
+// with more data than fits in one `Bytes` has no route here.
+
+pub type CryptoErrorKind =
+    | EntropyUnavailable
+    | InvalidLength
+    | RequestTooLarge
+    | InvalidRange
+
+pub record CryptoError {
+    pub kind: CryptoErrorKind
+    pub message: String
+}
+
+// These four values are duplicated in `crates/nova-runtime/src/crypto.rs`.
+// Nothing ties the two sides together, so the fixtures assert a known vector
+// per operation: swapping two of these must fail a fixture.
+const OP_SHA256: Int = 0
+const OP_SHA512: Int = 1
+const OP_HMAC_SHA256: Int = 2
+const OP_HMAC_SHA256_VERIFY: Int = 3
+
+fn crypto_error_kind_of(status: Int) -> CryptoErrorKind {
+    match 0 - status {
+        1 => EntropyUnavailable
+        2 => InvalidLength
+        3 => RequestTooLarge
+        _ => InvalidRange
+    }
+}
+
+fn no_bytes() -> Bytes { bytes_from_ints([]) }
+
+// SHA-256 of `data`, 32 bytes.
+//
+// Infallible: the intrinsic's status is always 0 for this operation, because
+// no input this surface can produce makes a digest fail.
+pub fn sha256(data: Bytes) -> Bytes {
+    let _ = crypto_hash(OP_SHA256, no_bytes(), data, no_bytes())
+    fs_take_bytes()
+}
+
+// SHA-512 of `data`, 64 bytes. Infallible, for the reason `sha256` gives.
+pub fn sha512(data: Bytes) -> Bytes {
+    let _ = crypto_hash(OP_SHA512, no_bytes(), data, no_bytes())
+    fs_take_bytes()
+}
+
+// HMAC-SHA-256 of `data` under `key`, 32 bytes. Infallible.
+pub fn hmac_sha256(key: Bytes, data: Bytes) -> Bytes {
+    let _ = crypto_hash(OP_HMAC_SHA256, key, data, no_bytes())
+    fs_take_bytes()
+}
+
+// Whether `tag` is the HMAC-SHA-256 of `data` under `key`.
+//
+// **Constant-time, and that property is INHERITED from `ring::hmac::verify`
+// rather than demonstrated here.** No test in this project observes timing.
+// Prefer this over comparing tags yourself: `Bytes::eq` is available and
+// exact, but it is not constant-time -- it returns early on a length
+// mismatch and then calls `memcmp` -- so a hand-written check leaks.
+pub fn hmac_sha256_verify(key: Bytes, data: Bytes, tag: Bytes) -> Bool {
+    crypto_hash(OP_HMAC_SHA256_VERIFY, key, data, tag) == 0
+}
+
+// `n` cryptographically random bytes.
+//
+// Fallible where section 8 declared it infallible: the OS entropy source can
+// fail, `n` can be negative or above the runtime's cap, and no panic may
+// cross a generated poll boundary, so the alternative to a `Result` is
+// ending the process.
+pub fn random_bytes(n: Int) -> Result<Bytes, CryptoError> {
+    let status = crypto_random_bytes(n)
+    if status == 0 {
+        return Ok(fs_take_bytes())
+    }
+    Err(CryptoError {
+        kind: crypto_error_kind_of(status),
+        message: "random_bytes failed",
+    })
+}
+
+// A uniform integer in `min ..= max`.
+//
+// `min == max` is a valid degenerate range and returns `min`; a range with
+// `min` above `max` is `InvalidRange`.
+pub fn random_int(min: Int, max: Int) -> Result<Int, CryptoError> {
+    let status = crypto_random_int(min, max)
+    if status == 0 {
+        return Ok(decode_count(fs_take_bytes()))
+    }
+    Err(CryptoError {
+        kind: crypto_error_kind_of(status),
+        message: "random_int failed",
+    })
+}
