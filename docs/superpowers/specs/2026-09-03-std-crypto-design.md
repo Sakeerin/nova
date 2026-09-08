@@ -247,26 +247,40 @@ operations can fail. Its status carries only "ok" and "tag mismatch", and a
 negative value from it would be a runtime invariant violation rather than an
 error kind to map.
 
-**AMENDED 2026-09-08 (branch `std-crypto-hashes-hmac-random`): "cannot fail"
-is stated unconditionally here and it needs a scope.** Three of the four
-operations route through a `ring` entry point that ends in an `.unwrap()` —
-`ring::digest::digest`, `ring::hmac::Key::new` and `ring::hmac::sign` each
-unwrap an `InputTooLongError`. That error needs an input near 2^61 bytes, so
-**no input a Nova program can construct reaches it** and every conclusion
-this document draws from "cannot fail" still holds. What does not hold is the
-unqualified form: the operations cannot fail *for reachable inputs*, on a
-bound that is `ring`'s rather than this tree's. `ring::hmac::verify`, which
-the tag check uses, is the clean one — it returns a `Result` and unwraps
-nothing, which matters because section 5's constant-time argument rests on
-exactly that function. **This marker governs every other place this document
-states the claim**: section 5's "The four hash operations cannot fail, so
-their status is never negative" bullet, its **Panic discipline** paragraph —
-whose disclosed blind spot is this module's own indexing and arithmetic, and
-which should also have said the scan reads only the module's own source and
-never the dependency it calls into — and section 6's "The four hash functions
-raise no kinds". The shipped comments in
-`crates/nova-runtime/src/crypto.rs` carry the scoped wording; the wording
-above is left as written and superseded by this marker rather than edited.
+**AMENDED 2026-09-08 (branch `std-crypto-hashes-hmac-random`): this amendment
+corrects two claims, not one, and both are enumerated here. The first is
+"cannot fail", stated unconditionally and needing a scope.** Three of the
+four operations route through a `ring` entry point that ends in an
+`.unwrap()` — `ring::digest::digest`, `ring::hmac::Key::new` and
+`ring::hmac::sign` each unwrap an `InputTooLongError`. That error needs an
+input near 2^61 bytes, so **no input a Nova program can construct reaches
+it** and every conclusion this document draws from "cannot fail" still holds.
+What does not hold is the unqualified form: the operations cannot fail *for
+reachable inputs*, on a bound that is `ring`'s rather than this tree's.
+`ring::hmac::verify`, which the tag check uses, is the clean one — it returns
+a `Result` and unwraps nothing, which matters because section 5's
+constant-time argument rests on exactly that function. **This first
+correction governs every other place this document states "cannot fail"**:
+section 5's "The four hash operations cannot fail, so their status is never
+negative" bullet, its **Panic discipline** paragraph — whose disclosed blind
+spot is this module's own indexing and arithmetic, and which should also have
+said the scan reads only the module's own source and never the dependency it
+calls into — and section 6's "The four hash functions raise no kinds". The
+shipped comments in `crates/nova-runtime/src/crypto.rs` carry the scoped
+wording; the wording above is left as written and superseded by this marker
+rather than edited.
+
+**The second correction is a deletion, and it lands in the first of those
+three places.** That bullet also called the asymmetry "pinned by a runtime
+test", and no test pins it: the failure is unreachable, so no fixture can
+reach it. The phrase is struck rather than scoped, because there is nothing
+left to scope it to — it survives quoted in the bullet's own parenthetical,
+which records instead what the two goldens actually hold. So the amendment
+changed two things and no more: it scoped "cannot fail", and it struck that
+phrase. Two of the three places above carry a short parenthetical pointing
+back to this marker — section 5's bullet and section 6's "raise no kinds"
+sentence; the **Panic discipline** paragraph is governed by this marker alone
+and its text was not touched.
 
 **Why each is `unsafe extern "C"`, stated per function rather than
 collectively**, since only one of the three takes a pointer:
