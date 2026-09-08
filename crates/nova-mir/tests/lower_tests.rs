@@ -1126,6 +1126,123 @@ fn http_parse_request_lowers_to_a_runtime_call() {
     );
 }
 
+/// `crypto_hash`, `crypto_random_bytes` and `crypto_random_int` are all
+/// `STD_ONLY` (`crates/nova-resolver/src/lib.rs`), so pinning that a Nova call
+/// reaches each one's `RtFunc` needs the same `resolve_program`/`extra_std`
+/// machinery as `http_parse_request_lowers_to_a_runtime_call` above — read
+/// that test's own comment before touching this one, since it is the
+/// authority on why the shape below is not optional.
+///
+/// The naming trap it documents applies here unchanged: `import_std_module`
+/// merges every std module's exports into every other module's scope with
+/// `scope.values.entry(n.clone()).or_insert(*r)` — first writer wins,
+/// silently, and nothing on that path reports a collision. A stub sharing a
+/// name with a real `std/crypto` export would be dropped without a
+/// diagnostic, the call in `main` would resolve to the real function
+/// instead, and this test would keep passing while pinning nothing. That is
+/// why each stub below is named `lower_tests_crypto_*_stub` rather than
+/// `hash`, `random_bytes` or `random_int` — the names `std/crypto` itself is
+/// expected to export.
+///
+/// Three separate `resolve_program` calls, each under its own `$test.*` key,
+/// rather than one wrapper module holding all three stubs: the point of the
+/// synthetic module is to isolate this test from everything unrelated to the
+/// one builtin it is checking, and folding all three into one module would
+/// let a change to one intrinsic's wrapper affect the others' resolution.
+#[test]
+fn crypto_builtins_reach_their_runtime_functions() {
+    use nova_mir::{RtFunc, Stmt};
+    use nova_resolver::{resolve_program, ModuleSource, STD_MODULES};
+
+    fn assert_stub_reaches(
+        wrapper_key: &str,
+        wrapper_src: &str,
+        main_src: &str,
+        stub_prefix: &str,
+        expected: RtFunc,
+    ) {
+        let file_id = FileId::DUMMY;
+        let (tokens, lex_errors) = lex(main_src, file_id);
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (ast, parse_errors) = parse(&tokens, file_id);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        let ast = ast.expect("no AST");
+
+        let sources = [ModuleSource {
+            name: "main".to_string(),
+            file: &ast,
+        }];
+        let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+        let resolved = resolve_program(
+            &sources,
+            &std_files,
+            Some(((wrapper_key, wrapper_src), FileId::DUMMY)),
+        );
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "resolve: {:?}",
+            resolved.diagnostics
+        );
+        let checked = check(&resolved.file, &resolved.definitions);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "typeck: {:?}",
+            checked.diagnostics
+        );
+        let mir = lower_module(&checked.module).expect("MIR lowering failed");
+
+        let names: Vec<&str> = mir.functions.iter().map(|f| f.name.as_str()).collect();
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name.starts_with(stub_prefix))
+            .unwrap_or_else(|| panic!("no `{stub_prefix}*`: {names:?}"));
+        let rt_calls: Vec<RtFunc> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.stmts)
+            .filter_map(|s| match s {
+                Stmt::CallRuntime { func, .. } => Some(*func),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rt_calls,
+            vec![expected],
+            "a Nova call to `{stub_prefix}` reaches `{expected:?}` exactly once"
+        );
+    }
+
+    assert_stub_reaches(
+        "$test.crypto_hash_stub",
+        "pub fn lower_tests_crypto_hash_stub(op: Int, key: Bytes, data: Bytes, tag: Bytes) -> Int { crypto_hash(op, key, data, tag) }\n",
+        "fn main() {\n\
+             let key = bytes_from_ints([])\n\
+             let data = bytes_from_ints([])\n\
+             let tag = bytes_from_ints([])\n\
+             let _ = lower_tests_crypto_hash_stub(0, key, data, tag)\n\
+         }",
+        "lower_tests_crypto_hash_stub",
+        RtFunc::CryptoHash,
+    );
+
+    assert_stub_reaches(
+        "$test.crypto_random_bytes_stub",
+        "pub fn lower_tests_crypto_random_bytes_stub(n: Int) -> Int { crypto_random_bytes(n) }\n",
+        "fn main() { let _ = lower_tests_crypto_random_bytes_stub(8) }",
+        "lower_tests_crypto_random_bytes_stub",
+        RtFunc::CryptoRandomBytes,
+    );
+
+    assert_stub_reaches(
+        "$test.crypto_random_int_stub",
+        "pub fn lower_tests_crypto_random_int_stub(min: Int, max: Int) -> Int { crypto_random_int(min, max) }\n",
+        "fn main() { let _ = lower_tests_crypto_random_int_stub(0, 9) }",
+        "lower_tests_crypto_random_int_stub",
+        RtFunc::CryptoRandomInt,
+    );
+}
+
 /// How many resume states `<name>`'s poll function dispatches between; 1 when
 /// its entry block is not a tag dispatch at all, which is what an await-free
 /// body gets.

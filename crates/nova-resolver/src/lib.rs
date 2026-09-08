@@ -780,6 +780,15 @@ builtins! {
     /// `crates/nova-runtime/src/http.rs`, which is the half that writes it.
     /// Std-only.
     HttpParseRequest,
+    /// `crypto_hash(op: Int, key: Bytes, data: Bytes, tag: Bytes) -> Int` —
+    /// `std/crypto`'s hash/HMAC intrinsic. Std-only.
+    CryptoHash,
+    /// `crypto_random_bytes(n: Int) -> Int` — `std/crypto`'s random-bytes
+    /// intrinsic. Std-only.
+    CryptoRandomBytes,
+    /// `crypto_random_int(min: Int, max: Int) -> Int` — `std/crypto`'s
+    /// bounded random-integer intrinsic. Std-only.
+    CryptoRandomInt,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
     /// process epoch, monotonic and never negative.
     ///
@@ -887,6 +896,9 @@ impl Builtin {
             Builtin::BytesEq => "bytes_eq",
             Builtin::IntHashSeed => "int_hash_seed",
             Builtin::HttpParseRequest => "http_parse_request",
+            Builtin::CryptoHash => "crypto_hash",
+            Builtin::CryptoRandomBytes => "crypto_random_bytes",
+            Builtin::CryptoRandomInt => "crypto_random_int",
             Builtin::TimeNowNanos => "time_now_nanos",
             Builtin::TimeNowEpochNanos => "time_now_epoch_nanos",
             Builtin::LogConfigLevel => "log_config_level",
@@ -919,7 +931,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 71] = [
+    pub const STD_ONLY: [Builtin; 74] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -986,6 +998,9 @@ impl Builtin {
         Builtin::BytesEq,
         Builtin::IntHashSeed,
         Builtin::HttpParseRequest,
+        Builtin::CryptoHash,
+        Builtin::CryptoRandomBytes,
+        Builtin::CryptoRandomInt,
         Builtin::TimeNowNanos,
         Builtin::TimeNowEpochNanos,
         Builtin::LogConfigLevel,
