@@ -922,16 +922,31 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lowering test) and one is not a site at all (a doc-comment line inside
   `Builtin::CryptoRandomInt`'s doc comment that names the other two
   variants; the rule assigns a doc comment to the variant it sits on). The
-  remaining **30** are seam sites, and re-running that ADR's own grep for
-  its single intrinsic still returns **10** for `StrToFloat`, so 30 is
-  exactly three times the one-intrinsic baseline. **The naive scaling held
-  here, and that is a measurement rather than an assumption** — it can fail,
-  because an array or a `match` can take three entries in one edit; in this
-  change no site collapsed that way, and the one shared `hint` arm that does
-  batch contains `Builtin::StrToFloat` too, so the baseline batches
-  identically and the ratio survives it. The 34 figure is itself dated: the
-  same grep returned 33 at the commit that wired the seam, and the
-  doc-comment line was added by the commit after it.
+  remaining **30** are the *grep-visible* seam sites, and re-running that
+  ADR's own grep for its single intrinsic still returns **10** for
+  `StrToFloat`: **30 against 10**, a ratio of 3.
+  **30 is not this change's site count, and 10 is not the ADR's
+  one-intrinsic figure.** ADR 0018 §3 headlines "Adding one intrinsic
+  touches **12 sites**" and says its prescribed grep sees only 10 of them,
+  the other 2 being the `extern "C" fn nova_rt_str_to_float` definition and
+  its `symbols()` entry, "which name the C symbol instead". Crypto's six
+  analogues exist, and the grep above returns not one line from any of them:
+  the three `extern "C"` definitions in `crates/nova-runtime/src/crypto.rs`
+  (`nova_rt_crypto_hash`, `nova_rt_crypto_random_bytes`,
+  `nova_rt_crypto_random_int`) and the three matching name/pointer pairs in
+  `symbols()` in `crates/nova-runtime/src/lib.rs`, all six of which spell
+  `nova_rt_crypto_*` rather than a `Builtin` or `RtFunc` variant. So under
+  that ADR's own rule this change touched **36 sites against a one-intrinsic
+  figure of 12** — also a ratio of 3. The `symbols()` half is worth naming
+  separately, because that ADR singles it out as the seam whose omission
+  survives every compile in the pipeline and is held by a guard test alone.
+  **The naive scaling held here, and that is a measurement rather than an
+  assumption** — it can fail, because an array or a `match` can take three
+  entries in one edit; in this change no site collapsed that way, and the one
+  shared `hint` arm that does batch contains `Builtin::StrToFloat` too, so
+  the baseline batches identically and both ratios above survive it. The 34
+  figure is itself dated: the same grep returned 33 at the commit that wired
+  the seam, and the doc-comment line was added by the commit after it.
   **Known vectors, and the claim their provenance does and does not
   make.** Every expected digest and tag in `tests/runtime/crypto_hashes.nova`
   and in `crates/nova-runtime/src/crypto.rs`'s unit tests was cross-checked
@@ -941,10 +956,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cross-check, not the documents**, and the fixtures say so at themselves so
   a later reader can upgrade the claim rather than assume it.
   **The constant-time property of `hmac_sha256_verify` is inherited from
-  `ring::hmac::verify`, not demonstrated.** No test in this project observes
-  timing. It ships anyway because the comparison a caller would otherwise
-  reach for, `Bytes::eq`, is exact but leaks — it returns early on a length
-  mismatch and then reaches `memcmp`.
+  `ring::hmac::verify`, not demonstrated.** No test of this module observes
+  timing, which is the scope `crates/nova-runtime/src/crypto.rs`'s own header
+  states at itself ("No test here observes timing") and is not a claim about
+  the rest of the suite, which does time things in
+  `crates/nova-cli/tests/run_tests.rs`. It ships anyway because the comparison
+  a caller would otherwise reach for, `Bytes::eq`, is exact but leaks — it
+  returns early on a length mismatch and then reaches `memcmp`.
   **Digest lengths are documented, not typed.** `nova-spec/20-STDLIB.md` §8
   declares `[u8; 32]` and `[u8; 64]`; neither is writable — `u8` gives
   `error[E0001]: cannot find type u8` and a fixed-length array type gives
@@ -1653,8 +1671,8 @@ that already compiled.
   earlier in this section, so that clause of the marker above was already
   false before `std/crypto` shipped and is not credited here. Phase 2's gate
   is still not reached, and "**Phase 2 is still not complete**" in the bullet
-  above still holds, as does `20-STDLIB.md` §7's own openness. Both markers
-  above left byte-identical.]
+  above still holds, as does `20-STDLIB.md` §7's own openness. Left
+  byte-identical above, per this file's convention.]
 
 - **The `C-unwind` exports in `nova-runtime` that are nullary and return `i64`
   — `nova_rt_log_config_level`, `nova_rt_log_config_to_stderr`,
