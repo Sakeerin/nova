@@ -7,10 +7,26 @@
 // cross-check, not the documents**, and states which claim it is making so a
 // later reader can upgrade it.
 //
-// This fixture is what pins the operation constants: `OP_SHA256` and
-// `OP_SHA512` are duplicated between `std/crypto/lib.nova` and
-// `crates/nova-runtime/src/crypto.rs`, and swapping either pair makes the
-// digests below wrong.
+// This fixture is what pins the operation constants. The roster duplicated
+// between `std/crypto/lib.nova` and `crates/nova-runtime/src/crypto.rs` is
+// `OP_SHA256`, `OP_SHA512`, `OP_HMAC_SHA256` and `OP_HMAC_SHA256_VERIFY`, and
+// every one of them has known-vector lines of its own below: `OP_SHA256` the
+// two `sha256` lines, `OP_SHA512` the two `sha512` lines, `OP_HMAC_SHA256` the
+// `hmac` line, `OP_HMAC_SHA256_VERIFY` the four `verify` lines. That mapping
+// is read off the dispatch rather than sampled -- one `op ==
+// OP_HMAC_SHA256_VERIFY` branch ahead of a three-arm `match` and a wildcard --
+// so it is the check to re-derive per constant, not a count to trust.
+//
+// **What a swap costs is not always a digest.** Trading `OP_HMAC_SHA256` with
+// `OP_HMAC_SHA256_VERIFY` sends `hmac_sha256` into the tag-check branch, which
+// stashes no payload at all, so the `hmac` line prints an *empty* digest; and
+// it sends `hmac_sha256_verify` into the signing arm, whose status is 0
+// whatever the tag was, so every `verify` line reads `true` and the three
+// expecting `false` go wrong. That pair was run on each side of the boundary
+// in turn and the output was identical both times. The `OP_SHA256`/`OP_SHA512`
+// pair moves the four digest lines. No claim is made here about every pair a
+// reader could form from the roster -- the mapping above is what says which
+// lines any given swap would move.
 //
 // **Hex, not `to_ints()`.** `String::char_at` returns `Option<Char>`, not
 // `Char`, so it cannot sit directly in an interpolation the way a hex digit
