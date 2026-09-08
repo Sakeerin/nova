@@ -465,8 +465,10 @@ rt_funcs! {
     /// Status word, not the digest: `0` on success for the digest
     /// operations, with the digest waiting in `FsTakeBytes`; `1` for a
     /// failed tag check (an answer, not an error); no negative range at
-    /// all, since none of its operations can fail
-    /// (`crates/nova-runtime/src/crypto.rs`).
+    /// all, since none of its operations can fail **for any input a Nova
+    /// program can construct** — a bound that is `ring`'s rather than this
+    /// tree's, stated in full on the `ERR_*` block in
+    /// `crates/nova-runtime/src/crypto.rs`.
     CryptoHash,
     /// `(i64) -> i64` — `std/crypto`'s random-bytes intrinsic. Status word,
     /// not the bytes: `0` on success, with the bytes waiting in

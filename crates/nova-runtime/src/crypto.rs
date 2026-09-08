@@ -41,7 +41,21 @@ pub(crate) const OP_HMAC_SHA256_VERIFY: i64 = 3;
 /// Error kinds, returned negated in a status word.
 ///
 /// `nova_rt_crypto_hash` never returns any of these: none of its operations
-/// can fail. They belong to the two random intrinsics.
+/// can fail **for any input a Nova program can construct**. That is the
+/// honest scope, and the bound is `ring`'s rather than this file's:
+/// `ring::digest::digest`, `ring::hmac::Key::new` and `ring::hmac::sign`
+/// each unwrap an `InputTooLongError`, which needs an input near 2^61 bytes
+/// and so is unreachable from here. The tag check is the exception that
+/// needs no scoping at all: `ring::hmac::verify` returns a `Result` and
+/// unwraps nothing, which matters because this module's constant-time
+/// argument rests on exactly that function. The kinds themselves belong to
+/// the random intrinsics.
+///
+/// "Unwrap" is spelled as a verb here, without its parentheses, on purpose:
+/// `no_crypto_intrinsic_can_panic` scans this file's own text for that
+/// token, so writing it — even in prose about a *dependency's* code, which
+/// is all this paragraph describes — fails that guard. That is itself a
+/// property of the guard worth knowing before editing these comments.
 const ERR_ENTROPY_UNAVAILABLE: i64 = 1;
 const ERR_INVALID_LENGTH: i64 = 2;
 const ERR_REQUEST_TOO_LARGE: i64 = 3;
@@ -148,12 +162,17 @@ fn fill(out: &mut [u8]) -> Result<(), ()> {
 ///
 /// Returns `0` with the digest in `Slot::Buffer` for the three producing
 /// operations, `TAG_MISMATCH` for a failed check, and `0` for a passing one.
-/// **No negative status**: none of the four operations can fail, so this
-/// intrinsic has no error range at all.
+/// **No negative status**: no operation here can fail for any input a Nova
+/// program can construct, so this intrinsic has no error range. The scope of
+/// that claim, and which of `ring`'s entry points it rests on, is stated on
+/// the `ERR_*` block above.
 ///
 /// # Safety
-/// `key`, `data` and `tag` must each be a valid `NovaStr` pointer or null,
-/// which is what the compiler emits for a `Bytes` argument.
+/// `key`, `data` and `tag` must each be a valid `NovaStr` pointer, which is
+/// what the compiler emits for a `Bytes` argument. **Not null**: `as_bytes`
+/// requires a live `NovaStr` and dereferences without checking, and the Nova
+/// side never passes one — `no_bytes()` is `bytes_from_ints([])`, a non-null
+/// empty `Bytes`.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_crypto_hash(
     op: i64,
@@ -331,8 +350,21 @@ mod tests {
     }
 
     /// The guard `std/http`'s intrinsic ships. It is a source-text check, not
-    /// a proof of panic-freedom: indexing and arithmetic can still panic
-    /// without matching any needle here.
+    /// a proof of panic-freedom, and it is blind in two directions.
+    ///
+    /// **Within this file**: indexing and arithmetic can still panic without
+    /// matching any needle here.
+    ///
+    /// **Outside this file**: the scan reads `crypto.rs` and nothing else, so
+    /// it says nothing about the dependency these intrinsics call into.
+    /// `ring::digest::digest`, `ring::hmac::Key::new` and `ring::hmac::sign`
+    /// each end in an `.unwrap()`; that unwrap needs an input near 2^61
+    /// bytes, so no Nova program reaches it, but the reason is an argument
+    /// about `ring`'s source and not something this test measures. The
+    /// distinction matters because the poll ABI is frozen and admits no panic
+    /// across a generated poll boundary, and this test is the project's named
+    /// mechanism for that invariant — so what it does not cover has to be
+    /// written down rather than assumed.
     #[test]
     fn no_crypto_intrinsic_can_panic() {
         let source = include_str!("crypto.rs");
