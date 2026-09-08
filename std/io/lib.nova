@@ -238,27 +238,32 @@ async fn read_all<T: Read>(reader: T) -> Result<Bytes, IoError> {
     Ok(acc)
 }
 
-// Decodes the 8 little-endian bytes a payload integer crosses the boundary
-// as (`crates/nova-runtime/src/io.rs`'s `stash_count`) back into the `Int` it
-// encodes, folding from the most significant byte down. Reading only the
-// first byte -- `fs_take_bytes().byte_at(0)` -- would silently truncate any
-// count at or above 256; a single write can exceed that.
+// Decodes a payload integer -- 8 little-endian bytes in the payload slot --
+// back into the `Int` it encodes, folding from the most significant byte
+// down. Four separate places in the runtime write that encoding, and they are
+// named at the end of this comment rather than cited here, because each
+// produces the payloads of exactly one module. Reading only the first byte --
+// `fs_take_bytes().byte_at(0)` -- would silently truncate any count at or
+// above 256; a single write can exceed that.
 //
 // **This fold RELIES ON `Int` ARITHMETIC WRAPPING, and the reliance is not
-// optional -- do not add an overflow check to this loop.** For a
-// non-negative payload no intermediate exceeds the final value, which is why
-// this comment used to claim the fold needs no more range than its result:
-// true of every payload `std/io`, `std/fs` and `std/net` produce, and false
-// as a general statement. `std/crypto`'s `random_int` is the first caller
-// whose payload can be negative, and for a drawn `0 - 1` -- eight `0xFF`
-// bytes -- the fold reaches `2^64 - 1` as an intermediate, with only
-// wrapping recovering `-1` at the end. An overflow check here would
-// therefore corrupt every negative draw while this module's own tests
-// stayed green, because none of their payloads is ever negative.
-// `tests/runtime/crypto_random.nova` is what does exercise it: it draws
-// `random_int(0 - 3, 3)` two hundred times, roughly three in seven of which
-// are negative, checks each against both ends, and its golden asserts
-// `bounded true`.
+// optional -- do not add an overflow check to this loop.** For a non-negative
+// payload no intermediate exceeds the final value, which is why this comment
+// used to claim the fold needs no more range than its result: true of every
+// payload `std/io`, `std/fs` and `std/net` produce, and false as a general
+// statement. `std/crypto`'s `random_int` is the first caller whose payload
+// can be negative, and for a drawn `0 - 1` -- eight `0xFF` bytes -- the fold
+// leaves `Int` range one step before it finishes: `n` is `2^56 - 1` after
+// seven iterations, so the eighth multiply reaches `2^64 - 256`, the largest
+// value the fold forms short of its own result, and the closing add reaches
+// `2^64 - 1`, which is that result and not an intermediate at all. Both of
+// those steps are out of range, and it is wrapping at both that carries the
+// fold to `-1`. An overflow check here would therefore corrupt every negative
+// draw while this module's own tests stayed green, because none of their
+// payloads is ever negative. `tests/runtime/crypto_random.nova` is what does
+// exercise it: it draws `random_int(0 - 3, 3)` two hundred times, roughly
+// three in seven of which are negative, checks each against both ends, and
+// its golden asserts `bounded true`.
 //
 // `pub` because this is the whole tree's payload-integer decoder rather than
 // this module's own. Every std module that reads an `Int` back out of the
@@ -268,12 +273,25 @@ async fn read_all<T: Read>(reader: T) -> Result<Bytes, IoError> {
 // `connect`'s and `accept`'s stream fds, `bind`'s listener fd, `local_port`
 // and its own write count, and `std/crypto` for `random_int`'s drawn value.
 // All of them cross the boundary the identical way, 8 little-endian bytes in
-// the payload slot, because the status word carries the error kind instead
-// -- `IoErrorKind` for this module, `std/fs` and `std/net`, and
-// `CryptoErrorKind` for `std/crypto`, which maps the same status word
-// through its own `crypto_error_kind_of`. The runtime side that produces
-// them (`crates/nova-runtime/src/file.rs`'s `stash_i64`) says the same of
-// its own encoding, one level down.
+// the payload slot, because the status word carries the error kind instead --
+// `IoErrorKind` for this module, `std/fs` and `std/net`, and
+// `CryptoErrorKind` for `std/crypto`, which maps the same status word through
+// its own `crypto_error_kind_of`.
+//
+// **The sharing stops at this function.** One level down, on the runtime
+// side, four separate producers write that same encoding, one per module, and
+// only three of them are even a named helper:
+// `crates/nova-runtime/src/io.rs`'s `stash_count` for this module's two
+// stream writes, `crates/nova-runtime/src/file.rs`'s `stash_i64` for
+// `std/fs`, `crates/nova-runtime/src/net.rs`'s `stash_i64` for `std/net` -- a
+// second and separate definition of the same one-line body, not a call into
+// `file.rs`'s -- and `crates/nova-runtime/src/crypto.rs` for `random_int`,
+// which stashes `value.to_le_bytes()` inline with no helper at all. So what
+// the call sites listed above actually share is the *encoding* -- 8
+// little-endian bytes in the payload slot -- plus this one decoder on the
+// Nova side; there is no shared encoder to point at, and citing any single
+// producer here would be wrong for every module but one. `net.rs`'s and
+// `file.rs`'s doc comments each record that their copy is a copy.
 pub fn decode_count(b: Bytes) -> Int {
     let ints = b.to_ints()
     let mut n = 0

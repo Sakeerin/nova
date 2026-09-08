@@ -51,11 +51,22 @@ pub(crate) const OP_HMAC_SHA256_VERIFY: i64 = 3;
 /// argument rests on exactly that function. The kinds themselves belong to
 /// the random intrinsics.
 ///
-/// "Unwrap" is spelled as a verb here, without its parentheses, on purpose:
-/// `no_crypto_intrinsic_can_panic` scans this file's own text for that
-/// token, so writing it — even in prose about a *dependency's* code, which
-/// is all this paragraph describes — fails that guard. That is itself a
-/// property of the guard worth knowing before editing these comments.
+/// "Unwrap" is spelled as a verb here, without its parentheses, on purpose.
+/// `no_crypto_intrinsic_can_panic` splits this file at its `mod tests`
+/// declaration and scans only the text ahead of it — the production half,
+/// which is where this paragraph sits — so the token with its parentheses
+/// fails that guard anywhere in this half, even in prose about a
+/// *dependency's* code, which is all this paragraph describes. Below the
+/// split it fails nothing: the guard's own doc comment names `ring`'s unwrap
+/// with parentheses attached and the suite is green, which is the check to
+/// run against this scope rather than a claim to take on trust.
+///
+/// One further hazard for anyone editing this half. Do not reproduce the
+/// line the guard splits on — keyword, module name and brace together —
+/// because the split keeps the text before its *first* occurrence, so a copy
+/// up here would silently shorten the scan to end at that copy instead of at
+/// the real module, leaving most of the production code unread by a guard
+/// that still passes.
 const ERR_ENTROPY_UNAVAILABLE: i64 = 1;
 const ERR_INVALID_LENGTH: i64 = 2;
 const ERR_REQUEST_TOO_LARGE: i64 = 3;
