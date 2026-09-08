@@ -9545,3 +9545,41 @@ fn bench_http_server_and_generator_agree() {
         String::from_utf8_lossy(&dead.stderr)
     );
 }
+
+/// `std/crypto`'s digests and HMAC against known vectors, cross-checked
+/// against Python's `hashlib`/`hmac`. Also pins the two operation-selector
+/// constants (`OP_SHA256`, `OP_SHA512`) `std/crypto/lib.nova` duplicates from
+/// `crates/nova-runtime/src/crypto.rs`: swapping either pair would make the
+/// digests below wrong. See `tests/runtime/crypto_hashes.nova`'s own header
+/// for the hex helper's route (`String::slice`, not `char_at`) and for which
+/// claim this fixture is and is not making about the published test vectors.
+#[test]
+fn crypto_hashes_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/crypto_hashes.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/crypto_hashes.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `std/crypto`'s entropy surface: no vector is asserted, only the
+/// properties that hold whatever the draw is -- a length, an error kind at
+/// each boundary, two draws differing, and 200 bounded draws all landing in
+/// range. See `tests/runtime/crypto_random.nova`'s own header for why the
+/// differing-draws check is safe despite being probabilistic.
+#[test]
+fn crypto_random_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/crypto_random.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/crypto_random.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}

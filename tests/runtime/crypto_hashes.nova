@@ -1,0 +1,48 @@
+// Known-vector fixture for `std/crypto`'s digests.
+//
+// **Provenance:** every expected value here was cross-checked against
+// Python's `hashlib`/`hmac` before being written down. The SHA-256 of "abc"
+// and the HMAC case are also widely published, as FIPS 180-4's worked
+// example and RFC 4231's first case; **this project has verified the
+// cross-check, not the documents**, and states which claim it is making so a
+// later reader can upgrade it.
+//
+// This fixture is what pins the operation constants: `OP_SHA256` and
+// `OP_SHA512` are duplicated between `std/crypto/lib.nova` and
+// `crates/nova-runtime/src/crypto.rs`, and swapping either pair makes the
+// digests below wrong.
+//
+// **Hex, not `to_ints()`.** `String::char_at` returns `Option<Char>`, not
+// `Char`, so it cannot sit directly in an interpolation the way a hex digit
+// needs to. `String::slice(self, start, end)` returns a plain `String`, so
+// `digits.slice(v / 16, v / 16 + 1)` is the one-character hex digit with no
+// `Option` to unwrap and no extra `match` in the loop below.
+
+fn hex(b: Bytes) -> String {
+    let digits = "0123456789abcdef"
+    let ints = b.to_ints()
+    let mut out = ""
+    let mut i = 0
+    while i < ints.len() {
+        let v = ints[i]
+        out = "${out}${digits.slice(v / 16, v / 16 + 1)}${digits.slice(v % 16, v % 16 + 1)}"
+        i = i + 1
+    }
+    out
+}
+
+fn main() {
+    println("sha256 empty ${hex(sha256(bytes_from_string("")))}")
+    println("sha256 abc ${hex(sha256(bytes_from_string("abc")))}")
+    println("sha512 abc len ${sha512(bytes_from_string("abc")).len()}")
+    println("sha512 abc head ${hex(sha512(bytes_from_string("abc")).slice(0, 8))}")
+
+    let key = bytes_from_ints([11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11])
+    let data = bytes_from_string("Hi There")
+    let tag = hmac_sha256(key, data)
+    println("hmac ${hex(tag)}")
+    println("verify good ${hmac_sha256_verify(key, data, tag)}")
+    println("verify wrong data ${hmac_sha256_verify(key, bytes_from_string("Hi there"), tag)}")
+    println("verify truncated ${hmac_sha256_verify(key, data, tag.slice(0, 31))}")
+    println("verify empty tag ${hmac_sha256_verify(key, data, bytes_from_ints([]))}")
+}

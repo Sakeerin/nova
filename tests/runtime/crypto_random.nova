@@ -1,0 +1,73 @@
+// `std/crypto`'s entropy surface. **No expected value can be asserted**, so
+// this asserts the properties that hold whatever the draw is.
+//
+// The differing-draws check is probabilistic: at 32 bytes a repeat has
+// probability around 2 to the negative 256, so it is astronomically safe,
+// and it is what catches an entropy source stuck at a constant.
+
+fn kind_name(k: CryptoErrorKind) -> String {
+    match k {
+        EntropyUnavailable => "EntropyUnavailable"
+        InvalidLength => "InvalidLength"
+        RequestTooLarge => "RequestTooLarge"
+        InvalidRange => "InvalidRange"
+    }
+}
+
+fn main() {
+    match random_bytes(32) {
+        Ok(a) => println("len ${a.len()}")
+        Err(e) => println("unexpected ${kind_name(e.kind)}")
+    }
+    match random_bytes(0) {
+        Ok(a) => println("zero len ${a.len()}")
+        Err(e) => println("unexpected ${kind_name(e.kind)}")
+    }
+    match random_bytes(0 - 1) {
+        Ok(a) => println("negative unexpectedly ok ${a.len()}")
+        Err(e) => println("negative ${kind_name(e.kind)}")
+    }
+    match random_bytes(65537) {
+        Ok(a) => println("over cap unexpectedly ok ${a.len()}")
+        Err(e) => println("over cap ${kind_name(e.kind)}")
+    }
+
+    // Two draws must differ. Compared with `Bytes::eq`, which is exact and
+    // is fine here: this is not a tag check, so constant time is irrelevant.
+    let x = match random_bytes(32) {
+        Ok(v) => v
+        Err(e) => bytes_from_ints([])
+    }
+    let y = match random_bytes(32) {
+        Ok(v) => v
+        Err(e) => bytes_from_ints([])
+    }
+    println("draws differ ${!x.eq(y)}")
+
+    match random_int(5, 5) {
+        Ok(v) => println("degenerate ${v}")
+        Err(e) => println("unexpected ${kind_name(e.kind)}")
+    }
+    match random_int(10, 1) {
+        Ok(v) => println("inverted unexpectedly ok ${v}")
+        Err(e) => println("inverted ${kind_name(e.kind)}")
+    }
+
+    let mut i = 0
+    let mut in_range = true
+    while i < 200 {
+        match random_int(0 - 3, 3) {
+            Ok(v) => {
+                if v < (0 - 3) {
+                    in_range = false
+                }
+                if v > 3 {
+                    in_range = false
+                }
+            }
+            Err(e) => in_range = false
+        }
+        i = i + 1
+    }
+    println("bounded ${in_range}")
+}
