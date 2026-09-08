@@ -27,6 +27,16 @@ fn main() {
         Ok(a) => println("negative unexpectedly ok ${a.len()}")
         Err(e) => println("negative ${kind_name(e.kind)}")
     }
+    // The cap itself, which is the largest accepted request, asserted
+    // alongside the first rejected one. Both sides are needed:
+    // `crates/nova-runtime/src/crypto.rs` guards with `want >
+    // MAX_RANDOM_BYTES`, and with only the 65537 line below that comparison
+    // could be `>=` -- off by one, silently refusing a legal request --
+    // without any line here moving.
+    match random_bytes(65536) {
+        Ok(a) => println("at cap ${a.len()}")
+        Err(e) => println("at cap unexpectedly ${kind_name(e.kind)}")
+    }
     match random_bytes(65537) {
         Ok(a) => println("over cap unexpectedly ok ${a.len()}")
         Err(e) => println("over cap ${kind_name(e.kind)}")

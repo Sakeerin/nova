@@ -1090,10 +1090,15 @@ its 2026-08-25 amendment.
    consults for `ring`". The `Cargo.toml` half no longer holds:
    `crates/nova-runtime/Cargo.toml` declares `ring` itself. Nor does
    `getrandom` still reach `Cargo.lock` only "by way of `rand` under
-   `proptest`" — `ring` pulls it directly, so the lockfile carries `getrandom`
-   0.2.17 behind `ring` alongside the pre-existing 0.3.4 behind `proptest`,
-   two routes where that sentence names one. `untrusted` 0.9.0 and `wasi`
-   0.11.1 arrive behind `ring` too. The clauses about `RandomState` in
+   `proptest`" — `ring` pulls 0.2.17 directly, and the pre-existing 0.3.4 was
+   never `proptest`'s alone. The packages whose own `dependencies` list names
+   `getrandom` in this increment's lockfile are `ring` 0.17.14, `rand_core`
+   0.9.5 and `tempfile` 3.27.0, with `tempfile` pulled by `insta` and
+   `rusty-fork` besides `proptest`. No count of routes is stated here,
+   because that set moves with the dev-dependency graph; re-derive the parent
+   set by searching `Cargo.lock`'s `dependencies` lists for `getrandom`.
+   `untrusted` 0.9.0 and `wasi` 0.11.1 arrive behind `ring` too. The clauses
+   about `RandomState` in
    `crates/nova-runtime/src/file.rs` and about `DefaultHasher` fingerprinting a
    path deterministically are untouched.
 

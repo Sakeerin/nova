@@ -321,10 +321,22 @@ already produces one.
   functions run. Swapping the SHA-256 and SHA-512 constants must fail a test.
 - **The four hash operations cannot fail, so their status is never
   negative**, and the Nova wrapper has no error branch. That asymmetry with
-  the two random intrinsics is documented and pinned by a runtime test rather
-  than papered over by inventing fallible signatures. *(Scoped by this
-  section's 2026-09-08 amendment: "cannot fail" holds for any input a Nova
-  program can construct, on a bound that is `ring`'s.)*
+  the two random intrinsics is documented rather than papered over by
+  inventing fallible signatures. *(Scoped by this section's 2026-09-08
+  amendment, on two clauses. First: "cannot fail" holds for any input a Nova
+  program can construct, on a bound that is `ring`'s. Second: "pinned by a
+  runtime test" is struck from this bullet, because no test pins it. What the
+  goldens hold was read rather than inferred —
+  `tests/runtime/crypto_hashes.stdout` is successful digests and `verify`
+  booleans and names no error kind anywhere, while
+  `tests/runtime/crypto_random.stdout` names `InvalidLength`,
+  `RequestTooLarge` and `InvalidRange`. So the fixtures pin the random side's
+  reachable kinds and the hash side's successes; they cannot pin "cannot
+  fail", because that failure is unreachable and so no test can reach it.
+  Neither golden names `EntropyUnavailable`, and `std/crypto/lib.nova`
+  discloses why at the `crypto_error_kind_of` arm. The load-bearing half of
+  the sentence survives untouched: the signatures were not made fallible to
+  paper the asymmetry over.)*
 
 **Panic discipline.** No panic may cross a generated poll boundary. The
 concrete commitment is the one `std/http`'s intrinsic already makes and

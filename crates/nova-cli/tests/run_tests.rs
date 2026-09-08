@@ -9547,12 +9547,19 @@ fn bench_http_server_and_generator_agree() {
 }
 
 /// `std/crypto`'s digests and HMAC against known vectors, cross-checked
-/// against Python's `hashlib`/`hmac`. Also pins the two operation-selector
-/// constants (`OP_SHA256`, `OP_SHA512`) `std/crypto/lib.nova` duplicates from
-/// `crates/nova-runtime/src/crypto.rs`: swapping either pair would make the
-/// digests below wrong. See `tests/runtime/crypto_hashes.nova`'s own header
-/// for the hex helper's route (`String::slice`, not `char_at`) and for which
-/// claim this fixture is and is not making about the published test vectors.
+/// against Python's `hashlib`/`hmac`. Also pins the operation-selector
+/// constants `std/crypto/lib.nova` duplicates from
+/// `crates/nova-runtime/src/crypto.rs` -- `OP_SHA256`, `OP_SHA512`,
+/// `OP_HMAC_SHA256` and `OP_HMAC_SHA256_VERIFY` -- each of which owns golden
+/// lines in the fixture: the `sha256` lines, the `sha512` lines, the `hmac`
+/// line and the four `verify` lines respectively. What a swap moves is not
+/// always a digest: `OP_HMAC_SHA256` traded with `OP_HMAC_SHA256_VERIFY`
+/// empties the `hmac` line and turns every `verify` answer `true`, measured
+/// from each side of the boundary in turn. See
+/// `tests/runtime/crypto_hashes.nova`'s own header for that mapping and how it
+/// was derived, for the hex helper's route (`String::slice`, not `char_at`)
+/// and for which claim this fixture is and is not making about the published
+/// test vectors.
 #[test]
 fn crypto_hashes_run() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/crypto_hashes.stdout"))
@@ -9568,8 +9575,11 @@ fn crypto_hashes_run() {
 
 /// `std/crypto`'s entropy surface: no vector is asserted, only the
 /// properties that hold whatever the draw is -- a length, an error kind at
-/// each boundary, two draws differing, and 200 bounded draws all landing in
-/// range. See `tests/runtime/crypto_random.nova`'s own header for why the
+/// each rejected boundary, the accepted length at the size cap itself, two
+/// draws differing, and 200 bounded draws all landing in range. The `at cap
+/// 65536` line is what stops `crates/nova-runtime/src/crypto.rs`'s `want >
+/// MAX_RANDOM_BYTES` drifting to `>=`; the over-cap line alone does not. See
+/// `tests/runtime/crypto_random.nova`'s own header for why the
 /// differing-draws check is safe despite being probabilistic.
 #[test]
 fn crypto_random_run() {

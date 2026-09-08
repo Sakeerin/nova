@@ -896,10 +896,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   0.17.14** with **four new `Cargo.lock` entries** observed rather than
   predicted: `ring` 0.17.14, `untrusted` 0.9.0, `wasi`
   0.11.1+wasi-snapshot-preview1 and `getrandom` 0.2.17. A pre-existing
-  `getrandom` 0.3.4, reached through `rand` under `proptest`, remains — so
-  `getrandom` now arrives by two routes, and a record naming only the
-  `proptest` one is describing one of two. Chosen over the RustCrypto
-  family because `00-MASTER-SPEC.md` §3 names it, it needs one dependency
+  `getrandom` 0.3.4 remains, and `proptest` is not the only thing that
+  reaches it. Measured from this increment's `Cargo.lock`: the packages
+  whose own `dependencies` list names `getrandom` are `ring` 0.17.14
+  (0.2.17), `rand_core` 0.9.5 (0.3.4) and `tempfile` 3.27.0 (0.3.4), and
+  `tempfile` is itself pulled by `insta` and `rusty-fork` as well as by
+  `proptest`. So a record calling `proptest` *the* route to 0.3.4 closes a
+  world it never enumerated, and no count of routes stated here would stay
+  true as the dev-dependency graph moves; the durable check is to re-derive
+  the parent set by searching `Cargo.lock`'s `dependencies` lists for
+  `getrandom`. Chosen over the RustCrypto family because
+  `00-MASTER-SPEC.md` §3 names it, it needs one dependency
   argument rather than four, and it adds fewer lockfile entries; its own
   MSRV 1.66 sits under this workspace's 1.78 floor. `hyper` and `blake3`
   are both absent from `Cargo.lock`.
@@ -1536,11 +1543,15 @@ that already compiled.
   move: `crates/nova-runtime/Cargo.toml` now declares `ring` itself, so
   "true only of the `Cargo.toml`s" no longer holds, and `getrandom` no
   longer reaches `Cargo.lock` only "by way of `rand` under `proptest`" —
-  `ring` pulls 0.2.17 directly alongside the pre-existing 0.3.4, two routes
-  where this bullet names one. And "the barrier is exposure to Nova, not
-  availability to the process" is discharged rather than narrowed: that
-  exposure is what shipped. The `RandomState` and `DefaultHasher` clauses are
-  untouched. Left byte-identical above, per this file's convention.]
+  `ring` pulls 0.2.17 directly, and the pre-existing 0.3.4 was never
+  `proptest`'s alone either. The `std/crypto` entry above names the
+  `Cargo.lock` parents that declare `getrandom` and gives the search that
+  re-derives them; no count of routes belongs in this bullet, because that
+  set moves with the dev-dependency graph. And "the barrier is exposure to
+  Nova, not availability to the process" is discharged rather than narrowed:
+  that exposure is what shipped. The `RandomState` and `DefaultHasher`
+  clauses are untouched. Left byte-identical above, per this file's
+  convention.]
 - **Seeding `str_hash` narrowed the HashDoS exposure above; it did not close
   it, and two statements in the entry above are now too broad.** Read this
   before citing either. That entry says "`impl Hash for String` in `std/core`
