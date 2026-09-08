@@ -462,10 +462,22 @@ rt_funcs! {
     /// head. Element 0 is a status; a non-zero status yields a length-1 array.
     HttpParseRequest,
     /// `(i64, ptr, ptr, ptr) -> i64` — `std/crypto`'s hash/HMAC intrinsic.
+    /// Status word, not the digest: `0` on success for the digest
+    /// operations, with the digest waiting in `FsTakeBytes`; `1` for a
+    /// failed tag check (an answer, not an error); no negative range at
+    /// all, since none of its operations can fail
+    /// (`crates/nova-runtime/src/crypto.rs`).
     CryptoHash,
-    /// `(i64) -> i64` — `std/crypto`'s random-bytes intrinsic.
+    /// `(i64) -> i64` — `std/crypto`'s random-bytes intrinsic. Status word,
+    /// not the bytes: `0` on success, with the bytes waiting in
+    /// `FsTakeBytes`; otherwise negative, naming one of `crypto.rs`'s
+    /// `ERR_*` kinds (`crates/nova-runtime/src/crypto.rs`).
     CryptoRandomBytes,
     /// `(i64, i64) -> i64` — `std/crypto`'s bounded random-integer intrinsic.
+    /// Status word, not the integer: `0` on success, with the value waiting
+    /// in `FsTakeBytes` as an 8-byte little-endian count; otherwise
+    /// negative, naming one of `crypto.rs`'s `ERR_*` kinds
+    /// (`crates/nova-runtime/src/crypto.rs`).
     CryptoRandomInt,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
