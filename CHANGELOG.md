@@ -478,6 +478,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `docs/benchmarks/` still do not exist, so the Phase 2 gate named here
   is still not reached. Left byte-identical above, per this file's
   convention.]
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`: the
+  marker directly above carved `std/crypto` out as the one of the two still
+  unstarted, and that carve-out is spent — position 12 has started, so
+  neither position this bullet names is unstarted now. Started is not
+  complete: hashes, HMAC and random ship, AEAD does not, and BLAKE3 is
+  refused by the `ring` backing rather than deferred. Two clauses of the
+  marker above are separately worth splitting apart, because only one of
+  them is this increment's doing: `examples/05-json-api` still genuinely
+  does not exist, while `docs/benchmarks/` had already existed since the
+  `phase-2-gate-benchmark` increment recorded further down this same
+  section, so that clause was already false before `std/crypto` shipped and
+  is not credited here. The gate is still not reached. Both markers above
+  left byte-identical.]
   **It also splits `docs/phase-2-plan.md` §2.4**, which
   bundles `std/net` + `std/http` + `std/json` as one increment: `std/net`
   shipped alone with the I/O poller, `std/json` ships alone here and ahead
@@ -568,6 +581,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/05-json-api` and `docs/benchmarks/` are all still absent, and
   the tag stays `v0.2.0-alpha.1` because §7 of `00-MASTER-SPEC.md` makes
   `v0.{phase}.0` assert that a phase is done.
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`, the
+  first marker this bullet has carried: of the four absences it names, one
+  is this increment's doing and two were already false before it. Position
+  12 `std/crypto` has started here — hashes, HMAC and random ship; AEAD does
+  not. Position 10 `std/http` shipped its server half in the earlier
+  increment recorded further down this same section, and `docs/benchmarks/`
+  was created by the `phase-2-gate-benchmark` increment recorded there too,
+  so neither is credited to `std/crypto`. `examples/05-json-api` is still
+  absent, "UDP and Unix sockets stay unbuilt" still holds, "**Phase 2 is not
+  complete**" still holds, and the tag reasoning is untouched. Left
+  byte-identical above, per this file's convention.]
 - **A declared depth cap on `std/json`'s `parse`, `MAX_DEPTH = 128`**, tested
   at `parse_value`'s entry. Exceeding it is an **ordinary `JsonError`**
   carrying `maximum nesting depth exceeded` — the same channel as a syntax
@@ -734,6 +758,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `write_response`, `parse_offsets`. See
   `docs/adr/0019-offset-table-intrinsic-boundary.md` for the design
   reasoning this entry only summarises.
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`: three
+  words above are stale and the rest of the parenthetical is not.
+  `$std.crypto` was appended after `$std.http`, so `$std.http` is no longer
+  "the array's last entry" — it is the fourteenth of fifteen. The delta
+  `STD_MODULES` 13 → 14 and the word "fourteenth" are true of this
+  increment forever and are deliberately left byte-identical: rewriting the
+  delta to 14 → 15 would falsify a correct record of what this increment
+  did.]
   One new intrinsic, `http_parse_request(buf: Bytes) -> [Int]`
   (`Builtin::STD_ONLY` 70 → 71), parsing an HTTP/1.1 request head into a
   flat table of **byte offsets into the caller's own buffer** — status
@@ -842,6 +874,135 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/adr/0019-offset-table-intrinsic-boundary.md` and
   `docs/phase-2-plan.md` each carry a dated amendment recording this; none
   is rewritten.
+- **`std/crypto`** (`"$std.crypto"`, `STD_MODULES` **14 → 15**, appended
+  after `$std.http`), the hash/HMAC/random third of Phase 2 position 12:
+  `sha256`, `sha512`, `hmac_sha256`, `hmac_sha256_verify`, `random_bytes`,
+  `random_int`, plus a `CryptoError` record over a `CryptoErrorKind` sum
+  (`EntropyUnavailable`, `InvalidLength`, `RequestTooLarge`,
+  `InvalidRange`). **Position 12 is started, not closed** — see "Not in this
+  increment" below.
+  Three new intrinsics, `crypto_hash`, `crypto_random_bytes` and
+  `crypto_random_int` (`Builtin::STD_ONLY` **71 → 74**), each returning a
+  **status word** and stashing its payload in `Slot::Buffer` for
+  `fs_take_bytes()` — the convention `std/fs` and `std/net` already use,
+  chosen over `nova_rt_http_parse_request`'s GC-allocated-array shape
+  because ADR 0019 argues that shape on FFI-crossing count and
+  leak-freedom, neither of which applies here. `crypto_hash` selects among
+  four operations by an `Int` constant duplicated on both sides of the
+  boundary; nothing in the compiler ties the two copies together.
+  **One new dependency, `ring = "0.17"`** in
+  `crates/nova-runtime/Cargo.toml` (not the workspace root, continuing the
+  placement `httparse` already established), resolving to **`ring`
+  0.17.14** with **four new `Cargo.lock` entries** observed rather than
+  predicted: `ring` 0.17.14, `untrusted` 0.9.0, `wasi`
+  0.11.1+wasi-snapshot-preview1 and `getrandom` 0.2.17. A pre-existing
+  `getrandom` 0.3.4, reached through `rand` under `proptest`, remains — so
+  `getrandom` now arrives by two routes, and a record naming only the
+  `proptest` one is describing one of two. Chosen over the RustCrypto
+  family because `00-MASTER-SPEC.md` §3 names it, it needs one dependency
+  argument rather than four, and it adds fewer lockfile entries; its own
+  MSRV 1.66 sits under this workspace's 1.78 floor. `hyper` and `blake3`
+  are both absent from `Cargo.lock`.
+  **Adding `ring` broke `nova build`'s standalone linking on Windows before
+  it fixed anything**, and the fix is part of this increment:
+  `getrandom` resolves `BCryptGenRandom` through `bcrypt.lib` and its
+  `SystemFunction036` fallback through `advapi32.lib`, neither of which was
+  in `crates/nova-driver/src/link.rs`'s hardcoded `MSVC_LIBS` (**6 → 8**).
+  The failure surfaced as `LNK2019: unresolved external symbol
+  __imp_BCryptGenRandom` across every `*_build_standalone` test, and the
+  array was recomputed from `cargo rustc -p nova-runtime --lib --crate-type
+  staticlib -- --print native-static-libs`, the source that array's own doc
+  comment already names, rather than guessed at. A dependency that only the
+  runtime crate declares can therefore break the *driver*; nothing in the
+  seam count above predicts that.
+  **The seam count, measured against ADR 0018 §3's arithmetic rather than
+  scaled from it.** `grep -rn 'CryptoHash\|CryptoRandomBytes\|CryptoRandomInt'
+  crates/ --include=*.rs` returns **34** lines. Under that ADR's own
+  counting rule three are coverage rather than seam (they sit inside the new
+  lowering test) and one is not a site at all (a doc-comment line inside
+  `Builtin::CryptoRandomInt`'s doc comment that names the other two
+  variants; the rule assigns a doc comment to the variant it sits on). The
+  remaining **30** are seam sites, and re-running that ADR's own grep for
+  its single intrinsic still returns **10** for `StrToFloat`, so 30 is
+  exactly three times the one-intrinsic baseline. **The naive scaling held
+  here, and that is a measurement rather than an assumption** — it can fail,
+  because an array or a `match` can take three entries in one edit; in this
+  change no site collapsed that way, and the one shared `hint` arm that does
+  batch contains `Builtin::StrToFloat` too, so the baseline batches
+  identically and the ratio survives it. The 34 figure is itself dated: the
+  same grep returned 33 at the commit that wired the seam, and the
+  doc-comment line was added by the commit after it.
+  **Known vectors, and the claim their provenance does and does not
+  make.** Every expected digest and tag in `tests/runtime/crypto_hashes.nova`
+  and in `crates/nova-runtime/src/crypto.rs`'s unit tests was cross-checked
+  against Python's `hashlib`/`hmac` before being written down. The SHA-256
+  of "abc" and the HMAC case are also widely published, as FIPS 180-4's
+  worked example and RFC 4231's first case — **this project has verified the
+  cross-check, not the documents**, and the fixtures say so at themselves so
+  a later reader can upgrade the claim rather than assume it.
+  **The constant-time property of `hmac_sha256_verify` is inherited from
+  `ring::hmac::verify`, not demonstrated.** No test in this project observes
+  timing. It ships anyway because the comparison a caller would otherwise
+  reach for, `Bytes::eq`, is exact but leaks — it returns early on a length
+  mismatch and then reaches `memcmp`.
+  **Digest lengths are documented, not typed.** `nova-spec/20-STDLIB.md` §8
+  declares `[u8; 32]` and `[u8; 64]`; neither is writable — `u8` gives
+  `error[E0001]: cannot find type u8` and a fixed-length array type gives
+  `error[P0001]: expected ] (in array type), found ;`, the parser having no
+  length branch — so a digest is a `Bytes` whose length lives in a comment,
+  and nothing can force a caller to hold exactly 32 bytes. That section now
+  carries its own dated amendment.
+  **Not in this increment:** AEAD (`Aead`, `aes_gcm_256`,
+  `chacha20_poly1305`, `encrypt`, `decrypt`), and any streaming or
+  incremental hasher, so a caller with more data than fits in one `Bytes`
+  has no route here. **BLAKE3 is refused rather than deferred:** `ring`,
+  which §8 names as the backing, does not implement it, so that declaration
+  cannot be satisfied without a second dependency.
+  **Nova can now obtain randomness through the compiler's own surface — and
+  this is not the first route from Nova to entropy.** `str_hash` already
+  was one: `("").hash()` returns splitmix64's finalizer over the raw
+  per-process seed and that finalizer inverts, and an `extern "C"`
+  declaration already reached the C runtime. What is new is a **deliberate,
+  per-call** entropy surface as distinct from a seed recoverable as a side
+  effect of hashing. `nova-spec/20-STDLIB.md` §7's entropy item carries the
+  distinction and records that its own headline claim was already false
+  before this increment.
+  **Five mutations, and one survived as predicted.** Swapping `OP_SHA256`
+  and `OP_SHA512` in `std/crypto/lib.nova` moved four golden lines and
+  failed the hashes fixture; swapping them in
+  `crates/nova-runtime/src/crypto.rs` instead failed the same fixture while
+  **all eleven of that crate's crypto unit tests passed** — those tests call
+  `digest_bytes(OP_SHA256, ...)` and the dispatch matches `OP_SHA256 =>
+  SHA256`, so both sides move together and the renumbering is invisible to
+  them by construction, which is why a cross-language fixture is what pins a
+  wire protocol. Making `sha256` return SHA-512's digest failed both the
+  fixture and `sha256_matches_a_cross_checked_vector` — a useful contrast,
+  since a changed digest is observable to a same-language vector where a
+  renumbering is not. Deleting `reduce`'s rejection guard — leaving
+  `Some(draw % span)` — failed cleanly rather than hanging, on
+  `reduce_rejects_the_low_tail_and_is_uniform_above_it`. **Replacing
+  `ring::hmac::verify` with a direct slice comparison
+  survived the whole suite**, including
+  `hmac_verify_accepts_the_right_tag_and_rejects_others`: that test asserts
+  only *which* tags are accepted, and both implementations accept exactly
+  the same tags, so no test of that shape can tell them apart. Recorded
+  rather than omitted — it is the honest measure of what this suite covers
+  and the reason the constant-time property is described as inherited.
+  **The `1 => EntropyUnavailable` arm is exercised by nothing here**, being
+  reachable only when the OS entropy source itself fails; disclosed at the
+  arm rather than covered.
+  Fourteen new tests, 1110 → 1124: eleven Rust unit tests in
+  `crates/nova-runtime/src/crypto.rs`, two `nova run` fixtures
+  (`crypto_hashes`, `crypto_random`), and one MIR lowering test,
+  `crypto_builtins_reach_their_runtime_functions`
+  (`crates/nova-mir/tests/lower_tests.rs`). `RESERVED_TYPE_NAMES` stays at
+  **7**: `CryptoError` and `CryptoErrorKind` are ordinary glob-imported,
+  shadowable `std/crypto` items, not builtin types.
+  Records amended, each with a dated marker rather than a rewrite:
+  `nova-spec/20-STDLIB.md` §7 (the entropy item and the Phase 2 status
+  chain), §8 and §10; `nova-spec/00-MASTER-SPEC.md` §3;
+  `nova-spec/13-RUNTIME.md` §1; `docs/adr/0018-std-json-scope-and-build-order.md`;
+  and `docs/adr/0019-offset-table-intrinsic-boundary.md`.
 
 ### Changed
 
@@ -1327,6 +1488,41 @@ that already compiled.
   deterministically for a cache-directory name, which is not an entropy
   source; the durable check is the predicate rather than a count of such
   sites, so grep for the constructor rather than trusting a tally here.
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`: the
+  inventory above is now false in several clauses, and the headline it was
+  built around — "**no runtime function exposes entropy to Nova**" — was
+  already false before this increment, by two routes this file records
+  itself. The `extern "C"` route is the one measured in this very bullet; the
+  other is `str_hash`, which the bullet directly below makes seeded, so
+  `("").hash()` returns splitmix64's finalizer over the raw per-process seed
+  and that finalizer inverts. **`std/crypto` is therefore not the first route
+  from Nova to entropy**, and nothing here should be read as saying it is.
+  What it adds is a deliberate, per-call entropy surface as distinct from a
+  seed recoverable as a side effect of hashing: `random_bytes` and
+  `random_int` over `Builtin::CryptoRandomBytes`/`CryptoRandomInt` and
+  `ring`'s `SecureRandom`, returning `Result<Bytes, CryptoError>` and
+  `Result<Int, CryptoError>`. So "through the compiler's own surface Nova
+  cannot obtain a random value" is false, as are "`random_bytes`/`random_int`
+  are unstarted declarations", "no `ring` in `Cargo.lock`" and "no
+  `std/crypto/` directory"; "through the C runtime by FFI a Nova program
+  already can" still stands and is not this increment's doing. The
+  `extern` finding survives measurement — a grep under `std/` still matches
+  only prose, and `std/crypto` crosses into Rust through intrinsics rather
+  than an `extern` — but the inference drawn from it does not:
+  `std/collections` does now have a seed available, because every
+  `STD_MODULES` entry globs into every module, std into std included
+  (`import_std_module`, `crates/nova-resolver`). That inference had already
+  failed on the seeding work's account before this increment; a swappable
+  seeded `Hasher` is still unbuilt for ADR 0005's reason rather than for want
+  of a source, and the two reasons must not be merged. Two further clauses
+  move: `crates/nova-runtime/Cargo.toml` now declares `ring` itself, so
+  "true only of the `Cargo.toml`s" no longer holds, and `getrandom` no
+  longer reaches `Cargo.lock` only "by way of `rand` under `proptest`" —
+  `ring` pulls 0.2.17 directly alongside the pre-existing 0.3.4, two routes
+  where this bullet names one. And "the barrier is exposure to Nova, not
+  availability to the process" is discharged rather than narrowed: that
+  exposure is what shipped. The `RandomState` and `DefaultHasher` clauses are
+  untouched. Left byte-identical above, per this file's convention.]
 - **Seeding `str_hash` narrowed the HashDoS exposure above; it did not close
   it, and two statements in the entry above are now too broad.** Read this
   before citing either. That entry says "`impl Hash for String` in `std/core`
@@ -1447,6 +1643,18 @@ that already compiled.
   when this bullet was written. `20-STDLIB.md` §7's own openness is
   unaffected by this note. Left byte-identical above, per this file's
   convention.]
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`: of
+  the four things the marker directly above names, this increment moves one.
+  Position 12 `std/crypto` has started — hashes, HMAC and random ship, AEAD
+  does not, BLAKE3 is refused by the `ring` backing — so "the one Phase 2
+  module group this tree has not started" no longer names anything.
+  `examples/05-json-api` is still genuinely absent. `docs/benchmarks/` had
+  already existed since the `phase-2-gate-benchmark` increment recorded
+  earlier in this section, so that clause of the marker above was already
+  false before `std/crypto` shipped and is not credited here. Phase 2's gate
+  is still not reached, and "**Phase 2 is still not complete**" in the bullet
+  above still holds, as does `20-STDLIB.md` §7's own openness. Both markers
+  above left byte-identical.]
 
 - **The `C-unwind` exports in `nova-runtime` that are nullary and return `i64`
   — `nova_rt_log_config_level`, `nova_rt_log_config_to_stderr`,
@@ -3125,6 +3333,19 @@ code that already compiled. Full detail is in the `### Added` entries above.
   exist, so the Phase 2 gate this bullet names is still not reached. Left
   byte-identical above, per this file's own convention for a released,
   dated section.]
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`:
+  `std/crypto` has started — hashes, HMAC and random ship over three
+  intrinsics; AEAD does not, and BLAKE3 is refused by the `ring` backing —
+  so the marker above can no longer confirm any of the six unstarted, and its
+  own carve-out naming `std/crypto` is spent. It remains true that the status
+  of `std/time`, `std/log` and `std/sync` is not re-verified in either
+  marker; each has its own later Added entry to check. `examples/05-json-api`
+  is still absent, so the gate this bullet names is still not reached. The
+  `docs/benchmarks/` clause of the marker above was already false before this
+  increment — the `phase-2-gate-benchmark` increment created that directory
+  — and is not credited here. The 2026-08-16 bullet above and the marker
+  above it are both left byte-identical, per this file's convention for a
+  released, dated section.]
 - Precise GC stack bounds remain Windows-only: `gc::stack_base` returns `None`
   everywhere else, so collection is skipped there (leak-until-exit). The eight
   `#[cfg(windows)]` root tests that exercise a real conservative scan stay
