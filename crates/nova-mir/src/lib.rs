@@ -461,6 +461,12 @@ rt_funcs! {
     /// `(bytes) -> ptr` — a Nova `[Int]` offset table for an HTTP/1.1 request
     /// head. Element 0 is a status; a non-zero status yields a length-1 array.
     HttpParseRequest,
+    /// `(i64, ptr, ptr, ptr) -> i64` — `std/crypto`'s hash/HMAC intrinsic.
+    CryptoHash,
+    /// `(i64) -> i64` — `std/crypto`'s random-bytes intrinsic.
+    CryptoRandomBytes,
+    /// `(i64, i64) -> i64` — `std/crypto`'s bounded random-integer intrinsic.
+    CryptoRandomInt,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
     /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
@@ -558,6 +564,9 @@ impl RtFunc {
             RtFunc::BytesEq => "nova_rt_bytes_eq",
             RtFunc::IntHashSeed => "nova_rt_int_hash_seed",
             RtFunc::HttpParseRequest => "nova_rt_http_parse_request",
+            RtFunc::CryptoHash => "nova_rt_crypto_hash",
+            RtFunc::CryptoRandomBytes => "nova_rt_crypto_random_bytes",
+            RtFunc::CryptoRandomInt => "nova_rt_crypto_random_int",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
             RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
             RtFunc::LogConfigLevel => "nova_rt_log_config_level",
@@ -734,6 +743,12 @@ impl RtFunc {
             RtFunc::BytesEq => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I8),
             RtFunc::IntHashSeed => (vec![], MirTy::I64),
             RtFunc::HttpParseRequest => (vec![MirTy::Ptr], MirTy::Ptr),
+            RtFunc::CryptoHash => (
+                vec![MirTy::I64, MirTy::Ptr, MirTy::Ptr, MirTy::Ptr],
+                MirTy::I64,
+            ),
+            RtFunc::CryptoRandomBytes => (vec![MirTy::I64], MirTy::I64),
+            RtFunc::CryptoRandomInt => (vec![MirTy::I64, MirTy::I64], MirTy::I64),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
             RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
             RtFunc::LogConfigLevel => (vec![], MirTy::I64),

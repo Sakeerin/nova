@@ -3972,6 +3972,9 @@ impl<'a> Checker<'a> {
             | Builtin::BytesEq
             | Builtin::IntHashSeed
             | Builtin::HttpParseRequest
+            | Builtin::CryptoHash
+            | Builtin::CryptoRandomBytes
+            | Builtin::CryptoRandomInt
             | Builtin::TimeNowNanos
             | Builtin::TimeNowEpochNanos
             | Builtin::LogConfigLevel
@@ -7274,6 +7277,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::BytesEq => (vec![Ty::Bytes, Ty::Bytes], Ty::Bool),
         Builtin::IntHashSeed => (vec![], Ty::Int),
         Builtin::HttpParseRequest => (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
+        Builtin::CryptoHash => (vec![Ty::Int, Ty::Bytes, Ty::Bytes, Ty::Bytes], Ty::Int),
+        Builtin::CryptoRandomBytes => (vec![Ty::Int], Ty::Int),
+        Builtin::CryptoRandomInt => (vec![Ty::Int, Ty::Int], Ty::Int),
         Builtin::TimeNowNanos => (vec![], Ty::Int),
         Builtin::TimeNowEpochNanos => (vec![], Ty::Int),
         Builtin::LogConfigLevel => (vec![], Ty::Int),
@@ -15390,6 +15396,18 @@ mod tests {
                 Builtin::HttpParseRequest => (
                     (vec![Ty::Bytes], Ty::Array(Box::new(Ty::Int))),
                     "`http_parse_request(buf)` in `std/http`'s `parse_offsets`",
+                ),
+                Builtin::CryptoHash => (
+                    (vec![Ty::Int, Ty::Bytes, Ty::Bytes, Ty::Bytes], Ty::Int),
+                    "`crypto_hash(op, key, data, tag)` in `std/crypto`",
+                ),
+                Builtin::CryptoRandomBytes => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`crypto_random_bytes(n)` in `std/crypto`",
+                ),
+                Builtin::CryptoRandomInt => (
+                    (vec![Ty::Int, Ty::Int], Ty::Int),
+                    "`crypto_random_int(min, max)` in `std/crypto`",
                 ),
                 Builtin::TimeNowNanos => (
                     (vec![], Ty::Int),
