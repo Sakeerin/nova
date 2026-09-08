@@ -53,6 +53,35 @@ than the label predicted, not one it leaves empty. `std/crypto` is the one
 box in that diagram still unbuilt and the workspace still depends on neither
 `hyper` nor `ring`.
 
+**AMENDED 2026-09-03 (branch `std-crypto-hashes-hmac-random`): the closing
+sentence of the amendment directly above is false in two of its clauses and
+true in a third, and the split matters.** "`std/crypto` is the one box in
+that diagram still unbuilt" is now false. "the workspace still depends on
+neither `hyper` nor `ring`" is now false of `ring` and still true of `hyper`
+— `ring` 0.17.14 is in the tracked `Cargo.lock`, declared as `ring = "0.17"`
+in `crates/nova-runtime/Cargo.toml`, and `hyper` appears in that lockfile
+nowhere. So "depends on neither" narrows to `hyper` alone rather than
+collapsing entirely. Re-grep the lockfile rather than trusting either half of
+this sentence at a later date.
+
+**What fills the "Ring crypto" box, and what it leaves empty.** SHA-256,
+SHA-512, HMAC-SHA-256, a constant-time HMAC tag check, random bytes and a
+bounded random integer ship, over three intrinsics in
+`crates/nova-runtime/src/crypto.rs` reached from `std/crypto/lib.nova`. AEAD
+does not ship. BLAKE3 does not and cannot come from this backing: `ring` does
+not implement it, so the refusal is the backing's and not a deferral. The box
+is therefore partly filled rather than closed, and `nova-spec/20-STDLIB.md`
+§8 carries the surface with its own dated amendment.
+
+**The undated prose at the head of this section is a separate case, and this
+increment is not what broke it.** "Hyper HTTP and Ring crypto are not —
+`std/http` and `std/crypto` are unstarted, and the workspace depends on
+neither crate" was already false in its `std/http` half before `std/crypto`
+existed, and the 2026-09-01 amendment above is where that half was corrected.
+Only the "Ring crypto" and `std/crypto` halves of it are this increment's
+doing. A marker crediting this increment with the whole sentence would put a
+new false claim into the record that exists to correct it.
+
 ---
 
 ## 2. Memory Layout

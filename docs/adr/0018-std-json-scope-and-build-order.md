@@ -40,6 +40,15 @@ the Consequences bullet naming position 10 unstarted is now stale.** No
 decision in this ADR moves — the correction is at the Consequences section
 itself, below, where the stale sentence lives.
 
+**Amended 2026-09-03 (branch `std-crypto-hashes-hmac-random`, a separate later
+increment): the same Consequences bullet's position-12 half is stale too, and
+its 2026-09-01 forward marker's carve-out for `std/crypto` is spent.** No
+decision in this ADR moves — the correction is a further forward marker at
+that bullet. §3's seam count was separately re-measured against a
+three-intrinsic change on that branch and held; the result is recorded in
+`CHANGELOG.md`'s `std/crypto` entry rather than here, since it confirms this
+ADR's arithmetic instead of correcting it.
+
 ## Context
 
 `00-MASTER-SPEC.md` §3 lists Phase 2's standard-library build order, and it
@@ -938,6 +947,22 @@ at the method.
   also asks for remains entirely unmeasured. The wording above is left as
   written, superseded by this marker rather than edited, the same
   convention the marker above follows.]
+  [Forward marker, 2026-09-03, branch `std-crypto-hashes-hmac-random`, a
+  separate later increment sharing that date: position 12 `std/crypto` is no
+  longer unstarted, so the 2026-09-01 marker's carve-out naming it alone is
+  spent and neither position named in this bullet is unstarted now. What
+  ships: SHA-256, SHA-512, HMAC-SHA-256, a constant-time HMAC tag check,
+  random bytes and a bounded random integer, over three intrinsics, with
+  `ring` 0.17.14 in `Cargo.lock`. Started is not complete — AEAD is unbuilt
+  and BLAKE3 is refused by the `ring` backing rather than deferred — so the
+  correction is a sentence naming what is missing inside `std/crypto`, not a
+  revised count of missing groups. `examples/05-json-api` still does not
+  exist, so the Phase 2 gate this bullet names is still not reached, and
+  nothing in that increment is a step toward the throughput number. The
+  `docs/benchmarks/` clause is not restated as newly broken here: the marker
+  directly above already records the increment that created it. Wording left
+  as written and superseded by this marker rather than edited, the same
+  convention the two markers above follow.]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both

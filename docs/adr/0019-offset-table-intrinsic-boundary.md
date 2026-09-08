@@ -32,6 +32,14 @@ deny.** No decision in this ADR moves. The corrections are inline, at the
 Context section and at the Consequences bullet naming position 10, where the
 stale sentences live.
 
+**Amended 2026-09-03 (branch `std-crypto-hashes-hmac-random`, a separate later
+increment again, sharing a date with the one above and told apart by branch):
+`std/crypto` has started, so the Consequences bullet calling position 12 the
+one Phase 2 module group this tree has not started is stale.** No decision in
+this ADR moves. The correction is inline, at that bullet. The Context
+section's own sentence about position 12 needs none: it is scoped to its
+moment — "untouched here" — and stays true of the increment it describes.
+
 ## Context
 
 `std/http` is Phase 2 position 10 of the thirteen listed in
@@ -322,6 +330,22 @@ can observe timing and adapt, and not claimed as cryptographic.
   does not exist and nothing here claims the 10k+ req/sec gate is reached;
   see `docs/benchmarks/http-fixed-response.md` for the measured figure and
   what it does and does not establish.]
+  [Amended 2026-09-03, branch `std-crypto-hashes-hmac-random`, a separate
+  later increment sharing that date: position 12 `std/crypto` has started.
+  SHA-256, SHA-512, HMAC-SHA-256, a constant-time HMAC tag check, random
+  bytes and a bounded random integer ship over three intrinsics; `ring`
+  0.17.14 is in `Cargo.lock`. So no Phase 2 module group is unstarted, and a
+  sentence naming one is wrong — but the group is not complete either: AEAD
+  is unbuilt and BLAKE3 is refused by the `ring` backing rather than
+  deferred, so the successor sentence names what is missing inside
+  `std/crypto` rather than which group is missing. `nova-spec/20-STDLIB.md`
+  §8's own dated amendment carries that. `examples/05-json-api` still does
+  not exist, so Phase 2's gate is still not reached and nothing here claims
+  it is. The `docs/benchmarks/` half of this bullet is not restated as newly
+  broken: the marker directly above already records that a prior merged
+  increment created it. Wording left as written and superseded by this
+  marker rather than edited, the convention this file's Consequences section
+  cites for itself.]
 - **2026-09-02, whole-branch review: neither `read` call in `read_request`
   carries a timeout, and nothing before this review said so.** Both calls
   (`std/http/lib.nova`) park with no deadline — `crates/nova-runtime/src/net.rs`'s

@@ -240,6 +240,43 @@ as precise, and replacing one stale number with a fresh one only restarts the
 countdown. That is why the citations this increment wrote for itself name the
 section rather than a line.
 
+**AMENDED 2026-09-03 (branch `std-crypto-hashes-hmac-random`, a different
+increment from the `phase-2-gate-benchmark` one dated the same day): Phase 2
+position 12 is now partially built — and the finding worth recording is that
+NO claim in this section is falsified by that.** A reader arriving here
+expecting a correction should stop looking for one. Position 12's entry under
+Phase 2 below reads "`std/crypto` (wrap `ring` at runtime)": that was a
+pending directive, and it is now carried out as written. `ring = "0.17"` is
+declared in `crates/nova-runtime/Cargo.toml` and `ring` 0.17.14 is in the
+tracked `Cargo.lock`, with `untrusted` 0.9.0, `wasi` 0.11.1 and `getrandom`
+0.2.17 behind it; `std/crypto/lib.nova` reaches it through three runtime
+intrinsics, which is the runtime layer the parenthetical specifies. Under §6
+below, the `ring = "0.17"` line is the version this increment pinned, so that
+line came true rather than going stale.
+
+**What that entry does and does not commit to.** It names no primitive, so
+what ships — SHA-256, SHA-512, HMAC-SHA-256, a constant-time HMAC tag check,
+random bytes and a bounded random integer — and what does not — AEAD, and
+BLAKE3, which the `ring` backing does not implement at all — leaves this
+section untouched either way. That exposure belongs to
+`nova-spec/20-STDLIB.md` §8, whose own declared surface names both and which
+carries its own dated amendment; audit that section, not this one. Cited by
+heading, per the instruction the note above gives.
+
+**Two things this increment did not do, said here so a later reader does not
+credit it with them.** It added no new deviation from the order this section
+specifies: `std/crypto` shipped after `std/net`, `std/http` and `std/json` and
+before `std/test`, which is position 12's place. And it put `ring` in a member
+crate's manifest rather than the workspace root the line introducing §6's
+block asks for — continuing the placement `httparse` had already established
+before `std/crypto` existed, so the departure from that instruction is older
+and broader than this increment and is not amended here.
+
+**Phase 2's gate is still not reached.** `examples/05-json-api` still does not
+exist, and no measurement in this increment bears on the throughput criterion
+or on the ratio `nova-spec/60-EXAMPLES.md` §5 asks for. Nothing here narrows
+the first amendment above.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

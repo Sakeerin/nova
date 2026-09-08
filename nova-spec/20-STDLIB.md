@@ -1030,6 +1030,81 @@ its 2026-08-25 amendment.
    the keys are `String`s"; §12's amendment chain carries the widened form, and
    that paragraph points at it.
 
+   **FURTHER AMENDMENT 2026-09-03 (branch `std-crypto-hashes-hmac-random`, a
+   later increment): this item's present-tense inventory of entropy routes is
+   now false in several clauses — and the headline claim the item was built
+   around was already false before this increment, so `std/crypto` is not the
+   first breach of it.**
+
+   **What was already false, and what already said so.** The claim "no runtime
+   function exposes entropy to Nova", at the head of this item, did not survive
+   to this increment. The paragraph headed **There IS a new route from Nova to
+   entropy, and it is stated here rather than denied** above retracts it in
+   those words and names `str_hash` as the route, because `("").hash()` returns
+   splitmix64's finalizer over the raw per-process seed and that finalizer
+   inverts; the 2026-08-28 amendment records `(0).hash()` recovering the int
+   seed the same way. The `extern "C"` route to the C runtime, in the roster
+   above, predates this increment as well. Nothing here should be read as
+   saying `std/crypto` opened the first route from Nova to entropy; a marker
+   claiming that would be a fresh false claim in the record correcting one.
+
+   **What this increment adds is a different thing.** A deliberate, per-call
+   entropy surface, as distinct from a seed recoverable as a side effect of
+   hashing: `random_bytes(n)` and `random_int(min, max)` in
+   `std/crypto/lib.nova`, each over its own `Builtin::STD_ONLY` intrinsic
+   (`CryptoRandomBytes`, `CryptoRandomInt`) reaching `ring`'s `SecureRandom`.
+   Inverting `("").hash()` yields one value per process lifetime by a route
+   whose purpose is hashing; these return a fresh draw per call and are asked
+   for as such. That distinction is the whole of what is new — not the
+   existence of a route.
+
+   **Which clauses of the inventory change.** The paragraph beginning **So the
+   present-tense answer is narrower than "no".** says that through the
+   compiler's own surface Nova cannot obtain a random value; that
+   `random_bytes` and `random_int` in §8 below are unstarted declarations; that
+   there is no `ring` in `Cargo.lock`; and that there is no `std/crypto/`
+   directory. Each of those is now false. Its remaining clause — "Through the C
+   runtime by FFI a Nova program already can" — stands unchanged and is not
+   this increment's doing. The shipped signatures are `Result<Bytes,
+   CryptoError>` and `Result<Int, CryptoError>`, not the infallible ones §8
+   declares; §8's own dated amendment carries why.
+
+   **The `std/collections` clause is separately stale, and not by this
+   increment's hand.** "No `std` module declares an `extern` at all today ...
+   which is why `std/collections` has no seed to hand a `Hasher`" keeps its
+   measured half: a grep for `extern` under `std/` still matches only prose,
+   and `std/crypto` crosses into Rust through intrinsics rather than an
+   `extern`, so it declared none. The inference is what fails, and it failed
+   before this increment — the seeding work recorded above put a per-process
+   seed inside the runtime that ordinary Nova code recovers through `.hash()`.
+   What this increment adds on top is a first-class source: every
+   `STD_MODULES` entry is glob-imported into every module, std into std
+   included (`import_std_module`, `crates/nova-resolver`), so `random_int` is
+   in `std/collections`'s scope. A swappable seeded `Hasher` is still unbuilt,
+   and for the reason the paragraph headed **The remedy.** above gives rather
+   than for want of a source; the two reasons must not be merged.
+
+   **Where randomness now sits in the dependency graph.** The retraction above
+   says the draft's "there is no randomness source anywhere in the runtime" was
+   "true only of the `Cargo.toml`s and false of the lockfile this section
+   consults for `ring`". The `Cargo.toml` half no longer holds:
+   `crates/nova-runtime/Cargo.toml` declares `ring` itself. Nor does
+   `getrandom` still reach `Cargo.lock` only "by way of `rand` under
+   `proptest`" — `ring` pulls it directly, so the lockfile carries `getrandom`
+   0.2.17 behind `ring` alongside the pre-existing 0.3.4 behind `proptest`,
+   two routes where that sentence names one. `untrusted` 0.9.0 and `wasi`
+   0.11.1 arrive behind `ring` too. The clauses about `RandomState` in
+   `crates/nova-runtime/src/file.rs` and about `DefaultHasher` fingerprinting a
+   path deterministically are untouched.
+
+   **And the barrier this item named is gone rather than narrowed.** "The
+   barrier is **exposure to Nova**, not availability to the process" was the
+   conclusion the argument reached; `random_bytes` and `random_int` are that
+   exposure, so availability to the process and exposure to Nova no longer come
+   apart. What stands open in its place is not where a seed comes from but what
+   a `Hasher`-shaped API should be, which is ADR 0005's question rather than
+   this section's.
+
 **This section is not closed by that amendment either, and its declared surface
 needed no edit.** `stringify_pretty(v: JsonValue, indent: Int)` still has no
 implementation and `@derive(ToJson, FromJson)` still has none, exactly as
@@ -1153,9 +1228,116 @@ methodology clause was the only part stale here. The ratio against Bun that
 `nova-spec/60-EXAMPLES.md` §5 also asks for remains entirely unmeasured, and
 no claim is made that the gate itself is passed.
 
+**AMENDED 2026-09-03 (branch `std-crypto-hashes-hmac-random`, a different
+increment from the `phase-2-gate-benchmark` one dated the same day — the two
+share a date and are told apart by branch): the `std/crypto` clause in all
+three paragraphs above is now false, and the `lib.nova` count moves one link
+further.** The count continues the chain rather than editing it: `$std.crypto`
+makes it **14 → 15** `STD_MODULES` entries and **15 → 16** files on disk with
+`STD_TEST_MODULE`, measured with `find std -name lib.nova` rather than
+incremented on paper. **Position 12 `std/crypto` is no longer unstarted**, so
+the three clauses of "is unstarted (no `ring` in `Cargo.lock`, no
+`std/crypto/`)" in the 2026-08-25 paragraph change together, and so do the
+2026-09-01 amendment's "the one Phase 2 module group this tree still has not
+started" and the 2026-09-03 `phase-2-gate-benchmark` amendment's restatement
+of it. A sentence naming any Phase 2 module group as unstarted is wrong now;
+the durable check is `ls std/` against `00-MASTER-SPEC.md` §3's numbered list,
+not this sentence.
+
+**Started is not complete, and the correct successor sentence names what is
+missing inside the module rather than which group is missing.** What ships:
+SHA-256, SHA-512, HMAC-SHA-256, a constant-time HMAC tag check, random bytes
+and a bounded random integer, over three `Builtin::STD_ONLY` intrinsics
+(`CryptoHash`, `CryptoRandomBytes`, `CryptoRandomInt`). What does not: AEAD,
+and any streaming or incremental hasher. BLAKE3 is refused rather than
+deferred — `ring` does not implement it, and §8 below names `ring` as the
+backing. `ring` 0.17.14 is in `Cargo.lock`, with `untrusted` 0.9.0, `wasi`
+0.11.1 and `getrandom` 0.2.17 behind it. §8's own dated amendment carries the
+surface against what that section declared.
+
+**Phase 2 is still not complete, and this increment did not break the
+`docs/benchmarks/` clause.** `examples/05-json-api` still does not exist —
+`examples/` holds `01-hello-world`, `02-fibonacci` and `03-producer-consumer`
+— so the gate is still not reached and nothing here claims otherwise.
+`docs/benchmarks/` had already existed since the `phase-2-gate-benchmark`
+increment, which the paragraph immediately above records; restating that
+clause as newly broken here would credit this increment with a sentence a
+prior merged increment already broke.
+
 ---
 
 ## 8. `std/crypto`
+
+**AMENDED 2026-09-03 (branch `std-crypto-hashes-hmac-random`): the code block
+below is written in types this language does not have, it names a primitive
+its own stated backing cannot supply, it uses a type it never declares, and
+what shipped is narrower than it and fallible where it is not.** The block is
+left as written and superseded by this marker rather than edited, the
+convention this project's records use throughout.
+
+**Written in a Nova that does not exist, probed on this tree rather than
+inferred.** `u8` does not name a type: `fn take(x: [u8]) -> Int` gives
+`error[E0001]: cannot find type u8`, and bare `u8` fails identically — the
+array wrapper itself parses, so this is a type-resolution failure and not a
+parse one. A fixed-length array type does not parse at all: `type Digest =
+[Int; 4]` gives `error[P0001]: expected ] (in array type), found ;`, the
+parser's array-type production having no length branch. So `[u8; 32]`,
+`[u8; 64]` and `[u8; 12]` above are unwritable twice over, once for the
+element type and once for the length. The byte type is `Bytes`, as §6's
+2026-09-01 amendment already recorded for its own block. **This is the same
+finding one module over, and the unwritability is a fact about the language
+that predates this increment**; what this increment changes is that these
+declarations no longer describe something pending, they misdescribe something
+shipped.
+
+**Digest lengths are therefore documented, not typed.** `sha256` returns a
+`Bytes` whose 32-byte length is stated in a comment on the function, and
+`sha512` a `Bytes` documented as 64; nothing in the type system can force a
+caller to hold exactly that many bytes. `tests/runtime/crypto_hashes.nova`
+prints `sha512`'s length as one of its golden lines, so the length is asserted
+by a fixture that runs even though it is not carried by a type.
+
+**`blake3` is refused by the backing this section names, not deferred.** The
+closing line below says "Backed by `ring` in nova-runtime", and `ring` does
+not implement BLAKE3. So `pub fn blake3(data: [u8]) -> [u8; 32]` cannot be
+satisfied without a second dependency, and `blake3` appears nowhere in
+`Cargo.lock`. Recorded as a contradiction inside this section rather than as a
+gap in the implementation.
+
+**`CryptoError` was used and never declared; it is declared now.** The `Aead`
+constructors below return `Result<Aead, CryptoError>` and `decrypt` returns
+`Result<[u8], CryptoError>`, with no declaration of that type or its variants
+anywhere in this file. `std/crypto/lib.nova` declares it as a record carrying
+a `CryptoErrorKind` sum — `EntropyUnavailable`, `InvalidLength`,
+`RequestTooLarge`, `InvalidRange` — and a message. The `EntropyUnavailable`
+arm is reachable only when the OS entropy source itself fails and is exercised
+by nothing in this project; that module's own header discloses the gap rather
+than covering it.
+
+**A tag producer with no consumer, and a verifier ships anyway.** This section
+declares `hmac_sha256` and nothing that checks a tag, which leaves a caller to
+compare tags itself. The comparison available on the Nova side, `Bytes::eq`,
+is exact but not constant-time — it returns early on a length mismatch and
+then reaches `memcmp` — so a hand-written check leaks. `hmac_sha256_verify(key,
+data, tag) -> Bool` ships for that reason. **Its constant-time property is
+inherited from `ring::hmac::verify` and is not demonstrated by any test here**:
+no test in this project observes timing, and a mutation replacing that call
+with a direct slice comparison passes the whole suite, the correctness test for
+which tags are accepted included — both implementations accept exactly the same
+tags, so no test asserting *which* tags are accepted can tell them apart.
+
+**Fallible where this section declares it infallible.** `random_bytes` and
+`random_int` below return `[u8]` and `Int`; what ships returns
+`Result<Bytes, CryptoError>` and `Result<Int, CryptoError>`. The OS entropy
+source can fail, `n` can be negative or above the runtime's size cap, and a
+range can be inverted — and no panic may cross a generated poll boundary, so
+the alternative to a `Result` is ending the process. `min == max` is a valid
+degenerate range returning `min`.
+
+**AEAD remains unstarted.** `Aead`, `aes_gcm_256`, `chacha20_poly1305`,
+`encrypt` and `decrypt` below are unbuilt, and nothing in this increment is a
+step toward them. §7's own dated amendment above records what position 12 does
+and does not close.
 
 ```nova
 module std.crypto
@@ -1402,6 +1584,20 @@ recent addition — plus `std/test`, held out of the array for the reason
 already given. Recorded here rather than corrected there, consistent with
 this section's own "recorded rather than fixed" choice for the thirteen
 header names in the same paragraph.)
+
+(A third such re-measurement, 2026-09-03, branch
+`std-crypto-hashes-hmac-random`: the figures in the parenthetical directly
+above are stale in their turn, which is the behaviour that paragraph
+predicted of them rather than a defect in it. `find std -name lib.nova`
+returns **sixteen** files today, fifteen of them `STD_MODULES` entries —
+`$std.crypto`, appended after `$std.http`, the most recent addition — plus
+`std/test`, still held out of the array. What moved is the number of sources
+the glob matches, not the paragraph's other count: `module std.crypto` was
+already among the dotted headers it lists, and `std/crypto/lib.nova` declares
+no `module` line either, so §8's header is nonconforming exactly as that
+paragraph already had it. The durable form of both claims is the grep the
+paragraph names rather than any number written here. Recorded rather than
+corrected, for the reason the two parentheticals above give.)
 
 ---
 
