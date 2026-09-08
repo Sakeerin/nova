@@ -259,13 +259,13 @@ What does not hold is the unqualified form: the operations cannot fail *for
 reachable inputs*, on a bound that is `ring`'s rather than this tree's.
 `ring::hmac::verify`, which the tag check uses, is the clean one — it returns
 a `Result` and unwraps nothing, which matters because section 5's
-constant-time argument rests on exactly that function. **This first
-correction governs every other place this document states "cannot fail"**:
-section 5's "The four hash operations cannot fail, so their status is never
-negative" bullet, its **Panic discipline** paragraph — whose disclosed blind
-spot is this module's own indexing and arithmetic, and which should also have
-said the scan reads only the module's own source and never the dependency it
-calls into — and section 6's "The four hash functions raise no kinds". The
+constant-time argument rests on exactly that function. **This first correction
+governs every other place this document states "cannot fail"**: section 5's
+"The four hash operations cannot fail, so their status is never negative"
+bullet, its **Panic discipline** paragraph — whose disclosed blind spot is this
+module's own indexing and arithmetic, and which should also have said the scan
+reads only the module's own production half and never the dependency it calls
+into — and section 6's "The four hash functions raise no kinds". The
 shipped comments in `crates/nova-runtime/src/crypto.rs` carry the scoped
 wording; the wording above is left as written and superseded by this marker
 rather than edited.
@@ -354,7 +354,8 @@ already produces one.
 
 **Panic discipline.** No panic may cross a generated poll boundary. The
 concrete commitment is the one `std/http`'s intrinsic already makes and
-enforces: a guard test that scans the module's own source for `unwrap()`,
+enforces: a guard test that splits the module at its `mod tests` declaration
+and scans only the text ahead of it — the production half — for `unwrap()`,
 `.expect(`, `panic!`, `format!` and `RefCell` borrows. That scan is a
 source-text check, not a proof of panic-freedom — indexing and arithmetic can
 still panic without matching any of those patterns — so the commitment is
