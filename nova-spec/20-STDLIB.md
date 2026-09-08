@@ -1311,8 +1311,10 @@ anywhere in this file. `std/crypto/lib.nova` declares it as a record carrying
 a `CryptoErrorKind` sum — `EntropyUnavailable`, `InvalidLength`,
 `RequestTooLarge`, `InvalidRange` — and a message. The `EntropyUnavailable`
 arm is reachable only when the OS entropy source itself fails and is exercised
-by nothing in this project; that module's own header discloses the gap rather
-than covering it.
+by nothing in this project; the gap is disclosed at the arm rather than
+covered, in the comment on `crypto_error_kind_of` in `std/crypto/lib.nova`,
+not in that module's header, which covers digest lengths and what the module
+does not provide.
 
 **A tag producer with no consumer, and a verifier ships anyway.** This section
 declares `hmac_sha256` and nothing that checks a tag, which leaves a caller to
@@ -1321,10 +1323,14 @@ is exact but not constant-time — it returns early on a length mismatch and
 then reaches `memcmp` — so a hand-written check leaks. `hmac_sha256_verify(key,
 data, tag) -> Bool` ships for that reason. **Its constant-time property is
 inherited from `ring::hmac::verify` and is not demonstrated by any test here**:
-no test in this project observes timing, and a mutation replacing that call
-with a direct slice comparison passes the whole suite, the correctness test for
-which tags are accepted included — both implementations accept exactly the same
-tags, so no test asserting *which* tags are accepted can tell them apart.
+no test of the crypto module observes timing, which is the scope
+`crates/nova-runtime/src/crypto.rs`'s own header states at itself ("No test
+here observes timing") and is not a claim about the rest of the suite, which
+does time things in `crates/nova-cli/tests/run_tests.rs`. And a mutation
+replacing that call with a direct slice comparison passes the whole suite, the
+correctness test for which tags are accepted included — both implementations
+accept exactly the same tags, so no test asserting *which* tags are accepted
+can tell them apart.
 
 **Fallible where this section declares it infallible.** `random_bytes` and
 `random_int` below return `[u8]` and `Int`; what ships returns

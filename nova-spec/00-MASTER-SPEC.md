@@ -265,10 +265,21 @@ heading, per the instruction the note above gives.
 
 **Two things this increment did not do, said here so a later reader does not
 credit it with them.** It added no new deviation from the order this section
-specifies: `std/crypto` shipped after `std/net`, `std/http` and `std/json` and
-before `std/test`, which is position 12's place. And it put `ring` in a member
-crate's manifest rather than the workspace root the line introducing §6's
-block asks for — continuing the placement `httparse` had already established
+specifies: `std/crypto` shipped after `std/net`, `std/http` and `std/json`,
+which is where position 12 sits relative to those three. **It did not ship
+before `std/test`, and a build-order audit needs that pair the other way
+round.** Position 13's `std/test/lib.nova` reached disk on 2026-08-07 (commit
+`6aa4296`, an ancestor of `main`), a month ahead of `std/crypto` and ahead of
+every lower-numbered position whose module reached disk after that date. That
+is an older deviation than this increment, which neither created nor closes
+it, and no record captures it:
+`docs/adr/0014-stdlib-build-order-deviations.md`, the ADR *for* build-order
+deviations, records position 2's skips and names neither `std/test` nor
+position 13. The durable check is `git log --diff-filter=A --format=%ad --
+std/<name>/lib.nova` for each entry in the Phase 2 list below, not this
+sentence. And it put `ring` in a member crate's manifest rather than the
+workspace root the line introducing §6's block asks for — continuing the
+placement `httparse` had already established
 before `std/crypto` existed, so the departure from that instruction is older
 and broader than this increment and is not amended here.
 
