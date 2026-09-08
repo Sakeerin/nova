@@ -781,13 +781,45 @@ builtins! {
     /// Std-only.
     HttpParseRequest,
     /// `crypto_hash(op: Int, key: Bytes, data: Bytes, tag: Bytes) -> Int` —
-    /// `std/crypto`'s hash/HMAC intrinsic. Std-only.
+    /// `std/crypto`'s hash/HMAC intrinsic: SHA-256, SHA-512, HMAC-SHA-256, or
+    /// HMAC-SHA-256's constant-time tag check, selected by `op` (the `OP_*`
+    /// constants in `crates/nova-runtime/src/crypto.rs`). Nova has no way to
+    /// reach a vetted hash implementation from source, so every one of these
+    /// operations crosses into Rust, which calls into `ring`.
+    ///
+    /// **The return is a status word, not the digest.** For the digest
+    /// operations, `0` means success, with the digest waiting in
+    /// [`Builtin::FsTakeBytes`]. For the tag check, `0` means the tag
+    /// matched and `1` means it did not — an answer, not an error. **No
+    /// negative range at all**: none of `crypto_hash`'s operations can fail.
+    /// Runtime symbol `nova_rt_crypto_hash`
+    /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoHash,
     /// `crypto_random_bytes(n: Int) -> Int` — `std/crypto`'s random-bytes
-    /// intrinsic. Std-only.
+    /// intrinsic: `n` bytes drawn from the OS entropy source via `ring`.
+    /// Nova has no way to reach an OS entropy source from source, so this
+    /// crosses into Rust.
+    ///
+    /// **The return is a status word, not the bytes.** `0` on success, with
+    /// the bytes waiting in [`Builtin::FsTakeBytes`]; otherwise
+    /// **negative**, naming one of `crypto.rs`'s `ERR_*` kinds — an `n` that
+    /// does not fit a `usize`, a request over the size cap, or the entropy
+    /// source itself failing. Runtime symbol `nova_rt_crypto_random_bytes`
+    /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoRandomBytes,
     /// `crypto_random_int(min: Int, max: Int) -> Int` — `std/crypto`'s
-    /// bounded random-integer intrinsic. Std-only.
+    /// bounded random-integer intrinsic: a uniform draw from `min..=max` by
+    /// rejection sampling against the OS entropy source. Nova has no way to
+    /// reach an OS entropy source from source, so this crosses into Rust.
+    ///
+    /// **The return is a status word, not the integer.** `0` on success,
+    /// with the value waiting in the same [`Builtin::FsTakeBytes`] slot
+    /// [`Builtin::CryptoHash`] and [`Builtin::CryptoRandomBytes`] use,
+    /// decoded on the Nova side as `decode_count(fs_take_bytes())`;
+    /// otherwise **negative**, naming one of `crypto.rs`'s `ERR_*` kinds —
+    /// an inverted range, or the entropy source itself failing. Runtime
+    /// symbol `nova_rt_crypto_random_int`
+    /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoRandomInt,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
     /// process epoch, monotonic and never negative.
