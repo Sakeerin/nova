@@ -9,6 +9,32 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.2] - 2026-09-09
+
+Phase 2's module inventory completed, and a **pre-release on purpose** for the
+same reason `v0.2.0-alpha.1` was: `nova-spec/00-MASTER-SPEC.md` §7 reserves
+`v0.{phase}.0` for a *completed* phase, and Phase 2's gate is not met.
+
+What changed since `v0.2.0-alpha.1` is the inventory rather than the gate. New
+module directories, by the date each `lib.nova` reached disk: `std/time`,
+`std/fmt`, `std/log`, `std/sync`, `std/json`, `std/http` and `std/crypto` --
+which leaves no Phase 2 module group **unstarted**. Unstarted is not the same
+as complete, and this paragraph claims only the weaker thing: position 10 is
+`std/http` "server first, then client" and the client half does not exist,
+and `std/crypto` ships neither AEAD nor BLAKE3. `STD_MODULES` carries fifteen
+entries, with `std/test` riding alongside rather than folded in, so sixteen
+`std/*/lib.nova` files exist; the durable check is
+`git log --diff-filter=A --format=%ad -- std/<name>/lib.nova` per entry rather
+than this paragraph.
+
+**The gate is still not reached, and this tag claims nothing about it.** Phase
+2's gate is `examples/05-json-api` serving 10k+ req/sec with methodology in
+`docs/benchmarks/`. The methodology exists and carries one measured figure for
+`std/http`'s read-and-parse path; `examples/05-json-api` does not exist, and the
+listing `nova-spec/60-EXAMPLES.md` §5 gives for it is written in a Nova that
+does not exist -- it needs a router, `@derive`, `?`, turbofish, struct update
+syntax, `String::parse` and `Map::values()`, none of which the language has.
+
 ### Added
 - **`std/time`**, a ninth `STD_MODULES` entry (`"$std.time"`, `STD_MODULES`
   8 → 9): `Instant { nanos: Int }` and `Duration { nanos: Int }`, both a
