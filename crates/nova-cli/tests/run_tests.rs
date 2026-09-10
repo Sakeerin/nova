@@ -9597,10 +9597,19 @@ fn crypto_random_run() {
 /// `examples/05-json-api` driven over a real socket: its routes and their
 /// error paths, asserted by status code and response body.
 ///
-/// **No duration and no rate is asserted here**, so nothing in this test can
-/// flake on timing. It is a correctness test that happens to need a server;
-/// the throughput question belongs to `nova-bench-http` and
-/// `docs/benchmarks/`.
+/// **No duration and no rate is asserted here.** It is a correctness test
+/// that happens to need a server; the throughput question belongs to
+/// `nova-bench-http` and `docs/benchmarks/`. Asserting no duration is not the
+/// same as having no timing dependency, though: `exchange` installs a
+/// ten-second read and write timeout below, and exceeding it turns that
+/// exchange into a `(0, "read failed: ...")` outcome which then fails its
+/// assertion. The bound is there to break a hang rather than to measure
+/// anything -- a stalled peer must fail this test rather than park the suite
+/// -- so a red here reads as a stall rather than as a slow machine.
+/// `nova-bench-http`'s `IO_TIMEOUT` takes the same ten seconds for the same
+/// reason and argues its margin from a measured round trip; no round trip has
+/// been timed against this example, so the margin here is unmeasured rather
+/// than proven.
 ///
 /// **Bodies are compared whole; heads are not.** The example interpolates
 /// its response bodies rather than building `Map`-backed `JsonValue`s
@@ -9622,6 +9631,18 @@ fn crypto_random_run() {
 /// is passed by reference under ADR 0005 and `Store::create` writes through
 /// a `mut self` receiver, with no lock, because ADR 0009 makes
 /// single-threading a correctness requirement.
+///
+/// **`GET /users` runs twice, and the second run is the one that exercises
+/// the list.** On an empty store `users_json`'s `while` never enters, so its
+/// `Some(u)` arm, its `first` flag and its comma separator are all skipped
+/// and the `[]` comes back out of a loop body that never ran. The second
+/// `GET /users` goes last, after both `POST`s, and pins the two-element
+/// array: the separator between the elements and the ascending walk over
+/// ids. Confirmed by mutation rather than assumed -- deleting
+/// `if !first { out = "${out}," }` from `users_json` fails the `listed`
+/// assertion below. Nothing else here can catch that deletion, because every
+/// other body asserted is a single object or an empty array, and a separator
+/// never appears in one.
 ///
 /// Every I/O failure becomes a `(0, "...")` outcome instead of a panic, and
 /// every outcome is collected before the child is killed, so a failing
@@ -9779,6 +9800,10 @@ fn json_api_example_serves_its_routes() {
         "/users",
         r#"{"name":"a\"b\\c","email":"q@example.com"}"#,
     );
+    // Last, so every exchange above keeps the store state it was written
+    // against. This is the only one that drives `users_json`'s loop body:
+    // the `empty` exchange above skips it entirely.
+    let listed = exchange("GET", "/users", "");
 
     let _ = server.kill();
     let _ = server.wait();
@@ -9817,5 +9842,13 @@ fn json_api_example_serves_its_routes() {
         seen(&escaped),
         (201, r#"{"id":2,"name":"a\"b\\c","email":"q@example.com"}"#),
         "POST /users with a quote and a backslash in the name"
+    );
+    assert_eq!(
+        seen(&listed),
+        (
+            200,
+            r#"[{"id":1,"name":"ada","email":"a@example.com"},{"id":2,"name":"a\"b\\c","email":"q@example.com"}]"#
+        ),
+        "GET /users with two users: the separator and the ascending id walk"
     );
 }

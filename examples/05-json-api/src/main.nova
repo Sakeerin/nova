@@ -8,13 +8,17 @@
 // `docs/superpowers/specs/2026-09-10-examples-05-json-api-design.md` section
 // 3, with the diagnostic that established it.
 //
-// **Responses are interpolated strings rather than `Map`-backed
+// **Response BODIES are interpolated strings rather than `Map`-backed
 // `JsonValue`s, and that is a correctness requirement before it is an
 // optimisation.** `std/collections`' `Map` is seeded per process, so object
 // key order varies between runs -- measured, the same two-field object
 // emitting both key orders across runs. A golden test over JSON text would
 // flake intermittently. Interpolation fixes the order; `stringify` supplies
 // the escaping, so a name containing a quote cannot break the document.
+//
+// **The response HEADER block is the exception and is NOT fixed**, because
+// `json_response` below has to build one through a `Map`. See its own
+// comment: this determinism claim covers the body bytes only.
 //
 // **No `Mutex`.** ADR 0009 makes single-threading a correctness requirement,
 // so there is nothing for one to protect. Records are heap objects with
@@ -50,11 +54,12 @@ fn str_field(m: Map<String, JsonValue>, k: String) -> Result<String, JsonError> 
     }
 }
 
-// Hand-written because `@derive` does not exist: `E0082` reports `test` as
-// the only attribute the compiler knows. The decode direction is the one the
-// example needs -- `POST /users` turns a body into a record. There is no
-// `impl ToJson for User`, because with responses interpolated nothing would
-// call it.
+// Hand-written because `@derive` does not exist: an unknown attribute is
+// `E0082`, and that message lists whatever the resolver's `KNOWN_ATTRIBUTES`
+// holds, which was `test` alone when this was written. The decode direction
+// is the one the example needs -- `POST /users` turns a body into a record.
+// There is no `impl ToJson for User`, because with responses interpolated
+// nothing would call it.
 impl FromJson for User {
     fn from_json(v: JsonValue) -> Result<User, JsonError> {
         match v {
@@ -105,6 +110,14 @@ fn users_json(s: Store) -> String {
 }
 
 // `Response::text` hardcodes `text/plain`, so this builds the record.
+//
+// **This is where the determinism the bodies get runs out.** A `Response`
+// carries its headers in a `Map`, and `Response::to_bytes` emits them in
+// `self.headers.keys()` order, which is seeded per process -- so the two
+// inserts below fix WHICH headers go out, not the order they go out in.
+// `std/http/lib.nova`'s comment above `record Response` records that measured
+// rather than argued. Copy this function for the body; read a header back by
+// name, and never diff a whole response as text.
 fn json_response(status: Int, body: String) -> Response {
     let b = bytes_from_string(body)
     let mut h: Map<String, String> = Map::new()
@@ -194,9 +207,13 @@ async fn serve(conn: TcpStream, store: Store) {
                         // `std/net`'s `write` is one non-blocking attempt, not
                         // a `write_all` loop, so a short write needs a retry.
                         // Writing `wire` whole first keeps the common case
-                        // free of slicing. Unexercised by the suite: a
-                        // response this small does not get a short write on
-                        // loopback.
+                        // free of slicing. The suite does not drive this
+                        // retry -- a response this small does not get a short
+                        // write on loopback -- and it is not the only arm no
+                        // fixture reaches. This comment is not the inventory
+                        // of those: delete a line and re-run
+                        // `json_api_example_serves_its_routes` to find out
+                        // whether the one you are looking at is driven.
                         if n < total {
                             let mut sent = n
                             let mut write_ok = true
