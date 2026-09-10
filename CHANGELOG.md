@@ -39,11 +39,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`json_api_example_serves_its_routes`** in
   `crates/nova-cli/tests/run_tests.rs`: spawns the example, parses the port out
   of its one printed line, and asserts a status code and a whole response body
-  for each route and error path, plus a `POST` whose name carries a quote and a
-  backslash and a second `GET /users` that is the only exchange driving
-  `users_json`'s loop body — the earlier `[]` comes out of a loop that never
-  enters. `Content-Length` is pulled from the head case-insensitively and the
-  head itself is never compared, because header order is not fixed.
+  per exchange. The exchanges: the three routes, an unparseable id, an unknown
+  id, a one-segment unknown path, a two-segment path with the wrong resource,
+  a `POST` whose name carries a quote and a backslash, and a second
+  `GET /users` that is the only exchange driving `users_json`'s loop body —
+  the earlier `[]` comes out of a loop that never enters. **That is a roster
+  and not every arm of the example's `handle`**: a `POST` to an unknown path,
+  a `POST` whose body is not UTF-8, is not JSON or is not an object, and any
+  method other than `GET` or `POST` all answer without being asserted, so
+  deleting a response line from the example and re-running is what settles any
+  particular arm. The two-segment exchange is the only one that can tell a
+  router checking the resource segment from one that merely counts them —
+  measured: reverting that check leaves it the sole failing assertion.
+  `Content-Length` is pulled from the head case-insensitively and the head
+  itself is never compared, because header order is not fixed.
 - **`--path` and a response-status check in `crates/nova-bench-http`.**
   `--path` defaults to `/`, so a generator invoked as
   `docs/benchmarks/README.md` already invoked it sends the same bytes it always
@@ -168,20 +177,34 @@ listing `nova-spec/60-EXAMPLES.md` §5 gives for it is written in a Nova that
 does not exist -- it needs a router, `@derive`, `?`, turbofish, struct update
 syntax, `String::parse` and `Map::values()`, none of which the language has.
 
-[Forward marker, 2026-09-10, branch `examples-05-json-api`: three claims in the
-paragraph above have since fallen, and the gate has not. `examples/05-json-api`
-**exists** — see the `[Unreleased]` section at the top of this file — and was
-measured at 455.5 req/sec against `/users` at a ten-user collection, short of
-the 10k+ this paragraph names by a factor of roughly twenty-two, so **the gate
-is still not reached and this tag's claim about it still holds**. Of the roster
-this paragraph says the language lacks, two entries are wrong: **struct update
-syntax works** (`tests/runtime/records.nova` executes `Point { x: 100, ..q }`
-against a golden `r = (100, 24)`), and a **String-to-number conversion is
-reachable from user code** through `std/json`'s public `parse` plus
-`impl FromJson for Int`, which existed before this increment and went
-unnoticed. `String::parse` as spelled here still does not exist, and neither
-does turbofish; the router, `@derive`, `?` and `Map::values()` are all still
-absent. Left byte-identical above, per this file's convention.]
+[Forward marker, 2026-09-10, branch `examples-05-json-api`: the gate claim in
+the paragraph above still holds. What has fallen is named below rather than
+counted, and naming it is not a certificate for the rest of the paragraph.
+`examples/05-json-api` **exists** — see the `[Unreleased]` section at the top
+of this file — and was measured at 455.5 req/sec against `/users` at a
+ten-user collection, short of the 10k+ this paragraph names by a factor of
+roughly twenty-two, so **the gate is still not reached and this tag's claim
+about it still holds**. The other fallen clause is the roster's closing "none
+of which the language has". Entry by entry, that roster:
+
+- **a router** — absent.
+- **`@derive`** — absent.
+- **`?`** — absent.
+- **turbofish** — absent.
+- **struct update syntax** — **wrong when written**: it works, and
+  `tests/runtime/records.nova` executes `Point { x: 100, ..q }` against a
+  golden `r = (100, 24)`.
+- **`String::parse`** — absent *as spelled*; the capability behind it is not.
+  A String-to-number conversion is reachable from user code through
+  `std/json`'s public `parse` plus `impl FromJson for Int`, which existed
+  before this increment and went unnoticed. Right about the spelling, wrong
+  about the language.
+- **`Map::values()`** — absent.
+
+Read the entries, not a tally. An earlier draft of this marker said "two
+entries are wrong" over that seven-entry roster and then declared six of them
+absent, which put `String::parse` on both sides and left 2 + 6 standing
+against 7. Left byte-identical above, per this file's convention.]
 
 ### Added
 - **`std/time`**, a ninth `STD_MODULES` entry (`"$std.time"`, `STD_MODULES`

@@ -393,8 +393,20 @@ impl Response {
 // peer reads as one response. Request-derived strings cannot carry either
 // byte: `httparse` itself terminates the request line and every header
 // value at CRLF, so the reachable case is a handler that writes body-derived
-// or otherwise untrusted data straight into a response header, exactly
-// `examples/05-json-api`'s shape.
+// or otherwise untrusted data straight into a response header.
+//
+// **This paragraph used to name `examples/05-json-api` as exactly that
+// shape, and that example is the opposite of it.** The sentence was written
+// before the example existed, so nothing checked it. `json_response` there
+// sets two headers -- a literal `application/json`, and `"${b.len()}"`, an
+// `Int` interpolation -- and neither can carry CR or LF, which makes it the
+// pattern to copy rather than the hazard to point at. The argument for this
+// check never rested on an exemplar anyway: the serialiser cannot see where
+// a caller's value came from, so it refuses the bytes whatever the current
+// set of callers happens to do. Whether some handler in the tree does feed
+// untrusted data into a header is a search of `*.nova` for `insert(`, read
+// for which hits write into a header map and where each value comes from --
+// it is not this comment.
 //
 // `to_bytes` above skips (does not emit) any header whose name or value
 // fails this check, rather than emitting it verbatim or panicking, and its

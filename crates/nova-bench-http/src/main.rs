@@ -201,6 +201,20 @@ impl Config {
         if !path.starts_with('/') {
             return Err("--path must begin with /".to_string());
         }
+        // A CR or LF here would terminate the request line `request_bytes`
+        // builds and turn the rest of the value into forged header lines, on
+        // every request of the run -- so the run would measure a request
+        // shape other than the one its own `--path` record names, with
+        // nothing in the `RESULT` line to show it. The value is
+        // operator-supplied rather than attacker-supplied, so this is
+        // hygiene: it costs one scan and closes the one way a flag can
+        // silently change what was measured. It is deliberately NOT a full
+        // request-target check -- a path carrying a space still produces a
+        // malformed request line, and that one fails loudly, because the
+        // target answers outside 2xx and `errors` counts it.
+        if path.contains('\r') || path.contains('\n') {
+            return Err("--path must contain no CR and no LF".to_string());
+        }
         Ok(Config {
             addr: addr.unwrap_or_default(),
             path,
@@ -536,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn the_path_defaults_to_root_and_must_begin_with_a_slash() {
+    fn the_path_defaults_to_root_and_is_validated() {
         let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
         let dflt = args(&["--self-test"]).expect("--self-test alone is valid");
         assert_eq!(
@@ -550,6 +564,22 @@ mod tests {
             "a path without a leading slash would send a malformed request line"
         );
         assert!(args(&["--self-test", "--path"]).is_err());
+        // Both bytes, both separately: a CRLF pair would be rejected by
+        // either check alone, so testing only the pair cannot tell which
+        // half is doing the work.
+        assert!(
+            args(&["--self-test", "--path", "/a\rb"]).is_err(),
+            "a CR would forge header lines into every request of the run"
+        );
+        assert!(
+            args(&["--self-test", "--path", "/a\nb"]).is_err(),
+            "an LF would forge header lines into every request of the run"
+        );
+        assert!(
+            args(&["--self-test", "--path", "/a b"]).is_ok(),
+            "the check is CR and LF, not a full request-target grammar: a \
+             space is still accepted here and fails loudly at the target"
+        );
     }
 
     #[test]

@@ -206,7 +206,7 @@ fn handle(req: Request, store: Store) -> Response {
                 json_response(200, users_json(store))
             } else {
                 let parts = req.path.split("/")
-                if parts.len() == 3 {
+                if parts.len() == 3 && parts[1] == "users" {
                     match path_id(parts[2]) {
                         Some(id) => {
                             match store.users.get(id) {
@@ -320,6 +320,12 @@ async fn main() {
 }
 ```
 
+**CORRECTED 2026-09-11 (same branch, final fix round): the `GET` fallback above read `if parts.len() == 3` when this listing was written, and that is a defect rather than a simplification.** A path split on `/` gives three parts for `/foo/1` exactly as it does for `/users/1`, so counting alone serves `GET /<anything>/<int>` as a user fetch. Measured on the built example before the fix: `/foo/1`, `/nope/1`, `/USERS/1` and `//1` all answered `200` with user 1, and `/a/b` answered `400` rather than `404`.
+
+The listing now carries `&& parts[1] == "users"`. The comparison is byte-for-byte because HTTP paths are case-sensitive, and `&&` short-circuits — `lower_logical` in `crates/nova-mir/src/lower.rs` puts the right operand in its own basic block, measured against a program that indexes out of range on the right of a false `&&` and does not panic — which is what keeps `parts[1]` off a shorter array, since an out-of-range index panics and a panic here would cross a poll boundary.
+
+**Step 2's probe list below is where this escaped**: it drives the three routes and the two id error cases and no wrong-resource path at all, and Step 3's golden set inherited the same shape, so nothing in this plan could tell a router that checks the resource segment from one that only counts segments.
+
 - [ ] **Step 2: Check it compiles, and run it by hand**
 
 Run: `cargo build --locked --workspace` then `./target/debug/nova check examples/05-json-api/src/main.nova`
@@ -339,7 +345,9 @@ Against the printed port: `curl -s localhost:PORT/users`, `curl -s -X POST local
 
 Append to `crates/nova-cli/tests/run_tests.rs`, modelled on the existing `crypto_random_run` and on the benchmark smoke test that parses a port from stdout. A **normal test, not `#[ignore]`d**: CI's Test job runs the ignored tests in an advisory step whose failures are tolerated and unread.
 
-It must assert **status codes and bodies**, never a duration or a rate, so it cannot flake on timing. Drive, in order: `GET /users` on an empty store, `POST /users`, `GET /users/1`, `GET /users/zz`, `GET /users/99`, and `GET /nope`.
+It must assert **status codes and bodies**, never a duration or a rate, so it cannot flake on timing. Drive, in order: `GET /users` on an empty store, `POST /users`, `GET /users/1`, `GET /users/zz`, `GET /users/99`, `GET /nope`, and — **added by the 2026-09-11 correction above** — `GET /nope/1`, two segments with the wrong resource.
+
+`GET /nope` is one segment and misses the length test, so it is satisfied by a router that checks the resource segment and by one that does not. The two-segment exchange is the only one that separates them, and it has to run after the `POST` so that a router which does not check answers with a user rather than with a 404 from an empty store.
 
 Expected bodies, given the interpolation order fixed in Step 1:
 
@@ -349,6 +357,7 @@ Expected bodies, given the interpolation order fixed in Step 1:
 - bad id → status 400
 - missing id → status 404
 - unknown path → status 404
+- unknown path, two segments with an integer tail → status 404 (2026-09-11)
 
 - [ ] **Step 4: Run the test and watch it fail first**
 

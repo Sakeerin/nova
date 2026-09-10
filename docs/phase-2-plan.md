@@ -155,7 +155,10 @@ gate is no longer unwritten, and the gate is still not reached.**
 functional half this plan asks for first — with a golden test,
 `json_api_example_serves_its_routes` in
 `crates/nova-cli/tests/run_tests.rs`, asserting a status code and a whole
-response body for each route and error path. So the bullet's
+response body per exchange over the three routes and a roster of error
+paths — **a roster and not every arm of the example's `handle`**, and
+`CHANGELOG.md`'s entry for that test names which arms nothing drives. So
+the bullet's
 "`examples/05-json-api` and `docs/benchmarks/` still do not exist" and the
 2026-09-03 amendment's "`examples/05-json-api` still does not exist" are both
 superseded here rather than edited. **The throughput half is measured and
@@ -171,9 +174,10 @@ not comparable to this one — `examples/05-json-api/BENCHMARK.md` says why — 
 it remains the destination `nova-spec/00-MASTER-SPEC.md` §3 asks for the
 **methodology**. The ratio against Bun that `nova-spec/60-EXAMPLES.md` §5 also
 asks for remains unmeasured, though Bun 1.3.0 is installed on this project's
-development host, so that half is measurable rather than blocked. **The router and the HTTP client named in the
-bullet above are still not built**, and this example routes around the router
-with a `match` over the method and the split path rather than supplying one.
+development host, so that half is measurable rather than blocked. **The
+router and the HTTP client named in the bullet above are still not built**,
+and this example routes around the router with a `match` over the method and
+the split path rather than supplying one.
 
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.

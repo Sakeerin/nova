@@ -76,8 +76,12 @@ See §8's own correction below.
 
 ## 4. Architecture
 
-Modelled on `docs/benchmarks/server.nova`, which is the only working Nova HTTP
-server in the tree.
+Modelled on `docs/benchmarks/server.nova`, which was the only working Nova
+HTTP server in the tree when this section was written. The example this
+document designs is the second, so that clause is this document's own history
+rather than a standing fact — `git grep -ln read_request -- '*.nova'`
+enumerates the candidates, and each hit has to be read for whether it is a
+server, the `std/http` definition itself, or a runtime fixture.
 
 **Task shape is forced, not chosen.** One task accepts; one task serves each
 connection. Staging two socket waits in a single poll aborts the process
@@ -89,6 +93,15 @@ connection. Staging two socket waits in a single poll aborts the process
 and `pub body: Bytes`, so nothing about the routing needs a type the language
 cannot express. `/users/:id` is a path split, and the trailing segment becomes
 an `Int` by the route in section 3.
+
+**The split has to test the resource segment and not just the segment count**,
+because a path split on `/` gives `["", "users", "1"]` and a count of three is
+equally true of `/foo/1`. A router that tested only the count would answer
+`GET /<anything>/<int>` as a user fetch. The paragraph above says "is a path
+split" and stops there; this clause is written down because the first
+implementation read the count alone, and only
+`json_api_example_serves_its_routes`' two-segment wrong-resource exchange can
+tell the two routers apart.
 
 **State is a plain record, and `Mutex` is not used.** ADR 0009 makes
 single-threading a *correctness* requirement — the collector's heap is
@@ -219,6 +232,16 @@ interpolation decision. Asserting no duration is not the same as having no
 timing dependency, though: the test installs a ten-second read and write
 timeout on each socket, so a stalled peer fails it rather than parking the
 suite, and a red there reads as a stall rather than as a slow machine.
+
+**Driving the three routes is not sufficient, and section 4's resource-segment
+clause says why.** An unknown one-segment path never reaches the segment test,
+so a set of exchanges holding only that one cannot distinguish a router that
+checks the resource segment from one that counts segments. The set needs a
+two-segment path with the wrong resource and an integer tail, driven after the
+`POST` so that the router which does not check answers with a user rather than
+with a 404 from an empty store. That exchange was added on 2026-09-11 after
+the shipped router turned out to lack the check; it is the only assertion in
+the set that fails when the check is reverted, measured both ways.
 
 **The full load run is never executed by CI.**
 
