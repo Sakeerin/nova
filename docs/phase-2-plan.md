@@ -162,11 +162,16 @@ superseded here rather than edited. **The throughput half is measured and
 short:** 455.5 req/sec against `/users` at a ten-user collection, 2026-09-10,
 Cranelift backend and release runtime profile, 200 connections, 30s after a 5s
 warmup — against the **10k+** this bullet names, short by a factor of roughly
-twenty-two, recorded in `examples/05-json-api/BENCHMARK.md` as well as in
-`docs/benchmarks/`, the destination this bullet points at. The ratio against
-Bun that `nova-spec/60-EXAMPLES.md` §5 also asks for remains unmeasured, though
-Bun 1.3.0 is installed on this project's development host, so that half is
-measurable rather than blocked. **The router and the HTTP client named in the
+twenty-two, recorded in `examples/05-json-api/BENCHMARK.md`, which
+`nova-spec/60-EXAMPLES.md` §5 names as the destination for this example's
+numbers. **So the gate's own figure no longer defaults to `docs/benchmarks/`**,
+the destination this bullet points at: that directory keeps its own separate
+figure for `std/http`'s read-and-parse path, which is a different subject and
+not comparable to this one — `examples/05-json-api/BENCHMARK.md` says why — and
+it remains the destination `nova-spec/00-MASTER-SPEC.md` §3 asks for the
+**methodology**. The ratio against Bun that `nova-spec/60-EXAMPLES.md` §5 also
+asks for remains unmeasured, though Bun 1.3.0 is installed on this project's
+development host, so that half is measurable rather than blocked. **The router and the HTTP client named in the
 bullet above are still not built**, and this example routes around the router
 with a `match` over the method and the split path rather than supplying one.
 

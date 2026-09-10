@@ -19,8 +19,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `req.path.split("/")` because the spec's `Handler` type alias does not parse;
   `impl FromJson for User` is written out because `@derive` is not implemented
   (an unknown attribute is `E0082`, whose message lists what the resolver's
-  `KNOWN_ATTRIBUTES` holds, which is `test`); a path segment becomes an `Int`
-  through `parse` and then `Int::from_json` because there is no
+  `KNOWN_ATTRIBUTES` holds — `test` alone when this entry was written, so read
+  that constant in `crates/nova-resolver/src/lib.rs` rather than this
+  sentence); a path segment becomes an `Int` through `parse` and then
+  `Int::from_json` because there is no
   `parse::<Int>()` and no turbofish; and the store is a plain record with a
   `mut self` method because ADR 0009 makes single-threading a correctness
   requirement, leaving a `Mutex` nothing to protect. Response bodies are
@@ -1058,23 +1060,30 @@ absent. Left byte-identical above, per this file's convention.]
   `docs/adr/0019-offset-table-intrinsic-boundary.md` and
   `docs/phase-2-plan.md` each carry a dated amendment recording this; none
   is rewritten.
-  [Forward marker, 2026-09-10, branch `examples-05-json-api`: of the four
-  reasons this bullet gives for making no gate claim, one has changed and the
-  rest have not. `examples/05-json-api` **exists** and was measured at 455.5
-  req/sec against `/users` at a ten-user collection — so "which does not exist"
-  is false, while "cannot be written as the spec currently states it" is still
-  true: the router's `Handler` type alias, `@derive`, `?` and turbofish are all
-  still absent, and the example substitutes for each rather than closing any.
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`: one of the
+  reasons this bullet gives for making no gate claim has changed — the last
+  one, that the gate names `examples/05-json-api`, "which does not exist and
+  cannot be written as the spec currently states it". Named rather than
+  counted, so a reader reconciles this marker against the bullet's own
+  semicolon-separated list rather than against a number written here.
+  `examples/05-json-api` **exists** and was measured at 455.5 req/sec against
+  `/users` at a ten-user collection — so "which does not exist" is false, while
+  "cannot be written as the spec currently states it" is still true: the
+  router's `Handler` type alias, `@derive`, `?` and turbofish are all still
+  absent, and the example substitutes for each rather than closing any.
   **The gate is still not passed**, and 455.5 is short of the 10k+ absolute
   criterion by a factor of roughly twenty-two, which is a sharper reason than
-  the one this bullet had. The other three reasons stand as written: one host
-  and one run, Cranelift rather than the optimising LLVM path, and the Bun
-  ratio unmeasured — though Bun 1.3.0 is installed on this host, so that last
-  one is now measurable rather than blocked. The 11,940.0 figure this bullet
-  reports is for `std/http`'s read-and-parse path with the response bytes built
-  once outside the accept loop; `examples/05-json-api/BENCHMARK.md` records why
-  the two numbers are not comparable. Left byte-identical above, per this
-  file's convention.]
+  the one this bullet had. Every other reason this bullet gives stands as
+  written, each named here: one host and one run; the Cranelift backend rather
+  than the optimising LLVM path; that the figure **excludes response
+  serialisation**; and the Bun ratio unmeasured — though Bun 1.3.0 is installed
+  on this host, so that last one is now measurable rather than blocked. **The
+  response-serialisation caveat is the one that separates the two figures**, and
+  it stands of the 11,940.0 only: that figure is `std/http`'s read-and-parse
+  path with the response bytes built once outside the accept loop, while 455.5
+  includes serialising a response per request, which is why
+  `examples/05-json-api/BENCHMARK.md` records the two as not comparable. Left
+  byte-identical above, per this file's convention.]
 - **`std/crypto`** (`"$std.crypto"`, `STD_MODULES` **14 → 15**, appended
   after `$std.http`), the hash/HMAC/random third of Phase 2 position 12:
   `sha256`, `sha512`, `hmac_sha256`, `hmac_sha256_verify`, `random_bytes`,

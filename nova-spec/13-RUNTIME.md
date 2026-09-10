@@ -624,8 +624,13 @@ shortfall. The gate's other criterion, a ratio against Bun
 this project's development host and so that half is measurable rather than
 blocked. **No stress harness of the kind the original roster named ("spawn 10k
 tasks, verify no leaks") exists**, and this increment added none;
-`NOVA_GC_STRESS` (3.3) is still the one stress mechanism this tree has. The two
-figures are not comparable and this amendment does not compare them:
+`NOVA_GC_STRESS` (3.3) was still the one stress mechanism this tree had at this
+amendment's date. That is a count of a growable population, so the durable
+check is `git grep -n STRESS -- crates/ .github/` — which reaches
+`crates/nova-runtime/src/gc.rs`, where `NOVA_GC_STRESS` is read — rather than
+this sentence; if a later increment adds a harness, re-measure there instead of
+inheriting this. The two figures are not comparable and this amendment does not
+compare them:
 `docs/benchmarks/http-fixed-response.md`'s 11,940.0 req/sec builds its response
 bytes once outside the accept loop, and `examples/05-json-api` builds every
 response from current state — `examples/05-json-api/BENCHMARK.md` records that
