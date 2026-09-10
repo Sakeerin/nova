@@ -9,6 +9,137 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`examples/05-json-api`, Phase 2's gate example**, in the language that
+  exists rather than the one `nova-spec/60-EXAMPLES.md` §5's listing assumes —
+  that listing's own dated amendment already ruled it "written in a Nova that
+  does not exist", and this makes the substitutions instead of waiting on the
+  features. `src/main.nova` serves `GET /users`, `POST /users` and
+  `GET /users/:id` over `std/http`: routing is a `match` over `req.method` and
+  `req.path.split("/")` because the spec's `Handler` type alias does not parse;
+  `impl FromJson for User` is written out because `@derive` is not implemented
+  (an unknown attribute is `E0082`, whose message lists what the resolver's
+  `KNOWN_ATTRIBUTES` holds, which is `test`); a path segment becomes an `Int`
+  through `parse` and then `Int::from_json` because there is no
+  `parse::<Int>()` and no turbofish; and the store is a plain record with a
+  `mut self` method because ADR 0009 makes single-threading a correctness
+  requirement, leaving a `Mutex` nothing to protect. Response bodies are
+  interpolated strings rather than `Map`-backed `JsonValue`s: `Map` is seeded
+  per process, so an object built through it emits its keys in an order that
+  varies between runs and a test over JSON text would flake. The response
+  HEADERS are still `Map`-ordered, so anything reading this server looks them
+  up by name.
+- **`examples/05-json-api/README.md`**, the first example README on disk to
+  follow `nova-spec/60-EXAMPLES.md` §9's per-example template. **It brought no
+  other example folder into line** — `01-hello-world`, `02-fibonacci` and
+  `03-producer-consumer` still have none, and §9's own 2026-09-01 record was
+  right about each of them at its date; the population changed, not the check.
+- **`json_api_example_serves_its_routes`** in
+  `crates/nova-cli/tests/run_tests.rs`: spawns the example, parses the port out
+  of its one printed line, and asserts a status code and a whole response body
+  for each route and error path, plus a `POST` whose name carries a quote and a
+  backslash and a second `GET /users` that is the only exchange driving
+  `users_json`'s loop body — the earlier `[]` comes out of a loop that never
+  enters. `Content-Length` is pulled from the head case-insensitively and the
+  head itself is never compared, because header order is not fixed.
+- **`--path` and a response-status check in `crates/nova-bench-http`.**
+  `--path` defaults to `/`, so a generator invoked as
+  `docs/benchmarks/README.md` already invoked it sends the same bytes it always
+  sent. The status check makes `errors=0` mean the route answered 2xx;
+  previously any completed round trip counted, so a run against the wrong route
+  reported `errors=0` while measuring a not-found handler. It does not inspect
+  bodies.
+- **`examples/05-json-api/BENCHMARK.md`**, the measurement.
+  `nova-spec/60-EXAMPLES.md` §5 has named that path as the destination for this
+  example's numbers since before the example existed; this is its first
+  content.
+
+### Measured, and the gate is NOT met
+- **455.5 req/sec against `/users`** — the endpoint `nova-spec/60-EXAMPLES.md`
+  §5's own methodology names — at a ten-user collection, 494-byte body, no
+  errors. Taken 2026-09-10 on the Cranelift backend with the release runtime
+  profile, 200 connections, 30s after a 5s warmup, `--path /users`.
+  **`nova-spec/00-MASTER-SPEC.md` §3's Phase 2 gate asks for 10k+, so the
+  endpoint the gate names is short by a factor of roughly twenty-two, and
+  nothing in this increment claims the gate is passed.** Two other collection
+  sizes were taken beside it, empty at 3100.6 and twenty users at 232.1, and a
+  harness ceiling of 122129.0 shows the generator was not the constraint. Cost
+  is linear in response bytes at roughly four microseconds each; **a quadratic
+  accumulation hypothesis was tested and refuted** — doubling the collection
+  halved throughput rather than quartering it. Naming the mechanism needs
+  profiling and was not attempted.
+- **The gate's other criterion is still unmeasured.** §5 asks for a ratio of at
+  least 1.0 against Bun, which is not the same claim as the absolute 10k and
+  can disagree with it in either direction. Bun 1.3.0 **is** installed on this
+  project's development host, so that half is measurable rather than blocked —
+  a weaker gap to inherit than the one `docs/benchmarks/README.md` records for
+  `wrk`.
+- Suite after this increment: **1130 passed / 0 failed / 8 ignored across 45
+  targets**, summed over every `test result:` line rather than sampled.
+
+### Corrections to earlier records
+- **A String-to-number conversion IS reachable from user code, and this
+  increment did not add it.** `nova-spec/60-EXAMPLES.md` §5's 2026-09-03
+  amendment says the language has none, and `[0.2.0-alpha.2]` below repeats it
+  as `String::parse`. The evidence behind that claim is sound as far as it
+  goes — `str_to_float` is `Builtin::STD_ONLY`, and so is `char_to_int`, both
+  inside that array's real bounds — but the conclusion does not follow.
+  `std/json` exposes `pub fn parse` and `pub trait FromJson` with an
+  `impl FromJson for Int`, so `parse("42")` then `Int::from_json(v)` yields
+  `42` from ordinary user code; that is what the example's `path_id` does, and
+  the golden test drives it through `GET /users/1` and `GET /users/zz`. **That
+  route existed already and went unnoticed; no credit for adding it belongs to
+  this increment.** A hand-rolled digit walk over `String::chars()` is a second
+  route, so neither is *the* route. What stands, narrower: `parse::<Int>()` as
+  the listing spells it does not exist, and neither does turbofish.
+- **Struct update syntax works.** `[0.2.0-alpha.2]` below names it among what
+  "the language has" not, and that is wrong: `tests/runtime/records.nova`
+  executes `Point { x: 100, ..q }` against a golden `r = (100, 24)`, so both
+  the overridden field and the inherited one are driven by a fixture that runs.
+  **`nova-spec/60-EXAMPLES.md` §5's amendment is not the record at fault here**
+  — checked against its own text, it never names struct update syntax; the
+  claim to correct is the one in this file.
+- **`[0.2.0-alpha.2]`'s "`examples/05-json-api` does not exist" is now
+  false**, along with the same clause in the forward markers further down this
+  file. Those are released, dated sections and are left byte-identical, per
+  this file's convention; the markers added there record it at each site.
+- **Append-only correction to a commit body on this branch**, which cannot be
+  edited. The commit whose subject is
+  `feat(examples): add 05-json-api, Phase 2's gate example` asserts in its body
+  that the golden test "asserts no duration and no rate, so it cannot flake on
+  timing". **The premise is true and the conclusion is false.** That test's
+  `exchange` helper installs a ten-second read and write timeout on each
+  socket, whose own comment reads "A stalled peer must fail this test rather
+  than hang the suite"; exceeding it turns the exchange into a
+  `(0, "read failed: ...")` outcome that then fails its assertion. What is true
+  is the narrower statement the tracked files now carry: the test asserts no
+  duration and no rate, which is not the same as having no timing dependency,
+  and a red there reads as a stall rather than as a slow machine. The margin is
+  unmeasured — no round trip has been timed against this example. No SHA is
+  cited because it is branch-local.
+
+### Known limitations / follow-ups
+- **Nothing in the language or `std` changed here, and the example routes
+  around each gap rather than closing it.** Still absent, each named rather
+  than counted: the router's `pub type Handler = async fn(Request) -> Response`
+  does not parse (`P0001`), `@derive` is not implemented, there is no `?`
+  operator, and there is no turbofish. And `Map` has `keys()` and no
+  `values()` — `users_json` walks ids ascending from 1 and looks each up
+  instead of iterating values.
+- **The example has no shutdown path.** `block_on` cannot return while a task
+  is parked and the accept loop parks forever, so a caller kills the process.
+  `docs/benchmarks/server.nova` records the same constraint.
+- **The measurement is one host, one run per configuration.** It says nothing
+  about other hosts, does not diagnose the per-byte cost, and reaches neither
+  of the two costs already recorded against `std/http` — eager header
+  materialisation and quadratic body accumulation — because the generator sends
+  one header and no body. A header-carrying and a body-carrying run against
+  this example are both still unmeasured.
+- **The short-write retry loop in `serve` is not driven by the golden test**, a
+  response that small not getting a short write on loopback. It is written for
+  correctness rather than pinned by a fixture, and it is not the only undriven
+  arm; deleting a line and re-running is what settles any particular one.
+
 ## [0.2.0-alpha.2] - 2026-09-09
 
 Phase 2's module inventory completed, and a **pre-release on purpose** for the
@@ -34,6 +165,21 @@ than this paragraph.
 listing `nova-spec/60-EXAMPLES.md` §5 gives for it is written in a Nova that
 does not exist -- it needs a router, `@derive`, `?`, turbofish, struct update
 syntax, `String::parse` and `Map::values()`, none of which the language has.
+
+[Forward marker, 2026-09-10, branch `examples-05-json-api`: three claims in the
+paragraph above have since fallen, and the gate has not. `examples/05-json-api`
+**exists** — see the `[Unreleased]` section at the top of this file — and was
+measured at 455.5 req/sec against `/users` at a ten-user collection, short of
+the 10k+ this paragraph names by a factor of roughly twenty-two, so **the gate
+is still not reached and this tag's claim about it still holds**. Of the roster
+this paragraph says the language lacks, two entries are wrong: **struct update
+syntax works** (`tests/runtime/records.nova` executes `Point { x: 100, ..q }`
+against a golden `r = (100, 24)`), and a **String-to-number conversion is
+reachable from user code** through `std/json`'s public `parse` plus
+`impl FromJson for Int`, which existed before this increment and went
+unnoticed. `String::parse` as spelled here still does not exist, and neither
+does turbofish; the router, `@derive`, `?` and `Map::values()` are all still
+absent. Left byte-identical above, per this file's convention.]
 
 ### Added
 - **`std/time`**, a ninth `STD_MODULES` entry (`"$std.time"`, `STD_MODULES`
@@ -517,6 +663,18 @@ syntax, `String::parse` and `Map::values()`, none of which the language has.
   section, so that clause was already false before `std/crypto` shipped and
   is not credited here. The gate is still not reached. Both markers above
   left byte-identical.]
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`: the
+  `examples/05-json-api` clause carried by the marker above is now false — the
+  example exists, and was measured at 455.5 req/sec against `/users` at a
+  ten-user collection. **The gate is still not reached**, for a different
+  reason than absence: that is short of the 10k+ criterion by a factor of
+  roughly twenty-two, and the ratio against Bun that
+  `nova-spec/60-EXAMPLES.md` §5 also asks for is still unmeasured, though Bun
+  1.3.0 is installed on this project's development host and so that half is now
+  measurable rather than blocked. See the `[Unreleased]` section at the top of
+  this file and `examples/05-json-api/BENCHMARK.md`. Nothing else the marker
+  above names moved here. Left byte-identical above, per this file's
+  convention.]
   **It also splits `docs/phase-2-plan.md` §2.4**, which
   bundles `std/net` + `std/http` + `std/json` as one increment: `std/net`
   shipped alone with the I/O poller, `std/json` ships alone here and ahead
@@ -900,6 +1058,23 @@ syntax, `String::parse` and `Map::values()`, none of which the language has.
   `docs/adr/0019-offset-table-intrinsic-boundary.md` and
   `docs/phase-2-plan.md` each carry a dated amendment recording this; none
   is rewritten.
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`: of the four
+  reasons this bullet gives for making no gate claim, one has changed and the
+  rest have not. `examples/05-json-api` **exists** and was measured at 455.5
+  req/sec against `/users` at a ten-user collection — so "which does not exist"
+  is false, while "cannot be written as the spec currently states it" is still
+  true: the router's `Handler` type alias, `@derive`, `?` and turbofish are all
+  still absent, and the example substitutes for each rather than closing any.
+  **The gate is still not passed**, and 455.5 is short of the 10k+ absolute
+  criterion by a factor of roughly twenty-two, which is a sharper reason than
+  the one this bullet had. The other three reasons stand as written: one host
+  and one run, Cranelift rather than the optimising LLVM path, and the Bun
+  ratio unmeasured — though Bun 1.3.0 is installed on this host, so that last
+  one is now measurable rather than blocked. The 11,940.0 figure this bullet
+  reports is for `std/http`'s read-and-parse path with the response bytes built
+  once outside the accept loop; `examples/05-json-api/BENCHMARK.md` records why
+  the two numbers are not comparable. Left byte-identical above, per this
+  file's convention.]
 - **`std/crypto`** (`"$std.crypto"`, `STD_MODULES` **14 → 15**, appended
   after `$std.http`), the hash/HMAC/random third of Phase 2 position 12:
   `sha256`, `sha512`, `hmac_sha256`, `hmac_sha256_verify`, `random_bytes`,
@@ -1710,6 +1885,18 @@ that already compiled.
   is still not reached, and "**Phase 2 is still not complete**" in the bullet
   above still holds, as does `20-STDLIB.md` §7's own openness. Left
   byte-identical above, per this file's convention.]
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`: the
+  `examples/05-json-api` clause carried by the marker above is now false — the
+  example exists, and was measured at 455.5 req/sec against `/users` at a
+  ten-user collection. **The gate is still not reached**, for a different
+  reason than absence: that is short of the 10k+ criterion by a factor of
+  roughly twenty-two, and the ratio against Bun that
+  `nova-spec/60-EXAMPLES.md` §5 also asks for is still unmeasured, though Bun
+  1.3.0 is installed on this project's development host and so that half is now
+  measurable rather than blocked. See the `[Unreleased]` section at the top of
+  this file and `examples/05-json-api/BENCHMARK.md`. Nothing else the marker
+  above names moved here. Left byte-identical above, per this file's
+  convention.]
 
 - **The `C-unwind` exports in `nova-runtime` that are nullary and return `i64`
   — `nova_rt_log_config_level`, `nova_rt_log_config_to_stderr`,
@@ -3401,6 +3588,18 @@ code that already compiled. Full detail is in the `### Added` entries above.
   — and is not credited here. The 2026-08-16 bullet above and the marker
   above it are both left byte-identical, per this file's convention for a
   released, dated section.]
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`: the
+  `examples/05-json-api` clause carried by the marker above is now false — the
+  example exists, and was measured at 455.5 req/sec against `/users` at a
+  ten-user collection. **The gate is still not reached**, for a different
+  reason than absence: that is short of the 10k+ criterion by a factor of
+  roughly twenty-two, and the ratio against Bun that
+  `nova-spec/60-EXAMPLES.md` §5 also asks for is still unmeasured, though Bun
+  1.3.0 is installed on this project's development host and so that half is now
+  measurable rather than blocked. See the `[Unreleased]` section at the top of
+  this file and `examples/05-json-api/BENCHMARK.md`. Nothing else the marker
+  above names moved here. Left byte-identical above, per this file's
+  convention.]
 - Precise GC stack bounds remain Windows-only: `gc::stack_base` returns `None`
   everywhere else, so collection is skipped there (leak-until-exit). The eight
   `#[cfg(windows)]` root tests that exercise a real conservative scan stay

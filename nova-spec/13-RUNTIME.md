@@ -606,3 +606,27 @@ on one host and one run. See `docs/benchmarks/http-fixed-response.md` and
 claim is made that the gate itself is passed, since `examples/05-json-api`
 remains unwritten and the gate's other criterion, a ratio against Bun
 (`60-EXAMPLES.md` §5), is entirely unmeasured.
+
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): the
+`examples/05-json-api` clause in both amendments above is now false, and the
+stress half of the harness-gap sentence is still the part that holds.**
+`examples/05-json-api` exists — `src/main.nova`, a `README.md` and a
+`BENCHMARK.md` — so the 2026-09-01 amendment's "`examples/05-json-api` still
+does not exist", the 2026-09-03 amendment's restatement of it, and its "remains
+unwritten" all fall together. Measured 2026-09-10 against `/users` at a
+ten-user collection: **455.5 req/sec**, on the Cranelift backend with the
+release runtime profile, 200 connections, 30s after a 5s warmup. That is short
+of `00-MASTER-SPEC.md` §3's absolute 10k+ criterion by a factor of roughly
+twenty-two, so **Phase 2's gate is still not reached and nothing here claims
+otherwise** — the reason changed from an absent example to a measured
+shortfall. The gate's other criterion, a ratio against Bun
+(`60-EXAMPLES.md` §5), remains unmeasured, though Bun 1.3.0 is installed on
+this project's development host and so that half is measurable rather than
+blocked. **No stress harness of the kind the original roster named ("spawn 10k
+tasks, verify no leaks") exists**, and this increment added none;
+`NOVA_GC_STRESS` (3.3) is still the one stress mechanism this tree has. The two
+figures are not comparable and this amendment does not compare them:
+`docs/benchmarks/http-fixed-response.md`'s 11,940.0 req/sec builds its response
+bytes once outside the accept loop, and `examples/05-json-api` builds every
+response from current state — `examples/05-json-api/BENCHMARK.md` records that
+distinction and what its own number does and does not settle.

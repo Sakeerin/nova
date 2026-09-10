@@ -149,6 +149,27 @@ and no claim is made that the Phase 2 gate as a whole is passed — the ratio
 against Bun that `nova-spec/60-EXAMPLES.md` §5 also asks for remains
 entirely unmeasured.
 
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): the first half of that
+gate is no longer unwritten, and the gate is still not reached.**
+`examples/05-json-api` exists and responds correctly to requests — the
+functional half this plan asks for first — with a golden test,
+`json_api_example_serves_its_routes` in
+`crates/nova-cli/tests/run_tests.rs`, asserting a status code and a whole
+response body for each route and error path. So the bullet's
+"`examples/05-json-api` and `docs/benchmarks/` still do not exist" and the
+2026-09-03 amendment's "`examples/05-json-api` still does not exist" are both
+superseded here rather than edited. **The throughput half is measured and
+short:** 455.5 req/sec against `/users` at a ten-user collection, 2026-09-10,
+Cranelift backend and release runtime profile, 200 connections, 30s after a 5s
+warmup — against the **10k+** this bullet names, short by a factor of roughly
+twenty-two, recorded in `examples/05-json-api/BENCHMARK.md` as well as in
+`docs/benchmarks/`, the destination this bullet points at. The ratio against
+Bun that `nova-spec/60-EXAMPLES.md` §5 also asks for remains unmeasured, though
+Bun 1.3.0 is installed on this project's development host, so that half is
+measurable rather than blocked. **The router and the HTTP client named in the
+bullet above are still not built**, and this example routes around the router
+with a `match` over the method and the split path rather than supplying one.
+
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
 - Fold in the drift cleanup: chumsky 0.10, `salsa` scaffolding, `fuzz/` targets

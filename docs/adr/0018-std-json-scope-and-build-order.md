@@ -963,6 +963,26 @@ at the method.
   directly above already records the increment that created it. Wording left
   as written and superseded by this marker rather than edited, the same
   convention the two markers above follow.]
+  [Forward marker, 2026-09-10, branch `examples-05-json-api`, a separate later
+  increment: `examples/05-json-api` **exists**, so the clause every marker
+  above carries — and the bullet's own "`examples/` holds `01-hello-world`,
+  `02-fibonacci` and `03-producer-consumer`" — is now false. `examples/` holds
+  a fourth entry, and the durable check is `ls -d examples/*/` rather than any
+  of these sentences. **Phase 2's gate is still not reached**, for a sharper
+  reason than absence: measured 2026-09-10, the example serves **455.5 req/sec**
+  against `/users` at a ten-user collection, Cranelift backend and release
+  runtime profile, which is short of the gate's absolute 10k+ criterion by a
+  factor of roughly twenty-two. The ratio against Bun that `60-EXAMPLES.md` §5
+  also asks for is still unmeasured, though Bun 1.3.0 is installed on this
+  project's development host, so that half is measurable rather than blocked.
+  The 11,940.0 figure the second marker above reports is **not comparable** to
+  455.5 and the difference is not a regression: that server builds its response
+  bytes once outside the accept loop and the example builds every response from
+  current state — `examples/05-json-api/BENCHMARK.md` records that and what its
+  own number does and does not settle. Nothing about `std/json`'s scope or
+  build-order position moved here. Wording above left as written and superseded
+  by this marker rather than edited, the same convention the three markers above
+  follow.]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both
