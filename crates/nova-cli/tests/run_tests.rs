@@ -9593,3 +9593,229 @@ fn crypto_random_run() {
         .success()
         .stdout(expected);
 }
+
+/// `examples/05-json-api` driven over a real socket: its routes and their
+/// error paths, asserted by status code and response body.
+///
+/// **No duration and no rate is asserted here**, so nothing in this test can
+/// flake on timing. It is a correctness test that happens to need a server;
+/// the throughput question belongs to `nova-bench-http` and
+/// `docs/benchmarks/`.
+///
+/// **Bodies are compared whole; heads are not.** The example interpolates
+/// its response bodies rather than building `Map`-backed `JsonValue`s
+/// exactly so that key order is fixed by the source text, because `Map`
+/// iteration is seeded per process. The response HEADERS are still
+/// `Map`-ordered -- a hand run emitted `content-type` ahead of the
+/// `content-length` that `json_response` inserts first -- so this test pulls
+/// `Content-Length` out of the head case-insensitively and never compares
+/// the head itself.
+///
+/// One connection per exchange, each response framed by `Content-Length`
+/// rather than by end-of-stream: the example keeps a connection alive until
+/// its own read fails, so a reader waiting for EOF would be waiting for a
+/// close that only its own close can cause.
+///
+/// `GET /users/1` runs over a connection later than the `POST` that created
+/// the user, so a different `serve` task answers it. That is what makes it a
+/// check on the shared store rather than on one task's local state: `Store`
+/// is passed by reference under ADR 0005 and `Store::create` writes through
+/// a `mut self` receiver, with no lock, because ADR 0009 makes
+/// single-threading a correctness requirement.
+///
+/// Every I/O failure becomes a `(0, "...")` outcome instead of a panic, and
+/// every outcome is collected before the child is killed, so a failing
+/// assertion cannot leave a server process behind.
+#[test]
+fn json_api_example_serves_its_routes() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::Stdio;
+
+    let mut server = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
+        .arg("run")
+        .arg(repo_root().join("examples/05-json-api/src/main.nova"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the json-api example");
+
+    // The port line is the first thing the example prints, so this read
+    // blocks only until it arrives -- and if the program fails to compile,
+    // the stream closes and `next()` yields `None`, which fails with a clear
+    // message rather than hanging.
+    let stdout = server.stdout.take().expect("stdout was piped");
+    let first = BufReader::new(stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.ok())
+        .unwrap_or_default();
+    let port = match first
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim().parse::<u16>().ok())
+    {
+        Some(p) => p,
+        None => {
+            let _ = server.kill();
+            let _ = server.wait();
+            panic!("the example did not print a parseable port line; got {first:?}");
+        }
+    };
+
+    // `Content-Length` out of a complete head, case-insensitively. `None`
+    // for an absent or malformed value rather than `0`, which would be
+    // indistinguishable from a legitimately empty body.
+    fn content_length(head: &str) -> Option<usize> {
+        for line in head.split("\r\n") {
+            // A line with no `:` is the status line or the blank terminator,
+            // not a header -- skip it rather than stopping the scan.
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                return value.trim().parse().ok();
+            }
+        }
+        None
+    }
+
+    let exchange = |method: &str, path: &str, body: &str| -> (u16, String) {
+        // Shaped like the `curl` invocations this example was driven with by
+        // hand: no `content-length` at all on a bodyless request.
+        let mut wire = if body.is_empty() {
+            format!("{method} {path} HTTP/1.1\r\nhost: nova-json-api\r\n\r\n")
+        } else {
+            format!(
+                "{method} {path} HTTP/1.1\r\nhost: nova-json-api\r\n\
+                 content-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            )
+        };
+        wire.push_str(body);
+
+        let mut sock = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(s) => s,
+            Err(e) => return (0, format!("connect failed: {e}")),
+        };
+        // A stalled peer must fail this test rather than hang the suite.
+        let limit = Some(std::time::Duration::from_secs(10));
+        if let Err(e) = sock.set_read_timeout(limit) {
+            return (0, format!("set_read_timeout failed: {e}"));
+        }
+        if let Err(e) = sock.set_write_timeout(limit) {
+            return (0, format!("set_write_timeout failed: {e}"));
+        }
+        if let Err(e) = sock.write_all(wire.as_bytes()) {
+            return (0, format!("write failed: {e}"));
+        }
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let total = loop {
+            let framed = buf
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4)
+                .and_then(|end| {
+                    // The head is ASCII; a body need not be, which is why
+                    // only the head is decoded here.
+                    let head = std::str::from_utf8(&buf[..end]).ok()?;
+                    Some(end + content_length(head)?)
+                });
+            match framed {
+                Some(n) if buf.len() >= n => break n,
+                _ => {}
+            }
+            match sock.read(&mut chunk) {
+                Ok(0) => {
+                    return (
+                        0,
+                        format!(
+                            "peer closed mid-response after {} bytes: {:?}",
+                            buf.len(),
+                            String::from_utf8_lossy(&buf)
+                        ),
+                    );
+                }
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(e) => return (0, format!("read failed: {e}")),
+            }
+        };
+
+        let head_end = buf
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(0);
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let status = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(0);
+        (
+            status,
+            String::from_utf8_lossy(&buf[head_end..total]).to_string(),
+        )
+    };
+
+    let empty = exchange("GET", "/users", "");
+    let created = exchange(
+        "POST",
+        "/users",
+        r#"{"name":"ada","email":"a@example.com"}"#,
+    );
+    let fetched = exchange("GET", "/users/1", "");
+    let bad_id = exchange("GET", "/users/zz", "");
+    let no_such = exchange("GET", "/users/99", "");
+    let unknown = exchange("GET", "/nope", "");
+    // Beyond the routes above, and the reason the example reaches for
+    // `stringify` instead of interpolating a name directly: a name carrying
+    // a quote and a backslash must come back escaped rather than breaking
+    // the document.
+    let escaped = exchange(
+        "POST",
+        "/users",
+        r#"{"name":"a\"b\\c","email":"q@example.com"}"#,
+    );
+
+    let _ = server.kill();
+    let _ = server.wait();
+
+    fn seen(r: &(u16, String)) -> (u16, &str) {
+        (r.0, r.1.as_str())
+    }
+
+    assert_eq!(seen(&empty), (200, "[]"), "GET /users on an empty store");
+    assert_eq!(
+        seen(&created),
+        (201, r#"{"id":1,"name":"ada","email":"a@example.com"}"#),
+        "POST /users"
+    );
+    assert_eq!(
+        seen(&fetched),
+        (200, r#"{"id":1,"name":"ada","email":"a@example.com"}"#),
+        "GET /users/1 over a later connection"
+    );
+    assert_eq!(
+        seen(&bad_id),
+        (400, r#"{"error":"id must be an integer"}"#),
+        "GET /users/zz"
+    );
+    assert_eq!(
+        seen(&no_such),
+        (404, r#"{"error":"no such user"}"#),
+        "GET /users/99"
+    );
+    assert_eq!(
+        seen(&unknown),
+        (404, r#"{"error":"not found"}"#),
+        "GET /nope"
+    );
+    assert_eq!(
+        seen(&escaped),
+        (201, r#"{"id":2,"name":"a\"b\\c","email":"q@example.com"}"#),
+        "POST /users with a quote and a backslash in the name"
+    );
+}

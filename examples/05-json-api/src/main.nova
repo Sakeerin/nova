@@ -1,0 +1,255 @@
+// Phase 2's gate example: a JSON API over `std/http`.
+//
+// **This is not `nova-spec/60-EXAMPLES.md` section 5's listing, and that is
+// deliberate.** That listing carries a dated amendment ruling it "written in
+// a Nova that does not exist" and leaving it "as the aspiration it always
+// was". This serves the same three routes in the language that exists. Every
+// substitution is recorded in
+// `docs/superpowers/specs/2026-09-10-examples-05-json-api-design.md` section
+// 3, with the diagnostic that established it.
+//
+// **Responses are interpolated strings rather than `Map`-backed
+// `JsonValue`s, and that is a correctness requirement before it is an
+// optimisation.** `std/collections`' `Map` is seeded per process, so object
+// key order varies between runs -- measured, the same two-field object
+// emitting both key orders across runs. A golden test over JSON text would
+// flake intermittently. Interpolation fixes the order; `stringify` supplies
+// the escaping, so a name containing a quote cannot break the document.
+//
+// **No `Mutex`.** ADR 0009 makes single-threading a correctness requirement,
+// so there is nothing for one to protect. Records are heap objects with
+// reference semantics under ADR 0005, and `tests/runtime/field_assign.nova`
+// pins that a `mut self` write is visible through every alias.
+//
+// **This server never exits**, for the reason `docs/benchmarks/server.nova`
+// gives: `block_on` cannot return while a task is parked, and the accept
+// loop parks forever. The benchmark procedure kills it.
+
+record User { id: Int, name: String, email: String }
+
+record Store { users: Map<Int, User>, next_id: Int }
+
+impl Store {
+    // `mut self` stores through the receiver pointer, so the write is visible
+    // to every alias -- which is how the handlers share one store without a
+    // lock.
+    fn create(mut self, name: String, email: String) -> User {
+        let id = self.next_id
+        self.next_id = id + 1
+        let u = User { id: id, name: name, email: email }
+        self.users.insert(id, u)
+        u
+    }
+}
+
+// One string field out of a decoded object, or a `JsonError` naming it.
+fn str_field(m: Map<String, JsonValue>, k: String) -> Result<String, JsonError> {
+    match m.get(k) {
+        Some(v) => String::from_json(v)
+        None => Err(JsonError { msg: "missing field ${k}", at: 0 })
+    }
+}
+
+// Hand-written because `@derive` does not exist: `E0082` reports `test` as
+// the only attribute the compiler knows. The decode direction is the one the
+// example needs -- `POST /users` turns a body into a record. There is no
+// `impl ToJson for User`, because with responses interpolated nothing would
+// call it.
+impl FromJson for User {
+    fn from_json(v: JsonValue) -> Result<User, JsonError> {
+        match v {
+            Object(m) => {
+                match str_field(m, "name") {
+                    Ok(n) => {
+                        match str_field(m, "email") {
+                            Ok(e) => Ok(User { id: 0, name: n, email: e })
+                            Err(er) => Err(er)
+                        }
+                    }
+                    Err(er) => Err(er)
+                }
+            }
+            _ => Err(JsonError { msg: "expected an object", at: 0 })
+        }
+    }
+}
+
+// `stringify(String(s))` quotes AND escapes, so a name carrying a quote or a
+// backslash cannot break the document. The key order is fixed by this
+// sentence rather than by `Map` iteration.
+fn user_json(u: User) -> String {
+    "{\"id\":${u.id},\"name\":${stringify(String(u.name))},\"email\":${stringify(String(u.email))}}"
+}
+
+// Ids are dense from 1, so walking them ascending is DETERMINISTIC -- which
+// `keys()` is not, and which is why this does not use `keys()` and does not
+// need the `values()` that `std/collections` lacks. It costs a lookup per id
+// ever issued rather than per user held; at this example's scale that is not
+// the measured path.
+fn users_json(s: Store) -> String {
+    let mut out = "["
+    let mut id = 1
+    let mut first = true
+    while id < s.next_id {
+        match s.users.get(id) {
+            Some(u) => {
+                if !first { out = "${out}," }
+                out = "${out}${user_json(u)}"
+                first = false
+            }
+            None => {}
+        }
+        id = id + 1
+    }
+    "${out}]"
+}
+
+// `Response::text` hardcodes `text/plain`, so this builds the record.
+fn json_response(status: Int, body: String) -> Response {
+    let b = bytes_from_string(body)
+    let mut h: Map<String, String> = Map::new()
+    h.insert("content-length", "${b.len()}")
+    h.insert("content-type", "application/json")
+    Response { status: status, headers: h, body: b }
+}
+
+fn error_json(msg: String) -> String {
+    "{\"error\":${stringify(String(msg))}}"
+}
+
+// The absent `parse::<Int>()`, via `std/json`'s public `FromJson for Int`.
+fn path_id(seg: String) -> Option<Int> {
+    match parse(seg) {
+        Ok(v) => {
+            match Int::from_json(v) {
+                Ok(n) => Some(n)
+                Err(e) => None
+            }
+        }
+        Err(e) => None
+    }
+}
+
+// `store` is `mut` because `Store::create` takes `mut self`: `E0060` rejects a
+// `mut self` call through an immutable binding. That is a binding-level check,
+// not a copy -- records are heap objects with reference semantics under ADR
+// 0005, so the insert lands in the one store `main` built.
+fn handle(req: Request, mut store: Store) -> Response {
+    match req.method {
+        Get => {
+            if req.path == "/users" {
+                json_response(200, users_json(store))
+            } else {
+                let parts = req.path.split("/")
+                if parts.len() == 3 {
+                    match path_id(parts[2]) {
+                        Some(id) => {
+                            match store.users.get(id) {
+                                Some(u) => json_response(200, user_json(u))
+                                None => json_response(404, error_json("no such user"))
+                            }
+                        }
+                        None => json_response(400, error_json("id must be an integer"))
+                    }
+                } else {
+                    json_response(404, error_json("not found"))
+                }
+            }
+        }
+        Post => {
+            if req.path == "/users" {
+                match req.body.to_string() {
+                    Some(s) => {
+                        match parse(s) {
+                            Ok(v) => {
+                                match User::from_json(v) {
+                                    Ok(u) => {
+                                        let created = store.create(u.name, u.email)
+                                        json_response(201, user_json(created))
+                                    }
+                                    Err(e) => json_response(400, error_json(e.msg))
+                                }
+                            }
+                            Err(e) => json_response(400, error_json(e.msg))
+                        }
+                    }
+                    None => json_response(400, error_json("body is not UTF-8"))
+                }
+            } else {
+                json_response(404, error_json("not found"))
+            }
+        }
+        _ => json_response(404, error_json("not found"))
+    }
+}
+
+async fn serve(conn: TcpStream, store: Store) {
+    while true {
+        match read_request(conn, Limits::default()).await {
+            Ok(req) => {
+                let wire = handle(req, store).to_bytes()
+                let total = wire.len()
+                match conn.write(wire).await {
+                    Ok(n) => {
+                        // `std/net`'s `write` is one non-blocking attempt, not
+                        // a `write_all` loop, so a short write needs a retry.
+                        // Writing `wire` whole first keeps the common case
+                        // free of slicing. Unexercised by the suite: a
+                        // response this small does not get a short write on
+                        // loopback.
+                        if n < total {
+                            let mut sent = n
+                            let mut write_ok = true
+                            while sent < total {
+                                match conn.write(wire.slice(sent, total)).await {
+                                    Ok(m) => {
+                                        // No progress must not retry forever
+                                        // -- that hangs rather than fails.
+                                        if m <= 0 {
+                                            write_ok = false
+                                            break
+                                        }
+                                        sent = sent + m
+                                    }
+                                    Err(e) => {
+                                        write_ok = false
+                                        break
+                                    }
+                                }
+                            }
+                            if !write_ok { break }
+                        }
+                    }
+                    Err(e) => break
+                }
+            }
+            Err(e) => break
+        }
+    }
+    let _ = conn.close().await
+}
+
+async fn main() {
+    let l = match bind("127.0.0.1:0") {
+        Ok(l) => l
+        Err(e) => panic("bind: ${e.message}")
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => panic("local_port: ${e.message}")
+    }
+    // The one line this server prints. The golden test parses it from stdout,
+    // so its shape is load-bearing.
+    println("listening on 127.0.0.1:${port}")
+
+    let store = Store { users: Map::new(), next_id: 1 }
+
+    while true {
+        match l.accept().await {
+            Ok(conn) => {
+                let h = spawn(serve(conn, store))
+            }
+            Err(e) => break
+        }
+    }
+}
