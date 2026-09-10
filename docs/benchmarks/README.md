@@ -38,11 +38,45 @@ natural follow-up; nobody has done it as part of this increment.
 
 ### The request side, and three costs it leaves at their floor
 
-The generator sends one fixed request, 36 bytes (`REQUEST` in
-`crates/nova-bench-http/src/main.rs`): the request line `GET / HTTP/1.1`, one
-header `Host: nova-bench`, and the blank line that ends the head. No body.
-Three costs `std/http` documents in its own source are consequently exercised
-at or near their minimum, and each narrows what a figure from here covers:
+The generator sends one request per round trip, built by `request_bytes`
+(`crates/nova-bench-http/src/main.rs`): the request line
+`GET <path> HTTP/1.1`, one header `Host: nova-bench`, and the blank line that
+ends the head. No body.
+
+**The path comes from `--path`, and it defaults to `/`.** So a generator
+invoked exactly as the commands below invoke it sends exactly the bytes it
+sent before the flag existed: the 36-byte request. That default is the reason
+adding the flag left every observation `http-fixed-response.md` already held
+describing the same run it had always described.
+`docs/benchmarks/server.nova` answers every path with the same fixed
+response, so against it the path changes nothing. **Against a target that
+routes, the path decides which handler gets measured.**
+`examples/05-json-api` answers `GET /` with a 404 while `60-EXAMPLES.md`
+section 5's own methodology drives `/users`, so a run against a router at the
+default path measures its not-found handler. Set `--path` to the route being
+measured.
+
+**`errors=` counts a non-2xx answer, so a run aimed at a route the target
+does not serve no longer reports zero.** Alongside `--path`, a completed
+response whose status line reads anything other than 2xx -- or that will not
+parse as a status line at all -- began incrementing the same `errors` counter
+a failed write already incremented. Round trips that got such an answer are
+still counted in `requests`, so `rps` remains a round-trip rate and a wrong
+route shows up as an error count near the request count rather than as a
+throughput figure that drops to zero.
+
+**What that widening catches is narrow**: a route the target answers with a
+4xx, and a target answering 5xx under load. It says nothing about whether the
+response body was the one expected, and it is not a general warrant that a
+figure printed beside `errors=0` measured what its surrounding prose claims.
+Neither is `errors=` a roster of one thing: a connection that could not be
+established, a socket option that could not be set, a read that timed out and
+a connection closed mid-response all land in that same figure, so a non-zero
+count is a reason to look rather than a diagnosis.
+
+Back to that request's shape. One header and no body leave three costs
+`std/http` documents in its own source exercised at or near their minimum,
+and each narrows what a figure from here covers:
 
 - **Header materialisation runs at its one-header minimum.** `std/http`'s
   design spec
@@ -185,11 +219,16 @@ of it, survives that rewrite; a bare hash from the branch does not.
 
 **The `RESULT` line does not carry the settings that define the run, so
 record them beside it.** It prints `mode`, `addr`, `connections`, `requests`,
-`errors`, `elapsed_ms`, `rps`, `conn_min` and `conn_max`. Of the three
-settings that shape a run, only `--connections` appears there; `--duration`
-and `--warmup` leave no trace in the line at all. A pasted `RESULT` line is
-therefore not self-describing, and whoever appends an observation must write
-the invoking command's flags alongside it, as `http-fixed-response.md` does.
+`errors`, `elapsed_ms`, `rps`, `conn_min` and `conn_max`. Of the settings
+that shape a run, only `--connections` appears there; `--duration`,
+`--warmup` and `--path` leave no trace in the line at all -- and a run's path
+decides which of a routing target's handlers was measured, so it belongs in
+the record. `errors=` does not stand in for it: a non-zero count catches a
+path the target refuses, while a path the target does serve but that is not
+the one the surrounding prose claims leaves no trace in the line at all. A
+pasted `RESULT` line is therefore not self-describing, and whoever appends an
+observation must write the invoking command's flags alongside it, as
+`http-fixed-response.md` does.
 
 **That calibration is mandatory, not advisory.** A Nova figure without its
 self-test ceiling beside it is not a measurement: a reading of, say, 5,000
