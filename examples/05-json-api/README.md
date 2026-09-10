@@ -14,7 +14,10 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
   `KNOWN_ATTRIBUTES` actually holds, which is `test`.
 - Turning a path segment into an `Int` through `std/json`: `parse(seg)` and
   then `Int::from_json(v)`. There is no `parse::<Int>()` and no turbofish, and
-  `str_to_float` is `STD_ONLY`, so this is the route a user program has.
+  `str_to_float` is `STD_ONLY`, so this is the route through `std`. A program
+  can also walk `String::chars()` and fold digits by hand -- `std/json`'s own
+  `hex_digit` is that shape in the other direction -- which is more code and
+  has to repeat the range check `Int::from_json` already makes.
 - Shared mutable state with no lock: a plain `Store` record and a `mut self`
   method. ADR 0009 makes single-threading a correctness requirement, so there
   is nothing for a `Mutex` to protect, and ADR 0005 gives records reference
@@ -107,8 +110,18 @@ records the same constraint.
 `json_api_example_serves_its_routes` in `crates/nova-cli/tests/run_tests.rs`
 spawns this example, parses the port out of that first line, and asserts a
 status code and a whole response body for each exchange in the transcript
-above, plus a `POST` whose name carries a quote and a backslash. It asserts no
-duration and no rate, so it cannot flake on timing. Not driven by it: the
-short-write retry loop in `serve`, because a response this small does not get
-a short write on loopback -- that loop is written for correctness rather than
-pinned by a fixture.
+above, plus a `POST` whose name carries a quote and a backslash and then a
+second `GET /users`, which comes back as
+`[{"id":1,...},{"id":2,...}]` -- the only exchange that drives `users_json`'s
+loop body, since the `[]` above it comes out of a loop that never enters.
+
+It asserts no duration and no rate. That is not the same as being immune to
+timing: it puts a ten-second read and write timeout on each socket, so a
+stalled peer fails the test instead of parking the suite. A red there means a
+stall, not a slow machine.
+
+The short-write retry loop in `serve` is not driven by it, because a response
+this small does not get a short write on loopback -- that loop is written for
+correctness rather than pinned by a fixture. It is not the only arm the test
+leaves undriven, and this paragraph is not the list of them; deleting a line
+and re-running the test is what settles any particular one.

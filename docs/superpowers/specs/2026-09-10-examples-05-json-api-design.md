@@ -187,17 +187,22 @@ One golden test in `crates/nova-cli/tests/run_tests.rs`, a normal test and not
 `#[ignore]`d: CI's Test job runs the ignored tests in an advisory step whose
 failures are tolerated and unread, so a test placed there would run unwatched.
 
-It pins **correctness, not throughput**, so it cannot flake on timing: start
-the server, drive the three routes, assert the status codes and the response
-bodies. The bodies are pinnable only because of section 5's interpolation
-decision.
+It pins **correctness, not throughput**, and asserts no duration and no rate:
+start the server, drive the three routes, assert the status codes and the
+response bodies. The bodies are pinnable only because of section 5's
+interpolation decision. Asserting no duration is not the same as having no
+timing dependency, though: the test installs a ten-second read and write
+timeout on each socket, so a stalled peer fails it rather than parking the
+suite, and a red there reads as a stall rather than as a slow machine.
 
 **The full load run is never executed by CI.**
 
 ## 10. What is not covered
 
 - No compiler feature. The four language gaps stay open.
-- No `std` change. `Map::values()` stays absent; this example iterates `keys()`.
+- No `std` change. `Map::values()` stays absent; this example walks ids
+  ascending from 1 and looks each one up instead, which is what makes its list
+  output deterministic — `keys()` is seeded per process and is not used here.
 - No optimisation of `std/http`'s two recorded costs — eager header
   materialisation and quadratic `Bytes::concat` body accumulation. If the
   measured number lands under 10k, those are the named suspects and
