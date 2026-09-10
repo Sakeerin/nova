@@ -18,14 +18,14 @@
 // section 7) puts that cost at "roughly 20 GC allocations for the header
 // strings alone", about 18 microseconds -- but the sentence stating it is
 // scoped "per request **with ten headers**", and the figure is linear in the
-// header count. The generator drives one fixed request (`REQUEST` in
-// `crates/nova-bench-http/src/main.rs`) carrying a single header,
-// `Host: nova-bench`, so a run here pays roughly a tenth of that figure. The
-// same spec section nominated "the first benchmark" as what would "confirm or
-// refute it directly"; this is that benchmark, and at one header it does
-// neither. **The header-materialisation risk that spec flagged is left
-// exactly as unconfirmed as it was before this measurement**, and a
-// header-carrying run is what would settle it.
+// header count. The generator drives one request per round trip, built by
+// `request_bytes` in `crates/nova-bench-http/src/main.rs`, carrying a single
+// header, `Host: nova-bench`, so a run here pays roughly a tenth of that
+// figure. The same spec section nominated "the first benchmark" as what
+// would "confirm or refute it directly"; this is that benchmark, and at
+// one header it does neither. **The header-materialisation risk that spec
+// flagged is left exactly as unconfirmed as it was before this
+// measurement**, and a header-carrying run is what would settle it.
 //
 // **This server never exits.** `block_on` cannot return while a task is parked,
 // and the accept loop parks forever, so the benchmark procedure kills the

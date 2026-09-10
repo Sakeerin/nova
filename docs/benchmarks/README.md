@@ -56,6 +56,13 @@ section 5's own methodology drives `/users`, so a run against a router at the
 default path measures its not-found handler. Set `--path` to the route being
 measured.
 
+**On Git Bash, protect that value from MSYS's own path conversion.** A
+plain `--path /users` there is rewritten before the generator ever sees it
+and is then refused with `--path must begin with /` -- an exit-2 failure,
+not a wrong number, on a value that visibly starts with `/`. Set
+`MSYS_NO_PATHCONV=1` before the invocation; see the Git Bash note after the
+command block below for the full command.
+
 **`errors=` counts a non-2xx answer, so a run aimed at a route the target
 does not serve no longer reports zero.** Alongside `--path`, a completed
 response whose status line reads anything other than 2xx -- or that will not
@@ -69,10 +76,12 @@ throughput figure that drops to zero.
 4xx, and a target answering 5xx under load. It says nothing about whether the
 response body was the one expected, and it is not a general warrant that a
 figure printed beside `errors=0` measured what its surrounding prose claims.
-Neither is `errors=` a roster of one thing: a connection that could not be
-established, a socket option that could not be set, a read that timed out and
-a connection closed mid-response all land in that same figure, so a non-zero
-count is a reason to look rather than a diagnosis.
+Neither is `errors=` a roster of one thing: every `errors += 1` site inside
+`worker` (`crates/nova-bench-http/src/main.rs`) lands in that same figure --
+among them a connection that could not be established, a socket option that
+could not be set, a request write that failed, a read that timed out, and a
+connection closed mid-response -- so a non-zero count is a reason to look at
+the code rather than a diagnosis in itself.
 
 Back to that request's shape. One header and no body leave three costs
 `std/http` documents in its own source exercised at or near their minimum,
@@ -199,6 +208,20 @@ for a name that does not exist anywhere on `PATH`). Both were checked with a
 throwaway build on this project's Windows host rather than assumed. Passing
 `-o bench-server.exe` in step 2 sidesteps both by giving either shell the
 extension it needs.
+
+**That same Git Bash also mangles `--path`'s own value, a separate problem
+from the one above.** MSYS's automatic path conversion rewrites a
+POSIX-looking argument such as `/users` into a Windows path before
+`nova-bench-http` ever reads it, so `--path /users` typed exactly as shown
+is refused with `--path must begin with /`, exit code 2 -- on a value that
+visibly starts with `/`. This reproduces on the first attempt, not a
+contrived one, and it fails loudly rather than reporting a wrong number: the
+run does not start and no `RESULT` line prints. Prefix the invocation with
+`MSYS_NO_PATHCONV=1` to pass the value through unchanged:
+
+```bash
+MSYS_NO_PATHCONV=1 ./target/release/nova-bench-http --addr 127.0.0.1:<port> --path /users --connections 200 --duration 30 --warmup 5
+```
 
 ## What must be recorded beside any number
 

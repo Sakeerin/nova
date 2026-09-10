@@ -154,9 +154,10 @@ struct Config {
 impl Config {
     fn from_args<I: Iterator<Item = String>>(args: I) -> Result<Config, String> {
         let mut addr: Option<String> = None;
-        // `/` rather than a required flag: it is the request every observation
-        // in `docs/benchmarks/` was taken with, so defaulting to it leaves
-        // those figures describing the same run they always did.
+        // `/` rather than a required flag: it is the request every
+        // observation `docs/benchmarks/http-fixed-response.md` already held
+        // was taken with, so defaulting to it left those figures describing
+        // the same run they always did.
         let mut path = "/".to_string();
         let mut connections = 1usize;
         let mut duration = 10u64;
