@@ -9594,8 +9594,17 @@ fn crypto_random_run() {
         .stdout(expected);
 }
 
-/// `examples/05-json-api` driven over a real socket: its routes and their
-/// error paths, asserted by status code and response body.
+/// `examples/05-json-api` driven over a real socket: its three routes and the
+/// error paths the assertions below name, each by status code and whole
+/// response body.
+///
+/// **The exchanges below are a roster and not a closed world.** Arms of the
+/// example's `handle` that nothing here drives include a `POST` to an unknown
+/// path, a `POST` whose body is not UTF-8, is not JSON or is not an object,
+/// and any method other than `GET` or `POST`. Which arms are undriven changes
+/// as the example does, so the durable check is the one the example's own
+/// comments hand over rather than this list: delete a response line from
+/// `examples/05-json-api/src/main.nova` and re-run this test.
 ///
 /// **No duration and no rate is asserted here.** It is a correctness test
 /// that happens to need a server; the throughput question belongs to
@@ -9643,6 +9652,19 @@ fn crypto_random_run() {
 /// assertion below. Nothing else here can catch that deletion, because every
 /// other body asserted is a single object or an empty array, and a separator
 /// never appears in one.
+///
+/// **`GET /nope/1` is what pins the resource segment, and nothing else here
+/// can.** `GET /nope` is one segment, so it misses the router's
+/// `parts.len() == 3` test and never reaches the `parts[1] == "users"` test
+/// beside it; an assertion set holding only that one is satisfied by a router
+/// that checks the resource segment and by one that only counts segments.
+/// The second is what this example served until the check was added: every
+/// two-segment path whose tail parsed as an integer answered as a user fetch,
+/// so `/foo/1` and `//1` both returned user 1. Confirmed by mutation rather
+/// than assumed -- dropping `&& parts[1] == "users"` from the example turns
+/// this exchange into `(200, {"id":1,...})` and fails this assertion alone.
+/// It runs after the first `POST`, which is what makes the mutant's answer a
+/// user rather than a 404 from an empty store.
 ///
 /// Every I/O failure becomes a `(0, "...")` outcome instead of a panic, and
 /// every outcome is collected before the child is killed, so a failing
@@ -9791,6 +9813,10 @@ fn json_api_example_serves_its_routes() {
     let bad_id = exchange("GET", "/users/zz", "");
     let no_such = exchange("GET", "/users/99", "");
     let unknown = exchange("GET", "/nope", "");
+    // Two segments, wrong resource. This runs after the `POST` above, so
+    // user 1 exists and a router that only counted segments would answer it
+    // with that user rather than a 404 -- see the doc comment.
+    let wrong_prefix = exchange("GET", "/nope/1", "");
     // Beyond the routes above, and the reason the example reaches for
     // `stringify` instead of interpolating a name directly: a name carrying
     // a quote and a backslash must come back escaped rather than breaking
@@ -9837,6 +9863,11 @@ fn json_api_example_serves_its_routes() {
         seen(&unknown),
         (404, r#"{"error":"not found"}"#),
         "GET /nope"
+    );
+    assert_eq!(
+        seen(&wrong_prefix),
+        (404, r#"{"error":"not found"}"#),
+        "GET /nope/1: two segments, wrong resource -- not GET /users/:id"
     );
     assert_eq!(
         seen(&escaped),

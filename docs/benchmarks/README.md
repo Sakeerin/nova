@@ -78,13 +78,18 @@ response body was the one expected, and it is not a general warrant that a
 figure printed beside `errors=0` measured what its surrounding prose claims.
 Neither is `errors=` a roster of one thing: `worker`
 (`crates/nova-bench-http/src/main.rs`) hands back an error tally, and
-every path that feeds it lands in that same figure -- four early
-`return (0, 1)` exits before the loop begins, and four `errors += 1`
-sites within it, among them a connection that could not be established,
-a socket option that could not be set, a request write that failed, a
-read that timed out, and a connection closed mid-response -- so a
-non-zero count is a reason to look at the code rather than a diagnosis
-in itself.
+every path that feeds it lands in that same figure -- the early
+`return (0, 1)` exits before its loop begins, and the `errors += 1`
+sites within it. **The population is whatever those two patterns match
+inside `worker` today**, which is the check; a count written here is
+not. That is not a hypothetical: this paragraph named a count for each,
+and the `errors += 1` count was one lower earlier on the same branch
+that wrote it, before the response-status check above added a site.
+Among the members are a connection that could not be established, a
+socket option that could not be set, a request write that failed, a
+read that timed out, a connection closed mid-response, and an answer
+outside 2xx -- so a non-zero count is a reason to look at the code
+rather than a diagnosis in itself.
 
 Back to that request's shape. One header and no body leave three costs
 `std/http` documents in its own source exercised at or near their minimum,

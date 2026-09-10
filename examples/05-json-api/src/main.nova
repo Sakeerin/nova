@@ -153,8 +153,23 @@ fn handle(req: Request, mut store: Store) -> Response {
             if req.path == "/users" {
                 json_response(200, users_json(store))
             } else {
+                // Both halves are load-bearing. `len() == 3` bounds the
+                // index; `parts[1] == "users"` is what makes this
+                // `/users/:id` rather than `/<anything>/:id` -- without it
+                // every two-segment path whose tail parses as an integer
+                // answers as a user fetch, which is what this served before
+                // the check was added. The comparison is byte-for-byte on
+                // purpose: HTTP paths are case-sensitive, so `/USERS/1` is
+                // not this route and falls through to the 404 below.
+                //
+                // `&&` short-circuits (`crates/nova-mir/src/lower.rs`'s
+                // `lower_logical` puts the right operand in its own block),
+                // so `parts[1]` is evaluated only where `len() == 3` already
+                // holds. That ordering is what keeps the index in range --
+                // an out-of-range index is a panic, and a panic here would
+                // cross a poll boundary.
                 let parts = req.path.split("/")
-                if parts.len() == 3 {
+                if parts.len() == 3 && parts[1] == "users" {
                     match path_id(parts[2]) {
                         Some(id) => {
                             match store.users.get(id) {

@@ -7,11 +7,18 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
 - Routing without a router type: a `match` over `req.method` and a
   `req.path.split("/")`. `nova-spec/20-STDLIB.md`'s own
   `pub type Handler = async fn(Request) -> Response` does not parse today, so
-  there is nothing here for `Server.get`/`.post` to be built on.
+  there is nothing here for `Server.get`/`.post` to be built on. **The split
+  has to test the resource segment and not only the segment count** --
+  `/users/1` splits to `["", "users", "1"]` and so does `/foo/1` to
+  `["", "foo", "1"]`, so counting alone serves `/<anything>/<int>` as a user
+  fetch -- which is what this example did until the resource test was added,
+  measured. The comparison is byte-for-byte, because HTTP paths are
+  case-sensitive: `/USERS/1` is not this route.
 - Decoding a request body into a record by hand -- `impl FromJson for User`,
   written out rather than derived. `@derive` is not implemented: an unknown
   attribute is `E0082`, and the message lists what the resolver's
-  `KNOWN_ATTRIBUTES` actually holds, which is `test`.
+  `KNOWN_ATTRIBUTES` holds -- `test` alone when this was written, so read
+  that constant in `crates/nova-resolver/src/lib.rs` rather than this line.
 - Turning a path segment into an `Int` through `std/json`: `parse(seg)` and
   then `Int::from_json(v)`. There is no `parse::<Int>()` and no turbofish, and
   `str_to_float` is `STD_ONLY`, so this is the route through `std`. A program
@@ -72,6 +79,10 @@ HTTP/1.1 404 Not Found
 $ curl -s -i localhost:PORT/nope
 HTTP/1.1 404 Not Found
 {"error":"not found"}
+
+$ curl -s -i localhost:PORT/nope/1
+HTTP/1.1 404 Not Found
+{"error":"not found"}
 ```
 
 ## Notes
@@ -114,6 +125,14 @@ above, plus a `POST` whose name carries a quote and a backslash and then a
 second `GET /users`, which comes back as
 `[{"id":1,...},{"id":2,...}]` -- the only exchange that drives `users_json`'s
 loop body, since the `[]` above it comes out of a loop that never enters.
+
+`GET /nope/1` in that transcript is the one exchange that pins the resource
+segment. `GET /nope` is a single segment, so it never reaches the
+`parts[1] == "users"` test at all; measured, reverting that test leaves
+`/nope/1` the only failing assertion in the whole set. The transcript is a
+roster and not every arm of `handle`: a `POST` to an unknown path, a `POST`
+with a body that is not UTF-8, not JSON or not an object, and any method
+other than `GET` or `POST` all answer without being asserted.
 
 It asserts no duration and no rate. That is not the same as being immune to
 timing: it puts a ten-second read and write timeout on each socket, so a

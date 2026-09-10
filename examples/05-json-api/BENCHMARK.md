@@ -68,12 +68,22 @@ preceded by a `curl /users` that confirmed the expected user count.
 
 ## What the three collection sizes establish
 
-The empty-store run exists to separate response *framing* from element
-*serialisation*, and the twenty-user run to characterise how the cost grows.
+The three runs vary one thing — how many elements the response carries — so
+together they give a marginal cost per response byte. **They do not separate
+response construction from the rest of the request.** An earlier draft of this
+section said the empty-store run "exists to separate response *framing* from
+element *serialisation*", which reads as attributing the delta to the code that
+builds the body. Profiling in this same increment says otherwise; the
+decomposition is under "Where the cost is not" below, and that framing is
+withdrawn rather than left standing beside its own correction, because the
+same branch wrote it and it is not yet released history.
 
-**Cost is linear in response bytes, at roughly 4 µs per byte.** Marginal:
-1.87 ms over the 492 bytes from empty to ten users (3.81 µs/B), and 2.11 ms
-over the 520 bytes from ten to twenty (4.07 µs/B).
+**Whole-server cost is linear in response bytes, at roughly 4 µs per byte.**
+Marginal: 1.87 ms over the 492 bytes from empty to ten users (3.81 µs/B), and
+2.11 ms over the 520 bytes from ten to twenty (4.07 µs/B). **Whole-server is
+the load-bearing word** — it is what the server's throughput does as the
+response grows, not what building the response costs. Those two differ by more
+than an order of magnitude, measured below.
 
 **A quadratic-accumulation hypothesis was tested and refuted.**
 `users_json` builds its output with `out = "${out}..."`, which looks like the
@@ -81,8 +91,39 @@ same shape as the quadratic `Bytes::concat` body accumulation already recorded
 against `std/http` — so doubling the collection should have quartered
 throughput. It halved it: 455.5 to 232.1, a ratio of 1.96 against a payload
 ratio of 2.05. Whatever dominates is proportional to output size, not to the
-square of the element count. **Naming the actual mechanism needs profiling and
-is not attempted here.**
+square of the element count. **Naming the actual mechanism needs profiling**,
+which was attempted after these runs and is reported in the next section. It
+narrowed where the cost is *not* and still names no mechanism.
+
+## Where the cost is not
+
+**Profiled in this same increment, after the runs above.** These figures are
+recorded here because this is their only tracked home.
+
+- **The whole response side sums to 167 µs per request** — building the body,
+  building the header map and serialising the `Response` to bytes — and
+  **`users_json` is about 91% of that**.
+- **167 µs is 7.6% of the 2,195 µs per-request service time** that 455.5
+  req/sec implies. The runtime is single-threaded by ADR 0009, so 1/rps is a
+  serial per-request budget rather than an average over parallel workers, which
+  is the same arithmetic the "ms per request" column above uses.
+- **`users_json` measured in isolation costs about 317 ns per byte** of output,
+  against the roughly **4000 ns per byte** the server shows as its marginal
+  cost. That is a **13× amplification the body-building code does not
+  account for**.
+
+**So the per-byte figure above is a whole-server marginal, and a reader who
+optimises `users_json` is addressing under a tenth of the per-request cost.**
+That is the correction: not that the marginal figure is wrong, but that the
+code it appears to indict is not where the time is.
+
+**Where the other 92% goes is unmeasured.** `read_request` and its parse, the
+socket write, task scheduling and the collector are candidates and **not one of
+them was measured** — not by the runs above and not by the profiling, which
+measured response construction and nothing else. Measured, not diagnosed,
+applies to this section exactly as it applies to the rest of the file: it
+bounds one share and names no mechanism for the remainder, and figures that
+add up are not an explanation.
 
 ## Comparison, and one that does not hold
 
@@ -108,7 +149,10 @@ is weaker evidence than one without, so it is written down.
 
 ## What this does not settle
 
-- **Why the per-byte cost is what it is.** Measured, not diagnosed.
+- **Why the per-byte cost is what it is.** Measured, not diagnosed. "Where the
+  cost is not" above narrows it from one side — response construction is 7.6%
+  of the per-request budget — and leaves the remaining 92% unattributed to any
+  named mechanism.
 - **The two costs already recorded against `std/http`** — eager header
   materialisation, and quadratic body accumulation — are neither confirmed nor
   refuted here. The generator sends one header and no body, so this
