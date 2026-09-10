@@ -272,8 +272,10 @@ a claim that no other record says it.
 
 **What the amendment above still has right, and this increment left open.**
 `@derive` is not implemented — an unknown attribute is `E0082`, and the message
-lists what the resolver's `KNOWN_ATTRIBUTES` holds, which is `test`. `Map` has
-`keys()` and no `values()` (`std/collections/lib.nova`), so this example walks
+lists what the resolver's `KNOWN_ATTRIBUTES` holds — `test` alone at this
+amendment's date, so read that constant in `crates/nova-resolver/src/lib.rs`
+rather than this sentence. `Map` has `keys()` and no `values()`
+(`std/collections/lib.nova`), so this example walks
 ids ascending from 1 instead of iterating values. The `Handler` type alias
 still does not parse, so there is nothing for `Server.get`/`.post` to be built
 on. There is no `?` operator. None of those moved here.

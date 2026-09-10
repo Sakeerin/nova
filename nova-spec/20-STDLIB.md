@@ -1270,17 +1270,29 @@ clause as newly broken here would credit this increment with a sentence a
 prior merged increment already broke.
 
 **AMENDED 2026-09-10 (branch `examples-05-json-api`): the
-`examples/05-json-api` clause in every paragraph above is now false, and Phase
-2 is still not complete.** The example exists —
-`examples/05-json-api/src/main.nova`, with a `README.md` and a
+`examples/05-json-api` absence claim in the four paragraphs this amendment
+quotes is now false, and Phase 2 is still not complete.** The example
+exists — `examples/05-json-api/src/main.nova`, with a `README.md` and a
 `BENCHMARK.md` — so the 2026-08-25 paragraph's "which does not exist", the
 2026-09-01 amendment's "Phase 2's gate still needs `examples/05-json-api`", the
 `phase-2-gate-benchmark` amendment's "still does not exist" and the
 `std-crypto-hashes-hmac-random` amendment's "still does not exist — `examples/`
 holds `01-hello-world`, `02-fibonacci` and `03-producer-consumer`" all change
-together. `examples/` now holds a fourth entry; the durable check is
-`ls -d examples/*/` against `00-MASTER-SPEC.md` §2's tree, not any of these
-sentences.
+together. **Not every mention of the example above is one of those four, and
+the HashDoS item earlier in this section is deliberately untouched here.** That
+item names the gate as `examples/05-json-api` serving 10k+ req/sec in order to
+*define* what the gate is; that is not a claim the example is missing, and the
+example existing does not falsify it. Its ruling — that Phase 2's throughput
+gate is not claimable on untrusted input — still stands, and nothing measured
+in this increment bears on adversarially chosen keys. The separate stale clause
+in the same sentence, "behind an HTTP server that does not exist yet", was
+falsified by `std/http` on 2026-09-01 by a different increment rather than by
+this one, and still has no successor note. **So the check before citing any of
+these is per-site rather than a count:** search this section for the example's
+path and read each hit for whether it asserts the example is absent or states
+what the gate is. `examples/` now holds a fourth entry; the durable check for
+that is `ls -d examples/*/` against `00-MASTER-SPEC.md` §2's tree, not any of
+these sentences.
 
 **Measured, and the gate is not reached — for a sharper reason than absence.**
 455.5 req/sec against `/users` at a ten-user collection, 2026-09-10, Cranelift
