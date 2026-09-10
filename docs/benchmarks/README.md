@@ -76,12 +76,15 @@ throughput figure that drops to zero.
 4xx, and a target answering 5xx under load. It says nothing about whether the
 response body was the one expected, and it is not a general warrant that a
 figure printed beside `errors=0` measured what its surrounding prose claims.
-Neither is `errors=` a roster of one thing: every `errors += 1` site inside
-`worker` (`crates/nova-bench-http/src/main.rs`) lands in that same figure --
-among them a connection that could not be established, a socket option that
-could not be set, a request write that failed, a read that timed out, and a
-connection closed mid-response -- so a non-zero count is a reason to look at
-the code rather than a diagnosis in itself.
+Neither is `errors=` a roster of one thing: `worker`
+(`crates/nova-bench-http/src/main.rs`) hands back an error tally, and
+every path that feeds it lands in that same figure -- four early
+`return (0, 1)` exits before the loop begins, and four `errors += 1`
+sites within it, among them a connection that could not be established,
+a socket option that could not be set, a request write that failed, a
+read that timed out, and a connection closed mid-response -- so a
+non-zero count is a reason to look at the code rather than a diagnosis
+in itself.
 
 Back to that request's shape. One header and no body leave three costs
 `std/http` documents in its own source exercised at or near their minimum,
@@ -348,6 +351,23 @@ tree.** `60-EXAMPLES.md` names `examples/05-json-api/BENCHMARK.md`, but
 `examples/` holds `01-hello-world`, `02-fibonacci` and `03-producer-consumer`
 -- no `05-json-api` directory exists to hold that file. `docs/benchmarks/` is
 where the number goes instead.
+
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): both halves
+of this paragraph are false now.** `examples/05-json-api` exists,
+so `examples/` no longer holds only the three folders named above;
+and `examples/05-json-api/BENCHMARK.md` exists and carries the gate's
+own figure (455.5 req/sec against `/users`, recorded 2026-09-10), so the
+destination `60-EXAMPLES.md` names is satisfied rather than unsatisfiable,
+and the gate's number no longer defaults to `docs/benchmarks/` the way this
+paragraph concluded. `docs/benchmarks/` keeps its own figure regardless:
+the read-and-parse-path ceiling this document is about is a different
+subject from the gate's number, not a stand-in for it, and remains the
+destination `00-MASTER-SPEC.md` section 3 asks for. The branch that added
+the example is what falsified this paragraph, not an edit to this file. The
+same branch's most recent commit amended the identical stale claim in
+`nova-spec/60-EXAMPLES.md` and other spec files but left this one untouched:
+owning a file is not the same as fixing everything another task falsified
+in it, and this file's amendment fell to whichever task next touched it.
 
 **The named tool does not run on this project's own Windows development
 host.** `60-EXAMPLES.md`'s own methodology names `wrk -t8 -c200 -d30s
