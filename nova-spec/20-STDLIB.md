@@ -1269,6 +1269,44 @@ increment, which the paragraph immediately above records; restating that
 clause as newly broken here would credit this increment with a sentence a
 prior merged increment already broke.
 
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): the
+`examples/05-json-api` clause in every paragraph above is now false, and Phase
+2 is still not complete.** The example exists —
+`examples/05-json-api/src/main.nova`, with a `README.md` and a
+`BENCHMARK.md` — so the 2026-08-25 paragraph's "which does not exist", the
+2026-09-01 amendment's "Phase 2's gate still needs `examples/05-json-api`", the
+`phase-2-gate-benchmark` amendment's "still does not exist" and the
+`std-crypto-hashes-hmac-random` amendment's "still does not exist — `examples/`
+holds `01-hello-world`, `02-fibonacci` and `03-producer-consumer`" all change
+together. `examples/` now holds a fourth entry; the durable check is
+`ls -d examples/*/` against `00-MASTER-SPEC.md` §2's tree, not any of these
+sentences.
+
+**Measured, and the gate is not reached — for a sharper reason than absence.**
+455.5 req/sec against `/users` at a ten-user collection, 2026-09-10, Cranelift
+backend and release runtime profile, 200 connections, 30s after a 5s warmup.
+`00-MASTER-SPEC.md` §3's Phase 2 gate asks for 10k+, so that is short by a
+factor of roughly twenty-two. The ratio against Bun that
+`nova-spec/60-EXAMPLES.md` §5 also asks for remains unmeasured, though Bun
+1.3.0 is installed on this project's development host, so that half is
+measurable rather than blocked. **No claim is made that the gate is passed.**
+`examples/05-json-api/BENCHMARK.md` carries the run lines and states why its
+figure is not comparable to the 11,940.0 the amendment above reports: that
+server builds its response bytes once outside the accept loop and the example
+cannot.
+
+**This increment changed nothing in `std`, and the example routes around what
+is missing rather than closing it.** `$std.*` entry counts are untouched.
+`Map` still has `keys()` and no `values()`, so `users_json` walks ids ascending
+from 1 and looks each up; §7's `stringify_pretty` and
+`@derive(ToJson, FromJson)` are still unimplemented, and the example writes
+`impl FromJson for User` out by hand for exactly that reason. **What the
+example did establish about this section's surface**: `pub fn parse` plus
+`impl FromJson for Int` is a working String-to-number route from ordinary user
+code, which `nova-spec/60-EXAMPLES.md` §5 had recorded as absent from the
+language. That route predates this increment; see §5's own 2026-09-10
+amendment.
+
 ---
 
 ## 8. `std/crypto`

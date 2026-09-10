@@ -70,6 +70,17 @@ and against a one-header bodyless request; see
 what that figure does and does not cover. `examples/05-json-api` still does
 not exist, so the gate itself is still unwritten regardless.]
 
+[Amended 2026-09-10, branch `examples-05-json-api`: `examples/05-json-api` now
+exists, so the marker above's closing clause — "the gate itself is still
+unwritten regardless" — no longer holds. It was measured on 2026-09-10 at
+**455.5 req/sec** against `/users` at a ten-user collection, on the Cranelift
+backend with the release runtime profile; `00-MASTER-SPEC.md` §3's Phase 2 gate
+asks for 10k+, so **the gate is still not reached** and nothing here claims it
+is. That figure and the 11,940.0 above are **not comparable**:
+`docs/benchmarks/server.nova` builds its response bytes once outside the accept
+loop and the example builds every response from current state. See
+`examples/05-json-api/BENCHMARK.md`.]
+
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
 parsed request head crosses the Rust/Nova boundary, and whether the
@@ -346,6 +357,21 @@ can observe timing and adapt, and not claimed as cryptographic.
   increment created it. Wording left as written and superseded by this
   marker rather than edited, the convention this file's Consequences section
   cites for itself.]
+  [Amended 2026-09-10, branch `examples-05-json-api`, a separate later
+  increment: `examples/05-json-api` **exists**, so this bullet's own clause and
+  the two markers above that restate it are false now. **Phase 2's gate is
+  still not reached, and nothing here claims the 10k+ req/sec gate is
+  reached** — measured 2026-09-10, the example serves **455.5 req/sec** against
+  `/users` at a ten-user collection on the Cranelift backend with the release
+  runtime profile, short of 10k+ by a factor of roughly twenty-two. The two
+  open costs §5 above records against `std/http` — eager header materialisation
+  and quadratic body accumulation — are **neither confirmed nor refuted** by
+  that measurement: the generator sends one header and no body, so it reaches
+  neither. A quadratic-accumulation hypothesis about the example's own
+  `users_json` was tested separately and refuted; cost there is linear in
+  response bytes. See `examples/05-json-api/BENCHMARK.md`. Wording above left as
+  written and superseded by this marker rather than edited, the convention this
+  file's Consequences section cites for itself.]
 - **2026-09-02, whole-branch review: neither `read` call in `read_request`
   carries a timeout, and nothing before this review said so.** Both calls
   (`std/http/lib.nova`) park with no deadline — `crates/nova-runtime/src/net.rs`'s

@@ -288,6 +288,48 @@ exist, and no measurement in this increment bears on the throughput criterion
 or on the ratio `nova-spec/60-EXAMPLES.md` §5 asks for. Nothing here narrows
 the first amendment above.
 
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): `examples/05-json-api`
+now exists and has been measured. Phase 2's gate, below, is still NOT met, and
+the reason it is not met has changed.** Cited by heading, per the instruction
+two amendments above. The example serves `GET /users`, `POST /users` and
+`GET /users/:id` over `std/http`, written in the language that exists rather
+than as `nova-spec/60-EXAMPLES.md` section 5's listing spells it — that
+section carries its own dated amendment on the substitutions and on two
+corrections to what it had recorded as absent. So the clause in the first
+amendment above reading "`examples/05-json-api` itself still does not exist" no
+longer holds, and neither does the same clause in the paragraph directly above
+this one; both are left as written and superseded here.
+
+**The figure, and what it is a figure for.** Measured 2026-09-10 against
+`/users`, the endpoint section 5's own methodology names, at a ten-user
+collection: **455.5 req/sec** over a 494-byte body, no errors, on the Cranelift
+backend with the release runtime profile, 200 connections, 30s after a 5s
+warmup. This section's Phase 2 gate asks for 10k+, so the endpoint the gate
+names is short by a factor of roughly twenty-two. **Nothing here claims the
+gate is passed, and no record should read this figure as passing it.** Every
+axis above belongs to the number; `examples/05-json-api/BENCHMARK.md` holds the
+run lines, two further collection sizes, and what the measurement does and does
+not settle.
+
+**Only one of the gate's two statements has been measured, and they are still
+not equivalent.** The first amendment above records that Phase 2's gate is
+specified twice with criteria that can disagree in either direction: this
+section's absolute 10k, and `nova-spec/60-EXAMPLES.md` section 5's ratio of at
+least 1.0 against Bun. The absolute one is what 455.5 req/sec answers, and it
+answers it in the negative. **The Bun ratio remains unmeasured** — but Bun
+1.3.0 is installed on this project's development host, so that half is now
+measurable rather than blocked, which is a different thing to inherit than it
+was when the first amendment was written. A later increment can take it
+deliberately.
+
+**What this increment did not do, said here so a later reader does not credit
+it.** It changed no build-order position and closed no deviation, including the
+`std/test` ordering the amendment above records as older and open. It shipped no
+language feature: the router's `Handler` type alias still does not parse,
+`@derive` is not implemented, and there is no `?` operator and no turbofish.
+`Map` still has `keys()` and no `values()`. The example routes around each of
+those rather than removing any of them.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
@@ -592,3 +634,25 @@ section's per-example template applies to every entry, and none of
 `examples/03-producer-consumer` has a `README.md` at all — checked directly
 (`ls examples/*/README.md` matches nothing), not assumed from one example
 and generalised to the rest.
+
+[Amended 2026-09-10, branch `examples-05-json-api`: one example on disk now has
+that README. `examples/05-json-api/README.md` follows
+`60-EXAMPLES.md` section 9's template. **The population changed, not the
+check** — the paragraph above was measured against every entry under
+`examples/` at its own date and was right about each of them; a fourth entry
+was added, and `01-hello-world`, `02-fibonacci` and `03-producer-consumer`
+still have no `README.md`. Nothing here brought them into line. The durable
+check is `ls examples/*/README.md` against `ls -d examples/*/`, not this note.
+Also worth knowing before sweeping for this claim: the version of it in
+`60-EXAMPLES.md` section 9 wraps across a line break, so a line-oriented `grep`
+for the phrase missed it there entirely — until that section's own 2026-09-10
+amendment quoted the phrase on one line and thereby changed what such a `grep`
+finds. Flatten before concluding a wrapped claim is absent, and re-measure
+rather than trusting a count written into the file it counts.]
+
+[Amended 2026-09-10, branch `examples-05-json-api`: the tree drift recorded
+above is not narrowed by that addition. Section 2's tree above and
+`60-EXAMPLES.md` section 3 both still name `examples/03-http-server/` while
+`examples/` holds `03-producer-consumer`, and adding `05-json-api` touched
+neither. Section 2's tree does name `05-json-api/`, so that entry of it is no
+longer ahead of the disk.]

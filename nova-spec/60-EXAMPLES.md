@@ -193,6 +193,91 @@ gap — see `docs/benchmarks/README.md` for the procedure used instead and
 produced. The listing below stays as written, as the aspiration it always
 was.
 
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): the example now exists,
+and the gate this section names is still NOT met.** `examples/05-json-api/`
+holds `src/main.nova`, a `README.md` and a `BENCHMARK.md`. It serves the same
+three routes the listing below describes — `GET /users`, `POST /users` and
+`GET /users/:id` — written in the language that exists rather than the one the
+listing assumes: routing is a `match` over `req.method` and
+`req.path.split("/")`, `impl FromJson for User` is written out by hand, and
+response bodies are interpolated strings rather than `Map`-backed
+`JsonValue`s, because `Map` iteration order is seeded per process and a test
+over JSON text would flake between runs. **The decision the amendment above
+records — that the listing below stays as written, as the aspiration it always
+was — is not reopened here.** Each substitution and the diagnostic that
+established it are in
+`docs/superpowers/specs/2026-09-10-examples-05-json-api-design.md` section 3.
+
+**The `BENCHMARK.md` sentence in the amendment above has fallen in both
+halves.** `examples/05-json-api` exists, so `examples/` no longer holds only
+the three folders that sentence lists; and `examples/05-json-api/BENCHMARK.md`
+exists and carries the figure, so the measured number this gate asks for no
+longer lives in `docs/benchmarks/` instead. `docs/benchmarks/` keeps its own
+separate figure for `std/http`'s read-and-parse path, which is a different
+subject and not comparable to this one — `BENCHMARK.md` says why, and
+`docs/benchmarks/` remains the destination `00-MASTER-SPEC.md` section 3 asks
+for.
+
+**Measured 2026-09-10, and the gate is NOT met.** Against `/users`, the
+endpoint this section's own methodology names, at a ten-user collection:
+**455.5 req/sec** over a 494-byte body, no errors. `00-MASTER-SPEC.md` section
+3's Phase 2 gate asks for 10k+, so this is short by a factor of roughly
+twenty-two, and no record may read this figure as the gate being reached. Two
+other collection sizes were taken beside it — empty at 3100.6 and twenty users
+at 232.1 — and cost is linear in response bytes at roughly four microseconds
+each; a quadratic-accumulation hypothesis was tested and refuted. Backend,
+runtime profile, generator settings and route all belong to the figure and are
+recorded beside it in `examples/05-json-api/BENCHMARK.md`, which is what to
+read before citing it. **This section's own criterion, a ratio of at least 1.0
+against Bun, is still unmeasured** — but Bun 1.3.0 is installed on this
+project's development host, so that half is measurable rather than blocked,
+which is a weaker thing to inherit than the `wrk` gap the amendment above
+records.
+
+**Correction to the amendment above: a String-to-number conversion IS
+reachable from user code, and this increment did not add it.** That
+amendment's evidence is sound as far as it goes — `str_to_float` is
+`Builtin::STD_ONLY`, and so is `char_to_int`, both verified inside that
+array's real bounds in `crates/nova-resolver/src/lib.rs` — but the conclusion
+does not follow from it. `std/json` exposes `pub fn parse` and
+`pub trait FromJson` with an `impl FromJson for Int`, so `parse("42")` followed
+by `Int::from_json(v)` yields `42` from ordinary user code. That is what
+`examples/05-json-api`'s `path_id` does, and
+`json_api_example_serves_its_routes` in `crates/nova-cli/tests/run_tests.rs`
+drives it both ways, through `GET /users/1` and through `GET /users/zz`.
+**That route existed before this increment and went unnoticed; no credit for
+adding it belongs here.** A hand-rolled digit walk over `String::chars()` is a
+second route — more code, and it repeats the range check `Int::from_json`
+already makes — so neither should be called *the* route. What the amendment
+above has right, narrower than what it wrote: `parse::<Int>()` as the listing
+spells it does not exist, and neither does turbofish.
+
+**On struct update syntax this amendment corrects nothing, because the
+amendment above claims nothing about it.** Checked against that amendment's
+own text rather than inherited from a summary of it: the features it names as
+measurably absent, each needed by the listing, are `@derive`, `Map::values()`,
+a String-to-number conversion, the `Handler` type alias, `?` and turbofish.
+Struct update syntax is not among them, and it works — the listing below writes
+`User { id, ..user }`, and `tests/runtime/records.nova` executes
+`Point { x: 100, ..q }` against a golden `r = (100, 24)`, so the overridden
+field and the inherited one are both driven by a fixture that runs. If a later
+increment amends that list, re-read it rather than this sentence. Two tracked
+records do get it wrong, and each is corrected where it sits rather than here:
+`CHANGELOG.md`'s `[0.2.0-alpha.2]` prose names struct update syntax among what
+the language lacks, corrected there under `[Unreleased]`; and this increment's
+own design document says *this* amendment listed it, corrected at both of its
+sites. That is the population searched — tracked files, both spellings
+(hyphenated and not), flattened first because this repo's prose wraps — and not
+a claim that no other record says it.
+
+**What the amendment above still has right, and this increment left open.**
+`@derive` is not implemented — an unknown attribute is `E0082`, and the message
+lists what the resolver's `KNOWN_ATTRIBUTES` holds, which is `test`. `Map` has
+`keys()` and no `values()` (`std/collections/lib.nova`), so this example walks
+ids ascending from 1 instead of iterating values. The `Handler` type alias
+still does not parse, so there is nothing for `Server.get`/`.post` to be built
+on. There is no `?` operator. None of those moved here.
+
 `src/main.nova`:
 ```nova
 import std/http
@@ -397,6 +482,36 @@ under `examples/` rather than assumed from one — `01-hello-world`,
 `02-fibonacci` and `03-producer-consumer` each lack a `README.md` entirely.
 An earlier draft of the `std/http` design work named only the third of
 these, which was true of it and misleading about the other two.
+
+**AMENDED 2026-09-10 (branch `examples-05-json-api`): one example on disk now
+follows this template, and the rest still do not.**
+`examples/05-json-api/README.md` follows it — name, one-line description, What
+this demonstrates, Run it, Expected output, Notes. **The population changed,
+not the check.** The 2026-09-01 record above was measured against every entry
+under `examples/` at its own date and was right about all of them; writing one
+README added a fourth entry rather than correcting a wrong reading of the three
+it names, and `01-hello-world`, `02-fibonacci` and `03-producer-consumer` still
+have no `README.md` at all. Nothing here brought them into line, and a reader
+should not take this note as saying otherwise. The durable check is
+`ls examples/*/README.md` against `ls -d examples/*/`, not either paragraph.
+
+**That 2026-09-01 sentence is also this project's clearest instance of the
+line-oriented sweep hazard, and it belongs here rather than only in a ledger.**
+Measured against this file as it stood before this amendment:
+`grep -c 'no example on disk'` returned **0**, because "no" ends one line of
+that sentence and "example" begins the next. Flattened — line endings collapsed
+to spaces — the phrase was there exactly once. So a line-oriented sweep of this
+very file reported the claim absent while the claim was present and stale.
+
+**Writing that measurement down changed it, which is the other half of the
+lesson.** The paragraph above quotes the phrase on a single line, so the same
+`grep -c` returns **1** against this file now, and it lands on that paragraph
+rather than on the sentence the paragraph is about — re-measured after the edit,
+not predicted. A count taken of a document and then written into that document
+stops being a count of it. Two things to carry: flatten before concluding a
+wrapped claim is absent, since a `grep` miss over wrapped prose is not evidence
+the claim is not there; and re-measure rather than trusting a figure recorded
+inside the file it counts.
 
 ---
 

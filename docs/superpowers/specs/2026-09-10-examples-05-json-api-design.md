@@ -60,6 +60,20 @@ The last two rows matter beyond this increment: `60-EXAMPLES.md` §5 and
 `nova-next-increment` both listed struct update syntax among the missing
 features. It works.
 
+**CORRECTED 2026-09-10 (Task 3, same branch): `60-EXAMPLES.md` §5 does not
+list struct update syntax, and the sentence above is wrong to say it does.**
+Checked against that amendment's own text rather than against a summary of it:
+what it names as measurably absent, each needed by its listing, is `@derive`,
+`Map::values()`, a String-to-number conversion, the `Handler` type alias, `?`
+and turbofish. Struct update syntax is not there. The row above still stands on
+its own terms — `User { id, ..user }` ran, and `tests/runtime/records.nova`
+executes `Point { x: 100, ..q }` against a golden `r = (100, 24)` — so the
+feature works and the blocker was stale in the controller's own memory notes;
+it just was not stale in `60-EXAMPLES.md`, because it was never there. The
+tracked record that does name it among what the language lacks is
+`CHANGELOG.md`'s `[0.2.0-alpha.2]` prose, corrected there rather than in §5.
+See §8's own correction below.
+
 ## 4. Architecture
 
 Modelled on `docs/benchmarks/server.nova`, which is the only working Nova HTTP
@@ -173,6 +187,17 @@ clears 10k. It claims nothing about the ratio.
   amendment lists it among the missing features. Note this is the *tracked*
   record; a stale note in the controller's own memory is not a repository
   concern and is not this increment's work.
+  **CORRECTED 2026-09-10 (Task 3, same branch): the second clause of that
+  bullet is false — `60-EXAMPLES.md` §5's amendment does not list struct update
+  syntax at all**, so §5's 2026-09-10 amendment corrects nothing on that point
+  and says so instead. Verified against the amendment's own text, which names
+  `@derive`, `Map::values()`, a String-to-number conversion, the `Handler` type
+  alias, `?` and turbofish as measurably absent, and nothing else. The feature
+  does work, and the *tracked* record that misstates it is `CHANGELOG.md`'s
+  `[0.2.0-alpha.2]` prose, corrected there under `[Unreleased]`. This bullet's
+  own point about the controller's memory notes stands untouched. Task 3 was
+  directed to check the amendment's actual text before writing a correction of
+  it; that check is what found this.
 - **`00-MASTER-SPEC.md` §3** — the gate's status after this measurement,
   cited by heading rather than line number, since that section's numbering
   has shifted twice.
