@@ -10,8 +10,10 @@
 // `docs/benchmarks/bun-equivalence.js` checks and the example's golden
 // test drives -- not a general claim of byte-identity beyond that roster.
 // Wire framing is NOT identical: `Bun.serve`
-// adds a `Date` header the example does not, measured at 37 bytes, and that
-// difference is recorded beside the ratio rather than removed.
+// adds a `Date` header the example does not, measured at 37 bytes with
+// `curl -s -D - -o /dev/null` against each server for the same 2-byte
+// body, and that difference is recorded beside the ratio rather than
+// removed.
 
 const store = { users: new Map(), nextId: 1 };
 
