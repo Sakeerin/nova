@@ -513,6 +513,10 @@ the Nova binary:
 bun docs/benchmarks/bun-equivalence.js /path/to/json-api.exe
 ```
 
+Run from the repository root: `bun-equivalence.js` spawns
+`docs/benchmarks/bun-server.js` by that same relative path, so it only
+finds it when launched from there.
+
 It drives the nine exchanges `crates/nova-cli/tests/run_tests.rs` already
 pins, against a fresh instance of each server, and compares status code and
 response body bytes. Exit 0 and `EQUIVALENCE OK: all 9 exchanges match on
@@ -566,7 +570,8 @@ workload, not a claim about Bun in general.
 ### The warmup finding
 
 Checked once, not assumed: quadrupling the generator's warmup from 5s to
-20s, one further pinned Bun run at 20s warmup measured **12207.4** against
+20s, one further pinned Bun run — mask read back as **1**, same as cell
+C — at 20s warmup measured **12207.4** against
 **12245.0** for the first 5s-warmup replicate of that same cell — well
 inside Bun's own 1.57x spread between its two pinned replicates. The
 standard 5s warmup stands for both sides. Recorded either way, because
@@ -582,7 +587,8 @@ scheduler left free on both sides. Neither may be quoted as a general
 multiple — a different host, route or payload shape is a different
 measurement — and neither answers `00-MASTER-SPEC.md` section 3's separate
 10k+ criterion, which this file's own figure above bears on instead. The
-37-byte wire-framing difference recorded in
-`examples/05-json-api/BENCHMARK.md` biases every ratio here in Nova's
-favour, so none of them should be quoted as a ceiling on how far short Nova
+37-byte wire-framing difference, measured on this host rather than
+assumed and recorded in `examples/05-json-api/BENCHMARK.md`, biases every
+ratio here in Nova's favour, so none of them should be quoted as a
+ceiling on how far short Nova
 falls.

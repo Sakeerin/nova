@@ -6,9 +6,10 @@
 // `pub type Handler = async fn(Request) -> Response` being P0001. Putting a
 // routing framework here would measure Nova against that framework.
 //
-// Response BODIES are byte-identical to the example's; `docs/benchmarks/
-// bun-equivalence.js` is what checks that, over the nine exchanges the
-// example's golden test drives. Wire framing is NOT identical: `Bun.serve`
+// Response BODIES match the example's over the nine exchanges
+// `docs/benchmarks/bun-equivalence.js` checks and the example's golden
+// test drives -- not a general claim of byte-identity beyond that roster.
+// Wire framing is NOT identical: `Bun.serve`
 // adds a `Date` header the example does not, measured at 37 bytes, and that
 // difference is recorded beside the ratio rather than removed.
 

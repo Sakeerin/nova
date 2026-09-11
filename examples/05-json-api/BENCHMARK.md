@@ -336,8 +336,9 @@ exchanges `crates/nova-cli/tests/run_tests.rs` already pins, against a
 fresh instance of each server, comparing status code and response body
 bytes: `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
 That result is load-bearing rather than vacuously green: mutating the Bun
-side's body formatting failed 4 of the 9 exchanges that carry a user body,
-and mutating its routing to drop the `/users` segment check failed the one
+side's body formatting failed 4 of the 9 exchanges — 2, 3, 8 and 9, the
+ones whose response body calls `userJson` — and mutating its routing to
+drop the `/users` segment check failed the one
 exchange that depends on it (`GET /nope/1`); a revert reconfirmed 9 of 9.
 The equivalence check gates the measurement above, not the build — see
 `docs/benchmarks/README.md`.
@@ -346,8 +347,10 @@ The equivalence check gates the measurement above, not the build — see
 
 Nova's response head is **70 bytes** for a 2-byte body; Bun's is **107
 bytes** for the same body — `Bun.serve` adds one `Date` header the example
-does not, measured at **37 bytes**. Bun pays for framing this measurement
-does not charge Nova for, which biases the ratio **in Nova's favour**. At
+does not, measured at **37 bytes** with `curl -s -D - -o /dev/null`
+against each server for the same 2-byte body, not assumed. Bun pays for
+framing this measurement does not charge Nova for, which biases the
+ratio **in Nova's favour**. At
 0.116 – 0.231 that bias cannot rescue the result; a ratio landing within a
 few percent of 1.0 would need to be read against it rather than reported as
 a pass.
