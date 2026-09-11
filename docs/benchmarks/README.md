@@ -183,21 +183,62 @@ unmeasured.
 # 1. A release nova, so a release runtime is what gets linked.
 cargo build --release --locked --workspace
 
-# 2. Build the server to a native binary. Cranelift backend; --release needs
+# 2. Remove BOTH names before building. `-o bench-server` writes exactly
+#    `bench-server`; a stale `bench-server.exe` from an earlier build would
+#    survive and is what step 3 would then run. See "Check, do not trust"
+#    below -- this is not hypothetical.
+rm -f bench-server bench-server.exe
+
+# 3. Build the server to a native binary. Cranelift backend; --release needs
 #    clang/llc, which may be absent.
 ./target/release/nova build docs/benchmarks/server.nova -o bench-server
 
-# 3. Start it and read the port it prints.
+# 4. Assert exactly ONE file, written just now, and RECORD ITS BYTE SIZE.
+#    The size is the identity check: a debug-runtime build of the same
+#    program differs from a release one by hundreds of kilobytes, so the
+#    size recorded beside a figure is what makes its runtime profile
+#    auditable afterwards.
+ls -l bench-server*
+
+# 5. Start it and read the port it prints.
 ./bench-server
 
-# 4. In another shell: the harness's own ceiling. MANDATORY.
+# 6. In another shell: the harness's own ceiling. MANDATORY.
 ./target/release/nova-bench-http --self-test --connections 200 --duration 30 --warmup 5
 
-# 5. The measurement, same shape, against the Nova server.
+# 7. The measurement, same shape, against the Nova server.
 ./target/release/nova-bench-http --addr 127.0.0.1:<port> --connections 200 --duration 30 --warmup 5
 
-# 6. Kill the server. It has no shutdown path and that is deliberate.
+# 8. Kill the server. It has no shutdown path and that is deliberate.
 ```
+
+### Check, do not trust
+
+**2026-09-11.** Everything above about the runtime profile was already in
+this document on 2026-09-10, including the verdict table calling a debug
+`nova` "measurable, misleading", and a gate figure was published anyway from
+a binary built by a debug `nova`. The record beside it asserted "release
+runtime profile" as a stated parameter. **A warning without a check is what
+failed**, and the mechanism was the `-o` suffix rule this document explains
+two paragraphs down: `-o NAME` writes `NAME`, an earlier build had left
+`NAME.exe`, and the measurement asked for `NAME.exe`. An explicit path that
+does not exist fails loudly; a stale file at the path you asked for succeeds
+and answers every sanity check.
+
+So steps 2 and 4 above are not tidiness. Three further habits follow, and
+`examples/05-json-api/BENCHMARK.md` applies all of them:
+
+- **Record the binary's byte size beside every figure.** It converts the
+  runtime profile from a claim into something a later reader can check
+  against a rebuild.
+- **One fresh server process per data point.** Serving a few hundred
+  thousand requests measurably slows a process here, so a table that seeds
+  progressively inside one server varies heap age alongside whatever it
+  meant to vary.
+- **State a range, or say it was one run.** Repeated runs of one workload on
+  this host have spanned 1.66x. Every figure recorded in this directory is a
+  single run, and none has been re-verified against the identity check
+  above.
 
 **A note for readers on a different shell.** Step 2's `-o bench-server` is
 taken literally: `nova build --help` documents the platform executable
@@ -361,7 +402,10 @@ where the number goes instead.
 of this paragraph are false now.** `examples/05-json-api` exists,
 so `examples/` no longer holds only the three folders named above;
 and `examples/05-json-api/BENCHMARK.md` exists and carries the gate's
-own figure (455.5 req/sec against `/users`, recorded 2026-09-10), so the
+own figure (recorded 2026-09-10 as 455.5 req/sec against `/users`, and
+CORRECTED 2026-09-11 to a 1875-3109 req/sec range after that run was found
+to have measured a debug-runtime build -- see the amendment at the head of
+that file, and the procedure fix below), so the
 destination `60-EXAMPLES.md` names is satisfied rather than unsatisfiable,
 and the gate's number no longer defaults to `docs/benchmarks/` the way this
 paragraph concluded. `docs/benchmarks/` keeps its own figure regardless:

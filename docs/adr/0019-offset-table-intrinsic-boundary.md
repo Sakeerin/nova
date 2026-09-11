@@ -80,6 +80,27 @@ is. That figure and the 11,940.0 above are **not comparable**:
 `docs/benchmarks/server.nova` builds its response bytes once outside the accept
 loop and the example builds every response from current state. See
 `examples/05-json-api/BENCHMARK.md`.]
+[Amended 2026-09-11: the 455.5 req/sec figure the marker above reports is
+WITHDRAWN. That run measured a binary built by a debug `nova`, so the debug
+runtime was linked -- the hazard `docs/benchmarks/README.md` names in its own
+verdict table, in a procedure that had no step checking it. The stale binary
+was still on disk and was re-measured at 258.9 and 386.7 req/sec, beside 2364.8
+for the same source built by the release `nova`; a 2x2 over profile and source
+revision established that binary size is a pure function of the `nova` profile.
+Corrected, one fresh server process per data point: 1875.2 to 3108.5 req/sec at
+ten users over six fresh-process runs, median 2328.2, with twelve
+release-runtime runs in all spanning 1769.6 to 3108.5 -- short of 10k+ by
+roughly 3x to 5x
+rather than twenty-two. **The gate is still not reached and nothing here claims
+it is.** Response construction is about a third of per-request cost rather than
+the 7.6% the earlier record derived, so that record's advice against optimising
+the body builder inverts. What this marker does NOT change: the incomparability
+of the 11,940.0 figure, which holds for the reason already given; and the
+refutation of quadratic accumulation, which is now supported from a second
+direction, the isolated per-byte cost being flat across a factor of eight in
+collection size. See `examples/05-json-api/BENCHMARK.md`. Wording above left as
+written and superseded by this marker rather than edited, the convention this
+file follows.]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
@@ -372,6 +393,27 @@ can observe timing and adapt, and not claimed as cryptographic.
   response bytes. See `examples/05-json-api/BENCHMARK.md`. Wording above left as
   written and superseded by this marker rather than edited, the convention this
   file's Consequences section cites for itself.]
+  [Amended 2026-09-11: the 455.5 req/sec figure the marker above reports is
+  WITHDRAWN. That run measured a binary built by a debug `nova`, so the debug
+  runtime was linked -- the hazard `docs/benchmarks/README.md` names in its
+  own verdict table, in a procedure that had no step checking it. The stale
+  binary was still on disk and was re-measured at 258.9 and 386.7 req/sec,
+  beside 2364.8 for the same source built by the release `nova`; a 2x2 over
+  profile and source revision established that binary size is a pure function
+  of the `nova` profile. Corrected, one fresh server process per data point:
+  1875.2 to 3108.5 req/sec at ten users over six fresh-process runs, median
+  2328.2, with twelve release-runtime runs in all spanning 1769.6 to 3108.5 --
+  short of 10k+ by roughly 3x to 5x rather than twenty-two. **The gate is
+  still not reached and nothing here claims it is.** Response construction is
+  about a third of per-request cost rather than the 7.6% the earlier record
+  derived, so that record's advice against optimising the body builder
+  inverts. What this marker does NOT change: the incomparability of the
+  11,940.0 figure, which holds for the reason already given; and the
+  refutation of quadratic accumulation, which is now supported from a second
+  direction, the isolated per-byte cost being flat across a factor of eight
+  in collection size. See `examples/05-json-api/BENCHMARK.md`. Wording above
+  left as written and superseded by this marker rather than edited, the
+  convention this file follows.]
 - **2026-09-02, whole-branch review: neither `read` call in `read_request`
   carries a timeout, and nothing before this review said so.** Both calls
   (`std/http/lib.nova`) park with no deadline — `crates/nova-runtime/src/net.rs`'s
