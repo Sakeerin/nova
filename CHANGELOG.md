@@ -9,6 +9,65 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.4] - 2026-09-12
+
+Phase 2's gate now carries a **measured figure on both of its criteria for the
+first time, and they agree it is not met.** A pre-release on purpose for the
+reason the three before it were: `nova-spec/00-MASTER-SPEC.md` §7 reserves
+`v0.{phase}.0` for a *completed* phase.
+
+**This tag exists partly to correct the one before it.** `v0.2.0-alpha.3`
+published **455.5 req/sec** for the gate's absolute criterion. That run
+measured a binary built by a **debug** `nova`, so the debug runtime was
+linked, while the record beside the figure asserted "release runtime profile"
+as a stated parameter. The stale binary was still on disk and re-measured at
+**258.9 and 386.7** req/sec against **2364.8** for the same source built by
+the release `nova`. Ten tracked files, and the GitHub release body, now carry
+dated amendments. **`v0.2.0-alpha.3`'s annotated tag message still states the
+withdrawn figures and is left standing deliberately** -- a tag message cannot
+be corrected without moving a published tag -- which is why the corrected
+figures are stated here rather than pointed at.
+
+**The absolute criterion: 1875.2 to 3108.5 req/sec** at a ten-user collection
+over six fresh-process runs, median 2328.2; twelve release-runtime runs in
+all, fresh and aged, span 1769.6 to 3108.5. Cranelift backend, release runtime
+profile established by the binary's 690,176-byte size rather than asserted,
+200 connections, 30s after a 5s warmup, `errors=0`. Against the 10k+
+`§3` asks for, short by roughly **3x to 5x** -- not the twenty-two the
+withdrawn figure implied.
+
+**The ratio criterion, measured for the first time: 0.116 to 0.204 pinned,
+0.185 to 0.231 unpinned.** `nova-spec/60-EXAMPLES.md` §5 asks for at least
+1.0 against Bun on the same hardware, so short by roughly **4.3x to 8.6x**.
+Bun 1.3.0, the same generator driving both sides, an identical 534-byte body
+confirmed before every run, two replicates per cell taken alternating sides,
+one fresh process per data point.
+
+**What makes that ratio mean anything.** An equivalence check compares status
+codes and response body bytes across the nine exchanges the example's golden
+test already pins, and it was proven to fire before it was trusted: mutating
+the Bun side's JSON spacing fails 4 of 9, and weakening its router to count
+segments only fails exactly 1 of 9. Both sides were pinned to one core and
+measured unpinned as well; their ranges overlap, so the fairness choice does
+not move the verdict, and CPU time across the window confirms Bun used about
+one core either way.
+
+**What this release does not establish, stated rather than left to be
+inferred.** Why Nova is slower -- this measures and diagnoses nothing. The
+absolute criterion is **not reachable by response-path work alone**: it allows
+100 microseconds per request, and with a 2-byte body the example already costs
+108.9 to 111.9. Response construction is **29% to 49%** of per-request cost,
+not the 7.6% the withdrawn record derived, so `users_json` is the largest
+single identified cost and the old advice against starting there inverts.
+Latency percentiles remain unmeasured. One host, Windows.
+
+**Spawning an extensionless binary fails on this host and the mechanism is not
+diagnosed.** A single `.exe` works; an extensionless copy of a different
+executable also launched, which no account on record explains. What is
+load-bearing regardless: the binary must stay one file with that stem, because
+two files sharing a stem with one of them stale is the arrangement that
+produced the withdrawn figure.
+
 ### Fixed
 
 - **The published Phase 2 gate figure was measured against the wrong binary,
