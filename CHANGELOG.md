@@ -84,6 +84,39 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   corrected without moving a published tag, so it is left standing and named
   here instead.
 
+### Added
+
+- **The Bun ratio, `60-EXAMPLES.md` section 5's own criterion, is measured
+  for the first time.** Pinned Nova over pinned Bun (the headline): **0.116
+  to 0.204**. Unpinned Nova over unpinned Bun: **0.185 to 0.231**. The
+  section asks for at least 1.0; combined, the measured ratio is 0.116 to
+  0.231, short by roughly **4.3x to 8.6x**. Four cells, two replicates
+  each, `/users`, a ten-user collection, 200 connections, 30s after a 5s
+  warmup, `crates/nova-bench-http` driving both sides.
+- **The equivalence check that licenses the comparison.**
+  `docs/benchmarks/bun-equivalence.js`, against a fresh instance of each
+  server, drives the nine exchanges `crates/nova-cli/tests/run_tests.rs`
+  already pins and compares status code and response body bytes:
+  `EQUIVALENCE OK: all 9 exchanges match on status and body bytes` -- and
+  it is load-bearing rather than vacuously green, since mutating either
+  side's body formatting or routing fails 4 of 9 and 1 of 9 respectively.
+  It gates the measurement, not the build, and runs by hand: CI has no
+  Bun, and an `#[ignore]`d test would fail every push inside the advisory
+  step rather than occasionally.
+- **Both sides were pinned to one core, and measured unpinned too, rather
+  than pinning being assumed fair.** Nova's executor is single-threaded by
+  ADR 0009, so pinning Bun to one core as well is the matching comparison;
+  each side's pinned and unpinned ranges overlap, so the choice does not
+  move the verdict. CPU time across the measurement window confirms the
+  pin took (33.07 of a possible ~35 cpu-seconds pinned, 34.98 unpinned)
+  and that Bun was not exploiting the host's twelve cores on this workload
+  either way.
+- **The wire framing is not identical, and the difference favours Nova.**
+  Nova's response head is 70 bytes for a 2-byte body; Bun's is 107,
+  `Bun.serve` adding one `Date` header. Bun pays for framing this
+  measurement does not charge Nova for, which biases every ratio above in
+  Nova's favour without changing which side of 1.0 they land on.
+
 ## [0.2.0-alpha.3] - 2026-09-11
 
 Phase 2's gate example exists and its gate is **measured and not met**. A

@@ -351,6 +351,22 @@ language feature: the router's `Handler` type alias still does not parse,
 `Map` still has `keys()` and no `values()`. The example routes around each of
 those rather than removing any of them.
 
+**AMENDED 2026-09-11: the gate's two criteria, recorded above as able to
+disagree in either direction, now both have a measured figure — and they
+agree.** The absolute figure, above, is 1875.2 to 3108.5 req/sec at ten
+users against the 10k+ this section asks for, short by roughly 3x to 5x.
+`nova-spec/60-EXAMPLES.md` section 5's own ratio against Bun is now
+measured too, at the same ten-user `/users` collection this section's own
+figure uses: 0.116 to 0.204 pinned (the headline), 0.185 to 0.231
+unpinned — combined, 0.116 to 0.231 — against the ≥ 1.0 that section asks
+for, short by roughly 4.3x to 8.6x. **Both criteria say the gate is not
+met.** That they agree here is not guaranteed by their definitions — the
+amendment above is explicit that an absolute figure and a ratio against a
+second, independently-variable server can disagree in either direction —
+it is what this increment found on measuring both. Full account, including
+the fairness check on pinning and the wire-framing bias in Nova's favour,
+in `examples/05-json-api/BENCHMARK.md` and `docs/benchmarks/README.md`.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

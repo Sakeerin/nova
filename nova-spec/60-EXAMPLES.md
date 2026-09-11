@@ -304,6 +304,21 @@ ids ascending from 1 instead of iterating values. The `Handler` type alias
 still does not parse, so there is nothing for `Server.get`/`.post` to be built
 on. There is no `?` operator. None of those moved here.
 
+**AMENDED 2026-09-11: this section's own criterion, the ratio against Bun,
+is no longer unmeasured.** Four cells, two replicates each, `/users`, a
+ten-user collection, 200 connections, 30s after a 5s warmup, pinned and
+unpinned both measured rather than one chosen: pinned Nova over pinned Bun
+(the headline) is **0.116 – 0.204**; unpinned Nova over unpinned Bun is
+**0.185 – 0.231**. Combined, the measured ratio is 0.116 to 0.231 — short
+of the ≥ 1.0 this section asks for by roughly **4.3x to 8.6x**. Pinning
+does not move the verdict — each side's pinned and unpinned ranges overlap
+— and the wire framing biases the ratio in Nova's favour (Bun's response
+head carries one more header than Nova's for the same body), which does
+not change the outcome at this margin. **The gate is still NOT met.** Full
+account, including each side's identity, the affinity read-back and the
+equivalence check the ratio depends on, in
+`examples/05-json-api/BENCHMARK.md` and `docs/benchmarks/README.md`.
+
 `src/main.nova`:
 ```nova
 import std/http
