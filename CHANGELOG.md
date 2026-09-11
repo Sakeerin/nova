@@ -9,6 +9,81 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The published Phase 2 gate figure was measured against the wrong binary,
+  and every claim derived from it inverts.** `v0.2.0-alpha.3` reported 455.5
+  req/sec. That run measured a binary built by a **debug** `nova`, so
+  `find_runtime_lib` linked the debug runtime staticlib -- the hazard
+  `docs/benchmarks/README.md` names in its own verdict table as "measurable,
+  misleading". The record beside the figure asserted "release runtime
+  profile" as a stated parameter, which was a claim about a build nobody had
+  checked. **Corrected, with one fresh server process per data point: 1875.2
+  to 3108.5 req/sec at ten users over six fresh-process runs, median
+  2328.2 -- twelve release-runtime runs in all, fresh and aged, span 1769.6
+  to 3108.5.** The gate
+  asks 10k+, so the shortfall is roughly **3x to 5x**, not twenty-two.
+  **Phase 2's gate is still not met and nothing here claims otherwise.**
+- **How the wrong binary got measured, because the mechanism is the reusable
+  part.** `nova build -o NAME` writes exactly `NAME`, with no platform
+  executable suffix -- documented in `docs/benchmarks/README.md`. An earlier
+  build had left a `NAME.exe` beside it, and the measurement asked for
+  `NAME.exe`. An explicit path that does not exist fails loudly; a stale file
+  at the path you asked for succeeds and answers every sanity check. Nothing
+  else could have caught it: the example's golden test drives it with
+  `nova run` on the source and never builds a binary, and the one test that
+  does run the load generator asserts no throughput number by design and also
+  drives its server with `nova run`. No test in this workspace compares a
+  throughput figure against anything.
+- **Identified by measuring, then by a 2x2 rather than one matching cell.**
+  The stale binary was still on disk and was re-measured at 258.9 and 386.7
+  req/sec, beside 2364.8 for the same source built by the release `nova`.
+  Binary size is a pure function of the `nova` profile and does not move with
+  the source revision -- 690,176 bytes release, 965,632 debug, for both
+  revisions -- which a single size match could not have established.
+- **The derived claims, all withdrawn and replaced.** Response construction
+  is about **a third** of per-request cost, not 7.6%; the amplification over
+  the isolated body-building cost is **2x to 3x**, not 13x; the unattributed
+  residual is on the order of **a fifth**, not 92%. So `users_json` is the
+  largest single identified cost and the previous guidance against starting
+  there points the wrong way. The re-profiling was done in a **compiled**
+  binary, because the original used `nova run` while the measured server is
+  compiled; the JIT figures transfer within about 4% on the dominant term, so
+  the numerator was never the problem -- the denominator was.
+- **The quadratic-accumulation refutation still stands**, and is now
+  supported from a second direction: the isolated per-byte cost is flat
+  across a factor of eight in collection size.
+- **The harness ceiling figure is not invalidated**, only noisy.
+  `--self-test` runs its server inside the generator binary, so the target
+  binary is irrelevant to it; a second sample of the same quantity gave
+  63455.4 against the recorded 122129.0.
+
+### Changed
+
+- **`docs/benchmarks/README.md`'s procedure now checks rather than warns.**
+  It deletes both `NAME` and `NAME.exe` before building, asserts exactly one
+  file written, and records the binary's **byte size** beside every figure so
+  the runtime profile is auditable from the record instead of asserted in
+  prose. It also now prescribes **one fresh server process per data point**:
+  a server that has already served roughly 280,000 requests measures 1.29x
+  to 1.38x slower on the same workload, measured in both replicates of an
+  alternated design, so the withdrawn table varied heap age alongside payload
+  size and attributed the whole difference to payload. ADR 0002's leaking
+  allocator is a plausible mechanism and is not established by those runs.
+- **Every tracked record stating the withdrawn figure now carries a dated
+  amendment beside it** rather than a silent rewrite: `CHANGELOG.md`,
+  `docs/adr/0018-std-json-scope-and-build-order.md`,
+  `docs/adr/0019-offset-table-intrinsic-boundary.md`,
+  `docs/benchmarks/README.md`, `docs/phase-2-plan.md`,
+  `examples/05-json-api/BENCHMARK.md`, `nova-spec/00-MASTER-SPEC.md`,
+  `nova-spec/13-RUNTIME.md`, `nova-spec/20-STDLIB.md` and
+  `nova-spec/60-EXAMPLES.md`. That population was found by a set difference
+  over every tracked file naming the figure, not by recalling where it had
+  been written; the durable check is `git grep -n '455\.5'`. The
+  `v0.2.0-alpha.3` annotated tag message carries the figure too and cannot be
+  corrected without moving a published tag, so it is left standing and named
+  here instead.
+
 ## [0.2.0-alpha.3] - 2026-09-11
 
 Phase 2's gate example exists and its gate is **measured and not met**. A
@@ -36,6 +111,27 @@ criterion, a ratio against Bun, is unmeasured; Bun 1.3.0 is installed on the
 development host, so that half is measurable rather than blocked, which is a
 different thing to inherit. And not every error arm of the example's handler
 is asserted by its golden test.
+
+**AMENDED 2026-09-11: the figures in this entry are WITHDRAWN, and this note
+supersedes every occurrence of them in this file rather than editing any of
+them.** The 455.5 req/sec run measured a binary built by a debug `nova`, so
+the debug runtime was linked; "release runtime profile" above is false of the
+binary measured, not merely an inaccurate number. Corrected, one fresh server
+process per data point: 1875.2 to 3108.5 req/sec at ten users across nine
+fresh-process runs, median 2328.2 (twelve release-runtime runs in all,
+fresh and aged, span 1769.6 to 3108.5) -- short of 10k+ by roughly 3x to 5x
+rather than
+twenty-two, so **the gate is still not met**. The 7.6% response-side share
+and its unmeasured 92% divided a per-request budget taken from that debug
+build; response construction is about a third of per-request cost and
+`users_json` is the largest single identified cost, which inverts this
+entry's advice against optimising it. The figure also appears in forward
+markers inside the `0.2.0-alpha.2` and `0.2.0-alpha.1` sections below; the
+durable check is `git grep -n '455\.5'` rather than any count here. The
+entry's "cost is linear in response bytes at roughly four microseconds each"
+is withdrawn too: the whole-server marginal is 0.60 to 0.95 microseconds per
+byte, computed within each replicate. Full account in the `[Unreleased]`
+entry above and in `examples/05-json-api/BENCHMARK.md`.
 
 ### Added
 - **`examples/05-json-api`, Phase 2's gate example**, in the language that

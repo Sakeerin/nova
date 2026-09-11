@@ -635,3 +635,24 @@ compare them:
 bytes once outside the accept loop, and `examples/05-json-api` builds every
 response from current state — `examples/05-json-api/BENCHMARK.md` records that
 distinction and what its own number does and does not settle.
+
+**AMENDED 2026-09-11: the 455.5 req/sec figure above is WITHDRAWN.** That run
+measured a binary built by a debug `nova`, so the debug runtime was linked --
+the hazard `docs/benchmarks/README.md` names in its own verdict table, in a
+procedure that had no step checking it. The stale binary was still on disk
+and was re-measured at 258.9 and 386.7 req/sec, beside 2364.8 for the same
+source built by the release `nova`. Binary size turned out to be a pure
+function of the `nova` profile, and a 2x2 over profile and source revision is
+what established that, rather than a single matching size.
+**Corrected, with one fresh server process per data point: 1875.2 to 3108.5
+req/sec at ten users over six fresh-process runs, median 2328.2 -- twelve
+release-runtime runs in all, fresh and aged, span 1769.6 to 3108.5.** So the
+shortfall
+against 10k+ is roughly **3x to 5x**, not twenty-two. The derived claims
+invert too: response construction is about a third of per-request cost rather
+than 7.6%, the amplification over the isolated body-building cost is 2x to 3x
+rather than 13x, and the unattributed residual is on the order of a fifth
+rather than 92%. **The gate is still NOT met and nothing here claims
+otherwise.** `examples/05-json-api/BENCHMARK.md` carries the amendment, both
+identification tables, the corrected runs, and two confounds found in the
+withdrawn methodology.

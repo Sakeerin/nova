@@ -234,6 +234,30 @@ project's development host, so that half is measurable rather than blocked,
 which is a weaker thing to inherit than the `wrk` gap the amendment above
 records.
 
+**AMENDED 2026-09-11: the 455.5 req/sec figure above is WITHDRAWN.** That run
+measured a binary built by a debug `nova`, so the debug runtime was linked --
+the hazard `docs/benchmarks/README.md` names in its own verdict table, in a
+procedure that had no step checking it. The stale binary was still on disk
+and was re-measured at 258.9 and 386.7 req/sec, beside 2364.8 for the same
+source built by the release `nova`. Binary size turned out to be a pure
+function of the `nova` profile, and a 2x2 over profile and source revision is
+what established that, rather than a single matching size.
+**Corrected, with one fresh server process per data point: 1875.2 to 3108.5
+req/sec at ten users over six fresh-process runs, median 2328.2 -- twelve
+release-runtime runs in all, fresh and aged, span 1769.6 to 3108.5.** So the
+shortfall
+against 10k+ is roughly **3x to 5x**, not twenty-two. The derived claims
+invert too: response construction is about a third of per-request cost rather
+than 7.6%, the amplification over the isolated body-building cost is 2x to 3x
+rather than 13x, and the unattributed residual is on the order of a fifth
+rather than 92%. **The gate is still NOT met and nothing here claims
+otherwise.** `examples/05-json-api/BENCHMARK.md` carries the amendment, both
+identification tables, the corrected runs, and two confounds found in the
+withdrawn methodology. The paragraph above also states cost as linear in
+response bytes at roughly four microseconds each; the whole-server marginal is
+**0.60 to 0.95 microseconds per byte**, computed within each replicate, and
+that figure is withdrawn with the rest.
+
 **Correction to the amendment above: a String-to-number conversion IS
 reachable from user code, and this increment did not add it.** That
 amendment's evidence is sound as far as it goes — `str_to_float` is
