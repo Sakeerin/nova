@@ -292,3 +292,62 @@ produced it.
   host.
 - **Anything about other hosts.** One host, two replicates per point,
   Windows.
+
+## Measured 2026-09-11: the Bun ratio, §5's own criterion
+
+Four cells, two replicates each, taken alternating sides (A, C, B, D, then
+A, C, B, D) so drift over the session could not align with one side of the
+ratio. `errors=0` on every run. Generator: `crates/nova-bench-http`, the
+same binary driving both sides, `--connections 200 --duration 30 --warmup 5
+--path /users`, keep-alive, against a ten-user collection.
+
+| cell | side | pinned | affinity read back | range across 2 replicates |
+|---|---|---|---|---|
+| A | Nova | core 0 | **1** | 2234.7 – 2500.9 |
+| B | Nova | no | **4095** | 2314.3 – 2349.0 |
+| C | Bun | core 0 | **1** | 12245.0 – 19220.6 |
+| D | Bun | no | **4095** | 10165.1 – 12498.7 |
+
+**Headline: cell A over cell C, pinned Nova over pinned Bun — 0.116 –
+0.204.** Cell B over cell D, unpinned Nova over unpinned Bun, is 0.185 –
+0.231. Combined, the measured ratio is 0.116 to 0.231. `docs/benchmarks/
+README.md` records the pinning mechanism, why pinned is reported as the
+headline, and that both arms were measured rather than one chosen — which
+is how it is known that the fairness decision does not move the verdict.
+
+`nova-spec/60-EXAMPLES.md` section 5 asks for at least 1.0. **The measured
+ratio falls short by roughly 4.3x to 8.6x.**
+
+### Identity of each side, and the seeded payload
+
+| side | artifact | identity |
+|---|---|---|
+| Nova | `examples/05-json-api` built by the release `nova` | `json-api.exe`, **690,176 bytes** |
+| Bun | `docs/benchmarks/bun-server.js` | **4,179 bytes**, run by **bun 1.3.0** |
+
+Ten users seeded by `curl` POSTs into a freshly started server; every cell
+above reported `seeded users=10 body_bytes=534` — the same 534-byte body on
+both sides, confirmed by `curl /users` before every run.
+
+### Equivalence, which is what the ratio is a ratio *of*
+
+Task 1's check (`docs/benchmarks/bun-equivalence.js`) drove the nine
+exchanges `crates/nova-cli/tests/run_tests.rs` already pins, against a
+fresh instance of each server, comparing status code and response body
+bytes: `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+That result is load-bearing rather than vacuously green: mutating the Bun
+side's body formatting failed 4 of the 9 exchanges that carry a user body,
+and mutating its routing to drop the `/users` segment check failed the one
+exchange that depends on it (`GET /nope/1`); a revert reconfirmed 9 of 9.
+The equivalence check gates the measurement above, not the build — see
+`docs/benchmarks/README.md`.
+
+### The wire framing is not identical, and the difference favours Nova
+
+Nova's response head is **70 bytes** for a 2-byte body; Bun's is **107
+bytes** for the same body — `Bun.serve` adds one `Date` header the example
+does not, measured at **37 bytes**. Bun pays for framing this measurement
+does not charge Nova for, which biases the ratio **in Nova's favour**. At
+0.116 – 0.231 that bias cannot rescue the result; a ratio landing within a
+few percent of 1.0 would need to be read against it rather than reported as
+a pass.

@@ -474,3 +474,115 @@ exercising a path nothing has exercised before. Windows' poller uses
 the 200-connection shape used throughout this procedure stays well under the
 cap on both, which is deliberate: reproducing the same command on either
 platform should not itself be the source of a difference in the result.
+
+## Comparing against Bun
+
+`nova-spec/60-EXAMPLES.md` section 5 asks for a throughput ratio against
+Bun, not just the absolute figure this file's own procedure produces. This
+section is that comparison's procedure; `examples/05-json-api/BENCHMARK.md`
+is where a run's numbers get recorded, the same division of labour this
+file already keeps with `http-fixed-response.md`.
+
+### Build both sides
+
+Steps 1–5 above still build and start the Nova side, with one change: name
+the output with an explicit `.exe` extension rather than the bare stem
+`-o` alone would leave. **This is observed behaviour, not a diagnosed
+mechanism.** Spawning an extensionless Nova binary from Bun's `Bun.spawn`
+failed here with `uv_spawn ENOENT`; naming a single `<stem>.exe` — that
+stem, no extensionless sibling — spawned successfully, and no account on
+record explains why. Nor is "extensionless paths never spawn" the rule
+either: an extensionless copy of a *different* executable, with no `.exe`
+sibling present, launched successfully in the same setup. What follows is
+load-bearing regardless of mechanism: **the binary must remain one file
+with that stem.** Two files sharing a stem, one of them stale, is the
+arrangement behind this project's withdrawn benchmark figure (see the
+amendment at the top of `examples/05-json-api/BENCHMARK.md`), independent
+of which of the two carries the extension.
+
+Start `docs/benchmarks/bun-server.js` with `bun docs/benchmarks/bun-server.js`
+and read its port from the `listening on 127.0.0.1:<port>` line it prints —
+the same shape step 5's Nova server prints.
+
+### Equivalence gates the measurement, not the build
+
+Before any throughput number is taken, run the equivalence check against
+the Nova binary:
+
+```bash
+bun docs/benchmarks/bun-equivalence.js /path/to/json-api.exe
+```
+
+It drives the nine exchanges `crates/nova-cli/tests/run_tests.rs` already
+pins, against a fresh instance of each server, and compares status code and
+response body bytes. Exit 0 and `EQUIVALENCE OK: all 9 exchanges match on
+status and body bytes` is what licenses reading a throughput ratio between
+the two servers as a ratio of the same workload rather than of two
+different ones; it says nothing about whether either server builds, only
+about whether, having built, the two answer alike. A failing equivalence
+run means the throughput numbers below are not comparable, not that either
+binary is broken.
+
+**No automated test runs this.** CI's runners have no Bun installed, and an
+`#[ignore]`d test that shells out to it would fail on every push rather
+than occasionally — CI's Test job has an advisory step that runs exactly
+the ignored tests with `continue-on-error: true`, so a deterministically
+failing one would sit there unread rather than catching a real regression.
+The equivalence check is run by hand, alongside the throughput comparison
+it gates.
+
+### Pin both sides to one core, and read the mask back
+
+Nova's executor is single-threaded by ADR 0009
+(`docs/adr/0009-async-execution-model.md`), so the fairer single-core
+comparison pins Bun to one core too rather than leaving it free to use the
+host's twelve. Spawn first, then set the process's affinity, then read the
+property back before trusting it — a short-lived process can exit before
+the set lands, and a pin that silently failed would look exactly like a
+slow Bun. Recorded in `examples/05-json-api/BENCHMARK.md`: mask **1** when
+a pin was applied, mask **4095** when it was not — an assertion that read
+back 1 either way would prove nothing, and this one distinguishes the two.
+
+Both sides were measured pinned and unpinned rather than pinning being
+assumed fair: each side's pinned and unpinned ranges overlap, so the
+fairness decision does not move which side of 1.0 the ratio lands on.
+Pinned is reported as the headline because it is the single-core
+comparison that matches Nova's own executor, not because it was the only
+one measured.
+
+### The CPU-usage observation
+
+Process affinity sets the default for every thread, but a thread can
+override its own, so a silently-failed pin and a genuinely slow Bun would
+look identical from throughput alone. CPU time consumed across a
+35-second window (30s measurement plus 5s warmup, where one fully
+saturated core is about 35 cpu-seconds) was checked directly with one
+further run on each arm: pinned, **33.07** cpu-seconds (about 0.95 of a
+core); unpinned, **34.98** cpu-seconds (about 1.0 core). So the pin took,
+and separately, Bun was not exploiting the other eleven cores on this
+workload even when free to. Read as an observation about Bun on this
+workload, not a claim about Bun in general.
+
+### The warmup finding
+
+Checked once, not assumed: quadrupling the generator's warmup from 5s to
+20s, one further pinned Bun run at 20s warmup measured **12207.4** against
+**12245.0** for the first 5s-warmup replicate of that same cell — well
+inside Bun's own 1.57x spread between its two pinned replicates. The
+standard 5s warmup stands for both sides. Recorded either way, because
+"checked and it did not matter" and "not checked" are different things for
+a later reader to inherit.
+
+### What each figure may be quoted for
+
+The pinned/pinned ratio may be quoted for "Nova against Bun, single core
+against single core, on this host, this route, this payload." The
+unpinned/unpinned ratio may be quoted for the same comparison with the OS
+scheduler left free on both sides. Neither may be quoted as a general
+multiple — a different host, route or payload shape is a different
+measurement — and neither answers `00-MASTER-SPEC.md` section 3's separate
+10k+ criterion, which this file's own figure above bears on instead. The
+37-byte wire-framing difference recorded in
+`examples/05-json-api/BENCHMARK.md` biases every ratio here in Nova's
+favour, so none of them should be quoted as a ceiling on how far short Nova
+falls.
