@@ -9,6 +9,34 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0-alpha.3] - 2026-09-11
+
+Phase 2's gate example exists and its gate is **measured and not met**. A
+pre-release on purpose for the reason the two before it were:
+`nova-spec/00-MASTER-SPEC.md` §7 reserves `v0.{phase}.0` for a *completed*
+phase.
+
+`v0.2.0-alpha.2` closed the module inventory. This closes the artifact gap:
+`examples/05-json-api` had never existed, so the gate could not be assessed
+at all. It exists now, written in the Nova that exists rather than the one
+`60-EXAMPLES.md` §5's listing assumes, and it has been measured.
+
+**The figure is 455.5 req/sec against the 10k+ the gate asks for** -- short
+by roughly twenty-two times -- at a ten-user collection, Cranelift backend,
+release runtime profile, 200 connections over 30s. Every parameter that
+belongs to that number is recorded beside it in
+`examples/05-json-api/BENCHMARK.md`, the destination §5 names and which was
+unsatisfiable until now.
+
+**What this release does not establish, stated rather than left to be
+inferred.** Response construction is only 7.6% of per-request cost, so the
+remaining 92% is unmeasured and the record names no mechanism for it -- a
+quadratic-accumulation hypothesis was tested and refuted. §5's other
+criterion, a ratio against Bun, is unmeasured; Bun 1.3.0 is installed on the
+development host, so that half is measurable rather than blocked, which is a
+different thing to inherit. And not every error arm of the example's handler
+is asserted by its golden test.
+
 ### Added
 - **`examples/05-json-api`, Phase 2's gate example**, in the language that
   exists rather than the one `nova-spec/60-EXAMPLES.md` §5's listing assumes —
