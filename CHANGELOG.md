@@ -98,7 +98,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server, drives the nine exchanges `crates/nova-cli/tests/run_tests.rs`
   already pins and compares status code and response body bytes:
   `EQUIVALENCE OK: all 9 exchanges match on status and body bytes` -- and
-  it is load-bearing rather than vacuously green, since mutating either
+  it is load-bearing rather than vacuously green, since mutating the Bun
   side's body formatting or routing fails 4 of 9 and 1 of 9 respectively.
   It gates the measurement, not the build, and runs by hand: CI has no
   Bun, and an `#[ignore]`d test would fail every push inside the advisory
@@ -113,7 +113,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   either way.
 - **The wire framing is not identical, and the difference favours Nova.**
   Nova's response head is 70 bytes for a 2-byte body; Bun's is 107,
-  `Bun.serve` adding one `Date` header. Bun pays for framing this
+  `Bun.serve` adding one `Date` header -- both read with `curl` against
+  each server, not assumed. Bun pays for framing this
   measurement does not charge Nova for, which biases every ratio above in
   Nova's favour without changing which side of 1.0 they land on.
 
