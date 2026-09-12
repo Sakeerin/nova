@@ -227,6 +227,38 @@ const MAX_RENDER_DEPTH: Int = 100_000
 // carry is simply gone; the roster of what changed -- by name, not count --
 // is at `scan_str`.
 pub fn stringify(v: JsonValue) -> String {
+    // A TOP-LEVEL SCALAR IS ALREADY FINISHED, so return it rather than
+    // copying it twice. The general path below hands `buf_push_str` exactly
+    // these values, and `buf_push_str` appends them character by character
+    // into `out`, which `vec_chars_to_string` then drains back into a
+    // `String` -- two round trips through a `Vec<Char>`, plus two `Vec`
+    // allocations and the `Work`/`Pending` wrappers, for a value that needs
+    // none of them.
+    //
+    // Byte-identical, argued in this increment's spec rather than assumed:
+    // the depth guard cannot fire here because it tests
+    // `d > MAX_RENDER_DEPTH` and a top-level value carries `d = 0`;
+    // `buf_push_str` into an empty buffer is a pure copy; and draining those
+    // characters back is lossless for anything already a `String`, which
+    // `crates/nova-runtime/src/lib.rs`'s
+    // `str_from_chars_round_trips_and_substitutes_invalid_scalars` pins.
+    //
+    // `tests/runtime/json_stringify.nova` pins each arm's output at TOP
+    // LEVEL; `tests/runtime/json_round_trip.nova` pins `Bool` and `String`
+    // INSIDE a container. A DELETED arm here is caught by NEITHER -- it
+    // falls through the catch-all into the general path below and renders
+    // IDENTICAL text, which is fine, because this path only shadows
+    // behaviour the general path already has and adds none of its own. A
+    // WRONG-RENDERING arm is different and IS caught: mutating the
+    // `String` arm to return its argument unquoted failed six tests. Only
+    // the `String` arm's saving was measured.
+    match v {
+        Null => return "null"
+        Bool(b) => return if b { "true" } else { "false" }
+        Number(n) => return number_to_json(n)
+        String(s) => return quote(s)
+        _ => {}
+    }
     let mut out: Vec<Char> = Vec::new()
     let mut stack: Vec<Work> = Vec::new()
     stack.push(Value(Pending { v: v, d: 0 }))
