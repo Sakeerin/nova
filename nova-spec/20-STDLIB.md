@@ -1328,6 +1328,23 @@ otherwise.** `examples/05-json-api/BENCHMARK.md` carries the amendment, both
 identification tables, the corrected runs, and two confounds found in the
 withdrawn methodology.
 
+**AMENDED 2026-09-12 (branch `remeasure-after-fast-path`): the
+1875.2-to-3108.5 figure above is re-measured against a binary built from
+`stringify`'s scalar fast path.** That fast path, shipped on a separate,
+earlier branch, left every `stringify`-affected figure in
+`examples/05-json-api/BENCHMARK.md` measuring a superseded build.
+Re-measured with one fresh process per point against `json-api.exe` at
+**690,688 bytes** (690,176 before), the equivalence check re-run first
+(all nine exchanges still match): **2868.2 to 3392.4 req/sec** at ten
+users, short of 10k+ by roughly **2.9x to 3.5x** rather than 3x to 5x. What
+that change did to the server's own per-request cost, and how it compares
+with the saving measured inside `users_json`, is reported in
+`examples/05-json-api/BENCHMARK.md` and deliberately not restated here: it
+is a comparison whose size depends on which readings each side is drawn
+from, and repeating it in every record is how it would go stale in every
+record. **The gate is still NOT met and nothing here
+claims otherwise.** Full account in `examples/05-json-api/BENCHMARK.md`.
+
 **This increment changed nothing in `std`, and the example routes around what
 is missing rather than closing it.** `$std.*` entry counts are untouched.
 `Map` still has `keys()` and no `values()`, so `users_json` walks ids ascending

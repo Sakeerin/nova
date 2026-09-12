@@ -101,6 +101,22 @@ direction, the isolated per-byte cost being flat across a factor of eight in
 collection size. See `examples/05-json-api/BENCHMARK.md`. Wording above left as
 written and superseded by this marker rather than edited, the convention this
 file follows.]
+[Amended 2026-09-12 (branch `remeasure-after-fast-path`): the
+1875.2-to-3108.5 figure above is re-measured against a binary built from
+`stringify`'s scalar fast path, shipped on a separate, earlier branch. One
+fresh process per point, `json-api.exe` at 690,688 bytes (690,176 before),
+equivalence re-checked first (all nine exchanges still match): 2868.2 to
+3392.4 req/sec at ten users, short of 10k+ by roughly 2.9x to 3.5x rather
+than 3x to 5x. What that change did to the server's own per-request cost,
+and how it compares with the saving measured inside `users_json`, is
+reported in `examples/05-json-api/BENCHMARK.md` and deliberately not
+restated here: it is a comparison whose size depends on which readings each
+side is drawn from, and repeating it in every record is how it would go
+stale in every record. The gate is still not
+reached and nothing here claims it is. See
+`examples/05-json-api/BENCHMARK.md`. Wording above left as written and
+superseded by this marker rather than edited, the convention this file
+follows.]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a

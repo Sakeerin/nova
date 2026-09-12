@@ -319,6 +319,25 @@ account, including each side's identity, the affinity read-back and the
 equivalence check the ratio depends on, in
 `examples/05-json-api/BENCHMARK.md` and `docs/benchmarks/README.md`.
 
+**AMENDED 2026-09-12 (branch `remeasure-after-fast-path`): this section's
+ratio against Bun is re-measured against a binary built from `stringify`'s
+scalar fast path, and remains short.** Four cells, two replicates each,
+the same method as the amendment above, against `json-api.exe` at
+**690,688 bytes** (690,176 before), with the equivalence check re-run
+first and all nine exchanges still matching on status and body bytes:
+pinned Nova over pinned Bun is now 0.230 – 0.272 and unpinned is 0.234 –
+0.242, combined **0.230 to 0.272** — short of the ≥ 1.0 this section asks
+for by roughly **3.7x to 4.4x** rather than 4.3x to 8.6x. Part of the old
+lower bound's apparent gain was Bun's own variance rather than Nova's: the
+withdrawn 0.116 was computed against a Bun reading far above its other
+three pinned-cell samples, and this session's two pinned Bun cells agree
+to within 10 req/sec of each other. `00-MASTER-SPEC.md` §3's absolute
+criterion, re-measured the same way, is 2868.2 to 3392.4 req/sec at ten
+users over six fresh-process readings -- matching the six the earlier range
+came from -- short by roughly 2.9x to 3.5x. **The gate is still NOT met on
+either criterion.** Full account, including the four-cell matrix and the
+compiled decomposition re-run, in `examples/05-json-api/BENCHMARK.md`.
+
 `src/main.nova`:
 ```nova
 import std/http
