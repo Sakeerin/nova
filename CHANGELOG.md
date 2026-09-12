@@ -70,6 +70,49 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   check that gates the ratio, not a single rerun -- and recorded as owed
   work in that file rather than only here.
 
+  **Re-measured 2026-09-12 (branch `remeasure-after-fast-path`): the
+  re-measurement deferred above is done, against a binary built from this
+  fast path, and the gate moved on both criteria without closing.** All
+  three items named as owed above -- the fresh-process absolute-criterion
+  series, the four-cell Bun-ratio matrix with replicates, and a re-run of
+  the compiled decomposition -- are complete, with the equivalence check
+  re-run alongside them (all nine exchanges still match on status and body
+  bytes). Binary: `json-api.exe`, **690,688 bytes** (690,176 before this
+  branch). The absolute criterion is now **2868.2 to 3392.4 req/sec** at ten
+  users over six fresh-process readings -- matched against the six the
+  earlier range came from -- short of `00-MASTER-SPEC.md` §3's 10k+ by
+  roughly **2.9x to 3.5x** rather than 3x to 5x; the Bun ratio is now
+  **0.230 to 0.272**, short of `60-EXAMPLES.md` §5's >= 1.0 by roughly
+  **3.7x to 4.4x** rather than 4.3x to 8.6x. **Neither criterion is met.**
+  **Part of the ratio's apparent movement is Bun's own variance rather than
+  Nova's gain:** the old 0.116 lower bound was computed against a Bun
+  reading far above its other three, and this session's two pinned Bun
+  cells agree within ten req/sec. The absolute series measures the
+  Nova-side change more cleanly than the ratio does.
+  **The 2.0x to 3.2x amplification between `users_json`'s isolated saving
+  and the server's whole per-request saving is neither confirmed nor
+  refuted.** Compared median against median on matched six-reading
+  populations it is about **1.6x**, but propagating the ranges instead puts
+  it anywhere from about -0.4x to 3.8x -- an interval that contains the band
+  entirely, because the best before reading is faster than the worst after
+  one. The measurement locates the quantity no better than the inference it
+  was meant to test. The before six also span several sessions where the
+  after six come from one, and only the after six include pinned cells. An
+  earlier draft of this entry reported 3.06x to 3.30x by comparing against
+  the two lowest of the six before readings, and is withdrawn --
+  traceability is not the same property as a matched population. Mechanism
+  unestablished either way: GC pressure, cache behaviour and allocator
+    contention are candidates and none is measured here. `to_bytes` and
+  `json_response`, both unchanged by this fast path,
+  read slightly slower than before rather than the same or faster. The
+  empty-store control cell, which never calls `stringify`, moved 0.95x to
+  1.06x -- its before and after ranges overlap, which is what lets the
+  ten- and twenty-user cells be read as this change's effect rather than
+  machine drift. `examples/05-json-api/BENCHMARK.md` now carries this as a
+  further dated amendment, with the 2026-09-11 and 2026-09-12 amendments
+  above each marked with which new series supersedes them rather than
+  edited.
+
 ## [0.2.0-alpha.4] - 2026-09-12
 
 Phase 2's gate now carries a **measured figure on both of its criteria for the

@@ -78,6 +78,13 @@ that at least one request completed and no error did, and it too drives its
 server with `nova run`. So no test in this workspace compares a throughput
 figure against anything, and none measures a built binary.
 
+**RESOLVED 2026-09-12 (branch `remeasure-after-fast-path`): the range this
+amendment corrects to, 1875.2 to 3108.5 req/sec, is re-measured in the
+further amendment below at 2868.2 to 3392.4 req/sec at ten users — six
+fresh-process readings against this range's own six — with a binary built
+from `stringify`'s scalar fast path. The two ranges OVERLAP; the later one
+does not cleanly replace this one, and the amendment below says why.**
+
 ---
 
 ## AMENDMENT 2026-09-12: `stringify`-affected figures below measure a superseded build
@@ -136,6 +143,209 @@ with the equivalence check re-run alongside them -- before any figure named
 in this amendment is read as current. No new throughput or per-call
 figure, measured or predicted, is stated here.
 
+**RESOLVED 2026-09-12 (branch `remeasure-after-fast-path`): all three items
+owed above are done, against a binary built from the current `stringify`,
+with the equivalence check re-run alongside them and passing.** See the
+further amendment immediately below for the series, and the honesty
+caveats that come with them.
+
+---
+
+## FURTHER AMENDMENT 2026-09-12 (branch `remeasure-after-fast-path`): the debt above is discharged, on both criteria, without closing the gate
+
+All three items the amendment above named as owed — the fresh-process
+absolute-criterion series, the four-cell Bun-ratio matrix with replicates,
+and a re-run of the compiled decomposition — are measured here against a
+binary built from the current `stringify`, with the equivalence check
+re-run alongside them first. `json-api.exe` is **690,688 bytes** (690,176
+before this branch — the identity check working the same way it worked for
+the debug/release distinction in the first amendment above). The
+equivalence gate (`docs/benchmarks/bun-equivalence.js`) passed: all nine
+exchanges match on status and body bytes. Host: MINGW64_NT-10.0-26100, 12
+cores, Windows — the host this file's header names.
+
+### The finding: a matched comparison neither confirms nor refutes the amplification
+
+The amendment above records a **2.0x to 3.2x** amplification between
+`users_json`'s isolated cost and the whole server's marginal cost per byte,
+arrived at by comparing two separately-measured quantities and explained by
+nothing. This re-measurement is a controlled change of a known isolated
+size, so it can test that band rather than re-infer it.
+
+**It does not settle it either way, and saying so is the whole finding.**
+Compared median against median on matched populations the amplification is
+about **1.6x**. But propagating the ranges instead of the medians, the
+per-request saving runs from **-27.0 to +238.5 microseconds** — the best
+before reading is faster than the worst after one — which puts the
+amplification anywhere from about **-0.4x to 3.8x**. That interval contains
+the 2.0x-3.2x band entirely. **So this measurement locates the amplification
+no better than the inference it was meant to test**, and a reader should take
+1.6x as where the middles sit rather than as where the quantity is.
+
+The comparison has to be drawn against the same population on both sides,
+and "The runs" below enumerates six fresh-process ten-user readings from
+before this branch — 1875.2, 1906.7, 2291.6, 2364.8, 2622.1 and 3108.5,
+spread 1.66x, median 2328.2. Six fresh-process readings were taken after
+it, across the two series here: 2868.2, 3024.9, 3036.5, 3056.5, 3078.4 and
+3392.4, spread 1.18x, median 3046.5.
+
+| quantity | before | after |
+|---|---|---|
+| six fresh-process readings, ten users | 1875.2 – 3108.5, median 2328.2 | 2868.2 – 3392.4, median 3046.5 |
+| per request at the medians | 429.5 microseconds | 328.2 microseconds |
+
+So the server saves about **101 microseconds** per request at the medians,
+against an isolated `users_json` saving of **63.1 to 63.8 microseconds**
+(158,399 ns/call before, 94,562 to 95,251 after) — an amplification of
+**1.59x to 1.60x**.
+
+**Three things keep even the median figure loose, and all are stated rather
+than left for a reader to find.** The before and after ranges OVERLAP: the
+highest before reading, 3108.5, exceeds the lowest after reading, 2868.2.
+The before six were taken across different scripts and sessions while the
+after six all come from one contiguous session, so between-session variance
+sits in one population and not the other. And the two populations are not
+composed alike: the after six include two readings from pinned cells, while
+the before six include none — folding in the four available pinned and
+unpinned before-side counterparts moves the median only from 2328.2 to
+2331.7 and leaves the figure at 1.58x-1.60x, so the number is robust to that,
+but the composition is disclosed rather than assumed away. The median shift
+of 1.31x should be held loosely for all three reasons.
+
+**An earlier draft of this section reported 3.06x to 3.30x**, and it was
+wrong in a way worth recording rather than quietly fixing: it compared the
+after readings against 1875.2 and 1906.7, which are the two LOWEST of the
+six the same file already enumerated a few paragraphs below. Picking a
+subsample rather than the recorded population roughly doubled the apparent
+effect. The figure was never untraceable — every number traced — and that
+is the point: traceability is not the same property as a matched
+population.
+
+The mechanism remains unestablished either way: GC pressure from fewer
+allocations, cache behaviour, and allocator contention across 200 live
+connections are all candidates, and this measures none of them.
+**Measured, not diagnosed.**
+
+### Absolute criterion, re-measured — one fresh process per point
+
+200 connections, 15s measurement, 5s warmup, unpinned:
+
+| collection | body | before | after | change |
+|---|---|---|---|---|
+| empty (CONTROL) | 2 B | 8940.2, 9180.4 | 9501.0, 8688.1 | 0.95x – 1.06x |
+| ten users | 534 B | 1906.7, 1875.2 | **3078.4, 3036.5** | see below |
+| twenty users | 1094 B | 945.1, 1146.1 | **2203.3, 2107.0** | see below |
+
+**The change column is deliberately absent from the two seeded rows.** Each
+pairs two readings against two, and for the ten-user row the two "before"
+values are the lowest of six this file records; dividing them would restate
+the error the section above withdraws. The matched six-against-six
+comparison is there instead, and the twenty-user row has only two readings
+per side, so it cannot carry the same weight as the ten-user one and no
+ratio is offered for it here.
+
+**The empty-store cell is a control, not a data point.** An empty
+collection means `users_json` loops zero times and never calls
+`stringify`, so this cell should not move under this change — and it does
+not; its before and after ranges overlap. That is what makes the ten- and
+twenty-user cells attributable to the fast path rather than to machine
+drift between sessions.
+
+Even taken on its own, the control shows this file's response-side work
+cannot be the whole story for the 10k+ ask, and that is a claim with
+standing history rather than one minted here: `CHANGELOG.md`'s
+`[0.2.0-alpha.4]` entry and
+`docs/superpowers/specs/2026-09-11-bun-ratio-design.md` §2 both record
+that the absolute criterion is not reachable by response-path work alone,
+because the gate allows 100 microseconds per request and the empty-store
+control already exceeds it. **This session's control reads 105.3 to 115.1
+microseconds per request against that 100-microsecond line — the fastest
+reading is within about 5% of it, while the control's own two readings
+differ from each other by 1.09x, a wider swing than that margin.** The
+claim holds on every reading taken so far, but it is not a settled
+impossibility: it rests on a quantity that moves by more than the margin
+it has left, so a later reader should re-derive it rather than quote it
+forward.
+
+### Bun ratio, re-measured — four cells, two replicates each, alternating sides
+
+200 connections, 30s measurement, 5s warmup:
+
+| cell | before | after |
+|---|---|---|
+| A Nova pinned | 2234.7, 2500.9 | 2868.2, 3392.4 |
+| B Nova unpinned | 2314.3, 2349.0 | 3024.9, 3056.5 |
+| C Bun pinned | 12245.0, 19220.6 | 12470.8, 12480.6 |
+| D Bun unpinned | 10165.1, 12498.7 | 12647.3, 12934.0 |
+
+| ratio | before | after |
+|---|---|---|
+| pinned | 0.116 – 0.204 | **0.230 – 0.272** |
+| unpinned | 0.185 – 0.231 | **0.234 – 0.242** |
+
+**Part of the pinned ratio's apparent gain is Bun's own variance, not
+Nova's.** The withdrawn 0.116 lower bound was computed against Bun's
+19220.6, a reading far above Bun's other three pinned-cell readings across
+both sessions; this session's two pinned Bun cells agree to within 10
+req/sec of each other. The Nova-side change is the trustworthy half of this
+comparison, and the absolute series above measures it more cleanly than
+this ratio does.
+
+### Compiled decomposition, re-run — ten users, same harness source as before, 2000 iterations per cell, two runs each its own process
+
+Harness binary: **521,728 bytes**.
+
+| step | before | after |
+|---|---|---|
+| `users_json` | 158,399 ns | **94,562 – 95,251 ns** |
+| `to_bytes` | 8,663 ns | 9,325 – 9,437 ns |
+| `json_response` | 1,612 ns | 1,759 – 2,000 ns |
+| response side total | 168,674 ns | **105,999 – 106,335 ns** |
+
+Shares after: `users_json` 89–90%, `to_bytes` 9%, `json_response` 2%.
+
+**`to_bytes` and `json_response` read slightly slower than before, and
+neither was changed by this branch.** Recorded rather than smoothed;
+nothing here establishes whether the difference is measurement noise, code
+layout, or something else, and both remain small absolute numbers beside
+`users_json`.
+
+`users_json` in isolation, after, across the same four collection sizes as
+before: 5 users 46,265 and 46,614 ns; 10 users 95,251 and 94,562 ns; 20
+users 198,027 and 196,703 ns; 40 users 358,962 and 374,218 ns.
+
+### The gate, re-measured on both criteria, still not met
+
+| criterion | asked | now | short by |
+|---|---|---|---|
+| absolute (`00-MASTER-SPEC.md` §3) | 10k+ req/sec | 2868.2 – 3392.4 req/sec at ten users, six fresh-process readings | ~2.9x to 3.5x |
+| ratio (`60-EXAMPLES.md` §5) | at least 1.0 | 0.230 – 0.272 | ~3.7x to 4.4x |
+
+Previously ~3.2x to 5.3x and ~4.3x to 8.6x respectively, each
+from its own population. **Both criteria
+moved in the same direction and both remain unmet.** Nothing here suggests
+either is close: at ten users the absolute criterion is still short by
+more than three times, and the control cell above shows response-side work
+alone has no path to 10k+ regardless.
+
+**Figures superseded by this amendment, kept visible rather than
+deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
+req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
+against that range's own six — and note the two RANGES OVERLAP rather than
+one replacing the other cleanly. Its Bun ratio of 0.116 to 0.231 is now
+0.230 to 0.272, with the caveat above that part of the pinned movement is
+Bun's own variance. "Where the cost is"' compiled decomposition — 158,399
+ns/call for `users_json` with 94%/5%/1% shares — is now 94,562 to 95,251
+ns/call with 89-90%/9%/2% shares.
+
+**Its 2.0x-3.2x amplification is neither superseded nor confirmed.** The
+matched comparison above puts the medians at about 1.6x while the ranges
+admit anything from -0.4x to 3.8x, an interval containing that band; an
+earlier draft of this amendment reported 3.06x-3.30x as a confirmation and
+is withdrawn there, and a second draft reported 1.6x as a refutation and is
+withdrawn with it. None of the superseded figures is edited at its own
+site.
+
 ---
 
 **Phase 2's gate is NOT met by this measurement, and nothing here claims
@@ -145,6 +355,10 @@ the six runs taken in a fresh process — short of the gate by roughly
 **3× to 5×**, where the withdrawn figure implied 22×. §5's other criterion, a ratio
 against Bun, is **not measured here**; Bun 1.3.0 is installed on this host,
 so that half is measurable rather than blocked.
+
+**Both figures in this paragraph are further superseded — see the
+"FURTHER AMENDMENT 2026-09-12" section above for the fresh-process series
+and the four-cell Bun-ratio matrix that supersede them.**
 
 ## What was measured, and with what
 
@@ -268,6 +482,9 @@ this section -- the decomposition, the isolation table, the 32%-52%
 framing and the 2.0x-3.2x amplification -- was measured through the
 `stringify` this branch replaced, for the same reason and to the same
 degree that amendment states, and is not restated as a new figure here.
+**This decomposition is re-run in the "FURTHER AMENDMENT 2026-09-12"
+section near the top of this file**, against a binary built from the
+current `stringify`.
 
 **Re-profiled in a compiled binary, because the withdrawn profiling used
 `nova run`** while the measured server is compiled — a comparison between
@@ -399,6 +616,10 @@ produced it.
   Windows.
 
 ## Measured 2026-09-11: the Bun ratio, §5's own criterion
+
+**Its four cells are superseded by the "FURTHER AMENDMENT 2026-09-12"
+section near the top of this file, which re-runs this same matrix against
+a binary built from `stringify`'s scalar fast path.**
 
 Four cells, two replicates each, taken alternating sides (A, C, B, D, then
 A, C, B, D) so drift over the session could not align with one side of the

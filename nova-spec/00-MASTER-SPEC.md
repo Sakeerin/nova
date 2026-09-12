@@ -367,6 +367,42 @@ it is what this increment found on measuring both. Full account, including
 the fairness check on pinning and the wire-framing bias in Nova's favour,
 in `examples/05-json-api/BENCHMARK.md` and `docs/benchmarks/README.md`.
 
+**AMENDED 2026-09-12 (branch `remeasure-after-fast-path`): both of the
+gate's criteria are re-measured against a binary built from `stringify`'s
+scalar fast path, and both remain unmet.** That fast path shipped on a
+separate, earlier branch; the amendment immediately above already named
+every `stringify`-affected figure in this section as measuring the build
+before it. Re-measured with one fresh process per point, across the pinned and
+unpinned cells alike, against
+`json-api.exe` at **690,688 bytes** (690,176 before — the identity check
+working), the equivalence check re-run first and all nine exchanges still
+matching on status and body bytes: this section's absolute criterion is
+**2868.2 to 3392.4 req/sec** at ten users, short of the 10k+ asked for by
+roughly **2.9x to 3.5x** rather than 3x to 5x. `nova-spec/60-EXAMPLES.md`
+§5's ratio against Bun, re-measured as a four-cell matrix with replicates,
+is **0.230 to 0.272**, short of its ≥ 1.0 by roughly **3.7x to 4.4x**
+rather than 4.3x to 8.6x. **Both criteria moved and both say the gate is
+still not met.** Nor does this bring it within reach through further work
+on the response path — a claim with standing history rather than one
+minted here: `CHANGELOG.md`'s `[0.2.0-alpha.4]` entry and
+`docs/superpowers/specs/2026-09-11-bun-ratio-design.md` §2 both record
+that the absolute criterion is not reachable by response-path work alone,
+because the gate allows 100 microseconds per request and the empty-store
+control already exceeds it. **This session's control, which never calls
+`stringify`, reads 105.3 to 115.1 microseconds per request against that
+100-microsecond line — the fastest reading is within about 5% of it,
+while the control's own two readings differ from each other by 1.09x, a
+wider swing than that margin.** The claim holds on every reading taken so
+far, but it is not a settled impossibility: it rests on a quantity that
+moves by more than the margin it has left, so a later reader should
+re-derive it rather than quote it forward. What that change did to the
+server's own per-request cost, and how it compares with the saving measured
+inside `users_json`, is reported in `examples/05-json-api/BENCHMARK.md` and
+deliberately not restated here: it is a comparison whose size depends on
+which readings each side is drawn from, and repeating it in every record is
+how it would go stale in every record. Full account in
+`examples/05-json-api/BENCHMARK.md`.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
