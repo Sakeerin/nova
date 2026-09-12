@@ -20,4 +20,13 @@ fn main() {
 
     let empty: Map<String, JsonValue> = Map::new()
     println(stringify(Object(empty)))
+
+    // Two variant-coverage cases this fixture was missing, independent of any
+    // fast path: an empty string, and a character outside the basic multi-
+    // lingual plane. The runtime's own
+    // `str_from_chars_round_trips_and_substitutes_invalid_scalars` pins that
+    // an astral-plane pair survives a `[Char]` round trip, and this pins that
+    // `stringify` does not escape it.
+    println(stringify(String("")))
+    println(stringify(String("ok 🦀")))
 }
