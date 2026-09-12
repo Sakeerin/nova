@@ -9,6 +9,55 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
+  `Null`, `Bool`, `Number` or `String` -- now matches before `stringify`
+  allocates its work-list stack and output buffer, and returns finished text
+  directly; `Array`, `Object`, and a scalar reached through either, still
+  fall through to the unchanged general path. No public API was added or
+  exposed: an earlier design was going to expose the internal `quote` helper
+  as public API, and dropped that for the reason `std/strings`' `join`
+  comment already gives -- a top-level `pub fn` is glob-imported into every
+  module and would take that name from user code, and `quote` is more
+  collision-prone than either of the two names (`stringify`, `parse`)
+  `std/json` already claims globally. The fast path removes the need for a
+  new name entirely, and speeds up every existing caller instead.
+
+  **Only the `String` arm's saving was measured; `Null`, `Bool` and `Number`
+  got the same match arm with no separate measurement, and no figure here
+  covers them.** Measured with a dedicated harness, three separate process
+  invocations per cell, reported as ranges beside the harness binary's byte
+  size: `stringify` on a `String`, per call, measured 4330 to 4491 ns before
+  this change (511488-byte binary) and 2161 to 2314 ns after (512000-byte
+  binary) -- roughly 1.9x to 2.1x faster. `users_json` -- which calls that
+  same top-level `String` path twice per user rather than stringifying an
+  assembled `JsonValue::Object` -- improved at every size measured: 5 users,
+  80227 to 82254 ns before and 46627 to 49438 ns after; 10 users, 163015 to
+  165525 ns before and 94620 to 106971 ns after; 20 users, 342292 to 346948
+  ns before and 198884 to 221441 ns after; 40 users, 644027 to 656796 ns
+  before and 428785 to 456048 ns after -- roughly 1.4x to 1.8x faster across
+  the four sizes. Full figures and raw output are in
+  `.superpowers/sdd/2026-09-12-stringify-scalar-fast-path/task-1-results.md`
+  (gitignored, not part of this entry).
+
+  **Mutation, reported rather than predicted:** changing the fast path's
+  `String` arm to return its argument unquoted and unescaped took the suite
+  from 1130 passed / 0 failed / 8 ignored to 1124 passed / 6 failed / 8
+  ignored across the same 45 targets -- `json_stringify_run`,
+  `json_stringify_escapes_run`, `json_traits_run`,
+  `json_object_forged_map_run`, `json_parse_strings_run`, and
+  `json_api_example_serves_its_routes`. Reverting to `String(s) => return
+  quote(s)` restored 1130 passed / 0 failed / 8 ignored.
+
+  **`examples/05-json-api/BENCHMARK.md`'s server figures now describe a
+  superseded build.** Its 1875.2-to-3108.5-req/sec absolute-criterion range
+  and its 0.116-to-0.231 Bun-ratio range were both measured through the
+  `stringify` this change replaces. Re-measurement is deferred -- it is the
+  full four-cell Bun-ratio matrix and the fresh-process absolute-criterion
+  series, both with replicates, plus the equivalence check that gates the
+  ratio, not a single rerun -- and recorded as owed work in that file rather
+  than only here.
+
 ## [0.2.0-alpha.4] - 2026-09-12
 
 Phase 2's gate now carries a **measured figure on both of its criteria for the
