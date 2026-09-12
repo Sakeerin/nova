@@ -80,6 +80,38 @@ figure against anything, and none measures a built binary.
 
 ---
 
+## AMENDMENT 2026-09-12: every server figure below measures a superseded build
+
+**`std/json`'s `stringify` gained a scalar fast path on this branch, and every
+server figure in this file was measured through the `stringify` that existed
+before it.** The absolute-criterion range below (**1875.2 to 3108.5
+req/sec**) and the Bun-ratio range below (**0.116 to 0.231**) both come from
+load-testing a compiled `examples/05-json-api` binary, and that binary's
+`users_json` calls `stringify` twice per user. Both ranges describe a build
+that no longer matches what `std/json/lib.nova` renders today.
+
+**What makes that checkable rather than only asserted.** Both ranges are
+already recorded beside the example binary's byte size, `690,176` -- see
+"What was measured, and with what" below and "Identity of each side" in the
+Bun-ratio section. That recorded size is what a rebuild's own byte size has
+to be compared against; this amendment does not perform that rebuild and
+does not state what its byte size would be.
+
+**Re-measurement is deferred, not silently owed, and for a stated reason.**
+Neither range above came from one run: the absolute criterion came from a
+fresh-process series with replicates, and the Bun ratio came from a
+four-cell matrix (pinned and unpinned, both sides) with replicates,
+alternating sides, gated by the equivalence check
+(`docs/benchmarks/bun-equivalence.js`). Re-running a single cell would not
+reproduce either figure's own methodology. **Owed against this file:** the
+fresh-process absolute-criterion series and the four-cell Bun-ratio matrix,
+replicates included, against a binary built from the current `stringify`,
+with the equivalence check re-run alongside them -- before either range
+above is read as current. No new throughput figure, measured or predicted,
+is stated here.
+
+---
+
 **Phase 2's gate is NOT met by this measurement, and nothing here claims
 otherwise.** `nova-spec/00-MASTER-SPEC.md` §3 asks for 10k+ req/sec. The
 corrected ten-user figure is a **range of 1875.2 to 3108.5 req/sec** across
@@ -259,6 +291,47 @@ replicated pair. **The residual is on the order of 20% at the fast end, not
 add up are still not an explanation, and nothing here measured
 `read_request`'s parse, the socket write, the scheduler or the collector
 separately.
+
+## Measured 2026-09-12: `stringify`'s scalar fast path
+
+`std/json`'s `stringify` gained a fast path that matches a top-level scalar
+(`Null`, `Bool`, `Number` or `String`) before the work-list loop above
+allocates anything, and returns finished text directly for each of those
+four cases; `Array`, `Object`, and a scalar reached through either, still
+fall through to the unchanged loop above. **Only the `String` arm's saving
+was measured below -- `Null`, `Bool` and `Number` got the same match arm
+with no separate measurement, and no figure in this section covers them.**
+
+Measured with a dedicated harness (`/tmp/bench_stringify.nova`), separate
+from the compiled per-request decomposition above and not merged into it
+here: three separate process invocations per cell, each reported as a
+range, beside the harness binary's byte size for that side of the
+comparison.
+
+| cell | before -- 511488-byte binary | after -- 512000-byte binary |
+|---|---|---|
+| `stringify` on a `String`, per call | 4330–4491 ns | 2161–2314 ns |
+| `users_json`, 5 users, 266 B | 80227–82254 ns | 46627–49438 ns |
+| `users_json`, 10 users, 532 B | 163015–165525 ns | 94620–106971 ns |
+| `users_json`, 20 users, 1092 B | 342292–346948 ns | 198884–221441 ns |
+| `users_json`, 40 users, 2212 B | 644027–656796 ns | 428785–456048 ns |
+
+`stringify` on a `String` is roughly **1.9x–2.1x faster**. `user_json(u)`
+builds each user's JSON by hand, interpolating `stringify(String(u.name))`
+and `stringify(String(u.email))` directly rather than calling `stringify`
+once on an assembled `JsonValue::Object` -- so `users_json` exercises that
+same top-level `String` path twice per user, and its speedup, roughly
+**1.4x–1.8x** across the four collection sizes above, sits close to
+`stringify`'s own rather than diluted by tree-walking work this fast path
+does not touch.
+
+This harness's own `users_json` figures are a different measurement from
+the compiled per-request decomposition above (`users_json` at 158,399
+ns/call, ten users, 2000 iterations) -- a different harness, not folded into
+one series with it here. Full figures, raw per-run output and the mutation
+that checked the `String` arm are in
+`.superpowers/sdd/2026-09-12-stringify-scalar-fast-path/task-1-results.md`
+(gitignored, not part of this file).
 
 ## Comparison, and one that does not hold
 

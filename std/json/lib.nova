@@ -226,6 +226,17 @@ const MAX_RENDER_DEPTH: Int = 100_000
 // surviving nowhere in this file. The accumulator cost these arms used to
 // carry is simply gone; the roster of what changed -- by name, not count --
 // is at `scan_str`.
+//
+// A SEPARATE, LATER SAVING ON THIS SAME FUNCTION, PAST THAT MIGRATION. The
+// migration above made the general path below LINEAR where interpolation
+// had made it QUADRATIC; it did not change how many times a top-level
+// scalar passes through that path on its way to a `String`. This increment
+// does not make that path cheaper -- it SKIPS the path entirely for a
+// top-level scalar, falling into it only for `Array`/`Object` or a scalar
+// reached through either. `tests/runtime/json_stringify.nova` is what
+// checks the fast path just below. Only the `String` arm's saving was
+// measured; `Null`, `Bool` and `Number` got the same match arm with no
+// separate measurement.
 pub fn stringify(v: JsonValue) -> String {
     // A TOP-LEVEL SCALAR IS ALREADY FINISHED, so return it rather than
     // copying it twice. The general path below hands `buf_push_str` exactly
