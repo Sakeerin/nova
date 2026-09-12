@@ -14,14 +14,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Null`, `Bool`, `Number` or `String` -- now matches before `stringify`
   allocates its work-list stack and output buffer, and returns finished text
   directly; `Array`, `Object`, and a scalar reached through either, still
-  fall through to the unchanged general path. No public API was added or
-  exposed: an earlier design was going to expose the internal `quote` helper
-  as public API, and dropped that for the reason `std/strings`' `join`
-  comment already gives -- a top-level `pub fn` is glob-imported into every
-  module and would take that name from user code, and `quote` is more
-  collision-prone than either of the two names (`stringify`, `parse`)
-  `std/json` already claims globally. The fast path removes the need for a
-  new name entirely, and speeds up every existing caller instead.
+  fall through to the unchanged general path -- a caller passing a
+  top-level `Array` or `Object` pays one extra match arm for no saving,
+  since the scalar arms inside that general path are untouched. No public
+  API was added or exposed: an earlier design was going to expose the
+  internal `quote` helper as public API, and dropped that for the reason
+  `std/strings`' `join` comment already gives -- a top-level `pub fn` is
+  glob-imported into every module and would take that name from user code,
+  and `quote` is more collision-prone than either of the two global
+  **function** names (`stringify`, `parse`) `std/json` already claims
+  (`std/json` also glob-exports `JsonValue`, `JsonError`, `ToJson`,
+  `FromJson` and six variant constructors, several more collision-prone
+  than `quote` would have been, but none of them a `pub fn`). The fast path
+  removes the need for a new name entirely, and speeds up every existing
+  caller that passes a top-level scalar instead -- which is what
+  `examples/05-json-api` does.
 
   **Only the `String` arm's saving was measured; `Null`, `Bool` and `Number`
   got the same match arm with no separate measurement, and no figure here
@@ -49,14 +56,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `json_api_example_serves_its_routes`. Reverting to `String(s) => return
   quote(s)` restored 1130 passed / 0 failed / 8 ignored.
 
-  **`examples/05-json-api/BENCHMARK.md`'s server figures now describe a
-  superseded build.** Its 1875.2-to-3108.5-req/sec absolute-criterion range
-  and its 0.116-to-0.231 Bun-ratio range were both measured through the
-  `stringify` this change replaces. Re-measurement is deferred -- it is the
-  full four-cell Bun-ratio matrix and the fresh-process absolute-criterion
-  series, both with replicates, plus the equivalence check that gates the
-  ratio, not a single rerun -- and recorded as owed work in that file rather
-  than only here.
+  **`examples/05-json-api/BENCHMARK.md` now carries an amendment marking
+  its `stringify`-affected figures as measuring a superseded build** --
+  its 1875.2-to-3108.5-req/sec absolute-criterion range, its
+  0.116-to-0.231 Bun-ratio range, AND its compiled per-call decomposition
+  (`users_json` at 158,399 ns/call and the shares and amplification derived
+  from it), all measured through the `stringify` this change replaces. Two
+  figures in that file are named as unaffected: its empty-store req/sec
+  rows, which never call `stringify`, and a comparison figure that is
+  another program's. Re-measurement of the server figures is deferred --
+  it is the full four-cell Bun-ratio matrix and the fresh-process
+  absolute-criterion series, both with replicates, plus the equivalence
+  check that gates the ratio, not a single rerun -- and recorded as owed
+  work in that file rather than only here.
 
 ## [0.2.0-alpha.4] - 2026-09-12
 
