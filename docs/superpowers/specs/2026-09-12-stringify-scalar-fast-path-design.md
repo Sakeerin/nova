@@ -77,10 +77,17 @@ measured**, and must not imply a figure for the others.
 was going to expose `quote` as public API. `std/strings`' own `join` comment
 explains why that is costly: a top-level `pub fn` is glob-imported into every
 module and would take that name from all user code. `std/json` currently
-claims exactly two global names, `stringify` and `parse`, and `quote` is far
-more collision-prone than either. The fast path removes the need entirely, and
-makes every existing caller faster rather than only callers rewritten to use a
-new function.
+claims exactly two global FUNCTION names, `stringify` and `parse`, and
+`quote` is far more collision-prone than either -- `JsonValue`, `JsonError`,
+`ToJson`, `FromJson` and the six variant constructors are already
+glob-exported too, several more collision-prone than `quote` would have
+been, but none of them is a `pub fn`. The fast path removes the need
+entirely, and makes every existing caller that passes a top-level scalar
+faster -- which is what `examples/05-json-api` does -- rather than only
+callers rewritten to use a new function. A caller that passes a top-level
+`Array` or `Object` pays one extra match arm for no saving: `stringify`'s
+own scalar arms inside the general path are untouched, so a caller reaching
+them through a container gets no speedup either.
 
 ## 4. Why the output is byte-identical, argued rather than asserted
 

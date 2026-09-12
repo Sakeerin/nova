@@ -80,35 +80,61 @@ figure against anything, and none measures a built binary.
 
 ---
 
-## AMENDMENT 2026-09-12: every server figure below measures a superseded build
+## AMENDMENT 2026-09-12: `stringify`-affected figures below measure a superseded build
 
-**`std/json`'s `stringify` gained a scalar fast path on this branch, and every
-server figure in this file was measured through the `stringify` that existed
-before it.** The absolute-criterion range below (**1875.2 to 3108.5
-req/sec**) and the Bun-ratio range below (**0.116 to 0.231**) both come from
-load-testing a compiled `examples/05-json-api` binary, and that binary's
-`users_json` calls `stringify` twice per user. Both ranges describe a build
-that no longer matches what `std/json/lib.nova` renders today.
+**`std/json`'s `stringify` gained a scalar fast path on this branch.** Every
+figure below that exercises `users_json` on a NON-EMPTY user collection --
+which calls that top-level `String` path twice per user -- was measured
+through the `stringify` that existed before this branch. Two figures in
+this file are NOT reached by this note: the empty-store rows (**8940.2**
+and **9180.4** req/sec, below), because an empty collection means
+`users_json` loops zero times and never calls `stringify`; and the
+**11940.0** req/sec figure in "Comparison, and one that does not hold",
+which is `docs/benchmarks/http-fixed-response.md`'s own program, not this
+one, and was never measured through this file's `stringify` at all.
 
-**What makes that checkable rather than only asserted.** Both ranges are
-already recorded beside the example binary's byte size, `690,176` -- see
-"What was measured, and with what" below and "Identity of each side" in the
-Bun-ratio section. That recorded size is what a rebuild's own byte size has
-to be compared against; this amendment does not perform that rebuild and
-does not state what its byte size would be.
+**What this note covers is the server figures below AND the compiled
+per-call decomposition in "Where the cost is" further down -- not only the
+former.** The absolute-criterion range (**1875.2 to 3108.5 req/sec**) and
+the Bun-ratio range (**0.116 to 0.231**), whose Nova-side cells come from
+that same binary, are both below. So is "Where the cost is"' compiled
+decomposition: `users_json` at 158,399 ns/call with its 94%/5%/1% shares,
+the "about 32% to 52%" response-side share, and the 2.0x-3.2x
+amplification. All of it comes from a binary built before this branch.
+**What changed between that build and this one is HOW a top-level scalar
+reaches `stringify`'s output, not WHAT it outputs** -- the fast path is
+argued byte-identical to the general path it shadows, in this increment's
+own design doc, rather than asserted; the build is superseded as a
+measurement of cost, not as a record of behaviour. "Measured 2026-09-12"
+below shows the quantity at the center of that decomposition moved: this
+same harness's `users_json`, measured in isolation, is faster after this
+branch than the 158,399 ns/call (and the 80,092–594,432 ns/call range)
+"Where the cost is" records, so the percentages, the 32%-52% framing and
+the 2.0x-3.2x amplification derived from that number are stale in the same
+way -- this amendment does not restate any of them as a new figure.
+
+**What makes that checkable rather than only asserted.** The req/sec ranges
+are already recorded beside the example binary's byte size, `690,176` --
+see "What was measured, and with what" below and "Identity of each side" in
+the Bun-ratio section. That recorded size is what a rebuild's own byte size
+has to be compared against; this amendment does not perform that rebuild
+and does not state what its byte size would be.
 
 **Re-measurement is deferred, not silently owed, and for a stated reason.**
-Neither range above came from one run: the absolute criterion came from a
-fresh-process series with replicates, and the Bun ratio came from a
-four-cell matrix (pinned and unpinned, both sides) with replicates,
-alternating sides, gated by the equivalence check
-(`docs/benchmarks/bun-equivalence.js`). Re-running a single cell would not
-reproduce either figure's own methodology. **Owed against this file:** the
-fresh-process absolute-criterion series and the four-cell Bun-ratio matrix,
-replicates included, against a binary built from the current `stringify`,
-with the equivalence check re-run alongside them -- before either range
-above is read as current. No new throughput figure, measured or predicted,
-is stated here.
+Neither the absolute-criterion range nor the Bun ratio came from one run:
+the absolute criterion came from a fresh-process series with replicates,
+and the Bun ratio came from a four-cell matrix (pinned and unpinned, both
+sides) with replicates, alternating sides, gated by the equivalence check
+(`docs/benchmarks/bun-equivalence.js`). The compiled decomposition came from
+two thousand iterations at each of four collection sizes, in a compiled
+binary rather than under `nova run`. Re-running any one of these without
+the others would not reproduce its own methodology. **Owed against this
+file:** the fresh-process absolute-criterion series, the four-cell
+Bun-ratio matrix with replicates, and a re-run of the compiled
+decomposition, all against a binary built from the current `stringify`,
+with the equivalence check re-run alongside them -- before any figure named
+in this amendment is read as current. No new throughput or per-call
+figure, measured or predicted, is stated here.
 
 ---
 
@@ -236,6 +262,12 @@ property of the in-process self-test server under 200 connections, and a
 ceiling with a starved connection is weaker evidence than a clean one.
 
 ## Where the cost is
+
+**Superseded by AMENDMENT 2026-09-12, above.** Every `users_json` figure in
+this section -- the decomposition, the isolation table, the 32%-52%
+framing and the 2.0x-3.2x amplification -- was measured through the
+`stringify` this branch replaced, for the same reason and to the same
+degree that amendment states, and is not restated as a new figure here.
 
 **Re-profiled in a compiled binary, because the withdrawn profiling used
 `nova run`** while the measured server is compiled — a comparison between
