@@ -1,0 +1,100 @@
+// Times `std/http`'s head parsing against header count, in a compiled
+// binary, so materialisation can be priced in isolation.
+//
+// **Why two loops and a subtraction.** `parse_offsets` is the thin `pub`
+// wrapper over the `http_parse_request` intrinsic; `parse_request_head`
+// is that same call plus method and path extraction plus the
+// materialisation loop and its `Map`. The difference between the two is
+// what `parse_request_head` adds over the intrinsic call, which is
+// dominated by materialisation.
+//
+// **`parse_offsets` is NOT a zero-allocation baseline.** The intrinsic
+// copies nothing and holds no Rust-side state, but this wrapper returns
+// `[Int]`, so a call allocates one Nova array. That allocation cancels in
+// the subtraction because `parse_request_head` calls `parse_offsets`
+// exactly once -- it does not vanish from either side.
+//
+// **The accumulators are load-bearing, not decoration.** A loop whose
+// result is discarded can in principle be removed, and a harness that
+// measures nothing reports an impressively small number. Each loop folds
+// something derived from every call's result into a value that is
+// printed, so a reader can tell the loop ran.
+//
+// Build with a RELEASE `nova`: `find_runtime_lib` resolves the runtime
+// staticlib beside the `nova` executable, so a debug `nova` links the
+// debug runtime and depresses every figure here.
+
+const ITERS: Int = 20000
+
+// A well-formed request head carrying `extra` headers beyond `Host`.
+//
+// Each padding header is a fixed width, so the head's byte length is
+// linear in `extra` and a slope in nanoseconds per header is not also a
+// slope in bytes per header at some other rate.
+fn head_with(extra: Int) -> Bytes {
+    let mut s = "GET / HTTP/1.1\r\nHost: nova-bench\r\n"
+    let mut i = 0
+    while i < extra {
+        s = "${s}x-pad-${i}: 0123456789abcdef\r\n"
+        i = i + 1
+    }
+    s = "${s}\r\n"
+    bytes_from_string(s)
+}
+
+fn profile(extra: Int) {
+    let buf = head_with(extra)
+    let total = extra + 1
+
+    let mut acc_offsets = 0
+    let start_a = Instant::now()
+    let mut i = 0
+    while i < ITERS {
+        let t = parse_offsets(buf)
+        // `t.len()`, deliberately NOT `t[0]`. Element 0 is the status, and a
+        // complete head makes it `0` -- so an accumulator folding it in
+        // stays `0` whether this loop runs or not, which is precisely the
+        // decorative accumulator this design exists to rule out. The table's
+        // length is non-zero and grows with the header count, so a skipped
+        // loop is visible and a mis-parsed one is too.
+        acc_offsets = acc_offsets + t.len()
+        i = i + 1
+    }
+    let span_a = start_a.elapsed()
+
+    let mut acc_head = 0
+    let start_b = Instant::now()
+    i = 0
+    while i < ITERS {
+        // `Ok(Some(r))` is E0900 -- nested variant patterns are not
+        // supported -- so this nests two matches, the same shape
+        // `read_request` uses on this very function's result.
+        match parse_request_head(buf, Limits::default()) {
+            Ok(maybe) => {
+                match maybe {
+                    Some(r) => acc_head = acc_head + r.headers.len()
+                    None => acc_head = acc_head - 1
+                }
+            }
+            Err(_) => acc_head = acc_head - 1000
+        }
+        i = i + 1
+    }
+    let span_b = start_b.elapsed()
+
+    let ns_a = span_a.nanos / ITERS
+    let ns_b = span_b.nanos / ITERS
+    println("headers=${total} bytes=${buf.len()} iters=${ITERS} offsets_ns=${ns_a} head_ns=${ns_b} acc_offsets=${acc_offsets} acc_head=${acc_head}")
+}
+
+fn main() {
+    // Header counts spanning the one-header shape every recorded figure was
+    // taken with up to a count well inside `Limits::default()`'s
+    // `max_header_count` of 100, with the head staying inside its
+    // `max_head_bytes` of 8192.
+    profile(0)
+    profile(4)
+    profile(9)
+    profile(19)
+    profile(49)
+}
