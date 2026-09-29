@@ -48,8 +48,13 @@ fn request_bytes(cfg: &Config) -> Vec<u8> {
         s.push_str(h);
         s.push_str("\r\n");
     }
+    if cfg.body_bytes > 0 {
+        s.push_str(&format!("Content-Length: {}\r\n", cfg.body_bytes));
+    }
     s.push_str("\r\n");
-    s.into_bytes()
+    let mut v = s.into_bytes();
+    v.resize(v.len() + cfg.body_bytes, b'x');
+    v
 }
 
 /// Per-read and per-write socket timeout for every connection.
@@ -67,6 +72,14 @@ fn request_bytes(cfg: &Config) -> Vec<u8> {
 /// hangs past `--duration` with no diagnostic and no `RESULT` line. Ten
 /// seconds converts that unbounded hang into one counted error.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound on `--body-bytes`, matching `std/http`'s
+/// `Limits::default().max_body_bytes`. Above it the target answers
+/// `BodyTooLarge` and every response counts as an error, so nothing
+/// measurable lies up there; bounding here also keeps an operator's typo
+/// from being allocated before any server sees it. Inclusive, so a sweep
+/// can reach the bound itself.
+const MAX_BODY_BYTES: usize = 1_048_576;
 
 /// Byte offset just past a complete `CRLF CRLF`, or `None`.
 ///
@@ -160,6 +173,8 @@ struct Config {
     /// default, which is what keeps the default request byte-identical to
     /// the one every already-recorded figure was taken with.
     headers: Vec<String>,
+    /// Body length in bytes; `0` means no body and no `Content-Length`.
+    body_bytes: usize,
     connections: usize,
     duration: Duration,
     warmup: Duration,
@@ -204,6 +219,7 @@ impl Config {
         // the same run they always did.
         let mut path = "/".to_string();
         let mut headers: Vec<String> = Vec::new();
+        let mut body_bytes = 0usize;
         let mut connections = 1usize;
         let mut duration = 10u64;
         let mut warmup = 1u64;
@@ -223,6 +239,11 @@ impl Config {
                     let h = take("--header")?;
                     validate_header(&h)?;
                     headers.push(h);
+                }
+                "--body-bytes" => {
+                    body_bytes = take("--body-bytes")?
+                        .parse()
+                        .map_err(|_| "--body-bytes must be a non-negative integer".to_string())?;
                 }
                 "--connections" => {
                     connections = take("--connections")?
@@ -265,10 +286,28 @@ impl Config {
         if path.contains('\r') || path.contains('\n') {
             return Err("--path must contain no CR and no LF".to_string());
         }
+        if body_bytes > MAX_BODY_BYTES {
+            return Err(format!("--body-bytes must be at most {MAX_BODY_BYTES}"));
+        }
+        // Rejected whether or not a body was asked for. With a body the two
+        // framings disagree; without one the target waits for bytes that
+        // never arrive and the run becomes timeouts rather than a
+        // measurement.
+        if headers.iter().any(|h| {
+            h.split(':')
+                .next()
+                .is_some_and(|n| n.trim().eq_ignore_ascii_case("content-length"))
+        }) {
+            return Err(
+                "set a body with --body-bytes; an explicit content-length header is refused"
+                    .to_string(),
+            );
+        }
         Ok(Config {
             addr: addr.unwrap_or_default(),
             path,
             headers,
+            body_bytes,
             connections,
             duration: Duration::from_secs(duration),
             warmup: Duration::from_secs(warmup),
@@ -699,6 +738,94 @@ mod tests {
             b"GET / HTTP/1.1\r\nHost: nova-bench\r\nx-a:1\r\nx-b:2\r\n\r\n".to_vec(),
             "asserting the WIRE bytes, not the parsed config: a flag stored \
              but never written would pass a config assertion"
+        );
+    }
+
+    #[test]
+    fn body_bytes_is_validated_and_framed() {
+        let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
+
+        assert_eq!(
+            args(&["--self-test"]).expect("valid").body_bytes,
+            0,
+            "no body by default, which keeps the default request the 36 bytes \
+             every already-recorded figure was taken with"
+        );
+        assert_eq!(
+            args(&["--self-test", "--body-bytes", "0"])
+                .expect("0 is valid")
+                .body_bytes,
+            0
+        );
+        assert_eq!(
+            args(&["--self-test", "--body-bytes", "7"])
+                .expect("7 is valid")
+                .body_bytes,
+            7
+        );
+
+        assert!(
+            args(&["--self-test", "--body-bytes", "-1"]).is_err(),
+            "a negative body is not a body"
+        );
+        assert!(args(&["--self-test", "--body-bytes", "x"]).is_err());
+        assert!(args(&["--self-test", "--body-bytes"]).is_err());
+
+        assert!(
+            args(&["--self-test", "--body-bytes", "1048577"]).is_err(),
+            "above std/http's max_body_bytes the server answers BodyTooLarge, \
+             so nothing measurable lies up there -- and an unbounded value \
+             would be allocated here first"
+        );
+        assert!(
+            args(&["--self-test", "--body-bytes", "1048576"]).is_ok(),
+            "the bound is inclusive, so a sweep can reach it"
+        );
+
+        assert!(
+            args(&[
+                "--self-test",
+                "--body-bytes",
+                "4",
+                "--header",
+                "content-length:4"
+            ])
+            .is_err(),
+            "two framings disagree even when they agree, and the run would \
+             measure framing confusion rather than the body loop"
+        );
+        assert!(
+            args(&["--self-test", "--header", "Content-Length:5"]).is_err(),
+            "a content-length with no body makes the server wait for bytes \
+             that never arrive, so the run becomes timeouts; the name is \
+             matched without regard to case"
+        );
+    }
+
+    #[test]
+    fn a_body_reaches_the_wire_with_matching_framing() {
+        let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
+
+        let none = args(&["--self-test", "--body-bytes", "0"]).expect("valid");
+        assert_eq!(
+            request_bytes(&none),
+            b"GET / HTTP/1.1\r\nHost: nova-bench\r\n\r\n".to_vec(),
+            "zero means no Content-Length at all, not a zero-valued one"
+        );
+
+        let some = args(&["--self-test", "--body-bytes", "4"]).expect("valid");
+        assert_eq!(
+            request_bytes(&some),
+            b"GET / HTTP/1.1\r\nHost: nova-bench\r\nContent-Length: 4\r\n\r\nxxxx".to_vec(),
+            "without Content-Length the server's `want` is 0, its body loop \
+             runs zero iterations, and a body sweep would read flat -- as \
+             'body accumulation is free' rather than 'the body was never sent'"
+        );
+
+        let both = args(&["--self-test", "--header", "x-a:1", "--body-bytes", "2"]).expect("valid");
+        assert_eq!(
+            request_bytes(&both),
+            b"GET / HTTP/1.1\r\nHost: nova-bench\r\nx-a:1\r\nContent-Length: 2\r\n\r\nxx".to_vec()
         );
     }
 
