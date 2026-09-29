@@ -28,9 +28,11 @@ const ITERS: Int = 20000
 
 // A well-formed request head carrying `extra` headers beyond `Host`.
 //
-// Each padding header is a fixed width, so the head's byte length is
-// linear in `extra` and a slope in nanoseconds per header is not also a
-// slope in bytes per header at some other rate.
+// Each padding header has a fixed base width, plus the index's own
+// digit count, so the head's byte length is linear enough in `extra`
+// that a slope in nanoseconds per header is not secretly a slope in
+// bytes per header at some other rate -- and the exact byte count is
+// printed on every line regardless.
 fn head_with(extra: Int) -> Bytes {
     let mut s = "GET / HTTP/1.1\r\nHost: nova-bench\r\n"
     let mut i = 0
@@ -67,8 +69,13 @@ fn profile(extra: Int) {
     i = 0
     while i < ITERS {
         // `Ok(Some(r))` is E0900 -- nested variant patterns are not
-        // supported -- so this nests two matches, the same shape
-        // `read_request` uses on this very function's result.
+        // supported -- so this nests two matches. Unlike `read_request`,
+        // which assigns the `Option` straight through in one flat arm
+        // (`Ok(maybe) => head = maybe`) and defers the unwrap to a
+        // separate, later match once its own retry loop exits, this loop
+        // gets one call per iteration and no retry: it must reach a
+        // committed value -- what to fold into `acc_head` -- every time,
+        // so the `Result` and the `Option` are both inspected here.
         match parse_request_head(buf, Limits::default()) {
             Ok(maybe) => {
                 match maybe {
