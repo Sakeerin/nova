@@ -680,8 +680,14 @@ free". Restore and re-run. **Record what actually happened.**
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces: a compiled binary printing one line per header count:
-  `headers=<n> iters=<i> offsets_ns=<a> head_ns=<b> acc_offsets=<x> acc_head=<y>`.
+  `headers=<n> bytes=<z> iters=<i> offsets_ns=<a> head_ns=<b> acc_offsets=<x> acc_head=<y>`.
   Task 6 records those figures.
+
+  **Corrected 2026-09-29, during execution.** An earlier draft of this line
+  omitted `bytes=`, which Step 1's own code block always printed — the two
+  halves of this task disagreed. The field stays and the interface line was
+  the stale half: the printed byte count is load-bearing, and the task
+  review used it to catch the imprecision corrected below.
 
 **Design notes an implementer needs:**
 
@@ -699,10 +705,22 @@ right instrument because `parse_request_head` calls `parse_offsets`
 exactly once (`std/http/lib.nova:201`), so that allocation cancels. Do not
 describe it as zero-allocation anywhere.
 
-**`Ok(Some(r))` is E0900** — nested variant patterns are unsupported.
-Nest two matches, the same shape `read_request` itself uses at
-`std/http/lib.nova:510`. A wildcard inside a variant, `Err(_)`, **is**
-supported — `std/core/lib.nova:41` uses it.
+**`Ok(Some(r))` is E0900** — nested variant patterns are unsupported, so
+nest two matches. A wildcard inside a variant, `Err(_)`, **is** supported —
+`std/core/lib.nova:41` uses it.
+
+**Corrected 2026-09-29, during execution — this paragraph made a false
+claim and the task review caught it.** It read "the same shape
+`read_request` itself uses at `std/http/lib.nova:510`". `read_request` does
+the OPPOSITE and says so in its own comment at `std/http/lib.nova:506-513`:
+"One arm, not two: `parse_request_head` already returns `Option<Request>`,
+so the loop assigns it straight through" — the code there is
+`Ok(maybe) => head = maybe`, flat, with the unwrap deferred to a separate
+match after its retry loop exits. The harness nests because it has no retry
+and must reach a committed value every iteration; that is the justification,
+not a precedent. **A sentence that reads as careful, cites a real source by
+line number, and states something that source does not say is this
+project's recurring defect, and the plan is not exempt from it.**
 
 The clock is read once before a loop and once after, never per iteration.
 `Instant` and `Duration` both carry a public `nanos: Int`; `std/time`'s
@@ -745,9 +763,11 @@ const ITERS: Int = 20000
 
 // A well-formed request head carrying `extra` headers beyond `Host`.
 //
-// Each padding header is a fixed width, so the head's byte length is
-// linear in `extra` and a slope in nanoseconds per header is not also a
-// slope in bytes per header at some other rate.
+// Each padding header has a fixed base width, plus the index's own
+// digit count, so the head's byte length is linear enough in `extra`
+// that a slope in nanoseconds per header is not secretly a slope in
+// bytes per header at some other rate -- and the exact byte count is
+// printed on every line regardless.
 fn head_with(extra: Int) -> Bytes {
     let mut s = "GET / HTTP/1.1\r\nHost: nova-bench\r\n"
     let mut i = 0
@@ -784,8 +804,13 @@ fn profile(extra: Int) {
     i = 0
     while i < ITERS {
         // `Ok(Some(r))` is E0900 -- nested variant patterns are not
-        // supported -- so this nests two matches, the same shape
-        // `read_request` uses on this very function's result.
+        // supported -- so this nests two matches. Unlike `read_request`,
+        // which assigns the `Option` straight through in one flat arm
+        // (`Ok(maybe) => head = maybe`) and defers the unwrap to a
+        // separate, later match once its own retry loop exits, this loop
+        // gets one call per iteration and no retry: it must reach a
+        // committed value -- what to fold into `acc_head` -- every time,
+        // so the `Result` and the `Option` are both inspected here.
         match parse_request_head(buf, Limits::default()) {
             Ok(maybe) => {
                 match maybe {
@@ -958,9 +983,12 @@ minus one `--header` flags — and for two replicates each:
 3. Record the whole `RESULT` line verbatim.
 4. Kill the server.
 
-Every point gets its own server process. Use padding headers of a fixed
-width, matching the harness's `x-pad-<i>: 0123456789abcdef`, so the head's
-byte length is linear in the count.
+Every point gets its own server process. Use the harness's own padding
+header, `x-pad-<i>: 0123456789abcdef` — a fixed base width plus the index's
+own digit count, so the head's byte length is linear enough in the count
+that a per-header slope is not secretly a per-byte slope at some other
+rate. Record the head's actual byte length beside each point rather than
+computing it, for the same reason the harness prints it.
 
 **`errors` must be 0 on every run.** A non-zero count means the target
 answered outside 2xx — most likely the head crossed `max_head_bytes`
