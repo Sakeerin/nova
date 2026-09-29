@@ -107,9 +107,15 @@ and each narrows what a figure from here covers:
   than representative. `docs/benchmarks/server.nova`'s own header records the
   consequence: that spec nominated the first benchmark as what would confirm
   or refute its 18 microsecond figure, and this benchmark does neither.
+  **Measured 2026-09-29 by a different benchmark -- see "Differential
+  decomposition" at the end of this file.** The bullet above still
+  describes the run it was written about; it is not rewritten.
 - **The request-body read loop is never entered at all.** The request declares
   no `Content-Length`, so `read_request`'s `want` is 0 and its
   `while body.len() < want` loop (`std/http/lib.nova`) runs zero iterations.
+  **This remains true of the run this bullet describes. A body-carrying
+  series was taken 2026-09-29 -- see "Differential decomposition" at the
+  end of this file -- and it enters that loop at its larger sizes.**
   That loop accumulates with `Bytes::concat`, and its own comment records the
   bytes copied as triangular in the read count -- around a 128x amplification
   to assemble a 1 MiB body 4096 bytes at a time, stated there as a floor
@@ -592,3 +598,293 @@ assumed and recorded in `examples/05-json-api/BENCHMARK.md`, biases every
 ratio here in Nova's favour, so none of them should be quoted as a
 ceiling on how far short Nova
 falls.
+
+## Differential decomposition, 2026-09-29
+
+`examples/05-json-api/BENCHMARK.md` records that nothing had measured
+`read_request`'s parse, the socket write, the scheduler or the collector
+separately, and calls the leftover unattributed to any named mechanism.
+This series measures two of the mechanisms inside that remainder -- eager
+header materialisation and body accumulation -- by varying one client-side
+input at a time and reading serial throughput, and by timing the same head
+parsing in isolation in a compiled harness.
+
+**This is the home for these figures. Other records point here rather than
+restating them.** A comparison whose size depends on which readings each
+side draws from should have one home.
+
+### Why a differential reads as serial cost here
+
+ADR 0009 makes the runtime single-threaded, and `BENCHMARK.md` uses that to
+establish that `1/rps` is a **serial per-request budget** rather than an
+average over parallel workers. So varying one input and reading throughput
+attributes real serial cost.
+
+`docs/benchmarks/server.nova` is the instrument because its response wire
+bytes are built once outside the accept loop -- its own header says this is
+so a run against it times the read-and-parse path. Header count therefore
+varies only `parse_request_head`'s materialisation loop, and
+`Content-Length` varies only `read_request`'s body loop.
+
+**`examples/05-json-api` cannot do this job and is not equated with it.**
+Its response size depends on the store, its handler branches on method and
+path, and its `POST /users` requires the body to parse into a record. It
+appears below only as a separately labelled anchor.
+
+### The commands
+
+```bash
+# A release nova, so a release runtime is what gets linked.
+cargo build --release --locked --workspace
+
+# Remove BOTH names before building, then assert exactly one file.
+rm -f benchsrv benchsrv.exe && ls benchsrv*
+./target/release/nova build docs/benchmarks/server.nova -o benchsrv
+ls -l benchsrv*
+
+rm -f profhead profhead.exe && ls profhead*
+./target/release/nova build docs/benchmarks/profile-http-head.nova -o profhead
+ls -l profhead*
+
+# Header sweep: one fresh server process per point.
+./benchsrv                      # prints its port
+./target/release/nova-bench-http --addr 127.0.0.1:<port> \
+  --connections 200 --duration 15 --warmup 5 \
+  --header "x-pad-0: 0123456789abcdef" --header "x-pad-1: 0123456789abcdef"
+
+# Body sweep: same shape.
+./target/release/nova-bench-http --addr 127.0.0.1:<port> \
+  --connections 200 --duration 15 --warmup 5 --body-bytes 16384
+
+# The isolated side.
+./profhead
+```
+
+**`MSYS_NO_PATHCONV=1` and `taskkill` interact, and getting it wrong hangs
+the run with no diagnostic.** Git Bash needs `MSYS_NO_PATHCONV=1` so a
+`--header` value's colon and a `--path` value survive intact. That same
+setting stops MSYS rewriting `taskkill`'s flags, so with it exported the
+form is `taskkill /F /IM benchsrv` and **without** it the form is
+`taskkill //F //IM benchsrv`. Both were hit here: the doubled form under
+the export is refused with `Invalid argument/option - '//F'`, and the
+single form without it is silently path-converted and does nothing -- the
+server then survives, a `wait` blocks on a process that never exits, and
+the driver hangs forever. Any `nova build` must run **outside** the export,
+because it needs the path conversion the export disables.
+
+### Binary byte sizes, the identity check
+
+| binary | bytes |
+|---|---|
+| `benchsrv` (`docs/benchmarks/server.nova`) | 608,256 |
+| `profhead` (`docs/benchmarks/profile-http-head.nova`) | 510,464 |
+| `jsonapi` (`examples/05-json-api/src/main.nova`) | 690,688 |
+
+`jsonapi` at 690,688 matches what `BENCHMARK.md` records for the
+post-fast-path build, so the anchor below measures the build that record
+describes.
+
+The harness's own `bytes=` output and the sweep's request lengths agree at
+every point -- 36, 144, 279, 558, 1398 -- so the isolated and serial
+instruments measure the same request shape rather than two shapes that
+happen to share a header count.
+
+### Bounds on each series
+
+`Limits::default()` sets `max_head_bytes` 8192, `max_header_count` 100 and
+`max_body_bytes` 1048576. Every point below is inside all three. Crossing
+one is not silent: the server answers outside 2xx and the generator counts
+every non-2xx as an error.
+
+### A pass-state finding, and it is NOT the warmup finding above
+
+**The first sweep pass taken after a build reads high, by up to 1.58x, and
+its whole pass is affected rather than just its first point.** The first
+pass here read 22896.6 req/sec at one header. Six consecutive repeats of
+that same point, taken later with nothing varied, read **14604.4 --
+14886.1, a spread of 1.019x**, and two further full passes agreed with
+those six.
+
+This is a different mechanism from "The warmup finding" above, which
+concerns the generator's own `--warmup` flag. **Every run here already
+carried the standard 5s warmup, and it did not cover this.** The remedy is
+a discarded pass, not a longer `--warmup`.
+
+It was caught by running a control that varies nothing. Without that
+control, the first pass and the second would have been recorded as two
+replicates whose disagreement was noise -- and the gap between them shrank
+as header count rose, which would have biased any slope drawn through them.
+
+**The discarded pass, recorded rather than deleted:** 22896.6, 17415.9,
+13150.8, 7643.3, 3009.1 req/sec at 1, 5, 10, 20, 50 headers.
+
+### Header sweep -- three settled passes
+
+`errors=0` on every run below; `elapsed_ms` between 15019 and 15099. The
+`addr`, `conn_min` and `conn_max` fields of each `RESULT` line are omitted
+as incidental to the figure.
+
+| headers | head bytes | pass A | pass B | pass C | microseconds per request |
+|---|---|---|---|---|---|
+| 1 | 36 | 14518.0 | 14844.0 | 14556.9 | **67.37 - 68.88** |
+| 5 | 144 | 11434.5 | 11906.3 | 11575.1 | **83.99 - 87.45** |
+| 10 | 279 | 8870.0 | 9239.4 | 8589.7 | **108.23 - 116.42** |
+| 20 | 558 | 6049.0 | 6426.8 | 6248.1 | **155.60 - 165.32** |
+| 50 | 1398 | 2973.9 | 3050.9 | 2883.7 | **327.77 - 346.78** |
+
+Pass-to-pass agreement is 1.02x to 1.08x, comparable to the 1.019x the
+control showed with nothing varied.
+
+**Control, nothing varied** (one header, six fresh processes): 14886.1,
+14832.1, 14747.7, 14639.2, 14604.4, 14723.5 req/sec -- 67.18 to 68.47
+microseconds.
+
+### Isolated materialisation -- the harness, two runs
+
+`head_ns` minus `offsets_ns`. Both sides pay exactly one `parse_offsets`
+call, so that call's array allocation cancels rather than landing in the
+difference. **`parse_offsets` is not a zero-allocation baseline** -- the
+intrinsic copies nothing and holds no Rust-side state, but the wrapper
+returns a Nova array, so a call allocates one.
+
+| headers | offsets_ns | head_ns | materialisation, ns |
+|---|---|---|---|
+| 1 | 199, 202 | 4639, 4840 | **4440 - 4638** |
+| 5 | 457, 457 | 11577, 12118 | **11120 - 11661** |
+| 10 | 486, 512 | 21797, 22615 | **21311 - 22103** |
+| 20 | 663, 726 | 41110, 42342 | **40447 - 41616** |
+| 50 | 1148, 1201 | 105850, 105220 | **104019 - 104702** |
+
+Accumulators exact and identical across every run -- `acc_offsets` 240000,
+560000, 960000, 1760000, 4160000 and `acc_head` 20000, 100000, 200000,
+400000, 1000000 -- which is what shows each timing loop ran.
+
+### The ~18 microsecond figure, measured
+
+`docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
+section 7 puts eager header materialisation at about 18 microseconds for a
+**ten-header** request, computed as roughly 20 GC allocations at this
+project's measured ~900 ns each;
+`docs/adr/0019-offset-table-intrinsic-boundary.md` section 5 restates it
+and names the escape hatch. (An earlier draft of this paragraph attributed
+the figure to the ADR's own section 7. The ADR has no section 7; section 5
+is the one, and the section 7 it cites is the design spec's. Corrected
+before this file was committed, and recorded because a citation that names
+the wrong section of the right file is the shape of error this project
+keeps finding.)
+
+**Measured isolated, ten headers: 21.3 to 22.1 microseconds.**
+
+Two arithmetics bracket that rather than either matching it. The two
+allocations per header the original figure assumes give 18. Reading
+`parse_request_head`'s source suggested three or more per header -- a
+`text_at` String, a `to_lower` String, a `text_at_utf8` String, and a
+`Map::insert` -- which at ~900 ns gives 27 or more. **The measurement sits
+between them, so neither allocation count is established by it.** A cost
+consistent with ~900 ns per allocation is consistent with other mechanisms
+of similar size regardless, so nothing here establishes allocation as the
+cause.
+
+### Amplification, on matched populations
+
+Nine extra headers, from the one-header shape to the ten-header shape, in
+one session against one build.
+
+| quantity | value |
+|---|---|
+| serial, whole-server | **39.35 - 49.05 microseconds** |
+| isolated, harness | **16.67 - 17.66 microseconds** |
+| amplification | **2.23x - 2.94x** |
+
+Propagated at both endpoint pairings, not summarised by a middle.
+
+That interval falls inside the 2.0x to 3.2x band `BENCHMARK.md` records.
+**It does not confirm that band's own claim.** The band was inferred for
+RESPONSE-side work on `examples/05-json-api`; this is header
+materialisation on `docs/benchmarks/server.nova`. Two different mechanisms
+on two different servers agreeing in magnitude is worth recording, and is
+not the same as one verifying the other.
+
+### Anchor -- `examples/05-json-api` empty store, re-derived
+
+Four fresh-process readings, `GET /users`, store never seeded, `errors=0`
+throughout: **10074.1, 10400.4, 10230.4, 10245.8 req/sec** -- **96.15 to
+99.26 microseconds per request**.
+
+**All four clear 10k req/sec and all four sit below the 100-microsecond
+line.**
+
+`BENCHMARK.md` records that same control, on a binary of the same byte
+size, at 8688.1 and 9501.0 req/sec -- 105.3 to 115.1 microseconds -- and
+that reading is what supports the standing claim that response-path work
+alone cannot reach the gate, the control already exceeding the whole
+budget. That record tells a later reader to re-derive the figure rather
+than quote it forward, because it rests on a quantity moving by more than
+its remaining margin. Re-derived, it moved across the line.
+
+**Pooled across both sessions the control spans 8688.1 to 10400.4 req/sec,
+a 1.20x spread straddling the criterion**, while within-session spread is
+about 1.03x -- so the movement is between sessions, not within one. **This
+control can therefore neither support nor refute the claim built on it.**
+That is not the same as the claim being refuted. And it is not a gate
+figure: `05-json-api` serving an EMPTY store is not the gate's workload.
+
+### Body sweep -- a loop no measurement had entered
+
+No run on this project had ever sent a `Content-Length`, so
+`read_request`'s `while body.len() < want` loop had always run zero times.
+`errors=0` on every run; a discarded warm-up point read 14926.0 at body=0.
+
+| body bytes | rep 1 | rep 2 | microseconds per request | over the 0-byte point | marginal ns/byte |
+|---|---|---|---|---|---|
+| 0 | 14783.7 | 15036.9 | **66.50 - 67.64** | -- | -- |
+| 1024 | 12646.2 | 12578.9 | **79.08 - 79.50** | 11.44 - 13.00 | 11.2 - 12.7 |
+| 4096 | 10774.2 | 10669.3 | **92.81 - 93.73** | 25.17 - 27.23 | 4.0 - 5.1 |
+| 16384 | 8948.4 | 9334.3 | **107.13 - 111.75** | 39.49 - 45.25 | 1.0 - 1.6 |
+| 65536 | 6216.3 | 6221.3 | **160.74 - 160.87** | 93.10 - 94.37 | 1.0 - 1.1 |
+| 262144 | 2427.3 | 2387.1 | **411.98 - 418.92** | 344.34 - 352.42 | 1.3 - 1.3 |
+
+"Marginal" is the cost of the bytes added since the previous row, divided
+by that increment, propagated at both endpoint pairings.
+
+**The sweep is decisively not flat**, which rules out the failure mode
+worth naming: a missing `Content-Length` would leave `want` at 0, run the
+loop zero times, and read as "body accumulation is free". It would also
+desync keep-alive, since the body bytes would be parsed as the next
+request, and `errors=0` rules that out independently.
+
+**The shape is SUBLINEAR, not triangular.** Marginal cost falls from about
+4-5 ns per byte to about 1, then sits between 1.0 and 1.3. The last
+segment is slightly above the two before it, which is a mild upward trend
+and not an establishment of a superlinear term.
+
+**Two limits on what this series covers, stated rather than left to be
+inferred:**
+
+- **The triangular worst case is not exercised.** `read_request` asks for
+  exactly `want - body.len()` bytes per read, so a peer delivering the
+  remainder promptly costs one concatenation regardless of `want` -- and
+  this generator writes the whole request with a single `write_all`, so it
+  is that prompt peer. The triangular figure in `std/http/lib.nova`'s own
+  comment describes a dribbling peer and is neither confirmed nor refuted
+  here.
+- **The small points may not enter the loop at all.** A 1024-byte body
+  makes the whole request about 1060 bytes, which the first 4096-byte read
+  can take entire, leaving `body.len()` already equal to `want`. That
+  point's 11.4 to 13.0 microseconds is the fixed price of having a body --
+  the `Content-Length` lookup, the `buf.slice`, the larger read -- not the
+  loop's price. The points at 16384 and above cannot arrive in one
+  4096-byte read.
+
+### What this series does not measure
+
+Of the mechanisms `BENCHMARK.md` names as never separately measured --
+`read_request`'s parse, the socket write, the scheduler and the collector
+-- **this series measures none of them individually.** It measures two
+mechanisms that sit inside the same remainder. Header materialisation is
+part of what `read_request` does, not the whole of it; the intrinsic parse
+is priced here only as the `offsets_ns` baseline the subtraction removes.
+
+**Nothing here totals the measured mechanisms against the 100-microsecond
+budget or pronounces on the gate.** Two mechanisms of an undecomposed
+remainder do not make a decomposition.
