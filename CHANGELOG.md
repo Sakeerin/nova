@@ -9,6 +9,53 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`crates/nova-bench-http` can vary two request inputs: `--header
+  NAME:VALUE` (repeatable) and `--body-bytes N`.** Each is validated — a
+  header needs a non-empty, space-free name and a colon, neither half may
+  carry CR or LF, and a body is bounded at `std/http`'s own
+  `max_body_bytes` of 1048576 so an operator's typo is not allocated
+  before any server sees it. An explicit `content-length` header is
+  refused outright, because one that disagrees with `--body-bytes`
+  measures framing confusion and one with no body at all makes the server
+  wait for bytes that never arrive. **With neither flag the request is
+  byte-identical to the 36 bytes every previously recorded figure was
+  taken with**, and a test asserts those exact bytes.
+- **`docs/benchmarks/profile-http-head.nova`, a tracked profiling
+  harness.** It times `parse_offsets` against `parse_request_head` across a
+  header sweep in a compiled binary; the difference is materialisation in
+  isolation. It is tracked because the harness that produced this
+  project's existing per-call figures lived outside the repository and no
+  longer exists, so those figures cannot be reproduced from a checkout.
+
+### Measured
+- **Eager header materialisation and body accumulation now carry figures.**
+  Ten-header materialisation measures **21.3 to 22.1 microseconds**
+  isolated. The long-standing inferred ~18 microseconds and the "three or
+  more allocations per header" that reading the source suggests instead
+  **bracket that measurement rather than either matching it**, so neither
+  allocation count is established — and a cost consistent with ~900 ns per
+  allocation is consistent with other mechanisms of similar size anyway.
+  Serial-against-isolated amplification for the same nine headers is
+  **2.23x to 2.94x** on matched populations. That falls inside the 2.0x to
+  3.2x band `examples/05-json-api/BENCHMARK.md` records but **does not
+  confirm it**: that band was inferred for response-side work on a
+  different server. Body accumulation is **sublinear, not triangular**, at
+  about 1.0 to 1.3 ns per byte in the upper range — but this generator
+  delivers the whole body in one write, so the triangular worst case, which
+  needs a dribbling peer, is not exercised and remains unmeasured. Method,
+  limits and every reading are in `docs/benchmarks/README.md` under
+  "Differential decomposition, 2026-09-29".
+- **`examples/05-json-api`'s empty-store control moved across the
+  100-microsecond line.** Four fresh-process readings give 96.15 to 99.26
+  microseconds per request, all clearing 10k req/sec, against the 105.3 to
+  115.1 previously recorded on a binary of the same byte size. Pooled, that
+  control spans a 1.20x range straddling the criterion. **So the standing
+  claim that the absolute criterion is unreachable by response-path work
+  alone is no longer supported by that control — nor is it refuted.** An
+  empty store is not the gate's workload, and the gate's own figure is
+  unchanged: it remains measured and not met.
+
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
   `Null`, `Bool`, `Number` or `String` -- now matches before `stringify`

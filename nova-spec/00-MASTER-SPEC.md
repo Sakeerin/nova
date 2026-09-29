@@ -403,6 +403,22 @@ which readings each side is drawn from, and repeating it in every record is
 how it would go stale in every record. Full account in
 `examples/05-json-api/BENCHMARK.md`.
 
+**RE-DERIVED 2026-09-29, as the paragraph above instructs, and it moved.**
+Four fresh-process readings of that same empty-store control, same route,
+same parameters, on a binary of the same byte size, give **96.15 to 99.26
+microseconds per request — all four clearing 10k req/sec and all four
+below the 100-microsecond line.** The two readings above do not. Pooled,
+the control spans a **1.20x range that straddles the criterion**, while
+within-session spread is about 1.03x, so the movement is between sessions
+rather than within one. **The claim that the absolute criterion is
+unreachable by response-path work alone is therefore no longer supported by
+this control — and it is not refuted either.** That is the outcome the
+"not a settled impossibility" sentence above anticipated, and the figure
+above is left standing as what was measured then. An empty store is not
+the gate's workload, and the gate's own figure is unchanged: measured, and
+not met. Readings and method in `docs/benchmarks/README.md` under
+"Differential decomposition, 2026-09-29".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

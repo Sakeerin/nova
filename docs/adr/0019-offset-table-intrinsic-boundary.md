@@ -281,7 +281,20 @@ because it bears on this ADR's own §1: the escape hatch does not touch the
 intrinsic. If eager materialisation turns out to dominate, `Request` can
 keep the offset table instead of a `Map` and materialise a header only when
 one is looked up — the intrinsic, its encoding and the wire behaviour are
-unchanged; only `Request`'s internals move. No claim is made that the
+unchanged; only `Request`'s internals move.
+
+**Measured 2026-09-29, and the figure above is deliberately left as
+written.** A header sweep against `docs/benchmarks/server.nova`, with the
+same head parsing timed in isolation in a compiled harness, puts ten-header
+materialisation at **21.3 to 22.1 microseconds** isolated. The ~18 µs
+above, and the "three or more allocations per header" that reading
+`parse_request_head` suggests instead, **bracket the measurement rather
+than either matching it**, so neither allocation count is established by
+it. Figures, method and limits are in `docs/benchmarks/README.md` under
+"Differential decomposition, 2026-09-29"; they are not restated here. The
+escape hatch this section names is still unimplemented.
+
+No claim is made that the
 10k req/sec gate is reached by this increment. It makes the number
 **measurable**, which it was not before.
 

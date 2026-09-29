@@ -360,6 +360,61 @@ so that half is measurable rather than blocked.
 "FURTHER AMENDMENT 2026-09-12" section above for the fresh-process series
 and the four-cell Bun-ratio matrix that supersede them.**
 
+## AMENDMENT 2026-09-29: two mechanisms of this file's own residual are measured, and its empty-store control moved
+
+"Where the cost is" below states that nothing had measured
+`read_request`'s parse, the socket write, the scheduler or the collector
+separately, and calls the leftover unattributed to any named mechanism.
+**Two mechanisms inside that remainder now carry a measurement**: eager
+header materialisation and body accumulation.
+
+**The figures live in `docs/benchmarks/README.md` under "Differential
+decomposition, 2026-09-29" and are deliberately not restated here.** A
+comparison whose size depends on which readings each side draws from
+should have one home; this file learned that when a single amplification
+sentence was copied into seven satellite records and was wrong in all
+seven at once.
+
+**None of the four mechanisms named above is measured individually.** The
+new series measures header materialisation, which is part of what
+`read_request` does rather than the whole of it, and body accumulation.
+The socket write, the scheduler and the collector remain unmeasured, and
+so does the intrinsic parse except as a subtracted baseline.
+
+### The empty-store control was re-derived, and it moved across the line
+
+This file's own instruction was followed rather than its figure quoted.
+The "Absolute criterion, re-measured" section above says of the
+105.3–115.1 microsecond control that "it rests on a quantity that moves
+by more than the margin it has left, so a later reader should re-derive it
+rather than quote it forward."
+
+Re-derived on 2026-09-29, same route, same parameters, on a binary of the
+**same 690,688 bytes** this file records for the post-fast-path build:
+**10074.1, 10400.4, 10230.4 and 10245.8 req/sec** across four
+fresh-process readings — **96.15 to 99.26 microseconds per request. All
+four clear 10k req/sec and all four sit below the 100-microsecond line.**
+
+The two readings above, 8688.1 and 9501.0, do not. **Pooled, the control
+spans 8688.1 to 10400.4 req/sec, a 1.20x spread that straddles the
+criterion**, while within-session spread is about 1.03x — so the movement
+is between sessions rather than within one.
+
+**The consequence for the claim this control carries.** This file, and
+`CHANGELOG.md`'s `[0.2.0-alpha.4]` entry, and
+`docs/superpowers/specs/2026-09-11-bun-ratio-design.md` section 2, all
+record that the absolute criterion is not reachable by response-path work
+alone, because the empty-store control already exceeds the gate's whole
+100-microsecond budget. **On this session's readings it does not exceed
+it.** The claim is therefore **neither supported nor refuted by this
+control any longer** — which is not the same as the claim being refuted,
+and is exactly the outcome the sentence quoted above anticipated.
+
+**None of this is a gate figure.** `examples/05-json-api` serving an EMPTY
+store is not the gate's workload; the gate's own measured figure remains
+the seeded ten-user series above, unchanged by this amendment. Nothing
+here claims the gate is met, reachable, or unreachable.
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
