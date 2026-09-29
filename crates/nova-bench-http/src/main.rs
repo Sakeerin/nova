@@ -37,8 +37,19 @@ use std::time::{Duration, Instant};
 /// still the default; `examples/05-json-api` answers `GET /` with a 404, so a
 /// run against it at the default path measures its not-found handler rather
 /// than the route the gate's methodology names.
-fn request_bytes(path: &str) -> Vec<u8> {
-    format!("GET {path} HTTP/1.1\r\nHost: nova-bench\r\n\r\n").into_bytes()
+///
+/// Extra headers are appended after `Host`, each verbatim. With no
+/// `--header` the bytes are unchanged, which is deliberate: every figure
+/// recorded before this flag existed describes the 36-byte request, and a
+/// default that altered it would silently redescribe all of them.
+fn request_bytes(cfg: &Config) -> Vec<u8> {
+    let mut s = format!("GET {} HTTP/1.1\r\nHost: nova-bench\r\n", cfg.path);
+    for h in &cfg.headers {
+        s.push_str(h);
+        s.push_str("\r\n");
+    }
+    s.push_str("\r\n");
+    s.into_bytes()
 }
 
 /// Per-read and per-write socket timeout for every connection.
@@ -145,10 +156,43 @@ fn is_success(response: &[u8]) -> bool {
 struct Config {
     addr: String,
     path: String,
+    /// Extra header lines, each emitted verbatim after `Host`. Empty by
+    /// default, which is what keeps the default request byte-identical to
+    /// the one every already-recorded figure was taken with.
+    headers: Vec<String>,
     connections: usize,
     duration: Duration,
     warmup: Duration,
     self_test: bool,
+}
+
+/// Check one `--header` value, which is emitted verbatim if it passes.
+///
+/// The colon is located only to validate the name; nothing is rewritten.
+/// A CR or LF anywhere would terminate the header line and turn the rest
+/// of the value into forged header lines, on every request of the run --
+/// so the run would measure a request shape other than the one its own
+/// record names, with nothing in the `RESULT` line to show it. Same
+/// reason `--path` carries the same check.
+fn validate_header(h: &str) -> Result<(), String> {
+    if h.contains('\r') {
+        return Err("--header must contain no CR".to_string());
+    }
+    if h.contains('\n') {
+        return Err("--header must contain no LF".to_string());
+    }
+    let colon = match h.find(':') {
+        Some(i) => i,
+        None => return Err("--header must be NAME:VALUE".to_string()),
+    };
+    let name = &h[..colon];
+    if name.is_empty() {
+        return Err("--header name must not be empty".to_string());
+    }
+    if name.contains(' ') {
+        return Err("--header name must contain no space".to_string());
+    }
+    Ok(())
 }
 
 impl Config {
@@ -159,6 +203,7 @@ impl Config {
         // was taken with, so defaulting to it left those figures describing
         // the same run they always did.
         let mut path = "/".to_string();
+        let mut headers: Vec<String> = Vec::new();
         let mut connections = 1usize;
         let mut duration = 10u64;
         let mut warmup = 1u64;
@@ -174,6 +219,11 @@ impl Config {
                 // The `other` arm below rejects anything unrecognised, so a
                 // flag that is not listed here is refused rather than ignored.
                 "--path" => path = take("--path")?,
+                "--header" => {
+                    let h = take("--header")?;
+                    validate_header(&h)?;
+                    headers.push(h);
+                }
                 "--connections" => {
                     connections = take("--connections")?
                         .parse()
@@ -218,6 +268,7 @@ impl Config {
         Ok(Config {
             addr: addr.unwrap_or_default(),
             path,
+            headers,
             connections,
             duration: Duration::from_secs(duration),
             warmup: Duration::from_secs(warmup),
@@ -436,7 +487,7 @@ fn main() {
 
     // Built once, before the warmup, so the warmup and the measurement send
     // byte-identical requests.
-    let request = request_bytes(&cfg.path);
+    let request = request_bytes(&cfg);
 
     if !cfg.warmup.is_zero() {
         let w = run_load(&addr, &request, cfg.connections, cfg.warmup, IO_TIMEOUT);
@@ -538,14 +589,116 @@ mod tests {
 
     #[test]
     fn the_request_line_carries_the_configured_path() {
+        let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
+        let users = args(&["--self-test", "--path", "/users"]).expect("/users is valid");
         assert_eq!(
-            request_bytes("/users"),
+            request_bytes(&users),
             b"GET /users HTTP/1.1\r\nHost: nova-bench\r\n\r\n".to_vec()
         );
+        let root = args(&["--self-test"]).expect("--self-test alone is valid");
         assert_eq!(
-            request_bytes("/"),
+            request_bytes(&root),
             b"GET / HTTP/1.1\r\nHost: nova-bench\r\n\r\n".to_vec(),
             "the default path's request is the 36 bytes docs/benchmarks/README.md describes"
+        );
+    }
+
+    #[test]
+    fn headers_are_validated_and_sent_verbatim() {
+        let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
+
+        let none = args(&["--self-test"]).expect("--self-test alone is valid");
+        assert!(
+            none.headers.is_empty(),
+            "no --header means no extra header, which is what keeps every \
+             already-recorded figure describing the run it was taken from"
+        );
+
+        let one = args(&["--self-test", "--header", "x-a:1"]).expect("one header is valid");
+        assert_eq!(one.headers, vec!["x-a:1".to_string()]);
+
+        let two = args(&["--self-test", "--header", "x-a:1", "--header", "x-b:2"])
+            .expect("two headers are valid");
+        assert_eq!(
+            two.headers,
+            vec!["x-a:1".to_string(), "x-b:2".to_string()],
+            "repetition accumulates in the order given, because a sweep's \
+             record names the request it sent"
+        );
+
+        assert!(
+            args(&["--self-test", "--header", "x-a"]).is_err(),
+            "without a colon it is not a header line"
+        );
+        assert!(
+            args(&["--self-test", "--header", ":1"]).is_err(),
+            "an empty name is not a header line"
+        );
+        assert!(
+            args(&["--self-test", "--header", "x a:1"]).is_err(),
+            "a space in the name is a malformed header line on every request \
+             of the run, which the target answers outside 2xx"
+        );
+        // Both bytes, both halves, all separately: one check covering the
+        // whole string would satisfy a test of the pair alone, and that test
+        // could not tell which half is doing the work.
+        assert!(
+            args(&["--self-test", "--header", "x\ra:1"]).is_err(),
+            "a CR in the name would forge header lines into every request"
+        );
+        assert!(
+            args(&["--self-test", "--header", "x\na:1"]).is_err(),
+            "an LF in the name would forge header lines into every request"
+        );
+        assert!(
+            args(&["--self-test", "--header", "x-a:1\r2"]).is_err(),
+            "a CR in the value would forge header lines into every request"
+        );
+        assert!(
+            args(&["--self-test", "--header", "x-a:1\n2"]).is_err(),
+            "an LF in the value would forge header lines into every request"
+        );
+
+        assert_eq!(
+            args(&["--self-test", "--header", "x-a:b:c"])
+                .expect("further colons belong to the value")
+                .headers,
+            vec!["x-a:b:c".to_string()],
+            "the split is at the FIRST colon; a value carrying colons is \
+             ordinary HTTP"
+        );
+        assert_eq!(
+            args(&["--self-test", "--header", "x-a:"])
+                .expect("an empty value is valid HTTP")
+                .headers,
+            vec!["x-a:".to_string()],
+            "rejecting an empty field value would be stricter than the protocol"
+        );
+
+        assert!(args(&["--self-test", "--header"]).is_err());
+    }
+
+    #[test]
+    fn the_default_request_is_unchanged_and_headers_reach_the_wire() {
+        let args = |a: &[&str]| Config::from_args(a.iter().map(|s| s.to_string()));
+
+        let dflt = args(&["--self-test"]).expect("--self-test alone is valid");
+        assert_eq!(
+            request_bytes(&dflt),
+            b"GET / HTTP/1.1\r\nHost: nova-bench\r\n\r\n".to_vec(),
+            "the default is still the 36 bytes docs/benchmarks/README.md \
+             describes, so every figure recorded before these flags existed \
+             still describes the request it was taken with"
+        );
+        assert_eq!(request_bytes(&dflt).len(), 36);
+
+        let with = args(&["--self-test", "--header", "x-a:1", "--header", "x-b:2"])
+            .expect("two headers are valid");
+        assert_eq!(
+            request_bytes(&with),
+            b"GET / HTTP/1.1\r\nHost: nova-bench\r\nx-a:1\r\nx-b:2\r\n\r\n".to_vec(),
+            "asserting the WIRE bytes, not the parsed config: a flag stored \
+             but never written would pass a config assertion"
         );
     }
 
@@ -649,7 +802,9 @@ mod tests {
             let _ = conn.write_all(body);
         });
         let stop = AtomicBool::new(false);
-        worker(&addr, &request_bytes("/"), &stop, Duration::from_secs(5))
+        let cfg = Config::from_args(["--self-test"].iter().map(|s| s.to_string()))
+            .expect("--self-test alone is valid");
+        worker(&addr, &request_bytes(&cfg), &stop, Duration::from_secs(5))
     }
 
     #[test]
@@ -712,9 +867,11 @@ mod tests {
         });
         let stop = AtomicBool::new(false);
         let start = Instant::now();
+        let cfg = Config::from_args(["--self-test"].iter().map(|s| s.to_string()))
+            .expect("--self-test alone is valid");
         let (requests, errors) = worker(
             &addr,
-            &request_bytes("/"),
+            &request_bytes(&cfg),
             &stop,
             Duration::from_millis(200),
         );
