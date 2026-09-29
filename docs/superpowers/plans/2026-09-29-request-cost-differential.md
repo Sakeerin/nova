@@ -1153,7 +1153,9 @@ bullet a **pointer** to the new section. Do not rewrite it.
 
 - [ ] **Step 2: `docs/adr/0019-offset-table-intrinsic-boundary.md`**
 
-Beside section 7's ~18 microsecond figure, add a dated line pointing at
+Beside section 5's ~18 microsecond figure -- an earlier draft of this plan
+said section 7, which is that ADR's rulings section -- add a dated line
+pointing at
 the README section. **Do not edit the figure.** If the measurement differs
 from it, the pointer says so; the original stays legible as what was
 believed when it was written.

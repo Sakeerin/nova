@@ -684,6 +684,14 @@ because it needs the path conversion the export disables.
 post-fast-path build, so the anchor below measures the build that record
 describes.
 
+**What the byte size does and does not discriminate, with a counterexample
+from this session.** It separates a release-runtime build from a
+debug-runtime one, which is what it was introduced for. It does not track
+source content: gutting the harness's FIRST timing loop left its binary at
+510,464 bytes, identical to the unmutated build, while gutting its second
+moved it to 482,304. So a matching byte size establishes the runtime
+profile, not that the source is unchanged.
+
 The harness's own `bytes=` output and the sweep's request lengths agree at
 every point -- 36, 144, 279, 558, 1398 -- so the isolated and serial
 instruments measure the same request shape rather than two shapes that
@@ -699,7 +707,9 @@ every non-2xx as an error.
 ### A pass-state finding, and it is NOT the warmup finding above
 
 **The first sweep pass taken after a build reads high, by up to 1.58x, and
-its whole pass is affected rather than just its first point.** The first
+more than its first point is affected.** Four of its five points are
+elevated; the fifth, at 50 headers, reads 3009.1 against a settled range of
+2883.7 to 3050.9 and is not. The first
 pass here read 22896.6 req/sec at one header. Six consecutive repeats of
 that same point, taken later with nothing varied, read **14604.4 --
 14886.1, a spread of 1.019x**, and two further full passes agreed with
@@ -759,6 +769,17 @@ Accumulators exact and identical across every run -- `acc_offsets` 240000,
 560000, 960000, 1760000, 4160000 and `acc_head` 20000, 100000, 200000,
 400000, 1000000 -- which is what shows each timing loop ran.
 
+**One `parse_offsets` call costs 199 to 1201 nanoseconds** across this
+range, which prices an argument no measurement had priced. `read_request`
+makes more than one such call per request -- once inside
+`parse_request_head` and again afterwards to re-derive `body_start`, plus
+another per read when a head arrives across several -- and that second
+call's own comment argues it "costs less than threading it out of
+`parse_request_head`". At a one-header request that second call is about
+200 ns; at fifty headers about 1.2 microseconds, against that request's
+roughly 105 microseconds of head parsing. **Nothing here recommends
+changing it**; the argument simply now has a number.
+
 ### The ~18 microsecond figure, measured
 
 `docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
@@ -767,8 +788,12 @@ section 7 puts eager header materialisation at about 18 microseconds for a
 project's measured ~900 ns each;
 `docs/adr/0019-offset-table-intrinsic-boundary.md` section 5 restates it
 and names the escape hatch. (An earlier draft of this paragraph attributed
-the figure to the ADR's own section 7. The ADR has no section 7; section 5
-is the one, and the section 7 it cites is the design spec's. Corrected
+the figure to the ADR's own section 7. That ADR's section 7 is a different
+subject -- three rulings and their reasons -- while section 5 is the one
+carrying this figure, and the section 7 it cites is the design spec's. (A
+first correction of this said "the ADR has no section 7", which is itself
+false, inside the very paragraph warning about citing the wrong section of
+the right file.) Corrected
 before this file was committed, and recorded because a citation that names
 the wrong section of the right file is the shape of error this project
 keeps finding.)
@@ -823,8 +848,7 @@ than quote it forward, because it rests on a quantity moving by more than
 its remaining margin. Re-derived, it moved across the line.
 
 **Pooled across both sessions the control spans 8688.1 to 10400.4 req/sec,
-a 1.20x spread straddling the criterion**, while within-session spread is
-about 1.03x -- so the movement is between sessions, not within one. **This
+a 1.20x spread straddling the criterion**, while the two sessions' ranges do NOT OVERLAP -- 8688.1 to 9501.0 against 10074.1 to 10400.4 -- so the movement is between sessions rather than within one. (Within-session spreads are 1.09x for the earlier pair and 1.03x for this session's four. An earlier draft of this paragraph cited only the 1.03x and called it "within-session spread", which generalised one session's figure to both and was contradicted by the 1.09x these same records already state.) **This
 control can therefore neither support nor refute the claim built on it.**
 That is not the same as the claim being refuted. And it is not a gate
 figure: `05-json-api` serving an EMPTY store is not the gate's workload.

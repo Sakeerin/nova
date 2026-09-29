@@ -408,9 +408,13 @@ Four fresh-process readings of that same empty-store control, same route,
 same parameters, on a binary of the same byte size, give **96.15 to 99.26
 microseconds per request — all four clearing 10k req/sec and all four
 below the 100-microsecond line.** The two readings above do not. Pooled,
-the control spans a **1.20x range that straddles the criterion**, while
-within-session spread is about 1.03x, so the movement is between sessions
-rather than within one. **The claim that the absolute criterion is
+the control spans a **1.20x range that straddles the criterion**, while the two sessions' ranges do NOT OVERLAP -- 8688.1 to 9501.0
+against 10074.1 to 10400.4 -- so the movement is between sessions
+rather than within one. (Within-session spreads are 1.09x for the
+earlier pair and 1.03x for this session's four. An earlier draft cited
+only the 1.03x and called it "within-session spread", generalising one
+session's figure to both -- contradicted by the 1.09x these same records
+already state.) **The claim that the absolute criterion is
 unreachable by response-path work alone is therefore no longer supported by
 this control — and it is not refuted either.** That is the outcome the
 "not a settled impossibility" sentence above anticipated, and the figure

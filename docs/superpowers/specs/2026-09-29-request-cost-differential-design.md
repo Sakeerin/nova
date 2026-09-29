@@ -50,7 +50,7 @@ depends on that framing, and the spec restates it rather than assuming it.
 
 ### 2.2 Inferred — a product of two numbers, never measured together
 
-`docs/adr/0019-offset-table-intrinsic-boundary.md` section 7,
+`docs/adr/0019-offset-table-intrinsic-boundary.md` section 5,
 `docs/superpowers/specs/2026-09-01-std-http-request-parsing-design.md`
 section 7, and `CHANGELOG.md` all carry the same figure: eager header
 materialisation costs **about 18 microseconds per request**, computed as
@@ -389,8 +389,9 @@ behave as this section expects.
   and the `max_head_bytes` / `max_header_count` bounds. The existing
   "Header materialisation runs at its one-header minimum" bullet gets a
   pointer to the new section rather than a rewrite.
-- **`docs/adr/0019-offset-table-intrinsic-boundary.md`** — its section 7
-  carries the ~18 microsecond figure. It gains a dated pointer to the
+- **`docs/adr/0019-offset-table-intrinsic-boundary.md`** — its section 5
+  carries the ~18 microsecond figure (an earlier draft said section 7,
+  which is that ADR's rulings section). It gains a dated pointer to the
   measurement. **The inferred figure is not edited at its own site**, in
   keeping with this project's practice of amending rather than silently
   rewriting.
