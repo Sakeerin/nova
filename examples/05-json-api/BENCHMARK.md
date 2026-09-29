@@ -397,8 +397,13 @@ four clear 10k req/sec and all four sit below the 100-microsecond line.**
 
 The two readings above, 8688.1 and 9501.0, do not. **Pooled, the control
 spans 8688.1 to 10400.4 req/sec, a 1.20x spread that straddles the
-criterion**, while within-session spread is about 1.03x — so the movement
-is between sessions rather than within one.
+criterion**, while the two sessions' ranges do NOT OVERLAP -- 8688.1 to 9501.0
+against 10074.1 to 10400.4 -- so the movement is between sessions
+rather than within one. (Within-session spreads are 1.09x for the
+earlier pair and 1.03x for this session's four. An earlier draft cited
+only the 1.03x and called it "within-session spread", generalising one
+session's figure to both -- contradicted by the 1.09x these same records
+already state.)
 
 **The consequence for the claim this control carries.** This file, and
 `CHANGELOG.md`'s `[0.2.0-alpha.4]` entry, and
