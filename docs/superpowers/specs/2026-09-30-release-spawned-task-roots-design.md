@@ -173,6 +173,9 @@ payload and re-spawn tests the plan adds) are shown failing against the
 unfixed code before the fix goes in. Tests 2 and 4 guard the fix's
 *safety*: they pass before and after it by design, and they fail only
 under the mutations in 5, which is how their power is shown.
+**[2026-09-30, final review: true of test 2 only. No mutation run on the
+branch is caught by test 4 alone, and its doc comment in
+`crates/nova-cli/tests/run_tests.rs` now says so.]**
 
 1. **`a_spawned_tasks_root_is_released_at_completion`** (runtime, new).
    - Spawns a task, drains it to completion, and asserts

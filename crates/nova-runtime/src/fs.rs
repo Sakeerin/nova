@@ -1159,12 +1159,12 @@ mod tests {
     /// A task's unread payload is released when its state root is.
     ///
     /// `task.rs` releases a task's state root in `release_internal` and
-    /// `take_output_internal` — deliberately not at completion, because a spawned
-    /// task's output has to outlive it so a later `join` can take it (see
-    /// `poll_one`'s and `take_output_internal`'s own doc comments in
-    /// `task.rs`). Payload release hangs off the same two points so payload
-    /// lifetime follows the policy `task.rs` already owns rather than a
-    /// second one.
+    /// `take_output_internal` — through `release_internal` from `poll_one` at
+    /// completion for every task but `block_on`'s root, and at
+    /// `take_output_internal` for that root (see `poll_one`'s and
+    /// `take_output_internal`'s own doc comments in `task.rs`). Payload
+    /// release hangs off the same two points so payload lifetime follows the
+    /// policy `task.rs` already owns rather than a second one.
     ///
     /// Uses `gc::root_count` rather than asserting the object is collected: per
     /// ADR 0010, a churn-loop test asserting survival cannot discriminate on this

@@ -2024,7 +2024,7 @@ mod tests {
         unsafe { crate::bytes::as_bytes(ptr) }.to_vec()
     }
 
-    /// Test-only: drive `fut` to completion via `nova_rt_task_spawn`, then
+    /// Test-only: drive `fut` to completion via `spawn_kept_for_test`, then
     /// pump this thread's queue with an unrelated, immediately-ready future
     /// through `nova_rt_task_block_on` -- the identical spawn-then-pump
     /// technique
