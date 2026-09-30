@@ -1005,7 +1005,11 @@ small objects is not measured here: the counters see sizes, not call sites.
 
 - **Which code makes the objects.** The obvious next measurement is
   attribution by call site. Nothing here names a mechanism for the 79
-  objects per user or the 17 per header.
+  objects per user or the 17 per header. **[Later on 2026-09-30:
+  attributed by function -- `stringify` of a string at about ten objects
+  plus one per character (the per-character one is `Vec::get`'s `Some`),
+  and all of the per-header objects inside `parse_request_head`. See "AMENDMENT 2026-09-30 (alloc-attribution)"
+  below.]**
 - **Whether fewer, larger objects would cost the collector less than the
   same bytes in many small ones.** This file has found collector cost
   following bytes. Whether object count matters separately is not
@@ -1040,6 +1044,211 @@ The `nova-gc-time` line then also prints `total_bytes`, `total_objs`,
 then runs `nova-bench-http --path /users --connections 200 --duration 15
 --warmup 0`, with `--header "x-pad-N: <value>"` repeated for the header
 arms.
+
+## AMENDMENT 2026-09-30 (alloc-attribution): which functions make the objects
+
+The amendment above counted about 963 GC-heap objects per ten-user
+request, about 79 per user and about 17 per extra header. It left open
+which code makes them. **Counted in isolation, one function at a time,
+the answer has three parts:**
+
+- **`std/json`'s `stringify` of a string** allocates about ten objects
+  plus one per character. It accounts for about 55 of the 79 objects per
+  user.
+- **The per-character object is `Vec::get`'s `Some`.** One 16-byte object
+  is allocated per call, and `stringify`'s string path calls it once per
+  output character.
+- **All of the ~17 objects per extra header, and about 80% of its bytes,
+  are inside `std/http`'s `parse_request_head`.**
+
+### How it was measured
+
+The same scratch counters as the amendment above, which are not on `main`.
+Fourteen small compiled Nova programs were used, plus four `stringify`
+length variants. Each one:
+
+- calls one function in a loop;
+- folds a value derived from every result into a printed accumulator, so
+  a skipped loop would show;
+- where it needs the example's records and response-building functions,
+  copies them verbatim from `src/main.nova`.
+
+Objects per call is the last collection's cumulative count divided by the
+loop's iterations. Each program ran once, with `NOVA_GC_DEBUG=1` and
+`NOVA_GC_THRESHOLD=65536`, on the runtime source at `6f7d941` plus the
+counters. The binaries are 470,016–526,336 bytes, consistent with release
+builds. No build log was kept.
+
+**How exact the counts are.** Each figure is (setup plus loop) divided by
+the iterations, less an uncounted tail:
+
+- **The tail:** allocations after a program's last collection go
+  uncounted. The small threshold keeps that to one collection window, 64
+  KiB or less, against at least 22 MB allocated by each program in the
+  first table. That is 0.3% or less of the bytes, and it makes a figure
+  read up to 0.26% low. The three probes further down allocate less, as
+  little as 6.4 MB for `get`, so their figures can read up to about 1%
+  low. `get` reads 0.993.
+- **Setup:** it is counted too, and it can push a figure slightly high.
+  Setup is at most about 1,250 objects, in the 604-byte `json_response`
+  program, whose setup builds a ten-user body. That is 0.03 objects per
+  call or less. `parse_offsets` at ten headers reads 1.00012 for this
+  reason.
+- **Integers:** if every iteration allocates the same number of objects,
+  these bounds force the true per-call counts to the nearest integers
+  (25, 73, 4, 793, 93, 93, 1, 1, 43 and 196 in the first table). That premise
+  is an assumption.
+
+### Per call
+
+| function | iterations | objects per call | bytes per call |
+|---|---|---|---|
+| loop with no call (baseline) | 400,000 | under 0.33 (no collection ran) | under 2.7 |
+| `stringify(String(s))`, `s` = `"User Number 5"` (13 characters) | 400,000 | 25.000 | 799.0 |
+| `user_json(u)`, one user | 100,000 | 72.986 | 2,386.5 |
+| `users_json(s)`, empty store | 400,000 | 3.990 | 55.9 |
+| `users_json(s)`, ten users | 10,000 | 792.979 | 31,217.6 |
+| `json_response(200, body).to_bytes()`, 2-byte body | 40,000 | 92.979 | 2,638.4 |
+| `json_response(200, body).to_bytes()`, 604-byte body | 40,000 | 92.990 | 3,878.4 |
+| `parse_offsets(head)`, 1 header | 400,000 | 0.999 | 103.8 |
+| `parse_offsets(head)`, 10 headers | 400,000 | 1.000 | 392.0 |
+| `parse_request_head(head)`, 1 header | 100,000 | 42.971 | 875.4 |
+| `parse_request_head(head)`, 10 headers | 40,000 | 195.976 | 3,635.7 |
+
+The baseline's bound follows from its never collecting: the first
+collection comes at 1 MiB, so it allocated less than that in total.
+
+**The heads are byte-identical to what the load generator sends** with
+`--path /users`: `GET /users HTTP/1.1`, then `Host: nova-bench`, then for
+the ten-header rows nine `x-pad-N: 0123456789abcdef` headers.
+
+### The isolated figures reproduce the server's
+
+- **Per user.** `users_json` at ten users minus the empty store is 78.9
+  objects per user, against the server's 78.9. In bytes it is 3,116 per
+  user. The server's difference also includes the larger response body:
+  `json_response` at 604 bytes minus 2 bytes is 1,240 bytes, or 124 per
+  user. Adding that gives 3,240, inside the server's 3,237.6–3,247.2.
+- **Per header, objects.** `parse_request_head` at ten headers minus one
+  is 17.0 objects per header, against the server's 16.85–16.90.
+- **Per header, bytes.** It is 306.7 bytes per header, against the
+  server's 382.5–388.8. **About 20% of the per-header bytes are outside
+  `parse_request_head`.** The server reaches it through `read_request`,
+  which grows its buffer with `concat` and calls `parse_offsets` a second
+  time. `parse_offsets`'s array grows 32 bytes per header (103.8 to
+  392.0). Neither of those was measured separately.
+- **The rest of the request path.** Head parsing, `users_json` and the
+  response sum to about 929 objects at ten users and about 140 for the
+  empty store. The server measured 963 and 174, so **about 34 objects per
+  request fall outside these three pieces in both arms.** They belong to
+  reading, routing and writing, including `read_request`'s own work. That
+  split is not measured.
+
+### `stringify` of a string: about ten objects plus one per character
+
+One run each, varying only the string:
+
+| characters | objects per call | bytes per call |
+|---|---|---|
+| 1 | 10.991 | 199.8 |
+| 13 | 25.000 | 799.0 |
+| 17 | 29.999 | 1,195.0 |
+| 26 | 38.996 | 1,491.9 |
+| 52 | 65.997 | 2,869.9 |
+
+The slope is 1.00 objects per character from 17 to 26 and 1.04 from 26 to
+52. Below 17 the relation is not a straight line.
+
+**Per user, then:** the name (13 characters, 25 objects) and the email (17
+characters, 30 objects) make about 55 of `user_json`'s 73 objects. By
+elimination, the other 18 go to the interpolation that assembles the
+user's JSON. About 6 per user go to `users_json`'s own loop, the `Map::get`
+and the growing output's concatenations. These per-user figures are
+averages over the seeded store. Its tenth user's name and email are one
+character longer, and ten users carry only nine commas.
+
+**The per-character object is `Vec::get`'s `Some`, measured directly.**
+`stringify`'s string path, `quote` in `std/json/lib.nova`, builds its
+output as follows:
+
+- it walks `s.chars()`;
+- it pushes each character, plus the two quotes, into a `Vec<Char>`;
+- `vec_chars_to_string`, a private function in the same file, reads the
+  vector back with `b.get(i)` once per output character.
+
+`Vec::get` returns `Some(self.data[i])` (`std/collections/lib.nova`), and
+an enum value is a heap allocation. Three probes, each counted like the
+table above:
+
+| probe | iterations | objects per call | bytes per call |
+|---|---|---|---|
+| `v.get(i)` on a 13-element `Vec<Char>` | 400,000 | 0.993 | 15.9 |
+| building a 13-element `Vec<Char>` with `push` | 100,000 | 4.996 | 271.8 |
+| `"User Number 5".chars()` | 400,000 | 0.999 | 111.9 |
+
+So each `get` is one 16-byte object, and `quote` makes one per output
+character. That is the per-character slope, and it lands in the 16-byte
+bucket that holds most of a request's objects. Building the vector by
+`push` adds a few objects: its growth steps (capacity 4, then doubling). A
+formula of 9 + n + the number of capacity steps needed for n + 2 elements
+reproduces all five measured counts. That formula is fitted, not measured
+term by term.
+
+### Also measured
+
+- **`json_response` plus `to_bytes` is about 93 objects at both body sizes
+  measured** (2 and 604 bytes). The two differ by 0.01 objects and 1,240
+  bytes, about 2.1 bytes allocated per body byte.
+- **`parse_offsets` allocates one array at both header counts measured**
+  (1 and 10). Its bytes, 103.8 and 392.0, fit 8 + 8 × 12 and 8 + 8 × 48. So
+  every per-header object comes from what `parse_request_head` adds over
+  the intrinsic.
+
+### What this does not settle
+
+- **Whether allocating less would move the gate.** The collector's cost
+  has followed bytes allocated in this file's earlier series. Nothing here
+  changes code or measures throughput.
+- **The ~34 objects per request outside the three pieces**, and the ~20%
+  of per-header bytes outside `parse_request_head`.
+- **One run per program.** The earlier amendment found object counts
+  repeating to within 0.03% within one script, and to within 0.07% between
+  scripts.
+
+### Reproduction
+
+The programs that call the example's functions copy the example's `User`,
+`Store`, `Store::create`, `user_json`, `users_json` and `json_response`
+verbatim from `src/main.nova`. Two helpers go with them. `seeded(n)`
+creates `n` users named `User Number i` with email `useri@example.com`.
+`head_with(extra)` builds the head described above. Then:
+
+```
+fn main() {
+    <setup>
+    let mut acc = 0
+    let mut i = 0
+    while i < <iterations> {
+        <body>
+        i = i + 1
+    }
+    println("phase=<name> iters=<iterations> acc=${acc}")
+}
+```
+
+The `<body>` of each program is:
+
+- **`stringify`:** `acc = acc + stringify(String(v)).len()`
+- **`user_json`:** `acc = acc + user_json(u).len()`
+- **`users_json`:** `acc = acc + users_json(s).len()`
+- **`json_response`:** `acc = acc + json_response(200, body).to_bytes().len()`
+- **`parse_offsets`:** `acc = acc + parse_offsets(buf).len()`
+- **`parse_request_head`:** the two nested matches from
+  `docs/benchmarks/profile-http-head.nova`, folding `r.headers.len()`
+- **`get`:** a `match v.get(i % 13)` that folds `+1` for `Some`
+- **`push`:** a fresh `Vec<Char>`, pushed from `v0.chars()`, folding its
+  `len()`
+- **`chars`:** `acc = acc + s.chars().len()`
 
 ## What was measured, and with what
 

@@ -94,10 +94,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request header adds about 17 objects, nearly independent of the header
   value's length (16.93 to 17.08 objects per header over 4 to 32
   characters). 77% of a ten-user request's objects are 16 bytes or
-  smaller, carrying 29% of its bytes. Which code allocates them is not
-  measured. From scratch instrumentation that is **not on
+  smaller, carrying 29% of its bytes. Which code allocates them is the
+  next entry. From scratch instrumentation that is **not on
   `main`**; details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-09-30 (alloc-per-request)".
+- **Which functions make those objects, measured one at a time.**
+  `stringify` of a string allocates about ten objects plus one per
+  character: 11 at 1 character, 25 at 13 and 66 at 52. Its two calls per
+  user, on the name and the email, make about 55 of the 79 objects per
+  user. The per-character object is `Vec::get`'s `Some`, one 16-byte
+  allocation per call (0.993 measured), which `stringify`'s string path
+  makes once per output character. All of the ~17 objects per extra header
+  are inside `parse_request_head`, though about 20% of the per-header bytes
+  are not. `json_response` plus `to_bytes` is about 93 objects at both body
+  sizes measured. The isolated counts reproduce the server's to within
+  about 34 objects per request, which fall outside the three pieces
+  measured. Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-09-30 (alloc-attribution)".
 
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
