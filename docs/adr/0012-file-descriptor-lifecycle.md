@@ -60,6 +60,11 @@ invented. Neither leak is fixed by this decision; both are accepted as the
 deliberate half of a trade, for reasons specific to what would have to change
 to close them.
 
+**Amended 2026-09-30:** the task-state leak cited above is fixed for
+spawned tasks (ADR 0009 §1's 2026-09-30 amendment). The descriptor leak
+this decision is about is unchanged: a `File` still needs an explicit
+`close`.
+
 **Close-on-collect is foreclosed for two measured reasons, not merely left
 unbuilt:**
 
