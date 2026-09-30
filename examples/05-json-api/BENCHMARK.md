@@ -712,7 +712,9 @@ Rust-side and outside the collector's heap:
   dropped or detached is unsound, because a parked task's state would then
   be swept. A detach has to mark the task, so that the executor releases
   it at completion, or at once if the task is already done. That is a
-  design question and is not taken up here.
+  design question and is not taken up here. **[Later on 2026-09-30: fixed
+  on branch `release-spawned-task-roots`, without a detach -- see the
+  amendment below.]**
 
 ### The patch, for reproduction
 
@@ -736,6 +738,107 @@ In `crates/nova-runtime/src/task.rs`, at the end of `poll_one`:
 +    }
  }
 ```
+
+## AMENDMENT 2026-09-30 (release-spawned-task-roots): the retained roots are released
+
+The FURTHER AMENDMENT above found each finished connection task's GC root
+retained for the life of the process, because nothing joins the task.
+Branch `release-spawned-task-roots` makes the executor release a spawned
+task's root when the task completes. Only `block_on`'s own root keeps
+release-at-take. **Measured before against after: the retention is gone,
+and ten-user throughput rose by 11% to 18%, with the ranges disjoint. The
+gate is still not met.**
+
+### What was measured
+
+Four release binaries, all built fresh for this series. Sibling names were
+deleted before each build, and each binary's contents were checked for the
+strings its build must and must not carry.
+
+| binary | bytes | built from | carries |
+|---|---|---|---|
+| `before` | 690,688 | `a598d18` | — |
+| `before-i` | 693,760 | `a598d18` + the instrumentation | timer, `NOVA_GC_THRESHOLD`, `pinned=` |
+| `after` | 691,712 | this branch | the fix |
+| `after-i` | 694,784 | this branch + the instrumentation | the fix, timer, `NOVA_GC_THRESHOLD`, `pinned=` |
+
+The instrumentation is the `gc.rs` part of the "FURTHER AMENDMENT
+2026-09-30" patch above. It is not on `main`, and none of the four
+binaries contains the experiment switch.
+
+Ten seeded users, a 604-byte `/users` body, 200 connections,
+`--warmup 5 --duration 15`, one fresh server process per reading. The
+twelve readings ran in one script, alternating before and after, with the
+instrumented pair right after each uninstrumented pair. Every reading had
+`errors=0` and a 604-byte body, and every result line and server log was
+saved.
+
+### Throughput
+
+| arm | before | after |
+|---|---|---|
+| uninstrumented | 3394.0, 3479.0, 3487.3 | 3886.4, 3918.7, 4008.8 |
+| instrumented | 3454.3, 3550.8, 3453.8 | 3751.7, 3842.4, 3816.2 |
+
+**The uninstrumented ranges do not overlap**, and neither do the
+instrumented ones. Serial per-request cost falls from 286.8–294.6 to
+249.5–257.3 microseconds, which is 29.4 to 45.2 microseconds per request,
+or 1.11x to 1.18x the throughput.
+
+**The gate is still not met.** 3886.4–4008.8 req/sec is 2.5x–2.6x short
+of 10k. This session's before range, 3394.0–3487.3, sits above the
+2868.2–3392.4 recorded in the "FURTHER AMENDMENT 2026-09-12" series. That
+is the between-session movement this file has recorded before. So the
+comparison that counts is the alternated one within this session, not
+this session's figures against older ones.
+
+### The retention
+
+From the instrumented runs, reading the collector's log at its 100th
+collection (inside the warmup) and at 75% of the run (well after the
+boundary):
+
+| | before | after |
+|---|---|---|
+| registered roots, warmup | 212 (all three) | 201 (all three) |
+| registered roots, after the boundary | 412 (all three) | 201 (all three) |
+| live objects, warmup | 10,700–10,703 | 9,887–9,899 |
+| live objects, after the boundary | 22,301–22,305 | 9,887–9,899 |
+| collections | 880–931 | 1,588–1,611 |
+| total collector time | 9.88–9.93 s | 9.20–9.27 s |
+
+**The spec's three success criteria, each met in all three runs:**
+
+- **Met:** after the boundary, the root count is 201 (the `main` task plus
+  the 200 open connections), against 412 before.
+- **Met:** the live set after the boundary holds at 9,887–9,899 objects,
+  against 22,301–22,305.
+- **Met:** the 11 seeding connections no longer appear. The count during
+  warmup is 201, not 212.
+
+In one after run, the root count reads 201 at 1,600 of 1,603 collections
+and 200 at the other three. The before run shows 412 and 212, with
+transitional readings in between.
+
+**The smaller live set means more collections, not fewer.** The next
+threshold is twice the live bytes, so a smaller live set crosses it
+sooner. Each collection is cheaper, and the total collector time falls by
+6% to 7%, disjoint.
+
+**Not explained: the throughput gain is larger than that cut accounts
+for.** The collector's total falls by about 0.7 s over roughly 20 s of
+load, yet throughput rose 11% to 18%, in both the timed and untimed arms.
+Nothing here says where the rest comes from.
+
+### What this does not settle
+
+- **One host, Windows, three readings per arm.**
+- **Where the gain beyond the collector cut comes from.**
+- **`TASKS` growth.** The executor's `Vec` still gains one 32-byte entry
+  per spawn, joined or not, and the payload-slot table grows the same way.
+  Neither is on the GC heap, so neither appears in these counts.
+- **Anything about the gate beyond this workload.** The gate is measured,
+  and still not met.
 
 ## What was measured, and with what
 
