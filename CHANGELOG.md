@@ -113,6 +113,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "AMENDMENT 2026-09-30 (alloc-attribution)".
 
 ### Changed
+- **`std/json`: draining a `Vec` no longer allocates an `Option` per
+  element.** `vec_chars_to_string` and `vec_to_array` read the vector's
+  backing array directly instead of calling `Vec::get`. Their loops run
+  only below `len`, so `get` could never return `None` there, and each
+  `Some` was a 16-byte heap object. `stringify` of a string now allocates
+  exactly its output length fewer objects: 25 -> 10 at 13 characters, 66
+  -> 12 at 52. On `examples/05-json-api` a ten-user request allocates about
+  342 fewer objects (962.4-963.2 -> 620.8-621.0), and ten-user throughput
+  rose from 3098.1-3290.1 to 3798.1-4217.1 req/sec, ranges disjoint in one
+  alternated session. The gate is still not met. Output is unchanged. The
+  two mutations, a space in place of each character and `Null` in place of
+  each element, fail 8 and 2 of the JSON tests respectively. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-09-30
+  (json-drain-no-option)".
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
   `Null`, `Bool`, `Number` or `String` -- now matches before `stringify`
   allocates its work-list stack and output buffer, and returns finished text

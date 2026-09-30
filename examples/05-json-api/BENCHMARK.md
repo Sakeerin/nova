@@ -1208,7 +1208,11 @@ term by term.
 
 - **Whether allocating less would move the gate.** The collector's cost
   has followed bytes allocated in this file's earlier series. Nothing here
-  changes code or measures throughput.
+  changes code or measures throughput. **[Later on 2026-09-30: one lever
+  measured -- removing the per-character `Some` cut about 342 objects (14%
+  of the bytes) per request and raised ten-user throughput 1.15x-1.36x,
+  disjoint. The gate is still not met. See "AMENDMENT 2026-09-30
+  (json-drain-no-option)" below.]**
 - **The ~34 objects per request outside the three pieces**, and the ~20%
   of per-header bytes outside `parse_request_head`.
 - **One run per program.** The earlier amendment found object counts
@@ -1249,6 +1253,146 @@ The `<body>` of each program is:
 - **`push`:** a fresh `Vec<Char>`, pushed from `v0.chars()`, folding its
   `len()`
 - **`chars`:** `acc = acc + s.chars().len()`
+
+## AMENDMENT 2026-09-30 (json-drain-no-option): the per-character `Some` removed
+
+The amendment above traced `stringify`'s per-character allocation to
+`Vec::get`'s `Some`, allocated once per output character by `std/json`'s
+`vec_chars_to_string`. This branch makes that function, and its sibling
+`vec_to_array`, index the vector's backing array directly. The loop only
+runs below `len`, so `get` could never return `None` there. **A ten-user
+request now allocates about 342 fewer objects, and ten-user throughput rose
+from 3098.1–3290.1 to 3798.1–4217.1 req/sec, with the ranges disjoint.
+The gate is still not met.**
+
+### Allocation, before against after
+
+The same scratch counters as the amendments above, which are not on
+`main`. Every figure is objects or bytes per call, or per request, counted
+as described there.
+
+**`stringify(String(s))`**, one run each, `NOVA_GC_THRESHOLD=65536`:
+
+| characters | objects before → after | bytes before → after |
+|---|---|---|
+| 1 | 10.991 → 7.999 | 199.8 → 152.0 |
+| 13 | 25.000 → 9.998 | 799.0 → 558.9 |
+| 52 | 65.997 → 11.999 | 2,869.9 → 2,005.9 |
+
+The drop is 3, 15 and 54 objects: exactly the output length, the
+characters plus the two quotes. Bytes fall by 48, 240 and 864, which is 16
+per object. The accumulated output lengths are identical before and after.
+
+**The server**, ten users, 200 connections, `--warmup 0`, three fresh
+processes each, alternated:
+
+| | before | after |
+|---|---|---|
+| objects per request | 962.4–963.2 | 620.8–621.0 |
+| bytes per request | 38,323–38,345 | 32,838–32,891 |
+
+That is 341.5–342.4 fewer objects and 5,432–5,508 fewer bytes per request.
+The prediction was 342. Per user, the name costs 13 + 2 and the email 17 +
+2, which is 340 across ten users. The seeded store's tenth user has a name
+and an email one character longer each, which adds 2.
+
+The "before" counter binary is the one the "(alloc-per-request)"
+amendment used, built from `6240a05`, 695,296 bytes. The runtime and
+`std/json` there are identical to this branch's base; only documentation
+has changed since. The "after" counter binary is 694,784 bytes.
+
+### Throughput, before against after
+
+Uninstrumented binaries: `main` at `6b076f8` (691,712 bytes) against this
+branch (691,200 bytes). Ten users, a 604-byte body, 200 connections,
+`--warmup 5 --duration 15`, one fresh process per reading, alternated,
+three readings each. Every reading had `errors=0` and a 604-byte body.
+
+| before | after |
+|---|---|
+| 3290.1, 3198.0, 3098.1 | 3798.1, 3960.1, 4217.1 |
+
+**The ranges do not overlap.** Serial per-request cost falls from
+303.9–322.8 to 237.1–263.3 microseconds. That is 40.7 to 85.6
+microseconds per request, or 1.15x to 1.36x the throughput.
+
+**The gate is still not met.** 3798.1–4217.1 req/sec is 2.4x–2.6x short of
+10k.
+
+**No comparison with earlier series is made.** This session's before
+range, 3098.1–3290.1, sits below the post-fix 3886.4–4008.8 recorded
+earlier today on a binary of the same 691,712 bytes. That is consistent
+with the between-session movement this file has recorded several times,
+and nothing here measures it. The comparison that counts is the
+alternated one here.
+
+### The collector, in the counter runs
+
+The allocation runs above used the instrumented binaries, whose collector
+log carries a per-collection timer. The throughput runs did not. From the
+counter runs, ten users, `--warmup 0`:
+
+| | before | after |
+|---|---|---|
+| req/sec | 3361.2, 2862.7, 3198.5 | 3806.7, 3881.4, 3805.7 |
+| collector time per request | 136.6, 170.6, 148.9 µs | 113.8, 112.3, 112.8 µs |
+| collections per request | 0.0209 | 0.0179 |
+| time per collection | 6.54, 8.15, 7.13 ms | 6.35, 6.27, 6.30 ms |
+
+- **Collections per request fell 14.4%**, in line with bytes allocated.
+- **Time per collection fell too**, so collector time per request fell
+  more than bytes did: 16.7%, 34.2% and 24.3% in the three alternated
+  pairs.
+- **In these runs the collector's drop is 64% to 72% of each pair's
+  per-request saving.**
+
+These runs are instrumented and include the collector's own logging. The
+before arm is noisy: its second reading ran at 2862.7 req/sec, with the
+longest collections. Why the time per collection fell, whether from fewer
+objects to sweep or something else, is not measured.
+
+### Correctness
+
+**Behaviour is unchanged, by argument.** Old and new read the same slot of
+the backing array under the same bounds check, and `get`'s `None` arm was
+unreachable because the loop stays below `len`. The tests show only that
+nothing detectable changed. All 15 `nova-cli` JSON tests pass. Two
+mutations were run and restored:
+
+- **`vec_chars_to_string` writing a space instead of the character** fails
+  8 of those 15.
+- **`vec_to_array` writing `Null` instead of the element** fails 2,
+  `json_parse_values_run` and `json_round_trip_run`. That is the whole of
+  the guard on `vec_to_array`.
+
+Neither mutation changes an output's length, so the length checks in this
+file's harnesses cannot tell the fix from mutation 1. The JSON tests,
+which compare content, are what distinguish them.
+
+**The full suite, once, showed one failure that did not reproduce.**
+`repeat_array_negative_length_aborts` failed once: its program exited
+non-zero with empty stderr, where the test expects "array length must
+not be negative". The test uses no JSON. It passed 5 of 5 runs alone and
+283 of 283 in two reruns of the whole `nova-cli` target. Its cause is not
+known. A second full run of the workspace was clean: 1141 passed, 0 failed
+and 8 ignored across 45 targets. The `nova-cli` target then passed 283 of
+283 again on the final files.
+
+### What this does not settle
+
+- **The rest of the throughput gain.** About 28% to 36% of each counter
+  pair's per-request saving is outside the collector, and it may include
+  the removed call and `match` per character as well as allocation. That
+  split is not measured.
+- **The rest of the per-request objects.** About 621 remain. The earlier
+  attribution put about 93 in `json_response` plus `to_bytes`, 43 in head
+  parsing, and the rest in `users_json` and the ~34 outside the pieces
+  measured.
+- **The parser.** `vec_to_array`, and the parser's string scanning, which
+  also drains through `vec_chars_to_string`, run on request bodies. The GET
+  path measured here does neither, so the effect on `POST` is not
+  measured.
+- **One host, Windows, three readings per arm.**
 
 ## What was measured, and with what
 
