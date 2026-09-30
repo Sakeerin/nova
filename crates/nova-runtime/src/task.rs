@@ -145,11 +145,19 @@ struct Task {
     done: bool,
     output: i64,
     /// Whether this task's GC root has already been released, by either
-    /// [`take_output_internal`] or [`release_internal`]. The root is one
+    /// [`take_output_internal`] or [`release_internal`] -- the latter from
+    /// [`poll_one`] at completion, for every task but `block_on`'s root. The root is one
     /// `gc::add_root`, so it must be cancelled at most once; this flag is what
     /// both paths check, which is also what makes `release_internal`
     /// idempotent.
     taken: bool,
+    /// Whether this task keeps its GC root past completion, until
+    /// [`take_output_internal`] hands its output back. Set only by
+    /// [`spawn_root_internal`], for `block_on`'s root task -- the one task
+    /// whose output is read out of `Task::output` rather than through its
+    /// future. Every other task has its root released in [`poll_one`] the
+    /// moment it completes.
+    keep_root_until_taken: bool,
 }
 
 /// Why a parked task is waiting, and therefore what wakes it.
@@ -386,11 +394,13 @@ unsafe fn read_future(future: *mut u8) -> (PollFn, *mut u8) {
 /// Register `future` as a new task: read its fat pointer, root its state
 /// object, enqueue it, and return its id.
 ///
-/// The `gc::add_root` here is paired with exactly one `gc::remove_root` in
-/// [`take_output_internal`] -- **not** at completion. See [`poll_one`] for why
-/// the root has to outlive completion, and [`take_output_internal`] for what
-/// that ordering costs. This module owns that policy; `gc.rs` states only the
-/// registry's own multiset contract and deliberately not who pairs it or when.
+/// The `gc::add_root` here is paired with exactly one `gc::remove_root`,
+/// through [`release_internal`] or [`take_output_internal`], whichever runs
+/// first. For an ordinary task that is [`poll_one`] releasing it at
+/// completion; for `block_on`'s root ([`spawn_root_internal`]) it is
+/// `run_to_completion`'s take. This module owns that policy; `gc.rs` states
+/// only the registry's own multiset contract and deliberately not who pairs
+/// it or when.
 ///
 /// # Safety
 /// `future` must be a valid future fat pointer (see [`read_future`]).
@@ -435,9 +445,9 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
     // The state object sits on no Nova stack and in no register while its
     // task is queued or parked -- the executor is its only reference, and
     // those are the collector's only other root sources (see `gc.rs`'s
-    // module doc comment). Paired with exactly one `gc::remove_root`, in
-    // `take_output_internal`; see its doc comment for why completion is not
-    // where the root is released.
+    // module doc comment). Paired with exactly one `gc::remove_root`: at
+    // completion in `poll_one`, or at take for `block_on`'s root -- see
+    // `poll_one`'s doc comment.
     gc::add_root(state);
     let id = TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
@@ -448,12 +458,56 @@ unsafe fn spawn_internal(future: *mut u8) -> i64 {
             done: false,
             output: 0,
             taken: false,
+            keep_root_until_taken: false,
         });
         id
     });
     BY_STATE.with(|m| m.borrow_mut().insert(state as usize, id));
     QUEUE.with(|queue| queue.borrow_mut().push_back(id));
     id
+}
+
+/// [`spawn_internal`], for `block_on`'s root task: the task keeps its GC root
+/// past completion, until [`take_output_internal`] hands its output back.
+///
+/// `run_to_completion` needs this and nothing else does. It returns the
+/// root's output out of `Task::output`, a copy in a Rust-heap `Vec` that
+/// roots nothing, and it keeps polling other tasks -- which allocate --
+/// between the root's completion and that take. The state object's root is
+/// what keeps a heap-valued output alive across that gap.
+///
+/// # Safety
+/// As [`spawn_internal`].
+unsafe fn spawn_root_internal(future: *mut u8) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let id = unsafe { spawn_internal(future) };
+    TASKS.with(|tasks| {
+        tasks
+            .borrow_mut()
+            .get_mut(id as usize)
+            .expect("spawn_internal just registered this id")
+            .keep_root_until_taken = true;
+    });
+    id
+}
+
+/// Test-only: spawn `future` as a task that keeps its GC root, and so its
+/// payload slots, past completion -- [`spawn_root_internal`] exposed to this
+/// crate's other test modules.
+///
+/// For runtime unit tests that spawn a raw I/O future directly and read its
+/// stashed payload back from *outside* the task after it completes. Nova
+/// code never does that: every raw I/O builtin and every payload take is
+/// `std`-only, and `std` awaits the raw future and takes its payload inside
+/// the same task, before that task completes. An ordinary spawned task's
+/// slots are released at completion, so these tests need the kept variant.
+///
+/// # Safety
+/// As [`spawn_internal`].
+#[cfg(test)]
+pub(crate) unsafe fn spawn_kept_for_test(future: *mut u8) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    unsafe { spawn_root_internal(future) }
 }
 
 /// A poll may stage at most one deadline and at most one I/O wait.
@@ -678,20 +732,16 @@ pub(crate) fn stage_io_park(socket: RawSocket, interest: Interest, deadline: Opt
 /// the `Task` record, mark it done, and wake anything parked on it (see
 /// [`wake_tasks_waiting_on`]).
 ///
-/// **The state object's GC root is deliberately *not* released here.** The
-/// output value has been copied into `Task::output`, which lives in `TASKS` --
-/// a Rust-heap `Vec`, which is none of the collector's root sources (stack,
-/// callee-saved registers, `PINNED`, scanned GC objects; see `gc.rs`'s module
-/// doc comment). A copy there therefore roots nothing. Since the runtime
-/// cannot tell a scalar output from a pointer output -- both are `i64` --
-/// the root has to be conservative, and the state object already is one: the
-/// output also still sits in the state object's own [`STATE_SLOT_OUTPUT`],
-/// the state object is allocated scanned, and a `PINNED` root is traced
-/// transitively (`gc.rs`'s `a_registered_root_keeps_its_transitive_children_alive`).
-/// So keeping the state rooted until the output is taken keeps a heap-valued
-/// output alive with no new mechanism and no scalar/pointer discrimination.
-/// [`take_output_internal`] is where the single matching `gc::remove_root`
-/// lives.
+/// **A spawned task's GC root is released here, at completion.** The output
+/// value stays in the state object's own [`STATE_SLOT_OUTPUT`]; a caller that
+/// wants it holds the future (`JoinHandle::join` does), and the future
+/// reaches the state object by ordinary tracing, so a heap-valued output
+/// stays alive exactly as long as someone can still read it. A task whose
+/// handle was dropped is then reachable from nothing, and the collector can
+/// free it -- the leak this used to be. The one exception is `block_on`'s
+/// root ([`spawn_root_internal`]): its output is read out of `Task::output`,
+/// a Rust-heap copy that roots nothing, while other tasks keep running and
+/// allocating, so it keeps its root until [`take_output_internal`].
 ///
 /// Any status that is neither [`POLL_PENDING`] nor [`POLL_READY`] panics
 /// rather than being treated as completion. This module exists to pin the
@@ -754,15 +804,23 @@ unsafe fn poll_one(id: i64) {
     // slots follow it (see `nova_rt_task_spawn`'s contract, which requires at
     // least `STATE_MIN_SIZE` bytes for exactly this read).
     let output = unsafe { (state as *mut i64).add(STATE_SLOT_OUTPUT).read() };
-    TASKS.with(|tasks| {
+    let release_now = TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
         let task = tasks
             .get_mut(id as usize)
             .expect("poll_one: task id is not registered");
         task.output = output;
         task.done = true;
+        !task.keep_root_until_taken
     });
     wake_tasks_waiting_on(id);
+    // Outside the borrow above: `release_internal` borrows `TASKS` itself.
+    // After the wake, which only moves ids between Rust-heap queues and
+    // allocates nothing on the GC heap, so no collection can fall between
+    // completion and release.
+    if release_now {
+        release_internal(id);
+    }
 }
 
 /// Move every task parked on `done_id` back onto the ready queue.
@@ -819,8 +877,10 @@ fn is_done_internal(id: i64) -> bool {
 /// [`STATE_SLOT_OUTPUT`] of the state object, which is reachable from word
 /// [`FUTURE_SLOT_STATE`] of the future -- so a caller that holds the future
 /// holds the value, through the collector's ordinary tracing, and needs nothing
-/// from here but the end of the executor's own claim. `JoinHandle::join` is the
-/// intended caller; what it does with the value is its own business.
+/// from here but the end of the executor's own claim. [`poll_one`] is the
+/// main caller, at completion. `JoinHandle::join` also calls it (through
+/// `nova_rt_task_release`), and for a completed task that call finds `taken`
+/// already set and does nothing.
 fn release_internal(id: i64) {
     let state = TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
@@ -867,14 +927,12 @@ fn release_internal(id: i64) {
 ///   pointer this ordering exists to prevent. A caller that needs the value
 ///   twice must keep its own copy.
 ///
-/// The cost of releasing the root here rather than at completion: a spawned
-/// task whose root is *never* released keeps its state object rooted for the
-/// rest of the process. That is a leak, not unsoundness, and it is the
-/// deliberate trade -- the alternative (unroot at completion) frees a
-/// heap-valued output while `Task::output` still names it. Either this function
-/// or [`release_internal`] ends that claim; both check the same
-/// `Task::taken` flag, so a task's single root is cancelled at most once
-/// whichever of them a caller reaches.
+/// Only a task spawned through [`spawn_root_internal`] -- `block_on`'s root --
+/// still has its root when it completes; every other task's is released in
+/// [`poll_one`] at completion, so taking such a task's output is refused with
+/// a panic that says why. This function or [`release_internal`] ends a task's
+/// claim; both check the same `Task::taken` flag, so a task's single root is
+/// cancelled at most once.
 fn take_output_internal(id: i64) -> i64 {
     let (output, state) = TASKS.with(|tasks| {
         let mut tasks = tasks.borrow_mut();
@@ -885,6 +943,13 @@ fn take_output_internal(id: i64) -> i64 {
             task.done,
             "nova_rt_task_take_output: task {id} has not completed; \
              poll nova_rt_task_is_done until it reports true first"
+        );
+        assert!(
+            !task.taken || task.keep_root_until_taken,
+            "nova_rt_task_take_output: task {id}'s GC root has already been \
+             released -- a spawned task's is released when it completes -- so \
+             its output can no longer be taken; read it through its future, as \
+             JoinHandle::join does"
         );
         assert!(
             !task.taken,
@@ -977,7 +1042,7 @@ fn take_output_internal(id: i64) -> i64 {
 /// `future` must be a valid future fat pointer (see [`read_future`]).
 unsafe fn run_to_completion(future: *mut u8) -> i64 {
     // SAFETY: forwarding this function's own contract.
-    let root_id = unsafe { spawn_internal(future) };
+    let root_id = unsafe { spawn_root_internal(future) };
     loop {
         while let Some(id) = QUEUE.with(|queue| queue.borrow_mut().pop_front()) {
             // SAFETY: `id` was just popped from `QUEUE`, so it is a registered
@@ -1387,11 +1452,10 @@ pub unsafe extern "C-unwind" fn nova_rt_task_is_done(future: *mut u8) -> i8 {
 ///
 /// Taking releases the GC root that was keeping the output alive, so this must
 /// be called once per task and only after [`nova_rt_task_is_done`] reports
-/// true. `JoinHandle::join` is the intended caller and is specified to do
-/// exactly that. A second take, or a take before completion, panics with a
-/// diagnostic rather than returning a stale or uninitialised value -- see
-/// [`take_output_internal`] for the full rationale and for the leak that is
-/// the cost of this ordering.
+/// true. **Only `block_on`'s root still has that root when it completes**, and
+/// `run_to_completion` takes it itself; every other task's root is released at
+/// completion, so taking its output panics, naming that cause. A second take,
+/// or a take before completion, panics too -- see [`take_output_internal`].
 ///
 /// `"C-unwind"`: see [`nova_rt_task_is_done`]'s doc comment.
 ///
@@ -2122,8 +2186,11 @@ mod tests {
         assert!(r.is_err(), "output_bits must refuse an unfinished task");
     }
 
-    /// The lifetime of a task's GC root, asserted on the registry directly
-    /// rather than through a collection.
+    /// The lifetime of a *kept* task's GC root -- `block_on`'s root, spawned
+    /// through `spawn_root_internal` -- asserted on the registry directly
+    /// rather than through a collection. An ordinary spawned task's root is
+    /// released at completion instead; that is
+    /// `a_spawned_tasks_root_is_released_at_completion`, below.
     ///
     /// A heap-valued output (a `String`, record or sum returned by an
     /// `async fn`) is reachable from exactly one place once its task
@@ -2134,8 +2201,8 @@ mod tests {
     /// collectable from the moment the task finishes until
     /// `nova_rt_task_take_output` is called, and *anything* that allocates in
     /// between -- polling the next task in the queue, most obviously -- can
-    /// trip the threshold and free it. `JoinHandle::join` returns exactly that
-    /// value.
+    /// trip the threshold and free it. `run_to_completion` returns exactly
+    /// that value, for `block_on`'s root.
     ///
     /// Asserted here on `gc::root_count` rather than by allocating until a
     /// collection fires and checking the payload survived: the registry is
@@ -2149,15 +2216,15 @@ mod tests {
     ///
     /// The counts are asserted exactly, not merely as non-zero, so this also
     /// discriminates a double `add_root` or a missing `remove_root` rather
-    /// than only a missing root: releasing the root in `poll_one` on
-    /// completion fails the middle assertion, never releasing it fails the
+    /// than only a missing root: releasing a kept task's root in `poll_one`
+    /// on completion fails the middle assertion, never releasing it fails the
     /// last, and not registering it in `spawn_internal` at all fails the
     /// first.
     #[test]
     fn a_completed_tasks_state_stays_rooted_until_its_output_is_taken() {
         let fut = make_future(poll_ready_now, 0);
         let state = state_of(fut);
-        let id = unsafe { nova_rt_task_spawn(fut) };
+        let id = unsafe { spawn_root_internal(fut) };
         assert_eq!(
             gc::root_count(state),
             1,
@@ -2182,6 +2249,149 @@ mod tests {
             0,
             "take_output must release the state object's root exactly once, \
              so add_root/remove_root stay balanced"
+        );
+    }
+
+    /// An ordinary spawned task's GC root is released the moment it
+    /// completes, not when its output is taken -- which, for a `spawn`
+    /// whose handle is dropped, is never. Asserted on the registry, for the
+    /// reason `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`
+    /// documents. The `TASKS` entry survives the release: `is_done` still
+    /// answers, and the output copy is still there.
+    #[test]
+    fn a_spawned_tasks_root_is_released_at_completion() {
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        assert_eq!(
+            gc::root_count(state),
+            1,
+            "spawn must register the state object exactly once"
+        );
+
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+        assert_eq!(
+            gc::root_count(state),
+            0,
+            "a spawned task's root must be released at completion, so a \
+             handle nobody joins does not keep its state alive"
+        );
+        assert_eq!(output_bits(id), 7, "the TASKS entry keeps its output copy");
+    }
+
+    /// Releasing at completion goes through `release_internal`, so it
+    /// releases the task's stashed `fs` payloads too -- an undrained error
+    /// message must not outlive a task nobody joins.
+    #[test]
+    fn a_spawned_tasks_stashed_fs_payload_is_released_at_completion() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        let payload = crate::gc_str("release-at-completion-payload");
+        let addr = payload as usize;
+        crate::fs::stash_for_test(id, crate::fs::Slot::Buffer, payload);
+        assert_eq!(
+            gc::root_count(addr),
+            1,
+            "stash_for_test must root its pointer"
+        );
+
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+        assert_eq!(
+            gc::root_count(addr),
+            0,
+            "completion must release the task's stashed fs payload, not only \
+             its state root"
+        );
+    }
+
+    /// A spawned task's output cannot be taken once it has completed: its
+    /// root is already gone, so the bits could name a freed object. The
+    /// panic must say so, rather than claim a second take happened.
+    #[test]
+    fn taking_a_spawned_tasks_output_after_completion_panics_naming_the_release() {
+        let fut = make_future(poll_ready_now, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+
+        let r = std::panic::catch_unwind(|| unsafe { nova_rt_task_take_output(id) });
+        let msg = match r {
+            Ok(v) => panic!("take must panic for a released spawned task, got {v}"),
+            Err(e) => e.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            msg.contains("released when it completes"),
+            "the panic must name the cause: {msg}"
+        );
+    }
+
+    /// The behaviour change the spec records (section 3.4): a completed
+    /// spawned task has been released, so spawning its future again is
+    /// allowed, as it already was after `join`. It re-polls the completed
+    /// state machine -- the footgun ADR 0009 accepts for that shape.
+    #[test]
+    fn spawning_a_completed_unjoined_future_again_succeeds() {
+        let fut = make_future(poll_ready_now, 0);
+        let first = unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+
+        let second = unsafe { nova_rt_task_spawn(fut) };
+        assert_ne!(first, second, "a re-spawn registers a new task");
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
+    }
+
+    std::thread_local! {
+        static OBSERVED_ROOT_STATE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static OBSERVED_ROOT_COUNT: std::cell::Cell<i64> = const { std::cell::Cell::new(-1) };
+    }
+
+    /// Records how many times the `block_on` root's state is registered, at
+    /// the moment this task is polled -- which is after the root completed.
+    unsafe extern "C-unwind" fn poll_observe_root(_state: *mut u8, _ctx: *mut u8) -> i64 {
+        let root_state = OBSERVED_ROOT_STATE.with(|c| c.get());
+        OBSERVED_ROOT_COUNT.with(|c| c.set(gc::root_count(root_state) as i64));
+        POLL_READY
+    }
+
+    /// A `block_on` root that spawns an observer and completes on its first
+    /// poll, with output 7.
+    unsafe extern "C-unwind" fn poll_spawn_observer_then_ready(
+        state: *mut u8,
+        _ctx: *mut u8,
+    ) -> i64 {
+        OBSERVED_ROOT_STATE.with(|c| c.set(state as usize));
+        let observer = make_future(poll_observe_root, 0);
+        // SAFETY: `observer` is a fresh `make_future` result.
+        unsafe { nova_rt_task_spawn(observer) };
+        // SAFETY: `state` is a live state object (`make_future`'s contract).
+        unsafe { *(state as *mut i64).add(STATE_SLOT_OUTPUT) = 7 };
+        POLL_READY
+    }
+
+    /// `block_on`'s root keeps its root after completing, until
+    /// `run_to_completion` takes its output. An observer task, spawned by the
+    /// root and polled after it (`run_to_completion` drains the whole queue),
+    /// sees the count while the root is complete but not yet taken. A guard,
+    /// not a failing-first test: it passes before and after the fix, and
+    /// fails under the mutation that releases regardless of the flag.
+    #[test]
+    fn a_block_on_roots_state_stays_rooted_until_taken() {
+        let root = make_future(poll_spawn_observer_then_ready, 0);
+        let root_state = state_of(root);
+        assert_eq!(unsafe { nova_rt_task_block_on(root) }, 7);
+        assert_eq!(
+            OBSERVED_ROOT_COUNT.with(|c| c.get()),
+            1,
+            "the block_on root's state must stay rooted between its \
+             completion and run_to_completion's take"
+        );
+        assert_eq!(
+            gc::root_count(root_state),
+            0,
+            "run_to_completion's take must release it exactly once"
         );
     }
 
@@ -2236,11 +2446,13 @@ mod tests {
     /// calls `release_internal` directly: only that pins the call into
     /// `fs.rs`, rather than `crate::fs::release_task_slots` itself, which
     /// `fs::tests::releasing_one_tasks_slots_leaves_another_tasks_intact`
-    /// already covers.
+    /// already covers. Spawned through `spawn_root_internal`, because only a
+    /// kept task's output can be taken; an ordinary spawned task's root is
+    /// released at completion.
     #[test]
     fn taking_a_tasks_output_also_releases_its_stashed_fs_payload() {
         let fut = make_future(poll_ready_now, 0);
-        let id = unsafe { nova_rt_task_spawn(fut) };
+        let id = unsafe { spawn_root_internal(fut) };
         unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
         assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
 
@@ -2322,11 +2534,13 @@ mod tests {
     /// `take_output` is a take, not a peek: the second call must be diagnosed,
     /// because the first one released the root that was keeping a heap-valued
     /// output alive, so the bits it would hand back a second time may name a
-    /// freed object.
+    /// freed object. Spawned through `spawn_root_internal`, because only a
+    /// kept task's output can be taken; an ordinary spawned task's root is
+    /// released at completion.
     #[test]
     fn taking_an_output_twice_panics_rather_than_returning_stale_bits() {
         let fut = make_future(poll_ready_now, 0);
-        let id = unsafe { nova_rt_task_spawn(fut) };
+        let id = unsafe { spawn_root_internal(fut) };
         unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
         assert_eq!(unsafe { nova_rt_task_take_output(id) }, 7);
 
