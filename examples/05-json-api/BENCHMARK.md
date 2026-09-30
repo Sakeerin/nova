@@ -380,6 +380,9 @@ new series measures header materialisation, which is part of what
 `read_request` does rather than the whole of it, and body accumulation.
 The socket write, the scheduler and the collector remain unmeasured, and
 so does the intrinsic parse except as a subtracted baseline.
+**[2026-09-30: the collector is now measured, so one of the four is —
+see "AMENDMENT 2026-09-30" below. The socket write, the scheduler and the
+intrinsic parse remain unmeasured.]**
 
 ### The empty-store control was re-derived, and it moved across the line
 
@@ -419,6 +422,195 @@ and is exactly the outcome the sentence quoted above anticipated.
 store is not the gate's workload; the gate's own measured figure remains
 the seeded ten-user series above, unchanged by this amendment. Nothing
 here claims the gate is met, reachable, or unreachable.
+
+## AMENDMENT 2026-09-30: the collector is measured, and removing it does not reach the gate
+
+The 2026-09-29 amendment above lists the collector among the mechanisms
+that "remain unmeasured". **It now carries a measurement, taken on this
+example at the gate's own workload**: ten seeded users, a 604-byte `/users`
+body, 200 connections, one fresh server process per reading.
+
+**The headline: disabling collection raises throughput from 2981.1–3410.3
+to 4892.4–5561.1 req/sec. The ranges do not overlap.** Serial per-request
+cost falls from 293.2–335.4 to 179.8–204.4 microseconds, a differential of
+**88.8 to 155.6 microseconds per request** and a throughput share of
+**30% to 46%**. **Even with no collection at all, 179.8–204.4 microseconds is
+still 1.8x–2.0x over the 100-microsecond budget, so the collector alone does
+not close the gate.**
+
+### How it was measured
+
+The runtime was built with two additions that are **not on `main`**, so these
+figures cannot be reproduced from a checkout without re-applying them (the
+patch is below): a per-cycle wall-clock timer printed under
+`NOVA_GC_DEBUG`, and a `NOVA_GC_THRESHOLD` override of the 1 MiB initial
+collection threshold. A threshold of 10^11 bytes disables collection for any
+run that fits in memory. Three things support "disabled", and none is
+conclusive alone: the arithmetic (no run here allocated anywhere near
+10^11 bytes); one such run with `NOVA_GC_DEBUG` set logging **no**
+collection lines (weak on its own, because that flag prints only inside a
+collection, so a run without it logs nothing either); and a working set of
+about 2.5 GB against about 16 MB with collection on.
+
+Seeding is ten `POST /users`; the load is
+`nova-bench-http --path /users --connections 200`, `--duration 5 --warmup 1`
+for the short series and `--duration 15 --warmup 5` for the long one. Every
+reading below had `errors=0` and a 604-byte body. Nine readings' result
+lines were read from the terminal and not saved to a log: the fourth
+disabled reading, the six in the instrumentation control, and the two
+warmup runs below.
+
+| binary | bytes | what it is |
+|---|---|---|
+| instrumented | 693,760 | this amendment's arms |
+| `main` at `d029d71` | 690,688 | control, same size this file records for the post-fast-path build |
+
+**No effect of the instrumentation shows on the default arm.** Alternated
+in one script, 5 s each: `main` 2828.8, 3193.6, 3310.2; instrumented
+3089.8, 3201.2, 3146.9. The ranges overlap. Three readings each can show
+that no large effect exists, not that none does.
+
+### Collection disabled against default — 5 s
+
+| arm | readings (req/sec) |
+|---|---|
+| default, 1 MiB threshold | 2981.1, 3410.3, 3300.8 |
+| collection disabled | 5064.7, 5414.8, 5561.1, 4892.4 |
+
+The first three readings of each arm were alternated. The fourth disabled
+reading ran about 20 s after them, outside the alternation, and carried
+`NOVA_GC_DEBUG`. Across all four disabled readings the working set reached
+**2,361,708–2,650,084 K** as `tasklist` reports it, in about six seconds,
+against 15,644–16,096 K for the default arm. This is why the series is
+short: a 20-second disabled run would not fit in this host's free memory.
+
+**What the differential is a differential of.** The disabled arm skips
+marking, sweeping *and* every `free()`, and pays first-touch page faults on
+about 2.4–2.7 GB of fresh memory instead. So 88.8–155.6 microseconds prices "the
+collector plus freeing" against "never reusing memory". It is not the mark
+phase alone.
+
+### The cost scales mostly with bytes allocated, not with how often collection runs
+
+Long series, alternated, 15 s each:
+
+| arm | req/sec | collections | per collection | total collector time |
+|---|---|---|---|---|
+| default, 1 MiB | 3289.0, 3227.9, 3127.3 | — | — | — |
+| default, timer on | 3260.5, 3258.6, 3074.5 | 818–850 | 11.8–12.4 ms mean | 10.02–10.21 s |
+| 256 MiB threshold, timer on | 3289.8, 3235.3, 3259.5 | 9–10 | 874–917 ms mean | 7.87–9.17 s |
+
+Cutting the collection count 82- to 94-fold cuts total collector time by
+only 8.5% to 23%, and throughput does not move. The two total-time ranges do
+not overlap, so a part of the cost does depend on collection count. Per
+byte freed, the collector cost 3.89–4.14 ns at the 1 MiB threshold and
+3.26–3.42 ns at 256 MiB. **Most of the cost follows the garbage, and the
+garbage is set by what the program allocates. So raising the threshold is
+neither a fix nor a control.** One timed run freed 2.55 GB over its life.
+
+The totals cover the whole process life, including seeding, the warmup and
+the measured window, about 20 s of load in all. **The timer's ~10 s is
+therefore roughly half the process's time**, which is more than the 30–46%
+the differential implies. The two are different quantities, and three
+candidates for the gap are known and untested: the timer includes the
+collector's own logging; the disabled arm pays for page faults; and the
+timer's share comes from 20-second runs, the differential from 6-second
+runs whose live set was not recorded, and each collection costs more once
+the live set takes its second step (below). The gap is recorded and not explained.
+
+**Bytes allocated per request are not measured.** The generator does not
+report the warmup's request count, so the denominator is unknown. The
+working-set figures put it in the tens of kilobytes per request, and that is
+an inference.
+
+### The live set's second step follows the generator's warmup boundary
+
+In the timed default runs the live set grows in two steps, not steadily.
+It climbs from about 2,080 objects to about 10,700 by the eighth
+collection and holds there. Then, within three collections (collections
+349–364, depending on the run), it jumps to about 22,300 (1.94 MB) and
+holds there for the rest of the run. The per-collection time follows it:
+the first three collections of each run took 2.3–3.7 ms, the last three
+12.2–19.7 ms.
+
+`nova-bench-http` runs the warmup and the measurement as two separate
+`run_load` calls. So when the warmup ends, 200 connections close and 200
+new ones open. **Moving that boundary moves the step**, in one timed run
+per arm, all 200 connections and 20 s of load except where noted:
+
+| `--warmup` | second step, by bytes freed so far | final live objects |
+|---|---|---|
+| 0 (15 s of load) | none | 10,713 |
+| 5 | 0.67 of 2.55 GB, 26% | 22,296 |
+| 10 | 1.27 of 2.44 GB, 52% | 22,329 |
+
+The warmup boundaries sit at 25% and 50% of the load's duration, so the
+step lands at the boundary if the allocation rate is steady, which is
+assumed rather than measured.
+
+**So the objects added at the boundary stay live for the rest of the run,
+and no collection reclaims them.** About 11,600 objects for 200 closed
+connections is about 58 per connection. This locates the growth; it does
+not name what holds those objects. Retained per-connection or per-task
+state and false roots from the conservative stack scan are both
+candidates. **It bears on the gate's own figures**: every procedure these
+records give for a ten-user reading carries `--warmup 5`, and the
+generator's default is 1 s. So if those runs behaved as these did, their
+measured windows sat on the upper plateau. Whether that depresses them is
+not measured here. The one no-warmup reading, 3099.3 req/sec, sits
+inside the 3074.5–3260.5 range of the timed 5 s-warmup readings, which
+cannot show a small effect. **This
+bears on "Whether process age is the collector", below, and does not
+settle it.**
+
+### What this does not settle
+
+- **How much of the cost is marking, sweeping, or `free()`.** The timer
+  covers the whole cycle.
+- **Whether allocating less would recover the differential.** It is the
+  obvious reading of the scaling result, and it is untested.
+- **The socket write, the scheduler and `read_request`'s intrinsic parse**,
+  which remain unmeasured.
+- **Anything about other hosts.** One host, Windows, three or four readings
+  per arm.
+
+### The instrumentation, for reproduction
+
+Applied to `crates/nova-runtime/src/gc.rs` at `d029d71`:
+
+```diff
++fn thresh() -> usize {
++    static T: OnceLock<usize> = OnceLock::new();
++    *T.get_or_init(|| {
++        std::env::var("NOVA_GC_THRESHOLD")
++            .ok()
++            .and_then(|v| v.parse().ok())
++            .unwrap_or(INITIAL_THRESHOLD)
++    })
++}
++
+@@ fn maybe_collect(incoming: usize) {
+-        h.alloc_since_gc + incoming >= h.next_gc
++        h.alloc_since_gc + incoming >= h.next_gc.max(thresh())
+@@
+ fn collect() {
++    let t0 = std::time::Instant::now();
++    collect_inner();
++    if debug() {
++        let ns = t0.elapsed().as_nanos();
++        let (n, live) = HEAP.with(|h| {
++            let h = h.borrow();
++            (h.objects.len(), h.live_bytes)
++        });
++        eprintln!("nova-gc-time: ns={ns} objects={n} live={live}");
++    }
++}
++
++fn collect_inner() {
+@@ fn collect_with_roots(roots: &[usize]) {
+-        h.next_gc = std::cmp::max(INITIAL_THRESHOLD, h.live_bytes.saturating_mul(2));
++        h.next_gc = std::cmp::max(thresh(), h.live_bytes.saturating_mul(2));
+```
 
 ## What was measured, and with what
 
@@ -523,6 +715,10 @@ take one fresh process per data point, because the withdrawn table varied
 payload size and heap age together and attributed the whole difference to
 payload.
 
+**[2026-09-30: "AMENDMENT 2026-09-30" above records the collector's
+per-cycle time growing with the live set over a run. That bears on this
+mechanism and does not establish it.]**
+
 **The harness ceiling figure is noisy, not wrong.** `--self-test` spawns its
 server inside the generator binary, so the target binary is irrelevant to
 it, and the withdrawn `rps=122129.0` is **not invalidated** by the
@@ -599,7 +795,8 @@ replicated pair. **The residual is on the order of 20% at the fast end, not
 92%**, and it is unattributed to any named mechanism. Figures that nearly
 add up are still not an explanation, and nothing here measured
 `read_request`'s parse, the socket write, the scheduler or the collector
-separately.
+separately. **[2026-09-30: the collector now is — see "AMENDMENT
+2026-09-30" above.]**
 
 ## Measured 2026-09-12: `stringify`'s scalar fast path
 
@@ -665,7 +862,9 @@ produced it.
 - **The remaining fifth of the per-request budget**, above. Narrowed, not
   attributed.
 - **Whether process age is the collector.** Measured as an effect; ADR 0002
-  is a plausible cause and is not established here.
+  is a plausible cause and is not established here. **[2026-09-30: still
+  not established; see "AMENDMENT 2026-09-30" above for the growing live
+  set.]**
 - **The two costs already recorded against `std/http`** — eager header
   materialisation, and quadratic body accumulation — are neither confirmed
   nor refuted. The generator sends one header and no body, so this

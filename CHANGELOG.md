@@ -55,6 +55,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alone is no longer supported by that control — nor is it refuted.** An
   empty store is not the gate's workload, and the gate's own figure is
   unchanged: it remains measured and not met.
+- **The collector's cost is measured at the gate's own workload, and
+  removing it does not reach the gate.** At ten users, disabling collection
+  raises `examples/05-json-api` from 2981.1–3410.3 to 4892.4–5561.1
+  req/sec, ranges disjoint: **88.8 to 155.6 microseconds per request, 30%
+  to 46% of throughput.** With no collection at all the server still needs
+  179.8–204.4 microseconds per request, **1.8x–2.0x over the budget**. The
+  cost scales mostly with bytes allocated rather than with collection
+  count. An 82- to 94-fold cut in collections cuts total collector time by
+  only 8.5% to 23%, and throughput does not move. **The live set's growth
+  over a run follows the load generator's warmup boundary.** In one run
+  per arm, moving `--warmup` moved the step, and with no warmup there was
+  no step. The roughly 11,600 objects added when 200 connections close
+  and 200 open stay live for the rest of the run, and what holds them is
+  not identified. The figures come from an instrumented runtime that is
+  **not on `main`**. The patch, method and limits are in that example's
+  `BENCHMARK.md` under "AMENDMENT 2026-09-30".
 
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
