@@ -2035,7 +2035,10 @@ mod tests {
     /// Returns `fut`'s own task id (for reading its `Slot::Buffer` back via
     /// [`with_test_current`]) and its final status.
     fn spawn_and_pump_for_test(fut: *mut u8) -> (i64, i64) {
-        let id = unsafe { crate::task::nova_rt_task_spawn(fut) };
+        // Kept, not an ordinary spawn: callers read the task's stashed
+        // payload back after it completes, and an ordinary spawned task's
+        // slots are released at completion.
+        let id = unsafe { crate::task::spawn_kept_for_test(fut) };
         let pump: PollFn = poll_ready_immediately_for_test;
         let pump_fut = build_future(pump, STATE_MIN_SIZE, |_| {});
         assert_eq!(unsafe { crate::task::nova_rt_task_block_on(pump_fut) }, 0);
@@ -2778,17 +2781,19 @@ mod tests {
     /// the state object, which is the ordering hazard [`state_slot_of`]
     /// documents.
     ///
-    /// Spawns the connect future directly (`nova_rt_task_spawn`, not
+    /// Spawns the connect future directly (`spawn_kept_for_test`, not
     /// `nova_rt_task_block_on`) so this test -- not `block_on` -- controls
-    /// when its task's `fs::Slot` storage is released. A second, unrelated,
+    /// when its task's `fs::Slot` storage is released. Kept rather than an
+    /// ordinary `nova_rt_task_spawn`, because an ordinary spawned task's slots
+    /// are released at completion. A second, unrelated,
     /// immediately-ready future is then driven through `block_on`, which
     /// "implicitly joins everything queued on this thread" (`block_on`'s own
     /// doc comment) -- draining the connect task to completion too, as a
     /// side effect, without this test ever calling
-    /// `nova_rt_task_take_output`/`_release` *on it*. That is what leaves its
-    /// `Slot::Buffer` entry intact for [`with_test_current`] to read back
-    /// afterward, under the connect task's own id (returned directly by
-    /// `nova_rt_task_spawn`, not guessed).
+    /// `nova_rt_task_take_output`/`_release` *on it*. That, with the kept
+    /// spawn, is what leaves its `Slot::Buffer` entry intact for
+    /// [`with_test_current`] to read back afterward, under the connect task's
+    /// own id (returned directly by `spawn_kept_for_test`, not guessed).
     #[test]
     fn a_successful_connect_stashes_its_fd_via_slot_buffer() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -2796,7 +2801,7 @@ mod tests {
         let addr_ptr = crate::gc_str(&addr);
         let fut = unsafe { nova_rt_net_connect_future(addr_ptr) };
         // SAFETY: `fut` is the well-formed future built above.
-        let id = unsafe { crate::task::nova_rt_task_spawn(fut) };
+        let id = unsafe { crate::task::spawn_kept_for_test(fut) };
 
         let pump: PollFn = poll_ready_immediately_for_test;
         let pump_fut = build_future(pump, STATE_MIN_SIZE, |_| {});
