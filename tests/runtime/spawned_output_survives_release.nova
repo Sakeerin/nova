@@ -1,0 +1,40 @@
+// Spawned tasks whose `String` outputs must survive the executor releasing
+// each task's GC root at completion: `join` reads the value through the
+// handle's own future, which keeps the state object reachable. `outer`
+// spawns and joins a child of its own, so two release-at-completion tasks
+// nest. The loop allocates after the tasks can have completed and before
+// they are joined, so under NOVA_GC_STRESS=1 collections run in that gap.
+// See `a_spawned_tasks_string_output_survives_release_at_completion` in
+// `crates/nova-cli/tests/run_tests.rs` for what this does and does not
+// prove.
+
+async fn make(n: Int) -> String {
+    "value-${n}"
+}
+
+async fn outer() -> String {
+    let inner = spawn(make(2))
+    yield_now().await
+    let v = inner.join().await
+    "outer(${v})"
+}
+
+async fn run() -> String {
+    let a = spawn(make(1))
+    let b = spawn(outer())
+    yield_now().await
+    yield_now().await
+    let mut acc = ""
+    let mut i = 0
+    while i < 50 {
+        acc = "${acc}${i}"
+        i = i + 1
+    }
+    let ra = a.join().await
+    let rb = b.join().await
+    "${ra} ${rb} ${i}"
+}
+
+fn main() {
+    println(block_on(run()))
+}

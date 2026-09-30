@@ -54,8 +54,9 @@
 //
 // Holding the future also keeps the state object reachable for as long as the
 // handle itself is: the record is a scanned heap object, so the collector
-// traces through it. That is what makes the value still readable after
-// `task_release` has ended the executor's own claim on it.
+// traces through it. That is what makes the value still readable after the
+// executor has released its own claim on it, which for a spawned task
+// happens when it completes.
 //
 // No bound on `T` here: a bound on a record's type parameter is a resolution
 // scope and is not enforced at construction (ADR 0007), so any bound belongs on
@@ -77,12 +78,15 @@ impl<T> JoinHandle<T> {
     // never empty, so the check that would report one is never reached
     // (ADR 0009 §1's 2026-08-10 amendment).
     //
-    // `task_release` before the read, not after: it ends the executor's claim
-    // on the state object, and the read below then depends only on the claim
-    // this handle has through `self.fut`. It is idempotent, so calling `join`
-    // twice on one handle releases once and reads the same value twice —
-    // deliberately, because Nova has no move checking, so `self` by value
-    // cannot stop a second call.
+    // `task_release` before the read. The executor already released a
+    // spawned task's claim on its state object when the task completed, so
+    // for every task `join` reaches — it awaits completion first — this
+    // call finds the claim gone and does nothing. It stays because it is
+    // idempotent and costs nothing, and because it keeps `join` correct if
+    // the executor's release point ever moves. The read below depends only
+    // on the claim this handle has through `self.fut`. Calling `join` twice
+    // on one handle reads the same value twice — deliberately, because Nova
+    // has no move checking, so `self` by value cannot stop a second call.
     pub async fn join(self) -> T {
         task_join_future(self.fut).await
         task_release(self.fut)

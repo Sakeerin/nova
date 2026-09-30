@@ -1193,6 +1193,37 @@ fn gate_async_tasks_under_gc_stress() {
         .stdout(expected);
 }
 
+/// Spawned tasks' `String` outputs survive the executor releasing each task's
+/// GC root at completion, under `NOVA_GC_STRESS=1` (collect on every
+/// allocation), including a spawned task that spawns and joins its own child.
+///
+/// **What this guards:** that `join` keeps reading a completed task's output
+/// through the handle's future. If it went back to reading the executor's
+/// `Task::output` copy, a collection between completion and join could free
+/// the string, and this would print garbage or crash.
+///
+/// **What it does not prove: soundness.** It discriminates only where the
+/// collector frees memory, which is Windows (`gc::stack_base` is `None`
+/// elsewhere). Even there, conservative over-retention can let it pass with
+/// the rooting wrong, for the reason `gate_async_tasks_under_gc_stress`
+/// documents. The release itself is pinned deterministically on every
+/// platform by `nova-runtime`'s `a_spawned_tasks_root_is_released_at_completion`.
+#[test]
+fn a_spawned_tasks_string_output_survives_release_at_completion() {
+    let expected = std::fs::read_to_string(
+        repo_root().join("tests/runtime/spawned_output_survives_release.stdout"),
+    )
+    .expect("expected-output fixture exists")
+    .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/spawned_output_survives_release.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// `sleep(ms)`, the first primitive that parks rather than spins, proved by
 /// wake *order* rather than by elapsed time.
 ///
