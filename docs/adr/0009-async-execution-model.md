@@ -362,6 +362,13 @@ afterwards.
   standing decision rather than a limitation, and
   `spawning_the_same_future_again_after_release_succeeds` (`nova-runtime`) is
   what pins it as one.
+
+  **Amended 2026-09-30:** a *completed* spawned task is now released at
+  completion, so its future may be spawned again without a `join` first --
+  the same accepted re-poll, reached one step earlier. Two spawns with no
+  executor run between them still abort, because the first task is still
+  live (`spawning_the_same_future_twice_aborts`, `nova-cli`). Pinned by
+  `spawning_a_completed_unjoined_future_again_succeeds` (`nova-runtime`).
 - **No cancellation.** `nova-spec/13-RUNTIME.md` §4.4 specifies structured
   cancellation — dropping a handle cancels the child, plus an explicit
   `task.cancel()`. None of it exists. A `JoinHandle` is a plain value-semantics
@@ -403,6 +410,18 @@ afterwards.
   root at *completion* instead would free a heap-valued output while the task's
   own record still names it. A leak, not unsoundness. The natural fix point is a
   future `JoinHandle` drop or cancellation, i.e. the gap above.
+
+  **Amended 2026-09-30 (branch `release-spawned-task-roots`): fixed for
+  spawned tasks, without drop or cancellation.** `poll_one` now releases a
+  spawned task's root at completion. The trade above assumed the output was
+  read out of `Task::output`, and for a spawned task it is not: `join` reads
+  it through the handle's own future, which keeps the state object
+  reachable by ordinary tracing. Only `block_on`'s root still reads
+  `Task::output`, so only it keeps release-at-take (`spawn_root_internal`).
+  Measured on `examples/05-json-api` before the change: one retained root
+  and about 58 objects per closed connection
+  (`examples/05-json-api/BENCHMARK.md`, "FURTHER AMENDMENT 2026-09-30").
+  Pinned by `a_spawned_tasks_root_is_released_at_completion` (`nova-runtime`).
 
   **The identical shape recurs for a different resource (added 2026-08-14,
   branch `file-open-openoptions`): a `File` that is never `close`d leaks its

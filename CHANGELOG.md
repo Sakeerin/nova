@@ -83,7 +83,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state was freed. That switch breaks `block_on`'s own take and is not a
   fix. Whether the retention costs throughput is not established. Details
   are under "FURTHER AMENDMENT 2026-09-30" in
-  `examples/05-json-api/BENCHMARK.md`.
+  `examples/05-json-api/BENCHMARK.md`. **Fixed since: see `### Fixed`
+  below.**
 
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
@@ -188,6 +189,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   further dated amendment, with the 2026-09-11 and 2026-09-12 amendments
   above each marked with which new series supersedes them rather than
   edited.
+
+### Fixed
+- **A spawned task whose handle is never joined no longer keeps its state
+  alive for the life of the process.** The executor now releases a spawned
+  task's GC root when the task completes; only `block_on`'s own root keeps
+  it until its output is taken. `join` is unaffected, because it reads the
+  output through the handle's future. One behaviour follows: a completed
+  spawned task's future may be spawned again without a `join` first, as it
+  already could after one. `nova_rt_task_take_output` on a spawned task now
+  panics, naming the release; the test harness that used it reads
+  `nova_runtime::task::output_bits` instead. Measured effect: see
+  `examples/05-json-api/BENCHMARK.md`'s amendment for this change.
 
 ## [0.2.0-alpha.4] - 2026-09-12
 
