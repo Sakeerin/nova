@@ -199,8 +199,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spawned task's future may be spawned again without a `join` first, as it
   already could after one. `nova_rt_task_take_output` on a spawned task now
   panics, naming the release; the test harness that used it reads
-  `nova_runtime::task::output_bits` instead. Measured effect: see
-  `examples/05-json-api/BENCHMARK.md`'s amendment for this change.
+  `nova_runtime::task::output_bits` instead. Measured on
+  `examples/05-json-api`, alternated in one session: registered roots after
+  the load generator's warmup boundary 412 -> 201, live objects
+  22,301-22,305 -> 9,887-9,899, and ten-user throughput 3394.0-3487.3 ->
+  3886.4-4008.8 req/sec, ranges disjoint. The gate is still not met. Details
+  in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-09-30
+  (release-spawned-task-roots)".
 
 ## [0.2.0-alpha.4] - 2026-09-12
 
