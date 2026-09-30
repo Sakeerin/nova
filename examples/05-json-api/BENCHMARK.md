@@ -553,8 +553,10 @@ and no collection reclaims them.** About 11,600 objects for 200 closed
 connections is about 58 per connection. This locates the growth; it does
 not name what holds those objects. Retained per-connection or per-task
 state and false roots from the conservative stack scan are both
-candidates. **It bears on the gate's own figures**: every procedure these
-records give for a ten-user reading carries `--warmup 5`, and the
+candidates. **[Later on 2026-09-30: identified as retained per-task state
+-- see "FURTHER AMENDMENT 2026-09-30" below.]** **It bears on the gate's
+own figures**: every procedure these records give for a ten-user
+reading carries `--warmup 5`, and the
 generator's default is 1 s. So if those runs behaved as these did, their
 measured windows sat on the upper plateau. Whether that depresses them is
 not measured here. The one no-warmup reading, 3099.3 req/sec, sits
@@ -610,6 +612,129 @@ Applied to `crates/nova-runtime/src/gc.rs` at `d029d71`:
 @@ fn collect_with_roots(roots: &[usize]) {
 -        h.next_gc = std::cmp::max(INITIAL_THRESHOLD, h.live_bytes.saturating_mul(2));
 +        h.next_gc = std::cmp::max(thresh(), h.live_bytes.saturating_mul(2));
+```
+
+## FURTHER AMENDMENT 2026-09-30: what holds the closed connections' objects
+
+The amendment above located the live set's second step at the load
+generator's warmup boundary and left its holder unnamed. **The holder is
+the executor's own root on each finished connection task.** Nothing ever
+releases that root, because nothing ever joins the task.
+
+### The mechanism, from the source
+
+- `main` accepts each connection with `let h = spawn(serve(conn, store))`
+  and never uses `h` again.
+- `spawn_internal` in `crates/nova-runtime/src/task.rs` registers the
+  task's state object with `gc::add_root`. The only matching
+  `gc::remove_root` calls are in `take_output_internal` and
+  `release_internal`. **Neither runs when a task completes.**
+- **For a task created by `spawn`, the only Nova code that reaches either
+  is `JoinHandle::join`** in `std/task/lib.nova`, which calls
+  `task_release`. The one other route is `block_on`, which takes the output
+  of the root task it spawns itself (`run_to_completion` in `task.rs`), and
+  never of any other task. `std/task` offers no way to detach a task.
+- So a task whose handle is dropped keeps its state object rooted, with
+  everything that state reaches, for the rest of the process.
+  `take_output_internal`'s own doc comment names this cost: "That is a
+  leak, not unsoundness, and it is the deliberate trade". The trade is to
+  release the root at take and accept that leak. The alternative it
+  rejects, unrooting at completion, would free a heap-valued output while
+  `Task::output` still names it.
+
+### The measurement
+
+Two scratch additions, neither on `main` (the patch is below). The first
+prints the size of the collector's registered-root registry on each
+`nova-gc-time` line. That registry also holds the runtime's other
+registered roots, and none were present at these collections: the counts
+below are fully accounted for by tasks. The second is a switch,
+`NOVA_EXPERIMENT_RELEASE_AT_DONE`, that releases a task's root when the
+task completes. **It is an experiment, not a fix. It provably breaks
+`block_on`:** `take_output_internal` asserts that the root has not already
+been released, so a `block_on` root task that completes would panic.
+This server's `main` never completes, so it never trips that. Whether
+releasing at completion is otherwise sound is not settled here. `join`
+reads the output through the handle's own future rather than from the
+executor, which suggests it is, and nothing here tests it.
+
+One run per arm, `--warmup 5 --duration 15`, `NOVA_GC_DEBUG` on, binary
+694,272 bytes. The result lines, `errors=0` in each, and the choice of
+binary were read from the terminal and not saved. The logs corroborate the
+binary: only this build prints `pinned=`.
+
+| arm | registered roots, before → after the warmup boundary | live objects, before → after | req/sec |
+|---|---|---|---|
+| as shipped, 200 connections | 212 → **412** | 10,705 → 22,300 | 2937.0 |
+| as shipped, 50 connections | 62 → **112** | 3,350 → 6,255 | 3307.2 |
+| released at completion, 200 connections | 201 → 201 | 9,887 → 9,887 | 3238.9 |
+
+- **One root per closed connection.** The root count rises by the number
+  of connections the generator opens per phase, 200 and 50. That the old
+  set closed there is taken from the generator: its warmup joins all of its
+  connection threads before the measurement opens fresh ones.
+- **About 58 objects per retained task, at both connection counts.**
+  11,595 objects over 200 is 58.0, and 2,905 over 50 is 58.1.
+- **The starting counts fit the same account.** 212 is the `main` task, the
+  200 open connections, and the 11 connections the seeding step opens (ten
+  `POST`s and one `GET`). Those 11 had already finished and were still
+  registered at the first collection. 62 is 1 + 50 + 11. With the switch
+  on, the count is 201, the `main` task plus the 200 open connections.
+- **Releasing at completion removes the second step, and the old tasks'
+  state is actually freed.** With the switch on, the live set falls at the
+  boundary from its 9,887 plateau to 1,889 objects by collection #360, as
+  the finished tasks' state is collected. It then rebuilds as the new
+  connections open. For collections #360–#418 only 130–134 of the new
+  connections were registered (131–135 roots). From #419 all 200 were, and
+  by #425 the live set was back at about 9,900 objects. It held there until
+  the last three collections, where the measured window's own connections
+  close. The as-shipped 200-connection run shows the same two-stage
+  opening, 130 connections and then 70. Why the generator's second set of
+  connections opens that way is not examined.
+
+**The object counts do not show two further tables that grow.** Both are
+Rust-side and outside the collector's heap:
+
+- `TASKS` is a `Vec` indexed by task id. It gains an entry on every spawn,
+  joined or not, and no code in `task.rs` removes one.
+- `BY_STATE` drops an entry only when the collector frees that state
+  object, so it keeps one entry per task whose root is never released.
+
+### What this does not settle
+
+- **Whether the retention costs throughput.** The req/sec column is one
+  reading per arm. This file records a 1.66x spread across runs of one
+  workload, so the 2937.0 against 3238.9 difference establishes nothing.
+- **Whether it explains "Process age costs 1.29× to 1.38×", below.** An
+  aged process has accepted more connections, so it holds more retained
+  roots. That is consistent with the effect and does not establish it.
+- **What a fix looks like.** Releasing the root the moment a handle is
+  dropped or detached is unsound, because a parked task's state would then
+  be swept. A detach has to mark the task, so that the executor releases
+  it at completion, or at once if the task is already done. That is a
+  design question and is not taken up here.
+
+### The patch, for reproduction
+
+Applied on top of the "AMENDMENT 2026-09-30" instrumentation above. In
+`crates/nova-runtime/src/gc.rs`, the `nova-gc-time` line gains the
+registered-root count:
+
+```diff
++        let pinned = PINNED.with(|p| p.borrow().len());
+-        eprintln!("nova-gc-time: ns={ns} objects={n} live={live}");
++        eprintln!("nova-gc-time: ns={ns} objects={n} live={live} pinned={pinned}");
+```
+
+In `crates/nova-runtime/src/task.rs`, at the end of `poll_one`:
+
+```diff
+     wake_tasks_waiting_on(id);
++    // SCRATCH EXPERIMENT ONLY -- breaks `block_on`'s take of its root task.
++    if std::env::var_os("NOVA_EXPERIMENT_RELEASE_AT_DONE").is_some() {
++        release_internal(id);
++    }
+ }
 ```
 
 ## What was measured, and with what

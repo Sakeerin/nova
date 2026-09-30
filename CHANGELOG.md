@@ -67,10 +67,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over a run follows the load generator's warmup boundary.** In one run
   per arm, moving `--warmup` moved the step, and with no warmup there was
   no step. The roughly 11,600 objects added when 200 connections close
-  and 200 open stay live for the rest of the run, and what holds them is
-  not identified. The figures come from an instrumented runtime that is
+  and 200 open stay live for the rest of the run; what holds them is the
+  next entry. The figures come from an instrumented runtime that is
   **not on `main`**. The patch, method and limits are in that example's
   `BENCHMARK.md` under "AMENDMENT 2026-09-30".
+- **What holds them: a spawned task that is never joined stays a collector
+  root for the life of the process.** `examples/05-json-api` spawns each
+  connection's task and drops the `JoinHandle`. For a spawned task, the
+  executor's root on its state is released only by `JoinHandle::join`
+  (through `task_release`). `block_on` releases only the root task it
+  spawns itself, and `std/task` has no detach. In one run per arm, the
+  registered-root count rose by the number of connections that closed
+  (200 and 50), about 58 objects each. An experiment-only switch that
+  releases the root at completion removed the step, and the old tasks'
+  state was freed. That switch breaks `block_on`'s own take and is not a
+  fix. Whether the retention costs throughput is not established. Details
+  are under "FURTHER AMENDMENT 2026-09-30" in
+  `examples/05-json-api/BENCHMARK.md`.
 
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
