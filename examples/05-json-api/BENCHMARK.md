@@ -521,7 +521,11 @@ the live set takes its second step (below). The gap is recorded and not explaine
 **Bytes allocated per request are not measured.** The generator does not
 report the warmup's request count, so the denominator is unknown. The
 working-set figures put it in the tens of kilobytes per request, and that is
-an inference.
+an inference. **[Later on 2026-09-30: measured, with no warmup so the
+denominator is known -- about 38.3 KB in 963 objects per ten-user request
+on the collector's heap, on the post-fix `6240a05` build rather than the
+build this paragraph describes. See "AMENDMENT 2026-09-30
+(alloc-per-request)" below.]**
 
 ### The live set's second step follows the generator's warmup boundary
 
@@ -873,6 +877,169 @@ explains the gap is not measured.
   Neither is on the GC heap, so neither appears in these counts.
 - **Anything about the gate beyond this workload.** The gate is measured,
   and still not met.
+
+## AMENDMENT 2026-09-30 (alloc-per-request): what one request allocates on the GC heap
+
+The amendment above found the collector still costing 117.8–119.5
+microseconds per request after the retained roots were fixed, and this
+file has found its cost following bytes allocated. **This measures the
+allocation itself, on the collector's heap: one ten-user request allocates
+about 38.3 KB in 963 objects through `gc::alloc`, and three quarters of
+those objects are 16 bytes or smaller.** Rust-side allocations are not
+counted, for example `try_read`'s read buffer in `net.rs` and the
+executor's `TASKS` entries. Sizes are as `gc::alloc` records them, after its
+8-byte floor.
+
+### How it was measured
+
+Scratch instrumentation, not on `main`: cumulative counters in `gc::alloc`
+of bytes and objects allocated, plus a five-bucket size histogram, printed
+on each collection's `nova-gc-time` line. Its patch is below. The binary is
+695,296 bytes, built from `main` at `6240a05` plus the instrumentation. The
+size is consistent with a release build; no build log was kept.
+
+- **Load:** 200 connections, `--duration 15 --warmup 0`, one fresh server
+  process per reading, every reading `errors=0`.
+- **Why no warmup:** all load then falls in the generator's counted window,
+  so the denominator is the count the generator reports.
+- **Per request:** the last collection's cumulative totals divided by that
+  count.
+
+**The division is not exact:**
+- The denominator leaves out the seeding requests: ten `POST`s and one
+  `GET` in the seeded arms, one `GET` for the empty store. The generator
+  counts the request in progress when it stops, because it checks its stop
+  flag only between round trips, and every reading had `errors=0`.
+- The numerator leaves out whatever was allocated after the last
+  collection, at most one collection threshold: 1.4–2.2 MB here, against at
+  least 0.65 GB, so 0.21% or less.
+- The numerator includes startup, seeding, and setting up and tearing down
+  the 200 load connections. No bound on those is derived. Empirically they
+  are too small to see: two nine-header readings with 24,320 and 43,259
+  requests agree to 0.007% in objects per request, so no fixed per-run
+  offset shows.
+- Within one script, the three readings of each arm agree to within 0.03%
+  in objects per request, and to about 0.9% in bytes. The widest byte
+  spread is the empty store's 5,900–5,954, which is one object per request
+  landing in a different size class in one reading.
+
+### Three arms, alternated, three readings each
+
+| arm | body | bytes per request | objects per request |
+|---|---|---|---|
+| empty store | 2 B | 5,900–5,954 | 173.8 (all three) |
+| ten users | 604 B | 38,330–38,372 | 963.0–963.1 |
+| ten users + nine extra request headers | 604 B | 41,815–41,828 | 1,114.8–1,115.1 |
+
+The extra headers are `x-pad-N: 0123456789abcdef`, the form the 2026-09-29
+header sweep in `docs/benchmarks/README.md` uses, on top of the one header
+the generator always sends.
+
+Throughput varied from run to run (1605.8–2933.4 req/sec in the two
+ten-user arms), while objects per request stayed within 0.03%. **Those
+ranges understate the variation between separate scripts.** The
+value-length runs below repeat two of these configurations and land just
+outside them: 962.45 objects against 963.00–963.15 for ten users, and
+1,115.50 against 1,114.81–1,115.12 with nine headers. The differences are
+0.03% to 0.07% in objects, and 0.08% to 0.19% in bytes.
+
+### The differences
+
+- **Serving ten users rather than none adds 32,376–32,472 bytes and
+  789.2–789.4 objects per request.** That is about 79 objects and 3.2 KB
+  per user. Per byte of response body, it is about 1.3 objects and 54
+  bytes. The two arms share the route and differ only in the store, so
+  this is what the whole handler path allocates for ten users: reading the
+  store, building the body, and writing it.
+- **Each extra header adds 16.85–16.90 objects and 382.5–388.8 bytes.**
+  Differences are paired at the widest extremes of each range.
+
+**The per-header object count barely depends on the value's length.**
+One reading each, ten users, varying only the nine extra headers' value:
+
+| header value | objects per request | bytes per request |
+|---|---|---|
+| none (no extra headers) | 962.4 | 38,300 |
+| 4 characters | 1,114.8 | 41,455 |
+| 16 characters | 1,115.5 | 41,883 |
+| 32 characters | 1,116.1 | 42,483 |
+
+Measured against the no-extra-header row from the same script, each
+header adds 16.93 objects at 4 characters, 17.01 at 16 and 17.08 at 32: up
+about 0.15 per header over 28 characters. One object per character would
+add 252 objects per request over that span; the logs show about 1.3.
+**So the roughly 17 objects are close to a fixed per-header cost, not one
+per character.** The small rise is about twice the gap between scripts,
+from one reading per length, and is not examined further. Bytes grow by
+about 4.1 per extra value character per header. Header *name* length was
+not varied.
+
+**This does not settle the 2026-09-29 allocation-count question.** That
+series timed ten-header materialisation in isolation, in
+`docs/benchmarks/profile-http-head.nova`, at 21.3–22.1 microseconds. That
+time fell between two arithmetic predictions, 18 microseconds at two
+allocations per header and 27 or more at three or more, and the series
+recorded that neither count was established. The 17 here counts every
+`gc::alloc` object the whole server makes per header, which is a wider
+scope than materialisation. The two figures describe different things.
+
+### Where the objects are, by size
+
+Per request, from the first reading of each arm. The other two readings
+agree to within about one object per bucket; the largest gap is 1.015
+objects.
+
+| arm | ≤16 B | 17–64 B | 65–256 B | 257–4096 B | >4096 B |
+|---|---|---|---|---|---|
+| empty store | 132.8 obj, 1,818 B | 17.0 obj, 597 B | 23.0 obj, 2,217 B | 1.0 obj, 1,321 B | 0 |
+| ten users | 739.1 obj, 11,195 B | 92.0 obj, 3,666 B | 107.0 obj, 12,808 B | 25.0 obj, 10,661 B | 0 |
+| ten users + nine headers | 888.3 obj, 13,247 B | 89.9 obj, 3,580 B | 107.9 obj, 12,996 B | 29.0 obj, 12,002 B | 0 |
+
+**Objects of 16 bytes or smaller are 77% of a ten-user request's objects
+but 29% of its bytes.** The 25 objects between 257 and 4,096 bytes carry
+another 28% of the bytes. `gc::alloc` rounds every request up to at least
+8 bytes, so the smallest bucket is 8–16 bytes. Which code allocates the
+small objects is not measured here: the counters see sizes, not call sites.
+
+### What this does not settle
+
+- **Which code makes the objects.** The obvious next measurement is
+  attribution by call site. Nothing here names a mechanism for the 79
+  objects per user or the 17 per header.
+- **Whether fewer, larger objects would cost the collector less than the
+  same bytes in many small ones.** This file has found collector cost
+  following bytes. Whether object count matters separately is not
+  measured.
+- **One host, Windows, three readings per arm** (one per value-length
+  variant).
+
+### The instrumentation, for reproduction
+
+Applied on top of the `gc.rs` part of the "FURTHER AMENDMENT 2026-09-30"
+patch above, which is itself a delta on the first "AMENDMENT 2026-09-30"
+patch (the timer and `NOVA_GC_THRESHOLD`): four fields on `Heap` (`total_bytes`, `total_objs`, and
+five-slot `bucket_objs` and `bucket_bytes` arrays, all zero-initialised).
+In `gc::alloc`, after `h.live_bytes += size;`:
+
+```rust
+        h.total_bytes += size as u64;
+        h.total_objs += 1;
+        let b = match size {
+            0..=16 => 0,
+            17..=64 => 1,
+            65..=256 => 2,
+            257..=4096 => 3,
+            _ => 4,
+        };
+        h.bucket_objs[b] += 1;
+        h.bucket_bytes[b] += size as u64;
+```
+
+The `nova-gc-time` line then also prints `total_bytes`, `total_objs`,
+`bobjs` and `bbytes`. The harness seeds the store, or leaves it empty,
+then runs `nova-bench-http --path /users --connections 200 --duration 15
+--warmup 0`, with `--header "x-pad-N: <value>"` repeated for the header
+arms.
 
 ## What was measured, and with what
 
