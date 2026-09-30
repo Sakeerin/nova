@@ -143,7 +143,21 @@ collection actually freeing an object discriminates only on Windows.
   and its comment is updated so it no longer claims to end the executor's
   claim.
 
-### 3.4 Doc comments rewritten because they state the old contract
+### 3.4 One behaviour change for re-spawning
+
+`spawn_internal` aborts when a future's task has not been released ("this
+future is already a live task"). Today a completed but unjoined task is
+unreleased, so spawning its future again aborts. After this change it is
+released at completion, so the same spawn is allowed and re-polls the
+completed state machine from its last suspend point. That is the footgun
+ADR 0009 already accepts for re-spawning after `join`, and it is accepted
+here for the same reason. The abort exists to stop two *live* tasks
+driving one state object, and a completed task is no longer driven.
+`spawning_the_same_future_twice_aborts` (`nova-cli`) spawns twice with no
+executor run in between, so it still aborts. The plan adds a runtime test
+pinning the new case, and the ADR 0009 amendment records it.
+
+### 3.5 Doc comments rewritten because they state the old contract
 
 In `task.rs`: `poll_one`, `spawn_internal`, `take_output_internal` (its
 "The cost of releasing the root here rather than at completion" paragraph),
@@ -154,8 +168,11 @@ In `task.rs`: `poll_one`, `spawn_internal`, `take_output_internal` (its
 
 ## 4. Testing
 
-Every new or changed test is shown failing against the unfixed code
-before the fix goes in.
+Tests that pin the fix's *effect* (1, the reworked tests in 3, and the
+payload and re-spawn tests the plan adds) are shown failing against the
+unfixed code before the fix goes in. Tests 2 and 4 guard the fix's
+*safety*: they pass before and after it by design, and they fail only
+under the mutations in 5, which is how their power is shown.
 
 1. **`a_spawned_tasks_root_is_released_at_completion`** (runtime, new).
    - Spawns a task, drains it to completion, and asserts
