@@ -498,14 +498,20 @@ fn buf_push_str(mut b: Vec<Char>, s: String) {
 // to equal capacity, and capacity is always a power of two here, so exercise
 // the drain at a length that is not one.
 //
-// `unwrap_or(' ')` cannot take its default: `i` runs strictly below `b.len()`,
-// which is exactly the range `Vec::get` answers with `Some`.
+// Reads the backing array directly, not through `Vec::get`. `i` runs strictly
+// below `b.len()`, so the `Option` that `get` returns could never be `None`
+// here -- and every `Some` is a heap allocation. Going through `get` cost one
+// 16-byte object per output character, which
+// `examples/05-json-api/BENCHMARK.md` measured as all of `stringify`'s
+// per-character object count. For any `Vec` changed only through its own
+// methods the backing array is at least `len` long; the index is bounds
+// checked regardless, exactly as `get`'s own read of it was.
 fn vec_chars_to_string(b: Vec<Char>) -> String {
     let n = b.len()
     let mut out = [' '; n]
     let mut i = 0
     while i < n {
-        out[i] = b.get(i).unwrap_or(' ')
+        out[i] = b.data[i]
         i = i + 1
     }
     str_from_chars(out)
@@ -1263,14 +1269,16 @@ fn utf8_bytes(cp: Int) -> [Int] {
 // and `JsonValue` having a nullary variant is why this needs no `Default`
 // bound.
 //
-// `unwrap_or(Null)` cannot take its default: `i` runs strictly below `v.len()`,
-// which is exactly the range `Vec::get` answers with `Some`.
+// Reads the backing array directly, for the reason `vec_chars_to_string`
+// gives: `i` runs strictly below `v.len()`, so `Vec::get`'s `Option` could
+// never be `None` here, and each `Some` would be a heap allocation per
+// element. The index is bounds checked, as there.
 fn vec_to_array(v: Vec<JsonValue>) -> [JsonValue] {
     let n = v.len()
     let mut out = [Null; n]
     let mut i = 0
     while i < n {
-        out[i] = v.get(i).unwrap_or(Null)
+        out[i] = v.data[i]
         i = i + 1
     }
     out
