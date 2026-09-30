@@ -1197,10 +1197,18 @@ fn gate_async_tasks_under_gc_stress() {
 /// GC root at completion, under `NOVA_GC_STRESS=1` (collect on every
 /// allocation), including a spawned task that spawns and joins its own child.
 ///
-/// **What this guards:** that `join` keeps reading a completed task's output
-/// through the handle's future. If it went back to reading the executor's
-/// `Task::output` copy, a collection between completion and join could free
-/// the string, and this would print garbage or crash.
+/// **What this guards:** that a completed spawned task's state stays
+/// reachable through its handle across the gap between release-at-completion
+/// and `join`, which this fixture fills with collections. If the handle ever
+/// stopped reaching the state, that gap is where the string would be freed,
+/// and this would print garbage or crash.
+///
+/// **Its power is not shown by a mutation.** None run on this branch is
+/// caught by this test alone. A `join` that went back to taking the executor's
+/// output copy would not free anything here: it would panic, deterministically
+/// and on every platform, which
+/// `taking_a_spawned_tasks_output_after_completion_panics_naming_the_release`
+/// (`nova-runtime`) pins.
 ///
 /// **What it does not prove: soundness.** It discriminates only where the
 /// collector frees memory, which is Windows (`gc::stack_base` is `None`

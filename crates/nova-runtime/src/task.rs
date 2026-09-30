@@ -145,8 +145,9 @@ struct Task {
     done: bool,
     output: i64,
     /// Whether this task's GC root has already been released, by either
-    /// [`take_output_internal`] or [`release_internal`] -- the latter from
-    /// [`poll_one`] at completion, for every task but `block_on`'s root. The root is one
+    /// [`take_output_internal`] or [`release_internal`]. The latter runs from
+    /// [`poll_one`] at completion, for every task but `block_on`'s root, and
+    /// from [`nova_rt_task_release`]. The root is one
     /// `gc::add_root`, so it must be cancelled at most once; this flag is what
     /// both paths check, which is also what makes `release_internal`
     /// idempotent.
@@ -196,8 +197,9 @@ thread_local! {
     static QUEUE: RefCell<VecDeque<i64>> = const { RefCell::new(VecDeque::new()) };
     /// Every task this thread has ever spawned, indexed by id (its index at
     /// spawn time). Entries are never removed: a finished task stays here,
-    /// `done` and holding its output, since `nova_rt_task_is_done` /
-    /// `nova_rt_task_take_output` can be called an arbitrary time later. A
+    /// `done` and holding its output copy, since `nova_rt_task_is_done` can
+    /// be asked about it an arbitrary time later, [`output_bits`] reads the
+    /// copy, and `run_to_completion` takes it for `block_on`'s root. A
     /// plain `Vec<Task>`, not `Vec<Option<Task>>`: nothing ever vacates a
     /// slot, so an `Option` here would add an arm no code path can reach.
     /// An out-of-range id is still rejected, by `Vec::get` returning `None`.
@@ -919,8 +921,8 @@ fn release_internal(id: i64) {
 ///
 /// - **Not done.** The `output` field still holds its `0` initializer, which
 ///   is indistinguishable from a task that genuinely completed with `0`.
-///   `JoinHandle::join` is specified to poll [`nova_rt_task_is_done`] until
-///   it reports true before reading the output, so reaching here early is a
+///   `run_to_completion`, the one production caller, reaches here only once
+///   its queue has drained and the root is done, so reaching here early is a
 ///   caller bug.
 /// - **Already taken.** The root is gone, so `output`'s bits may name a freed
 ///   object; returning them a second time would be exactly the dangling
@@ -989,8 +991,8 @@ fn take_output_internal(id: i64) -> i64 {
 ///    background workers here: with no waker and no driver thread, a
 ///    `block_on` call is the only thing that ever advances any task on this
 ///    thread, so a task spawned earlier and left pending would otherwise have
-///    no way to reach `nova_rt_task_take_output`'s promised state (`done`,
-///    with an output) at all.
+///    no way to reach the state `nova_rt_task_is_done` and `join` wait for
+///    (`done`, with an output) at all.
 /// 2. **A task that stages a park no longer spins this loop forever, and a
 ///    task that instead keeps re-queueing itself can no longer starve
 ///    anything else's deadline while it does.** (It still re-queues itself

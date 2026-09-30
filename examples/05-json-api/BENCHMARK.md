@@ -702,7 +702,8 @@ Rust-side and outside the collector's heap:
 
 ### What this does not settle
 
-- **Whether the retention costs throughput.** The req/sec column is one
+- **Whether the retention costs throughput.** **[Later on 2026-09-30: measured
+  -- it does; see the amendment below.]** The req/sec column is one
   reading per arm. This file records a 1.66x spread across runs of one
   workload, so the 2937.0 against 3238.9 difference establishes nothing.
 - **Whether it explains "Process age costs 1.29× to 1.38×", below.** An
@@ -768,8 +769,9 @@ binaries contains the experiment switch.
 
 Ten seeded users, a 604-byte `/users` body, 200 connections,
 `--warmup 5 --duration 15`, one fresh server process per reading. The
-twelve readings ran in one script, alternating before and after, with the
-instrumented pair right after each uninstrumented pair. Every reading had
+twelve readings ran in one script, in the order uninstrumented before,
+instrumented before, uninstrumented after, instrumented after, repeated
+three times. Every reading had
 `errors=0` and a 604-byte body, and every result line and server log was
 saved.
 
@@ -786,11 +788,11 @@ instrumented ones. Serial per-request cost falls from 286.8–294.6 to
 or 1.11x to 1.18x the throughput.
 
 **The gate is still not met.** 3886.4–4008.8 req/sec is 2.5x–2.6x short
-of 10k. This session's before range, 3394.0–3487.3, sits above the
-2868.2–3392.4 recorded in the "FURTHER AMENDMENT 2026-09-12" series. That
-is the between-session movement this file has recorded before. So the
-comparison that counts is the alternated one within this session, not
-this session's figures against older ones.
+of 10k. **No comparison with earlier series is made.** The
+"FURTHER AMENDMENT 2026-09-12" series served a 534-byte body, not 604, and
+this file's other 604-byte series from 2026-09-30 used different durations
+or instrumented builds. The comparison that counts is the alternated one
+within this session.
 
 ### The retention
 
@@ -816,24 +818,56 @@ boundary):
 - **Met:** the 11 seeding connections no longer appear. The count during
   warmup is 201, not 212.
 
-In one after run, the root count reads 201 at 1,600 of 1,603 collections
-and 200 at the other three. The before run shows 412 and 212, with
-transitional readings in between.
+Every root-count value each run logged, with how many collections showed
+it:
+
+| run | values (count × collections) |
+|---|---|
+| before 1 | 212 × 364, 269 × 1, 401 × 18, 412 × 497 |
+| before 2 | 212 × 393, 412 × 530 |
+| before 3 | 212 × 413, 238 × 1, 367 × 19, 412 × 498 |
+| after 1 | 200 × 3, 201 × 1,600 |
+| after 2 | 135 × 64, 198 × 1, 199 × 1, 200 × 2, 201 × 1,543 |
+| after 3 | 148 × 51, 198 × 3, 199 × 2, 200 × 2, 201 × 1,530 |
+
+The after runs' 135 and 148 are the boundary itself: the old connections'
+roots are gone and not all of the new ones are open yet, the generator's
+two-stage reopening this file records above. The 198–200 readings come as
+the measured window's own connections close at the end.
 
 **The smaller live set means more collections, not fewer.** The next
 threshold is twice the live bytes, so a smaller live set crosses it
 sooner. Each collection is cheaper, and the total collector time falls by
 6% to 7%, disjoint.
 
-**Not explained: the throughput gain is larger than that cut accounts
-for.** The collector's total falls by about 0.7 s over roughly 20 s of
-load, yet throughput rose 11% to 18%, in both the timed and untimed arms.
-Nothing here says where the rest comes from.
+**In the timed arm, the collector accounts for the whole gain.** That arm
+rose 5.7% to 11.3% (3751.7 over 3550.8, and 3842.4 over 3453.8). Splitting
+each timed run's log at its first root-count change, which falls at the
+warmup boundary, and dividing by the measured window's request count:
+
+| | before (3 runs) | after (2 runs) |
+|---|---|---|
+| collector time after the boundary | 7.475–7.566 s | 6.821–6.870 s |
+| collector time per request | 139.7–145.3 µs | 117.8–119.5 µs |
+| everything else per request, (15 s − collector) ÷ requests | 140.6–143.3 µs | 141.2–141.5 µs |
+
+The third after run is excluded: its root count never changes at the
+boundary, so the split cannot be placed. **The cost outside the collector
+does not move; the collector's per-request cost falls by 14.5% to 18.9%.**
+Two approximations sit in this split: the first root-count change only
+approximates the start of the 15-second window, and the whole-run figures
+(9.88–9.93 s against 9.20–9.27 s) cover warmup too.
+
+The untimed arm's larger gain, 11.4% to 18.1%, is not accounted for here.
+One difference between the arms is known: the instrumented after-build
+logs two lines per collection on 1.71 to 1.83 times as many collections, so
+logging costs the timed arm more after the fix than before. Whether that
+explains the gap is not measured.
 
 ### What this does not settle
 
 - **One host, Windows, three readings per arm.**
-- **Where the gain beyond the collector cut comes from.**
+- **Why the untimed arm gained more than the timed one.**
 - **`TASKS` growth.** The executor's `Vec` still gains one 32-byte entry
   per spawn, joined or not, and the payload-slot table grows the same way.
   Neither is on the GC heap, so neither appears in these counts.

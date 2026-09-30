@@ -748,7 +748,7 @@ mod async_end_to_end {
     /// One probe per test, because the executor's task table is a
     /// `thread_local!` and libtest gives each `#[test]` its own thread: the
     /// probe's own task is therefore always id 0. A second probe on the same
-    /// thread would shift the ids and make `take_output(0)` quietly return the
+    /// thread would shift the ids and make `output_bits(0)` quietly return the
     /// first probe's answer, so that is refused rather than reasoned about.
     const PROBE_TASK_ID: i64 = 0;
 
@@ -869,7 +869,7 @@ mod async_end_to_end {
     }
 
     /// Overwrite `main` with MIR that builds the future twice: once spawned as
-    /// the probe (whose output is left in place for the caller to take), and
+    /// the probe (whose output copy the caller reads with `output_bits`), and
     /// once as `block_on`'s root, whose only job is to drain the queue so the
     /// probe gets polled. Two separate futures, because one future must not be
     /// registered as two tasks sharing a state object.
@@ -1425,7 +1425,7 @@ mod async_end_to_end {
 
     /// A unit-returning `async fn` never touches the output slot itself, yet
     /// the executor reads it on completion regardless. What is asserted here is
-    /// that the run completes at all: reaching `take_output` means the poll
+    /// that the run completes at all: reaching `output_bits` means the poll
     /// function returned exactly `POLL_READY` and the executor's unconditional
     /// read of `STATE_SLOT_OUTPUT` stayed inside a state object with the
     /// fewest temp slots any body can have -- the `STATE_MIN_SIZE` case.
