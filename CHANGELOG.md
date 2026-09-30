@@ -85,6 +85,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are under "FURTHER AMENDMENT 2026-09-30" in
   `examples/05-json-api/BENCHMARK.md`. **Fixed since: see `### Fixed`
   below.**
+- **What one request allocates on the collector's heap, measured.** On
+  `examples/05-json-api`, with no warmup so the whole load is counted, a
+  ten-user request allocates 38,330-38,372 bytes in 963.0-963.1 objects
+  through `gc::alloc`; Rust-side allocations are not counted. An
+  empty-store request allocates 5,900-5,954 bytes in 173.8 objects, so
+  serving ten users adds about 79 objects and 3.2 KB per user. Each extra
+  request header adds about 17 objects, nearly independent of the header
+  value's length (16.93 to 17.08 objects per header over 4 to 32
+  characters). 77% of a ten-user request's objects are 16 bytes or
+  smaller, carrying 29% of its bytes. Which code allocates them is not
+  measured. From scratch instrumentation that is **not on
+  `main`**; details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-09-30 (alloc-per-request)".
 
 ### Changed
 - **`std/json`: a scalar fast path for `stringify`.** A top-level scalar --
