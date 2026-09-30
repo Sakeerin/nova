@@ -1407,6 +1407,34 @@ pub unsafe extern "C-unwind" fn nova_rt_task_take_output(id: i64) -> i64 {
     take_output_internal(id)
 }
 
+/// The raw bits a completed task's output was copied out as, **without**
+/// taking it and without touching any GC root.
+///
+/// For Rust harnesses that read *scalar* outputs (`Int`, `Float`, `Bool`)
+/// of a spawned task. After completion a spawned task's GC root is released,
+/// so if these bits name a heap object, that object may already have been
+/// freed; this function cannot tell and does not try. Nova code reads a
+/// task's output through its future instead (`JoinHandle::join`), which
+/// keeps any heap value reachable by ordinary tracing. Not registered in
+/// [`crate::symbols`], so compiled Nova code cannot reach it.
+///
+/// # Panics
+/// If `id` is unknown, or if task `id` has not completed.
+pub fn output_bits(id: i64) -> i64 {
+    TASKS.with(|tasks| {
+        let tasks = tasks.borrow();
+        let task = tasks
+            .get(id as usize)
+            .expect("output_bits: unknown task id");
+        assert!(
+            task.done,
+            "output_bits: task {id} has not completed, so its output field \
+             still holds its 0 initializer"
+        );
+        task.output
+    })
+}
+
 /// End the executor's claim on the task named by `future`'s state object.
 /// See [`release_internal`] for why this exists next to
 /// [`nova_rt_task_take_output`] rather than instead of it, and why calling it
@@ -2080,7 +2108,18 @@ mod tests {
         let root = make_future(poll_ready_now, 0);
         unsafe { nova_rt_task_block_on(root) };
         assert_eq!(unsafe { nova_rt_task_is_done(fut) }, 1);
-        assert_eq!(unsafe { nova_rt_task_take_output(id) }, 42);
+        assert_eq!(output_bits(id), 42);
+    }
+
+    /// `output_bits` refuses a task that has not completed: its `output`
+    /// field still holds the `0` initializer, which is indistinguishable from
+    /// a genuine `0`.
+    #[test]
+    fn output_bits_of_an_unfinished_task_panics() {
+        let fut = make_future(poll_suspend_once, 0);
+        let id = unsafe { nova_rt_task_spawn(fut) };
+        let r = std::panic::catch_unwind(|| output_bits(id));
+        assert!(r.is_err(), "output_bits must refuse an unfinished task");
     }
 
     /// The lifetime of a task's GC root, asserted on the registry directly

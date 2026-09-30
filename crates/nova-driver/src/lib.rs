@@ -850,20 +850,22 @@ mod async_end_to_end {
         // name the offending status.
         //
         // A task left queued rather than polled -- the other failure shape --
-        // is caught by `nova_rt_task_take_output` itself: it asserts the task
-        // is done before handing back its output, so that case panics here
-        // with its own message rather than silently returning the `output: 0`
+        // is caught by `output_bits` itself: it asserts the task is done
+        // before handing back its output, so that case panics here with its
+        // own message rather than silently returning the `output: 0`
         // initializer. There is no `nova_rt_task_is_done` pre-check for it any
         // more: that entry point now takes a future, not a task id, and this
         // harness only ever kept `PROBE_TASK_ID`, the id `TaskSpawn` returned
         // to the JIT-compiled `main` -- the future itself was never a value
         // this Rust frame held, so there is nothing to pass it.
         //
-        // SAFETY: `PROBE_TASK_ID` was registered by the `TaskSpawn` above, on
-        // this same thread -- `program.run()` ran the synthesized `main`
-        // in-process. Now known complete or this call panics, and taken
-        // exactly once.
-        unsafe { nova_runtime::task::nova_rt_task_take_output(PROBE_TASK_ID) }
+        // `output_bits` rather than `nova_rt_task_take_output`: the probe is a
+        // *spawned* task, and a spawned task's GC root is released at
+        // completion, so its output can no longer be taken. Every probe in
+        // this module returns a scalar (`Int`, `Float`, `Bool` or unit),
+        // which is what `output_bits` is for -- its bits are read, not
+        // dereferenced.
+        nova_runtime::task::output_bits(PROBE_TASK_ID)
     }
 
     /// Overwrite `main` with MIR that builds the future twice: once spawned as
