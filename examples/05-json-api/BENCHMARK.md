@@ -1891,6 +1891,152 @@ shares in the headline span both sets.
   in 16 in sweep order, not random.
 - **One host, Windows, six readings in two sets.**
 
+## AMENDMENT 2026-10-01 (gc-page-heap): small objects in size-class pages
+
+The "(gc-phase-cost)" amendment found about 70% of collection time going
+to work over every object on the heap. This change, ADR 0020, moves every
+object of 2048 bytes or less into 64 KiB pages of fixed-size slots, marked
+and swept by bitmap. **Ten-user throughput rose from 3983.0–4411.0 to
+7559.7–9129.2 req/sec, ranges disjoint: 1.71x to 2.29x. That is
+109.5–132.3 microseconds per request against the gate's 100, so the
+absolute criterion is now short by 1.10x to 1.32x.** In the profiling
+build the collector costs 11.6–12.9 microseconds per request, against
+93.8–101.6 in "(gc-phase-cost)"'s profiling build. An allocation costs
+29.8–34.9 ns, against 65.6–77.4 in "(noncollector-cost)". That earlier
+bracket also held extra counter work, so not all of the drop is the
+change. Peak working set fell from 12.0–12.2 MB to 9.3–10.0 MB.
+
+### How it was measured
+
+- **Binaries:**
+  - `before`: 691,712 bytes, `main` at `331dec5`, built from its own
+    worktree. That is the plain build's byte size recorded in
+    "(noncollector-cost)".
+  - `after`: 700,928 bytes, branch `gc-page-heap` at `2225e6c`.
+  - The build commands deleted every sibling name before each
+    `nova build -o`. They were run by hand and are not saved as a script.
+- **Configuration:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`, one fresh process per reading. Before and
+  after were alternated, and every reading was `errors=0`.
+- **Peak working set** is the process's `PeakWorkingSet64`, read through
+  PowerShell just before the process is killed.
+
+The predictions were written before anything was built:
+
+| prediction | measured | verdict |
+|---|---|---|
+| before 4200–4800 req/sec | 3983.0–4411.0 | one reading below |
+| after 5500–8000 req/sec | 7559.7–9129.2 | two readings above |
+| collector 15–35 µs per request | 11.64–12.94 | below: smaller than predicted |
+| allocation 15–40 ns per call | 29.8–34.9 | within |
+| large path under 5 objects per request | 0 | within |
+| peak working set after 0.8x–1.5x before | 0.775–0.815 per pair | two of three pairs below |
+
+### Throughput and footprint
+
+In run order:
+
+| reading | build | req/sec | peak working set |
+|---|---|---|---|
+| 1 | before | 3983.0 | 12,230,656 B |
+| 2 | after | 7559.7 | 9,969,664 B |
+| 3 | before | 4411.0 | 12,017,664 B |
+| 4 | after | 8658.7 | 9,318,400 B |
+| 5 | before | 4308.5 | 11,988,992 B |
+| 6 | after | 9129.2 | 9,314,304 B |
+
+The after readings span 1.21x, wider than the before readings' 1.11x.
+The three after readings rose in run order. With three readings, that
+is not evidence of a trend, and its cause is not known.
+
+### Where a request's time goes now
+
+These figures come from a profiling build of 702,464 bytes: the `after`
+runtime plus scratch timers, never committed. It ran
+three fresh processes with `--warmup 0` and `NOVA_GC_DEBUG` set, and every
+RESULT line was kept. The timers cover:
+- the root scan;
+- the large-object sort;
+- marking;
+- the page sweep;
+- the large-object sweep;
+- the state-map prune;
+- the whole collection;
+- one `alloc` call in 16, skipping any call during which a collection ran.
+
+The allocation sample is corrected by the 35.8 ns clock bias calibrated in
+"(noncollector-cost)".
+
+| | run 1 | run 2 | run 3 | "(gc-phase-cost)", runs 4–6 |
+|---|---|---|---|---|
+| requests | 119,866 | 130,798 | 129,571 | |
+| req/sec | 7972.0 | 8695.3 | 8618.4 | 4231.1–4548.4 |
+| wall time per request | 125.4 µs | 115.0 µs | 116.0 µs | 219.9–236.3 µs |
+| **collector** | **12.94** | **11.67** | **11.64** | **93.8–101.6** |
+| — mark | 10.89 | 10.02 | 10.02 | 25.8–28.0 |
+| — outside every phase, including the `nova-gc:` debug print | 1.81 | 1.39 | 1.37 | 2.48–2.83 |
+| — page sweep | 0.099 | 0.121 | 0.104 | sweep 42.9–46.2 |
+| — state-map prune | 0.083 | 0.078 | 0.077 | `forget_freed_state` 6.8–8.8, inside the sweep |
+| — root scan | 0.062 | 0.060 | 0.064 | 0.12–0.15 |
+| — large sort and large sweep together | 0.0017 | 0.0016 | 0.0016 | clearing, building and sorting the index 22.6–24.5 |
+| allocation outside collection | 18.0 | 15.4 | 15.5 | 33.8–39.9 ("(noncollector-cost)") |
+
+**Per collection:**
+- A collection takes 705.6–784.0 µs, against 5.59–6.05 ms.
+- It comes every 60.6 requests.
+- Marking is 84.1–86.1% of it, at 6.61–7.18 ns per scanned word against
+  18.8–20.4 ns.
+- It scans 91,817–91,836 words, against 81,289–81,370, a rise of about
+  12.9%. Marking now scans each slot's full size rather than the requested
+  size, which adds rounding-tail words. Whether that accounts for the whole
+  rise, or the survivors changed as well, is not known: this run counted
+  neither the tail words nor the survivors.
+
+**Per allocation:** 515.8–516.1 calls per request, at 65.6–70.7 ns raw
+and 29.8–34.9 ns corrected. The bracket differs from "(noncollector-cost)"'s,
+which also held two collection-count reads and that build's allocation
+counters. That amendment said its figure overstates allocation by a few
+ns, so part of the drop from 65.6–77.4 is the measurement, not the
+change.
+
+**The large path took no objects at all** in any of the three runs: zero
+objects and zero bytes.
+
+**What is left of the budget.** Collection plus allocation is now
+27.1–31.0 µs of a 115.0–125.4 µs request in the profiling build.
+**Subtracting them leaves 87.9–94.5 µs, which is close to the whole
+100-microsecond budget on its own.** That figure is derived, not measured,
+and it includes the profiling's own overhead:
+- the per-collection `nova-gc-pg:` print, which sits outside the
+  collection timer;
+- the counter work on every allocation;
+- the clock reads around the sampled one call in 16. By the calibrated
+  pair cost that is about 2.4 µs per request, an estimate.
+
+"(noncollector-cost)" split its own remainder, 92.9–101.6 µs on an earlier
+build, into three parts:
+- socket calls, 42.8–47.4;
+- everything else, 49.2–53.1;
+- idle wait, 0.98–1.06.
+
+This amendment did not re-measure that split.
+
+### What this does not settle
+
+- **Why the peak working set fell.** Three things the old heap had are
+  candidates. None was measured.
+  - The 24-byte `Obj` record that each of about 40k objects per collection
+    carried.
+  - The 24-byte-per-object sort index each collection built, about 1 MB.
+  - The system allocator's own overhead per object.
+- **Why the after readings vary as much as they do** (7559.7–9129.2).
+- **The profiling timers' own cost.** The profiling runs used
+  `--warmup 0` with `NOVA_GC_DEBUG` set, and were not alternated with the
+  plain runs. So their 7972.0–8695.3 req/sec cannot rule out an overhead
+  of around 10%, inside a plain after range that is itself 1.21x wide.
+- **What the remaining 87.9–94.5 µs is made of** on this build.
+- **One host, Windows, three readings per arm.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
