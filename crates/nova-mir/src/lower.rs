@@ -591,6 +591,29 @@ impl<'a> Lowerer<'a> {
                     self.push(Stmt::ConstStr(t, String::new()));
                     return t;
                 }
+                // Three or more parts: one array of the parts and one n-ary
+                // concatenation, which copies each part once and builds one
+                // string. Pairwise folding made a new string per part, each
+                // copying everything built so far. Parts are lowered in the
+                // same order as before, so evaluation order, side effects and
+                // any `.await` inside a part are unchanged. Two parts keep the
+                // pairwise call below: an array there would cost three objects
+                // against two.
+                if parts.len() >= 3 {
+                    let elems: Vec<(Temp, MirTy)> = parts
+                        .iter()
+                        .map(|part| (self.lower_expr(part), MirTy::Ptr))
+                        .collect();
+                    let arr = self.new_temp(MirTy::Ptr);
+                    self.push(Stmt::MakeArray { dst: arr, elems });
+                    let t = self.new_temp(MirTy::Ptr);
+                    self.push(Stmt::CallRuntime {
+                        dst: Some(t),
+                        func: RtFunc::StrConcatN,
+                        args: vec![arr],
+                    });
+                    return t;
+                }
                 let mut acc = self.lower_expr(&parts[0]);
                 for part in &parts[1..] {
                     let rhs = self.lower_expr(part);

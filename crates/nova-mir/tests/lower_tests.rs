@@ -33,6 +33,78 @@ fn function_names(mir: &nova_mir::Module) -> Vec<&str> {
     mir.functions.iter().map(|f| f.name.as_str()).collect()
 }
 
+/// Every statement of the function named `name`, or of its one
+/// monomorphised instance (`name.0`, ...), which is how lowering names a
+/// top-level function.
+fn stmts_of<'m>(mir: &'m nova_mir::Module, name: &str) -> Vec<&'m nova_mir::Stmt> {
+    let instance = format!("{name}.");
+    let f = mir
+        .functions
+        .iter()
+        .find(|f| f.name == name || f.name.starts_with(&instance))
+        .unwrap_or_else(|| panic!("no function `{name}`: {:?}", function_names(mir)));
+    f.blocks.iter().flat_map(|b| &b.stmts).collect()
+}
+
+fn count_rt(stmts: &[&nova_mir::Stmt], want: nova_mir::RtFunc) -> usize {
+    stmts
+        .iter()
+        .filter(|s| matches!(s, nova_mir::Stmt::CallRuntime { func, .. } if *func == want))
+        .count()
+}
+
+/// An interpolation of three or more parts lowers to one array of the parts
+/// and one n-ary concatenation, not a chain of pairwise ones.
+#[test]
+fn an_interpolation_of_three_or_more_parts_lowers_to_one_nary_concat() {
+    let mir = mir_for(
+        "fn s(a: Int, x: String, y: String) -> String { \"a=${a} x=${x} y=${y}\" }\n\
+         fn main() { println(s(1, \"p\", \"q\")) }",
+    );
+    let stmts = stmts_of(&mir, "s");
+    assert_eq!(
+        count_rt(&stmts, nova_mir::RtFunc::StrConcatN),
+        1,
+        "{stmts:?}"
+    );
+    assert_eq!(
+        count_rt(&stmts, nova_mir::RtFunc::StrConcat),
+        0,
+        "{stmts:?}"
+    );
+    assert_eq!(
+        stmts
+            .iter()
+            .filter(|s| matches!(s, nova_mir::Stmt::MakeArray { .. }))
+            .count(),
+        1,
+        "{stmts:?}"
+    );
+}
+
+/// Exactly two parts keep the single pairwise call: an array there would
+/// cost three objects where the pairwise call costs two. A guard, which
+/// passes before and after the change; the mutation that applies the n-ary
+/// path to two parts is what shows its power.
+#[test]
+fn an_interpolation_of_two_parts_keeps_the_pairwise_concat() {
+    let mir = mir_for(
+        "fn s(x: String, y: String) -> String { \"${x}${y}\" }\n\
+         fn main() { println(s(\"p\", \"q\")) }",
+    );
+    let stmts = stmts_of(&mir, "s");
+    assert_eq!(
+        count_rt(&stmts, nova_mir::RtFunc::StrConcat),
+        1,
+        "{stmts:?}"
+    );
+    assert_eq!(
+        count_rt(&stmts, nova_mir::RtFunc::StrConcatN),
+        0,
+        "{stmts:?}"
+    );
+}
+
 #[test]
 fn hello_world_lowers() {
     let mir = mir_for("fn main() { println(\"hi\") }");
