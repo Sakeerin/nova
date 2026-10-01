@@ -166,6 +166,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on its own. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
   (gc-page-heap)".
+- **What the rest of a request is made of, split.** After the page heap,
+  a ten-user request in a profiling build splits as follows:
+  - everything else, derived by subtraction (compiled code, runtime
+    helpers, the scheduler, the profiling's own cost and any OS time on
+    other threads): 49.7-52.5 microseconds, 41-42%;
+  - the one socket write per request: 35.5-38.6, 30%;
+  - allocation: 14.3-16.8, 12-13%;
+  - the collector: 11.6-12.0, 9-10%;
+  - the OS call of the one read that returns data: 3.6-4.0;
+  - the OS calls of the 0.98 reads per request that find nothing waiting:
+    1.5-1.7 in all;
+  - the readiness wait: about 1.
+
+  The write alone costs more than the gate's remaining gap, 12.4-28.7
+  microseconds over budget in the plain build. It costs about ten times a
+  data read, and why is not measured. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
+  (remainder-split)".
 
 ### Changed
 - **The collector allocates small objects from size-class pages.** Every

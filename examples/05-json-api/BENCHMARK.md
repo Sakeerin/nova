@@ -2037,6 +2037,163 @@ This amendment did not re-measure that split.
 - **What the remaining 87.9–94.5 µs is made of** on this build.
 - **One host, Windows, three readings per arm.**
 
+## AMENDMENT 2026-10-01 (remainder-split): what the rest of a request is made of
+
+"(gc-page-heap)" put collection plus allocation at 27.1–31.0
+microseconds of a ten-user request, and derived the rest, 87.9–94.5, by
+subtraction. Here collection plus allocation is 25.9–28.7, and the rest
+91.3–97.8. This measures 41.6–45.3 µs of that rest directly: the socket
+calls and the readiness wait. The other 49.7–52.5 is still a subtraction.
+
+**The response write is the costliest single item measured: one write per
+request at 35.5–38.6 µs, 30.3–30.5% of the request.** Reads are cheap:
+- a read that returns data (an `Ok` read) takes 3.6–4.0 µs in the OS call;
+- a read that finds nothing waiting happens 0.98 times per request and
+  takes 1.5–1.7 µs per request in the OS call, 1.3%. The park and re-poll
+  it leads to are not measured separately.
+
+**Everything else is 49.7–52.5 µs, 41.5–42.4%.** That is compiled Nova
+code, runtime helpers, the scheduler, the profiling's own cost, and any OS
+time spent on other threads.
+
+### How it was measured
+
+Scratch timers in the runtime, never committed. They add to the
+"(gc-page-heap)" profiling build:
+
+- **Socket calls:** around the `std::io::Read::read` call in `net.rs`'s
+  `try_read`, and around the `std::io::Write::write` call in `try_write`.
+  Each call's time and count is kept by outcome:
+  - a read returning `Ok`, a read that would block, any other read. An
+    `Ok` read of zero bytes, which is end of file, counts as `Ok`;
+  - a write that completes, a partial write, any other write.
+- **`try_read` and `try_write` as wholes**, and the allocation and zeroing
+  of `try_read`'s 4096-byte buffer.
+- **Readiness wait:** around the whole of `poll::wait`, with its call count,
+  the number of sockets it was given and the number it returned.
+- **The collector, and one `alloc` call in 16:** exactly as in
+  "(gc-page-heap)". The allocation sample is corrected by the 35.8 ns
+  clock bias. The socket and wait timers carry the same bias, about 0.1 µs
+  per request across three calls, and it is left in.
+- **Everything else** is wall time minus the socket OS calls, the readiness
+  wait, the collector and allocation. The `try_read`, `try_write` and
+  buffer timers overlap those and are not subtracted.
+
+**Readiness wait during seeding is excluded.** The counters cover the whole
+process, but by the first collection the wait total already held
+0.939–0.959 s over 31–33 calls. That is mostly idle time while the eleven
+seeding requests trickled in, before the load generator connected, so the
+wait figure below subtracts the value at the first collection. The other
+counters are left whole; seeding is under 0.01% of their requests.
+
+Ten users, a 604-byte body, 200 connections, `--warmup 0 --duration 15`,
+three fresh processes, every reading `errors=0`, `NOVA_GC_DEBUG` set. The
+profiling server is 704,512 bytes: `main` at `00ccb48` plus the timers. The
+plain build of that commit is 700,928 bytes.
+
+These predictions were written before anything was built:
+
+| prediction | measured | verdict |
+|---|---|---|
+| about 3 socket calls per request: 2 reads, 1 write | 1.000 `Ok` reads, 0.983–0.985 reads that find nothing, 1.000 writes | within |
+| about 1 read per request finds nothing waiting | 0.983–0.985 | within |
+| 10–16 µs per socket call | reads 1.6–4.0, writes 35.5–38.6 | wrong: the average fits, but the calls are nothing alike |
+| socket total 30–48 µs per request | 40.6–44.3 | within |
+| readiness wait under 2 µs per request | 0.94–1.03 | within |
+| collector 11–13 µs per request | 11.60–11.98 | within |
+| allocation 15–18 µs per request | 14.28–16.76 | one run below |
+| everything else 40–60 µs per request | 49.7–52.5 | within |
+| `try_read`'s 4096-byte buffer under 1 µs per request | 0.67–0.71 | within |
+| wall time 110–130 µs per request | 117.2–126.5 | within |
+
+### Per request
+
+| | run 1 | run 2 | run 3 | share |
+|---|---|---|---|---|
+| requests | 118,855 | 128,252 | 124,926 | |
+| req/sec | 7904.6 | 8531.3 | 8310.2 | |
+| wall time | 126.5 µs | 117.2 µs | 120.3 µs | 100% |
+| everything else | 52.50 | 49.73 | 50.33 | 41.5–42.4% |
+| socket write, 1.000 per request | 38.61 | 35.47 | 36.46 | 30.3–30.5% |
+| allocation, 516 calls | 16.76 | 14.28 | 15.31 | 12.2–13.2% |
+| collector | 11.93 | 11.60 | 11.98 | 9.4–10.0% |
+| socket read returning `Ok`, 1.000 per request | 3.97 | 3.63 | 3.72 | 3.1% |
+| socket read finding nothing, 0.983–0.985 per request | 1.70 | 1.53 | 1.57 | 1.3% |
+| readiness wait, inside the load window | 1.03 | 0.98 | 0.94 | 0.8% |
+
+- **An `Ok` read carries 41.0 bytes on average**, the whole request head.
+- **No read failed.** The counters do not separate end of file from data.
+  Between the first and last collection, the bytes read are exact
+  multiples of the 41-byte head: 118,819, 128,228 and 124,886 heads over
+  118,821, 128,230 and 124,887 `Ok` reads. That leaves 2, 2 and 1 reads
+  that carried no head, consistent with end of file or with a head split
+  across two reads.
+- **Every write completed in one call.** No write was partial or failed.
+- **The readiness wait is rare and wide.** It ran 0.0049 times per request
+  inside the window. Each wait was given about 200–201 sockets and returned
+  about 199–200 ready.
+- **`try_read`'s work beyond the OS call** is 1.65–1.78 µs per request.
+  - Of that, 0.67–0.71 is allocating and zeroing its 4096-byte buffer.
+  - The other 0.98–1.07 is not broken down. It includes copying the data
+    into a GC byte buffer and making its `NovaStr` node, two allocations
+    also counted under allocation. It also includes freeing the buffer,
+    the handle-table lookup and the timers. An allocation in it can also
+    run a collection, which is then counted under the collector as well.
+
+  It overlaps "everything else" and allocation rather than sitting beside
+  them.
+- **`try_write`'s work beyond the OS call** is 0.66–0.76 µs per request.
+
+**The profiling overhead is not resolved.** The plain build (700,928 bytes)
+and the profiling build were alternated, three readings each, at the
+standard `--warmup 5 --duration 15` with `NOVA_GC_DEBUG` unset. Which
+binary each reading ran is not recorded beside the readings: `run_pk.sh`
+takes it from `$BIN` and does not log it.
+
+| plain | profiling |
+|---|---|
+| 7769.8, 8895.7, 8771.6 | 8118.9, 8087.2, 7912.0 |
+
+The ranges overlap. The per-pair ratios are 1.04, 0.91 and 0.90, and the
+profiling mean is 5.2% lower. That cannot rule out an overhead of around
+10%. **This check ran with `NOVA_GC_DEBUG` unset, while the profile ran
+with it set** and printed two lines per collection, so the printing's
+cost is not in this comparison.
+
+### What the figures bound
+
+- **The write alone costs more than the gate's remaining gap.** The plain
+  build here runs at 112.4–128.7 µs per request, 12.4–28.7 over the 100 µs
+  budget, and the write is 35.5–38.6. Taking the whole write away would
+  leave 81.7–87.9 µs of the profiling build's requests.
+- **One write costs about ten times one data read:** 35.5–38.6 µs against
+  3.6–4.0. By the code, the write carries 676 bytes, the 72-byte response
+  head plus the 604-byte body, against the read's 41, about 16 times as
+  many. How a write's cost depends on its size is not measured.
+- **Everything else, 49.7–52.5 µs, is now the largest category.** It is
+  still not broken down.
+
+### What this does not settle
+
+- **Why a write costs 35.5–38.6 µs.** The load generator's 200 threads share
+  this host, and on loopback a send may do part of the receiver's work, or
+  wait while the OS runs another thread. Nothing here separates those from
+  the server's own cost. How the cost depends on the payload size is not
+  measured either.
+- **What "everything else" contains.** Beyond compiled code, runtime
+  helpers and the scheduler, it holds the profiling's own cost:
+  - the `nova-gc-pg:` print on every collection, outside the collection
+    timer;
+  - the counter work on every allocation;
+  - the clock reads around the sampled allocations, about 2.4 µs per
+    request by "(gc-page-heap)"'s estimate;
+  - the outer timers around `try_read`, its buffer and `try_write`.
+
+  It also holds any OS time spent on other threads outside the timed
+  regions.
+- **The profiling's own cost**, as above.
+- **One host, Windows, three readings.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
