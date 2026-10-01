@@ -427,6 +427,23 @@ impl Pages {
                 .all(|&(b, d)| self.descs[d].base == b && !self.spare.contains(&d))
     }
 
+    /// Test-only: every cursor names a page its class owns, and every
+    /// reserve page is empty and owned by no class. A sweep must leave both
+    /// true, or a class could allocate into a page the reserve or the system
+    /// now holds.
+    #[cfg(test)]
+    pub(super) fn cursors_are_sound(&self) -> bool {
+        let in_dir = |d: usize| self.dir.iter().any(|&(_, x)| x == d);
+        let owned =
+            |d: usize, c: usize| in_dir(d) && !self.descs[d].reserved && self.descs[d].class == c;
+        (0..NUM_CLASSES).all(|c| {
+            self.current[c].iter().all(|&d| owned(d, c))
+                && self.with_space[c].iter().all(|&d| owned(d, c))
+        }) && self.reserve.iter().all(|&d| {
+            in_dir(d) && self.descs[d].reserved && self.descs[d].alloc.iter().all(|&w| w == 0)
+        })
+    }
+
     /// Test-only: return every page to the system and start empty.
     #[cfg(test)]
     pub(super) fn free_all(&mut self) {
@@ -558,6 +575,7 @@ mod tests {
         assert_eq!(p.try_mark(traced), Hit::Done, "already marked");
         assert_eq!(p.try_mark(leaf), Hit::Done, "a leaf is marked, not traced");
         let s = p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!(s.live_slots, 2, "both were marked");
         p.free_all();
     }
@@ -571,6 +589,7 @@ mod tests {
         assert_eq!(p.try_mark(base + nslots * slot), Hit::Done, "the page tail");
         assert_eq!(p.try_mark(base - 1), Hit::Outside);
         let s = p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!(s.live_slots, 0, "none of those marked the allocated slot");
         p.free_all();
     }
@@ -583,12 +602,14 @@ mod tests {
         let gone = p.alloc_slot(c, true);
         assert_eq!(p.try_mark(keep), Hit::Push(keep, 64));
         let s = p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!((s.freed_bytes, s.live_slots, s.live_bytes), (64, 1, 64));
         assert_eq!(p.slot_scan(keep), Some(true));
         assert_eq!(p.slot_scan(gone), None);
         // The mark was cleared, so a second sweep with nothing marked frees
         // `keep` too.
         let s = p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!((s.freed_bytes, s.live_slots), (64, 0));
         p.free_all();
     }
@@ -602,6 +623,7 @@ mod tests {
         unsafe { std::ptr::write_bytes(freed as *mut u8, 0xCD, 32) };
         p.try_mark(keep);
         p.sweep();
+        assert!(p.cursors_are_sound());
         let again = p.alloc_slot(c, true);
         assert_eq!(again, freed, "the lowest free slot is the one just freed");
         let bytes = unsafe { std::slice::from_raw_parts(again as *const u8, 32) };
@@ -618,6 +640,7 @@ mod tests {
         let s2 = p.alloc_slot(c, false);
         p.try_mark(keep);
         p.sweep();
+        assert!(p.cursors_are_sound());
         let r1 = p.alloc_slot(c, false);
         let r2 = p.alloc_slot(c, true);
         assert_eq!((r1, r2), (s1, s2));
@@ -636,6 +659,7 @@ mod tests {
         }
         assert_eq!(p.page_count(), RESERVE_PAGES + 4);
         let s = p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!(s.live_slots, 0);
         assert_eq!(
             p.page_count(),
@@ -684,6 +708,7 @@ mod tests {
             p.try_mark(a);
         }
         p.sweep();
+        assert!(p.cursors_are_sound());
         assert_eq!(p.page_count(), 33);
         assert_eq!(p.reserve_count(), RESERVE_PAGES);
         assert!(p.directory_is_sorted());

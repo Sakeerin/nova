@@ -833,6 +833,31 @@ mod tests {
         assert!(object_info(victim).is_none());
     }
 
+    /// A page taken back from the reserve is an ordinary page again: swept,
+    /// marked and traced on every later collection. A reuse that left it
+    /// flagged as reserved would leave it out of every sweep, so its marks
+    /// would never clear and its garbage would never be freed.
+    #[test]
+    fn a_reused_reserve_page_is_swept_and_traced_on_every_collection() {
+        reset();
+        let _ = alloc(16, true);
+        collect_with_roots(&[]);
+        let child = alloc(48, true) as usize;
+        let parent = alloc(48, true) as *mut usize;
+        unsafe { *parent = child };
+        assert_eq!(
+            HEAP.with(|h| h.borrow().pages.page_count()),
+            1,
+            "the class-48 objects went into the reserved class-16 page"
+        );
+        collect_with_roots(&[parent as usize]);
+        assert_eq!(count(), 2, "parent and child survive the first collection");
+        collect_with_roots(&[parent as usize]);
+        assert_eq!(count(), 2, "and the second, traced again");
+        collect_with_roots(&[]);
+        assert_eq!(count(), 0, "garbage in a reused reserve page is freed");
+    }
+
     // The two tests below exercise `add_root`/`remove_root`'s own bookkeeping
     // (via `PINNED`'s length) directly, without going through `collect()`, so
     // -- unlike the tests in `mod registry` below -- they run on every

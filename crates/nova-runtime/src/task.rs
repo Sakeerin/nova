@@ -2999,6 +2999,60 @@ mod tests {
         );
     }
 
+    /// The same two properties for state objects too big for a page, whose
+    /// liveness the prune predicate finds through `gc`'s large-object list
+    /// rather than a page bitmap. 300 temps make a `(2 + 300) * 8` = 2416-byte
+    /// state, over the 2048-byte page limit. Large non-state objects sit
+    /// between the states, so the predicate's search over that list depends
+    /// on the list being sorted when it runs.
+    #[test]
+    fn a_large_states_key_is_kept_while_reachable_and_dropped_once_freed() {
+        let mut kept = Vec::new();
+        let mut dropped = Vec::new();
+        for i in 0..6 {
+            let _filler = gc::alloc(3000, true);
+            let fut = make_future(poll_ready_now, 300);
+            unsafe { nova_rt_task_spawn(fut) };
+            if i % 2 == 0 {
+                kept.push(fut);
+            } else {
+                dropped.push(fut);
+            }
+        }
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        for &f in kept.iter().chain(&dropped) {
+            unsafe { nova_rt_task_release(f) };
+        }
+        let kept_states: Vec<usize> = kept.iter().map(|&f| state_of(f)).collect();
+        let dropped_states: Vec<usize> = dropped.iter().map(|&f| state_of(f)).collect();
+        for s in kept_states.iter().chain(&dropped_states) {
+            assert!(
+                BY_STATE.with(|m| m.borrow().contains_key(s)),
+                "spawn must have registered every state, or the checks below prove nothing"
+            );
+            assert!(
+                gc::object_info(*s).is_some_and(|(size, _)| size > 2048),
+                "the state must be on the large path"
+            );
+        }
+        let roots: Vec<usize> = kept.iter().map(|&f| f as usize).collect();
+
+        gc::sweep_with_roots_for_test(&roots);
+
+        for s in &kept_states {
+            assert!(
+                BY_STATE.with(|m| m.borrow().contains_key(s)),
+                "a large state a handle can still reach lost its key"
+            );
+        }
+        for s in &dropped_states {
+            assert!(
+                !BY_STATE.with(|m| m.borrow().contains_key(s)),
+                "a freed large state's key survived it"
+            );
+        }
+    }
+
     /// The exact layout `nova_rt_task_yield_future` builds, read back from the
     /// collector's own records.
     ///
