@@ -1,0 +1,49 @@
+// String interpolations of three to eight parts. Their output must be
+// byte-identical whether interpolation lowers to pairwise concatenations or
+// to one n-ary call. Covers every interpolable part type, an empty string,
+// non-ASCII text, a user `Display` type (whose own `fmt` interpolates),
+// parts with side effects (evaluation order), an interpolation in a loop,
+// and an `.await` inside a part.
+
+trait Display { fn fmt(self) -> String }
+
+record P { x: Int, y: Int }
+
+impl Display for P {
+    fn fmt(self) -> String { "(${self.x}, ${self.y})" }
+}
+
+fn side(tag: String, v: Int) -> Int {
+    println("eval ${tag}")
+    v
+}
+
+async fn later(n: Int) -> Int {
+    yield_now().await
+    n * 10
+}
+
+async fn with_await(a: Int) -> String {
+    "a=${a} later=${later(a).await} done"
+}
+
+fn main() {
+    let i = 7
+    let f = 2.5
+    let b = true
+    let c = 'z'
+    let s = "héllo"
+    let e = ""
+    let p = P { x: 1, y: 2 }
+    println("three ${i} parts")
+    println("${i}${f}${b}")
+    println("i=${i} f=${f} b=${b} c=${c}")
+    println("s=${s}|e=${e}|p=${p}|end")
+    println("${side("first", 1)}-${side("second", 2)}-${side("third", 3)}")
+    let mut k = 0
+    while k < 3 {
+        println("loop ${k} of ${3}")
+        k = k + 1
+    }
+    println(block_on(with_await(4)))
+}
