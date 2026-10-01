@@ -1384,7 +1384,9 @@ and 8 ignored across 45 targets. The `nova-cli` target then passed 283 of
   pair's per-request saving is outside the collector, and it may include
   the removed call and `match` per character as well as allocation. That
   split is not measured.
-- **The rest of the per-request objects.** About 621 remain. The earlier
+- **The rest of the per-request objects.** About 621 remain. **[2026-10-01: 105
+  of them removed by joining interpolations once -- see "AMENDMENT
+  2026-10-01 (nary-interpolation)" below.]** The earlier
   attribution put about 93 in `json_response` plus `to_bytes`, 43 in head
   parsing, and the rest in `users_json` and the ~34 outside the pieces
   measured.
@@ -1392,6 +1394,176 @@ and 8 ignored across 45 targets. The `nova-cli` target then passed 283 of
   also drains through `vec_chars_to_string`, run on request bodies. The GET
   path measured here does neither, so the effect on `POST` is not
   measured.
+- **One host, Windows, three readings per arm.**
+
+## AMENDMENT 2026-10-01 (nary-interpolation): interpolation joined once, not pairwise
+
+The previous amendment left about 621 GC objects per ten-user request.
+Probing what remained showed how strings are paid for:
+
+- every runtime string is two objects, a 16-byte header plus a separate
+  byte buffer;
+- evaluating a string literal allocates one header;
+- an interpolation of *n* parts made *n* − 1 pairwise concatenations, each
+  a new two-object string copying everything built so far.
+
+Branch `nary-interpolation` lowers every interpolation of three or more
+parts to one heap array of the parts and one `nova_rt_str_concat_n`, which
+copies each part once and builds one string. **The per-request saving was
+predicted from the code before the change was measured, and the measurement
+matches it: about 105 fewer objects per request.** **Ten-user throughput
+rose from 3929.3–4071.1 to 4257.0–4770.4 req/sec,
+with the ranges disjoint, and the gate is still not met.**
+
+### The prediction, written before measuring
+
+An interpolation of *n* ≥ 3 parts saves 2(*n* − 1) − 3 = 2*n* − 5 objects
+per execution. That is *n* − 1 two-object concatenations replaced by one
+array and one two-object result. Literal headers and conversions are
+unchanged.
+
+| site | parts | runs per request | saving |
+|---|---|---|---|
+| `src/main.nova` `user_json` | 7 (`{"id":`, id, `,"name":`, name, `,"email":`, email, `}`) | 10 | 90 |
+| `std/http` `Response::to_bytes`, status line | 5 (`HTTP/1.1 `, status, a space, reason, CRLF) | 1 | 5 |
+| `std/http` `Response::to_bytes`, header line | 5 (head, name, `: `, value, CRLF) | 2 (`content-length`, `content-type`) | 10 |
+| every 1- and 2-part interpolation on the path | 1 or 2 | — | 0 |
+
+**Predicted: 105 fewer objects per ten-user request, 621 → 516.** Head
+parsing makes no interpolation and was predicted unchanged.
+
+### Allocation, before against after
+
+The same scratch counters as the amendments above, which are not on
+`main`.
+
+**Per call**, one run each, with `NOVA_GC_THRESHOLD=65536`. That makes a
+collection run about every 64 KiB after the first, which always comes at
+the fixed 1 MiB initial threshold, and so keeps the uncounted tail small:
+
+| probe | objects before → after | bytes before → after | predicted objects |
+|---|---|---|---|
+| `user_json`'s 7-part interpolation alone | 17.990 → 8.989 | 392.8 → 226.7 | 18 → 9 |
+| `user_json(u)` | 38.988 → 29.999 | 1,842.4 → 1,677.0 | 39 → 30 |
+| `users_json(s)`, ten users | 450.969 → 361.002 | 25,744.5 → 24,078.2 | 451 → 361 |
+| `json_response(200, body).to_bytes()`, 604-byte body | 92.984 → 77.995 | 3,878.4 → 3,524.9 | 93 → 78 |
+| `stringify(String(s))`, 13 characters (control) | 9.998 → 9.998 | 558.9 → 558.9 | unchanged |
+
+The accumulated output lengths are identical before and after for every
+probe.
+
+**Per request**, ten users, 200 connections, `--warmup 0`, three fresh
+processes per build, alternated:
+
+| | before | after |
+|---|---|---|
+| objects per request | 620.6–620.9 | 515.9–516.0 |
+| bytes per request | 32,828–32,888 | 30,862–30,871 |
+
+That is 104.8–105.0 fewer objects per request within each alternated
+pair, or 104.6–105.1 across the ranges' extremes, against the predicted
+105.
+
+### Throughput, before against after
+
+Uninstrumented binaries: `main` at `0e00190` (691,200 bytes) against this
+branch (691,712 bytes). Ten users, a 604-byte body, 200 connections,
+`--warmup 5 --duration 15`, one fresh process per reading, alternated,
+three readings each. Every reading had `errors=0` and a 604-byte body.
+
+| before | after |
+|---|---|
+| 4049.7, 3929.3, 4071.1 | 4770.4, 4583.9, 4257.0 |
+
+**The ranges do not overlap, though the gap between them is narrow:**
+4071.1 against 4257.0. Serial per-request cost falls from 245.6–254.5 to
+209.6–234.9 microseconds. That is 10.7 to 44.9 microseconds per request,
+or 1.05x to 1.21x the throughput. The gate is still not met: 4257.0–4770.4
+req/sec is 2.1x–2.3x short of 10k.
+
+### The collector, in the counter runs
+
+| | before | after |
+|---|---|---|
+| collector time per request | 116.5, 117.5, 108.6 µs | 93.3, 93.2, 96.2 µs |
+| collections per request | 0.0179 | 0.0168 |
+| time per collection | 6.51, 6.57, 6.06 ms | 5.56, 5.54, 5.73 ms |
+
+Collections per request fell 6.1%, in line with the 6.0% drop in bytes
+allocated, and each collection got shorter too. In the three alternated
+pairs, the collector's drop is 52% to 61% of the per-request saving
+measured in those same counter runs. These runs are instrumented and
+include the collector's own logging.
+
+### Binaries
+
+| binary | bytes |
+|---|---|
+| before | 691,200 |
+| after | 691,712 |
+| before, counters | 694,784 |
+| after, counters | 695,808 |
+| probes | 470,528–527,360 |
+
+Before and after differ for every pair, checked with `cmp`.
+
+### Correctness
+
+Output is byte-identical by construction: the parts are lowered as before,
+in the same order, and both runtime paths copy their bytes in part order.
+It is checked byte for byte only by a new fixture,
+`tests/runtime/interpolation_nary.nova`, pins it: interpolations of three
+to eight parts across every part type, an empty string, non-ASCII text, a
+user `Display` type, parts with side effects, a loop, and an `.await`
+inside a part. The fixture covers 3, 4, 5, 7 and 8 parts; the probes
+above compare only lengths. It runs normally and under
+`NOVA_GC_STRESS=1`. Its output
+was predicted by hand and matched on the unchanged compiler before the
+change.
+
+Three mutations were run and restored:
+
+- dropping the last part fails the runtime test and the fixture;
+- reversing the order fails both;
+- applying the n-ary path to two parts fails the two-part MIR guard.
+
+**The only full workspace run on this branch counted 1146 tests, 1141
+plus the 5 this branch adds: 1145 passed, 1 failed, 8 ignored.** The
+failure was a crash of a compiled `nova test` child, an access violation
+with empty stdout. **That crash family predates this change: base
+`0e00190` shows it too.** From repeated runs of the `nova-cli` target:
+
+| suite | runs | runs with any compiled-child failure | of which an access violation |
+|---|---|---|---|
+| base `0e00190` | 30 | 5 | 2 |
+| this branch | 15 | 7 | 6 |
+| this branch, skipping its two new tests | 15 | 3 | 3 |
+
+The other failures are children that exited non-zero with empty stderr,
+where an abort message was expected. Of three further branch runs outside
+the table, one failed, with three tests crashing, all access violations.
+The full run above is a fourth.
+
+The harness binary of one crashing fixture (`tests/runtime/nova_test.nova`),
+built by each compiler, ran 800 times under 8-way concurrency with no
+access violation and identical exit codes per test. A further 400 runs
+alone are not kept in a log. This checks one fixture's binary, not the
+others that crashed in the suite.
+
+**The branch's higher rate is consistent with its two new tests adding
+load to the parallel suite**: with them skipped, the branch's rate fell to
+the base's. That comparison ran in a separate series, and 7 of 15 against 3
+of 15 is not statistically strong, so this is not established. If it is
+the cause, it is a real cost of this change, which makes an existing flake
+appear more often. The flake's own cause is not established either.
+
+### What this does not settle
+
+- **The literal headers.** Each evaluated string literal still allocates
+  one header. In the probe interpolation that is 4 of the 9 objects left.
+- **Two-part concatenations**, such as `users_json`'s growing `out`, which
+  still copy the whole prefix each time.
+- **The access-violation flake's cause.**
 - **One host, Windows, three readings per arm.**
 
 ## What was measured, and with what
