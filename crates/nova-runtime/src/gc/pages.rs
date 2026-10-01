@@ -9,10 +9,7 @@
 //! and the directory that maps an address to its page. The decision is
 //! `docs/adr/0020-size-class-page-heap.md`.
 
-use std::alloc::{alloc, handle_alloc_error, Layout};
-// Only `free_all` frees a page until Task 2's `release` exists.
-#[cfg(test)]
-use std::alloc::dealloc;
+use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 
 /// Bytes in one page.
 pub(super) const PAGE_BYTES: usize = 1 << 16;
@@ -130,6 +127,25 @@ pub(super) enum Loc {
     Tail,
     /// In slot `index` of the page whose descriptor is `desc`.
     Slot { desc: usize, index: usize },
+}
+
+/// What [`Pages::try_mark`] did with a candidate word.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Hit {
+    /// The word is in no page, so the caller should try the large objects.
+    Outside,
+    /// Nothing left to do. The word fell in a page tail, a free slot or an
+    /// already-marked slot, or it newly marked a leaf.
+    Done,
+    /// Newly marked and scanned: trace `len` bytes from `addr`.
+    Push(usize, usize),
+}
+
+/// What a sweep found across every page.
+pub(super) struct Swept {
+    pub(super) freed_bytes: usize,
+    pub(super) live_slots: usize,
+    pub(super) live_bytes: usize,
 }
 
 /// A const empty list, so `[NO_PAGES; NUM_CLASSES]` can build an array of
@@ -277,6 +293,95 @@ impl Pages {
     /// The lowest page base and the highest page end, if there is a page.
     pub(super) fn bounds(&self) -> Option<(usize, usize)> {
         Some((self.dir.first()?.0, self.dir.last()?.0 + PAGE_BYTES))
+    }
+
+    /// Mark the allocated slot `w` points into, if it is not marked yet.
+    pub(super) fn try_mark(&mut self, w: usize) -> Hit {
+        let (desc, index) = match self.locate(w) {
+            Loc::Outside => return Hit::Outside,
+            Loc::Tail => return Hit::Done,
+            Loc::Slot { desc, index } => (desc, index),
+        };
+        let page = &mut self.descs[desc];
+        let (word, mask) = (index / 64, 1u64 << (index % 64));
+        if page.alloc[word] & mask == 0 || page.mark[word] & mask != 0 {
+            return Hit::Done;
+        }
+        page.mark[word] |= mask;
+        if page.scan[word] & mask == 0 {
+            return Hit::Done;
+        }
+        Hit::Push(page.base + index * page.slot, page.slot)
+    }
+
+    /// Free every allocated slot that is not marked, clear every mark, put
+    /// empty pages in the reserve or back to the system, and point each
+    /// class's cursor at a page with space.
+    pub(super) fn sweep(&mut self) -> Swept {
+        let mut out = Swept {
+            freed_bytes: 0,
+            live_slots: 0,
+            live_bytes: 0,
+        };
+        let mut empty = Vec::new();
+        for list in &mut self.with_space {
+            list.clear();
+        }
+        for &(_, desc) in &self.dir {
+            let page = &mut self.descs[desc];
+            if page.reserved {
+                continue;
+            }
+            let words = page.words();
+            let (mut live, mut freed) = (0usize, 0usize);
+            for (a, m) in page.alloc[..words].iter_mut().zip(&mut page.mark[..words]) {
+                // A mark is only ever set on an allocated slot, so the
+                // survivors are exactly the marks.
+                freed += (*a & !*m).count_ones() as usize;
+                *a = *m;
+                live += a.count_ones() as usize;
+                *m = 0;
+            }
+            out.freed_bytes += freed * page.slot;
+            out.live_slots += live;
+            out.live_bytes += live * page.slot;
+            if live == 0 {
+                empty.push(desc);
+            } else if live < page.nslots {
+                self.with_space[page.class].push(desc);
+            }
+        }
+        for desc in empty {
+            if self.reserve.len() < RESERVE_PAGES {
+                self.descs[desc].reserved = true;
+                self.reserve.push(desc);
+            } else {
+                self.release(desc);
+            }
+        }
+        for (cur, list) in self.current.iter_mut().zip(&mut self.with_space) {
+            *cur = list.pop();
+        }
+        self.hint = [0; NUM_CLASSES];
+        out
+    }
+
+    /// Return the empty page `desc` to the system and forget it.
+    fn release(&mut self, desc: usize) {
+        let base = self.descs[desc].base;
+        let at = self.dir.partition_point(|&(b, _)| b < base);
+        debug_assert_eq!(self.dir.get(at), Some(&(base, desc)));
+        self.dir.remove(at);
+        // SAFETY: `base` came from `alloc(page_layout())` in `page_for`, and
+        // is freed only here, once, as it leaves the directory.
+        unsafe { dealloc(base as *mut u8, page_layout()) };
+        self.spare.push(desc);
+    }
+
+    /// Test-only: how many empty pages the reserve holds.
+    #[cfg(test)]
+    pub(super) fn reserve_count(&self) -> usize {
+        self.reserve.len()
     }
 
     /// Test-only: how many pages exist, reserve included.
@@ -435,6 +540,162 @@ mod tests {
         for a in addrs {
             let (base, _, _) = p.page_of(a).unwrap();
             assert!(lo <= base && base + PAGE_BYTES <= hi);
+        }
+        assert!(p.directory_is_sorted());
+        p.free_all();
+    }
+
+    #[test]
+    fn try_mark_marks_an_allocated_slot_once_and_pushes_only_scanned_ones() {
+        let mut p = Pages::new();
+        let traced = p.alloc_slot(class_of(32), true);
+        let leaf = p.alloc_slot(class_of(32), false);
+        assert_eq!(
+            p.try_mark(traced + 5),
+            Hit::Push(traced, 32),
+            "an interior word names its slot, and the whole slot is traced"
+        );
+        assert_eq!(p.try_mark(traced), Hit::Done, "already marked");
+        assert_eq!(p.try_mark(leaf), Hit::Done, "a leaf is marked, not traced");
+        let s = p.sweep();
+        assert_eq!(s.live_slots, 2, "both were marked");
+        p.free_all();
+    }
+
+    #[test]
+    fn try_mark_passes_over_free_slots_tails_and_outside_words() {
+        let mut p = Pages::new();
+        let a = p.alloc_slot(class_of(48), true);
+        let (base, slot, nslots) = p.page_of(a).unwrap();
+        assert_eq!(p.try_mark(a + slot), Hit::Done, "a free slot");
+        assert_eq!(p.try_mark(base + nslots * slot), Hit::Done, "the page tail");
+        assert_eq!(p.try_mark(base - 1), Hit::Outside);
+        let s = p.sweep();
+        assert_eq!(s.live_slots, 0, "none of those marked the allocated slot");
+        p.free_all();
+    }
+
+    #[test]
+    fn sweep_frees_the_unmarked_keeps_the_marked_and_clears_every_mark() {
+        let mut p = Pages::new();
+        let c = class_of(64);
+        let keep = p.alloc_slot(c, true);
+        let gone = p.alloc_slot(c, true);
+        assert_eq!(p.try_mark(keep), Hit::Push(keep, 64));
+        let s = p.sweep();
+        assert_eq!((s.freed_bytes, s.live_slots, s.live_bytes), (64, 1, 64));
+        assert_eq!(p.slot_scan(keep), Some(true));
+        assert_eq!(p.slot_scan(gone), None);
+        // The mark was cleared, so a second sweep with nothing marked frees
+        // `keep` too.
+        let s = p.sweep();
+        assert_eq!((s.freed_bytes, s.live_slots), (64, 0));
+        p.free_all();
+    }
+
+    #[test]
+    fn a_freed_slot_is_handed_out_again_zeroed() {
+        let mut p = Pages::new();
+        let c = class_of(32);
+        let keep = p.alloc_slot(c, true);
+        let freed = p.alloc_slot(c, true);
+        unsafe { std::ptr::write_bytes(freed as *mut u8, 0xCD, 32) };
+        p.try_mark(keep);
+        p.sweep();
+        let again = p.alloc_slot(c, true);
+        assert_eq!(again, freed, "the lowest free slot is the one just freed");
+        let bytes = unsafe { std::slice::from_raw_parts(again as *const u8, 32) };
+        assert!(bytes.iter().all(|&x| x == 0));
+        p.free_all();
+    }
+
+    #[test]
+    fn a_reused_slot_takes_the_scan_flag_it_is_given_now() {
+        let mut p = Pages::new();
+        let c = class_of(16);
+        let keep = p.alloc_slot(c, true);
+        let s1 = p.alloc_slot(c, true);
+        let s2 = p.alloc_slot(c, false);
+        p.try_mark(keep);
+        p.sweep();
+        let r1 = p.alloc_slot(c, false);
+        let r2 = p.alloc_slot(c, true);
+        assert_eq!((r1, r2), (s1, s2));
+        assert_eq!(p.slot_scan(r1), Some(false), "scanned before, a leaf now");
+        assert_eq!(p.slot_scan(r2), Some(true), "a leaf before, scanned now");
+        p.free_all();
+    }
+
+    #[test]
+    fn empty_pages_past_the_reserve_go_back_and_the_reserve_is_reused_first() {
+        let mut p = Pages::new();
+        let c = class_of(16);
+        let per_page = PAGE_BYTES / 16;
+        for _ in 0..per_page * (RESERVE_PAGES + 4) {
+            p.alloc_slot(c, false);
+        }
+        assert_eq!(p.page_count(), RESERVE_PAGES + 4);
+        let s = p.sweep();
+        assert_eq!(s.live_slots, 0);
+        assert_eq!(
+            p.page_count(),
+            RESERVE_PAGES,
+            "pages past the reserve were released"
+        );
+        assert_eq!(p.reserve_count(), RESERVE_PAGES);
+        assert!(p.directory_is_sorted());
+        // Review Focus 2: a reserve page reused by another class is sized for it.
+        let big = p.alloc_slot(class_of(2048), true);
+        assert_eq!(
+            p.page_count(),
+            RESERVE_PAGES,
+            "a reserve page was reused, none added"
+        );
+        assert_eq!(p.reserve_count(), RESERVE_PAGES - 1);
+        let (_, slot, nslots) = p.page_of(big).unwrap();
+        assert_eq!((slot, nslots), (2048, 32));
+        assert_eq!(p.alloc_slot(class_of(2048), true), big + 2048);
+        p.free_all();
+    }
+
+    /// Review Focus 5. Three classes get twelve pages each, 36 in all:
+    /// - class 16 keeps a slot in every page, so none of its pages empties;
+    /// - class 224 (292 slots a page) keeps slots 0, 1000, 2000 and 3000,
+    ///   which sit in pages 0, 3, 6 and 10, so 8 of its pages empty;
+    /// - class 2048 keeps slot 0 only, so 11 of its pages empty.
+    ///
+    /// That is 19 empty pages. The reserve takes 16 and 3 are released.
+    #[test]
+    fn after_a_releasing_sweep_every_class_allocates_inside_a_page_it_holds() {
+        let mut p = Pages::new();
+        let classes = [class_of(16), class_of(200), class_of(2048)];
+        let mut kept = Vec::new();
+        for &c in &classes {
+            let per_page = PAGE_BYTES / CLASS_SIZES[c];
+            for i in 0..per_page * 12 {
+                let a = p.alloc_slot(c, true);
+                if i % 1000 == 0 {
+                    kept.push(a);
+                }
+            }
+        }
+        assert_eq!(p.page_count(), 36);
+        for &a in &kept {
+            p.try_mark(a);
+        }
+        p.sweep();
+        assert_eq!(p.page_count(), 33);
+        assert_eq!(p.reserve_count(), RESERVE_PAGES);
+        assert!(p.directory_is_sorted());
+        for &c in &classes {
+            for _ in 0..3 {
+                let a = p.alloc_slot(c, true);
+                assert!(
+                    matches!(p.locate(a), Loc::Slot { .. }),
+                    "class {c} handed out an address in no page the directory holds"
+                );
+                assert_eq!(p.page_of(a).unwrap().1, CLASS_SIZES[c]);
+            }
         }
         assert!(p.directory_is_sorted());
         p.free_all();
