@@ -1511,15 +1511,16 @@ Before and after differ for every pair, checked with `cmp`.
 
 Output is byte-identical by construction: the parts are lowered as before,
 in the same order, and both runtime paths copy their bytes in part order.
-It is checked byte for byte only by a new fixture,
-`tests/runtime/interpolation_nary.nova`, pins it: interpolations of three
-to eight parts across every part type, an empty string, non-ASCII text, a
-user `Display` type, parts with side effects, a loop, and an `.await`
-inside a part. The fixture covers 3, 4, 5, 7 and 8 parts; the probes
-above compare only lengths. It runs normally and under
-`NOVA_GC_STRESS=1`. Its output
-was predicted by hand and matched on the unchanged compiler before the
-change.
+It is checked byte for byte by a new fixture,
+`tests/runtime/interpolation_nary.nova`, which covers interpolations of 3,
+4, 5, 7 and 8 parts across every part type, an empty string, non-ASCII
+text, a user `Display` type, parts with side effects, a loop, and an
+`.await` inside a part. It runs normally and under `NOVA_GC_STRESS=1`, and
+its output was predicted by hand and matched on the unchanged compiler
+before the change. Existing tests also compare exact interpolation output:
+`std/test`'s four-part `assert_eq` messages, and `user_json`'s seven-part
+interpolation in `json_api_example_serves_its_routes`. The probes above
+compare only lengths.
 
 Three mutations were run and restored:
 
@@ -1527,10 +1528,16 @@ Three mutations were run and restored:
 - reversing the order fails both;
 - applying the n-ary path to two parts fails the two-part MIR guard.
 
-**The only full workspace run on this branch counted 1146 tests, 1141
-plus the 5 this branch adds: 1145 passed, 1 failed, 8 ignored.** The
-failure was a crash of a compiled `nova test` child, an access violation
-with empty stdout. **That crash family predates this change: base
+**Full workspace runs on this branch.** Four were run:
+
+- at the lowering change: 1146 tests, 1141 plus 5 new, of which 1145
+  passed, 1 failed and 8 were ignored;
+- on the final code: 1146 passed, 0 failed, 8 ignored;
+- twice after the whole-branch review added one more MIR test: once 1146
+  passed, 1 failed, 8 ignored, and once 1147 passed, 0 failed, 8 ignored.
+
+Both failures were a crash of a compiled `nova test` child: an access
+violation, with empty stdout. **That crash family predates this change: base
 `0e00190` shows it too.** From repeated runs of the `nova-cli` target:
 
 | suite | runs | runs with any compiled-child failure | of which an access violation |
@@ -1555,7 +1562,11 @@ load to the parallel suite**: with them skipped, the branch's rate fell to
 the base's. That comparison ran in a separate series, and 7 of 15 against 3
 of 15 is not statistically strong, so this is not established. If it is
 the cause, it is a real cost of this change, which makes an existing flake
-appear more often. The flake's own cause is not established either.
+appear more often. The flake's own cause is not established either. It is
+the anomaly `docs/adr/0008-attributes-and-test-isolation.md` §4 has recorded
+as open since Phase 2.2e: a freshly linked binary producing no output at
+all, with `0xC0000005`. That section now carries this branch's recurrence
+tally.
 
 ### What this does not settle
 

@@ -625,6 +625,53 @@ the design doc's §11 risk 3:
   which is the only shape that can discriminate between the reopen conditions
   above. The instrumentation for it is in place.
 
+### Recurrence, 2026-10-01 (branch `nary-interpolation`)
+
+Counted from the saved logs of repeated `cargo test --locked -p nova-cli
+--test run_tests` runs on one Windows host, not carried forward from prose.
+
+| arm | runs | runs with an `0xC0000005` child | tests that caught it |
+|---|---|---|---|
+| base `0e00190` | 30 | 2 | `join_handle_rejects_a_never_spawned_future_and_a_live_duplicate` (twice) |
+| `nary-interpolation` | 15 | 6 | `nova_test_run` (×3), `nova_test_under_gc_stress` (×2), `join_handle_rejects…` |
+| `nary-interpolation`, its two new tests skipped | 15 | 3 | `nova_test_run`, `nova_test_under_gc_stress` (×2), `join_handle_rejects…` |
+
+Outside the table, two more branch runs caught it:
+- one full workspace run, `nova_test_filter_run`, at the inventory step, with
+  stdout and stderr both empty;
+- one `nova-cli` run in which `join_handle_rejects…`, `nova_test_run` and
+  `nova_test_build_standalone` all faulted, `nova_test_build_standalone`
+  with every one of its four test subprocesses trapped.
+
+**The same anomaly appears on base, so it predates this branch.** Its rate
+on the branch is higher, which is consistent with the branch's two new
+tests (one under `NOVA_GC_STRESS`) adding load to the parallel suite. Seven
+of 15 against 3 of 15 does not establish that.
+
+**A second shape may belong to the same family:** a child that exits
+non-zero with empty stderr where an abort message is expected. It caught
+`repeat_array_negative_length_aborts`, `repeat_array_overlong_length_aborts_instead_of_segfaulting`
+and `undescribable_allocation_size_aborts_cleanly`, on base and on the
+branch. The exit code is not captured in those tests, so whether it is
+`0xC0000005` is not known.
+
+**A deliberate reproduction attempt failed.** The `nova_test` fixture's test
+binary, built by each compiler, ran 400 times alone and 800 times under
+8-way concurrency. There was no access violation, and the exit codes were
+identical per test index.
+
+**Against the reopen conditions:**
+- **Some but not all subprocesses of one binary faulting:** still not seen.
+  The fan-out occurrence above was 4 of 4.
+- **Differing exit codes between subprocesses:** not determinable, because
+  the per-subprocess codes in the fan-out occurrence are normalised in the
+  assertion and not logged.
+- **A trapping test still emitting its marker while siblings fault:** not
+  seen.
+- **Reproduction under `NOVA_GC_STRESS` in isolation:** not attempted.
+
+The standing decision, instrument only, is unchanged.
+
 ---
 
 ## References
