@@ -125,6 +125,26 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fall too. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
   (noncollector-cost)".
+- **Where one collection's time goes, measured.** Scratch phase timers ran
+  on the ten-user workload in six fresh processes, as two sets of three.
+  Collection time splits as follows:
+  - sweep: 42-46%;
+  - mark: 27-28%;
+  - clearing marks and rebuilding the sorted index: 24-27%, most of it
+    the sort.
+
+  The sweep, the mark clearing and the index rebuild together take 69-71%
+  in every run. All three are work over every object on the heap, about
+  three quarters of which were allocated since the last collection. In the
+  three runs with request counts, the collector cost 94-102 microseconds
+  per request, about the whole 100-microsecond budget. Its largest phase,
+  the sweep, was 43-46 of that, with `dealloc` at 42-49 ns per freed
+  object. The other set measured `dealloc` at 26-35 ns. The two ranges are
+  disjoint, and four other measures also differ between the sets
+  for no known reason. No collection threshold was varied, so how this
+  split changes with collection frequency is not measured. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
+  (gc-phase-cost)".
 
 ### Changed
 - **String interpolation of three or more parts is joined once, not
