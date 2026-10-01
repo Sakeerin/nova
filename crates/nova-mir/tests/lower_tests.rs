@@ -105,6 +105,32 @@ fn an_interpolation_of_two_parts_keeps_the_pairwise_concat() {
     );
 }
 
+/// An `.await` inside one part of a three-part interpolation still splits
+/// the body, and the interpolation still lowers to the n-ary call. The
+/// existing `.await`-inside-interpolation test uses a one-part
+/// interpolation, which never reaches the n-ary branch.
+#[test]
+fn an_await_inside_a_three_part_interpolation_suspends_and_lowers_to_one_nary_concat() {
+    let mir = mir_for(
+        "async fn g() -> Int { 1 }\n\
+         async fn f() -> String { \"a${g().await}b\" }\n\
+         fn main() { let x = f() }",
+    );
+    assert_eq!(
+        resume_states(&mir, "f"),
+        2,
+        "an `.await` inside a three-part interpolation suspends"
+    );
+    let all: Vec<&nova_mir::Stmt> = mir
+        .functions
+        .iter()
+        .filter(|f| f.name.starts_with("f."))
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.stmts))
+        .collect();
+    assert_eq!(count_rt(&all, nova_mir::RtFunc::StrConcatN), 1, "{all:?}");
+    assert_eq!(count_rt(&all, nova_mir::RtFunc::StrConcat), 0, "{all:?}");
+}
+
 #[test]
 fn hello_world_lowers() {
     let mir = mir_for("fn main() { println(\"hi\") }");
