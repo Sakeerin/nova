@@ -113,6 +113,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "AMENDMENT 2026-09-30 (alloc-attribution)".
 
 ### Changed
+- **String interpolation of three or more parts is joined once, not
+  pairwise.** The MIR lowering used to make *n* - 1 calls to
+  `nova_rt_str_concat` for an *n*-part interpolation, each building a new
+  two-object string that copied everything built so far. It now makes one
+  `MakeArray` of the parts and one call to a new `nova_rt_str_concat_n`,
+  which copies each part once. Two-part interpolations keep the pairwise
+  call, and output is byte-identical. `user_json`'s 7-part interpolation
+  falls from 18 objects to 9. On `examples/05-json-api` a ten-user request
+  allocates about 105 fewer objects (620.6-620.9 -> 515.9-516.0), matching
+  the 105 predicted from the code before the change was measured (104.8-105.0
+  per alternated pair). Ten-user throughput rose
+  from 3929.3-4071.1 to 4257.0-4770.4 req/sec, ranges disjoint in one
+  alternated session. The gate is still not met. An existing flake, in
+  which compiled child programs crash or exit with empty stderr under the
+  parallel `nova-cli` suite, appears more often on this branch. It is
+  present on `main` too. The extra load from the two new tests is
+  consistent with the higher rate, but that is not established. Details are in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT
+  2026-10-01 (nary-interpolation)".
 - **`std/json`: draining a `Vec` no longer allocates an `Option` per
   element.** `vec_chars_to_string` and `vec_to_array` read the vector's
   backing array directly instead of calling `Vec::get`. Their loops run

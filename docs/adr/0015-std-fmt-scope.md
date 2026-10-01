@@ -71,6 +71,17 @@ interpolation is a single compiler lowering. Both are recorded in
 `nova-spec/20-STDLIB.md` §3's own 2026-08-19 amendment as specifications
 the compiler has overtaken, not gaps still to fill.
 
+**Amended 2026-10-01:** one premise above has moved. Interpolation of three
+or more parts now lowers to one array of the parts plus one
+`nova_rt_str_concat_n` call (`crates/nova-mir/src/lower.rs`). So "would
+allocate an array to do identical work" no longer separates `format` from
+interpolation: both allocate one array, though `format` would also allocate
+a `FormatPart` per part. And when this was written,
+interpolation was itself a chain of pairwise concatenations, each copying
+the prefix built so far. The conclusion stands: `format` would still be a
+longer spelling of what interpolation already does, with nothing visible to
+any user.
+
 ## Consequences
 
 **Position 2 is closed, not skipped a third time — that is what

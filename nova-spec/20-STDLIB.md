@@ -197,6 +197,13 @@ single compiler lowering. Neither item is deferred: `format` is a
 pessimization of work the compiler already does, and `Formatter` has no
 specification to implement in the first place.
 
+**Amended 2026-10-01:** interpolation of three or more parts now lowers to
+one array of the parts plus one `nova_rt_str_concat_n` call, so "would
+allocate an array to do the identical work" no longer separates `format`
+from interpolation, and interpolation was pairwise rather than one join when
+this was written. The conclusion that `format` adds nothing visible stands.
+ADR 0015 carries the same amendment.
+
 **Separately, and not a `std/fmt` deviation:** the `module std.fmt` line
 that opens the code block above does not parse, and this is true of every
 section in this document — no std module source declares a `module` line at

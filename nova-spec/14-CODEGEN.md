@@ -107,6 +107,16 @@ __s.push_str("!")
 __s
 ```
 
+**Amended 2026-10-01:** the lowering that ships is not the builder above.
+`crates/nova-mir/src/lower.rs` lowers an interpolation of three or more
+parts to one heap array of the already-stringified parts and one call to
+`nova_rt_str_concat_n`, which copies each part once into one new string. A
+two-part interpolation is one `nova_rt_str_concat`, and a one-part
+interpolation is the part itself. Until 2026-10-01 every interpolation of
+two or more parts was a chain of pairwise `nova_rt_str_concat` calls, each
+copying everything built so far. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT
+2026-10-01 (nary-interpolation)".
+
 ### 6.2 Pattern Match
 Compiled to decision tree (Maranget). Each leaf is a basic block. Compiler emits:
 ```llvm
