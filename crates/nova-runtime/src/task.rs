@@ -221,7 +221,7 @@ thread_local! {
     /// unrelated object the collector next placed at that address, and the
     /// two reads below would answer about that dead task instead of rejecting
     /// a future the executor never saw. `spawn_internal` inserts;
-    /// [`forget_freed_state`] removes, at the moment the address stops
+    /// [`prune_freed_states`] removes, at the moment the address stops
     /// meaning anything.
     ///
     /// Two properties follow, and both are load-bearing elsewhere in this
@@ -340,26 +340,26 @@ pub(crate) fn staged_task_for_test() -> Option<i64> {
     PENDING_PARK.with(|cell| cell.get().task)
 }
 
-/// Forget the [`BY_STATE`] entry for the state object at `addr`, whose memory
-/// the collector has just returned to the allocator.
+/// Drop every [`BY_STATE`] key whose state object the collector has just
+/// freed. `is_live` holds for exactly the start addresses of objects that
+/// survived the collection.
 ///
 /// The removal half of that map's own invariant, and the reason `gc.rs` calls
 /// in here rather than this module watching for it: a freed address can be
-/// reissued for an unrelated object (`gc.rs`'s module doc comment), and the
-/// sweep is where that transition happens, so it is the only place a key can
-/// be dropped before it starts naming the wrong thing.
+/// reissued for an unrelated object (`gc.rs`'s module doc comment), and a
+/// collection is where that transition happens. It calls this once, after it
+/// has freed and before anything can be allocated again, so a key cannot
+/// start naming the wrong thing.
 ///
 /// **Removal only.** Nothing here inserts a key, and nothing here touches
 /// `TASKS`, so this cannot introduce a key whose id `TASKS` does not have --
 /// `spawn_internal` is still the only thing that puts a key in this map or an
 /// entry in `TASKS`, and it takes the id from `TASKS` itself.
 ///
-/// An address that never was a task's state simply misses: this map is keyed
-/// on state objects, and a sweep frees every kind of heap object.
-pub(crate) fn forget_freed_state(addr: usize) {
-    BY_STATE.with(|m| {
-        m.borrow_mut().remove(&addr);
-    });
+/// Costs one predicate call per key, which is per live task, not per freed
+/// object.
+pub(crate) fn prune_freed_states(is_live: &dyn Fn(usize) -> bool) {
+    BY_STATE.with(|m| m.borrow_mut().retain(|&addr, _| is_live(addr)));
 }
 
 /// Read the `{ poll_code, state }` fat pointer the compiler builds for a
@@ -1408,7 +1408,7 @@ pub unsafe extern "C-unwind" fn nova_rt_task_block_on(future: *mut u8) -> i64 {
 ///
 /// **A miss means `future` was never spawned, and nothing else can miss.** The
 /// key is dropped only when the collector frees the state object
-/// ([`forget_freed_state`]), and that cannot have happened while a live future
+/// ([`prune_freed_states`]), and that cannot have happened while a live future
 /// still points at the state: the fat pointer is a scanned heap object holding
 /// the state address in word [`FUTURE_SLOT_STATE`], so tracing the future marks
 /// the state. So a hit is this future's own task -- including a released one,
@@ -2967,6 +2967,35 @@ mod tests {
             unsafe { nova_rt_task_is_done(fut) },
             1,
             "and the surviving key must still resolve to that task"
+        );
+    }
+
+    /// Pruning removes the keys of freed states and nothing else. With every
+    /// state the map names in the root set, a sweep frees only objects that
+    /// are not task states, and the map comes out exactly as it went in.
+    #[test]
+    fn a_sweep_freeing_only_non_state_objects_removes_no_key() {
+        let fut = make_future(poll_ready_now, 0);
+        let state = state_of(fut);
+        unsafe { nova_rt_task_spawn(fut) };
+        unsafe { nova_rt_task_block_on(make_future(poll_ready_now, 0)) };
+        unsafe { nova_rt_task_release(fut) };
+        let keys: Vec<usize> = BY_STATE.with(|m| m.borrow().keys().copied().collect());
+        assert!(
+            keys.contains(&state),
+            "spawn must have registered this state"
+        );
+        for _ in 0..100 {
+            gc::alloc(24, true);
+        }
+        let before = BY_STATE.with(|m| m.borrow().clone());
+
+        gc::sweep_with_roots_for_test(&keys);
+
+        assert_eq!(
+            BY_STATE.with(|m| m.borrow().clone()),
+            before,
+            "a sweep that freed no state removed a key"
         );
     }
 
