@@ -1577,6 +1577,120 @@ tally.
 - **The access-violation flake's cause.**
 - **One host, Windows, three readings per arm.**
 
+## AMENDMENT 2026-10-01 (noncollector-cost): where a request's time goes
+
+After the n-ary interpolation change, the collector costs about 93–96
+microseconds of a ten-user request's roughly 220–226 in the counter runs.
+So even a collector that cost nothing would leave about 126–130
+microseconds, still over the 100-microsecond budget. This measures that
+remainder. **Collection plus allocation take 118.3–136.1 microseconds per
+request, over the whole budget on their own. Socket calls take 42.8–47.4.
+Everything else, which is compiled Nova code, runtime helpers, the
+scheduler and the profiling's own printing, takes 49.2–53.1. The server
+is almost never idle.**
+
+### How it was measured
+
+Scratch timers in the runtime, never committed. Each adds nanoseconds to a
+per-thread total, and the totals print on the collector's `nova-gc-time`
+line:
+
+- **Socket calls:** around the `std::io::Read::read` call in `net.rs`'s
+  `try_read`, and the `std::io::Write::write` call in `try_write`. In
+  effect that is the OS call. Reads and writes go into one counter.
+- **Idle wait:** around the whole of `poll::wait`, the executor's
+  readiness wait.
+- **Allocation outside collection:** around one `gc::alloc` call in 16,
+  skipping any sampled call during which a collection ran, then scaled by
+  the allocation count.
+- **The collector:** the per-collection timer from the "AMENDMENT
+  2026-09-30" scratch patch, which accumulates only with `NOVA_GC_DEBUG`
+  set.
+- **Everything else:** wall time minus those four.
+
+**The wait is counted inside the measured window only.** The timers run
+for the whole process, but wall time is the load generator's 15-second
+window, which starts after the store is seeded. By the first collection,
+the wait total already held 0.98–1.17 s over 32–33 calls, which is idle
+time while the seeding requests trickled in. That is subtracted. The other
+categories do almost nothing during seeding, eleven requests' worth, and
+are left whole.
+
+**The allocation sample was calibrated.**
+- A pair of `Instant::now` and `elapsed` calls costs 73.0–73.4 ns on this
+  host, and the interval it reports around nothing averages 35.8 ns
+  (35.7–35.8 per run). That bias is subtracted from each sample: the raw
+  101.4–113.2 ns per allocation becomes 65.6–77.4 ns.
+- The correction removes only the clock's own time. The bracket also
+  contains the scratch counters and two extra reads of the collection
+  count, so the corrected figure still overstates a plain build's
+  allocation by a few ns.
+- This clock ticks every 100 ns, which is longer than the operation being
+  timed. Each sample therefore reads 0, 100 or 200 ns, and the average is
+  meaningful only because samples land at random against the ticks.
+- The socket timer carries the same 36 ns bias on about 3 calls per
+  request, about 0.1 µs, which is left in.
+
+Ten users, a 604-byte body, 200 connections, `--warmup 0 --duration 15`,
+three fresh processes, every reading `errors=0`, `NOVA_GC_DEBUG` set. The
+profiling server is 696,832 bytes. It is `main` at `c59d2eb` plus the
+timers and the "(alloc-per-request)" counters, which carry an inactive
+`NOVA_GC_THRESHOLD` override.
+
+### Per request
+
+| category | run 1 | run 2 | run 3 | share |
+|---|---|---|---|---|
+| wall time | 237.7 µs | 211.2 µs | 215.3 µs | 100% |
+| collector | 96.2 | 84.5 | 86.1 | 40% |
+| everything else | 53.1 | 49.2 | 50.0 | 22–23% |
+| socket read and write calls | 47.4 | 42.8 | 43.7 | 20% |
+| allocation outside collection | 39.9 | 33.8 | 34.6 | 16–17% |
+| idle in the readiness wait | 1.06 | 0.98 | 1.00 | under 0.5% |
+
+- **Socket calls:** 2.99 per request, at 14.3–15.9 µs each. The counter
+  does not separate reads from writes, and each call's time includes any
+  time the OS spent running other threads. The 200 load-generator threads
+  share this host.
+- **Allocation:** 515.8–516.1 objects per request, at 65.6–77.4 ns each.
+- **Idle wait:** about 0.005 calls per request inside the window, averaging
+  0.20–0.21 ms each. The server is idle less than 0.5% of the window.
+
+**What the budget arithmetic says.** The gate allows 100 µs per request.
+- Collection plus allocation is 118.3–136.1 µs. That is over the budget on
+  its own, so it has to fall.
+- With both removed, the rest sums to 92.9–101.6 µs, about the whole
+  budget. So unless collection and allocation fall almost to nothing,
+  socket calls or everything else have to fall as well.
+- Idle time is not a lever.
+
+**The profiling overhead is not resolved.** Plain `main` (691,712 bytes)
+and the profiling build were alternated, three readings each, at the
+standard `--warmup 5 --duration 15`:
+
+| plain | profiling |
+|---|---|
+| 4834.7, 4971.7, 4641.0 | 4360.8, 4763.4, 4778.2 |
+
+The ranges overlap. The per-pair ratios are 0.90, 0.96 and 1.03, and the
+profiling mean is 3.8% lower. That cannot rule out an overhead of around
+10%. The arithmetic predicts about 3 µs per request, mostly the sampled
+timer pairs. **This comparison ran with `NOVA_GC_DEBUG` unset, while the
+profile above ran with it set.** The collector's per-collection
+`nova-gc-time` print sits outside every timer, so the profile's printing
+lands in "everything else", and this check did not compare it.
+
+### What this does not settle
+
+- **What "everything else" contains**, beyond compiled code, runtime
+  helpers, the scheduler, the profiling's printing, and time the OS spent
+  on other threads.
+- **Why a socket call costs about 15 µs**, and how the three calls per
+  request split between reads and writes.
+- **The plain build's exact allocation cost**, which is a few ns under the
+  figure above.
+- **One host, Windows, three readings.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
