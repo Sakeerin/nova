@@ -145,6 +145,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   split changes with collection frequency is not measured. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
   (gc-phase-cost)".
+- **The size-class page heap roughly doubles `examples/05-json-api`'s
+  throughput.** At ten users, alternated fresh-process readings went from
+  3983.0-4411.0 to 7559.7-9129.2 req/sec, ranges disjoint, a gain of 1.71x
+  to 2.29x. That is 109.5-132.3 microseconds per request, so the gate's
+  absolute criterion is now short by 1.10x-1.32x.
+  - Peak working set fell from 12.0-12.2 MB to 9.3-10.0 MB.
+  - In a profiling build of the change:
+    - the collector costs 11.6-12.9 microseconds per request, against
+      93.8-101.6 in the earlier gc-phase-cost profiling build, and marking
+      is now 84-86% of it;
+    - an allocation costs 29.8-34.9 ns, against 65.6-77.4 measured with a
+      bracket that held extra counter work, so not all of that drop is the
+      change;
+    - no object took the large path.
+
+  Collection plus allocation is 27.1-31.0 microseconds of a request there.
+  Subtracting them leaves 87.9-94.5, derived rather than measured and
+  including the profiling's own overhead. That is nearly the whole budget
+  on its own. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
+  (gc-page-heap)".
 
 ### Changed
 - **The collector allocates small objects from size-class pages.** Every
