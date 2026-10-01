@@ -232,6 +232,39 @@ pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr
     gc_str(&s)
 }
 
+/// Concatenate every string in `parts` into one new string: the n-ary form
+/// string interpolation of three or more parts lowers to.
+///
+/// One copy of each part and one result, two GC objects, where pairwise
+/// concatenation made a new string per part, each copying everything built
+/// so far.
+///
+/// GC safety: every part's bytes are copied into the Rust `String` before
+/// this function's first GC allocation (in `gc_str`), so a collection
+/// triggered while building the result cannot free anything still being
+/// read. `nova_rt_str_concat` relies on the same ordering.
+///
+/// # Safety
+/// `parts` must point to a Nova array `{ len: i64, elems… }` whose element
+/// `i`, at byte offset `8 + 8*i`, is a valid `NovaStr` pointer. A negative
+/// length is treated as zero, as `nova_rt_str_from_chars` does.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_concat_n(parts: *const u8) -> *mut NovaStr {
+    let words = parts as *const i64;
+    let n = (*words).max(0) as usize;
+    let mut total = 0usize;
+    for i in 0..n {
+        let p = *words.add(1 + i) as *const NovaStr;
+        total += (*p).len as usize;
+    }
+    let mut s = String::with_capacity(total);
+    for i in 0..n {
+        let p = *words.add(1 + i) as *const NovaStr;
+        s.push_str(as_str(p));
+    }
+    gc_str(&s)
+}
+
 /// Compare two strings for byte equality.
 ///
 /// # Safety
@@ -702,6 +735,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_eprint", nova_rt_eprint as *const u8),
         ("nova_rt_eprintln", nova_rt_eprintln as *const u8),
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
+        ("nova_rt_str_concat_n", nova_rt_str_concat_n as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
@@ -949,6 +983,35 @@ mod tests {
         unsafe {
             assert_eq!(to_string(nova_rt_bool_to_str(1)), "true");
             assert_eq!(to_string(nova_rt_bool_to_str(0)), "false");
+        }
+    }
+
+    /// Build a Nova `[String]` array `{ len, elems… }` from `parts`, for
+    /// `nova_rt_str_concat_n`. The parts are allocated first so the array is
+    /// the last allocation before the call.
+    unsafe fn str_array(parts: &[&'static str]) -> *const u8 {
+        let ptrs: Vec<*mut NovaStr> = parts.iter().map(|p| make_str(p)).collect();
+        let block = gc::alloc(8 + 8 * ptrs.len(), true) as *mut i64;
+        *block = ptrs.len() as i64;
+        for (i, p) in ptrs.iter().enumerate() {
+            *block.add(1 + i) = *p as i64;
+        }
+        block as *const u8
+    }
+
+    #[test]
+    fn concat_n_joins_every_part_in_order() {
+        unsafe {
+            for parts in [
+                &[][..],
+                &["solo"][..],
+                &["a", "b", "c"][..],
+                &["", "x", ""][..],
+                &["日本", "語", "🦀", "-", "é"][..],
+            ] {
+                let got = as_str(nova_rt_str_concat_n(str_array(parts))).to_string();
+                assert_eq!(got, parts.concat(), "parts {parts:?}");
+            }
         }
     }
 
