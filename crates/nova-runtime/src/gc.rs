@@ -46,6 +46,12 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
+// Wired into the collector by Task 3 of
+// docs/superpowers/plans/2026-10-01-gc-page-heap.md; until then only its own
+// tests use it.
+#[allow(dead_code)]
+mod pages;
+
 /// All heap objects are 8-byte-slot aligned; 16-byte alignment keeps the
 /// returned pointer well-aligned for every value class.
 const ALIGN: usize = 16;
