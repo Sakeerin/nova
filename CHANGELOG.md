@@ -147,6 +147,26 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (gc-phase-cost)".
 
 ### Changed
+- **The collector allocates small objects from size-class pages.** Every
+  object of 2048 bytes or less now takes a slot in a 64 KiB page of one of
+  24 size classes, tracked by out-of-band allocated, marked and scan
+  bitmaps.
+  - Marking finds a slot by searching a directory of page bases, instead
+    of a sorted index of every object rebuilt at each collection.
+  - The sweep frees slots by bitmap instead of calling `dealloc` per
+    object.
+  - Up to 16 empty pages (1 MiB) are kept for reuse, and the rest go back
+    to the system.
+  - Larger objects keep a system allocation each.
+  - The executor's state map is pruned once per collection
+    (`task::prune_freed_states`), instead of once per freed object. So the
+    collector no longer has a per-object notification hook, and ADRs 0009,
+    0012, 0016 and 0017 and `nova-spec/13-RUNTIME.md` and `20-STDLIB.md`
+    carry dated amendments saying so.
+
+  `gc::alloc`'s signature, its callers and codegen are unchanged.
+  `docs/adr/0020-size-class-page-heap.md` records the decision, and the
+  measured effect is under `### Measured`.
 - **String interpolation of three or more parts is joined once, not
   pairwise.** The MIR lowering used to make *n* - 1 calls to
   `nova_rt_str_concat` for an *n*-part interpolation, each building a new

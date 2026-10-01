@@ -148,6 +148,10 @@ runtime-managed handle. A `MutexGuard`'s release never reaches the
 collector at all, so that argument does not transfer here; only the shape
 of the resulting trade-off does.
 
+**Amended 2026-10-01 (gc-page-heap):** the per-object notification hook
+ADR 0012 describes no longer exists (ADR 0020). That does not change this
+decision: a `MutexGuard`'s release never reached the collector anyway.
+
 What did not ship, and why each is a deferral rather than an oversight:
 
 - **`channel<T>(buffer: Int) -> (Sender<T>, Receiver<T>)`.** Its signature

@@ -211,6 +211,12 @@ afterwards.
   `await` on a channel nothing sends to) — a park set plus a deadlock diagnostic
   when the ready queue is empty and the park set is not. A busy re-poll loop
   cannot tell "not ready yet" from "never will be".
+  **Amended 2026-10-01 (gc-page-heap):** where this paragraph says "`gc.rs`'s
+  sweep calls `task::forget_freed_state`", the sweep no longer calls a hook
+  per freed object. The collector prunes the map once per collection, through
+  `task::prune_freed_states`, before anything can be allocated again. The
+  property and its home in `gc.rs`'s module doc comment are unchanged.
+  ADR 0020.
 
   **AMENDED 2026-08-10 (branch `park-set`): the previous paragraph is now
   stale — the park set and the deadlock diagnostic it names as owed both
@@ -434,6 +440,9 @@ afterwards.
   that would make such a backstop dishonest even if it could, is recorded as
   its own decision rather than folded into this one:
   `docs/adr/0012-file-descriptor-lifecycle.md`.
+  **Amended 2026-10-01 (gc-page-heap):** that per-object hook no longer
+  exists (ADR 0020), so the question it raised is moot. ADR 0012's decision
+  stands.
 - **Each `yield_now()` costs four allocations** — `yield_now` is itself an `async
   fn` wrapping a builtin, so a state object and a fat pointer for each of the two
   layers. Nothing caches or pools them.
