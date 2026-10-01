@@ -172,6 +172,9 @@ rt_funcs! {
     EPrintln,
     /// `(str, str) -> str`
     StrConcat,
+    /// `([str]) -> str` — concatenate every element of a string array; the
+    /// lowering of an interpolation of three or more parts.
+    StrConcatN,
     /// `(i64) -> str`
     IntToStr,
     /// `(f64) -> str`
@@ -505,6 +508,7 @@ impl RtFunc {
             RtFunc::EPrint => "nova_rt_eprint",
             RtFunc::EPrintln => "nova_rt_eprintln",
             RtFunc::StrConcat => "nova_rt_str_concat",
+            RtFunc::StrConcatN => "nova_rt_str_concat_n",
             RtFunc::IntToStr => "nova_rt_int_to_str",
             RtFunc::FloatToStr => "nova_rt_float_to_str",
             RtFunc::FloatFixed => "nova_rt_float_fixed",
@@ -596,6 +600,7 @@ impl RtFunc {
                 (vec![MirTy::Ptr], MirTy::Unit)
             }
             RtFunc::StrConcat => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
+            RtFunc::StrConcatN => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::IntToStr => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::FloatToStr => (vec![MirTy::F64], MirTy::Ptr),
             RtFunc::FloatFixed => (vec![MirTy::F64, MirTy::I64], MirTy::Ptr),
