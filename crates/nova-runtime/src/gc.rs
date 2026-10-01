@@ -24,18 +24,27 @@
 //! held transiently) keep their containing object alive. Objects flagged
 //! `scan = false` (string byte buffers) are leaves and are not traced.
 //!
+//! **Small objects live in size-class pages; large ones do not.** An object of
+//! `pages::SMALL_MAX` bytes or less takes a slot in a 64 KiB page of one size
+//! class (`gc/pages.rs`), tracked by out-of-band bitmaps. A bigger one gets a
+//! system allocation of its own and an `Obj` record. Either way, `alloc`
+//! returns a bare pointer with nothing in front of it.
+//!
 //! **A sweep really frees, so an address is not a durable identity for an
-//! object.** An unmarked object's memory goes back to the system allocator
-//! (`dealloc`) rather than into an arena this module keeps, so a later [`alloc`]
-//! can hand the same address out for a wholly unrelated object. An address
-//! therefore names an object only while that object is live. [`alloc`] starts an
-//! address meaning what it means; the sweep in [`collect_with_roots`] ends it,
-//! and so does the `#[cfg(test)]` `reset`, which is the only other `dealloc` in
-//! this module. Every path that ends an address's meaning must tell the
-//! executor's state-address lookup, so that "a freed address is always
-//! forgotten" has no exception — a third such path would have to do the same.
-//! This is the one place that property is stated, so that a reader who needs it
-//! has somewhere to be pointed at instead of a copy to compare.
+//! object.** An unmarked small object's slot goes back to its page's free
+//! slots, and the next [`alloc`] of that size class can hand the same address
+//! out for a wholly unrelated object. An unmarked large object's memory goes
+//! back to the system allocator (`dealloc`), which can do the same. An address
+//! therefore names an object only while that object is live. [`alloc`] starts
+//! an address meaning what it means. The sweep in [`collect_with_roots`] ends
+//! it, and so does the `#[cfg(test)]` `reset`, which frees everything. Every
+//! path that ends an address's meaning must tell the executor's state-address
+//! lookup before anything can be allocated again, so that "a freed address is
+//! always forgotten" has no exception. Both do it by calling
+//! `task::prune_freed_states` once, after freeing, and a third such path would
+//! have to do the same. This is the one place that property is stated, so
+//! that a reader who needs it has somewhere to be pointed at instead of a copy
+//! to compare.
 //!
 //! Precise stack bounds are currently only implemented on Windows; on other
 //! platforms collection is skipped (allocations leak, as before — never
@@ -43,13 +52,11 @@
 
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::cell::RefCell;
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
-// Wired into the collector by Task 3 of
-// docs/superpowers/plans/2026-10-01-gc-page-heap.md; until then only its own
-// tests use it.
-#[allow(dead_code)]
 mod pages;
 
 /// All heap objects are 8-byte-slot aligned; 16-byte alignment keeps the
@@ -70,7 +77,8 @@ const MAX_HEAP_OBJECT: usize = (isize::MAX as usize) - (ALIGN - 1);
 /// (grows with the live set afterward).
 const INITIAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 
-/// One live allocation the collector tracks.
+/// A large object's out-of-band record: one over [`pages::SMALL_MAX`] bytes,
+/// which gets a system allocation of its own.
 struct Obj {
     /// Address returned to the mutator.
     addr: usize,
@@ -83,7 +91,14 @@ struct Obj {
 }
 
 struct Heap {
-    objects: Vec<Obj>,
+    /// Every object of [`pages::SMALL_MAX`] bytes or less.
+    pages: pages::Pages,
+    /// Every larger object. Sorted by address from the start of each
+    /// collection until it ends; allocation appends in between.
+    large: Vec<Obj>,
+    /// The mark phase's `(addr, len)` ranges still to trace. Kept between
+    /// collections so each one does not allocate it afresh.
+    work: Vec<(usize, usize)>,
     alloc_since_gc: usize,
     next_gc: usize,
     live_bytes: usize,
@@ -92,18 +107,27 @@ struct Heap {
     base: usize,
     collections: u64,
     freed_bytes: u64,
+    /// Test builds only: the size each object was requested at, which
+    /// rounding to a size class would otherwise hide from [`object_info`].
+    /// Written at every allocation; read only for a live object's start.
+    #[cfg(test)]
+    requested: BTreeMap<usize, usize>,
 }
 
 impl Heap {
     const fn new() -> Self {
         Heap {
-            objects: Vec::new(),
+            pages: pages::Pages::new(),
+            large: Vec::new(),
+            work: Vec::new(),
             alloc_since_gc: 0,
             next_gc: INITIAL_THRESHOLD,
             live_bytes: 0,
             base: 0,
             collections: 0,
             freed_bytes: 0,
+            #[cfg(test)]
+            requested: BTreeMap::new(),
         }
     }
 }
@@ -181,25 +205,38 @@ pub fn alloc(size: usize, scan: bool) -> *mut u8 {
         );
         std::process::abort();
     };
-    maybe_collect(size);
-    // Zeroed so unwritten slots (e.g. skipped unit fields) read as null and are
-    // never mistaken for pointers.
-    let p = unsafe { alloc_zeroed(layout) };
-    if p.is_null() {
-        handle_alloc_error(layout);
-    }
+    // A small object takes a whole slot of its class, so a slot's full size
+    // is what it costs the collection trigger and the live count.
+    let class = (size <= pages::SMALL_MAX).then(|| pages::class_of(size));
+    let taken = class.map_or(size, |c| pages::CLASS_SIZES[c]);
+    maybe_collect(taken);
     HEAP.with(|h| {
         let mut h = h.borrow_mut();
-        h.objects.push(Obj {
-            addr: p as usize,
-            size,
-            scan,
-            marked: false,
-        });
-        h.alloc_since_gc += size;
-        h.live_bytes += size;
-    });
-    p
+        let p = match class {
+            // Zeroed by `alloc_slot`.
+            Some(c) => h.pages.alloc_slot(c, scan) as *mut u8,
+            None => {
+                // Zeroed so unwritten slots (e.g. skipped unit fields) read as
+                // null and are never mistaken for pointers.
+                let p = unsafe { alloc_zeroed(layout) };
+                if p.is_null() {
+                    handle_alloc_error(layout);
+                }
+                h.large.push(Obj {
+                    addr: p as usize,
+                    size,
+                    scan,
+                    marked: false,
+                });
+                p
+            }
+        };
+        h.alloc_since_gc += taken;
+        h.live_bytes += taken;
+        #[cfg(test)]
+        h.requested.insert(p as usize, size);
+        p
+    })
 }
 
 /// Register `ptr` as a root until [`remove_root`].
@@ -251,17 +288,22 @@ pub fn remove_root(ptr: *mut u8) {
 /// correctly-scanned allocation from one that merely has enough slop past its
 /// declared size for a test's own assertions to still land inside live
 /// memory, or one whose `scan` flag is wrong (undetectable by reading words at
-/// all — it only changes GC behaviour). This reaches into the tracked `Obj`
-/// directly so a caller can assert the exact size and scan flag `alloc` was
+/// all — it only changes GC behaviour). This reaches into the collector's own
+/// records so a caller can assert the exact size and scan flag `alloc` was
 /// given, not just what got written.
 #[cfg(test)]
 pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
     HEAP.with(|h| {
-        h.borrow()
-            .objects
-            .iter()
-            .find(|o| o.addr == addr)
-            .map(|o| (o.size, o.scan))
+        let h = h.borrow();
+        let scan = h
+            .pages
+            .slot_scan(addr)
+            .or_else(|| h.large.iter().find(|o| o.addr == addr).map(|o| o.scan))?;
+        let size = *h
+            .requested
+            .get(&addr)
+            .expect("alloc records every object's requested size in test builds");
+        Some((size, scan))
     })
 }
 
@@ -400,74 +442,63 @@ fn collect() {
 /// scanning so the core is deterministically testable.
 fn collect_with_roots(roots: &[usize]) {
     HEAP.with(|h| {
-        let mut h = h.borrow_mut();
-        for o in &mut h.objects {
-            o.marked = false;
-        }
-        // Sorted (start, end, object-index) for range lookup during marking.
-        let mut index: Vec<(usize, usize, usize)> = h
-            .objects
-            .iter()
-            .enumerate()
-            .map(|(i, o)| (o.addr, o.addr + o.size, i))
-            .collect();
-        index.sort_unstable_by_key(|e| e.0);
+        let mut guard = h.borrow_mut();
+        let h = &mut *guard;
+        // The previous sweep left every page mark and every large record
+        // unmarked. Sort the large records for the range lookup; the large
+        // sweep's `retain` keeps that order, and the prune below relies on it.
+        h.large.sort_unstable_by_key(|o| o.addr);
+        let (lo, hi) = heap_range(&h.pages, &h.large);
 
-        let mut work: Vec<usize> = Vec::new();
+        let mut work = std::mem::take(&mut h.work);
         for &w in roots {
-            mark_word(w, &index, &mut h.objects, &mut work);
+            mark_word(w, lo, hi, &mut h.pages, &mut h.large, &mut work);
         }
-        while let Some(oi) = work.pop() {
-            let (addr, size, scan) = {
-                let o = &h.objects[oi];
-                (o.addr, o.size, o.scan)
-            };
-            if !scan {
-                continue;
-            }
+        while let Some((addr, len)) = work.pop() {
             let mut p = addr;
-            let end = addr + size;
+            let end = addr + len;
             while p + 8 <= end {
-                // SAFETY: [addr, end) is a live allocation this collector owns.
+                // SAFETY: [addr, end) is a live object this collector owns: a
+                // slot's full size, or a large object's.
                 let w = unsafe { *(p as *const usize) };
-                mark_word(w, &index, &mut h.objects, &mut work);
+                mark_word(w, lo, hi, &mut h.pages, &mut h.large, &mut work);
                 p += 8;
             }
         }
+        h.work = work;
 
-        // Sweep: free unmarked objects.
-        let mut freed = 0usize;
-        let mut i = 0;
-        while i < h.objects.len() {
-            if h.objects[i].marked {
-                i += 1;
-            } else {
-                let o = h.objects.swap_remove(i);
-                // Infallible, and not a user-input path: a tracked object's
-                // size is one `alloc` already built a layout from.
-                let layout = heap_layout(o.size)
-                    .expect("a live object's size was accepted by heap_layout at allocation");
-                // SAFETY: `addr`/`size` are from this object's own allocation.
-                unsafe { dealloc(o.addr as *mut u8, layout) };
-                // This address stops naming this object here (module doc
-                // comment), and the executor keys a lookup on state-object
-                // addresses. `task::forget_freed_state` states what that
-                // requires and why this is the only place it can be
-                // maintained; this call site deliberately does not restate it.
-                //
-                // Called with `HEAP` borrowed, which it must be able to
-                // tolerate: it touches nothing this module owns -- it borrows
-                // one unrelated thread-local and allocates nothing through
-                // `alloc` -- so it cannot re-enter this collector or this
-                // borrow.
-                crate::task::forget_freed_state(o.addr);
-                freed += o.size;
-                // `swap_remove` moved a new element into `i`; re-check it.
+        // Sweep: free unmarked slots and unmarked large objects.
+        let swept = h.pages.sweep();
+        let mut freed = swept.freed_bytes;
+        h.large.retain_mut(|o| {
+            if o.marked {
+                o.marked = false;
+                return true;
             }
-        }
+            // Infallible, and not a user-input path: a tracked object's size
+            // is one `alloc` already built a layout from.
+            let layout = heap_layout(o.size)
+                .expect("a live object's size was accepted by heap_layout at allocation");
+            // SAFETY: `addr`/`size` are from this object's own allocation.
+            unsafe { dealloc(o.addr as *mut u8, layout) };
+            freed += o.size;
+            false
+        });
+
+        // Every address this collection freed stops naming its object here
+        // (module doc comment), and the executor keys a lookup on state-object
+        // addresses. It is told once, before anything can be allocated again,
+        // with a predicate that holds for exactly the live objects' starts.
+        // Called with `HEAP` borrowed, which `prune_freed_states` tolerates: it
+        // borrows one unrelated thread-local and allocates nothing through
+        // `alloc`, so it cannot re-enter this collector or this borrow.
+        let (pages, large) = (&h.pages, &h.large);
+        crate::task::prune_freed_states(&|addr| {
+            pages.slot_scan(addr).is_some() || large.binary_search_by_key(&addr, |o| o.addr).is_ok()
+        });
 
         h.freed_bytes += freed as u64;
-        h.live_bytes = h.live_bytes.saturating_sub(freed);
+        h.live_bytes = swept.live_bytes + h.large.iter().map(|o| o.size).sum::<usize>();
         h.alloc_since_gc = 0;
         h.collections += 1;
         h.next_gc = std::cmp::max(INITIAL_THRESHOLD, h.live_bytes.saturating_mul(2));
@@ -475,32 +506,59 @@ fn collect_with_roots(roots: &[usize]) {
             eprintln!(
                 "nova-gc: collection {} freed {freed} bytes, {} objects live ({} bytes)",
                 h.collections,
-                h.objects.len(),
+                swept.live_slots + h.large.len(),
                 h.live_bytes,
             );
         }
     });
 }
 
-/// Mark the object containing `w` (if any) and queue it for tracing.
+/// The smallest range holding every page and every large object, or the
+/// empty range `(0, 0)` when there is neither.
+fn heap_range(pages: &pages::Pages, large: &[Obj]) -> (usize, usize) {
+    let (mut lo, mut hi) = pages.bounds().unwrap_or((usize::MAX, 0));
+    for o in large {
+        lo = lo.min(o.addr);
+        hi = hi.max(o.addr + o.size);
+    }
+    if lo < hi {
+        (lo, hi)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Mark whatever `w` points into, if anything, and queue it for tracing if
+/// it is scanned. `[lo, hi)` spans every page and large object, so most words
+/// that are not pointers -- zero included -- stop at the first comparison.
 fn mark_word(
     w: usize,
-    index: &[(usize, usize, usize)],
-    objects: &mut [Obj],
-    work: &mut Vec<usize>,
+    lo: usize,
+    hi: usize,
+    pages: &mut pages::Pages,
+    large: &mut [Obj],
+    work: &mut Vec<(usize, usize)>,
 ) {
-    if w == 0 {
+    if w < lo || w >= hi {
         return;
     }
-    // The only candidate is the object with the largest start <= w.
-    let pos = index.partition_point(|e| e.0 <= w);
-    if pos == 0 {
-        return;
-    }
-    let (_start, end, oi) = index[pos - 1];
-    if w < end && !objects[oi].marked {
-        objects[oi].marked = true;
-        work.push(oi);
+    match pages.try_mark(w) {
+        pages::Hit::Push(addr, len) => work.push((addr, len)),
+        pages::Hit::Done => {}
+        pages::Hit::Outside => {
+            // The only candidate is the large object with the largest start <= w.
+            let pos = large.partition_point(|o| o.addr <= w);
+            if pos == 0 {
+                return;
+            }
+            let o = &mut large[pos - 1];
+            if w < o.addr + o.size && !o.marked {
+                o.marked = true;
+                if o.scan {
+                    work.push((o.addr, o.size));
+                }
+            }
+        }
     }
 }
 
@@ -555,20 +613,21 @@ mod tests {
     fn reset() {
         HEAP.with(|h| {
             let mut h = h.borrow_mut();
-            for o in h.objects.drain(..) {
+            h.pages.free_all();
+            for o in h.large.drain(..) {
                 let layout = heap_layout(o.size).expect("tracked size is describable");
                 unsafe { dealloc(o.addr as *mut u8, layout) };
-                // The other place an address stops naming its object, and so
-                // the other place the executor's state-address lookup has to
-                // be told -- see the sweep in `collect_with_roots`. Here so
-                // that "a freed address is always forgotten" has no exception,
-                // this test-only path included.
-                crate::task::forget_freed_state(o.addr);
             }
+            h.requested.clear();
             h.alloc_since_gc = 0;
             h.live_bytes = 0;
             h.next_gc = INITIAL_THRESHOLD;
         });
+        // The other place every address stops naming its object, and so the
+        // other place the executor's state-address lookup has to be told --
+        // see the sweep in `collect_with_roots`. Here so that "a freed address
+        // is always forgotten" has no exception, this test-only path included.
+        crate::task::prune_freed_states(&|_| false);
         // Clears every piece of thread-local state this module owns, not
         // just `HEAP`, so a test that calls `reset()` starts from a fully
         // blank slate rather than trusting that nothing else could have left
@@ -582,8 +641,20 @@ mod tests {
         PINNED.with(|p| p.borrow_mut().clear());
     }
 
+    /// Live objects: allocated slots plus large objects.
     fn count() -> usize {
-        HEAP.with(|h| h.borrow().objects.len())
+        HEAP.with(|h| {
+            let h = h.borrow();
+            h.pages.live_slots() + h.large.len()
+        })
+    }
+
+    /// The range marking uses right now.
+    fn heap_bounds() -> (usize, usize) {
+        HEAP.with(|h| {
+            let h = h.borrow();
+            heap_range(&h.pages, &h.large)
+        })
     }
 
     #[test]
@@ -665,6 +736,100 @@ mod tests {
         // The leaf is rooted but not scanned, so `victim` is collected.
         collect_with_roots(&[leaf as usize]);
         assert_eq!(count(), 1);
+    }
+
+    #[test]
+    fn sizes_over_small_max_take_the_large_path() {
+        reset();
+        let small = alloc(pages::SMALL_MAX, true) as usize;
+        let large = alloc(pages::SMALL_MAX + 1, true) as usize;
+        HEAP.with(|h| {
+            let h = h.borrow();
+            assert_eq!(h.pages.slot_scan(small), Some(true));
+            assert_eq!(h.pages.slot_scan(large), None);
+            assert!(h
+                .large
+                .iter()
+                .any(|o| o.addr == large && o.size == pages::SMALL_MAX + 1));
+        });
+        assert_eq!(object_info(small), Some((pages::SMALL_MAX, true)));
+        assert_eq!(object_info(large), Some((pages::SMALL_MAX + 1, true)));
+    }
+
+    #[test]
+    fn a_small_large_small_chain_survives_from_one_root() {
+        reset();
+        let tail = alloc(16, true) as usize;
+        let mid = alloc(4096, true) as *mut usize;
+        let head = alloc(16, true) as *mut usize;
+        unsafe {
+            *mid.add(100) = tail;
+            *head = mid as usize;
+        }
+        let _unreachable_large = alloc(4096, true);
+        collect_with_roots(&[head as usize]);
+        assert_eq!(
+            count(),
+            3,
+            "head, mid and tail survive; the other large object does not"
+        );
+        assert!(object_info(tail).is_some());
+        assert!(object_info(mid as usize).is_some());
+    }
+
+    /// Review Focus 1: no pages at all, so the range is the large objects'.
+    #[test]
+    fn a_large_only_heap_collects() {
+        reset();
+        let keep = alloc(3000, false) as usize;
+        let _gone = alloc(5000, true);
+        collect_with_roots(&[keep + 1234]);
+        assert_eq!(count(), 1);
+        assert_eq!(object_info(keep), Some((3000, false)));
+    }
+
+    #[test]
+    fn a_pointer_into_a_rounding_tail_keeps_its_object() {
+        reset();
+        let a = alloc(17, true) as usize; // a 32-byte slot
+        collect_with_roots(&[a + 20]);
+        assert_eq!(count(), 1);
+    }
+
+    /// Review Focus 3.
+    #[test]
+    fn words_outside_the_heap_range_mark_nothing() {
+        reset();
+        let a = alloc(16, true) as usize;
+        let (lo, hi) = heap_bounds();
+        assert_eq!(lo, a, "the only page's first slot starts the range");
+        collect_with_roots(&[lo - 1, hi]);
+        assert_eq!(count(), 0);
+        let _b = alloc(16, true);
+        collect_with_roots(&[heap_bounds().0]);
+        assert_eq!(count(), 1, "the range's first byte is inside it");
+    }
+
+    /// Review Focus 4, and the zeroing guarantee seen from the collector: an
+    /// 8-byte object in a 16-byte slot must not trace what the slot's
+    /// previous occupant left in its second word.
+    #[test]
+    fn a_reused_slot_does_not_trace_its_previous_objects_words() {
+        reset();
+        let victim = alloc(16, true) as usize;
+        let old = alloc(16, true) as *mut usize;
+        unsafe { *old.add(1) = victim };
+        collect_with_roots(&[victim]);
+        assert_eq!(count(), 1, "`old` is freed, its stale word left behind");
+        let new = alloc(8, true) as usize;
+        assert_eq!(new, old as usize, "the freed slot is the lowest free one");
+        collect_with_roots(&[new]);
+        assert_eq!(
+            count(),
+            1,
+            "the reused slot's zeroed tail kept the old pointer's target alive"
+        );
+        assert!(object_info(victim).is_none());
     }
 
     // The two tests below exercise `add_root`/`remove_root`'s own bookkeeping
