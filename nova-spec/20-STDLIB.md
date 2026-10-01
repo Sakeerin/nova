@@ -2031,6 +2031,11 @@ uniform documented leak — a guard never released leaves its mutex locked
 for the life of the process, the same trade ADR 0012 made for an unclosed
 `File`.
 
+**Amended 2026-10-01 (gc-page-heap):** the hook ADR 0012 names no longer
+exists. The collector now prunes the executor's state map once per
+collection instead of notifying per freed object (ADR 0020). The conclusion
+about `MutexGuard` is unchanged.
+
 **Of those other three items, two remain deferrals with named blockers,
 not oversights**, and neither is a matter of merely not having gotten to
 it yet. **The third, `channel<T>`, shipped on 2026-08-21 (branch

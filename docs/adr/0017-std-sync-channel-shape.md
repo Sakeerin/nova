@@ -525,6 +525,8 @@ it, and this ADR does not claim otherwise.
   notification to look up. An earlier version of this entry said a channel
   "never reaches the collector", which is wrong about the object and right
   only about the registration
+  **Amended 2026-10-01 (gc-page-heap):** the per-object hook that bullet
+  mentions no longer exists (ADR 0020), and the conclusion is unchanged.
 - `docs/adr/0009-async-execution-model.md`: the single-threaded
   cooperative executor these two async methods live on; `spawn_blocking`
   recorded as un-honourable (`:107`) and cancellation as an **open

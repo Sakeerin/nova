@@ -32,11 +32,12 @@ pub record Mutex<T> { locked: Bool, value: T }
 // trade, accepted for the same reason.
 //
 // (An earlier version of this comment claimed ADR 0012 shows the collector
-// "offers no per-object hook". It shows the opposite -- the hook exists, and
-// the ADR names it. Its actual argument is that the hook reports *the dying
-// object's own address*, which tells an `fd`-keyed table nothing. That
-// argument is about `File`, not about a pure-Nova guard, and does not
-// transfer here.)
+// "offers no per-object hook". When written, ADR 0012 showed the opposite:
+// the hook existed and the ADR named it, and its argument was that the hook
+// reported *the dying object's own address*, which tells an `fd`-keyed table
+// nothing. Since 2026-10-01 the collector no longer has a per-object hook at
+// all (ADR 0020). Either way the argument is about `File`, not about a
+// pure-Nova guard, and does not transfer here.)
 //
 // `released` is what makes that idempotence true rather than merely claimed,
 // and `File`'s precedent does not supply it. `File`'s second `close` is safe

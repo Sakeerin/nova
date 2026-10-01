@@ -107,6 +107,13 @@ struct Obj {
 }
 ```
 
+**Amended 2026-10-01 (gc-page-heap):** that record now describes only objects
+over 2048 bytes. Every smaller object lives in a slot of a 64 KiB size-class
+page, and its allocated, marked and scan flags are bits in the page's
+descriptor (`crates/nova-runtime/src/gc/pages.rs`). Both kinds of metadata stay
+out of band, so `alloc` still returns a bare pointer with nothing in front of
+it. ADR 0020 records the decision.
+
 So there is **no `type_id` anywhere**, in the header sense or any other: a conservative
 collector (3.1) has no use for type identity, which is why `alloc` takes `scan: bool`
 instead. And there is no in-band mark word — `marked` lives in the side table beside the
@@ -170,6 +177,12 @@ memory goes back to the system allocator rather than into an arena this module k
 a later allocation can hand the same address out for something wholly unrelated. Nothing
 may key a persistent table on an object's address.
 
+**Amended 2026-10-01 (gc-page-heap):** an unmarked object of 2048 bytes or less
+now goes back to its page's free slots rather than to the system allocator.
+The next allocation of its size class can take the same address, so the
+property above holds more strongly than before. Only larger objects still go
+back to the system allocator. ADR 0020 records the decision.
+
 ### 3.2 MMTk — NOT BUILT, an aspiration
 Modular, precise, generational; better latency and throughput. It is recorded here as
 intent, not as specification.
@@ -220,6 +233,13 @@ shape is the reason it cannot stand in for one. The sweep calls
 freed object's **own address and nothing else** — never a field value read out of it. So
 a dying handle notifies with an address, which tells a table keyed on anything else
 (a file descriptor, say) nothing at all.
+
+**Amended 2026-10-01 (gc-page-heap):** that hook no longer exists. The
+collector now frees small objects by bitmap, and it tells the executor's state
+map once per collection, through `task::prune_freed_states` and a predicate on
+the survivors' addresses, instead of once per freed object. There is no
+per-object notification of any kind, so the argument above holds a fortiori.
+ADR 0020 records the decision.
 
 This is exactly why `docs/adr/0012-file-descriptor-lifecycle.md` chose an explicit,
 idempotent `close` for `File` over a collector-based backstop, and why

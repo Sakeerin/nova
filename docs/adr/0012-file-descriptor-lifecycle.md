@@ -41,6 +41,13 @@ nothing through `alloc`, and not re-enter the collector. Closing a file is a
 syscall with no allocation, so it fits that shape. **A reader who finds this
 hook will reasonably ask why `File` does not register with it.**
 
+**Amended 2026-10-01 (gc-page-heap):** that hook no longer exists. The
+collector frees small objects by bitmap and prunes the executor's state map
+once per collection (`task::prune_freed_states`), so it notifies nothing per
+object at all (ADR 0020). Reason 1 below is therefore stronger, not weaker:
+there is no per-object notification left to register with. Reason 2 is
+unchanged, and so is the decision.
+
 ## Decision
 
 **Explicit `close` is the only release mechanism. Forgetting it leaks the
@@ -170,6 +177,8 @@ its own.
 - `crates/nova-runtime/src/gc.rs`: the sweep loop and its
   `task::forget_freed_state` call (the notification hook this decision
   declines to use), `stack_base` (the Windows-only precise-bounds gap)
+  **Amended 2026-10-01 (gc-page-heap):** that call is gone; see the
+  amendment under Context and ADR 0020.
 - `crates/nova-runtime/src/task.rs`: `forget_freed_state`, and (for the
   pointer-identity pattern `File` declined) the `task-identity` branch's
   redesign of `JoinHandle<T>`, recorded in

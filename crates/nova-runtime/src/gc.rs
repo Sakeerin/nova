@@ -697,7 +697,8 @@ mod tests {
     }
 
     /// The size an ordinary object asks for is describable, and the layout
-    /// carries the size and alignment `alloc` will hand the system allocator.
+    /// carries the size and alignment `alloc` checks every request against --
+    /// and hands the system allocator, for an object too big for a page.
     #[test]
     fn heap_layout_describes_ordinary_sizes() {
         let layout = heap_layout(24).expect("24 bytes is describable");
