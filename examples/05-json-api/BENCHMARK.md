@@ -1691,6 +1691,206 @@ lands in "everything else", and this check did not compare it.
   figure above.
 - **One host, Windows, three readings.**
 
+## AMENDMENT 2026-10-01 (gc-phase-cost): where one collection's time goes
+
+The "(noncollector-cost)" amendment put the collector at 84.5–96.2
+microseconds of a ten-user request, about 40%. This splits the collector's
+time across its own phases. **About 70% of collection time is work over
+every object on the heap, three quarters of which are about to be freed.
+Sweeping takes 42–46% of collection time. Clearing the marks and
+rebuilding the sorted index take 24–27%, most of that the sort.
+Marking the survivors takes 27–28%. In the runs that kept their request
+counts, the collector cost 93.8–101.6 microseconds per request, which is
+about the whole 100-microsecond budget. Its largest phase, the sweep, was
+42.9–46.2 of that, so no single phase is half the collector.**
+
+### How it was measured
+
+Scratch timers in `gc.rs`, never committed. Each adds nanoseconds or a
+count to a per-thread total, and the totals print on a `nova-gc-phase`
+line after every collection when `NOVA_GC_DEBUG` is set. The figures below
+come from each run's last line, so they cover the whole process. Every
+share is therefore a share of a run's total collection time; no single
+collection's split was recorded. The totals include the eleven seeding
+requests, under 0.02% of the requests in runs 4–6.
+
+- **Whole collection:** around the entire body of `collect`.
+- **Root scan:** copying the pinned registry, plus
+  `nova_gc_collect_roots`'s scan of the stack and registers.
+- **Clear marks**, **build the index** (the `(start, end, index)` vector),
+  **sort the index** (`sort_unstable_by_key`), the **mark** loop including
+  every binary search, and the **sweep** loop. Each is timed as a whole.
+- **Inside the sweep**, every 16th freed object gets three `Instant::now`
+  reads, bracketing `dealloc` and `task::forget_freed_state`. Each
+  bracket's average is corrected by the 35.8 ns clock bias calibrated in
+  "(noncollector-cost)", then multiplied by the freed count. This clock
+  ticks every 100 ns, longer than either operation, so the averages are
+  meaningful only because samples land at random against the ticks. One
+  in 16 in sweep order is a systematic sample, not a random one.
+- **Counts:** objects on the heap when the collection starts, objects
+  freed, root words, and scanned words. Scanned words are those the mark
+  loop reads from surviving objects flagged for scanning.
+
+Ten seeded users, 200 connections, `--warmup 0 --duration 15`, one fresh
+process per run, `NOVA_GC_DEBUG` set. Both sets ran the same harness
+command with this binary. Only runs 4–6 kept the load-generator output,
+which records the seed and the 604-byte body. The profiling server is
+693,760 bytes. It is `main` at `c34420e`, whose runtime is unchanged from
+`c59d2eb`, plus these timers and nothing else. The plain build of that
+runtime is 691,712 bytes, as recorded in "(noncollector-cost)".
+
+**There are two sets of three runs, from the same binary.** The first
+set's load-generator output was discarded, so it has per-collection
+figures but no request counts. The second set reran the same binary with
+the output kept, and every one of its readings is `errors=0`. These
+predictions were written before the second set:
+
+| prediction | measured in runs 4–6 |
+|---|---|
+| shares within about 3 points of the first set | not throughout: sort is 1.6–3.7 points below the first set's runs, sweep 0.3–3.7 above |
+| sweep 42–45% | 45.5–45.7%, slightly above |
+| mark 27–28% | 27.4–27.7% |
+| sort 23–24% | 20.5–21.3%, below |
+| build about 2–3%, clear under 1%, root scan about 0.1% | 2.0–2.4%, 0.8–0.9%, 0.1–0.2% |
+| 4.8–5.6 ms per collection | 5.59–6.05, two runs above |
+| 1100–1300 collections per run | 1071–1150, one run below |
+| collector 84–96 µs per request | 93.8–101.6, one run above |
+| 4200–4800 req/sec | 4231.1–4548.4 |
+
+### Per collection, all six runs
+
+| | run 1 | run 2 | run 3 | run 4 | run 5 | run 6 |
+|---|---|---|---|---|---|---|
+| collections | 1135 | 1275 | 1252 | 1071 | 1146 | 1150 |
+| ms per collection | 5.60 | 4.82 | 5.03 | 6.05 | 5.69 | 5.59 |
+| sweep | 45.2% | 42.0% | 43.7% | 45.5% | 45.5% | 45.7% |
+| mark | 26.7% | 27.5% | 27.1% | 27.5% | 27.7% | 27.4% |
+| sort the index | 22.9% | 24.2% | 23.4% | 20.9% | 20.5% | 21.3% |
+| build the index | 2.0% | 2.6% | 2.4% | 2.4% | 2.4% | 2.0% |
+| clear marks | 0.6% | 0.7% | 0.6% | 0.8% | 0.9% | 0.8% |
+| root scan | 0.1% | 0.1% | 0.1% | 0.1% | 0.2% | 0.1% |
+| outside every phase | 2.4% | 2.8% | 2.6% | 2.8% | 2.9% | 2.6% |
+
+"Outside every phase" is everything inside the whole-collection timer that
+no phase timer covers. That includes the collector's own `nova-gc:` debug
+print, the bookkeeping after the sweep, freeing the index and the work
+list, and the phase timers' own reads and counter updates.
+
+Averaged per collection, the heap looks the same in all six runs:
+- 40,553–40,585 objects when it starts.
+- 30,687–30,710 of them freed, which is 75.7%, leaving about 9,870.
+- 81,289–81,370 words scanned, about 650 KB.
+- 507–646 root words.
+
+### Per request, runs 4–6
+
+| | run 4 | run 5 | run 6 |
+|---|---|---|---|
+| requests | 63,720 | 68,195 | 68,467 |
+| req/sec | 4231.1 | 4529.3 | 4548.4 |
+| wall time per request | 236.3 µs | 220.8 µs | 219.9 µs |
+| **collector** | **101.6** | **95.6** | **93.8** |
+| sweep | 46.2 | 43.5 | 42.9 |
+| — `dealloc` | 25.0 | 22.1 | 21.6 |
+| — `forget_freed_state` | 8.8 | 6.8 | 7.2 |
+| — rest of the sweep loop | 12.4 | 14.6 | 14.1 |
+| mark | 28.0 | 26.5 | 25.8 |
+| sort the index | 21.2 | 19.6 | 20.0 |
+| build the index | 2.46 | 2.33 | 1.87 |
+| clear marks | 0.78 | 0.83 | 0.74 |
+| root scan | 0.15 | 0.14 | 0.12 |
+| outside every phase | 2.83 | 2.75 | 2.48 |
+
+Each run made 59.5 requests per collection and freed 515.8 objects per
+request. That is close to the 515.8–516.1 allocated per request in
+"(noncollector-cost)". Allocations were not counted in these runs.
+
+**What each unit costs.** Runs 4–6 are given first, runs 1–3 in brackets.
+- **Sorting the index:** 28.8–31.1 ns per object (28.8–31.6).
+- **Marking:** 18.8–20.4 ns per scanned word (16.3–18.4). Each nonzero
+  word costs a binary search of the whole 40.5k-entry index, three
+  quarters of which are objects about to be freed.
+- **`dealloc`:** 41.9–48.5 ns per call after the correction, 77.7–84.3
+  raw (26.0–35.2 corrected, 61.8–71.0 raw). It is one call into the
+  system allocator per freed object.
+- **`forget_freed_state`:** 13.1–17.0 ns per call after the correction,
+  48.9–52.8 raw (12.2–22.1 corrected, 48.0–57.9 raw). It is one removal
+  from a thread-local `HashMap` per freed object.
+- **The rest of the sweep loop:** 18.2–21.4 ns per object visited, live
+  ones included (19.0–21.5).
+
+**The sampling's own cost is estimated, not measured.** Counting only the
+clock reads, each sample makes three at about 36.5 ns each, half the
+calibrated 73 ns pair. At 1,918 samples per collection, that is about
+0.21 ms per collection, or about 3.5 µs per request. Correcting the
+brackets moves it out of the `dealloc` and `forget_freed_state` figures.
+It stays in the sweep total, all of it in "rest of the sweep loop", where
+it is about 5 ns of the 18–21 per object. **That is a lower bound.** The
+sweep also makes three thread-local counter updates per sample, and a
+modulo test, three branches and a counter increment per freed object.
+This build's collector range, 93.8–101.6, overlaps
+"(noncollector-cost)"'s 84.5–96.2; only run 4 lies above it.
+
+**The two sets disagree.** The second set is slower, with disjoint ranges,
+in five measures:
+
+| | runs 1–3 | runs 4–6 |
+|---|---|---|
+| marking, per scanned word | 16.3–18.4 ns | 18.8–20.4 ns |
+| `dealloc`, per call | 26.0–35.2 ns | 41.9–48.5 ns |
+| clearing marks, per object | 0.78–0.84 ns | 1.09–1.22 ns |
+| root scan, per root word | 10.3–13.2 ns | 14.1–16.7 ns |
+| outside every phase, per collection | 132–137 µs | 147–168 µs |
+
+They overlap on the other four per-unit measures: sorting, building the
+index, `forget_freed_state` and the rest of the sweep loop. Sorting is
+nearly identical, 28.8–31.6 ns per object in the first set and 28.8–31.1
+in the second. That is consistent with the sort's share falling from
+22.9–24.2% to 20.5–21.3%. What changed between the sets is not known. The
+shares in the headline span both sets.
+
+### What the phases bound
+
+- **Per-object work is 69.3–70.7% of collection time in all six runs.**
+  That is the sweep, clearing marks, and building and sorting the index.
+  Each of them runs over every object on the heap at collection time.
+  About three quarters of those objects were allocated since the last
+  collection; the rest are the previous collection's survivors. In runs
+  4–6 this work costs 127–137 ns per freed object. Each object also costs
+  65.6–77.4 ns when it is allocated ("(noncollector-cost)").
+- **What that predicts, untested on this build.** Collecting less often
+  would leave most of this work in place, because every new object is
+  still cleared, indexed, sorted and swept at least once. What would fall
+  is the work repeated on survivors, at every collection they live
+  through. And the sort's cost per object would rise with the heap's size,
+  since sorting is O(n log n). No threshold was varied here. The first
+  "AMENDMENT 2026-09-30" finding agrees in direction: an 82- to 94-fold
+  cut in collections cut collector time by only 8.5% to 23%. It does not
+  confirm this split, because that build allocated differently, and
+  marking alone is 27–28% here.
+- **Marking is paid per collection, not per new object.** It reads the
+  survivors, about 9,870 objects and 650 KB. Each nonzero word, root words
+  included, searches the whole index, so its cost depends on the heap's
+  total size as well. The survivor count did not vary across these runs,
+  so how marking scales was not measured.
+- **The remainders, runs 4–6.** Without clearing marks or the index
+  rebuild, the collector would still take 71.3–77.2 µs per request.
+  Without the sweep, it would still take 50.9–55.4. Neither fits the
+  100-microsecond budget beside the 92.9–101.6 µs that
+  "(noncollector-cost)" measured outside both collection and allocation.
+
+### What this does not settle
+
+- **Why the two sets differ.** Five measures are slower in the second set,
+  ranges disjoint. The sort per object did not change.
+- **What the ~81.4k scanned words per collection are**, meaning which
+  surviving objects carry them.
+- **The sampling's own cost.** The figure above is an estimate and a
+  lower bound, not a measurement.
+- **Whether `dealloc`'s cost depends on object size.** The sample is one
+  in 16 in sweep order, not random.
+- **One host, Windows, six readings in two sets.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
