@@ -1193,6 +1193,44 @@ fn gate_async_tasks_under_gc_stress() {
         .stdout(expected);
 }
 
+/// Interpolations of three to eight parts, across every interpolable part
+/// type, an empty string, non-ASCII text, a user `Display` type, parts with
+/// side effects, a loop, and an `.await` inside a part. A guard: it must pass
+/// before and after interpolation is lowered to one n-ary concatenation,
+/// because that change must not alter any output by a byte.
+#[test]
+fn interpolation_nary_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/interpolation_nary.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/interpolation_nary.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation), so
+/// a part or the parts array freed before the concatenation reads it shows up
+/// as wrong output or a crash. It discriminates only where the collector frees
+/// memory, which is Windows.
+#[test]
+fn interpolation_nary_under_gc_stress() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/interpolation_nary.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/interpolation_nary.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// Spawned tasks' `String` outputs survive the executor releasing each task's
 /// GC root at completion, under `NOVA_GC_STRESS=1` (collect on every
 /// allocation), including a spawned task that spawns and joins its own child.
