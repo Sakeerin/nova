@@ -111,6 +111,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about 34 objects per request, which fall outside the three pieces
   measured. Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-09-30 (alloc-attribution)".
+- **Where a request's time goes, measured.** On `examples/05-json-api`
+  after the n-ary interpolation change, with scratch timers and a
+  calibrated allocation sample, a ten-user request's 211-238 microseconds
+  split as follows: collector 40%; everything else (compiled code,
+  runtime helpers, the scheduler, the profiling's printing) 22-23%; socket
+  read and write calls 20%, about 3 per request at 14-16 microseconds each;
+  allocation outside collection 16-17%, at 66-77 ns per allocation; and
+  idle readiness wait under 0.5%. Collection plus allocation is 118-136
+  microseconds, over the 100-microsecond budget on its own. With both
+  removed, the rest sums to 93-102, about the whole budget. So unless
+  allocation falls almost to nothing, socket calls or everything else must
+  fall too. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
+  (noncollector-cost)".
 
 ### Changed
 - **String interpolation of three or more parts is joined once, not
