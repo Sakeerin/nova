@@ -337,7 +337,12 @@ above describe `991fdfc`. On `main` at `5efcc2e`, the same method gives:
   8424.0–8520.1, below.
 - **Ratio:** 0.70–0.79 pinned and 0.79–0.81 unpinned, not met.
 
-See "AMENDMENT 2026-10-02 (gate-remeasure)".
+See "AMENDMENT 2026-10-02 (gate-remeasure)". A later run on `68d0b94`
+repeated only the unpinned cells and found Nova and Bun level, at 0.89–1.13
+taken the same way, partly because Bun read lower than it did there. It is
+not a gate measurement, and this status stands until the full method is run
+again. See
+"AMENDMENT 2026-10-02 (fixed-vs-json)".
 
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
@@ -2881,6 +2886,174 @@ bound on the work removed, since the change also added a counting pass.
 - **What `chars()` still costs inside `quote` and the header check** on this
   build. The sampled profile was not rerun.
 - **One host, Windows.**
+
+## AMENDMENT 2026-10-02 (fixed-vs-json): each server measured beside a fixed-response variant
+
+This run asks where a json-api request's time goes, and how that compares
+with Bun. Is it in the path that reads a request and sends a response, or
+in building the response? It measures each server beside variants that
+send the same ten-user response, prepared once at startup.
+
+**Results:**
+- **Nova and Bun were level on this run.**
+  - Unpinned, Nova's json-api ran at 11392.3–13400.0 req/sec and Bun's twin
+    at 11834.1–12844.0. The ranges overlap.
+  - Taken round by round, Nova over Bun was 0.963, 1.043 and 0.943.
+  - Taken the way "(gate-remeasure)" took its 0.79–0.81 unpinned, from the
+    two ranges' extremes, it is 0.89–1.13.
+  - **Both servers moved since "(gate-remeasure)", in opposite
+    directions.** Nova's readings sit wholly above its 10250.0–10382.4
+    there. Bun's sit wholly below its 12846.9–12956.6, by 2.9 req/sec. So
+    part of the move to level is Bun reading lower on this run.
+  - **This is not a gate measurement.** It has no pinned cells and three
+    readings per cell, and it ran on `68d0b94` rather than `5efcc2e`. The
+    gate's recorded status stays "(gate-remeasure)"'s until the full method
+    is run again.
+- **Within Nova, the fixed path is most of a request.**
+  - Nova's fixed variant took 52.1–57.5 us per request, against 74.6–87.8
+    for the json-api. That fixed path still reads and parses each request
+    and builds its `Request`.
+  - Response building is the json-api minus the fixed variant: 30.2, 22.1
+    and 32.3 us, round by round. It covers the route match, `users_json`,
+    `json_response`, `to_bytes`, and the collection their allocations
+    trigger.
+- **Against Bun, only the totals compare like for like.**
+  - Bun's static route is the closest analogue to Nova's fixed variant,
+    since both send a response prepared once.
+  - But building the request object falls on opposite sides of that
+    split. Both runtimes read and parse each request on both sides. Nova's
+    fixed variant also builds a `Request`. Bun's handler call, and the
+    JavaScript `Request` it receives, fall on the json-api side, unless the
+    static route also pays for them, which this run did not check.
+  - Split there anyway, Nova's fixed path was slower than Bun's by 19.5, 6.4
+    and 4.9 us. Its response building was cheaper than all of Bun's work
+    beyond the static route, by 16.2, 9.6 and 0.1 us. Both differences may
+    be inflated by the same unmeasured amount: what building the request
+    object costs on the side where it falls.
+  - Nova's json-api minus Bun's came to 3.3, −3.2 and 4.8 us.
+- **Nova's fixed variant, at 52.1–57.5 us per request, beat Bun's
+  fetch-handler variant at 61.3–64.6 us.** The ranges are disjoint. That Bun
+  variant builds a JavaScript `Request` and a `Response` per request, while
+  Nova's builds a `Request` and writes prebuilt bytes. So this is not like
+  for like either.
+- **Bun's json-api minus its fixed variant is 19.9, 16.5 and 17.9 us**, round
+  by round. That covers the json-api handler's `async` Promise, `new URL`,
+  the method and path match, and `usersJson`.
+
+### How it was measured
+
+- **The five cells**, each built or run from `68d0b94`:
+  - **Nova json-api:** the example, 700,416 bytes, SHA-256
+    `c081248a8cb573ca…`.
+  - **Nova fixed:** the example with four edits and nothing else, 659,968
+    bytes, SHA-256 `01e3d2d845b36438…`. `serve` takes the response's wire
+    bytes instead of the store and writes them for every request. `main`
+    creates the same ten users through `Store.create`, then builds the wire
+    bytes once with `json_response(200, users_json(store)).to_bytes()`.
+  - **Bun json-api:** `docs/benchmarks/bun-server.js`.
+  - **Bun fixed:** that file's helpers, with the same ten users created at
+    startup and `usersJson()` computed once. Its fetch handler is a plain
+    function, where the json-api's is `async`, and returns
+    `json(200, BODY)` for every request.
+  - **Bun static:** the same, but answered from a `routes` entry holding a
+    prebuilt `Response`. Whether Bun runs any JavaScript per request on
+    that route is not checked here.
+- **Provenance, from this session rather than a file:** both Nova binaries
+  were built by the release `nova` from `68d0b94`, and Bun is 1.3.0.
+  - The three variants are scratch files, never committed, each generated
+    by a script.
+  - The Nova one asserts each of its four edits matches exactly once.
+  - The Bun one asserts its one anchor, `const server = Bun.serve({`, and
+    replaces it and everything after it.
+- **Method:** "(gate-remeasure)"'s unpinned cells.
+  - Ten users, 200 connections, `--warmup 5 --duration 30`.
+  - One fresh process per reading, each process's affinity mask read back
+    as 4095 (all twelve logical processors).
+  - Five cells alternated in the order above, three rounds.
+  - Every reading reported `errors=0`.
+  - `bun docs/benchmarks/bun-equivalence.js` passed first, with all 9
+    exchanges matching. Its log names no binary; that it ran against the
+    Nova json-api binary is from this session.
+- **Generator ceiling:** the self-test ran at 109246.7 req/sec, against at
+  most 26282.9 in any cell, so the generator was not the limit. Its
+  connections ranged from 861 to 36430 requests each.
+- **Same body, different framing.**
+  - All fifteen bodies were 604 bytes with SHA-256 `3ff5004bf26139cc…`.
+  - Every Nova head was 72 bytes and every Bun fetch head 109. Bun's own
+    `Date` header accounts for the 37-byte difference.
+  - The static route's head was 135 bytes, because it also sends a 26-byte
+    `etag` line.
+  - Nova's two headers came out in either order, varying by process: in
+    round 3 both Nova processes sent `content-type` first. Every head was
+    read once per reading, with `curl -D`, and compared with its `Date`
+    line removed.
+- **Per request means wall time at saturation, `1e6 / rps`.** It is not CPU
+  time: a Bun process may also run work on other threads, which this run
+  did not check.
+- **3-second smoke readings, taken first to check framing, pointed the
+  other way.** They had Nova's fixed variant at 26235.6 and Bun's json-api
+  above its fixed variant. They are not used.
+
+These predictions were written before any variant existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| Nova json-api 10,000–11,900 | 11392.3–13400.0 | one of three above |
+| Nova fixed 14,000–19,000 | 17376.6–19210.0 | two of three just above |
+| Bun json-api 12,000–13,500 | 11834.1–12844.0 | one of three below |
+| Bun fixed 13,500–15,500 | 15484.2–16306.8 | two of three above |
+| Bun static 18,000–25,000 | 21190.0–26282.9 | one of three above |
+| Nova response building 30–40 us | 30.2, 22.1, 32.3 by round | two of three in range |
+| Bun `usersJson` 3–8 us | 19.9, 16.5, 17.9 by round, which also covers the `async` Promise, `new URL` and the method and path match | wrong: far above |
+| Nova fixed above Bun static by 10–25 us | 19.5, 6.4, 4.9 by round | two of three below |
+| most of the gap is response building; but Nova's fixed path is also slower than Bun's static path | little gap to place; Nova's fixed variant was slower than Bun's static route in all three rounds | first half wrong; second right, though that comparison may count building the request object on opposite sides |
+
+### The readings, req/sec, in run order
+
+| cell | round 1 | round 2 | round 3 | us per request |
+|---|---|---|---|---|
+| Nova json-api | 11392.3 | 13400.0 | 11861.3 | 74.6–87.8 |
+| Nova fixed | 17376.6 | 19040.8 | 19210.0 | 52.1–57.5 |
+| Bun json-api | 11834.1 | 12844.0 | 12577.4 | 77.9–84.5 |
+| Bun fixed | 15484.2 | 16306.8 | 16226.6 | 61.3–64.6 |
+| Bun static | 26282.9 | 21670.9 | 21190.0 | 38.0–47.2 |
+
+### Derived, us per request, by round
+
+| difference | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| Nova json-api − Nova fixed | 30.2 | 22.1 | 32.3 |
+| Bun json-api − Bun fixed (`async` Promise, `new URL`, method and path match, `usersJson`) | 19.9 | 16.5 | 17.9 |
+| Bun json-api − Bun static | 46.5 | 31.7 | 32.3 |
+| Nova fixed − Bun static | 19.5 | 6.4 | 4.9 |
+| Nova json-api − Bun json-api | 3.3 | −3.2 | 4.8 |
+
+A round's five readings were taken minutes apart. Readings moved between
+rounds, and not all in one direction: from round 1 to round 2, Bun static
+fell 17.5% while the other four cells rose 5.3–17.6%. So each per-round
+figure carries that variance. Taken from the ranges' extremes instead, Nova
+json-api minus Nova fixed is 17.1–35.7 us, and Nova json-api minus Bun
+json-api is −9.9 to 9.9.
+
+### What this does not settle
+
+- **The gate.** Its full method has pinned cells too. Apart from this file
+  and `CHANGELOG.md`, this partial run amends none of the eight other
+  tracked files that cite "(gate-remeasure)":
+  `nova-spec/00-MASTER-SPEC.md`, `nova-spec/13-RUNTIME.md`,
+  `nova-spec/20-STDLIB.md`, `nova-spec/60-EXAMPLES.md`,
+  `docs/phase-2-plan.md`, `docs/adr/0018-std-json-scope-and-build-order.md`,
+  `docs/adr/0019-offset-table-intrinsic-boundary.md` and
+  `docs/benchmarks/README.md`.
+- **What building the request object costs, on each side.** That is what
+  keeps the half-by-half comparison with Bun from being like for like.
+  Whether Bun's static route also builds one is not checked.
+- **What Nova's fixed path spends its 52.1–57.5 us on.**
+  "(remainder-split)" put the one socket write at 35.5–38.6 us per request,
+  but that was measured in the json-api, on an earlier build. It was not
+  measured here.
+- **Whether the two would be level on another day.** This is one session,
+  one host, Windows, three rounds.
 
 ## What was measured, and with what
 

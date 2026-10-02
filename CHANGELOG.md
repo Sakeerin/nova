@@ -256,6 +256,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   10308.3-11824.1. After was faster in 5 of the 6 pairs, and its mean was
   6.0% higher. Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (str-chars-direct)".
+- **Each json-api server measured beside a fixed-response variant.**
+  Unpinned, Nova's json-api ran at 11392.3-13400.0 req/sec and Bun's twin
+  at 11834.1-12844.0, a ratio of 0.943-1.043 round by round and 0.89-1.13
+  from the ranges' extremes. Part of that move from 0.79-0.81 is Bun
+  reading lower than in "(gate-remeasure)". This is not a gate
+  measurement: there were no pinned cells, and the gate's recorded status
+  stands.
+
+  Within Nova, the fixed path is most of a request: 52.1-57.5 us of
+  74.6-87.8, with response building 22.1-32.3 us by round. Against Bun,
+  only the totals compare like for like. Building the request object
+  falls on opposite sides of a split at Bun's static route, unless that
+  route also builds one, which was not checked. Details are in
+  `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (fixed-vs-json)".
 
 ### Changed
 - **`nova_rt_str_chars` builds a string's character array straight into
