@@ -149,7 +149,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   throughput.** At ten users, alternated fresh-process readings went from
   3983.0-4411.0 to 7559.7-9129.2 req/sec, ranges disjoint, a gain of 1.71x
   to 2.29x. That is 109.5-132.3 microseconds per request, so the gate's
-  absolute criterion is now short by 1.10x-1.32x.
+  absolute criterion is now short by 1.10x-1.32x. (Superseded on
+  2026-10-02 by the gate remeasurement below.)
   - Peak working set fell from 12.0-12.2 MB to 9.3-10.0 MB.
   - In a profiling build of the change:
     - the collector costs 11.6-12.9 microseconds per request, against
@@ -211,6 +212,25 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   criterion was measured: not the 10k at the 30 s runs used before, and
   not the Bun ratio. Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (quote-fast-path)".
+- **The Phase 2 gate, remeasured on both criteria.** This used the
+  2026-09-11 method on `main` at `5efcc2e`: ten users, 200 connections,
+  30 s after a 5 s warmup, four cells alternated, with the equivalence check
+  passing first.
+  - **The absolute 10k+ is not cleanly met.** Unpinned it ran at
+    10250.0-10382.4 req/sec, both readings 2.5-3.8% above, a thin margin on
+    two readings. Pinned to one core it ran at 8424.0-8520.1. Pooled, as
+    the 2026-09-12 figure was, it spans 8424.0-10382.4, straddling 10k.
+  - **The ratio against Bun is not met:** 0.70-0.79 pinned and 0.79-0.81
+    unpinned, against 1.0, short by 1.24x-1.43x. Bun still sends a 37-byte
+    `Date` header Nova does not, which favours Nova.
+
+  **The gate's two statements now disagree, and under any reading that
+  counts the Bun ratio it is not met.** `nova-spec/00-MASTER-SPEC.md`
+  §3 and its five twins, `nova-spec/60-EXAMPLES.md` §5,
+  `docs/benchmarks/README.md` and the status table at the top of
+  `examples/05-json-api/BENCHMARK.md` carry dated amendments. The twins are
+  `13-RUNTIME.md`, `20-STDLIB.md`, `docs/phase-2-plan.md` and ADRs 0018
+  and 0019. Details are in "AMENDMENT 2026-10-02 (gate-remeasure)".
 
 ### Changed
 - **`std/json`'s `quote` no longer rebuilds a string that needs no
@@ -346,6 +366,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   roughly **2.9x to 3.5x** rather than 3x to 5x; the Bun ratio is now
   **0.230 to 0.272**, short of `60-EXAMPLES.md` §5's >= 1.0 by roughly
   **3.7x to 4.4x** rather than 4.3x to 8.6x. **Neither criterion is met.**
+  (Superseded on 2026-10-02: see the gate remeasurement above.)
   **Part of the ratio's apparent movement is Bun's own variance rather than
   Nova's gain:** the old 0.116 lower bound was computed against a Bun
   reading far above its other three, and this session's two pinned Bun

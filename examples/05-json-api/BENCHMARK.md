@@ -328,6 +328,17 @@ either is close: at ten users the absolute criterion is still short by
 more than three times, and the control cell above shows response-side work
 alone has no path to 10k+ regardless.
 
+**Amended 2026-10-02 (gate-remeasure):** this table and the paragraph
+above describe `991fdfc`. On `main` at `5efcc2e`, the same method gives:
+- **Absolute, pooled the way the table pooled them:** 8424.0–10382.4
+  req/sec, straddling 10k+.
+- **Absolute, split by pinning:** unpinned 10250.0–10382.4, both readings
+  above 10k by 2.5–3.8%, which is a thin margin on two readings; pinned
+  8424.0–8520.1, below.
+- **Ratio:** 0.70–0.79 pinned and 0.79–0.81 unpinned, not met.
+
+See "AMENDMENT 2026-10-02 (gate-remeasure)".
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
@@ -2486,6 +2497,151 @@ run's output is from this session and was not saved to a file. So only the
 - **What `quote` still costs.** It still materialises `s.chars()` to scan.
   The sampled profile was not rerun on this build.
 - **One host, Windows, three readings per arm.**
+
+## AMENDMENT 2026-10-02 (gate-remeasure): the Phase 2 gate on `main` at `5efcc2e`
+
+This reruns both of the gate's criteria with the method the 2026-09-11 Bun
+ratio section uses: ten users, 200 connections, 30 s after a 5 s warmup,
+four cells alternated, two replicates each.
+
+**The absolute criterion is not cleanly met.**
+- **Pooled.** This file's earlier status table pooled Nova's pinned and
+  unpinned readings. Pooled the same way, the four Nova readings span
+  8424.0–10382.4 req/sec and straddle `nova-spec/00-MASTER-SPEC.md` §3's
+  10,000.
+- **Unpinned.** Nova clears 10,000 in both readings, at 10250.0–10382.4,
+  2.5–3.8% above it.
+- **Pinned to one core.** Nova misses, at 8424.0–8520.1.
+
+§3 names no pinning condition.
+
+**The ratio against Bun is not met.** Pinned Nova over pinned Bun is
+0.70–0.79, and unpinned over unpinned is 0.79–0.81, against the 1.0
+`nova-spec/60-EXAMPLES.md` §5 asks for: short by 1.24x to 1.43x.
+
+**The gate is specified twice, and the two statements now disagree.** That
+is the case §3's 2026-09-03 amendment anticipated: "10k could be reached
+while the ratio fails". Under any reading that counts §5, the gate is not
+met. The unpinned absolute pass is also thin. It rests on two readings, and
+this same code at 15 s ran from 9954.7 to 10806.2 req/sec in
+"(quote-fast-path)". Another session could land below 10,000.
+
+### The cells, in run order
+
+| reading | cell | side | pinned | mask read back | req/sec |
+|---|---|---|---|---|---|
+| 1 | A | Nova | core 0 | 1 | 8520.1 |
+| 2 | C | Bun | core 0 | 1 | 10774.3 |
+| 3 | B | Nova | no | 4095 | 10250.0 |
+| 4 | D | Bun | no | 4095 | 12956.6 |
+| 5 | A | Nova | core 0 | 1 | 8424.0 |
+| 6 | C | Bun | core 0 | 1 | 12068.8 |
+| 7 | B | Nova | no | 4095 | 10382.4 |
+| 8 | D | Bun | no | 4095 | 12846.9 |
+
+- **Every reading was `errors=0`.**
+- **Each server was a fresh process.** After it printed its listening line
+  and before seeding, it was pinned or left alone, and its affinity mask
+  was read back and logged.
+- **One reading is not in the table.** A smoke reading of cell C, run after
+  the predictions and before the matrix, gave 11741.5 req/sec with mask 1.
+  It falls inside C's range.
+
+| cell | range | ratio |
+|---|---|---|
+| A, Nova pinned | 8424.0–8520.1 | |
+| B, Nova unpinned | 10250.0–10382.4 | |
+| C, Bun pinned | 10774.3–12068.8 | A/C 0.698–0.791 |
+| D, Bun unpinned | 12846.9–12956.6 | B/D 0.791–0.808 |
+
+**The load generator was not the limit.** Its self-test ceiling, taken
+after the matrix in the same session, is 93680.1 req/sec. Bun's fastest
+reading is under 14% of that.
+- It was invoked as `nova-bench-http --self-test --connections 200
+  --duration 30 --warmup 5`. That command is from this session; the RESULT
+  line itself records only the connection count.
+- One connection was starved (`conn_min=672`, `conn_max=50255`), which this
+  file elsewhere treats as weaker evidence for a ceiling. At 13.8% of it,
+  the conclusion does not depend on that. The generator is
+`target/release/nova-bench-http.exe`: 256,512 bytes, SHA-256
+`d17062335e988c18…`, built 2026-09-29.
+
+**These predictions were written before any throughput reading.** The same
+command then ran the equivalence check. That ordering is from this
+session, and no file records it. The files' mtimes show only that the
+predictions precede the check's end.
+
+| prediction | measured | verdict |
+|---|---|---|
+| equivalence: all 9 exchanges match | all 9 match | within |
+| A: 9000–11000 | 8424.0–8520.1 | wrong: below |
+| B: 9000–11000 | 10250.0–10382.4 | within |
+| C: 11000–19000 | 10774.3–12068.8 | one reading below |
+| D: 10000–13000 | 12846.9–12956.6 | within |
+| A/C: 0.5–0.9 | 0.698–0.791 | within |
+| B/D: 0.7–1.05 | 0.791–0.808 | within |
+| Nova's ranges straddle 10,000 | A entirely below, B entirely above | partly: the cells split rather than straddle, though pooled they straddle |
+
+### Identity of each side, and the payload
+
+- **Nova:** `examples/05-json-api` built by the release `nova` from
+  `5efcc2e`. `json-api.exe` is 700,928 bytes, SHA-256
+  `99f6e5f6b4b45206…`, and the same binary ran in every Nova reading.
+- **Bun:** `docs/benchmarks/bun-server.js`, run by bun 1.3.0. The version
+  is from `bun --version` in this session and was not logged.
+  - The script's code is unchanged since 2026-09-11; only its comments
+    changed.
+  - It is 4,297 bytes in git, against 4,179 then, and 4,415 bytes in this
+    checkout because of Windows line endings.
+- **The payload.**
+  - Ten users were seeded by the same `curl` POSTs on each side.
+  - Before each load the body was fetched. Its size and hash were compared
+    afterwards, in analysis.
+  - Every reading on both sides served the same 604-byte body, SHA-256
+    `3ff5004bf26139cc…`.
+- **Equivalence was run first**, by hand, against the `json-api.exe` built
+  for this run. The log does not record the binary's path. Its result:
+  `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+
+**The wire framing still differs, and still in Nova's favour.** Measured
+again on this build for the `/users` response, Nova's head is 72 bytes and
+Bun's is 109. Bun adds a `Date` header, 37 bytes, the same difference
+recorded on 2026-09-11, so Bun sends 713 bytes per response against Nova's
+676.
+
+### Against the last matrix, 2026-09-12
+
+That matrix is the one behind the ratio row of this file's status table, on
+a 534-byte body. This one uses a 604-byte body.
+
+| cell | 2026-09-12 | now |
+|---|---|---|
+| A, Nova pinned | 2868.2, 3392.4 | 8424.0, 8520.1 |
+| B, Nova unpinned | 3024.9, 3056.5 | 10250.0, 10382.4 |
+| C, Bun pinned | 12470.8, 12480.6 | 10774.3, 12068.8 |
+| D, Bun unpinned | 12647.3, 12934.0 | 12846.9, 12956.6 |
+
+- **The pinned ratio** rose from 0.230–0.272 to 0.70–0.79.
+- **Part of that rise is Bun.** Bun pinned is lower now, at 0.863–0.968 of
+  its 2026-09-12 readings, ranges disjoint, on a 13% heavier body.
+- **Bun unpinned overlaps** its 2026-09-12 readings.
+
+### What this does not settle
+
+- **Why the pinned cells are slower than the unpinned ones.** This session
+  that holds on both sides, disjoint:
+  - Nova: 8424.0–8520.1 against 10250.0–10382.4;
+  - Bun: 10774.3–12068.8 against 12846.9–12956.6.
+
+  On 2026-09-11 and 2026-09-12, Nova's two cells overlapped. Bun's were
+  already narrowly disjoint on 2026-09-12. One candidate is that core 0 is
+  shared with the load generator's threads. It was not measured.
+- **Whether the unpinned absolute pass holds across sessions.** It rests on
+  two readings 2.5–3.8% above the line.
+- **Which statement of the gate governs.** No tracked file settles it.
+- **Any host but this one.** Every figure here is from this development
+  host, Windows, with the load generator on the same machine. The spec does
+  not define §3's "benchmark hardware".
 
 ## What was measured, and with what
 

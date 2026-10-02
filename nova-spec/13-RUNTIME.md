@@ -693,3 +693,15 @@ is a comparison whose size depends on which readings each side is drawn
 from, and repeating it in every record is how it would go stale in every
 record. **The gate is still NOT met and nothing here
 claims otherwise.** Full account in `examples/05-json-api/BENCHMARK.md`.
+
+**Amended 2026-10-02 (gate-remeasure):** remeasured on `main` at `5efcc2e`
+with the four-cell method of 2026-09-11:
+- **Pooled the way the figure above pooled them:** 8424.0–10382.4 req/sec at
+  ten users, straddling 10k+.
+- **Split by pinning:** unpinned 10250.0–10382.4, above 10k by a thin margin
+  on two readings; pinned 8424.0–8520.1, below.
+- **The ratio against Bun:** 0.70–0.81, still short of 1.0.
+
+The gate is not met under any reading that counts the Bun ratio. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
+(gate-remeasure)".

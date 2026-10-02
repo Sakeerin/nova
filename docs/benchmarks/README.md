@@ -396,7 +396,10 @@ numbers in `examples/05-json-api/BENCHMARK.md`." An absolute 10k and a ratio
 against Bun can disagree in either direction -- 10k could be reached while
 the ratio fails, or the ratio could clear 1.0 well under 10k if Bun itself is
 slower on the same machine. This procedure measures only the absolute
-figure; the Bun ratio is unmeasured.
+figure; the Bun ratio is unmeasured. (Amended 2026-10-02: the Bun ratio
+has been measured since 2026-09-11, by the procedure under "Comparing
+against Bun" below; this paragraph's last clause describes only
+this procedure's own scope.)
 
 **The destination is given twice, and the second is unsatisfiable on this
 tree.** `60-EXAMPLES.md` names `examples/05-json-api/BENCHMARK.md`, but
@@ -559,6 +562,17 @@ fairness decision does not move which side of 1.0 the ratio lands on.
 Pinned is reported as the headline because it is the single-core
 comparison that matches Nova's own executor, not because it was the only
 one measured.
+
+**Amended 2026-10-02 (gate-remeasure):** on `main` at `5efcc2e`, the pinned
+and unpinned ranges no longer overlap on either side:
+- Nova: 8424.0–8520.1 pinned against 10250.0–10382.4 unpinned;
+- Bun: 10774.3–12068.8 pinned against 12846.9–12956.6 unpinned.
+
+The conclusion still holds, since both ratios, 0.70–0.79 and 0.79–0.81,
+fall short of 1.0. But the premise above no longer does, and on the
+absolute criterion the pinning decision now does matter: unpinned clears
+10k, pinned does not. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT
+2026-10-02 (gate-remeasure)".
 
 ### The CPU-usage observation
 
