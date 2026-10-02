@@ -574,6 +574,19 @@ absolute criterion the pinning decision now does matter: unpinned clears
 10k, pinned does not. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT
 2026-10-02 (gate-remeasure)".
 
+**Amended 2026-10-02 (gate-remeasure-2):** on `main` at `cdaea7e`, the
+pinned and unpinned ranges overlap again on both sides:
+- Nova: 10986.5–12403.2 pinned against 10768.5–12126.4 unpinned;
+- Bun: 9300.1–15374.9 pinned, which contains 12427.5–12605.6 unpinned.
+
+But the pinning decision now moves the ratio. Unpinned it is 0.854–0.976,
+below 1.0. Pinned it is 0.715–1.334 and straddles 1.0, because Bun's pinned
+readings spread 1.65x. So under the pinned headline above, §5's ratio is
+not established, and the verdict that it is not met rests on the unpinned
+cells. On the absolute criterion the decision no longer matters: both clear
+10k. See `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-02 (gate-remeasure-2)".
+
 ### The CPU-usage observation
 
 Process affinity sets the default for every thread, but a thread can

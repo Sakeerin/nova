@@ -350,6 +350,18 @@ matching:
 **The gate is still NOT met**, because the ratio fails. Full account in
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure)".
 
+**Amended 2026-10-02 (gate-remeasure-2):** the same four-cell matrix on
+`main` at `cdaea7e`, three replicates per cell, with the equivalence check
+re-run first and all nine exchanges matching:
+- **this section's ratio:** unpinned Nova over unpinned Bun is 0.854–0.976,
+  short of 1.0, with the ranges disjoint. Pinned it is 0.715–1.334,
+  straddling 1.0, because Bun's pinned readings spread 1.65x.
+- **`00-MASTER-SPEC.md` §3's absolute criterion:** met in all six readings,
+  pinned 10986.5–12403.2 req/sec and unpinned 10768.5–12126.4.
+
+**The gate is still NOT met**, because the ratio is not. Full account in
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-2)".
+
 `src/main.nova`:
 ```nova
 import std/http

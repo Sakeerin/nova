@@ -125,6 +125,13 @@ and pinned 8424.0 to 8520.1, below. The ratio against Bun is 0.70 to 0.81,
 still short of 1.0, so the gate is not met under any reading that counts
 it. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
 (gate-remeasure)".]
+[Amended 2026-10-02 (gate-remeasure-2): remeasured on `main` at `cdaea7e`
+with the same four-cell method, three replicates per cell. All six readings
+clear 10k+ at ten users: pinned 10986.5 to 12403.2 req/sec, unpinned
+10768.5 to 12126.4. The ratio against Bun is 0.854 to 0.976 unpinned, short
+of 1.0, and 0.715 to 1.334 pinned, straddling it, so the gate is still not
+met under any reading that counts it. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-2)".]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
