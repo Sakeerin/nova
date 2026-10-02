@@ -2194,6 +2194,193 @@ cost is not in this comparison.
 - **The profiling's own cost**, as above.
 - **One host, Windows, three readings.**
 
+## AMENDMENT 2026-10-02 (sampled-profile): where the server thread's time goes, by function
+
+"(remainder-split)" left 49.7–52.5 µs of a ten-user request as "everything
+else", derived by subtraction. This samples the server thread directly, so
+every sample lands in a named function. **`users_json` is 38.9–39.4% of the
+server thread's time. Within it, `std/json`'s `quote` alone is 25.0–28.2%:
+it rebuilds each string one character at a time, through `String.chars`,
+`Vec.push` and `vec_chars_to_string`. The socket send path is 36.7–37.7%.
+The system heap, which the runtime's string helpers use, is 10.0–11.0%.
+No earlier counter isolated it: the string helpers' share sat inside the
+subtracted "everything else". Request-head parsing is 1.8–2.0%.**
+
+### How it was measured
+
+A scratch sampler in the runtime, never committed (`NOVA_PROF_SAMPLE=<path>`):
+- **Sampling.** A sampler thread asks to sleep 1 ms between samples. In
+  practice samples came 1.57 ms apart on the median, about 650 a second.
+  Each time, it suspends the thread that called `nova_rt_task_block_on`.
+  It reads that thread's registers, walks its stack, resumes it, and only
+  then writes the sample. It allocates nothing while the thread is
+  suspended.
+- **Stack walking.** Frames with Windows unwind info go through
+  `RtlVirtualUnwind`.
+  - **Nova's generated functions have no Windows unwind info.** In a smoke
+    build made before the fallback below, all 3,500 walks stopped early,
+    3,493 of them at an address inside Nova's code, and none passed a Nova
+    frame. Those addresses resolve with the final build's map: 3,474 of
+    them are exact addresses that also appear in the final build's stacks.
+  - Whether Cranelift or Nova's object emission is responsible is not
+    settled. `task.rs` already notes that generated frames have no unwind
+    table.
+  - So inside the image the sampler follows the frame-pointer chain,
+    bounds-checked against the thread's stack.
+  - 98.9–99.2% of walks then ended cleanly. The rest stopped early.
+- **Naming.** A scratch `/MAP` flag on the link step maps addresses inside
+  the executable to Nova functions, runtime functions and Rust std.
+  Addresses in system DLLs are named from those DLLs' own export tables.
+- **Each run counts only its load window**: the 14 s starting half a second
+  after the load generator connected.
+
+A sample is wall-clock time on the server thread, including time the OS
+spent running other threads while the server thread was descheduled.
+"Self" counts the function a sample was in. "Inclusive" counts every
+function on its stack, once per sample.
+
+Ten users, a 604-byte body, 200 connections, `--warmup 0 --duration 15`,
+three fresh processes, every reading `errors=0`. The sampled server is
+737,280 bytes, built from `main` at `5ef7b68` with the scratch sampler and
+link map applied. The patch file was saved after the build. That the tree
+was not edited in between is from this session, not from a file. It ran
+at 9382.6–9684.2 req/sec and took 9,071–9,153 samples per window.
+
+**The sampler's own cost is not resolved.** These builds were alternated,
+three 10 s readings each:
+
+| plain (700,928 B) | sampler build, sampling off | sampler build, sampling on |
+|---|---|---|
+| 7717.8, 8974.4, 8937.6 | 8972.4, 9109.0, 8927.6 | 8572.8, 8535.0, 8933.9 |
+
+All three ranges overlap.
+
+**One earlier observation was a mistake, not a finding.** Two smoke runs of
+the sampler reached 12,766 and 12,905 req/sec, which looked like the
+sampler making the server faster. Those runs never seeded the ten users, so
+they measured an empty store. `users_json` appears in 6 of one smoke run's
+3,442 samples, against about 39% when seeded.
+
+The plain build was then rerun on a seeded store, unsampled. Back-to-back
+5 s loads on one process gave 8329.6, 7294.9 and 8065.5 req/sec, and a
+15 s load gave 8487.7, none near the empty-store figures. These readings
+and the smoke figures come from this session's output and were not saved
+to a file. They show no steady decline: the second load is 12.4% below
+the first and the third recovers. They cannot show decay within one load.
+
+These predictions were written before the first sampled run:
+
+| prediction | measured | verdict |
+|---|---|---|
+| OS DLLs 30–40% of self time | 56.0–57.7% with kernel32, 55.3–57.1% for the four predicted | wrong: above; the socket system call alone is 44.2–45.1%, and the system heap adds about 10 points more |
+| collector 8–12% | 10.2–10.5% with the named collector functions' own self time, inferred (see below) | within |
+| allocation 8–14% | 8.0–8.2% self in `gc::alloc` and `Pages::alloc_slot`; 12.1–12.7% with the allocation closure and slot zeroing | within |
+| Nova compiled code 20–35% self | 9.0–9.3% | wrong: below |
+| other runtime helpers 10–20% self | 21.2–22.1%; 9.5–10.0% once both thread-local closures (collector and allocation) are set apart | wrong: slightly below in all three runs, once set apart |
+| `users_json` 25–40% inclusive | 38.9–39.4% | within |
+| `parse_request_head` 5–15% inclusive | 1.8–2.0% | wrong: below |
+| throughput within 10% of the plain build | no sampling-on reading is more than 4.9% below any plain reading | within on the slowdown side; the sampler's cost itself is not resolved |
+| most walks unwind cleanly through Nova frames | none did on unwind info alone; 98.9–99.2% did with the frame-pointer walk | wrong as stated |
+
+### Inclusive, % of the server thread's samples
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `handle` (the route) | 40.05 | 39.77 | 40.39 |
+| `users_json` | 39.11 | 38.92 | 39.40 |
+| — `user_json` | 30.44 | 30.27 | 33.02 |
+| — `stringify` | 26.49 | 25.54 | 28.59 |
+| — `quote` | 26.14 | 25.05 | 28.20 |
+| socket send path (`ws2_32!send`) | 37.67 | 36.69 | 37.72 |
+| `gc::alloc`, collection inside it included | 23.70 | 24.28 | 23.21 |
+| `read_request` | 11.58 | 11.67 | 12.57 |
+| — socket receive path (`ws2_32!recv`) | 7.39 | 7.53 | 7.55 |
+| — `parse_request_head` | 1.96 | 1.78 | 1.83 |
+| system heap (`RtlAllocateHeap`, `RtlFreeHeap`, `RtlReAllocateHeap`) | 10.99 | 9.99 | 10.72 |
+| `Vec.push` | 10.61 | 10.74 | 9.57 |
+| `vec_chars_to_string` | 7.99 | 7.11 | 11.07 |
+| `nova_rt_str_chars` | 7.35 | 7.20 | 7.93 |
+| `nova_rt_str_concat` | 7.81 | 7.60 | 5.66 |
+| `Response.to_bytes` | 4.12 | 5.10 | 5.58 |
+| `nova_rt_check_bounds` | 2.85 | 2.80 | 2.79 |
+| `memset` | 2.51 | 2.70 | 2.43 |
+
+These rows nest and overlap, so they do not sum to 100%.
+
+### Self, % of the server thread's samples
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `ntdll!ZwDeviceIoControlFile`, the socket system call | 45.03 | 44.17 | 45.13 |
+| system heap, self | 10.62 | 9.46 | 10.21 |
+| one `LocalKey::with` instance entered from `gc::alloc` (inferred collector) | 10.01 | 10.30 | 10.01 |
+| Nova compiled code | 9.05 | 9.26 | 9.18 |
+| `gc::alloc` and `Pages::alloc_slot` | 8.11 | 8.19 | 8.01 |
+| `vcruntime140` (`memset` and friends) | 3.67 | 4.13 | 3.64 |
+
+**The collector is identified by inference, and the evidence is strong.**
+`collect_with_roots` runs its mark and sweep inside a `HEAP.with` closure,
+reached from `gc::alloc` through the inlined `maybe_collect` and `collect`.
+- **The collector instance.** One `LocalKey::with` instance,
+  `…ce5e268d0d359845`, holds 10.0–10.3% of self time. Every one of its
+  2,761 self samples across the three runs is entered from `gc::alloc`. Its
+  callees are only collector-path code, including a frame named
+  `collect_with_roots::{{closure}}::{{closure}}`. With those callees it is 10.25–10.61%.
+- **The allocation instance.** Allocation runs in a different instance,
+  `…d03a43526a1fdc50`. That one is the parent of every `Pages::alloc_slot`
+  sample and every `memset` sample from slot zeroing.
+- **Against the timers.** The collector's 9.4–10.0% in the timer-based
+  "(remainder-split)" run is consistent with this, on a different build and
+  load.
+
+**What drives the system heap.** These are the samples inside a heap call,
+charged to the runtime function above it:
+- `nova_rt_str_chars`: 4.3–4.6%;
+- `nova_rt_str_from_chars`: 2.3–2.7%;
+- `nova_rt_str_concat`: 1.4–1.7%;
+- `nova_rt_int_to_str`: 0.5–0.6%;
+- `try_read`'s 4096-byte buffer: 0.6%;
+- `nova_rt_str_concat_n`: 0.4–0.6%.
+
+### What the figures bound
+
+- **`quote` is 25.0–28.2% inclusive.** It is the deepest Nova function
+  holding that much time: `user_json` and `stringify` contain it, and
+  `write_stream.240$poll` (37.0–38.0%) is the socket path.
+  - Collections that happened to trigger inside `quote`'s allocations
+    account for 3.4%, 3.5% and 6.5% of all samples. Without them `quote` is
+    21.5–22.8%, and run 3's higher figure comes entirely from them.
+  - What `quote` does: it turns every string into a `Vec<Char>`, pushes
+    each character into a second vector that grows through `nova_rt_alloc`,
+    and rebuilds a string from that. For a string with nothing to escape,
+    all of that produces the string wrapped in quotation marks.
+  - How much a faster `quote` would save is not measured.
+- **The socket send path is 36.7–37.7% here**, against the timed write's
+  30.3–30.5% in "(remainder-split)". Both cover the same layers: here,
+  std's `TcpStream::write` inclusive equals `ws2_32!send` inclusive to
+  within one sample. The gap is between methods, builds and loads, and is
+  not explained: 9382.6–9684.2 req/sec here, 7904.6–8531.3 there.
+- **Request-head parsing is small:** `parse_request_head` is 1.8–2.0%
+  inclusive. `read_request`'s other parsing (`parse_offsets`,
+  `content_length_of`) adds about 0.3–0.4%. Any collections its
+  allocations trigger are charged wherever the threshold is crossed.
+
+### What this does not settle
+
+- **Samples that stopped early.** 0.8–1.1% of walks did not end cleanly,
+  most of them at `kernel32!GetProcessHeap` on the allocation path. So the
+  heap and string-helper inclusive rows are slightly low.
+- **Frames a frameless Nova leaf would hide.** The frame-pointer walk
+  assumes every Nova function keeps a frame. A Nova leaf function without
+  one would charge its caller's samples to the caller's caller, which
+  slightly shifts the inclusive figures for Nova functions.
+- **The sampler's own cost**, as above.
+- **What a Nova function without unwind info means elsewhere.** Anything
+  that unwinds the stack on Windows, a debugger or a crash handler, cannot
+  pass through Nova frames on unwind info alone. That was not investigated
+  here.
+- **One host, Windows, three readings.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
