@@ -2761,6 +2761,127 @@ while its absolute cost stays flat, because others shrank around it.
   a write costs what it does is still unmeasured.
 - **One host, Windows, three readings.**
 
+## AMENDMENT 2026-10-02 (str-chars-direct): a string's characters go straight into GC memory
+
+"(reprofile)" found `nova_rt_str_chars` charging 6.1–6.8% of the server
+thread to the system heap. It collected a string's characters into a Rust
+`Vec<char>`, then copied that into the GC array. It now counts the
+characters, allocates the GC array once and fills it directly. Its output,
+size and scan flag are unchanged.
+
+**Results:**
+- **Per call,** `chars()` went from 160–201 to 33–38 ns on a 13-character
+  name, and from 164–226 to 35–43 ns on a 17-character email. `stringify` on
+  the clean name went from 348–368 to 215–258 ns. All three are disjoint.
+- **The ten-user server's ranges overlap**, so no gain is claimed for it.
+  Over six alternated pairs, before ran at 9597.7–11933.1 req/sec and after
+  at 10308.3–11824.1. After was faster in 5 of the 6 pairs, and its mean was
+  6.0% higher. The before readings alone ranged from 9597.7 to 11933.1
+  (1.24x) across the session, which is more than that difference.
+
+### How it was measured
+
+- **Per call:** a scratch Nova harness, never committed, times 500,000
+  calls each of `"User Number 7".chars()`, `"user7@example.com".chars()` and
+  `stringify(String("User Number 7"))`.
+  - `before` is 518,144 bytes, SHA-256 `85529fb73fa7f6d4…`.
+  - `after` is 517,120 bytes, SHA-256 `4a36eb0e6807f107…`.
+  - Both were built by the release `nova`, `before` from `00915c3` and
+    `after` from `7d04191`. That is from this session, not from a file.
+  - The two were alternated, three runs each, one fresh process per run.
+- **Server:**
+  - `before` is 700,928 bytes, SHA-256 `4c566ecc09053175…`; `after` is
+    700,416 bytes, SHA-256 `47058d5f49b2a10b…`. They were built the same
+    way, from the same two commits; that too is from this session.
+  - Ten users, a 604-byte body, 200 connections, `--warmup 5 --duration 15`.
+  - Alternated, one fresh process per reading, every reading `errors=0`.
+  - The response body was byte-identical in all twelve readings, SHA-256
+    `3ff5004bf26139cc…`.
+  - **Six pairs, not three.** The first three overlapped, so three more
+    pairs were taken. That follows the rule written for the page heap in
+    `docs/superpowers/plans/2026-10-01-gc-page-heap.md`: "If the ranges
+    overlap, take three more of each and report all readings." They
+    overlapped too.
+
+These predictions were written before the change existed. Their per-call
+"before" figures were copied from a smoke run of the `before` harness, so
+only the "after" figures and the server's are predictions:
+
+| prediction | measured | verdict |
+|---|---|---|
+| `chars()` name: after 100–170 ns | 33–38 | wrong: far below |
+| `chars()` email: after 100–170 ns | 35–43 | wrong: far below |
+| `stringify` name: after 300–360 ns | 215–258 | wrong: below |
+| server: after within 0–8% of before, ranges likely overlap | ranges overlap; after's mean 6.0% higher | ranges overlap, as predicted; the 0–8% part is not settled |
+
+The per-call savings ran past the predictions. A 13-character `chars()`
+went from 160–201 ns to 33–38, a cut of 76–83% per pair. So the work
+removed was most of each call's cost: the `Vec`'s allocation, its two
+regrowths and its free, and the copy. The two regrowths are read from the
+source of std's `Vec` collect in Rust 1.95.0, not measured: 4 to 8 to 16
+slots for the name, 5 to 10 to 20 for the email. The net cut is a lower
+bound on the work removed, since the change also added a counting pass.
+
+### Per call, ns, in run order
+
+| run | `chars()` name before | after | `chars()` email before | after | `stringify` name before | after |
+|---|---|---|---|---|---|---|
+| 1 | 160 | 33 | 172 | 35 | 368 | 258 |
+| 2 | 161 | 38 | 164 | 43 | 348 | 215 |
+| 3 | 201 | 34 | 226 | 37 | 365 | 216 |
+
+### Server, in run order
+
+| pair | before | after | after / before |
+|---|---|---|---|
+| 1 | 9597.7 | 10308.3 | 1.074 |
+| 2 | 10718.0 | 11360.5 | 1.060 |
+| 3 | 9795.0 | 11529.9 | 1.177 |
+| 4 | 10592.7 | 11016.9 | 1.040 |
+| 5 | 11933.1 | 11824.1 | 0.991 |
+| 6 | 10845.6 | 11271.1 | 1.039 |
+
+### Correctness
+
+- **A new unit test,
+  `str_chars_sizes_and_fills_by_character_on_a_long_mixed_string`,** runs
+  on 100 repetitions of `aé🦀`: 300 characters in 700 bytes. It checks the
+  length word, every element, and the size and scan flag `gc::alloc`
+  recorded, `(2408, true)`. The existing layout test still covers a mixed
+  ASCII and multi-byte string, `a→🦀`, and the empty string.
+- **Four mutants each fail named tests:**
+  - counting bytes instead of characters: 3 tests;
+  - shifting the fill onto the length word: 3;
+  - allocating the array as a leaf: 2;
+  - stopping the fill one character short: 3.
+- **The source is read after the allocation.** The old code copied it out
+  first. Its bytes stay alive because this function's pointer to them is a
+  root under the collector's stack scan, as `gc.rs`'s module doc states. A
+  comment at the call says so.
+  - All 12 `*_under_gc_stress` tests, which collect on every allocation,
+    pass.
+  - They are weak evidence for this claim. A literal's bytes are static
+    and never freed. A string a caller still holds keeps its bytes alive
+    through its header, which `gc_str` allocates as scanned. In both cases
+    the tests pass whether or not this frame's pointer is scanned. The
+    claim rests on the argument.
+- **The gates pass on `b117631`.** The branch's one later code commit
+  changes only a comment. A scratch log records that commit's hash and
+  each command:
+  - `cargo test --locked --workspace`: 1171 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0;
+  - `cargo fmt --all --check`: exit 0.
+
+### What this does not settle
+
+- **The server-level effect.** Its ranges overlap. Separating a shift of
+  the size the means suggest from this session's drift needs more pairs or
+  a quieter host.
+- **What `chars()` still costs inside `quote` and the header check** on this
+  build. The sampled profile was not rerun.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list

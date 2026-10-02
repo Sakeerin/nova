@@ -246,8 +246,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of one binary, while every share in the record's inclusive table stayed
   within 1.5 points. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (reprofile)".
+- **`nova_rt_str_chars` writing straight into GC memory, measured.** Per
+  call, `chars()` went from 160-201 to 33-38 ns on a 13-character string
+  and from 164-226 to 35-43 ns on a 17-character one. `stringify` on a
+  clean name went from 348-368 to 215-258 ns. All three are disjoint.
+
+  The ten-user server's ranges overlap over six alternated pairs, so no
+  server gain is claimed: before 9597.7-11933.1 req/sec, after
+  10308.3-11824.1. After was faster in 5 of the 6 pairs, and its mean was
+  6.0% higher. Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (str-chars-direct)".
 
 ### Changed
+- **`nova_rt_str_chars` builds a string's character array straight into
+  GC memory.** It used to collect the characters into a Rust `Vec<char>`
+  on the system heap and copy that into the GC array. It now counts them,
+  allocates once and fills the array directly. Output, size and scan flag
+  are unchanged.
 - **`std/json`'s `quote` no longer rebuilds a string that needs no
   escaping.** It scans first for `"`, `\` or a control character below
   `0x20`. A string with none is returned in quotation marks by one
