@@ -540,9 +540,9 @@ pub unsafe extern "C" fn nova_rt_str_len_chars(s: *const NovaStr) -> i64 {
 pub unsafe extern "C" fn nova_rt_str_chars(s: *const NovaStr) -> *mut u8 {
     // Counted first and written straight into the GC array, rather than
     // collected into a `Vec<char>` and copied. The intermediate vector was a
-    // system-heap allocation, regrown as it filled, and a free per call:
-    // 6.1–6.8% of the server thread in `examples/05-json-api/BENCHMARK.md`'s
-    // "(reprofile)".
+    // system-heap allocation per call, regrown whenever the string outgrew
+    // its first guess, and a free: 6.1–6.8% of the server thread in
+    // `examples/05-json-api/BENCHMARK.md`'s "(reprofile)".
     let text = as_str(s);
     let n = text.chars().count();
     // `8` for the length header plus `8` per element — the same size
