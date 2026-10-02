@@ -1020,6 +1020,14 @@ at the method.
   `examples/05-json-api/BENCHMARK.md`. Wording above left as written and
   superseded by this marker rather than edited, the convention this file
   follows.]
+  [Amended 2026-10-02 (gate-remeasure): remeasured on `main` at `5efcc2e`
+  with the four-cell method of 2026-09-11. Pooled as above it is 8424.0 to
+  10382.4 req/sec at ten users, straddling 10k+. Split by pinning, it is
+  unpinned 10250.0 to 10382.4, above 10k by a thin margin on two readings,
+  and pinned 8424.0 to 8520.1, below. The ratio against Bun is 0.70 to 0.81,
+  still short of 1.0, so the gate is not met under any reading that counts
+  it. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
+  (gate-remeasure)".]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both

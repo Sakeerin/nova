@@ -338,6 +338,18 @@ came from -- short by roughly 2.9x to 3.5x. **The gate is still NOT met on
 either criterion.** Full account, including the four-cell matrix and the
 compiled decomposition re-run, in `examples/05-json-api/BENCHMARK.md`.
 
+**Amended 2026-10-02 (gate-remeasure):** the same four-cell matrix on `main`
+at `5efcc2e`, with the equivalence check re-run first and all nine exchanges
+matching:
+- **this section's ratio:** pinned Nova over pinned Bun is 0.70–0.79, and
+  unpinned 0.79–0.81. That is still short of 1.0, by 1.24x to 1.43x.
+- **`00-MASTER-SPEC.md` §3's absolute criterion:** met unpinned at
+  10250.0–10382.4 req/sec, a thin margin on two readings; not met pinned at
+  8424.0–8520.1. Pooled, it is 8424.0–10382.4, straddling 10k.
+
+**The gate is still NOT met**, because the ratio fails. Full account in
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure)".
+
 `src/main.nova`:
 ```nova
 import std/http

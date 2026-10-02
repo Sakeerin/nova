@@ -423,6 +423,23 @@ the gate's workload, and the gate's own figure is unchanged: measured, and
 not met. Readings and method in `docs/benchmarks/README.md` under
 "Differential decomposition, 2026-09-29".
 
+**Amended 2026-10-02 (gate-remeasure):** remeasured on `main` at `5efcc2e`
+with the 2026-09-11 method (ten users, 200 connections, 30 s after a 5 s
+warmup).
+- **This section's absolute criterion, split by pinning:** met unpinned at
+  10250.0–10382.4 req/sec, both readings 2.5–3.8% above 10k; not met pinned
+  to one core, at 8424.0–8520.1.
+- **Pooled the way the 2026-09-12 figure pooled them:** 8424.0–10382.4,
+  straddling 10k.
+- **`60-EXAMPLES.md` §5's ratio against Bun is still not met:** 0.70–0.79
+  pinned, 0.79–0.81 unpinned.
+
+The gate's two statements now disagree, the case the 2026-09-03 amendment
+above anticipated. Under any reading that counts §5, the gate is not met.
+The unpinned absolute pass rests on two readings with a thin margin. Full
+account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
+(gate-remeasure)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

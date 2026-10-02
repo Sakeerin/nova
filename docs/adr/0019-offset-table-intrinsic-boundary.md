@@ -117,6 +117,14 @@ reached and nothing here claims it is. See
 `examples/05-json-api/BENCHMARK.md`. Wording above left as written and
 superseded by this marker rather than edited, the convention this file
 follows.]
+[Amended 2026-10-02 (gate-remeasure): remeasured on `main` at `5efcc2e`
+with the four-cell method of 2026-09-11. Pooled as above it is 8424.0 to
+10382.4 req/sec at ten users, straddling 10k+. Split by pinning, it is
+unpinned 10250.0 to 10382.4, above 10k by a thin margin on two readings,
+and pinned 8424.0 to 8520.1, below. The ratio against Bun is 0.70 to 0.81,
+still short of 1.0, so the gate is not met under any reading that counts
+it. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
+(gate-remeasure)".]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
