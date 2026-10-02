@@ -517,11 +517,35 @@ fn vec_chars_to_string(b: Vec<Char>) -> String {
     str_from_chars(out)
 }
 
+// Whether any character in `cs` must be escaped in a JSON string literal:
+// `"`, `\`, or a control character below `0x20` (RFC 8259). Stops at the
+// first one.
+fn needs_escape(cs: [Char]) -> Bool {
+    let mut i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        if c == '"' { return true }
+        if c == '\\' { return true }
+        if char_to_int(c) < 32 { return true }
+        i = i + 1
+    }
+    false
+}
+
 // Escape `s` as a JSON string literal, quotes included. `char_to_int` is how
 // this reaches a character's scalar value -- it is `STD_ONLY`, which is why
 // this helper lives here rather than in a fixture.
+//
+// A string with nothing to escape, the common case, is returned wrapped in
+// quotation marks by one interpolation instead of being rebuilt one character
+// at a time. `examples/05-json-api/BENCHMARK.md`'s "(sampled-profile)"
+// amendment measured that rebuild at a quarter of the server thread's time.
+// Any other string goes through the loop below, unchanged.
 fn quote(s: String) -> String {
     let cs = s.chars()
+    if !needs_escape(cs) {
+        return "\"${s}\""
+    }
     let mut out: Vec<Char> = Vec::new()
     out.push('"')
     let mut i = 0
