@@ -3499,6 +3499,152 @@ These predictions were written before the profiling build existed:
   It was 25.5–32.7 us here, against 33.5–60.3 us there.
 - **One host, Windows, three runs.**
 
+## AMENDMENT 2026-10-02 (fast-join): `String.join` copies bytes, and `users_json` joins once
+
+"(fixed-profile)" pointed back at response building, and "(reprofile)" had
+found `users_json` growing its output two pieces at a time, with each step
+copying everything built so far.
+- **The language:** a new std-only builtin, `str_join(sep, parts)`, now backs
+  `std/strings`' `String.join`. Its runtime function copies every part and
+  separator into one buffer sized up front. The Nova-level `join` it
+  replaces walked every part character by character into a `[Char]`.
+- **The example:** `users_json` now fills a `[String]` sized by
+  `s.users.len()` and joins it once with `","`. Bun's twin also joins once
+  with `","`, though it pushes onto an empty array rather than sizing one
+  by the user count.
+
+**Results:**
+- **Per call, both are disjoint.**
+  - `users_json` at ten users went from 10166–10337 to 8205–8491 ns, an
+    18–20% cut per pair.
+  - `",".join` of the ten user objects went from 4987–6463 to 160–181 ns,
+    29–39 times faster per pair.
+- **The ten-user server is disjoint after three pairs, so a gain is
+  claimed.**
+  - Before ran at 10734.5–11382.1 req/sec and after at 11893.7–12269.5.
+  - After was 6.6–10.8% higher per pair, 5.4–9.1 us less per request.
+- **The server saved more per request than the per-call cut.** `users_json`
+  got 1.8–2.0 us cheaper per call in the harness, pair by pair. Why the
+  server gained more is not measured.
+
+### How it was measured
+
+- **Per call:** a scratch Nova harness, never committed, times 100,000
+  calls each of `users_json` and of `",".join` over the ten user objects.
+  - It holds copies of the example's `User`, `Store` and `user_json`, and
+    both forms of `users_json`. It panics if the two give different
+    output.
+  - `before` is 526,336 bytes, SHA-256 `ea4f49385b9e0de4…`.
+  - `after` is 525,824 bytes, SHA-256 `9be3effdf31a1b97…`.
+  - The "before" figure is the old `users_json` under `before`, and the
+    "after" figure the new one under `after`. The two were alternated,
+    three runs each, one fresh process per run.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`.
+  - `before` is 700,416 bytes, SHA-256 `360e5ca596671ec8…`; `after` is
+    701,440 bytes, SHA-256 `cfea00f7615e6089…`.
+  - Alternated, one fresh process per reading, every reading `errors=0`.
+  - Every reading served the same body, SHA-256 `3ff5004bf26139cc…`.
+  - `bun docs/benchmarks/bun-equivalence.js` passed against `after`: all 9
+    exchanges match.
+- **Provenance, from this session rather than a file:**
+  - All four binaries were built by the release `nova`, `before` from
+    `2556880` and `after` from `bf0dc38`.
+  - The equivalence log does not name the binary it ran against.
+- **Ordering.** The predictions' modification time is 21:30:56. The
+  `before` harness's is 21:31:05, and the code commit is dated 21:36:38.
+
+These predictions were written before any of the change existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| `users_json` before 10,000–20,000 ns | 10166–10337 | within |
+| `users_json` after 20–40% lower, disjoint | 17.9–19.6% lower per pair, disjoint | wrong: just below |
+| `join` before 3,000–8,000 ns | 4987–6463 | within |
+| `join` after 200–600 ns | 160–181 | wrong: below |
+| server after 2–8% above before, ranges likely overlap | 6.6%, 8.8%, 10.8% per pair, ranges disjoint | wrong: one of three within, two above, and disjoint |
+| every existing join test, the json-api golden test and the equivalence check pass unchanged | all did | right |
+| the four named mutants each fail at least one named test | all four did | right; a fifth, added later, also failed |
+
+### Per call, ns, in run order
+
+| run | `users_json` before | after | `join` before | after |
+|---|---|---|---|---|
+| 1 | 10166 | 8297 | 5224 | 181 |
+| 2 | 10337 | 8491 | 6463 | 165 |
+| 3 | 10205 | 8205 | 4987 | 160 |
+
+The harness also timed the cross terms.
+- The old `users_json` under `after` took 10497–10670 ns. It calls no
+  `join`, yet it ran 2.9–4.5% slower per pair than under `before`, 1.5–5.0%
+  from the ranges' extremes, with the ranges disjoint.
+  - Why is not measured. `after` always ran second in each pair, so an
+    order effect cannot be told apart from a property of the binary.
+  - Either way the 18–20% cut may slightly understate the change. Within
+    the `after` binary alone, the new form was 20.4–21.9% faster than the
+    old, pair by pair.
+- The new `users_json` under `before` took 13353–13784 ns. Joining once
+  only paid off once the join itself was cheap.
+
+### Server, in run order
+
+| pair | before | after | after / before |
+|---|---|---|---|
+| 1 | 11273.7 | 12269.5 | 1.088 |
+| 2 | 11382.1 | 12129.7 | 1.066 |
+| 3 | 10734.5 | 11893.7 | 1.108 |
+
+### Correctness
+
+- **A new runtime test,
+  `join_puts_the_separator_between_every_pair_of_parts`,** checks
+  `nova_rt_str_join` against Rust's own `join`. It covers five part shapes,
+  from none to multi-byte, under four separators, from empty to
+  multi-byte.
+- **The existing tests pass unchanged.** They are `String.join`'s two
+  split-and-join tests, `strings_run`, `strings_under_gc_stress` (which
+  collects on every allocation), `strings_build_standalone`, and
+  `json_api_example_serves_its_routes`.
+  - `strings_build_standalone` is weaker evidence than the others. It
+    links `target/debug/nova_runtime.lib`, which `cargo test -p nova-cli`
+    does not refresh, so it passed under all three runtime mutants.
+  - In the full-suite run it linked a runtime that has the new function:
+    `strings.nova` calls `join`, so the link would fail without
+    `nova_rt_str_join`.
+- **Five mutants each fail named tests:**
+  - the runtime join dropping its separator: 6 tests;
+  - putting it after every part: 6;
+  - skipping the last part: 6;
+  - `users_json` sizing its array one slot too large: 1, the json-api
+    route test;
+  - `users_json` writing one user short: 1, the same test.
+- **The `users_json` change rests on an invariant its comment states.**
+  `Store.create` is the only insert and there is no delete route, so every
+  id below `next_id` is present and the walk fills every slot.
+- **The gates pass.** A scratch log records the base commit, the working
+  tree's files and each command:
+  - `cargo test --locked --workspace`: 1172 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0.
+  - Both ran before `cargo fmt` reflowed one line of the new type-checker
+    test entry. After the reflow, `cargo fmt --all --check` exited 0; the
+    log records that. That the signature test then passed again is from
+    this session.
+  - A later commit changes only comments and one test message string.
+
+### What this does not settle
+
+- **Why the server gained more than the per-call cut.**
+  - By arithmetic, not measurement, the old `users_json` made roughly 6 KB
+    of intermediate strings per ten-user request.
+  - One candidate is that those cost more to collect in the server's heap
+    than in the harness's. It was not measured.
+- **The gate.** Neither criterion was rerun. "(gate-remeasure-2)"'s
+  unpinned gap was 3.1–12.4 us per request, round by round. This change
+  saved 5.4–9.1 us per request on the 15 s method, a different method in
+  a different session.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list

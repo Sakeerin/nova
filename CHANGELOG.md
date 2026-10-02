@@ -311,8 +311,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (fixed-profile)".
+- **A byte-level `String.join`, and `users_json` joining once, measured.**
+  - Per call, `users_json` at ten users went from 10166-10337 to
+    8205-8491 ns. A ten-part join went from 4987-6463 to 160-181 ns. Both
+    are disjoint.
+  - The ten-user server went from 10734.5-11382.1 to 11893.7-12269.5
+    req/sec, disjoint after three pairs: 6.6-10.8% higher per pair.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (fast-join)".
 
 ### Changed
+- **`std/strings`' `String.join` copies bytes instead of characters.** A
+  new std-only builtin, `str_join(sep, parts)` (`Builtin::STD_ONLY`
+  74 → 75), backs it. Its runtime function copies every part and separator
+  into one buffer sized up front. Output is unchanged.
+- **`examples/05-json-api`'s `users_json` joins once.** It fills a
+  `[String]` sized by `s.users.len()` and joins it with `","`, instead of
+  appending two pieces at a time to a growing string.
 - **`nova_rt_str_chars` builds a string's character array straight into
   GC memory.** It used to collect the characters into a Rust `Vec<char>`
   on the system heap and copy that into the GC array. It now counts them,
