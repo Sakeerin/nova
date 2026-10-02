@@ -16,6 +16,13 @@
 // with no short escape, which must render as `\u0001`. Everything at or
 // above `0x20` passes through unescaped, covered by `hello` in the sibling
 // fixture.
+//
+// The last five lines pin `quote`'s fast path, which returns a string with
+// nothing to escape without walking it character by character:
+// - `0x1f`, the highest control character, must still escape;
+// - space and `~` must still pass through;
+// - an escapable character first, or last behind a clean run, must still
+//   send the whole string through the escaping loop.
 fn main() {
     println(stringify(String("say \"hi\"")))
     println(stringify(String("back\\slash")))
@@ -23,4 +30,10 @@ fn main() {
     println(stringify(String("tab\there")))
     let cs = "\u{0001}".chars()
     println(stringify(String("${cs[0]}")))
+    let us = "\u{001f}".chars()
+    println(stringify(String("${us[0]}")))
+    println(stringify(String("a b~")))
+    println(stringify(String("abcdefghij\"")))
+    println(stringify(String("\"abcdefghij")))
+    println(stringify(String("abcdefghij\\")))
 }
