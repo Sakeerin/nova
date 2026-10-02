@@ -95,8 +95,9 @@ fn user_json(u: User) -> String {
 // The user objects are collected and joined once, rather than appended to a
 // growing string that copied everything built so far at every step. The
 // array is sized by `s.users.len()`. `Store.create` is the only insert and
-// there is no delete route, so every id below `next_id` is present and the
-// walk fills every slot.
+// there is no delete route, so every id from 1 to `next_id - 1` is present
+// and the walk fills every slot. If either stopped being true, the unfilled
+// slots would come out as stray commas rather than as an error.
 fn users_json(s: Store) -> String {
     let mut parts = [""; s.users.len()]
     let mut n = 0

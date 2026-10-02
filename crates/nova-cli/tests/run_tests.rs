@@ -2417,20 +2417,20 @@ fn string_split_and_join_match_the_pinned_semantics() {
 /// haystack (`"xx"` in `"xx"`). That leaves gaps a one-character mutation
 /// could hide in:
 ///
-/// 1. `join`'s inner copy loop (`for k in 0..sep.len() { out[w] = sep[k] ...
-///    }`) mutated to hardcode `sep[0]` instead of indexing by `k` is
-///    invisible with `","` (length 1, so `sep[0]` and `sep[k]` never
-///    differ) or `""` (the loop never runs zero times either way).
+/// 1. A separator copied wrongly, say by repeating its first character, is
+///    invisible with `","` (length 1) or `""` (nothing to copy).
 ///    `"->".join(["a", "b", "c"])` uses a two-codepoint separator with
-///    DIFFERENT characters at each position, so the hardcoded version writes
+///    DIFFERENT characters at each position, so the wrong copy writes
 ///    `"--"` where the real one writes `"->"`.
-/// 2. `join`'s guard `if parts.len() == 0 { return "" }` mutated to
-///    `parts.len() == 1` still gets caught by `"-".join([])` in the brief's
-///    test above — but only by accident, via a negative-length array crash
-///    on the UNRELATED zero-part call. The mutant's actual, intended effect
-///    (silently returning `""` for a genuine one-part call) is never pinned
-///    on its own terms. `",".join(["solo"])` does that directly: the answer
-///    must be `"solo"`, unchanged, with no separator on either side.
+/// 2. A one-part special case that returned `""` would be caught by
+///    `"-".join([])` only by accident. `",".join(["solo"])` pins it on its
+///    own terms: the answer must be `"solo"`, unchanged, with no separator
+///    on either side.
+///
+///    Both items were first written against a Nova-level `join`, with an
+///    `out[w] = sep[k]` copy loop and a `parts.len() == 0` guard. Since
+///    2026-10-02 the runtime builtin `str_join` does the join, and these
+///    calls exercise it instead.
 /// 3. `split`'s count/fill arithmetic is only ever exercised with a
 ///    one-codepoint separator repeated inside a longer haystack, or a
 ///    multi-codepoint separator spanning the ENTIRE haystack (`"xx"`) with
@@ -2803,11 +2803,13 @@ fn strings_build_standalone() {
 /// the reason this gate exists. `str_chars` and `str_from_chars` introduce
 /// two new allocation shapes reachable from a builtin: a scanned array of
 /// scalars, and a leaf byte buffer plus a scanned header. Every method built
-/// on them (`slice`, `split`, `join`, the trim family, `repeat`, `reverse`,
+/// on them (`slice`, `split`, the trim family, `repeat`, `reverse`,
 /// `to_upper`/`to_lower`) decodes to an intermediate `[Char]` and then
 /// allocates again to build the result string, and that intermediate array
 /// must stay live across the second allocation. A missed root here is
-/// silently wrong text, not a crash.
+/// silently wrong text, not a crash. `join` no longer decodes: since
+/// 2026-10-02 the runtime builtin `str_join` copies its parts' bytes before
+/// it allocates its result.
 #[test]
 fn strings_under_gc_stress() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
@@ -9720,15 +9722,16 @@ fn crypto_random_run() {
 ///
 /// **`GET /users` runs twice, and the second run is the one that exercises
 /// the list.** On an empty store `users_json`'s `while` never enters, so its
-/// `Some(u)` arm, its `first` flag and its comma separator are all skipped
-/// and the `[]` comes back out of a loop body that never ran. The second
-/// `GET /users` goes last, after both `POST`s, and pins the two-element
-/// array: the separator between the elements and the ascending walk over
-/// ids. Confirmed by mutation rather than assumed -- deleting
-/// `if !first { out = "${out}," }` from `users_json` fails the `listed`
-/// assertion below. Nothing else here can catch that deletion, because every
-/// other body asserted is a single object or an empty array, and a separator
-/// never appears in one.
+/// `Some(u)` arm never runs and the `[]` comes from joining an empty array.
+/// The second `GET /users` goes last, after both `POST`s, and pins the
+/// two-element array: the separator between the elements and the ascending
+/// walk over ids. Confirmed by mutation rather than assumed. Since
+/// 2026-10-02, `users_json` sizing its array one slot too large, or writing
+/// one user short, fails this test, and the `listed` body is the only one
+/// either mutant changes. Before that, deleting the old
+/// `if !first { out = "${out}," }` failed the `listed` assertion. Nothing
+/// else here can catch these, because every other body asserted is a single
+/// object or an empty array, and a separator never appears in one.
 ///
 /// **`GET /nope/1` is what pins the resource segment, and nothing else here
 /// can.** `GET /nope` is one segment, so it misses the router's
