@@ -283,6 +283,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (gate-remeasure-2)".
+- **The fixed path measured against a native floor.** A scratch native
+  Rust server in the shape of Nova's runtime was measured unpinned beside
+  Nova's fixed variant and Bun's static route.
+  - One `send` costs about 34 us or more on this host in plain Rust too:
+    33.5-60.3 us per 50,000-response window after the warmup.
+  - In this session Bun's static route ran within 2.3 us of native in two
+    of three rounds, and 17.7 us slower in the first.
+  - Nova's fixed path sat 3.2-16.8 us per request above native, round by
+    round. That is about the size of the gate's remaining unpinned gap,
+    3.1-12.4 us round by round in "(gate-remeasure-2)".
+  - No effect of `TCP_NODELAY` was resolved.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (native-floor)".
 
 ### Changed
 - **`nova_rt_str_chars` builds a string's character array straight into
