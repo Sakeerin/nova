@@ -184,6 +184,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   data read, and why is not measured. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-01
   (remainder-split)".
+- **Where the server thread's time goes, by function.** A scratch sampling
+  profiler walked the server thread's stack about 650 times a second over
+  three ten-user runs. `users_json` is 39% of the thread's time, and within
+  it `std/json`'s `quote` alone is 25-28%: it rebuilds each string one
+  character at a time. The rest of the picture:
+  - the socket send path: 37-38%;
+  - `gc::alloc`, collection inside it included: 23-24%;
+  - the system heap, used by the runtime's string helpers: 10-11%, which
+    no earlier counter isolated;
+  - request-head parsing: 1.8-2.0%.
+
+  Nova's generated functions have no Windows unwind info, so the sampler
+  walked them by frame pointer. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
+  (sampled-profile)".
 
 ### Changed
 - **The collector allocates small objects from size-class pages.** Every
