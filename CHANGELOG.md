@@ -297,6 +297,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (native-floor)".
+- **Nova's fixed path profiled.** A sampled build of the fixed variant ran
+  three times.
+  - Socket system calls are 84.3-87.0% of its server thread. The send
+    path alone is 68.8-70.4%.
+  - Everything outside the system calls is 13.0-15.7%, 4.7-6.8 us per
+    request. That is about the size of the gate's remaining unpinned gap,
+    3.1-12.4 us round by round in "(gate-remeasure-2)". It includes
+    `read_request`'s own work at 2.7-4.0 us and `gc::alloc` at 2.1-3.0 us,
+    which overlap.
+  - Response building holds two to five times as much, comparing across
+    runs: 22.1-32.3 us per request in "(fixed-vs-json)".
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (fixed-profile)".
 
 ### Changed
 - **`nova_rt_str_chars` builds a string's character array straight into

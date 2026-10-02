@@ -3367,6 +3367,138 @@ These predictions were written before the native server existed:
   here, against 17376.6–19210.0 there.
 - **Any host but this one.** It is one host, Windows, three rounds.
 
+## AMENDMENT 2026-10-02 (fixed-profile): where Nova's fixed path spends its time
+
+"(native-floor)" left open what Nova's fixed path spends its time on beyond
+the native floor. This run samples the fixed variant's server thread with
+"(sampled-profile)"'s scratch sampler.
+
+**Results:**
+- **Socket system calls are 84.3–87.0% of the fixed variant's server
+  thread.** That is the self time inside `ntdll!ZwDeviceIoControlFile`.
+  - The send path, inclusive, is 68.8–70.4%: 25.5–32.7 us per request.
+  - The receive path, both reads, inclusive, is 14.8–16.4%: 6.0–6.9 us per
+    request.
+  - Those two are inclusive figures, so they also count the little time
+    each spends outside the system call. Their self time inside it is
+    68.6–70.3% and 14.3–16.0%.
+- **Everything outside those system calls is 13.0–15.7% of the thread,
+  4.7–6.8 us per request in these runs.** On a single-threaded runtime that
+  holds all of Nova's own work on this path: its runtime, its compiled code
+  and its allocator. It is wall time, so it also counts any time the thread
+  was descheduled outside a system call. It also holds the socket
+  libraries' own user-mode code, 1.7–2.0% of the thread or 0.6–0.8 us per
+  request. Without that, Nova's share is 4.1–6.0 us per request. Its
+  largest named parts overlap:
+  - `read_request`'s own work beyond its receive calls: 2.7–4.0 us per
+    request. That includes `parse_request_head` at 1.6–2.3 us, which in
+    turn holds 88–92% of `Bytes.slice`'s 0.8–0.9 us.
+  - `gc::alloc`, collection included: 5.7–6.8% of the thread, 2.1–3.0 us.
+    64–67% of it is called from inside `read_request`.
+  - The system heap: 0.8–1.2% of the thread.
+  - `WSAPoll`, the readiness wait: 2.1–2.4% of the thread, 0.9–1.0 us.
+    Only 37–39% of its samples are inside the system call. Most of the rest
+    are in the socket libraries' user-mode code. The part inside the
+    13.0–15.7% is 1.3–1.5% of the thread, 0.55–0.61 us.
+- **So this run puts 4.7–6.8 us per request outside the system calls.**
+  That is about the size of the gate's remaining unpinned gap, 3.1–12.4 us
+  round by round in "(gate-remeasure-2)".
+- **Response building holds two to five times as much, comparing across
+  runs.** It took 22.1–32.3 us per request, round by round, in
+  "(fixed-vs-json)". This run's 13.0–15.7% share, applied to that run's
+  fixed variant at 52.1–57.5 us, gives 6.8–9.0 us outside the system
+  calls there, which makes response building 2.5–4.8 times as large; from
+  that run's range extremes, the low end is 1.9 times. Either way it has
+  more of Nova's time to cut. That run found it no larger than Bun's
+  per-request work beyond its static route, but that comparison split
+  building the request object differently on the two sides.
+
+### How it was measured
+
+- **The binary.** The fixed variant from "(fixed-vs-json)", built by the
+  release `nova` from `cec2221` with the scratch sampler patch applied. It
+  is 691,712 bytes, SHA-256 `b740cba719076a22…`, linked with a symbol map.
+  - That the patch was unchanged from "(reprofile)"'s is from this
+    session. The patch was reverted afterwards.
+  - A json-api built by the rebuilt release `nova` then came out at
+    700,416 bytes with no map, the plain build's size. Unlike the profiling
+    binary, it does not contain the string `NOVA_PROF_SAMPLE`.
+  - `68d0b94..cec2221` changed only documentation, so apart from the
+    sampler patch, this binary's code is that of the fixed variant
+    measured unsampled before.
+- **The sampler** suspends the server thread, walks its stack, then asks
+  to sleep 1 ms, as "(sampled-profile)" describes. Samples came 1.57 ms
+  apart on the median, as they did there, so it took 8890–9845 samples per
+  15 s load window. 99.8–99.9% of the walks ended cleanly.
+- **The load:** 200 connections for 15 s, no warmup, one fresh process per
+  run, three runs. Every run reported `errors=0` and served the 604-byte
+  body.
+- **The analysis** is "(reprofile)"'s scripts, unchanged. They counted the
+  samples in the 15 s from each run's load start. "(reprofile)" counted the
+  14 s starting half a second in; recounting this run that way moved no
+  share by more than 0.33 points.
+  - Per-request figures are a share times that run's `1e6 / rps`.
+  - One new scratch script found where `WSAPoll`'s samples end and counted
+    the socket libraries' self time.
+- **Throughput with the sampler** was 21522.2–27524.8 req/sec. That is
+  above the unsampled fixed variant's 14563.7–19210.0 in "(fixed-vs-json)"
+  and "(native-floor)", which used 30 s after a 5 s warmup. The send cost
+  here, 25.5–32.7 us, is also below "(native-floor)"'s native 33.5–60.3.
+  - The candidates are three: the host was faster during this run, the
+    shorter method reads higher, or the sampler itself changes the
+    timing, whose cost "(sampled-profile)" left unresolved.
+  - Which one is not separated. The shares are this run's result.
+- **Ordering.** The predictions' modification time is 20:35:33, the
+  profiling binary's 20:36:00, and the end of the first run's samples
+  20:36:30.
+
+These predictions were written before the profiling build existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| send path 55–68% | 68.8–70.4% | wrong: above |
+| receive path 8–14% | 14.8–16.4% | wrong: above |
+| `read_request` incl. its receive 15–28%; `parse_request_head` 2–6% | 23.5–24.8%; 4.4–5.2% | within; within |
+| `gc::alloc` incl. collection 4–12% | 5.7–6.8% | within |
+| system heap 2–7% | 0.8–1.2% | wrong: below |
+| `poll::wait` 1–4% | 2.15–2.45% | within |
+| throughput with the sampler 13,000–19,000 | 21522.2–27524.8 | wrong: above |
+| Nova's excess is mostly `read_request`'s own work plus allocation and collection; the scheduler and poller are small | those are its largest named parts; everything outside the system calls is 4.7–6.8 us | right in kind; its size was not predicted |
+
+### The runs
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| req/sec | 27524.8 | 21522.2 | 24562.5 |
+| us per request | 36.3 | 46.5 | 40.7 |
+| samples in the load window | 9845 | 8890 | 9757 |
+| socket system calls, self | 87.04% | 85.41% | 84.34% |
+| send path, inclusive | 70.29% | 70.44% | 68.80% |
+| receive path, inclusive | 16.43% | 14.81% | 15.30% |
+| `read_request`, inclusive | 23.84% | 23.48% | 24.84% |
+| `parse_request_head`, inclusive | 4.37% | 4.98% | 5.22% |
+| `gc::alloc`, collection included | 5.67% | 6.41% | 6.82% |
+| `WSAPoll`, inclusive | 2.39% | 2.10% | 2.36% |
+| of those, inside the system call | 37% | 37% | 39% |
+| socket libraries, self | 1.73% | 1.78% | 1.97% |
+| `Bytes.slice`, inclusive | 2.09% | 1.87% | 2.27% |
+| system heap, inclusive | 0.83% | 1.08% | 1.19% |
+
+### What this does not settle
+
+- **Whether the unsampled build splits the same way.** These are a
+  sampled build's shares, at a higher throughput than the unsampled
+  readings.
+- **"(native-floor)"'s larger per-round differences.** Nova fixed ran
+  12.9 and 16.8 us above native in two of its rounds. That is more than all
+  of Nova's work outside the system calls here, 4.7–6.8 us. So in those
+  rounds Nova's system calls cost more than native's, or the readings
+  drifted between cells, or this run's split does not hold there. Which
+  one is not separated.
+- **Why the send's cost differed between these runs and "(native-floor)"'s.**
+  It was 25.5–32.7 us here, against 33.5–60.3 us there.
+- **One host, Windows, three runs.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
