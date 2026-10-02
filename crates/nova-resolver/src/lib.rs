@@ -144,6 +144,12 @@ builtins! {
     /// character by character through [`Builtin::StrChars`] and
     /// [`Builtin::StrFromChars`]. Std-only.
     StrJoin,
+    /// `str_index_of(haystack: String, needle: String) -> Int` — the
+    /// character index of the first occurrence of `needle`, or `-1`, found by
+    /// a byte search. Backs `std/strings`' `String.index_of` and
+    /// `String.contains`, which otherwise build a [`Builtin::StrChars`] array
+    /// for each string first. Std-only.
+    StrIndexOf,
     /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs
     /// `std/strings`' `String::to_upper`. Whole-string rather than
     /// `Char` → `Char` because `ß` → `SS` is not 1:1. Std-only.
@@ -880,6 +886,7 @@ impl Builtin {
             Builtin::StrChars => "str_chars",
             Builtin::StrFromChars => "str_from_chars",
             Builtin::StrJoin => "str_join",
+            Builtin::StrIndexOf => "str_index_of",
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
@@ -981,7 +988,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 75] = [
+    pub const STD_ONLY: [Builtin; 76] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -989,6 +996,7 @@ impl Builtin {
         Builtin::StrChars,
         Builtin::StrFromChars,
         Builtin::StrJoin,
+        Builtin::StrIndexOf,
         Builtin::StrToUpper,
         Builtin::StrToLower,
         Builtin::FloatFixed,
