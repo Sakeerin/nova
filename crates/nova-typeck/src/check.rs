@@ -15129,7 +15129,7 @@ mod tests {
                         vec![Ty::String, Ty::Array(Box::new(Ty::String))],
                         Ty::String,
                     ),
-                    "`str_join(self, parts)` in `String.join`",
+                    "`str_join(self, parts)` in `String::join`",
                 ),
                 Builtin::StrToUpper => (
                     (vec![Ty::String], Ty::String),
