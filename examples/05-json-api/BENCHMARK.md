@@ -3208,6 +3208,165 @@ matrix followed the self-test, in the same command, is from this session.
 - **Any host but this one.** Every figure here is from this development
   host, Windows, with the load generator on the same machine.
 
+## AMENDMENT 2026-10-02 (native-floor): what a request's fixed path costs on this host
+
+"(fixed-vs-json)" found that Nova's fixed path, at 52.1–57.5 us, is most of
+each json-api request. "(remainder-split)" had put the one socket write at
+35.5–38.6 us of a request. This run asks whether that cost is Nova's or this
+host's. It measures Nova's fixed variant beside a native Rust server built
+in the same shape, and beside Bun's static route.
+
+**Results:**
+- **One `send` costs about 34 us or more on this host, in plain Rust too.**
+  - The native server times each call. Averaged over windows of 50,000
+    responses after the warmup, a send took 33.5–60.3 us. In round 1, whose
+    windows varied least, it took 33.9–39.1 us.
+  - A recv that returned data took 3.2–5.2 us, and one that would block
+    1.4–2.1 us. `WSAPoll` came to 0.85–1.5 us per response.
+  - So the send is most of the native server's 42.2–51.9 us per request.
+  - "(remainder-split)"'s Nova figures fall inside these native ranges:
+    35.5–38.6 us per write, and 1.55–1.73 us per read that would block.
+    They come from the json-api, in a profiling build at 7904.6–8531.3
+    req/sec. Nova fixed's own system calls were not timed in this run.
+- **In this session Bun's static route ran close to the native floor.**
+  It was within 2.3 us of native in two of three rounds, and 17.7 us slower
+  in the first.
+- **Nova's fixed path sat 3.2–16.8 us above that floor.**
+  - Nova fixed minus native was 12.9, 16.8 and 3.2 us per request, round by
+    round, and 2.1–26.4 us from the ranges' extremes.
+  - If Nova's system calls cost what native's do, as "(remainder-split)"'s
+    figures suggest, the excess is Nova's own work. It includes parsing the
+    request, building its `Request`, scheduling the task, and the
+    collection those allocations trigger. It also includes the work
+    `try_read` and `try_write` do around the system call, which
+    "(remainder-split)" put at 1.65–1.78 and 0.66–0.76 us per request. It
+    was not attributed.
+  - It is about the size of the gate's remaining unpinned gap. In
+    "(gate-remeasure-2)", unpinned Nova took 3.1, 8.4 and 12.4 us more per
+    request than unpinned Bun, round by round, and 2.0–13.5 us from the
+    ranges' extremes.
+- **No effect of `TCP_NODELAY` was resolved.**
+  - The native server ran at 20828.7–23022.4 req/sec with it and
+    19278.0–23670.8 without. The ranges overlap.
+  - Round by round, the two differed in both directions, by −3.8%, +8.0%
+    and +16.9%. Native's own readings spread 23%.
+
+### How it was measured
+
+- **The four cells:**
+  - **Nova fixed:** "(fixed-vs-json)"'s `nf.exe`, 659,968 bytes, SHA-256
+    `01e3d2d845b36438…`, built from `68d0b94`. Through `c12a06c`, `main`
+    has changed only documentation since.
+  - **Native:** a scratch Rust program, never committed, 187,904 bytes,
+    SHA-256 `e0aed1ef05b5b3d2…`.
+    - It was built by `cargo build --release` with rustc 1.95.0, against
+      `windows-sys` 0.61.2, the version `Cargo.lock` resolves for
+      `nova-runtime` at `c12a06c`.
+    - It takes the shape of Nova's runtime. One thread waits in `WSAPoll`,
+      with no timeout, over the listener and every open connection. Its
+      sockets are std non-blocking sockets. It reads each ready connection
+      until a read would block. It answers each complete request with one
+      std `write` of the whole response.
+    - A complete request is a head plus any `content-length` body.
+    - The response is a prebuilt 676 bytes: Nova's 72-byte head and the
+      604-byte body, read from a file captured from Nova's fixed variant.
+  - **Native with `TCP_NODELAY`:** the same binary, setting `TCP_NODELAY` on
+    each accepted socket.
+  - **Bun static:** "(fixed-vs-json)"'s `bun-static.js`, 2,872 bytes,
+    SHA-256 `9f2237da56065aea…`, run by bun 1.3.0.
+- **Provenance:** the bun version is from this session rather than a file.
+  The rustc version is recorded in the scratch build's
+  `target/.rustc_info.json`.
+- **Differences from Nova's runtime that do not matter here.**
+  - The native server drops a connection on a short write, where Nova
+    writes the remainder, parking only if the socket is not writable. No
+    short write is evident: a dropped connection would have shown as an
+    error, and every reading had `errors=0`.
+  - It polls every open connection, where Nova polls only the parked
+    ones. When every connection is waiting for its next request, those
+    are the same set.
+  - Its clock reads add to its own figures. So if anything, Nova's excess
+    above it is understated.
+- **The native server's own timing.** It reads the clock before and after
+  each poll, recv and send, and the per-request figures include those
+  reads. It prints mean nanoseconds per call for each window of 50,000
+  responses. Each reading's first three windows are excluded. Together they
+  span 150,000 responses, more than the seeding and the 5 s warmup came to
+  at the measured rates, at most about 118,000.
+- **Method:** "(fixed-vs-json)"'s unpinned cells.
+  - Ten users POSTed, 200 connections, `--warmup 5 --duration 30`.
+  - One fresh process per reading, its affinity mask read back as 4095.
+  - Four cells alternated in the order Nova fixed, native, native with
+    `TCP_NODELAY`, Bun static, for three rounds.
+  - Every reading reported `errors=0`.
+- **Same body, same framing.**
+  - All twelve bodies were 604 bytes with SHA-256 `3ff5004bf26139cc…`.
+  - Every native head matched Nova's byte for byte, in one of the two
+    orders Nova's headers come in. Two of the three Nova readings sent the
+    other order. Bun static's head was 135 bytes, as before.
+- **Ordering.** The predictions' modification time is 17:29:08. The native
+  source's is 17:29:32, and its build's 17:29:46.
+- **3-second smoke readings again disagreed with the 30-second ones.**
+  Three of the four fell below their cell's range; Nova fixed read 9116.3.
+  They are not used.
+
+These predictions were written before the native server existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| Nova fixed 17,000–19,500 | 14563.7–18541.7 | one of three below |
+| native 18,000–30,000 | 19278.0–23670.8 | within |
+| native with `TCP_NODELAY` within 5% of native | −3.8%, +8.0%, +16.9% by round | wrong: two of three outside, both faster with `TCP_NODELAY` |
+| Bun static 20,000–26,500 | 16669.2–20171.7 | two of three below |
+| native send 15–35 us | 33.5–60.3 per window | wrong: 52 of 71 windows above |
+| native recv with data 3–10 us | 3.2–5.2 | within |
+| native recv that would block 1–3 us | 1.4–2.1 | within |
+| native within about 15 us of Bun static | −17.7, 2.3, −0.8 by round | two of three |
+| Nova fixed above native by 10–25 us | 12.9, 16.8, 3.2 by round | two of three; one below |
+
+### The readings, req/sec, in run order
+
+| cell | round 1 | round 2 | round 3 | us per request |
+|---|---|---|---|---|
+| Nova fixed | 18136.3 | 14563.7 | 18541.7 | 53.9–68.7 |
+| native | 23670.8 | 19278.0 | 19699.2 | 42.2–51.9 |
+| native, `TCP_NODELAY` | 22783.0 | 20828.7 | 23022.4 | 43.4–48.0 |
+| Bun static | 16669.2 | 20171.7 | 19389.7 | 49.6–60.0 |
+
+### Derived, us per request, by round
+
+| difference | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| Nova fixed − native | 12.9 | 16.8 | 3.2 |
+| native − Bun static | −17.7 | 2.3 | −0.8 |
+| Nova fixed − Bun static | −4.9 | 19.1 | 2.4 |
+| native with `TCP_NODELAY` − native | 1.6 | −3.9 | −7.3 |
+
+### Native per-call means, us, over each reading's windows after its third
+
+| reading | windows | send | recv with data | recv that would block |
+|---|---|---|---|---|
+| native, round 1 | 13 | 33.9–36.8 | 3.4–3.7 | 1.5–1.6 |
+| native, round 2 | 10 | 38.5–47.3 | 3.7–4.6 | 1.6–1.9 |
+| native, round 3 | 11 | 36.4–60.3 | 3.6–5.2 | 1.5–2.1 |
+| `TCP_NODELAY`, round 1 | 13 | 34.6–39.1 | 3.4–4.0 | 1.5–1.6 |
+| `TCP_NODELAY`, round 2 | 11 | 34.1–54.1 | 3.2–5.2 | 1.5–1.9 |
+| `TCP_NODELAY`, round 3 | 13 | 33.5–47.4 | 3.2–4.5 | 1.4–1.7 |
+
+### What this does not settle
+
+- **What Nova's 3.2–16.8 us above the floor is spent on.** A sampled
+  profile of the fixed variant would split it.
+- **Why a loopback send costs this much here.** The time is spent inside
+  the system call, which nothing here looks into. Whether another I/O model, such as
+  overlapped sends through an I/O completion port, would send more cheaply
+  is not tested.
+- **How far readings drift within one session.** Bun static ran at
+  16669.2–20171.7 here, against 21190.0–26282.9 in "(fixed-vs-json)" about
+  two hours earlier, from the same file. Nova fixed ran at 14563.7–18541.7
+  here, against 17376.6–19210.0 there.
+- **Any host but this one.** It is one host, Windows, three rounds.
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
