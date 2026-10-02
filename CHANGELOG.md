@@ -231,6 +231,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/05-json-api/BENCHMARK.md` carry dated amendments. The twins are
   `13-RUNTIME.md`, `20-STDLIB.md`, `docs/phase-2-plan.md` and ADRs 0018
   and 0019. Details are in "AMENDMENT 2026-10-02 (gate-remeasure)".
+- **The server thread re-profiled after `quote`'s fast path.** The socket
+  send path is now the largest item, at 38-39% of the thread. `users_json`
+  fell from 39% to 33%, and `quote` from 25-28% to 16%. The
+  per-character rebuild no longer appears. What remains on the Nova side:
+  - half of `quote`'s cost is `s.chars()`, at 8%, which builds a character
+    array only to scan it;
+  - the header check `is_crlf_free` is 5%, mostly spent building character
+    arrays;
+  - `users_json`'s two-piece string growth through `nova_rt_str_concat` is
+    8-9%.
+
+  `gc::alloc` holds at 23-24%. Throughput varied 1.41x across three runs
+  of one binary, while every share in the record's inclusive table stayed
+  within 1.5 points. Details are in
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (reprofile)".
 
 ### Changed
 - **`std/json`'s `quote` no longer rebuilds a string that needs no
