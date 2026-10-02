@@ -2350,6 +2350,11 @@ fn string_search_is_codepoint_indexed_and_empty_needle_matches() {
 /// in the search loop's bound and an `at = at + 1` → `at = at + 2` typo in
 /// its step (an every-other-position skip would jump straight over index 3
 /// and miss the match).
+///
+/// Since 2026-10-02 `index_of` is a runtime byte search with no such guard,
+/// bound or step. Its calls here still pin the same-length and
+/// last-position results; the guard described above survives in
+/// `ends_with`.
 #[test]
 fn string_search_same_length_and_last_position_boundaries() {
     let src = "fn main() {\n\
