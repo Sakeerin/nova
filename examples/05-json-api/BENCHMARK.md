@@ -2643,6 +2643,124 @@ a 534-byte body. This one uses a 604-byte body.
   host, Windows, with the load generator on the same machine. The spec does
   not define §3's "benchmark hardware".
 
+## AMENDMENT 2026-10-02 (reprofile): the server thread after `quote`'s fast path
+
+This reruns "(sampled-profile)"'s scratch sampler, unchanged, on `main` at
+`82c9c3a`, so the next lever is chosen from current data.
+
+**The socket send path is now the largest item: 38.4–39.3% of the server
+thread.** `users_json` fell from 38.9–39.4% to 33.0–33.4%, and `quote`
+within it from 25.0–28.2% to 15.5–16.4%. The per-character rebuild is gone:
+`vec_chars_to_string`, `Vec.push` and `nova_rt_str_from_chars` no longer
+appear. **Half of what `quote` still costs is `s.chars()`**, 7.7–8.2%,
+which builds a character array just to scan it. The scan itself,
+`needs_escape`, is 1.1–1.6%. `gc::alloc`, collection included, is
+unchanged at 23.0–23.8%, and the system heap is 11.4–12.2%.
+
+### How it was measured
+
+- **Method.** It is "(sampled-profile)"'s method and scratch patch; that
+  the patch was unchanged is from this session, not from a file.
+  - `analyze.py`, `heap_callers.py` and `lk.py` are unchanged.
+  - `keys.py` is renumbered for this build's Nova symbols and adds
+    `needs_escape`.
+  - A new script, `idx_callers.py`, charges a function's samples to the
+    Nova frames above it. The caller attributions below come from it.
+  - Another new script, `heap_split.py`, makes the system-heap split by
+    caller.
+- **The sampled server** is 737,280 bytes, SHA-256 `81833226e6961d71…`.
+  - It was built by the release `nova` from `82c9c3a` with the patch
+    applied, and the patch was reverted afterwards. Both facts are from
+    this session, not from a file.
+  - The map does show a build after the fast path, since it carries
+    `needs_escape`.
+- **Runs.** Ten seeded users, a 604-byte body, 200 connections,
+  `--warmup 0 --duration 15`, three fresh processes, every reading
+  `errors=0`. Each run counts only the 14 s starting half a second after
+  load began: 9,089–9,181 samples. 98.7–99.1% of walks ended cleanly.
+
+**Throughput varied 1.41x across the three runs** of this one binary, at
+9275.4, 13078.5 and 10831.8 req/sec, while every share in the inclusive
+table below stayed within 1.5 points.
+- **Not one part of the thread.** A cause confined to one part would have
+  moved that part's share far more, so the variation was not in any one
+  part.
+- **Possibly less CPU.** Samples are wall-clock time and include time the
+  thread was descheduled, with the load generator on the same host. So it
+  is as consistent with the thread getting less CPU as with all of it
+  running slower.
+- **The cause is not known.**
+
+These predictions were written before any sampled run:
+
+| prediction | measured | verdict |
+|---|---|---|
+| send path 40–46% | 38.4–39.3% | wrong: below |
+| `users_json` 22–30% | 33.0–33.4% | wrong: above |
+| `quote` 8–14%; within it, `nova_rt_str_chars` the largest part | 15.5–16.4%; `String.chars` is 7.7–8.2% of it, its largest callee | wrong: above; the part named is right |
+| `gc::alloc` 18–24% | 23.0–23.8% | within |
+| system heap 7–10% | 11.4–12.2% | wrong: above |
+| `read_request` 12–15%, `parse_request_head` 2–3% | 14.5–15.2%; 2.1–2.8% | two `read_request` readings just above |
+| 9500–11500 req/sec with the sampler | 9275.4, 13078.5, 10831.8 | one below, one above |
+
+### Inclusive, % of the server thread's samples
+
+| | run 1 | run 2 | run 3 | "(sampled-profile)" |
+|---|---|---|---|---|
+| socket send path (`ws2_32!send`) | 38.81 | 39.34 | 38.41 | 36.69–37.72 |
+| `handle` (the route) | 35.22 | 34.48 | 35.16 | 39.77–40.39 |
+| `users_json` | 33.35 | 33.00 | 33.38 | 38.92–39.40 |
+| — `user_json` | 23.09 | 22.25 | 23.73 | 30.27–33.02 |
+| — `quote` | 15.79 | 15.50 | 16.36 | 25.05–28.20 |
+| — — `String.chars` | 8.20 | 7.73 | 7.95 | 5.15–5.41 |
+| — — `needs_escape` | 1.07 | 1.55 | 1.52 | (new) |
+| `gc::alloc`, collection included | 23.80 | 23.04 | 22.98 | 23.21–24.28 |
+| `read_request` | 15.04 | 15.22 | 14.46 | 11.58–12.57 |
+| — socket receive path (`ws2_32!recv`) | 7.90 | 8.99 | 7.87 | 7.39–7.55 |
+| — `parse_request_head` | 2.81 | 2.11 | 2.47 | 1.78–1.96 |
+| system heap | 11.43 | 12.10 | 12.15 | 9.99–10.99 |
+| `nova_rt_str_chars` | 11.20 | 10.60 | 11.13 | 7.20–7.93 |
+| `nova_rt_str_concat` | 9.03 | 9.53 | 8.46 | 5.66–7.81 |
+| `Response.to_bytes` | 7.17 | 7.42 | 7.71 | 4.12–5.58 |
+| `nova_rt_str_concat_n` | 6.59 | 5.90 | 6.75 | 1.79–2.32 |
+
+The rows nest and overlap, so they do not sum to 100%. A share can rise
+while its absolute cost stays flat, because others shrank around it.
+
+### Where the remaining Nova-side work is
+
+- **`quote`'s `s.chars()`: 7.7–8.2%.** All but 2–4 `String.chars` samples
+  per run came from `quote`, and the exceptions lack only `quote`'s frame.
+  - `nova_rt_str_chars` builds a Rust `Vec<char>` on the system heap, then
+    copies it into a GC array, only for `needs_escape` to read it once.
+  - It is the system heap's largest caller, at 6.1–6.8% of all samples:
+    4.5–4.8% through `quote`, and the rest, 1.6–2.0%, through the header
+    check below.
+- **`is_crlf_free` in `Response.to_bytes`: 5.1–5.4% inclusive.** It is the
+  header check, run on every header name and value, once for `"\r"` and
+  once for `"\n"`.
+  - Each check goes through `String.contains` to `String.index_of`, which
+    builds two fresh character arrays first: one for the string and one
+    for the needle. That is `nova_rt_str_chars`, at 2.9–3.2% of the thread.
+  - The character-by-character walk itself, `chars_match_at`, is only
+    0.7–0.8%.
+  - Every `String.index_of` sample came from this check: 4.7–5.0% of the
+    thread.
+- **`nova_rt_str_concat`: 8.5–9.5%.** About 98% of it, 8.3–9.3 points of
+  the thread, is `users_json`, which grows its output string two pieces at
+  a time, so each step copies everything built so far.
+- **The collector:** 8.1–9.2%, the same inferred `LocalKey::with` instance
+  as before.
+
+### What this does not settle
+
+- **Why throughput varied 1.41x** across three runs of one binary.
+- **What a cheaper `s.chars()`, header check or concatenation would
+  save.** The shares above bound each one; none of them was measured.
+- **The send path.** At 38.4–39.3% it is the largest single item, and why
+  a write costs what it does is still unmeasured.
+- **One host, Windows, three readings.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
