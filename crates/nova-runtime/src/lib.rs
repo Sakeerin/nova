@@ -538,17 +538,27 @@ pub unsafe extern "C" fn nova_rt_str_len_chars(s: *const NovaStr) -> i64 {
 /// `s` must point to a valid `NovaStr`.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_str_chars(s: *const NovaStr) -> *mut u8 {
-    let chars: Vec<char> = as_str(s).chars().collect();
-    let n = chars.len();
+    // Counted first and written straight into the GC array, rather than
+    // collected into a `Vec<char>` and copied: the intermediate vector was a
+    // system-heap allocation and free per call, measured at 6.1–6.8% of the
+    // server thread in `examples/05-json-api/BENCHMARK.md`'s "(reprofile)".
+    let text = as_str(s);
+    let n = text.chars().count();
     // `8` for the length header plus `8` per element — the same size
     // arithmetic `nova_rt_alloc` is asked for when codegen builds an array.
     // A char count cannot overflow this on a 64-bit target, and `gc::alloc`
     // rejects an undescribable size regardless.
+    //
+    // `text` is read again after this allocation, which can run a
+    // collection. Its bytes stay alive because `text` itself, a pointer to
+    // them held in this frame, is a root: the collector scans every frame on
+    // the stack and the callee-saved registers (`gc.rs`'s module doc
+    // comment). The `NovaStr` header is not read again.
     let block = gc::alloc(8 + 8 * n, true);
     let words = block as *mut i64;
     *words = n as i64;
-    for (i, c) in chars.iter().enumerate() {
-        *words.add(1 + i) = *c as i64;
+    for (i, c) in text.chars().enumerate() {
+        *words.add(1 + i) = c as i64;
     }
     block
 }
@@ -1149,6 +1159,24 @@ mod tests {
             let empty = nova_rt_str_chars(make_str(""));
             assert_eq!(*(empty as *const i64), 0);
             assert_eq!(gc::object_info(empty as usize), Some((8, true)));
+        }
+    }
+
+    /// A long string whose byte length and character count differ, so an
+    /// array sized or filled by bytes instead of characters cannot pass: 100
+    /// repetitions of `aé🦀` are 300 characters in 700 bytes.
+    #[test]
+    fn str_chars_sizes_and_fills_by_character_on_a_long_mixed_string() {
+        unsafe {
+            let text: &'static str = Box::leak("aé🦀".repeat(100).into_boxed_str());
+            assert_eq!(text.len(), 700);
+            let block = nova_rt_str_chars(make_str(text));
+            let words = block as *const i64;
+            assert_eq!(*words, 300);
+            for (i, c) in text.chars().enumerate() {
+                assert_eq!(*words.add(1 + i), c as i64, "element {i}");
+            }
+            assert_eq!(gc::object_info(block as usize), Some((8 + 8 * 300, true)));
         }
     }
 
