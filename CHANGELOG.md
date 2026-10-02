@@ -333,8 +333,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (gate-remeasure-3)".
+- **A byte-level `String.index_of` and `String.contains`, measured.**
+  - Per call, a `contains` miss on `"application/json"` went from 168-390
+    to 23-26 ns.
+  - `Response.to_bytes` went from 2265-2278 to 1228-1331 ns, a 41.6-45.8%
+    cut per pair. Both are disjoint.
+  - The ten-user server's ranges overlap over six pairs, so no server gain
+    is claimed: after was faster in 4 of 6, with a mean 1.7% higher.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (byte-search)".
 
 ### Changed
+- **`std/strings`' `String.index_of` and `String.contains` search bytes.**
+  A new std-only builtin, `str_index_of(haystack, needle)`
+  (`Builtin::STD_ONLY` 75 → 76), backs both. Its runtime function finds
+  the first match with a byte search, then counts the characters before
+  it. `contains` no longer allocates an `Option`. Results are unchanged.
 - **`std/strings`' `String.join` copies bytes instead of characters.** A
   new std-only builtin, `str_join(sep, parts)` (`Builtin::STD_ONLY`
   74 → 75), backs it. Its runtime function copies every part and separator
