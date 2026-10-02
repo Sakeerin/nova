@@ -54,9 +54,10 @@ impl Bytes {
 
     // The index of `needle`'s first occurrence, or `None`.
     //
-    // Searched here in Nova over an `[Int]` rather than by an intrinsic, the
-    // same shape `String::index_of` uses over `str_chars` -- one runtime call
-    // per operand instead of one per byte compared.
+    // Searched here in Nova over an `[Int]` rather than by an intrinsic -- one
+    // runtime call per operand instead of one per byte compared. That is the
+    // shape `String::index_of` used over `str_chars` until 2026-10-02, when it
+    // moved to a runtime byte search.
     pub fn index_of(self, needle: Bytes) -> Option<Int> {
         let h = self.to_ints()
         let n = needle.to_ints()

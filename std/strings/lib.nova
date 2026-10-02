@@ -8,9 +8,11 @@
 // no part of this module's surface exposes that.
 //
 // PERFORMANCE CONTRACT, worth reading before using this module in a loop:
-// every operation that inspects the string decodes the whole thing into a
+// most operations that inspect the string decode the whole thing into a
 // `[Char]` first, so `char_at` is O(n), and calling it for each index is
-// QUADRATIC. Call `chars()` once and index the resulting array instead. This
+// QUADRATIC. Call `chars()` once and index the resulting array instead.
+// `index_of`, `contains` and `join` do not decode: runtime builtins work on
+// their bytes. This
 // is the same class of rule as the `hash & (cap - 1)` note beside
 // `pub trait Hash` in std/core — an invariant a caller has to know.
 //
@@ -46,13 +48,13 @@ fn chars_to_string(cs: [Char], start: Int, end: Int) -> String {
 
 // Whether `n` occurs in `h` starting exactly at `at`. A needle that would run
 // past the end of `h` does not match; an empty needle matches at any `at`
-// within `h`, including `h.len()`. Private: `starts_with`, `ends_with`,
-// `index_of` and `split` are its only callers.
+// within `h`, including `h.len()`. Private: `starts_with`, `ends_with` and
+// `split` are its only callers.
 fn chars_match_at(h: [Char], n: [Char], at: Int) -> Bool {
     // Every call site already guarantees `at >= 0` — `starts_with` passes the
     // literal `0`; `ends_with` passes `h.len() - n.len()` only after checking
-    // `n.len() <= h.len()`; `index_of` and `split` only ever step `at`/`i`/`j`
-    // upward starting from `0` — so this guard is currently unreachable. It
+    // `n.len() <= h.len()`; `split` only ever steps `i`/`j` upward starting
+    // from `0` — so this guard is currently unreachable. It
     // is defensive rather than load-bearing today, kept in case a future
     // caller of this module-private helper does not validate as carefully,
     // matching `chars_to_string`'s analogous `n < 0` guard above.

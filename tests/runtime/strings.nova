@@ -116,7 +116,8 @@ fn main() {
     println("search empty_haystack=${"".index_of("a").unwrap_or(0 - 1)} repeat_needle=${"aaa".index_of("aa").unwrap_or(0 - 1)} longneedle=${"abc".starts_with("abcd")}")
     // Same-length boundary (Task 5's review finding): `n.len() > h.len()` vs
     // `>=` only diverges when the needle and haystack are exactly the same
-    // length.
+    // length. `ends_with` still has that guard; since 2026-10-02 `index_of`
+    // is a runtime byte search, and the line below still pins its results.
     println("search samelen abc_ends_abc=${"abc".ends_with("abc")} ab_ends_abc=${"ab".ends_with("abc")}")
     println("search samelen abc_idx_abc=${"abc".index_of("abc").unwrap_or(0 - 1)} ab_idx_abc=${"ab".index_of("abc").unwrap_or(0 - 1)} abcde_idx_de=${"abcde".index_of("de").unwrap_or(0 - 1)}")
     // ANCHORING (review finding): a needle occurring ELSEWHERE in the
@@ -141,7 +142,9 @@ fn main() {
     // nonzero `at`: "axbab" (a x b a b) contains "ab" only at index 3 — the
     // candidate at index 0 matches at k=0 ('a') but must be rejected at k=1
     // ('x' vs 'b'). Skipping every other comparison would accept index 0
-    // and report `Some(0)` instead of the correct `Some(3)`.
+    // and report `Some(0)` instead of the correct `Some(3)`. Since 2026-10-02
+    // `index_of` no longer reaches that loop, being a runtime byte search;
+    // this line still pins its result.
     println("search odd_index_reject axbab_idx_ab=${"axbab".index_of("ab").unwrap_or(0 - 1)}")
 
     // === TRIM / REPEAT ===

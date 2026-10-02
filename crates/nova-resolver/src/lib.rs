@@ -147,7 +147,7 @@ builtins! {
     /// `str_index_of(haystack: String, needle: String) -> Int` — the
     /// character index of the first occurrence of `needle`, or `-1`, found by
     /// a byte search. Backs `std/strings`' `String.index_of` and
-    /// `String.contains`, which otherwise build a [`Builtin::StrChars`] array
+    /// `String.contains`, which used to build a [`Builtin::StrChars`] array
     /// for each string first. Std-only.
     StrIndexOf,
     /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs

@@ -306,11 +306,12 @@ pub unsafe extern "C" fn nova_rt_str_join(sep: *const NovaStr, parts: *const u8)
 /// `String.contains`. An empty needle occurs at `0`.
 ///
 /// A byte search finds the same first match a character-by-character one
-/// would. Both strings are valid UTF-8, and a needle starts with a lead
-/// byte, so a byte match can only begin on a character boundary. The
-/// characters before the match are then counted to turn its byte offset
-/// into a character index, so a miss allocates and counts nothing. The
-/// Nova-level search this replaces built a `[Char]` for each string first.
+/// would. Both strings are valid UTF-8, and no character starts with a
+/// continuation byte, so a byte match can only begin on a character
+/// boundary. The characters before the match are then counted to turn its
+/// byte offset into a character index. Nothing here allocates, and a miss
+/// counts nothing. The Nova-level search this replaces built a `[Char]` for
+/// each string first.
 ///
 /// # Safety
 /// `haystack` and `needle` must be valid `NovaStr` pointers.
