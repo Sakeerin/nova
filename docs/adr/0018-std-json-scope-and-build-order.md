@@ -1035,6 +1035,14 @@ at the method.
   unpinned, short of 1.0, and 0.715 to 1.334 pinned, straddling it, so the
   gate is still not met under any reading that counts it. See
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-2)".]
+  [Amended 2026-10-02 (gate-remeasure-3): remeasured on `main` at `012ca55`
+  with the same four-cell method. All six readings clear 10k+ at ten users,
+  on a run where every cell, Bun's included, ran much faster than before:
+  pinned 17682.5
+  to 18528.1 req/sec, unpinned 17400.4 to 20014.4. The ratio against Bun is
+  0.886 to 0.993 pinned, short of 1.0, and 0.891 to 1.076 unpinned,
+  straddling it, so the gate is still not met under any reading that counts
+  it. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-3)".]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both

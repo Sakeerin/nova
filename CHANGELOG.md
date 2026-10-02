@@ -320,6 +320,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (fast-join)".
+- **The Phase 2 gate remeasured on `012ca55`, after the fast join.** This
+  used "(gate-remeasure-2)"'s four-cell method, three replicates per cell.
+  - The absolute criterion is met in all six Nova readings: pinned
+    17682.5-18528.1 req/sec, unpinned 17400.4-20014.4.
+  - The ratio against Bun is not met. Pinned it is 0.886-0.993, with the
+    ranges disjoint. Unpinned it is 0.891-1.076, straddling 1.0.
+  - Every cell, Bun's included, ran much faster than in earlier runs, for
+    reasons not measured, so the absolute figures do not compare with
+    them.
+  - The gate is still not met.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (gate-remeasure-3)".
 
 ### Changed
 - **`std/strings`' `String.join` copies bytes instead of characters.** A

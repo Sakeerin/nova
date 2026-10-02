@@ -354,6 +354,18 @@ replicates per cell, on `main` at `cdaea7e`. Its figures supersede
 
 See "AMENDMENT 2026-10-02 (gate-remeasure-2)".
 
+**Amended 2026-10-02 (gate-remeasure-3):** the same method on `main` at
+`012ca55`, after "(fast-join)". Its figures supersede
+"(gate-remeasure-2)"'s as the gate's recorded status:
+- **Absolute:** met in all six Nova readings, pinned 17682.5–18528.1
+  req/sec and unpinned 17400.4–20014.4.
+- **Ratio:** not met pinned, at 0.886–0.993 with the ranges disjoint;
+  0.891–1.076 unpinned, straddling 1.0.
+
+Every cell, Bun's included, ran much faster than in earlier runs, for
+reasons not measured, so these absolute figures do not compare with them.
+See "AMENDMENT 2026-10-02 (gate-remeasure-3)".
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
@@ -3644,6 +3656,151 @@ The harness also timed the cross terms.
   saved 5.4–9.1 us per request on the 15 s method, a different method in
   a different session.
 - **One host, Windows.**
+
+## AMENDMENT 2026-10-02 (gate-remeasure-3): the Phase 2 gate on `main` at `012ca55`
+
+This reruns both of the gate's criteria after "(fast-join)", with
+"(gate-remeasure-2)"'s method: ten users, 200 connections, 30 s after a 5 s
+warmup, four cells alternated, three replicates per cell. Since `cdaea7e`,
+the only functional code change is "(fast-join)"'s.
+
+**The absolute criterion is met in every reading.** All six Nova readings
+clear `nova-spec/00-MASTER-SPEC.md` §3's 10,000 req/sec. Pinned to one core
+they ran at 17682.5–18528.1, and unpinned at 17400.4–20014.4. That is
+74.0–100.1% above the line.
+
+**The ratio against Bun is not met.**
+- **Pinned:** A/C is 0.886–0.993 from the ranges' extremes, wholly below
+  the 1.0 `nova-spec/60-EXAMPLES.md` §5 asks for.
+  - The ranges are disjoint. Nova's fastest pinned reading, 18528.1, is
+    below Bun's slowest pinned reading, 18664.9.
+  - Round by round it is 0.929, 0.928 and 0.947: Nova took 3.0–3.9 us more
+    per request.
+- **Unpinned:** B/D is 0.891–1.076, which straddles 1.0.
+  - Round by round it is 1.049, 0.979 and 0.935. Round 1 is above 1.0.
+
+**The two pinning conditions traded places since "(gate-remeasure-2)".**
+There, pinned straddled 1.0 and unpinned fell below it. Here, pinned falls
+below and unpinned straddles.
+- The trade cannot be separated from "(fast-join)", which by its own
+  record saved 5.4–9.1 us per request, more than the pinned gap here.
+- "(gate-remeasure-2)"'s pinned straddle also rested on one Bun reading,
+  9300.1.
+
+§3's absolute criterion is met under either condition. §5's ratio is not met
+pinned and not established unpinned, so the gate is still not met.
+
+**Every cell ran much faster than in "(gate-remeasure-2)", Bun's too,
+whose code did not change.** From the ranges' extremes:
+- Bun unpinned rose 1.48x–1.57x and Bun pinned 1.21x–2.15x;
+- Nova pinned rose 1.43x–1.69x and Nova unpinned 1.43x–1.86x.
+
+The change came within about 36 minutes.
+- "(fast-join)"'s `after` server, functionally the same code as
+  `012ca55`, ran at 11893.7–12269.5 req/sec between 21:39 and 21:41, on
+  the 15 s method. This matrix ran from 22:17 to 22:25.
+- The generator's self-test ceiling rose only 1.06x, from 99203.3 to
+  104971.2, while the servers rose 1.2x–2.2x.
+- Why is not measured.
+
+So absolute figures from different runs are not comparable here. The
+ratios, taken from alternated readings within one run, are less exposed to
+it. Nothing measured whether such a change leaves them alone either.
+
+### The cells, in run order
+
+| reading | cell | side | pinned | mask read back | req/sec |
+|---|---|---|---|---|---|
+| 1 | A | Nova | core 0 | 1 | 18277.9 |
+| 2 | C | Bun | core 0 | 1 | 19670.7 |
+| 3 | B | Nova | no | 4095 | 20014.4 |
+| 4 | D | Bun | no | 4095 | 19079.2 |
+| 5 | A | Nova | core 0 | 1 | 18528.1 |
+| 6 | C | Bun | core 0 | 1 | 19963.2 |
+| 7 | B | Nova | no | 4095 | 19117.4 |
+| 8 | D | Bun | no | 4095 | 19533.0 |
+| 9 | A | Nova | core 0 | 1 | 17682.5 |
+| 10 | C | Bun | core 0 | 1 | 18664.9 |
+| 11 | B | Nova | no | 4095 | 17400.4 |
+| 12 | D | Bun | no | 4095 | 18604.7 |
+
+- **Every reading was `errors=0`.**
+- **Each server was a fresh process.** After it printed its listening line
+  and before seeding, it was pinned or left alone, and its affinity mask
+  was read back and logged.
+
+| cell | range | ratio |
+|---|---|---|
+| A, Nova pinned | 17682.5–18528.1 | |
+| B, Nova unpinned | 17400.4–20014.4 | |
+| C, Bun pinned | 18664.9–19963.2 | A/C 0.886–0.993 |
+| D, Bun unpinned | 18604.7–19533.0 | B/D 0.891–1.076 |
+
+**The load generator was not the limit.** Its self-test ceiling, taken
+after the equivalence check and before the matrix, is 104971.2 req/sec.
+The fastest reading, Nova's 20014.4, is 19.1% of that.
+- It was invoked as `nova-bench-http --self-test --connections 200
+  --duration 30 --warmup 5`. That command is from this session.
+- The self-test recorded `errors=72`, and at least one connection completed
+  no requests (`conn_min=0`, `conn_max=110458`). That is weaker calibration
+  than "(gate-remeasure)"'s or "(gate-remeasure-2)"'s. At 19.1% of it, the
+  conclusion does not depend on it.
+- The generator is `target/release/nova-bench-http.exe`, SHA-256
+  `d17062335e988c18…`, the same file "(gate-remeasure)" and
+  "(gate-remeasure-2)" used.
+
+**These predictions were written before any throughput reading.** The
+files' modification times are 22:16:02 for the predictions, 22:16:32 for
+the gate binary, 22:16:42 for the equivalence log and 22:17:19 for the
+self-test log. That the matrix followed the self-test, in the same command,
+is from this session.
+
+| prediction | measured | verdict |
+|---|---|---|
+| A: 11,000–14,000 | 17682.5–18528.1 | wrong: above |
+| C: 9,000–16,000 | 18664.9–19963.2 | wrong: above |
+| B: 11,000–13,500 | 17400.4–20014.4 | wrong: above |
+| D: 11,500–13,500 | 18604.7–19533.0 | wrong: above |
+| B/D: 0.85–1.15, straddling 1.0 | 0.891–1.076 | within |
+| A/C: straddles 1.0 | 0.886–0.993 | wrong: wholly below |
+| unpinned, round by round: at least one of three at or above 1.0 | 1.049 in round 1 | right |
+| all six Nova readings above 10k | all six | right |
+| the ratio is not established as met unpinned | the ranges overlap | right |
+
+All four throughput predictions missed above, on both sides, Bun's
+unchanged code included; why is not measured. The ratio predictions held
+except the pinned one.
+
+### Identity of each side, and the payload
+
+- **Nova:** `examples/05-json-api`, built by the release `nova` from
+  `012ca55`; that is from this session. `json-api.exe` is 701,440 bytes,
+  SHA-256 `23437c576dc14112…`, and the same binary ran in every Nova
+  reading.
+- **Bun:** `docs/benchmarks/bun-server.js`, SHA-256 `f95426e14e22034c…`,
+  the same file as before, run by bun 1.3.0. The version is from this
+  session.
+- **The payload.** Ten users were seeded by the same `curl` POSTs on each
+  side. Every reading on both sides served the same 604-byte body, SHA-256
+  `3ff5004bf26139cc…`.
+- **Equivalence was run first**, against the `json-api.exe` built for this
+  run: `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+  The log does not record the binary's path; that is from this session.
+- **Framing was not re-measured.** The fast join changed only how the body
+  is built, not the head.
+
+### What this does not settle
+
+- **Which statement of the gate governs.** As of `012ca55`, no tracked
+  file settles it.
+- **Whether either ratio holds its side of 1.0 on another run.** The
+  pinned and unpinned verdicts have traded places once already, between
+  two runs that also differ by "(fast-join)". How much of the trade is the
+  host is not separated.
+- **Why every cell ran so much faster than about 36 minutes earlier.** It
+  was not measured.
+- **Any host but this one.** Every figure here is from this development
+  host, Windows, with the load generator on the same machine.
 
 ## What was measured, and with what
 
