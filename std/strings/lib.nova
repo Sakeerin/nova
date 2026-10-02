@@ -249,30 +249,10 @@ impl String {
     // is the receiver rather than this being a free `join(parts, sep)`,
     // because a top-level `pub fn` is glob-imported into every module and
     // would take the name `join` from all user code.
-    pub fn join(self, parts: [String]) -> String {
-        if parts.len() == 0 { return "" }
-        let sep = str_chars(self)
-        let mut total = sep.len() * (parts.len() - 1)
-        for i in 0..parts.len() { total = total + str_len_chars(parts[i]) }
-        if total == 0 { return "" }
-        // Filler is overwritten in full below; `total > 0` here.
-        let mut out = [' '; total]
-        let mut w = 0
-        for i in 0..parts.len() {
-            if i > 0 {
-                for k in 0..sep.len() {
-                    out[w] = sep[k]
-                    w = w + 1
-                }
-            }
-            let p = str_chars(parts[i])
-            for k in 0..p.len() {
-                out[w] = p[k]
-                w = w + 1
-            }
-        }
-        str_from_chars(out)
-    }
+    //
+    // A runtime builtin copies the parts' bytes straight into one result. It
+    // used to walk every part character by character into a `[Char]`.
+    pub fn join(self, parts: [String]) -> String { str_join(self, parts) }
 
     // Trims whitespace (see `char_is_whitespace`) from both ends. An
     // all-whitespace string, including "", yields "".
