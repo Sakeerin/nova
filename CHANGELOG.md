@@ -199,8 +199,27 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   walked them by frame pointer. Details are in
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
   (sampled-profile)".
+- **`quote`'s fast path, measured.** Per call, `stringify` on a string with
+  nothing to escape went from 747-824 to 402-459 ns for a 13-character
+  name, and from 986-1024 to 408-431 ns for a 17-character email. An
+  escaped string, the control, went from 1029-1080 to 1066-1140 ns,
+  overlapping.
+
+  Ten-user `examples/05-json-api` throughput rose from 8603.0-9340.5 to
+  9954.7-10806.2 req/sec, ranges disjoint. Two of the three after readings
+  exceed 10,000 req/sec under the file's 15 s method. Neither gate
+  criterion was measured: not the 10k at the 30 s runs used before, and
+  not the Bun ratio. Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-02 (quote-fast-path)".
 
 ### Changed
+- **`std/json`'s `quote` no longer rebuilds a string that needs no
+  escaping.** It scans first for `"`, `\` or a control character below
+  `0x20`. A string with none is returned in quotation marks by one
+  interpolation, and any other string takes the old per-character loop
+  unchanged. Output is identical. The escapes fixture gains boundary cases
+  (`0x1f`, space and `~`, and an escapable character first or last). Each
+  of the four weakening mutants run fails both string fixtures.
 - **The collector allocates small objects from size-class pages.** Every
   object of 2048 bytes or less now takes a slot in a 64 KiB page of one of
   24 size classes, tracked by out-of-band allocated, marked and scan

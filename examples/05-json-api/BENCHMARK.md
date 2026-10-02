@@ -2381,6 +2381,112 @@ charged to the runtime function above it:
   here.
 - **One host, Windows, three readings.**
 
+## AMENDMENT 2026-10-02 (quote-fast-path): a string with nothing to escape is not rebuilt
+
+"(sampled-profile)" found `std/json`'s `quote` at 25.0–28.2% of the server
+thread, rebuilding every string one character at a time. `quote` now scans
+first for `"`, `\` or a control character below `0x20`. A string with none
+is returned in quotation marks by one interpolation; any other string takes
+the old loop unchanged.
+
+**Results:**
+- **Per call, on strings with nothing to escape,** `stringify` went from
+  747–824 to 402–459 ns for a 13-character name, and from 986–1024 to
+  408–431 ns for a 17-character email.
+- **The escaped control string** went from 1029–1080 to 1066–1140 ns. Each
+  pair was slower, by +3.6%, +10.1% and +3.3%, but the ranges overlap and
+  the cause was not isolated.
+- **Ten-user throughput** rose from 8603.0–9340.5 to 9954.7–10806.2
+  req/sec. The ranges are disjoint, a gain of 1.07x to 1.26x.
+- **Two of the three after readings exceed 10,000 req/sec**, under this
+  file's 15 s method. Neither of the gate's criteria was measured here:
+  not the absolute 10k of `nova-spec/00-MASTER-SPEC.md` §3 under the 30 s
+  after a 5 s warmup that §5's 2026-09-11 amendment used, and not
+  `nova-spec/60-EXAMPLES.md` §5's ratio against Bun.
+
+### How it was measured
+
+- **Per call:** a scratch Nova harness, never committed, times 500,000
+  calls of `stringify(String(s))` per string with `std/time`'s `Instant`.
+  It used three strings: `User Number 7`, `user7@example.com`, and
+  `say "hi" back\slash`, which needs escaping and serves as the control.
+  - `before` is 517,120 bytes, built from `main` at `942506c`'s `std/json`.
+  - `after` is 517,632 bytes, built from `ccd8cea`.
+  - The two were alternated, three runs each, one fresh process per run.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`, three fresh processes each, alternated. Every
+  reading was `errors=0`.
+  - **Both server binaries are 700,928 bytes.** The linker pads each PE
+    section to the 512-byte FileAlignment, and the server's `.text` grew
+    384 bytes inside its existing padding. So each reading logged its
+    binary's SHA-256 as well: `1222411ee0f0296d…` before,
+    `b6fd6c650a1a2ed6…` after.
+  - **All four binaries were built by the release `nova`**, so they link the
+    release runtime. 700,928 bytes is also the plain release build's size
+    recorded in "(gc-page-heap)".
+  - **The response body was byte-identical in all six readings**, SHA-256
+    `3ff5004bf26139cc…`.
+
+These predictions were written before the fast path existed. Their per-call
+"before" figures were copied from a smoke run of the `before` harness. That
+run's output is from this session and was not saved to a file. So only the
+"after" figures, the control's and the server's are predictions:
+
+| prediction | measured | verdict |
+|---|---|---|
+| name: before about 760 ns, after 250–450 | before 747–824, after 402–459 | one after reading above |
+| email: before about 990 ns, after 300–550 | before 986–1024, after 408–431 | within |
+| escaped control: within +0% to +15% of before | +3.6%, +10.1% and +3.3% per pair | within |
+| server: before 7700–9100, after 9500–11500, disjoint | before 8603.0–9340.5, after 9954.7–10806.2, disjoint | one before reading above; after within |
+
+### Per call, ns, in run order
+
+| run | name before | name after | email before | email after | escaped before | escaped after |
+|---|---|---|---|---|---|---|
+| 1 | 747 | 402 | 986 | 408 | 1029 | 1066 |
+| 2 | 824 | 459 | 993 | 417 | 1035 | 1140 |
+| 3 | 790 | 411 | 1024 | 431 | 1080 | 1116 |
+
+### Server, in run order
+
+| reading | build | req/sec |
+|---|---|---|
+| 1 | before | 8603.0 |
+| 2 | after | 10676.8 |
+| 3 | before | 9061.9 |
+| 4 | after | 10806.2 |
+| 5 | before | 9340.5 |
+| 6 | after | 9954.7 |
+
+### Correctness
+
+- **The escapes fixture gained boundary cases:** `0x1f`, the highest
+  character below `0x20`, still escapes; space and `~` pass through; and an escapable
+  character first, or last behind a clean run, still sends the whole string
+  through the loop.
+- **Six mutants were run against every `json_` fixture:**
+  - dropping the `"` check: fails the two string fixtures;
+  - dropping the `\` check: fails them too;
+  - moving the control boundary down to `< 31`: fails them too;
+  - stopping the scan one character early: fails them too;
+  - returning the string without its quotation marks: fails seven tests;
+  - moving the boundary up to `< 33`: survives, as expected. The only
+    strings it additionally sends through the slow loop are clean strings
+    containing a space, and the loop's output for them is the same, so no
+    output test can see it.
+- **The gates pass:** the whole suite at 1170 passed, 0 failed, 8 ignored,
+  including all 12 `*_under_gc_stress` tests. Clippy with `-D warnings` and
+  rustfmt are clean on the code commit.
+
+### What this does not settle
+
+- **The gate.** Its absolute criterion was not measured at the 30 s after a
+  5 s warmup that §5's 2026-09-11 amendment used, and the after range here
+  straddles 10,000. Its ratio against Bun was not measured either.
+- **What `quote` still costs.** It still materialises `s.chars()` to scan.
+  The sampled profile was not rerun on this build.
+- **One host, Windows, three readings per arm.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
