@@ -3912,6 +3912,7 @@ impl<'a> Checker<'a> {
             | Builtin::StrLenChars
             | Builtin::StrChars
             | Builtin::StrFromChars
+            | Builtin::StrJoin
             | Builtin::StrToUpper
             | Builtin::StrToLower
             | Builtin::FloatFixed
@@ -7167,6 +7168,10 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrLenChars => (vec![Ty::String], Ty::Int),
         Builtin::StrChars => (vec![Ty::String], Ty::Array(Box::new(Ty::Char))),
         Builtin::StrFromChars => (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
+        Builtin::StrJoin => (
+            vec![Ty::String, Ty::Array(Box::new(Ty::String))],
+            Ty::String,
+        ),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::FloatFixed => (vec![Ty::Float, Ty::Int], Ty::String),
         Builtin::StrToFloat => (vec![Ty::String], Ty::Float),
@@ -15118,6 +15123,13 @@ mod tests {
                 Builtin::StrFromChars => (
                     (vec![Ty::Array(Box::new(Ty::Char))], Ty::String),
                     "`str_from_chars(cs)` in `chars_to_string`",
+                ),
+                Builtin::StrJoin => (
+                    (
+                        vec![Ty::String, Ty::Array(Box::new(Ty::String))],
+                        Ty::String,
+                    ),
+                    "`str_join(self, parts)` in `String.join`",
                 ),
                 Builtin::StrToUpper => (
                     (vec![Ty::String], Ty::String),

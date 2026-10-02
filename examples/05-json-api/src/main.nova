@@ -91,22 +91,27 @@ fn user_json(u: User) -> String {
 // need the `values()` that `std/collections` lacks. It costs a lookup per id
 // ever issued rather than per user held; at this example's scale that is not
 // the measured path.
+//
+// The user objects are collected and joined once, rather than appended to a
+// growing string that copied everything built so far at every step. The
+// array is sized by `s.users.len()`. `Store.create` is the only insert and
+// there is no delete route, so every id below `next_id` is present and the
+// walk fills every slot.
 fn users_json(s: Store) -> String {
-    let mut out = "["
+    let mut parts = [""; s.users.len()]
+    let mut n = 0
     let mut id = 1
-    let mut first = true
     while id < s.next_id {
         match s.users.get(id) {
             Some(u) => {
-                if !first { out = "${out}," }
-                out = "${out}${user_json(u)}"
-                first = false
+                parts[n] = user_json(u)
+                n = n + 1
             }
             None => {}
         }
         id = id + 1
     }
-    "${out}]"
+    "[${",".join(parts)}]"
 }
 
 // `Response::text` hardcodes `text/plain`, so this builds the record.

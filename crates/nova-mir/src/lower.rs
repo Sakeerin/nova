@@ -698,6 +698,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrLenChars => Lowering::Runtime(RtFunc::StrLenChars),
                     Builtin::StrChars => Lowering::Runtime(RtFunc::StrChars),
                     Builtin::StrFromChars => Lowering::Runtime(RtFunc::StrFromChars),
+                    Builtin::StrJoin => Lowering::Runtime(RtFunc::StrJoin),
                     Builtin::StrToUpper => Lowering::Runtime(RtFunc::StrToUpper),
                     Builtin::StrToLower => Lowering::Runtime(RtFunc::StrToLower),
                     Builtin::FloatFixed => Lowering::Runtime(RtFunc::FloatFixed),

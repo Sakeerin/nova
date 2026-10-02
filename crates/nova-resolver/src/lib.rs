@@ -138,6 +138,12 @@ builtins! {
     /// `String` (`E0013`), so building a result any other way would mean
     /// quadratic interpolation. Std-only.
     StrFromChars,
+    /// `str_join(sep: String, parts: [String]) -> String` — `parts` with
+    /// `sep` between each pair, copied byte for byte into one result. Backs
+    /// `std/strings`' `String.join`, which otherwise has to walk every part
+    /// character by character through [`Builtin::StrChars`] and
+    /// [`Builtin::StrFromChars`]. Std-only.
+    StrJoin,
     /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs
     /// `std/strings`' `String::to_upper`. Whole-string rather than
     /// `Char` → `Char` because `ß` → `SS` is not 1:1. Std-only.
@@ -873,6 +879,7 @@ impl Builtin {
             Builtin::StrLenChars => "str_len_chars",
             Builtin::StrChars => "str_chars",
             Builtin::StrFromChars => "str_from_chars",
+            Builtin::StrJoin => "str_join",
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
@@ -974,13 +981,14 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 74] = [
+    pub const STD_ONLY: [Builtin; 75] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
         Builtin::StrLenChars,
         Builtin::StrChars,
         Builtin::StrFromChars,
+        Builtin::StrJoin,
         Builtin::StrToUpper,
         Builtin::StrToLower,
         Builtin::FloatFixed,

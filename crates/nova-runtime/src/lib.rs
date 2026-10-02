@@ -265,6 +265,42 @@ pub unsafe extern "C" fn nova_rt_str_concat_n(parts: *const u8) -> *mut NovaStr 
     gc_str(&s)
 }
 
+/// Join every string in `parts` with `sep` between each pair: the body of
+/// `std/strings`' `String.join`.
+///
+/// One copy of each part and separator into a buffer sized up front, then
+/// one result. The Nova-level `join` it replaces walked every part
+/// character by character into a character array.
+///
+/// GC safety: every byte is copied into the Rust `String` before this
+/// function's first GC allocation (in `gc_str`), the same ordering
+/// [`nova_rt_str_concat_n`] relies on.
+///
+/// # Safety
+/// `sep` must be a valid `NovaStr` pointer. `parts` must point to a Nova
+/// array laid out as [`nova_rt_str_concat_n`] requires. A negative length is
+/// treated as zero, as there.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_join(sep: *const NovaStr, parts: *const u8) -> *mut NovaStr {
+    let words = parts as *const i64;
+    let n = (*words).max(0) as usize;
+    let sep = as_str(sep);
+    let mut total = sep.len() * n.saturating_sub(1);
+    for i in 0..n {
+        let p = *words.add(1 + i) as *const NovaStr;
+        total += (*p).len as usize;
+    }
+    let mut s = String::with_capacity(total);
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(sep);
+        }
+        let p = *words.add(1 + i) as *const NovaStr;
+        s.push_str(as_str(p));
+    }
+    gc_str(&s)
+}
+
 /// Compare two strings for byte equality.
 ///
 /// # Safety
@@ -747,6 +783,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_eprintln", nova_rt_eprintln as *const u8),
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
         ("nova_rt_str_concat_n", nova_rt_str_concat_n as *const u8),
+        ("nova_rt_str_join", nova_rt_str_join as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
@@ -1022,6 +1059,27 @@ mod tests {
             ] {
                 let got = as_str(nova_rt_str_concat_n(str_array(parts))).to_string();
                 assert_eq!(got, parts.concat(), "parts {parts:?}");
+            }
+        }
+    }
+
+    /// Against Rust's own `join`, over `concat_n`'s shapes and separators
+    /// from empty to multi-byte: a dropped, doubled or trailing separator,
+    /// or a skipped part, changes the result for at least one pair.
+    #[test]
+    fn join_puts_the_separator_between_every_pair_of_parts() {
+        unsafe {
+            for sep in ["", ",", "->", "—🦀"] {
+                for parts in [
+                    &[][..],
+                    &["solo"][..],
+                    &["a", "b", "c"][..],
+                    &["", "x", ""][..],
+                    &["日本", "語", "🦀", "-", "é"][..],
+                ] {
+                    let got = as_str(nova_rt_str_join(make_str(sep), str_array(parts)));
+                    assert_eq!(got, parts.join(sep), "sep {sep:?} parts {parts:?}");
+                }
             }
         }
     }
