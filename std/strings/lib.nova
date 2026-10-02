@@ -179,24 +179,18 @@ impl String {
     }
 
     // Codepoint index of the FIRST occurrence, or `None`. An empty needle
-    // occurs at every position, so it reports `Some(0)`.
+    // occurs at every position, so it reports `Some(0)`. A runtime builtin
+    // searches the bytes; it used to build a `[Char]` for each string first.
     pub fn index_of(self, needle: String) -> Option<Int> {
-        let h = str_chars(self)
-        let n = str_chars(needle)
-        if n.len() == 0 { return Some(0) }
-        if n.len() > h.len() { return None }
-        let last = h.len() - n.len()
-        let mut at = 0
-        while at <= last {
-            if chars_match_at(h, n, at) { return Some(at) }
-            at = at + 1
-        }
-        None
+        let at = str_index_of(self, needle)
+        if at < 0 { return None }
+        Some(at)
     }
 
     // Whether `needle` occurs anywhere in `self`. An empty `needle` always
-    // matches, since `index_of` reports `Some(0)` for it.
-    pub fn contains(self, needle: String) -> Bool { self.index_of(needle).is_some() }
+    // matches, since it occurs at `0`. Calls the builtin directly, so a
+    // search allocates no `Option`.
+    pub fn contains(self, needle: String) -> Bool { str_index_of(self, needle) >= 0 }
 
     // Split on every non-overlapping occurrence of `sep`, left to right.
     //

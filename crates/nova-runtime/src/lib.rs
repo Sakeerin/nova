@@ -301,6 +301,31 @@ pub unsafe extern "C" fn nova_rt_str_join(sep: *const NovaStr, parts: *const u8)
     gc_str(&s)
 }
 
+/// The character index of the first occurrence of `needle` in `haystack`,
+/// or `-1`: the body of `std/strings`' `String.index_of` and
+/// `String.contains`. An empty needle occurs at `0`.
+///
+/// A byte search finds the same first match a character-by-character one
+/// would. Both strings are valid UTF-8, and a needle starts with a lead
+/// byte, so a byte match can only begin on a character boundary. The
+/// characters before the match are then counted to turn its byte offset
+/// into a character index, so a miss allocates and counts nothing. The
+/// Nova-level search this replaces built a `[Char]` for each string first.
+///
+/// # Safety
+/// `haystack` and `needle` must be valid `NovaStr` pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_index_of(
+    haystack: *const NovaStr,
+    needle: *const NovaStr,
+) -> i64 {
+    let h = as_str(haystack);
+    match h.find(as_str(needle)) {
+        Some(at) => h[..at].chars().count() as i64,
+        None => -1,
+    }
+}
+
 /// Compare two strings for byte equality.
 ///
 /// # Safety
@@ -784,6 +809,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_concat", nova_rt_str_concat as *const u8),
         ("nova_rt_str_concat_n", nova_rt_str_concat_n as *const u8),
         ("nova_rt_str_join", nova_rt_str_join as *const u8),
+        ("nova_rt_str_index_of", nova_rt_str_index_of as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
@@ -1059,6 +1085,42 @@ mod tests {
             ] {
                 let got = as_str(nova_rt_str_concat_n(str_array(parts))).to_string();
                 assert_eq!(got, parts.concat(), "parts {parts:?}");
+            }
+        }
+    }
+
+    /// Against a character-level reference: the first `i` at which the
+    /// needle's characters match the haystack's, or `-1`. Multi-byte text
+    /// before a match is what tells a character index from a byte index.
+    #[test]
+    fn index_of_reports_the_first_match_as_a_character_index() {
+        fn reference(h: &str, n: &str) -> i64 {
+            let hc: Vec<char> = h.chars().collect();
+            let nc: Vec<char> = n.chars().collect();
+            if nc.len() > hc.len() {
+                return -1;
+            }
+            (0..=hc.len() - nc.len())
+                .find(|&i| hc[i..i + nc.len()] == nc[..])
+                .map_or(-1, |i| i as i64)
+        }
+        unsafe {
+            for (h, n) in [
+                ("hello wörld, hello wörld", "wörld"),
+                ("日本語のテキスト", "テキ"),
+                ("aé🦀aé🦀", "🦀a"),
+                ("axbab", "ab"),
+                ("aaa", "aa"),
+                ("abc", "abc"),
+                ("ab", "abc"),
+                ("application/json", "\r"),
+                ("", "a"),
+                ("", ""),
+                ("é", ""),
+                ("é", "e"),
+            ] {
+                let got = nova_rt_str_index_of(make_str(h), make_str(n));
+                assert_eq!(got, reference(h, n), "haystack {h:?} needle {n:?}");
             }
         }
     }

@@ -3913,6 +3913,7 @@ impl<'a> Checker<'a> {
             | Builtin::StrChars
             | Builtin::StrFromChars
             | Builtin::StrJoin
+            | Builtin::StrIndexOf
             | Builtin::StrToUpper
             | Builtin::StrToLower
             | Builtin::FloatFixed
@@ -7172,6 +7173,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
             vec![Ty::String, Ty::Array(Box::new(Ty::String))],
             Ty::String,
         ),
+        Builtin::StrIndexOf => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::FloatFixed => (vec![Ty::Float, Ty::Int], Ty::String),
         Builtin::StrToFloat => (vec![Ty::String], Ty::Float),
@@ -15130,6 +15132,10 @@ mod tests {
                         Ty::String,
                     ),
                     "`str_join(self, parts)` in `String::join`",
+                ),
+                Builtin::StrIndexOf => (
+                    (vec![Ty::String, Ty::String], Ty::Int),
+                    "`str_index_of(self, needle)` in `String::index_of`",
                 ),
                 Builtin::StrToUpper => (
                     (vec![Ty::String], Ty::String),

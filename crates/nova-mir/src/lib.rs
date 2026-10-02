@@ -204,6 +204,9 @@ rt_funcs! {
     /// `(str, ptr to [String]) -> str` — the parts with the separator
     /// between each pair.
     StrJoin,
+    /// `(str, str) -> i64` — the character index of the first match, or
+    /// `-1`.
+    StrIndexOf,
     /// `(str) -> str` — full Unicode uppercase.
     StrToUpper,
     /// `(str) -> str` — full Unicode lowercase.
@@ -525,6 +528,7 @@ impl RtFunc {
             RtFunc::StrChars => "nova_rt_str_chars",
             RtFunc::StrFromChars => "nova_rt_str_from_chars",
             RtFunc::StrJoin => "nova_rt_str_join",
+            RtFunc::StrIndexOf => "nova_rt_str_index_of",
             RtFunc::StrToUpper => "nova_rt_str_to_upper",
             RtFunc::StrToLower => "nova_rt_str_to_lower",
             RtFunc::Alloc => "nova_rt_alloc",
@@ -618,6 +622,7 @@ impl RtFunc {
             RtFunc::StrChars => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::StrFromChars => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::StrJoin => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
+            RtFunc::StrIndexOf => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::StrToUpper | RtFunc::StrToLower => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
