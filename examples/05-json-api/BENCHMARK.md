@@ -344,6 +344,16 @@ not a gate measurement, and this status stands until the full method is run
 again. See
 "AMENDMENT 2026-10-02 (fixed-vs-json)".
 
+**Amended 2026-10-02 (gate-remeasure-2):** the full method, with three
+replicates per cell, on `main` at `cdaea7e`. Its figures supersede
+"(gate-remeasure)"'s as the gate's recorded status:
+- **Absolute:** met in all six Nova readings, pinned 10986.5–12403.2 req/sec
+  and unpinned 10768.5–12126.4, so pooled 10768.5–12403.2.
+- **Ratio:** not met unpinned, at 0.854–0.976 with the ranges disjoint;
+  0.715–1.334 pinned, straddling 1.0.
+
+See "AMENDMENT 2026-10-02 (gate-remeasure-2)".
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
@@ -3054,6 +3064,149 @@ json-api is −9.9 to 9.9.
   measured here.
 - **Whether the two would be level on another day.** This is one session,
   one host, Windows, three rounds.
+
+## AMENDMENT 2026-10-02 (gate-remeasure-2): the Phase 2 gate on `main` at `cdaea7e`
+
+This reruns both of the gate's criteria with "(gate-remeasure)"'s method:
+ten users, 200 connections, 30 s after a 5 s warmup, four cells
+alternated. It takes three replicates per cell, where that run took two.
+Since `5efcc2e`, the only functional code change is "(str-chars-direct)"'s;
+the other commits changed only documentation and comments.
+
+**The absolute criterion is met in every reading.**
+- All six Nova readings clear `nova-spec/00-MASTER-SPEC.md` §3's 10,000
+  req/sec: pinned to one core at 10986.5–12403.2, unpinned at
+  10768.5–12126.4. That is 7.7–24.0% above the line.
+- This is the first matrix whose pinned cells clear it too. So the pooled
+  and split readings now agree.
+
+**The ratio against Bun is not met.**
+- **Unpinned:** B/D is 0.854–0.976, taken from the ranges' extremes as
+  "(gate-remeasure)" did, against the 1.0 `nova-spec/60-EXAMPLES.md` §5
+  asks for.
+  - The ranges are disjoint. Nova's fastest unpinned reading, 12126.4, is
+    below Bun's slowest, 12427.5.
+  - Round by round it is 0.962, 0.904 and 0.867.
+- **Pinned:** A/C is 0.715–1.334, which straddles 1.0.
+  - Bun's pinned readings spread 1.65x, from 9300.1 to 15374.9.
+  - Round by round it is 0.774, 1.181 and 0.807. The one round above 1.0 is
+    the round with Bun's slowest reading.
+
+**The gate's two statements still disagree.** §3's absolute criterion is
+now met under either pinning condition. §5's ratio is not met unpinned and
+not established pinned. Under any reading that counts §5, the gate is not
+met.
+
+### The cells, in run order
+
+| reading | cell | side | pinned | mask read back | req/sec |
+|---|---|---|---|---|---|
+| 1 | A | Nova | core 0 | 1 | 11394.6 |
+| 2 | C | Bun | core 0 | 1 | 14723.4 |
+| 3 | B | Nova | no | 4095 | 12126.4 |
+| 4 | D | Bun | no | 4095 | 12605.6 |
+| 5 | A | Nova | core 0 | 1 | 10986.5 |
+| 6 | C | Bun | core 0 | 1 | 9300.1 |
+| 7 | B | Nova | no | 4095 | 11390.0 |
+| 8 | D | Bun | no | 4095 | 12599.9 |
+| 9 | A | Nova | core 0 | 1 | 12403.2 |
+| 10 | C | Bun | core 0 | 1 | 15374.9 |
+| 11 | B | Nova | no | 4095 | 10768.5 |
+| 12 | D | Bun | no | 4095 | 12427.5 |
+
+- **Every reading was `errors=0`.**
+- **Each server was a fresh process.** After it printed its listening line
+  and before seeding, it was pinned or left alone, and its affinity mask
+  was read back and logged.
+
+| cell | range | ratio |
+|---|---|---|
+| A, Nova pinned | 10986.5–12403.2 | |
+| B, Nova unpinned | 10768.5–12126.4 | |
+| C, Bun pinned | 9300.1–15374.9 | A/C 0.715–1.334 |
+| D, Bun unpinned | 12427.5–12605.6 | B/D 0.854–0.976 |
+
+**The load generator was not the limit.** Its self-test ceiling, taken
+after the equivalence check and before the matrix, is 99203.3 req/sec.
+Bun's fastest reading is 15.5% of that.
+- It was invoked as `nova-bench-http --self-test --connections 200
+  --duration 30 --warmup 5`. That command is from this session.
+- The self-test recorded `errors=2`, and at least one connection completed
+  no requests (`conn_min=0`, `conn_max=66374`). That makes it weaker
+  calibration than "(gate-remeasure)"'s. At 15.5% of it, the conclusion
+  does not depend on it.
+- The generator is `target/release/nova-bench-http.exe`: 256,512 bytes,
+  SHA-256 `d17062335e988c18…`, built 2026-09-29, the same file
+  "(gate-remeasure)" used.
+
+**These predictions were written before any throughput reading.** The
+files' modification times put the predictions at 16:47:59, the
+equivalence log at 16:48:33 and the self-test log at 16:49:13. That the
+matrix followed the self-test, in the same command, is from this session.
+
+| prediction | measured | verdict |
+|---|---|---|
+| A: 8,500–10,500 | 10986.5–12403.2 | wrong: above |
+| C: 10,000–12,500 | 9300.1–15374.9 | one reading below, two above |
+| B: 10,500–13,500 | 10768.5–12126.4 | within |
+| D: 11,500–13,500 | 12427.5–12605.6 | within |
+| A/C: 0.70–0.95 | 0.715–1.334 | wrong: upper end above |
+| B/D: 0.85–1.10 | 0.854–0.976 | within |
+| unpinned above 10k in all three readings | all three | right |
+| pinned below 10k in at least two | none below | wrong |
+| ratio not met under any reading that counts the pinned cells | not met unpinned; straddles pinned | partly: pinned it is not established rather than not met |
+
+### Identity of each side, and the payload
+
+- **Nova:** `examples/05-json-api`, built by the release `nova` from
+  `cdaea7e`; that is from this session. `json-api.exe` is 700,416 bytes,
+  SHA-256 `923bef11794d9409…`, and the same binary ran in every Nova
+  reading.
+- **Bun:** `docs/benchmarks/bun-server.js`, 4,415 bytes in this checkout,
+  SHA-256 `f95426e14e22034c…`, run by bun 1.3.0. The version is from
+  `bun --version` in this session.
+- **The payload.** Ten users were seeded by the same `curl` POSTs on each
+  side. Every reading on both sides served the same 604-byte body, SHA-256
+  `3ff5004bf26139cc…`.
+- **Equivalence was run first**, against the `json-api.exe` built for this
+  run: `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+  The log does not record the binary's path; that is from this session.
+- **Framing was not re-measured in this matrix.** "(fixed-vs-json)"
+  measured it on `68d0b94`, whose code is the same: Nova's head is 72 bytes
+  and Bun's 109, the difference being Bun's `Date` header.
+
+### Against "(gate-remeasure)", on `5efcc2e`
+
+| cell | (gate-remeasure) | now |
+|---|---|---|
+| A, Nova pinned | 8520.1, 8424.0 | 11394.6, 10986.5, 12403.2 |
+| B, Nova unpinned | 10250.0, 10382.4 | 12126.4, 11390.0, 10768.5 |
+| C, Bun pinned | 10774.3, 12068.8 | 14723.4, 9300.1, 15374.9 |
+| D, Bun unpinned | 12956.6, 12846.9 | 12605.6, 12599.9, 12427.5 |
+
+- **Nova rose in both cells, disjoint.** Pinned rose by 1.29x–1.47x, and
+  unpinned by 1.04x–1.18x.
+- **Bun's code did not change, and its cells moved too.** Unpinned fell
+  1.9–4.1%, disjoint. Pinned now spans a range that contains its old one.
+- **The rise is not attributed.** Nova's one code change,
+  "(str-chars-direct)", claimed no server gain: its six pairs overlapped,
+  with a 6.0% higher mean. How much of Nova's rise is that change and how
+  much is the session is not separated.
+- **Pinned and unpinned now overlap on both sides.** In "(gate-remeasure)"
+  they were disjoint on both.
+
+### What this does not settle
+
+- **Which statement of the gate governs.** As of `cdaea7e`, no tracked
+  file settles it.
+- **Whether the unpinned ratio holds below 1.0 on another session.** About
+  an hour earlier, "(fixed-vs-json)" ran the same unpinned cells on the same code
+  and found Nova and Bun level: Nova 11392.3–13400.0 against Bun
+  11834.1–12844.0. That run's unpinned ratio straddled 1.0, at 0.89–1.13;
+  this one's falls below it.
+- **Why Bun's pinned readings spread 1.65x.** It was not measured.
+- **Any host but this one.** Every figure here is from this development
+  host, Windows, with the load generator on the same machine.
 
 ## What was measured, and with what
 

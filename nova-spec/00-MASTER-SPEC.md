@@ -440,6 +440,18 @@ The unpinned absolute pass rests on two readings with a thin margin. Full
 account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02
 (gate-remeasure)".
 
+**Amended 2026-10-02 (gate-remeasure-2):** remeasured on `main` at `cdaea7e`
+with the same method, three replicates per cell.
+- **This section's absolute criterion is met in all six readings:** pinned
+  to one core at 10986.5–12403.2 req/sec, unpinned at 10768.5–12126.4.
+- **`60-EXAMPLES.md` §5's ratio against Bun is still not met:** 0.854–0.976
+  unpinned, with the ranges disjoint; 0.715–1.334 pinned, straddling 1.0.
+
+The gate's two statements still disagree. This section's criterion is now
+met under either pinning condition, and §5's is not. Under any reading that
+counts §5, the gate is not met. Full account in
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-2)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
