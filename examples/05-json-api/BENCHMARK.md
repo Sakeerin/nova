@@ -3802,6 +3802,147 @@ except the pinned one.
 - **Any host but this one.** Every figure here is from this development
   host, Windows, with the load generator on the same machine.
 
+## AMENDMENT 2026-10-02 (byte-search): `String.index_of` and `String.contains` search bytes
+
+`Response.to_bytes` checks every header name and value with `std/http`'s
+`is_crlf_free`, which calls `String.contains` twice. Each `contains` went
+through `String.index_of`, which built a `[Char]` for both strings before
+comparing them character by character. For the json-api's two headers
+that is eight searches and sixteen character arrays per response.
+- **The change:** a new std-only builtin, `str_index_of(haystack, needle)`,
+  now backs both methods.
+- **How it searches:** its runtime function finds the first match with a
+  byte search, then counts the characters before it.
+- **Why the result is the same:** both strings are valid UTF-8, and no
+  character starts with a continuation byte, so a byte match can only begin
+  on a character boundary. It is therefore the same first match the character
+  search found.
+- **`contains`** now compares the builtin's result with 0 itself, so it no
+  longer allocates an `Option`.
+
+**Results:**
+- **Per call, all four are disjoint.**
+  - `"application/json".contains("\r")`, a miss, went from 168–390 to
+    23–26 ns.
+  - `"604".contains("\n")`, a miss, went from 82–146 to 13 ns.
+  - `"hello wörld, hello wörld".index_of("wörld")`, whose needle holds a
+    multi-byte character, went from 144–148 to 46–49 ns.
+  - `Response.to_bytes`, for a response with the json-api's two headers
+    and a 604-byte body, went from 2265–2278 to 1228–1331 ns. That is a
+    41.6–45.8% cut per pair, about 1 us.
+- **The ten-user server's ranges overlap over six pairs, so no gain is
+  claimed.**
+  - Before ran at 12178.4–12928.2 req/sec and after at 12603.0–13035.8.
+  - After was faster in 4 of the 6 pairs, and its mean was 1.7% higher.
+  - The roughly 1 us `to_bytes` saves is about 1% of a request here,
+    smaller than the spread of either side's readings.
+
+### How it was measured
+
+- **Per call:** a scratch Nova harness, never committed. It times 200,000
+  calls each of the two `contains` misses, the `index_of`, and `to_bytes`.
+  - Its response comes from a copy of the json-api's `json_response`, on a
+    604-character body.
+  - `before` is 495,616 bytes, SHA-256 `3791e301c5d75c91…`.
+  - `after` is 497,152 bytes, SHA-256 `3184eb7e0b8f836c…`.
+  - The two were alternated, three runs each, one fresh process per run.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`.
+  - `before` is 701,440 bytes, SHA-256 `ba5de69c09cb4358…`; `after` is
+    702,464 bytes, SHA-256 `bd67f5424af36c69…`.
+  - Alternated, one fresh process per reading, every reading `errors=0`.
+  - Every reading served the same body, SHA-256 `3ff5004bf26139cc…`.
+  - **Six pairs, not three.** The first three overlapped, so three more were
+    taken, under the rule written for the page heap in
+    `docs/superpowers/plans/2026-10-01-gc-page-heap.md`: "If the ranges
+    overlap, take three more of each and report all readings."
+  - `bun docs/benchmarks/bun-equivalence.js` passed against `after`: all 9
+    exchanges match.
+- **Provenance, from this session rather than a file:**
+  - All four binaries were built by the release `nova`, `before` from
+    `3ef7031` and `after` from `26b729a`.
+  - The equivalence log does not name the binary it ran against.
+- **Ordering.** The predictions' modification time is 22:39:32. The
+  `before` harness binary's is 22:39:49, and the code commit is dated
+  22:42:51.
+
+These predictions were written before any of the change existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| `contains` on `"application/json"`: before 150–400 ns, after 20–60 | 168–390; 23–26 | within; within |
+| `contains` on `"604"`: before 60–200 ns, after 15–50 | 82–146; 13 | within; wrong: below |
+| `index_of` multi-byte: before 200–600 ns, after 40–150 | 144–148; 46–49 | wrong: below; within |
+| `to_bytes`: before 1,500–4,000 ns, after 20–50% lower | 2265–2278; 41.6–45.8% lower per pair | within; within |
+| server after 1–5% above before, ranges likely overlap | ranges overlap over six pairs; −2.5% to +6.1% per pair, and after's mean req/sec 1.7% above before's | ranges overlap, as predicted; the 1–5% part is not settled |
+| the three named mutants each fail at least one named test | all three did | right; two more, added later, also failed |
+
+### Per call, ns, in run order
+
+| run | `contains` ctype before | after | `contains` short before | after | `index_of` before | after | `to_bytes` before | after |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 390 | 25 | 146 | 13 | 148 | 47 | 2278 | 1331 |
+| 2 | 168 | 23 | 86 | 13 | 146 | 46 | 2275 | 1244 |
+| 3 | 168 | 26 | 82 | 13 | 144 | 49 | 2265 | 1228 |
+
+The first `before` run's two `contains` readings are above its others:
+2.3 times for the `"application/json"` one and 1.7–1.8 times for the
+`"604"` one. Why is not measured. The two later runs are disjoint from
+every `after` run too.
+
+### Server, in run order
+
+| pair | before | after | after / before |
+|---|---|---|---|
+| 1 | 12178.4 | 12918.0 | 1.061 |
+| 2 | 12928.2 | 12603.0 | 0.975 |
+| 3 | 12654.0 | 13035.8 | 1.030 |
+| 4 | 12507.5 | 12723.1 | 1.017 |
+| 5 | 12731.6 | 12604.2 | 0.990 |
+| 6 | 12471.5 | 12877.9 | 1.033 |
+
+### Correctness
+
+- **A new runtime test,
+  `index_of_reports_the_first_match_as_a_character_index`,** checks
+  `nova_rt_str_index_of` against a character-level reference over twelve
+  haystack and needle pairs. They include matches after multi-byte text,
+  repeated and overlapping needles, misses, an empty needle and an empty
+  haystack.
+- **The existing tests pass unchanged.** `tests/runtime/strings.nova`'s
+  `index_of` and `contains` lines run in `strings_run`,
+  `strings_under_gc_stress` and `strings_build_standalone`.
+  `http_serialise_run` pins the header check's refusal of an embedded CRLF.
+- **Five mutants each fail named tests:**
+  - the runtime reporting a byte index instead of a character index: 3
+    tests;
+  - the runtime reporting an empty needle missing: 3;
+  - the runtime never finding a match: 4, `http_serialise_run` among
+    them;
+  - `contains` testing `> 0` instead of `>= 0`: 3;
+  - `index_of` treating a match at 0 as a miss: 3.
+- **`strings_build_standalone` caught only the two `std/strings`
+  mutants.** It links `target/debug/nova_runtime.lib`, which
+  `cargo test -p nova-cli` does not refresh, as "(fast-join)" found.
+- **The gates pass.** A scratch log records the base commit, the working
+  tree's files and each command:
+  - `cargo test --locked --workspace`: 1173 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0;
+  - `cargo fmt --all --check`: exit 0.
+  - A later commit changes only comments.
+
+### What this does not settle
+
+- **The server-level effect.** Its ranges overlap. A 1% shift is smaller
+  than this host's spread between readings.
+- **The gate.** Neither criterion was rerun, so "(gate-remeasure-3)", on
+  `012ca55`, stays the recorded status.
+- **`starts_with`, `ends_with` and `split`.** They still build character
+  arrays. None of them runs on the measured `GET /users` path; the example
+  splits the request path only for its other routes.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
