@@ -452,6 +452,19 @@ met under either pinning condition, and §5's is not. Under any reading that
 counts §5, the gate is not met. Full account in
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-2)".
 
+**Amended 2026-10-02 (gate-remeasure-3):** remeasured on `main` at `012ca55`
+with the same method, after a byte-level `String.join`.
+- **This section's absolute criterion is met in all six readings:** pinned
+  at 17682.5–18528.1 req/sec, unpinned at 17400.4–20014.4. Every cell,
+  Bun's included, ran much faster than in earlier runs, for reasons not
+  measured, so these figures do not compare with earlier ones.
+- **`60-EXAMPLES.md` §5's ratio against Bun is still not met:** 0.886–0.993
+  pinned, with the ranges disjoint; 0.891–1.076 unpinned, straddling 1.0.
+
+The gate's two statements still disagree. Under any reading that counts §5,
+the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-02 (gate-remeasure-3)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
