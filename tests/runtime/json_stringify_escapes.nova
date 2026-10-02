@@ -18,8 +18,8 @@
 // fixture.
 //
 // The last five lines pin `quote`'s fast path, which returns a string with
-// nothing to escape without walking it character by character:
-// - `0x1f`, the highest control character, must still escape;
+// nothing to escape without rebuilding it character by character:
+// - `0x1f`, the highest character below `0x20`, must still escape;
 // - space and `~` must still pass through;
 // - an escapable character first, or last behind a clean run, must still
 //   send the whole string through the escaping loop.
