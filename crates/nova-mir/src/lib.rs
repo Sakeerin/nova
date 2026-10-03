@@ -207,6 +207,8 @@ rt_funcs! {
     /// `(str, str) -> i64` — the character index of the first match, or
     /// `-1`.
     StrIndexOf,
+    /// `(str) -> str` — the string as a JSON string literal.
+    JsonQuote,
     /// `(str) -> str` — full Unicode uppercase.
     StrToUpper,
     /// `(str) -> str` — full Unicode lowercase.
@@ -529,6 +531,7 @@ impl RtFunc {
             RtFunc::StrFromChars => "nova_rt_str_from_chars",
             RtFunc::StrJoin => "nova_rt_str_join",
             RtFunc::StrIndexOf => "nova_rt_str_index_of",
+            RtFunc::JsonQuote => "nova_rt_json_quote",
             RtFunc::StrToUpper => "nova_rt_str_to_upper",
             RtFunc::StrToLower => "nova_rt_str_to_lower",
             RtFunc::Alloc => "nova_rt_alloc",
@@ -623,6 +626,7 @@ impl RtFunc {
             RtFunc::StrFromChars => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::StrJoin => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::Ptr),
             RtFunc::StrIndexOf => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
+            RtFunc::JsonQuote => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::StrToUpper | RtFunc::StrToLower => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::Alloc => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::CheckBounds => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),

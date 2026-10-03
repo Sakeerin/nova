@@ -150,6 +150,12 @@ builtins! {
     /// `String.contains`, which used to build a [`Builtin::StrChars`] array
     /// for each string first. Std-only.
     StrIndexOf,
+    /// `json_quote(s: String) -> String` — `s` as a JSON string literal,
+    /// quotation marks included, escaped in one pass over its bytes. Backs
+    /// `std/json`'s `quote`, which used to scan a [`Builtin::StrChars`]
+    /// array and rebuild any string that needed escaping character by
+    /// character. Std-only.
+    JsonQuote,
     /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs
     /// `std/strings`' `String::to_upper`. Whole-string rather than
     /// `Char` → `Char` because `ß` → `SS` is not 1:1. Std-only.
@@ -181,8 +187,9 @@ builtins! {
     /// language also has no `Int` → `Float` conversion (no such builtin, and
     /// `as` casts are unsupported, `E0900`), but that is a cost rather than a
     /// wall: an if/else chain from `Int` to a `Float` literal spans any fixed
-    /// digit range, the same construction `std/json`'s own `hex_digit` uses
-    /// over sixteen arms to reach `String` literals. Std-only, so
+    /// digit range, the same construction `std/json`'s `hex_digit` used over
+    /// sixteen arms to reach `String` literals, until [`Builtin::JsonQuote`]
+    /// replaced it on 2026-10-03. Std-only, so
     /// `str_to_float` is not a reserved word in user code.
     StrToFloat,
     /// `test_selector() -> Int` — which `@test` to run in this process, or a
@@ -887,6 +894,7 @@ impl Builtin {
             Builtin::StrFromChars => "str_from_chars",
             Builtin::StrJoin => "str_join",
             Builtin::StrIndexOf => "str_index_of",
+            Builtin::JsonQuote => "json_quote",
             Builtin::StrToUpper => "str_to_upper",
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
@@ -988,7 +996,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 76] = [
+    pub const STD_ONLY: [Builtin; 77] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -997,6 +1005,7 @@ impl Builtin {
         Builtin::StrFromChars,
         Builtin::StrJoin,
         Builtin::StrIndexOf,
+        Builtin::JsonQuote,
         Builtin::StrToUpper,
         Builtin::StrToLower,
         Builtin::FloatFixed,

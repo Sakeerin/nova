@@ -517,99 +517,13 @@ fn vec_chars_to_string(b: Vec<Char>) -> String {
     str_from_chars(out)
 }
 
-// Whether any character in `cs` must be escaped in a JSON string literal:
-// `"`, `\`, or a control character below `0x20` (RFC 8259). Stops at the
-// first one.
-fn needs_escape(cs: [Char]) -> Bool {
-    let mut i = 0
-    while i < cs.len() {
-        let c = cs[i]
-        if c == '"' { return true }
-        if c == '\\' { return true }
-        if char_to_int(c) < 32 { return true }
-        i = i + 1
-    }
-    false
-}
-
-// Escape `s` as a JSON string literal, quotes included. `char_to_int` is how
-// this reaches a character's scalar value -- it is `STD_ONLY`, which is why
-// this helper lives here rather than in a fixture.
-//
-// A string with nothing to escape, the common case, is returned wrapped in
-// quotation marks by one interpolation instead of being rebuilt one character
-// at a time. `examples/05-json-api/BENCHMARK.md`'s "(sampled-profile)"
-// amendment measured that rebuild at a quarter of the server thread's time.
-// Any other string goes through the loop below, unchanged.
-fn quote(s: String) -> String {
-    let cs = s.chars()
-    if !needs_escape(cs) {
-        return "\"${s}\""
-    }
-    let mut out: Vec<Char> = Vec::new()
-    out.push('"')
-    let mut i = 0
-    while i < cs.len() {
-        let c = cs[i]
-        let code = char_to_int(c)
-        if c == '"' {
-            out.push('\\')
-            out.push('"')
-        } else {
-            if c == '\\' {
-                out.push('\\')
-                out.push('\\')
-            } else {
-                if code < 32 {
-                    buf_push_str(out, escape_control(code))
-                } else {
-                    out.push(c)
-                }
-            }
-        }
-        i = i + 1
-    }
-    out.push('"')
-    vec_chars_to_string(out)
-}
-
-// One hex digit, lowercase, for a nibble in `0..16`. Nova has no formatting
-// width primitive, so `escape_control` builds `\u00XX` two characters at a
-// time through this.
-fn hex_digit(n: Int) -> String {
-    if n == 0 { "0" }
-    else if n == 1 { "1" }
-    else if n == 2 { "2" }
-    else if n == 3 { "3" }
-    else if n == 4 { "4" }
-    else if n == 5 { "5" }
-    else if n == 6 { "6" }
-    else if n == 7 { "7" }
-    else if n == 8 { "8" }
-    else if n == 9 { "9" }
-    else if n == 10 { "a" }
-    else if n == 11 { "b" }
-    else if n == 12 { "c" }
-    else if n == 13 { "d" }
-    else if n == 14 { "e" }
-    else { "f" }
-}
-
-// RFC 8259 requires every control character below `0x20` escaped. Five have
-// a named short escape; every other one falls back to `\u00XX`, which is
-// always exactly two hex digits because `code` is below `0x20`.
-fn escape_control(code: Int) -> String {
-    if code == 10 { "\\n" }
-    else if code == 13 { "\\r" }
-    else if code == 9 { "\\t" }
-    else if code == 8 { "\\b" }
-    else if code == 12 { "\\f" }
-    else {
-        let hi = code / 16
-        let lo = code % 16
-        "\\u00${hex_digit(hi)}${hex_digit(lo)}"
-    }
-}
+// Escape `s` as a JSON string literal, quotes included: `"` and `\` take a
+// backslash, the five control characters with a short escape take it, and
+// every other control character below `0x20` becomes `\u00XX` in lowercase
+// hex (RFC 8259). A runtime builtin does it in one pass over the bytes. It
+// used to scan a `[Char]` here and rebuild any string that needed escaping
+// one character at a time.
+fn quote(s: String) -> String { json_quote(s) }
 
 // Parse `s` as JSON. `JsonError::at` is a character index -- a count of Unicode
 // scalar values, matching the `[Char]` the parser walks.

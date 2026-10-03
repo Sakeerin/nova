@@ -327,6 +327,57 @@ pub unsafe extern "C" fn nova_rt_str_index_of(
     }
 }
 
+/// `s` as a JSON string literal, quotation marks included: the body of
+/// `std/json`'s `quote`.
+///
+/// `"` and `\` take a backslash. The five control characters with a short
+/// escape become `\n`, `\r`, `\t`, `\b` and `\f`, and every other byte below
+/// `0x20` becomes `\u00XX` in lowercase hex (RFC 8259). Everything else is
+/// copied as it is. Working on bytes is exact: every byte of a multi-byte
+/// UTF-8 character is `0x80` or above, so none can be mistaken for one of
+/// these, and every slice copied ends next to an ASCII byte, on a character
+/// boundary. The Nova-level `quote` this replaces built a `[Char]` and
+/// scanned it character by character.
+///
+/// GC safety: every byte is copied into the Rust `String` before `gc_str`
+/// allocates, the ordering [`nova_rt_str_concat_n`] relies on.
+///
+/// # Safety
+/// `s` must be a valid `NovaStr` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_json_quote(s: *const NovaStr) -> *mut NovaStr {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let src = as_str(s);
+    let mut out = String::with_capacity(src.len() + 2);
+    out.push('"');
+    let mut start = 0;
+    for (i, &b) in src.as_bytes().iter().enumerate() {
+        let short = match b {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            0x08 => "\\b",
+            0x0c => "\\f",
+            0x00..=0x1f => "",
+            _ => continue,
+        };
+        out.push_str(&src[start..i]);
+        if short.is_empty() {
+            out.push_str("\\u00");
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 15) as usize] as char);
+        } else {
+            out.push_str(short);
+        }
+        start = i + 1;
+    }
+    out.push_str(&src[start..]);
+    out.push('"');
+    gc_str(&out)
+}
+
 /// Compare two strings for byte equality.
 ///
 /// # Safety
@@ -811,6 +862,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_str_concat_n", nova_rt_str_concat_n as *const u8),
         ("nova_rt_str_join", nova_rt_str_join as *const u8),
         ("nova_rt_str_index_of", nova_rt_str_index_of as *const u8),
+        ("nova_rt_json_quote", nova_rt_json_quote as *const u8),
         ("nova_rt_str_eq", nova_rt_str_eq as *const u8),
         ("nova_rt_str_cmp", nova_rt_str_cmp as *const u8),
         ("nova_rt_str_hash", nova_rt_str_hash as *const u8),
@@ -1122,6 +1174,56 @@ mod tests {
             ] {
                 let got = nova_rt_str_index_of(make_str(h), make_str(n));
                 assert_eq!(got, reference(h, n), "haystack {h:?} needle {n:?}");
+            }
+        }
+    }
+
+    /// Against a character-level port of the Nova `quote` this replaced in
+    /// `std/json`: every control character, both characters that need a
+    /// backslash, the boundary at `0x7F`, and multi-byte text.
+    #[test]
+    fn json_quote_matches_the_character_level_escaper() {
+        fn reference(s: &str) -> String {
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                let code = c as u32;
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    _ if code < 32 => match code {
+                        10 => out.push_str("\\n"),
+                        13 => out.push_str("\\r"),
+                        9 => out.push_str("\\t"),
+                        8 => out.push_str("\\b"),
+                        12 => out.push_str("\\f"),
+                        _ => out.push_str(&format!("\\u00{code:02x}")),
+                    },
+                    _ => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        let controls: &'static str = Box::leak(
+            (0u8..32)
+                .map(|b| b as char)
+                .collect::<String>()
+                .into_boxed_str(),
+        );
+        unsafe {
+            for s in [
+                "",
+                "User Number 7",
+                "a\"b\\c\nd",
+                controls,
+                "\u{7f}",
+                "é🦀日本",
+                "x\u{1f}y\u{0}z",
+                "\"\\\"",
+                "tab\there",
+            ] {
+                let got = as_str(nova_rt_json_quote(make_str(s)));
+                assert_eq!(got, reference(s), "input {s:?}");
             }
         }
     }
