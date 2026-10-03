@@ -4230,6 +4230,186 @@ iterations and three runs, so the rows use its figures:
   identical binaries varied by more than a 2% effect.
 - **One host, Windows.**
 
+## AMENDMENT 2026-10-03 (json-quote): a string is quoted in one runtime pass
+
+"(reprofile-2)" put `quote` at 5.1–5.4 us of each ten-user request, across
+its twenty calls from `user_json`. It built a `[Char]` of the string,
+scanned it in Nova with `needs_escape`, and wrapped a clean string in
+quotation marks with an interpolation. A string that needed escaping it
+rebuilt one character at a time.
+- **The change:** a new std-only builtin, `json_quote(s)`, now backs
+  `quote`. Its runtime function copies the string's bytes into one buffer,
+  escaping as it goes.
+- **What it escapes:** a backslash goes before `"` and `\`. The five
+  control characters with a short escape become `\n`, `\r`, `\t`, `\b` and
+  `\f`, and every other byte below `0x20` becomes `\u00XX` in lowercase
+  hex.
+- **Why bytes are exact:** every byte of a multi-byte UTF-8 character is
+  `0x80` or above, so none can be mistaken for one of these.
+- **What went:** `needs_escape`, `escape_control` and `hex_digit` had no
+  other caller, and are gone.
+
+**Results:**
+- **Per call, all four are disjoint.**
+  - `stringify` of the clean name `"User Number 7"` went from 207.3–220.2
+    to 102.6–118.0 ns, a 44.6–53.2% cut per pair.
+  - `stringify` of the clean email `"user7@example.com"` went from
+    219.0–236.4 to 104.5–125.7 ns, 46.2–55.2%.
+  - `stringify` of a string holding a quote, a backslash and a newline
+    went from 517.2–538.1 to 158.2–181.1 ns, 65.0–70.4%.
+  - `users_json` at ten users went from 7688.8–7921.8 to 5331.9–5775.6 ns,
+    27.1–31.2%.
+- **The ten-user server is disjoint, in both orders, so a gain is
+  claimed.**
+  - Over six alternated pairs, before ran at 12322.9–12706.9 req/sec and
+    after at 13506.0–13988.8.
+  - After was 8.6–11.6% faster per pair, 6.3–8.4 us less per request.
+  - Three pairs ran `before` first and three `after` first, since
+    "(alloc-fast-path)" left run order a candidate confounder. Both orders
+    gave disjoint gains: 8.6–11.6% and 9.4–10.2%.
+
+### How it was measured
+
+- **Per call:** a scratch Nova harness, never committed, prints picoseconds
+  per call.
+  - It times 1,000,000 calls each of the three `stringify`s, and 200,000
+    calls of `users_json` over ten users.
+  - It holds copies of the example's `User`, `Store`, `user_json` and
+    `users_json` at `b0b606a`.
+  - `before` is 525,312 bytes, SHA-256 `6b7748ee651f020b…`; `after` is
+    525,312 bytes, SHA-256 `4d5e6261116c72bf…`.
+  - They were alternated, five runs each, one fresh process per run. Every
+    run printed the same output lengths and the same escaped sample,
+    `"a\"b\\c\nd"`.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`.
+  - `before` is 702,464 bytes, SHA-256 `c535a1e13aa39c53…`; `after` is
+    702,464 bytes, SHA-256 `4cd4671bc3c95dce…`.
+  - One fresh process per reading, every reading `errors=0`, every body the
+    same, SHA-256 `3ff5004bf26139cc…`.
+  - `bun docs/benchmarks/bun-equivalence.js` passed against `after` first:
+    all 9 exchanges match, one of them an escaped string.
+- **Provenance, from this session rather than a file:** all four binaries
+  were built by the release `nova`, `before` from `b0b606a` and `after`
+  from `487eda1`. The equivalence log does not name its binary.
+- **Ordering.** The predictions' modification time is 11:43:36. The
+  `before` harness binary's is 11:44:12, and the code commit is dated
+  11:48:11.
+
+These predictions were written before any of the change existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| clean name: before 150–350 ns, after 40–60% lower, disjoint | 207.3–220.2; 44.6–53.2% lower, disjoint | within |
+| clean email: before 150–350 ns, after 40–60% lower, disjoint | 219.0–236.4; 46.2–55.2% lower, disjoint | within |
+| escaped string: before 600–2,000 ns, after 70–90% lower | 517.2–538.1; 65.0–70.4% lower | wrong on `before`, below the band; the cut mostly below it, two of five pairs at 70.1% and 70.4%, three at 65.0–69.5% |
+| `users_json`: before 6,000–10,000 ns, after 25–45% lower, disjoint | 7688.8–7921.8; 27.1–31.2% lower, disjoint | within |
+| server after 2–6% above before, ranges likely overlap | 8.6–11.6% per pair, disjoint in both orders | wrong: above, and disjoint |
+| five named mutants each fail at least one named test | all five did | right |
+
+A sixth mutant was added after verification and was not predicted; see
+"Correctness".
+
+### Per call, ps, in run order
+
+| run | name before | after | email before | after | escaped before | after | `users_json` before | after |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 218539 | 107891 | 236426 | 112685 | 526368 | 171038 | 7921838 | 5775642 |
+| 2 | 220169 | 102961 | 235464 | 105431 | 538067 | 159304 | 7745016 | 5331909 |
+| 3 | 213146 | 118048 | 233649 | 125682 | 517159 | 181117 | 7896571 | 5556175 |
+| 4 | 207287 | 102617 | 218950 | 104489 | 528618 | 158213 | 7688781 | 5432010 |
+| 5 | 213028 | 109351 | 229583 | 111166 | 521546 | 158849 | 7710537 | 5549863 |
+
+### Server, in run order
+
+| pair | order | before | after | after / before |
+|---|---|---|---|---|
+| 1 | before first | 12536.0 | 13619.0 | 1.086 |
+| 2 | before first | 12706.9 | 13829.0 | 1.088 |
+| 3 | before first | 12405.1 | 13838.7 | 1.116 |
+| 4 | after first | 12322.9 | 13506.0 | 1.096 |
+| 5 | after first | 12492.1 | 13664.0 | 1.094 |
+| 6 | after first | 12698.9 | 13988.8 | 1.102 |
+
+### Correctness
+
+- **A new runtime test,
+  `json_quote_matches_the_character_level_escaper`,** checks
+  `nova_rt_json_quote` against a character-level port of the Nova `quote`
+  it replaces. It covers the empty string, plain ASCII, every control
+  character below `0x20`, `0x7F`, multi-byte text, strings mixing
+  quotes, backslashes and controls, and multi-byte text directly before
+  an escape (`"é\"🦀\n"` and `"日本\u{1}語"`).
+- **The existing JSON tests pass with their code and expected output
+  unchanged; only comments moved:** `json_stringify_run`,
+  `json_stringify_escapes_run`, `json_parse_strings_run`,
+  `json_round_trip_run`, `json_traits_run` and the json-api route test.
+- **Six mutants each fail named tests.** Each was run under two filtered
+  commands only: `cargo test -p nova-runtime --lib json_quote` and
+  `cargo test -p nova-cli --test run_tests -- json`. The counts are
+  failures within those filters, not across the workspace. Every run
+  printed a test result line, so none is a crash read as a pass.
+  - the backslash escape dropped: 5 tests;
+  - uppercase hex: 3;
+  - `0x1F` not treated as a control character: 3;
+  - the closing quotation mark missing: 8;
+  - `0x7F` escaped: 1, the new runtime test. `json_parse_strings.nova`
+    sends `0x7F` through `quote`, but it compares two `stringify`
+    results that would change together, so it does not pin the boundary;
+  - a clean run copied by counting characters instead of bytes: 1, the
+    new runtime test, and only through the two inputs added after
+    verification. Before them it passed the runtime test, and with them
+    it still passes all 15 fixture tests the `json` filter selects.
+- **The gates pass.** A scratch log records the base commit, the working
+  tree's files and each command:
+  - `cargo test --locked --workspace`: 1178 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0;
+  - `cargo fmt --all --check`: exit 0.
+- **Notes elsewhere.** These tracked passages described the Nova `quote`
+  and now say what replaced it:
+  - ADR 0018 named `hex_digit` as a worked example; it carries a dated
+    note that the argument stands without it. A second dated note in its
+    accumulator roster says `quote`'s accumulator is gone.
+  - `nova-spec/20-STDLIB.md`'s accumulator roster carries the same dated
+    note.
+  - The roster comment in `std/json/lib.nova` no longer counts `quote`
+    among the functions appending into a `Vec<Char>`.
+  - The example's `README.md` cited `hex_digit` as a shape; it now says
+    that function is gone.
+  - `tests/runtime/json_stringify_escapes.nova`'s header names
+    `nova_rt_json_quote` as where the five short escapes are listed, and
+    no longer describes a fast path that no longer exists.
+
+### What this does not settle
+
+- **The gate.** Neither criterion was rerun.
+  - "(gate-remeasure-3)" left Nova 3.0–3.9 us per request behind Bun
+    pinned, round by round, on its own method and in another session.
+    There the host's speed rose 1.2x–2.2x within about 36 minutes, Bun's
+    too, so microseconds do not carry from that session to this one.
+  - As shares of Nova's own time per request, that pinned gap was
+    5.3–7.2%, and this change cut 8.0–10.4% per pair. Those are still two
+    methods in two sessions, and Bun was not run here.
+  - The last lever of similar size, "(fast-join)", was 6.6–10.8% faster
+    per pair on this same 15 s method. "(gate-remeasure-3)" ran after it
+    and still found the pinned ratio below 1.0.
+- **Whether the server gained more than the per-call cuts predict.** In
+  microseconds it looks so: `users_json`'s cut was 2.1–2.4 us per call,
+  per pair, and the server saved 6.3–8.4 us per request. But the harness
+  runs one function in a loop and the server does not.
+  - In shares it is not established. "(reprofile-2)", in another session,
+    put `quote` at 9.2–9.6% of the server thread. Per call, `stringify`
+    of a string lost 44.6–70.4% of its time, and `quote` is only part of
+    that call, so `quote`'s own cut is at least that. That predicts a drop
+    of at least 4.1% of the thread, and at most 9.6% if `quote`'s cost
+    vanished entirely. The server's time per request fell 8.0–10.4%,
+    which overlaps that range.
+  - If there is an excess, one candidate is that fewer, smaller
+    allocations cost less to collect in the server's heap. It was not
+    measured.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list

@@ -369,8 +369,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (alloc-fast-path)".
+- **`std/json`'s `quote` as a runtime builtin, measured.**
+  - Per call, `stringify` of a clean name went from 207.3-220.2 to
+    102.6-118.0 ns, and of an escaped string from 517.2-538.1 to
+    158.2-181.1 ns. `users_json` at ten users went from 7688.8-7921.8 to
+    5331.9-5775.6 ns. All are disjoint.
+  - The ten-user server went from 12322.9-12706.9 to 13506.0-13988.8
+    req/sec over six alternated pairs, three in each order: 8.6-11.6%
+    faster per pair, disjoint in both orders.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (json-quote)".
 
 ### Changed
+- **`std/json`'s `quote` escapes in one runtime pass.** A new std-only
+  builtin, `json_quote(s)` (`Builtin::STD_ONLY` 76 → 77), backs it. Its
+  runtime function copies the string's bytes into one buffer, escaping as
+  it goes. `needs_escape`, `escape_control` and `hex_digit` are gone.
+  Output is unchanged.
 - **`std/strings`' `String.index_of` and `String.contains` search bytes.**
   A new std-only builtin, `str_index_of(haystack, needle)`
   (`Builtin::STD_ONLY` 75 → 76), backs both. Its runtime function finds
