@@ -409,6 +409,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (gate-remeasure-5)".
+- **The json-api's server thread, sampled again after `json_quote`.**
+  - `quote` fell to 4.1-4.4% of the thread, 2.0-2.1 us per request, from
+    9.2-9.6%. Only 23.4-24.8% of `nova_rt_json_quote`'s samples land in
+    its own code, the escaping loop and an inlined copy; 32.7-35.9% land
+    in the system heap, for the Rust `String` it builds before copying
+    into the GC heap.
+  - The system heap is 4.7-4.9% of the thread. Its three largest callers,
+    `nova_rt_json_quote`, `nova_rt_str_concat_n` and `nova_rt_int_to_str`,
+    hold 3.5-3.6%, about 1.7 us per request.
+  - Allocation, collection included, is 18.2-18.6% of the thread; the
+    collector is 3.3-3.5 us of it.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (reprofile-3)".
 
 ### Changed
 - **The Phase 2 gate's ratio against Bun is judged by twelve paired
