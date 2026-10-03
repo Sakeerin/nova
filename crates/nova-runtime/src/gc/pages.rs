@@ -512,6 +512,29 @@ mod tests {
         p.free_all();
     }
 
+    /// Every class, not only the 64-byte one: a slot is zeroed when handed
+    /// out even when the memory still holds another pattern. A change that
+    /// zeroed some classes differently from others would need each class
+    /// checked, which the 64-byte test alone does not do.
+    #[test]
+    fn every_class_hands_out_a_zeroed_slot_over_stale_bytes() {
+        for (class, &slot) in CLASS_SIZES.iter().enumerate() {
+            let mut p = Pages::new();
+            let a = p.alloc_slot(class, true);
+            // The next slot is free page memory: every class has at least
+            // 32 slots per 64 KiB page.
+            unsafe { std::ptr::write_bytes((a + slot) as *mut u8, 0xAB, slot) };
+            let b = p.alloc_slot(class, true);
+            assert_eq!(b, a + slot, "class {class}: slots come lowest first");
+            let bytes = unsafe { std::slice::from_raw_parts(b as *const u8, slot) };
+            assert!(
+                bytes.iter().all(|&x| x == 0),
+                "class {class} ({slot} bytes): a slot was handed out still holding stale bytes"
+            );
+            p.free_all();
+        }
+    }
+
     #[test]
     fn a_page_holds_whole_slots_and_its_tail_is_not_a_slot() {
         let mut p = Pages::new();

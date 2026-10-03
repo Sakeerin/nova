@@ -706,6 +706,61 @@ mod tests {
         assert_eq!(layout.align(), ALIGN);
     }
 
+    /// The allocation whose slot would reach `next_gc` collects first, then
+    /// takes its slot: the count it leaves is its own slot alone. Holds off
+    /// Windows too, where `collect()` resets the count and returns.
+    #[test]
+    fn the_crossing_allocation_collects_before_taking_its_slot() {
+        reset();
+        HEAP.with(|h| h.borrow_mut().next_gc = 64);
+        let count = || HEAP.with(|h| h.borrow().alloc_since_gc);
+        alloc(16, false);
+        alloc(16, false);
+        alloc(16, false);
+        assert_eq!(count(), 48, "three 16-byte slots, all below the threshold");
+        alloc(16, false);
+        assert_eq!(
+            count(),
+            16,
+            "the fourth reaches 64: it must collect, resetting the count, then charge its own slot"
+        );
+        reset();
+    }
+
+    /// Every small size is one `heap_layout` accepts, so an allocation path
+    /// that skipped the check for small requests would lose nothing. One was
+    /// tried on 2026-10-03 and did not land; see
+    /// `examples/05-json-api/BENCHMARK.md`, "(alloc-fast-path)".
+    #[test]
+    fn small_sizes_are_always_describable() {
+        assert!(heap_layout(pages::SMALL_MAX).is_some());
+    }
+
+    /// The boundary between the two paths: `SMALL_MAX` bytes takes a page
+    /// slot, one byte more takes the large path.
+    #[test]
+    fn small_max_takes_a_slot_and_one_byte_more_takes_the_large_path() {
+        reset();
+        let small = alloc(pages::SMALL_MAX, true) as usize;
+        let large = alloc(pages::SMALL_MAX + 1, true) as usize;
+        HEAP.with(|h| {
+            let h = h.borrow();
+            assert!(
+                h.pages.slot_scan(small).is_some(),
+                "2048 bytes must take a page slot"
+            );
+            assert!(
+                h.pages.slot_scan(large).is_none(),
+                "2049 bytes must not take a page slot"
+            );
+            assert!(
+                h.large.iter().any(|o| o.addr == large),
+                "2049 bytes must take the large path"
+            );
+        });
+        reset();
+    }
+
     /// A size no `Layout` can express is reported as such rather than reaching
     /// the allocator. Checked on the exact size that used to abort the process
     /// with a Rust panic: `[x; MAX_ARRAY_LEN]` asks `nova_rt_alloc` for
