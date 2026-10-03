@@ -343,6 +343,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-02 (byte-search)".
+- **The json-api re-profiled after three string changes.** A sampled
+  build ran three times on `369a82c`.
+  - Allocation is the largest Nova-side cost in two of three runs, and in
+    all three once the collector's samples are set aside: `gc::alloc`,
+    collection included, is 22.7-23.6% of the server thread, 12.0-13.3 us
+    per request.
+  - The collector, its callees included, is only 4.4-4.9 us of that.
+    Allocation proper is 7.6-8.5 us.
+  - Which allocation triggers a collection moves from run to run, so
+    `Response.to_bytes`' share swung from 4.3% to 12.7%.
+  - `user_json` is 8.8-9.5 us per request, `quote` 5.1-5.4 us of it.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (reprofile-2)".
 
 ### Changed
 - **`std/strings`' `String.index_of` and `String.contains` search bytes.**

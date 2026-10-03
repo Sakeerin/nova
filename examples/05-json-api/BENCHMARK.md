@@ -3943,6 +3943,140 @@ every `after` run too.
   splits the request path only for its other routes.
 - **One host, Windows.**
 
+## AMENDMENT 2026-10-03 (reprofile-2): the json-api's server thread after three string changes
+
+"(reprofile)" sampled the json-api on `82c9c3a`. Since then
+"(str-chars-direct)", "(fast-join)" and "(byte-search)" have changed how
+strings are built and searched. This run samples it again on `369a82c`,
+with the same sampler, "(reprofile)"'s scripts and three new ones, to
+re-rank what is left.
+
+**Results:**
+- **Allocation is the largest Nova-side cost in two of three runs, and
+  most of it is not the collector.**
+  - `gc::alloc`, collection included, is 22.7–23.6% of the server thread,
+    12.0–13.3 us per request.
+  - In the third run `users_json` carried a collection and came to 27.86%.
+    Without the collector's samples it is 19.5%, so `gc::alloc` is larger
+    in all three on that comparison.
+  - The collector, its callees included, is 8.1–8.6% of the thread,
+    4.4–4.9 us. Its self time alone is 7.9–8.5%.
+  - It is the `LocalKey::with` instance `ce5e268d0d359845`, the one
+    "(sampled-profile)" identified by inference. The inference is strong
+    here: the instance's only callees are the collector's sweep and mark
+    functions, and almost every sample of it in a run lands at one call
+    site, as a rare, threshold-triggered collection would.
+  - Every one of the collector's samples sits under `gc::alloc`. So the
+    rest of `gc::alloc`, 14.4–15.0% or 7.6–8.5 us, is allocation proper.
+  - Charging each sample of allocation proper to its leaf, the largest parts
+    are:
+    - finding a slot (`Pages::alloc_slot`, 4.9–5.1%);
+    - `gc::alloc`'s own code (3.8–4.2%);
+    - zeroing (`memset`, 2.1–2.6%);
+    - a second `LocalKey::with` instance (2.1–2.2%).
+- **Where a collection lands moves from run to run.** The collector's
+  total stays at 8.1–8.6%, but which allocation triggers it varies.
+  - In runs 1 and 2, `Bytes.concat` inside `Response.to_bytes` carried
+    8.8–9.3% of the thread. 95–97% of `Bytes.concat`'s samples sat under
+    `gc::alloc`, mostly inside the collector.
+  - In run 3 it carried 0.62%. There, `users_json`'s interpolation carried
+    the collection instead: `nova_rt_str_concat_n` was 15.36% against
+    7.04–7.12%.
+  - So the shares of `to_bytes`, `users_json` and `handle` swing with it,
+    and the stable comparisons are the ones that exclude it.
+- **The stable items, per request:**
+  - socket system calls, self: 55.8–56.6% of the thread, 29.9–32.1 us; the
+    send path alone is 44.4–45.3%, 23.4–25.8 us;
+  - `user_json`: 16.6–16.7%, 8.8–9.5 us, of which `quote` is 9.2–9.6%,
+    5.1–5.4 us, across its twenty calls;
+  - `read_request`, its receive calls included: 17.3–17.8%, 9.4–10.1 us;
+  - the system heap: 4.8–5.2%, 2.6–3.0 us.
+
+### How it was measured
+
+- **The binary.** The json-api, built by the release `nova` from
+  `369a82c` with "(sampled-profile)"'s scratch sampler patch applied. It is
+  739,328 bytes, SHA-256 `cfa80f804df92ec9…`, linked with a symbol map.
+  - That the patch was unchanged is from this session. The patch was
+    reverted afterwards.
+  - A json-api built by the rebuilt release `nova` then came out at 702,464
+    bytes, the plain build's size, with no map. Unlike the profiling
+    binary, it does not contain the string `NOVA_PROF_SAMPLE`.
+- **The load:** ten users seeded, 200 connections for 15 s, no warmup, one
+  fresh process per run, three runs. Every run reported `errors=0` and
+  served the 604-byte body. With the sampler they ran at 17554.4–18924.7
+  req/sec.
+  - That is 1.35–1.50 times the unsampled 12603.0–13035.8 that
+    "(byte-search)"'s `after` server reached the evening before. Its code
+    is functionally the same, measured on the same 15 s method.
+  - The host's speed swung between those runs, as "(gate-remeasure-3)"
+    found, so the sampler's own cost is not measured here.
+- **The sampler** took 9741–9792 samples per 15 s load window.
+- **The analysis:**
+  - "(reprofile)"'s `analyze.py`, unchanged, over the 15 s from each run's
+    load start. "(reprofile)" counted the 14 s starting half a second in.
+  - Three new scratch scripts. One counts inclusive shares by frame
+    name. One charges each `gc::alloc` sample to its leaf's full symbol,
+    which tells the collector's instance from the others. One breaks down
+    what sits beneath a named frame.
+  - Per-request figures are a share times that run's `1e6 / rps`.
+- **Ordering.** The predictions' modification time is 07:23:21, the
+  profiling binary's 07:23:49, and the end of the first run's samples
+  07:24:14.
+
+These predictions were written before the profiling build existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| send path 30–42% | 44.4–45.3% | wrong: above |
+| receive path 6–11% | 11.0–12.2% | wrong: above; run 1 at the edge, 11.01 |
+| `users_json` 15–25% | 19.3–27.9% | two within; the third carried a collection |
+| `quote` 6–12% | 9.2–9.6% | within |
+| `gc::alloc`, collection included, 15–25% | 22.7–23.6% | within |
+| `read_request` 10–15%; `parse_request_head` 2–4% | 17.3–17.8%; 2.3–3.0% | wrong: above; within |
+| `Response.to_bytes` 2–5% | 4.3–12.7% | one within; two carried a collection |
+| `json_response` 2–5% | 1.1–1.4% | wrong: below |
+| system heap 3–8% | 4.8–5.2% | within |
+| throughput with the sampler 10,000–20,000 | 17554.4–18924.7 | within |
+| allocation plus collection is the largest Nova-side item, larger than `users_json` | `gc::alloc` 22.7–23.6% against `users_json` 19.3–27.9% | right in two runs; in the third `users_json` carried a collection |
+
+### The runs, inclusive % of the server thread
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| req/sec with the sampler | 17702.9 | 17554.4 | 18924.7 |
+| us per request | 56.5 | 57.0 | 52.8 |
+| socket system calls, self | 55.82 | 56.38 | 56.64 |
+| send path (`ws2_32!send`) | 44.69 | 45.27 | 44.36 |
+| receive path (`ws2_32!recv`) | 11.01 | 11.20 | 12.24 |
+| `gc::alloc`, collection included | 23.60 | 22.70 | 22.73 |
+| — the collector's instance | 8.63 | 8.14 | 8.32 |
+| `handle` | 20.57 | 20.72 | 29.31 |
+| `users_json` | 19.31 | 19.38 | 27.86 |
+| `user_json` | 16.61 | 16.73 | 16.69 |
+| — `quote` | 9.62 | 9.22 | 9.58 |
+| — — `String.chars` | 1.92 | 1.93 | 1.95 |
+| — — `needs_escape` | 1.70 | 1.56 | 1.74 |
+| `nova_rt_str_concat_n` | 7.04 | 7.12 | 15.36 |
+| `String.join` | 0.70 | 0.82 | 0.82 |
+| `Response.to_bytes` | 12.70 | 12.10 | 4.25 |
+| — `Bytes.concat` | 9.29 | 8.91 | 0.62 |
+| `json_response` | 1.14 | 1.18 | 1.37 |
+| `read_request` | 17.35 | 17.79 | 17.77 |
+| — `parse_request_head` | 3.00 | 2.95 | 2.33 |
+| `poll::wait` | 1.77 | 1.51 | 1.53 |
+| system heap | 4.84 | 5.24 | 4.85 |
+
+### What this does not settle
+
+- **What allocation proper costs per object.** The object count per
+  request was last measured in "(nary-interpolation)", at 515.9–516.0.
+  "(quote-fast-path)", "(fast-join)" and "(byte-search)" have each changed
+  it since, so a per-object figure is not derived here.
+- **Whether the unsampled build splits the same way.** These are a
+  sampled build's shares.
+- **One host, Windows, three runs.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
