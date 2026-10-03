@@ -148,6 +148,15 @@ pinned and 0.822 to 1.279 unpinned, both straddling 1.0, so the gate is
 still not met under any reading that counts it. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".]
 
+[Amended 2026-10-03 (gate-remeasure-5): the first run judged under
+`docs/adr/0021-gate-ratio-paired-rounds.md`, on `main` at `1972b37`. All
+24 Nova readings clear 10k+ at ten users: pinned 13086.8 to 25031.1
+req/sec, unpinned 13463.0 to 24419.0. The ratio against Bun is
+inconclusive: Nova cleared the 1.0547 byte margin in 8 of 12 pinned
+rounds, where 10 are needed, though it was faster in plain req/sec in all
+12. So the gate is still not met under any reading that counts it. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".]
+
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a
 parsed request head crosses the Rust/Nova boundary, and whether the

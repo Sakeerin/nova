@@ -171,3 +171,8 @@ that; a range comparison throws it away.
 - **A run costs 48 readings.** On this host that is about 31 minutes of
   readings, and about 32 with the equivalence check and the self-test.
 - **The first run judged this way** is the next gate remeasurement.
+  [Amended 2026-10-03 (gate-remeasure-5): that run, on `1972b37`, was
+  inconclusive. Nova cleared the 1.0547 margin in 8 of 12 pinned rounds,
+  though it was faster in plain req/sec in all 12, so the margin decided
+  the verdict. See `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gate-remeasure-5)".]
