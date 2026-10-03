@@ -421,6 +421,20 @@ the equivalence check re-run first and all nine exchanges matching:
 **The gate is still NOT met**, because the ratio is inconclusive. Full
 account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".
 
+**Amended 2026-10-03 (gate-remeasure-6):** the second run judged under
+`docs/adr/0021-gate-ratio-paired-rounds.md`, on `main` at `b24379e`, with
+the equivalence check re-run first and all nine exchanges matching:
+- **this section's ratio: inconclusive.** The margin was again about
+  1.0547. Nova cleared it in 7 of the 12 pinned rounds; 10 were needed. Its
+  pinned round ratios scattered from 0.907 to 1.517, and it was faster in
+  plain req/sec in 8 of 12. Unpinned, which does not decide, it cleared
+  the margin in all 12.
+- **`00-MASTER-SPEC.md` §3's absolute criterion:** met in all 24 Nova
+  readings, pinned 14455.1–22200.2 req/sec and unpinned 14589.1–22089.4.
+
+**The gate is still NOT met**, because the ratio is inconclusive. Full
+account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-6)".
+
 `src/main.nova`:
 ```nova
 import std/http

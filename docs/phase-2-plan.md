@@ -281,6 +281,19 @@ the first run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`:
 The gate is still not met under any reading that counts the Bun ratio. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".
 
+**Amended 2026-10-03 (gate-remeasure-6):** remeasured on `main` at `b24379e`,
+the second run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`:
+- **Pooled:** 14455.1–22200.2 req/sec at ten users, all 24 Nova readings
+  above 10k+.
+- **Split by pinning:** pinned 14455.1–22200.2, unpinned 14589.1–22089.4,
+  both above.
+- **The ratio against Bun: inconclusive.** Nova cleared the 1.0547 byte
+  margin in 7 of 12 pinned rounds, where 10 are needed. Unpinned, which
+  does not decide, it cleared it in all 12.
+
+The gate is still not met under any reading that counts the Bun ratio. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-6)".
+
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
 - Fold in the drift cleanup: chumsky 0.10, `salsa` scaffolding, `fuzz/` targets

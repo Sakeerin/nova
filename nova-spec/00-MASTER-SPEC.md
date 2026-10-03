@@ -500,6 +500,18 @@ The gate's two statements still disagree. Under any reading that counts §5,
 the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-03 (gate-remeasure-5)".
 
+**Amended 2026-10-03 (gate-remeasure-6):** remeasured on `main` at
+`b24379e`, the second run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`.
+- **This section's absolute criterion is met in all 24 Nova readings:**
+  pinned at 14455.1–22200.2 req/sec, unpinned at 14589.1–22089.4.
+- **`60-EXAMPLES.md` §5's ratio against Bun is inconclusive:** Nova
+  cleared the 1.0547 margin in 7 of 12 pinned rounds, where 10 are needed.
+  Unpinned, which does not decide, it cleared it in all 12.
+
+The gate's two statements still disagree. Under any reading that counts §5,
+the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-03 (gate-remeasure-6)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

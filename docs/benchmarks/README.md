@@ -619,6 +619,15 @@ widened them:
 
 See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".
 
+**Amended 2026-10-03 (gate-remeasure-6):** on `main` at `b24379e`, the
+two conditions disagreed. Pinned, which decides under `docs/adr/0021-gate-ratio-paired-rounds.md`,
+Nova cleared the 1.0547 margin in 7 of 12 rounds, an inconclusive verdict;
+its pinned round ratios scattered from 0.907 to 1.517. Unpinned it cleared
+it in 12 of 12, at 1.067–1.468. In "(gate-remeasure-5)" the pinned ratios
+were the tighter of the two, so pinning to core 0, which the load generator
+may share, does not by itself account for it; neither run tests that. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-6)".
+
 ### Judging the ratio: twelve paired rounds
 
 **Added 2026-10-03.** `docs/adr/0021-gate-ratio-paired-rounds.md` decides how a
