@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Outcome (2026-10-03): only Task 1 landed.** Tasks 2 and 3 were implemented and measured, and
+> showed no measurable cut in allocation's cost, so they were set aside. See
+> `examples/05-json-api/BENCHMARK.md`, "(alloc-fast-path)".
+
 **Goal:** Cut `gc::alloc`'s per-allocation overhead without changing what it promises.
 
 **Architecture:** `alloc` takes one `HEAP` borrow per allocation. It tests the collection threshold and the stress flag inside that borrow, and calls `collect()` outside it only when over. Small requests skip the `Layout` check. `Pages::take` zeroes the eight smallest classes through constant-size `write_bytes` calls.

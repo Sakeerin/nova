@@ -6,6 +6,13 @@
 suite was 1173 passed / 0 failed / 8 ignored, on the PR #77 branch. PR #78
 after it changed documentation only.
 
+**Outcome (2026-10-03): not landed.** The design was implemented and
+measured. A same-session, alternated profile established no cut in
+allocation's cost, so the code was set aside. Only the characterization
+tests landed: section 6's three, and the plan's small/large boundary
+test. The account is in
+`examples/05-json-api/BENCHMARK.md`, "(alloc-fast-path)".
+
 ---
 
 ## 1. What this is, in one paragraph

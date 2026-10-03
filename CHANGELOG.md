@@ -357,6 +357,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (reprofile-2)".
+- **A trimmed allocation path, measured and not landed.** One `HEAP`
+  borrow per allocation and constant-size zeroing for the smallest slots
+  were implemented and profiled alternately against the base.
+  - Allocation proper ran at 13.9-15.1% of the server thread on the base
+    and 13.7-14.0% on the branch, so no reduction is established.
+  - The zeroing moved into `alloc_slot` rather than vanishing.
+  - Only the four characterization tests written first landed: zeroing in
+    every slot class, the crossing allocation, and the small/large
+    boundary.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (alloc-fast-path)".
 
 ### Changed
 - **`std/strings`' `String.index_of` and `String.contains` search bytes.**
