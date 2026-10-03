@@ -3914,6 +3914,7 @@ impl<'a> Checker<'a> {
             | Builtin::StrFromChars
             | Builtin::StrJoin
             | Builtin::StrIndexOf
+            | Builtin::JsonQuote
             | Builtin::StrToUpper
             | Builtin::StrToLower
             | Builtin::FloatFixed
@@ -7174,6 +7175,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
             Ty::String,
         ),
         Builtin::StrIndexOf => (vec![Ty::String, Ty::String], Ty::Int),
+        Builtin::JsonQuote => (vec![Ty::String], Ty::String),
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::FloatFixed => (vec![Ty::Float, Ty::Int], Ty::String),
         Builtin::StrToFloat => (vec![Ty::String], Ty::Float),
@@ -15136,6 +15138,10 @@ mod tests {
                 Builtin::StrIndexOf => (
                     (vec![Ty::String, Ty::String], Ty::Int),
                     "`str_index_of(self, needle)` in `String::index_of`",
+                ),
+                Builtin::JsonQuote => (
+                    (vec![Ty::String], Ty::String),
+                    "`json_quote(s)` in `std/json`'s `quote`",
                 ),
                 Builtin::StrToUpper => (
                     (vec![Ty::String], Ty::String),

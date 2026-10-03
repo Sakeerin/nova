@@ -206,6 +206,9 @@ the stronger. The second is a cost, not a wall:
    and no cast, one arm per digit value. So this ground raises the cost of
    the alternative; it does not remove it, and the decision rests on
    ground 1.
+   [Amended 2026-10-03: `hex_digit` is gone, since `quote` became the
+   runtime builtin `json_quote`. The argument stands: the shape it showed is
+   an if/else chain any Nova code can write.]
 
 Counts: `Builtin::STD_ONLY` **65 → 66**, `STD_MODULES` **12 → 13**
 (`$std.json`), `RESERVED_TYPE_NAMES` unchanged at **7** — `JsonValue`,

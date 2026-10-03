@@ -1,8 +1,8 @@
 // `quote` covers RFC 8259's mandatory escapes: `"` and `\` explicitly and
 // every character below `0x20`. FIVE of those have a named short escape, not
-// two: `escape_control` names `\n`, `\r`, `\t`, `\b` and `\f`, and
-// `std/json/lib.nova` says so at that function. This fixture exercises two of
-// them, newline and tab.
+// two: `quote` names `\n`, `\r`, `\t`, `\b` and `\f`, and `std/json/lib.nova`
+// says so at that function, a runtime builtin since 2026-10-03. This fixture
+// exercises two of them, newline and tab.
 //
 // The other three are covered in the same ENCODE direction by
 // `json_parse_strings.nova`, whose `report` prints `stringify(parse(src))`:
