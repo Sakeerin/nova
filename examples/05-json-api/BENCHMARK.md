@@ -5328,6 +5328,130 @@ than "(gate-remeasure-5)" led the predictions to expect.
 - **Any host but this one.** Every figure here is from this development
   host, Windows, with the load generator on the same machine.
 
+## AMENDMENT 2026-10-03 (aa-noise): how far the pinned setup moves a ratio on its own
+
+"(gate-remeasure-6)" left the deciding pinned condition's scatter
+unexplained. Its Nova/Bun pinned round ratios ran 0.907–1.517. ADR 0021
+lists pinning to core 0, which the load generator may share, as an
+unmeasured confound. This diagnostic measures two things:
+- how much two pinned readings of the *same* server, back to back, differ;
+- whether keeping the generator off core 0 changes that.
+
+It is not a gate run and judges nothing.
+
+**Results:**
+- **In this run, two pinned readings of the same server scattered about as
+  much as Nova against Bun did in "(gate-remeasure-6)".**
+  - With the generator as the gate runs it, the 12 A/A pairs' ratios have
+    a standard deviation of the log ratio of 0.139. "(gate-remeasure-6)"'s
+    Nova/Bun pinned pairs had 0.146.
+  - One pair carries most of it: without Bun's round 4, at 1.527, the
+    figure is 0.074.
+- **9 of the 24 A/A pairs moved by more than ADR 0021's margin,** with the
+  second reading above 1.0547 times the first or below its reciprocal.
+  That is 5 of 12 with the default generator and 4 of 12 with core 0
+  excluded.
+- **The readings fall into separate speed levels, and every large move is
+  between them.**
+  - Bun's readings form two clusters, 12453.3–13546.3 and 17829.0–22803.5,
+    with nothing between.
+  - Nova's form a slow cluster, 14121.5–14895.2, and a fast one,
+    20557.2–23407.8, with four readings between at 15258.7–16700.1.
+  - Each of the five pairs whose log ratio is above 0.1 in size has its two
+    readings in different places: Bun's two cross between its clusters, and
+    each of Nova's three has one reading in the band between.
+  - Rounds 1, 4, 5 and 6 each hold readings at both speeds, so the level
+    changed within rounds as well as between them.
+- **Keeping the generator off core 0 did not reduce the standard deviation
+  of the log ratio, and did not remove the large jumps.**
+  - The figure is 0.164 with core 0 excluded, against 0.139 without.
+  - The median absolute log ratio was lower with core 0 excluded, 0.013
+    against 0.040 pooled, so the small pair-to-pair differences shrank.
+- **Throughput was lower with the generator off core 0, and that is
+  tangled with the speed levels.**
+  - Median against median, the excluded variant ran at 0.908 of the
+    default for Nova and 0.701 for Bun.
+  - Bun's excluded readings sat at the slow level in 11 of 12, against 5
+    of 12 for its default ones. In rounds 2 and 3, where every reading sat
+    at the slow level, Bun's excluded/default ratio was 0.999 and 1.005.
+  - Variant and level are not separated here.
+
+**What this means for ADR 0021's criterion, as description:**
+- **Pairs of one unchanged server moved by more than the margin in 9 of
+  24.** So for 10 of 12 rounds to land on one side, a true ratio must sit
+  well clear of the margin.
+- **Nothing here changes any recorded verdict.**
+
+### How it was measured
+
+- **The design:** six rounds, each of four A/A pairs.
+  - Every reading was a fresh server pinned to core 0, with its mask read
+    back as 1. Ten users were seeded, then 200 connections ran for 30 s
+    after a 5 s warmup.
+  - In each round: Nova/Nova and Bun/Bun with the generator as the gate
+    runs it, plus a read of its affinity mask; and Nova/Nova and Bun/Bun
+    with the generator's affinity set to 4094, all cores but core 0.
+  - Odd rounds ran the default variant first and even rounds the excluded
+    one. An A/A ratio is the second reading over the first.
+- **The generator's affinity** read back as 4095, all twelve cores, in
+  every default reading, and as 4094 in every excluded one.
+  - It was set by the Windows process ID taken right after the generator
+    was launched. The record does not show that this ID was the
+    generator's own process rather than a launcher's.
+  - The setting was made during the generator's 5 s warmup. That it
+    landed before the measured window is inferred from PowerShell's
+    start-up time; the time it landed was not logged.
+- **Identity.**
+  - Nova is "(gate-remeasure-6)"'s `json-api.exe`, 701,440 bytes, SHA-256
+    `d02fcc62b20c44ea…`, built from `b24379e`. `main` at `62c3149` has the
+    same code.
+  - Bun is `docs/benchmarks/bun-server.js`, SHA-256 `f95426e14e22034c…`.
+  - The generator is `target/release/nova-bench-http.exe`, SHA-256
+    `d17062335e988c18…`, unchanged since 2026-09-29.
+  - Every reading was `errors=0` and served the 604-byte body, SHA-256
+    `3ff5004bf26139cc…`. The order in the log matches the design, reading
+    for reading.
+- **A smoke reading,** one excluded-variant Nova cell, ran before the six
+  rounds to check the affinity mechanism. It is not in the data; its log
+  is kept apart.
+- **Ordering.** The predictions' modification time is 20:59:41, the smoke
+  reading's 21:00:43, and the run's log has it starting at 21:00:48 and
+  ending at 21:31:52.
+
+These predictions were written before any A/A reading:
+
+| prediction | measured | verdict |
+|---|---|---|
+| the generator's default affinity reads back as 4095 | 4095 in every default reading | right |
+| default generator: A/A standard deviation of the log ratio 0.04–0.15 | 0.139 pooled; Nova 0.100, Bun 0.167 | within, pooled; Bun alone above |
+| excluding core 0 cuts that by at least 30% | 0.164 against 0.139, higher | wrong |
+| excluding core 0 raises pinned throughput 0–15%, median against median | Nova 0.908 and Bun 0.701 of default | wrong: lower |
+| if the cut fails, core 0 is not the main source, and host-level drift is the remaining candidate | the cut failed | the condition held; the conclusion was not tested, and the median absolute log ratio did fall with core 0 excluded |
+
+### The A/A ratios, second reading over first
+
+| round | first variant | Nova default | Bun default | Nova core 0 excluded | Bun core 0 excluded |
+|---|---|---|---|---|---|
+| 1 | default | 0.968 | 1.049 | 0.751 | 1.015 |
+| 2 | excluded | 0.856 | 0.993 | 0.991 | 0.997 |
+| 3 | default | 0.998 | 1.001 | 1.004 | 0.993 |
+| 4 | excluded | 1.059 | 1.527 | 0.998 | 1.012 |
+| 5 | default | 0.990 | 1.056 | 1.023 | 0.603 |
+| 6 | excluded | 1.159 | 0.999 | 1.055 | 0.942 |
+
+### What this does not settle
+
+- **What switches the host between speed levels.**
+  - The power plan and background load were not recorded.
+  - Host-level drift was named in the predictions but not tested.
+- **Whether the generator's placement moves which level a reading lands
+  on.** Bun's excluded readings sat at the slow level more often, but
+  variant and level are not separated.
+- **Whether shorter or more tightly interleaved readings would scatter
+  less.**
+- **Whether unpinned pairs scatter less.** No unpinned A/A pairs were run.
+- **One host, Windows, six rounds.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
