@@ -449,6 +449,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (gate-remeasure-6)".
+- **How far the pinned setup moves a ratio on its own, measured.** Two
+  pinned readings of the same server, back to back, over six rounds.
+  - In this run their ratios scattered about as much as Nova against Bun
+    did in (gate-remeasure-6): a standard deviation of the log ratio of
+    0.139, against 0.146. One pair carries most of it.
+  - 9 of the 24 A/A pairs moved by more than ADR 0021's 1.0547 margin.
+    Most pairs agree within a few percent; the largest ratios were 0.751,
+    1.527 and 0.603.
+  - The readings fall into separate speed levels, and every large move is
+    between them.
+  - Keeping the load generator off core 0 did not reduce the standard
+    deviation or remove the large jumps, and throughput was lower with it.
+  - It judges nothing.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (aa-noise)".
 
 ### Changed
 - **Five string builtins write their result straight into GC memory.**
