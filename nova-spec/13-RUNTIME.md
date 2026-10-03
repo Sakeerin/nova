@@ -743,3 +743,17 @@ with the same four-cell method, six rounds per cell:
 
 The gate is still not met under any reading that counts the Bun ratio. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".
+
+**Amended 2026-10-03 (gate-remeasure-5):** remeasured on `main` at `1972b37`,
+the first run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`:
+- **Pooled:** 13086.8–25031.1 req/sec at ten users, all 24 Nova readings
+  above 10k+. The upper end is from rounds 9 and 10, when every reading,
+  Bun's included, ran faster.
+- **Split by pinning:** pinned 13086.8–25031.1, unpinned 13463.0–24419.0,
+  both above.
+- **The ratio against Bun: inconclusive.** Nova cleared the 1.0547 byte
+  margin in 8 of 12 pinned rounds, where 10 are needed, though it was
+  faster in plain req/sec in all 12.
+
+The gate is still not met under any reading that counts the Bun ratio. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".

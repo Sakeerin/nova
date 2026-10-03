@@ -395,6 +395,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+- **The Phase 2 gate remeasured on `1972b37`, the first run judged under
+  ADR 0021.** Twelve paired rounds, the order alternating.
+  - Nova's response was 676 bytes and Bun's 713, so the margin is about
+    1.0547.
+  - The ratio is inconclusive. Nova cleared the margin in 8 of 12 pinned
+    rounds, where 10 are needed, though it was faster in plain req/sec in
+    all 12, at 1.025-1.161 round by round.
+  - The absolute criterion is met in all 24 Nova readings: pinned
+    13086.8-25031.1 req/sec, unpinned 13463.0-24419.0. The upper ends are
+    from rounds 9 and 10, when every reading, Bun's included, ran faster.
+  - The gate is still not met.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gate-remeasure-5)".
+
 ### Changed
 - **The Phase 2 gate's ratio against Bun is judged by twelve paired
   rounds.** `docs/adr/0021-gate-ratio-paired-rounds.md` records the

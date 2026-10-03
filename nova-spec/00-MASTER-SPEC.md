@@ -485,6 +485,21 @@ is now judged by twelve paired pinned rounds, with a margin for Bun's
 section's absolute criterion is unchanged. Which of the two statements
 governs is still not settled.
 
+**Amended 2026-10-03 (gate-remeasure-5):** remeasured on `main` at
+`1972b37`, the first run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`.
+- **This section's absolute criterion is met in all 24 Nova readings:**
+  pinned at 13086.8–25031.1 req/sec, unpinned at 13463.0–24419.0. The
+  upper ends are from rounds 9 and 10, when every reading, Bun's included,
+  ran faster, for reasons not measured. So these figures do not compare
+  with earlier runs'.
+- **`60-EXAMPLES.md` §5's ratio against Bun is inconclusive:** Nova
+  cleared the 1.0547 margin in 8 of 12 pinned rounds, where 10 are needed,
+  though it was faster in plain req/sec in all 12.
+
+The gate's two statements still disagree. Under any reading that counts §5,
+the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-03 (gate-remeasure-5)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

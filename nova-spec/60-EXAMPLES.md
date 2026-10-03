@@ -405,6 +405,22 @@ judged is now decided in `docs/adr/0021-gate-ratio-paired-rounds.md`.
 The range-extremes reading every ratio measurement above used is no longer
 the criterion. Those measurements are not re-judged.
 
+**Amended 2026-10-03 (gate-remeasure-5):** the first run judged under
+`docs/adr/0021-gate-ratio-paired-rounds.md`, on `main` at `1972b37`, with
+the equivalence check re-run first and all nine exchanges matching:
+- **this section's ratio: inconclusive.** Nova's response was 676 bytes
+  and Bun's 713, so the margin is about 1.0547. Nova cleared it in 8 of the
+  12 pinned rounds; 10 were needed. It was faster in plain req/sec in all
+  12, at 1.025–1.161 round by round. Unpinned, which does not decide, it
+  cleared the margin in 9 of 12.
+- **`00-MASTER-SPEC.md` §3's absolute criterion:** met in all 24 Nova
+  readings, pinned 13086.8–25031.1 req/sec and unpinned 13463.0–24419.0.
+  The upper ends are from rounds 9 and 10, when every reading, Bun's
+  included, ran faster.
+
+**The gate is still NOT met**, because the ratio is inconclusive. Full
+account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".
+
 `src/main.nova`:
 ```nova
 import std/http

@@ -608,6 +608,17 @@ the first three rounds alone the pinned ratio was 1.010–1.269, wholly above
 is not established. See `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+**Amended 2026-10-03 (gate-remeasure-5):** on `main` at `1972b37`, the
+first run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`, pinned
+decides and its verdict is inconclusive: Nova cleared the 1.0547 margin in
+8 of 12 pinned rounds. Unpinned, it cleared it in 9 of 12. The whole-run
+ranges overlap on both sides, and the host's speed-up in rounds 8–10
+widened them:
+- Nova: 13086.8–25031.1 pinned against 13463.0–24419.0 unpinned;
+- Bun: 11434.4–22949.7 pinned, which contains 12482.5–22670.2 unpinned.
+
+See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".
+
 ### Judging the ratio: twelve paired rounds
 
 **Added 2026-10-03.** `docs/adr/0021-gate-ratio-paired-rounds.md` decides how a
