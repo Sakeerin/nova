@@ -4827,6 +4827,166 @@ when the host sped up.
 - **Any host but this one.** Every figure here is from this development
   host, Windows, with the load generator on the same machine.
 
+## AMENDMENT 2026-10-03 (reprofile-3): the json-api's server thread after `json_quote`
+
+"(reprofile-2)" sampled the json-api on `369a82c`. Since then
+"(json-quote)" has made `std/json`'s `quote` a runtime builtin, and
+"(gate-remeasure-5)" found the ratio against Bun inconclusive on a 1.0547
+margin. This run samples the json-api again on `ef43fdf`, with the same
+sampler and "(reprofile-2)"'s scripts, to pick the next lever.
+
+**Results:**
+- **`quote` fell to 4.1–4.4% of the server thread, 2.0–2.1 us per
+  request,** from 9.2–9.6%. Nearly all of it is now `nova_rt_json_quote`.
+- **Inside `nova_rt_json_quote`, its own code is the smaller part.**
+  Splitting its samples:
+  - its own code, the escaping loop plus `gc_str`'s inlined copy into GC
+    memory, is the leaf in 23.4–24.8%;
+  - the system heap, `RtlAllocateHeap` and `RtlFreeHeap`, is the leaf in
+    32.7–35.9%. That is the Rust `String` it builds and then copies into
+    the GC heap;
+  - 35–39% sit under `gc::alloc`, for the GC string it returns.
+- **The system heap is 4.7–4.9% of the thread, 2.3–2.4 us per request,
+  and runtime builtins that build a Rust buffer first account for most of
+  it.** Charging each heap sample to its nearest runtime caller:
+  - `nova_rt_json_quote` 1.33–1.49%;
+  - `nova_rt_str_concat_n` 1.14–1.23%;
+  - `nova_rt_int_to_str` 0.87–1.01%;
+  - `net::try_read` 0.35–0.52%;
+  - `nova_rt_str_join` 0.20–0.33%;
+  - `nova_rt_bytes_concat` 0.15–0.25%;
+  - `str::to_lowercase` 0.07–0.17%.
+- **Allocation, collection included, outweighs every function named
+  here except those that call into the rest.**
+  - `gc::alloc` is 18.2–18.6% of the thread, 8.7–9.0 us per request.
+  - That is more than `std/json`'s `stringify` at 4.3–4.6%, `std/http`'s
+    `read_request` at 13.9–15.5% and `Response.to_bytes` at 4.9–5.6%, and
+    the example's own `users_json` at 14.2–17.3%.
+  - Frames that call into the rest are larger inclusive. The example's
+    `handle` is 18.5–21.2%, and 14.9–15.7% without the collector's
+    samples.
+  - The collector's instance, `LocalKey::with` `ce5e268d0d359845` as in
+    "(reprofile-2)", is 6.8–7.3%, or 3.3–3.5 us. All of it sits under
+    `gc::alloc`, as in "(reprofile-2)".
+  - The rest of `gc::alloc`, allocation proper, is 10.9–11.3%, 5.2–5.4 us.
+    Charged by leaf, its parts are:
+    - finding a slot, 3.9–4.2%;
+    - `gc::alloc`'s own code, 2.7–3.0%;
+    - zeroing, 1.6–2.0%;
+    - the second `LocalKey::with` instance, `d03a43526a1fdc50`, 1.4–1.6%;
+    - `FnOnce::call_once`, 0.7–1.0%.
+- **The stable items, per request:**
+  - socket system calls, self: 65.4–66.5% of the thread, 31.5–32.0 us. The
+    send path alone is 55.6–56.0%, 26.7–27.0 us;
+  - `read_request`, its receive calls included: 13.9–15.5%, 6.7–7.4 us;
+  - `user_json`, without the collector's samples: 11.2–11.5%, 5.4–5.5 us.
+    Run 1's 13.54% carried 2.32 points of a collection;
+  - `Response.to_bytes`, without the collector's samples: 3.7–3.8%,
+    1.8 us. It carried 1.12–1.80 points of a collection in every run.
+- **Where a collection lands still moves from run to run.** The
+  collector's samples, in points of the thread, under each frame:
+
+  | frame | run 1 | runs 2 and 3 |
+  |---|---|---|
+  | `json_response` | 0.00 | 5.01, 5.51 |
+  | `Bytes.concat` | 0.00 | 1.79, 1.76 |
+  | `nova_rt_str_concat_n` | 1.12 | 0.02, 0.00 |
+  | `user_json` | 2.32 | 0.01, 0.00 |
+
+  So `json_response` was 1.16% in run 1 and 6.23–6.91% in runs 2 and 3.
+
+**What this suggests, not measured:** a builtin that wrote its result
+straight into the GC string, instead of building a Rust buffer and copying
+it, would skip one system-heap allocation, one free and one copy per call.
+- The three largest such callers hold 3.5–3.6% of the thread between them,
+  about 1.7 us per request.
+- For scale, the shortest of "(gate-remeasure-5)"'s pinned rounds, 1.025,
+  needed about 2.9% more to reach the 1.0547 margin. These are shares of a
+  sampled build in another run, so they do not say whether removing the
+  buffers would close that.
+
+### How it was measured
+
+- **The binary.** The json-api, built by the release `nova` from
+  `ef43fdf` with "(sampled-profile)"'s scratch sampler patch applied. It is
+  738,816 bytes, SHA-256 `b8b7ac238b1b04c3…`, linked with a symbol map.
+  - The patch file is the one "(reprofile-2)" used; that is from this
+    session. It was reverted afterwards.
+  - A json-api built by the rebuilt release `nova` then came out at 702,464
+    bytes, the plain build's size, with no map. Unlike the profiling
+    binary, it does not contain the string `NOVA_PROF_SAMPLE`.
+- **The load:** ten users seeded, 200 connections for 15 s, no warmup, one
+  fresh process per run, three runs. Every run reported `errors=0` and
+  served the 604-byte body. With the sampler they ran at 20662.7–20800.5
+  req/sec. The sampler's own cost is not measured here.
+- **The sampler** took 9962–9980 samples per 15 s load window.
+- **The analysis:**
+  - "(reprofile-2)"'s scripts, over the 15 s from each run's load start.
+    The inclusive-share script's frame names were updated to this build's
+    symbols, such as `quote.288` and `Response.to_bytes.354`.
+  - The collector's instance was identified again, by counting, for each
+    `LocalKey::with` instance, the samples whose leaf is a collection
+    phase. `ce5e268d0d359845` had 15–20 a run, out of 681–727 samples. One
+    other, `b136050d1cde226a`, had 3–8, but it appears in only 3–8 samples
+    a run.
+  - The heap callers came from "(reprofile)"'s caller script, unchanged.
+  - Per-request figures are a share times that run's `1e6 / rps`.
+- **Ordering.** The predictions' modification time is 17:53:33, the
+  profiling binary's 17:54:05, and the end of the first run's samples
+  17:54:28.
+
+These predictions were written before the profiling build existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| socket system calls, self, 57–64% | 65.4–66.5% | wrong: above |
+| send path 45–53% | 55.6–56.0% | wrong: above |
+| `read_request`, receives included, 17–22% | 13.9–15.5% | wrong: below |
+| `user_json` 9–14% | 11.3–13.5% | within |
+| `quote`, `json_quote` included, 2–5% | 4.1–4.4% | within |
+| `gc::alloc`, collection included, 17–23% | 18.2–18.6% | within |
+| system heap 4–7% | 4.7–4.9% | within |
+| throughput with the sampler 12,000–25,000 | 20662.7–20800.5 | within |
+| `quote` stops being a lever | 2.0–2.1 us, a third of it the system heap | wrong, by judgment: its buffer is still a candidate |
+| the send path stays the largest item | 55.6–56.0% | right |
+| on the Nova side, allocation (`gc::alloc` and the second `LocalKey` instance) is the largest remaining item, ahead of any single `std/json` or `std/http` function | `gc::alloc` 18.2–18.6%, against `stringify` 4.3–4.6%, `read_request` 13.9–15.5% and `Response.to_bytes` 4.9–5.6%; the union with the second instance was not evaluated | partly: ahead of those functions, but `handle`, which calls them, is larger inclusive |
+
+### The runs, inclusive % of the server thread
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| req/sec with the sampler | 20800.5 | 20799.5 | 20662.7 |
+| us per request | 48.1 | 48.1 | 48.4 |
+| socket system calls, self | 66.51 | 65.45 | 65.71 |
+| send path (`ws2_32!send`) | 56.03 | 55.63 | 55.70 |
+| receive path (`ws2_32!recv`) | 10.12 | 9.70 | 9.65 |
+| `gc::alloc`, collection included | 18.16 | 18.16 | 18.55 |
+| — the collector's instance | 7.27 | 6.84 | 7.29 |
+| `handle` | 18.51 | 20.67 | 21.20 |
+| `users_json` | 17.29 | 14.31 | 14.18 |
+| `user_json` | 13.54 | 11.53 | 11.28 |
+| — `quote` | 4.09 | 4.39 | 4.19 |
+| — — `nova_rt_json_quote` | 4.08 | 4.35 | 4.16 |
+| `nova_rt_str_concat_n` | 4.55 | 3.23 | 3.69 |
+| `String.join` | 1.93 | 0.81 | 0.77 |
+| `Response.to_bytes` | 4.86 | 5.57 | 5.43 |
+| — `Bytes.concat` | 0.62 | 2.39 | 2.53 |
+| `json_response` | 1.16 | 6.23 | 6.91 |
+| `read_request` | 15.46 | 14.00 | 13.94 |
+| — `parse_request_head` | 3.03 | 2.03 | 1.91 |
+| `poll::wait` | 1.76 | 1.76 | 1.96 |
+| system heap | 4.70 | 4.78 | 4.94 |
+
+### What this does not settle
+
+- **What writing straight into the GC string would save.** The 1.7 us
+  above is the heap's share under the three largest callers, from a
+  sampled build. Removing the buffer would also remove a copy, and might
+  move other costs. It is a candidate, not a measured gain.
+- **Whether the unsampled build splits the same way.** These are a
+  sampled build's shares.
+- **One host, Windows, three runs.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
