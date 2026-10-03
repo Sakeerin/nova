@@ -1391,6 +1391,19 @@ with the same four-cell method, three replicates per cell:
 The gate is still not met under any reading that counts the Bun ratio. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-3)".
 
+**Amended 2026-10-03 (gate-remeasure-4):** remeasured on `main` at `7f2b85e`
+with the same four-cell method, six rounds per cell:
+- **Pooled:** 12010.9–15506.7 req/sec at ten users, all twelve Nova
+  readings above 10k+, on a run where every cell, Bun's included, ran
+  slower than in "(gate-remeasure-3)".
+- **Split by pinning:** pinned 12010.9–14557.6, unpinned 13200.4–15506.7,
+  both above.
+- **The ratio against Bun:** 0.708–1.334 pinned and 0.822–1.279 unpinned,
+  both straddling 1.0.
+
+The gate is still not met under any reading that counts the Bun ratio. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".
+
 **This increment changed nothing in `std`, and the example routes around what
 is missing rather than closing it.** `$std.*` entry counts are untouched.
 `Map` still has `keys()` and no `values()`, so `users_json` walks ids ascending

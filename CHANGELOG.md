@@ -380,6 +380,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (json-quote)".
+- **The Phase 2 gate remeasured on `7f2b85e`, after `json_quote`.** This
+  used "(gate-remeasure-3)"'s four-cell method, with six rounds per cell
+  instead of three, because after three the unpinned ranges overlapped.
+  - The absolute criterion is met in all twelve Nova readings: pinned
+    12010.9-14557.6 req/sec, unpinned 13200.4-15506.7.
+  - The ratio against Bun is not established. Pinned it is 0.708-1.334,
+    and unpinned 0.822-1.279; both straddle 1.0. Over the first three
+    rounds alone, pinned was 1.010-1.269, wholly above 1.0.
+  - Every cell, Bun's included, ran slower than in "(gate-remeasure-3)",
+    for reasons not measured.
+  - The gate is still not met.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
 ### Changed
 - **`std/json`'s `quote` escapes in one runtime pass.** A new std-only

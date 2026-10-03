@@ -1048,6 +1048,13 @@ at the method.
   0.886 to 0.993 pinned, short of 1.0, and 0.891 to 1.076 unpinned,
   straddling it, so the gate is still not met under any reading that counts
   it. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-3)".]
+  [Amended 2026-10-03 (gate-remeasure-4): remeasured on `main` at `7f2b85e`
+  with the same four-cell method, six rounds per cell. All twelve Nova
+  readings clear 10k+ at ten users: pinned 12010.9 to 14557.6 req/sec,
+  unpinned 13200.4 to 15506.7. The ratio against Bun is 0.708 to 1.334
+  pinned and 0.822 to 1.279 unpinned, both straddling 1.0, so the gate is
+  still not met under any reading that counts it. See
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both

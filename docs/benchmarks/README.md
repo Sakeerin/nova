@@ -597,6 +597,17 @@ The pinning decision still moves the ratio, now the other way. Pinned it is
 and straddles 1.0. So under the pinned headline above, §5's ratio is not
 met. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-3)".
 
+**Amended 2026-10-03 (gate-remeasure-4):** on `main` at `7f2b85e`, over six
+rounds per cell, the pinned and unpinned ranges overlap on both sides:
+- Nova: 12010.9–14557.6 pinned against 13200.4–15506.7 unpinned;
+- Bun: 10910.6–16971.5 pinned, which contains 12121.8–16064.0 unpinned.
+
+Both ratios straddle 1.0: pinned 0.708–1.334, unpinned 0.822–1.279. Over
+the first three rounds alone the pinned ratio was 1.010–1.269, wholly above
+1.0; rounds 4–6 undid that. So under the pinned headline above, §5's ratio
+is not established. See `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-03 (gate-remeasure-4)".
+
 ### The CPU-usage observation
 
 Process affinity sets the default for every thread, but a thread can
