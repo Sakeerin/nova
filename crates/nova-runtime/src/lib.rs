@@ -1221,6 +1221,10 @@ mod tests {
                 "x\u{1f}y\u{0}z",
                 "\"\\\"",
                 "tab\there",
+                // Multi-byte text right before an escape: a copy measured in
+                // characters instead of bytes would take the wrong run here.
+                "é\"🦀\n",
+                "日本\u{1}語",
             ] {
                 let got = as_str(nova_rt_json_quote(make_str(s)));
                 assert_eq!(got, reference(s), "input {s:?}");
