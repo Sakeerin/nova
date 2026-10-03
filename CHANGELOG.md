@@ -465,6 +465,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (aa-noise)".
+- **An interleaved-window gate method fails its validation.** Two
+  servers alive at once, and four short load windows per round in ABBA
+  order, were to replace ADR 0021's round structure if an A/A run passed
+  marks fixed in advance.
+  - It failed both. The standard deviation of the log A/A ratio was 0.094,
+    against at most 0.07, and 12 of 24 A/A ratios were at or beyond the
+    margin, against at most 2.
+  - Two windows of the same server, about 10 s to 30 s apart, moved by
+    more than the margin in 25 of 48 pairs, so throughput on this host
+    moved within about 10 s.
+  - ADR 0021 stands unchanged.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (aa-interleaved)".
 
 ### Changed
 - **Five string builtins write their result straight into GC memory.**

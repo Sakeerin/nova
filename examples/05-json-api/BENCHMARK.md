@@ -5452,6 +5452,140 @@ These predictions were written before any A/A reading:
 - **Whether unpinned pairs scatter less.** No unpinned A/A pairs were run.
 - **One host, Windows, six rounds.**
 
+## AMENDMENT 2026-10-03 (aa-interleaved): an interleaved-window method fails its validation
+
+"(aa-noise)" found that two pinned readings of the same server, run back to
+back as ADR 0021's rounds run them, moved by more than the 1.0547 margin in
+5 of 12 pairs, or 9 of 24 counting its variant with the generator kept off
+core 0. A method change was proposed to the user and approved, to be
+adopted only if it passed an A/A validation with pass marks fixed in
+advance:
+- **Both servers alive at once.** Each round starts two fresh servers,
+  pins both to core 0, and seeds both.
+- **Short interleaved windows.** The load then goes to one server at a
+  time, in four windows of `--warmup 2 --duration 8`, in ABBA order.
+- **The round's ratio** is one server's mean over its two windows divided
+  by the other's.
+- **The user also ruled** that, if the method passed, one gate run under it
+  could proceed on the current code.
+
+**The method failed both pass marks, so it is not adopted.** ADR 0021
+stands unchanged, and no ADR 0022 was written.
+- **Standard deviation of the log A/A ratio over the 24 rounds:** 0.094,
+  against a pass mark of at most 0.07. "(aa-noise)"'s figure with the
+  generator as the gate runs it was 0.139.
+- **A/A ratios at or beyond the margin either way:** 12 of 24, against a
+  pass mark of at most 2.
+  - "(aa-noise)" had 5 of 12 with the generator as the gate runs it.
+  - That is 9 of 24 with its core-0-excluded variant included, the figure
+    the pass mark quoted.
+- **The median absolute log ratio was 0.054.** Under the current method,
+  with the generator as the gate runs it, "(aa-noise)"'s figure was 0.040:
+  Nova 0.045, Bun 0.028.
+
+**One server's throughput changed within about 10 s, and interleaving at
+this granularity did not cancel it in this run.**
+- **Within a round, two windows of the same server moved by more than the
+  margin in 25 of 48 pairs.**
+  - The inner instance's two windows are adjacent and start about 10 s
+    apart. They moved beyond the margin in 10 of 24.
+  - The outer instance's two windows start about 30 s apart. They moved
+    beyond it in 15 of 24.
+  - Those spacings are inferred from the window settings; start times were
+    not logged.
+  - The standard deviation of the log ratio is 0.152 over all 48: 0.157
+    for the adjacent pairs and 0.150 for the outer ones. The median absolute
+    log ratio is 0.030 adjacent and 0.079 outer.
+- **19 of the 24 rounds** had a fastest and slowest window more than 1.0547
+  apart.
+- **Nova round 5's four windows,** on two servers running the same binary,
+  ran at 14089, 16042, 25310 and 20105 req/sec.
+- **The windows ranged over 11289–26366 req/sec in all.**
+
+**What this means, as description:**
+- Under neither ADR 0021's pairs nor this interleaving did single-round A/A
+  ratios stay within the margin. 5 of 12 default-generator pairs and 12 of
+  24 interleaved rounds moved beyond it.
+- Nothing here changes any recorded verdict.
+
+### How it was measured
+
+- **The design:** 24 pinned A/A rounds, alternating Nova/Nova and Bun/Bun,
+  12 each.
+  - **Each round:**
+    - started two fresh instances of the same server and pinned both to
+      core 0, with both masks read back as 1;
+    - seeded ten users into each;
+    - ran four load windows of 200 connections, `--warmup 2 --duration 8`,
+      one instance at a time.
+  - **Order:** instance 1, 2, 2, 1 in that side's odd rounds, and 2, 1, 1, 2
+    in its even rounds.
+  - **The A/A ratio** is instance 2's mean over its two windows divided by
+    instance 1's.
+  - **The generator** was restarted for every window, four times a round,
+    with no affinity setting. Its affinity was not read back in this run.
+- **Identity.**
+  - Nova is "(gate-remeasure-6)"'s `json-api.exe`, SHA-256
+    `d02fcc62b20c44ea…`. `main` at `a68aa09` has the same code.
+  - Bun is `docs/benchmarks/bun-server.js`.
+  - The generator is `target/release/nova-bench-http.exe`, SHA-256
+    `d17062335e988c18…`.
+- **Every window** was `errors=0` and timed 8014–8036 ms. Every instance
+  served the 604-byte body, SHA-256 `3ff5004bf26139cc…`, and every round
+  ran four windows.
+- **A smoke round,** Nova against Bun, ran before the 24 rounds to check the
+  mechanics. It is not in the data, and its log is kept apart.
+- **Ordering.**
+  - The predictions and pass marks were written at 21:55:01.
+  - The round script was last written at 21:55:21, and the smoke round's
+    first server started at 21:55:25. Its log was written at 21:56:12.
+  - The run started at 21:56:18 and ended at 22:15:05.
+
+These predictions and pass marks were written before any reading under the
+method:
+
+| prediction | measured | verdict |
+|---|---|---|
+| pass mark (a): standard deviation of the log A/A ratio at most 0.07 | 0.094 | failed |
+| pass mark (b): at most 2 of 24 A/A ratios at or beyond the margin | 12 of 24 | failed |
+| standard deviation of the log ratio 0.03–0.09 | 0.094 | wrong: above |
+| rounds beyond the margin 1–4 of 24 | 12 | wrong: above |
+| the pass is uncertain | it failed on both marks | the uncertainty was too optimistic |
+| every reading `errors=0` | every window | right |
+
+### The A/A ratios, instance 2 over instance 1
+
+| round | Nova/Nova | Bun/Bun |
+|---|---|---|
+| 1 | 1.014 | 0.984 |
+| 2 | 1.016 | 1.144 |
+| 3 | 1.022 | 0.780 |
+| 4 | 0.982 | 1.084 |
+| 5 | 1.209 | 1.057 |
+| 6 | 0.947 | 1.006 |
+| 7 | 0.922 | 1.022 |
+| 8 | 0.985 | 0.990 |
+| 9 | 1.056 | 0.974 |
+| 10 | 0.923 | 1.071 |
+| 11 | 0.811 | 0.936 |
+| 12 | 1.044 | 0.949 |
+
+Rounds alternated: Nova round 1, Bun round 1, Nova round 2, and so on.
+
+### What this does not settle
+
+- **What moves a server's throughput within about 10 s.** The power plan,
+  frequency scaling and background load were not recorded.
+- **Whether the idle second instance added noise of its own.** Both
+  instances were pinned to core 0, so the loaded server shared its core
+  with a live, idle one. ADR 0021 runs one server at a time. The two were
+  not separated here.
+- **Whether a quieter host would bring either structure's A/A scatter under
+  these pass marks.**
+- **Whether much shorter windows, or many more of them, would average the
+  noise down.** Nothing here measured that.
+- **One host, Windows, 24 rounds.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
