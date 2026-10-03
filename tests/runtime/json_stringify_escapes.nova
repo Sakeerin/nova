@@ -1,8 +1,9 @@
 // `quote` covers RFC 8259's mandatory escapes: `"` and `\` explicitly and
 // every character below `0x20`. FIVE of those have a named short escape, not
-// two: `quote` names `\n`, `\r`, `\t`, `\b` and `\f`, and `std/json/lib.nova`
-// says so at that function, a runtime builtin since 2026-10-03. This fixture
-// exercises two of them, newline and tab.
+// two: `quote` escapes `\n`, `\r`, `\t`, `\b` and `\f`, as the doc comment
+// on `nova_rt_json_quote` in `crates/nova-runtime/src/lib.rs` says. That
+// function has done `quote`'s work since 2026-10-03. This fixture exercises
+// two of them, newline and tab.
 //
 // The other three are covered in the same ENCODE direction by
 // `json_parse_strings.nova`, whose `report` prints `stringify(parse(src))`:
@@ -17,12 +18,13 @@
 // above `0x20` passes through unescaped, covered by `hello` in the sibling
 // fixture.
 //
-// The last five lines pin `quote`'s fast path, which returns a string with
-// nothing to escape without rebuilding it character by character:
+// The last five lines were written to pin a fast path the Nova `quote` once
+// had, for a string with nothing to escape. Since 2026-10-03 one runtime pass
+// handles every string, and they still pin its edges:
 // - `0x1f`, the highest character below `0x20`, must still escape;
 // - space and `~` must still pass through;
-// - an escapable character first, or last behind a clean run, must still
-//   send the whole string through the escaping loop.
+// - an escapable character first, or last behind a clean run, must still be
+//   escaped.
 fn main() {
     println(stringify(String("say \"hi\"")))
     println(stringify(String("back\\slash")))

@@ -741,8 +741,10 @@ its 2026-08-25 amendment.
    output buffer, which is what replaced the whole-document rebuild its `Array`
    and `Object` arms used to perform. Each of them appends into a `Vec<Char>`
    and drains once through `vec_chars_to_string`, so none is quadratic in what
-   it emits. The mechanical check, which the module's own comment tells a
-   reader to run rather than trust: `grep -n 'out = "${out}' std/json/lib.nova`
+   it emits. [Amended 2026-10-03: `quote` no longer accumulates at all; the
+   runtime builtin `json_quote` builds its result in one pass.] The
+   mechanical check, which the module's own comment tells a reader to run
+   rather than trust: `grep -n 'out = "${out}' std/json/lib.nova`
    must match nothing but text a comment quotes for illustration.
 
    **Measured 2026-08-25, in absolutes rather than growth ratios.** An array of
