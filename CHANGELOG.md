@@ -435,6 +435,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (gc-direct-strings)".
 
+- **The Phase 2 gate remeasured on `b24379e`, after the GC-direct string
+  builtins, under ADR 0021.** Twelve paired rounds, the order alternating.
+  - The margin was again 713/676, about 1.0547.
+  - The ratio is inconclusive. Nova cleared the margin in 7 of 12 pinned
+    rounds, where 10 are needed. Its pinned round ratios scattered from
+    0.907 to 1.517; the host's speed also fell during the run, not
+    steadily. Unpinned, which does not decide, it cleared the margin in
+    all 12.
+  - The absolute criterion is met in all 24 Nova readings: pinned
+    14455.1-22200.2 req/sec, unpinned 14589.1-22089.4.
+  - The gate is still not met.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gate-remeasure-6)".
+
 ### Changed
 - **Five string builtins write their result straight into GC memory.**
   `json_quote`, `str_concat_n`, `str_join`, `str_concat` and `int_to_str`

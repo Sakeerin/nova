@@ -140,7 +140,7 @@ that; a range comparison throws it away.
 
 - **No earlier run is re-judged.** Each took fewer than twelve rounds, and
   each fixed its method before this rule existed.
-- **This rule was not chosen to pass the latest run.** In
+- **This rule was not chosen to pass the run that preceded it.** In
   "(gate-remeasure-4)", Nova was faster in four of six pinned rounds, but
   cleared a 1.055 margin in only three: 1.101, 1.174 and 1.066. Three of
   every six over twelve rounds is six, inside the inconclusive band.

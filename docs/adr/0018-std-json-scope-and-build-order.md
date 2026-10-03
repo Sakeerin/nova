@@ -1064,6 +1064,15 @@ at the method.
   rounds, where 10 are needed, though it was faster in plain req/sec in all
   12. So the gate is still not met under any reading that counts it. See
   `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-5)".]
+
+  [Amended 2026-10-03 (gate-remeasure-6): the second run judged under
+  `docs/adr/0021-gate-ratio-paired-rounds.md`, on `main` at `b24379e`. All
+  24 Nova readings clear 10k+ at ten users: pinned 14455.1 to 22200.2
+  req/sec, unpinned 14589.1 to 22089.4. The ratio against Bun is
+  inconclusive: Nova cleared the 1.0547 byte margin in 7 of 12 pinned
+  rounds, where 10 are needed. So the gate is still not met under any
+  reading that counts it. See `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gate-remeasure-6)".]
 - **Position 8 stays partial**, unchanged by this increment and recorded
   in ADRs 0016 and 0017; and **ADR 0014's bullet describing positions 8 and
   10 as unbuilt and not yet passed over by name is now stale in both
