@@ -22,8 +22,9 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
 - Turning a path segment into an `Int` through `std/json`: `parse(seg)` and
   then `Int::from_json(v)`. There is no `parse::<Int>()` and no turbofish, and
   `str_to_float` is `STD_ONLY`, so this is the route through `std`. A program
-  can also walk `String::chars()` and fold digits by hand -- `std/json`'s own
-  `hex_digit` is that shape in the other direction -- which is more code and
+  can also walk `String::chars()` and fold digits by hand -- the reverse of
+  an if/else chain from `Int` to a digit, the shape `std/json`'s `hex_digit`
+  had until a runtime builtin replaced it on 2026-10-03 -- which is more code and
   has to repeat the range check `Int::from_json` already makes.
 - Shared mutable state with no lock: a plain `Store` record and a `mut self`
   method. ADR 0009 makes single-threading a correctness requirement, so there

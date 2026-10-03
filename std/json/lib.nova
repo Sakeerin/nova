@@ -955,11 +955,12 @@ impl P {
     // THE ACCUMULATOR ROSTER IN THIS FILE, by name rather than by count, and
     // what changed. `quote` and this function each built one string literal by
     // interpolation; `stringify`'s `Array` and `Object` arms built the whole
-    // rendered document that way. All of them now append into a `Vec<Char>`
-    // (`out` here and in `quote`, and `stringify`'s own separate output
+    // rendered document that way. This function and `stringify` now append
+    // into a `Vec<Char>` (`out` here, and `stringify`'s own separate output
     // buffer, also named `out`, which is unrelated to its work list) drained
-    // once through `vec_chars_to_string` instead, so none is quadratic in
-    // what it emits.
+    // once through `vec_chars_to_string` instead. `quote` hands the whole
+    // job to the runtime builtin `json_quote` (2026-10-03). So none is
+    // quadratic in what it emits.
     //
     // This used to close saying `stringify`'s two arms "do not yet" -- that
     // migration was called "later work in this same increment, not this

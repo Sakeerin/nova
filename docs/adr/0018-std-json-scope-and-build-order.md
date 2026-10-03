@@ -600,7 +600,9 @@ called from `std/json/lib.nova` itself — `Vec` at `vec_to_array`,
 `str_from_chars` at `span`. The fix needed no language change. Every accumulator
 this section counted now appends into a `Vec<Char>` and drains once through
 `vec_chars_to_string`: `quote`'s and `scan_str`'s, and `stringify`'s own output
-buffer, which replaces what the `Array` and `Object` arms used to do. The
+buffer, which replaces what the `Array` and `Object` arms used to do.
+[Amended 2026-10-03: `quote`'s accumulator is gone; the runtime builtin
+`json_quote` now builds that string in one pass.] The
 mechanical check, which the code's own comment tells a reader to run rather than
 trust: `grep -n 'out = "${out}' std/json/lib.nova` must match nothing but text a
 comment quotes for illustration.
