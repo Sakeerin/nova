@@ -4987,6 +4987,164 @@ These predictions were written before the profiling build existed:
   sampled build's shares.
 - **One host, Windows, three runs.**
 
+## AMENDMENT 2026-10-03 (gc-direct-strings): builtins write their string results straight into GC memory
+
+"(reprofile-3)" found that `nova_rt_json_quote`, `nova_rt_str_concat_n`
+and `nova_rt_int_to_str` spent 3.5–3.6% of the server thread in the system
+heap, building a Rust `String` that `gc_str` then copied into a GC buffer.
+- **The change:** a new runtime helper, `gc_str_filled`, allocates the GC
+  byte buffer at its exact final length and lets the caller write into it.
+  Five builtins now use it: `json_quote`, `str_concat_n`, `str_join`,
+  `str_concat` and `int_to_str`.
+- **What each call saves:** one system-heap allocation, one free and one
+  copy.
+  - `json_quote` now counts its escaped length before it writes.
+  - `int_to_str` formats its digits on the stack.
+- **What changed for the collector:** the sources are now read after the
+  result's first allocation, not before. They stay alive because a pointer
+  held in the caller's frame or a callee-saved register is a root, the
+  argument `nova_rt_str_chars` already relies on.
+- **Output is unchanged.**
+
+**Results:**
+- **Per call, all four are disjoint.**
+  - `stringify` of the clean name went from 103.5–111.6 to 77.2–80.1 ns, a
+    22.6–30.1% cut per pair.
+  - `stringify` of the clean email went from 104.5–118.8 to 81.3–87.2 ns,
+    21.1–29.9%.
+  - `stringify` of the escaped string went from 161.6–168.0 to 87.3–90.6
+    ns, 43.9–48.0%.
+  - `users_json` at ten users went from 5307.7–5647.7 to 4054.6–4372.1 ns,
+    17.6–28.2%.
+- **The ten-user server is disjoint, in both orders, so a gain is
+  claimed.**
+  - Over six alternated pairs, before ran at 14421.1–14720.4 req/sec and
+    after at 15137.2–15481.7.
+  - After was 4.2–6.7% faster per pair, 2.8–4.3 us less per request.
+  - Three pairs ran `before` first and three `after` first. Each order on
+    its own gave disjoint ranges: 4.2–5.0% faster per pair before-first,
+    and 5.0–6.7% after-first.
+
+### How it was measured
+
+- **Per call:** "(json-quote)"'s scratch Nova harness, never committed,
+  which prints picoseconds per call.
+  - It times 1,000,000 calls each of the three `stringify`s, and 200,000
+    calls of `users_json` over ten users.
+  - Its copies of the example's `User`, `Store`, `user_json` and
+    `users_json` are as of `b0b606a`. The example's source has not changed
+    since.
+  - `before` is 525,312 bytes, SHA-256 `bee430f576092a43…`; `after` is
+    524,288 bytes, SHA-256 `b96a1ddf2c896d33…`.
+  - They were alternated, five runs each, one fresh process per run, with
+    `before` first in runs 1, 3 and 5. Every run printed the same output
+    lengths and the same escaped sample.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`.
+  - `before` is 702,464 bytes, SHA-256 `828bc6742c351de0…`; `after` is
+    701,440 bytes, SHA-256 `faa4e26a9a6acf2d…`.
+  - One fresh process per reading. Every reading was `errors=0`, and every
+    body the same, SHA-256 `3ff5004bf26139cc…`.
+  - `bun docs/benchmarks/bun-equivalence.js` passed against `after` first:
+    all 9 exchanges match.
+- **Provenance.** The scratch binaries log records the release `nova`'s
+  SHA-256 beside the commit it was built from, `02fd6ee` for `before` and
+  `d32c5aa` for `after`. That all four binaries were built by it is from
+  this session. The equivalence log does not name its binary.
+- **Ordering.** The predictions' modification time is 18:58:25, and the
+  `before` harness binary's is 18:58:47. The code commit is dated
+  19:06:19.
+
+These predictions were written before any of the change existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| clean name: before 90–140 ns, after 20–40% lower, disjoint | 103.5–111.6; 22.6–30.1% lower, disjoint | within |
+| clean email: before 90–140 ns, after 20–40% lower, disjoint | 104.5–118.8; 21.1–29.9% lower, disjoint | within |
+| escaped string: before 140–200 ns, after 15–30% lower, disjoint | 161.6–168.0; 43.9–48.0% lower, disjoint | before within; the cut wrong: above |
+| `users_json`: before 4,500–7,000 ns, after 20–35% lower, disjoint | 5307.7–5647.7; 17.6–28.2% lower, disjoint | before within; the cut: four of five pairs within, one below at 17.6% |
+| server after 1–5% above before per pair; the ranges may overlap | 4.2–6.7% per pair, disjoint in both orders | four of six pairs within, two above at 5.2% and 6.7% |
+| three named mutants each fail at least one named test, with exit codes checked | all three did | right |
+
+### Per call, ps, in run order
+
+| run | first | name before | after | email before | after | escaped before | after | `users_json` before | after |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | before | 109175 | 79426 | 118844 | 83283 | 167964 | 87309 | 5641663 | 4128341 |
+| 2 | after | 111610 | 78026 | 110399 | 87150 | 161561 | 90574 | 5647702 | 4054602 |
+| 3 | before | 106584 | 77196 | 104458 | 81261 | 163149 | 88458 | 5513361 | 4320442 |
+| 4 | after | 103521 | 80077 | 109724 | 82565 | 167052 | 89392 | 5558060 | 4131211 |
+| 5 | before | 105585 | 79259 | 106931 | 81933 | 162020 | 90143 | 5307721 | 4372064 |
+
+### Server, in run order
+
+| pair | order | before | after | after / before |
+|---|---|---|---|---|
+| 1 | before first | 14708.0 | 15436.4 | 1.050 |
+| 2 | before first | 14660.4 | 15280.5 | 1.042 |
+| 3 | before first | 14650.5 | 15348.4 | 1.048 |
+| 4 | after first | 14451.3 | 15417.7 | 1.067 |
+| 5 | after first | 14421.1 | 15137.2 | 1.050 |
+| 6 | after first | 14720.4 | 15481.7 | 1.052 |
+
+### Correctness
+
+- **New tests:**
+  - `int_to_str_matches_rust_at_every_digit_count_and_both_ends`: every
+    digit count from one to nineteen, both signs, and `i64::MIN` and
+    `i64::MAX`, against Rust's own formatting;
+  - `concat_keeps_both_sides_whole`: either side empty, and multi-byte
+    text on both;
+  - `json_round_trip_under_gc_stress`,
+    `json_stringify_escapes_under_gc_stress` and
+    `json_parse_strings_under_gc_stress`: three `std/json` fixtures run
+    with `NOVA_GC_STRESS=1`, a collection on every allocation, so every
+    read after the result's allocation follows a collection. Between them
+    they reach all seven short escapes and the `\u00XX` form. The third was
+    added after the measurement, with comment fixes; that later commit
+    changes no compiled code.
+- **Existing tests pass unchanged:**
+  - the runtime's `json_quote`, `concat_n`, `join` and `int_to_str` tests;
+  - the JSON, strings and interpolation fixtures, including
+    `strings_under_gc_stress` and `interpolation_nary_under_gc_stress`.
+- **Three named mutants each fail.** Each was run under two filtered
+  commands only:
+  - `cargo test --locked -p nova-runtime --lib -- int_to_str concat
+    json_quote join_puts`;
+  - `cargo test --locked -p nova-cli --test run_tests -- json strings
+    interpolation`.
+
+  Exit codes and result lines were checked. The first mutant's text anchor
+  missed twice, after `cargo fmt` had reindented its line, and it ran on
+  the third attempt.
+  - **`json_quote` counting `\u00XX` as five bytes:** the runtime test
+    binary aborts when `Fill::put`'s bounds check panics (exit
+    `0xc0000409`), and 5 fixture tests fail.
+  - **`str_concat_n` dropping its last part:** the runtime test binary
+    aborts on the length check (exit `0xc0000409`), and 14 fixture tests
+    fail.
+  - **`int_to_str` losing the sign:** 2 runtime tests and 3 fixture tests
+    fail.
+- **The gates pass** on the final tree. A scratch log records the base
+  commit, the working tree's files and each step's exit code. The commands
+  and their flags are from this session:
+  - `cargo test --locked --workspace`: 1183 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0;
+  - `cargo fmt --all --check`: exit 0.
+
+### What this does not settle
+
+- **The gate.** Neither criterion was rerun. "(gate-remeasure-5)"'s
+  shortest pinned round needed about 2.9% more to clear ADR 0021's 1.0547
+  margin. This change is 4.2–6.7% faster per pair on the 15 s method, a
+  different method in a different run. Only a run under ADR 0021 can say.
+- **Why the escaped string gained most.** From the code, not measured:
+  the old `json_quote` reserved the input's length plus two, so any escape
+  outgrew the buffer and made it grow on the system heap. The new one
+  counts first and never grows.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list

@@ -423,8 +423,28 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (reprofile-3)".
+- **String builtins writing straight into GC memory, measured.**
+  - Per call, `stringify` of a clean name went from 103.5-111.6 to
+    77.2-80.1 ns, and of an escaped string from 161.6-168.0 to 87.3-90.6
+    ns. `users_json` at ten users went from 5307.7-5647.7 to 4054.6-4372.1
+    ns. All are disjoint.
+  - The ten-user server went from 14421.1-14720.4 to 15137.2-15481.7
+    req/sec over six alternated pairs, three in each order: 4.2-6.7%
+    faster per pair, disjoint in both orders.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-03 (gc-direct-strings)".
 
 ### Changed
+- **Five string builtins write their result straight into GC memory.**
+  `json_quote`, `str_concat_n`, `str_join`, `str_concat` and `int_to_str`
+  used to build a Rust `String` and copy it into a GC buffer. A new runtime
+  helper, `gc_str_filled`, allocates the GC buffer at its exact final
+  length and lets the caller write into it, saving a system-heap
+  allocation, a free and a copy per call. The sources are now read after
+  the result's allocation, kept alive by the conservative scan, and two
+  `std/json` fixtures also run under `NOVA_GC_STRESS`. Output is
+  unchanged.
 - **The Phase 2 gate's ratio against Bun is judged by twelve paired
   rounds.** `docs/adr/0021-gate-ratio-paired-rounds.md` records the
   decision.
