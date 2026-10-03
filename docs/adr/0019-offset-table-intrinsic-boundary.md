@@ -140,6 +140,13 @@ a run where every cell, Bun's included, ran much faster than before: pinned
 to 0.993 pinned, short of 1.0, and 0.891 to 1.076 unpinned, straddling it,
 so the gate is still not met under any reading that counts it. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-02 (gate-remeasure-3)".]
+[Amended 2026-10-03 (gate-remeasure-4): remeasured on `main` at `7f2b85e`
+with the same four-cell method, six rounds per cell. All twelve Nova
+readings clear 10k+ at ten users: pinned 12010.9 to 14557.6 req/sec,
+unpinned 13200.4 to 15506.7. The ratio against Bun is 0.708 to 1.334
+pinned and 0.822 to 1.279 unpinned, both straddling 1.0, so the gate is
+still not met under any reading that counts it. See
+`examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".]
 
 Two design questions had to be answered before any Nova code could be
 written, and both are architectural rather than local to `std/http`: how a

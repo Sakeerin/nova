@@ -465,6 +465,20 @@ The gate's two statements still disagree. Under any reading that counts §5,
 the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-02 (gate-remeasure-3)".
 
+**Amended 2026-10-03 (gate-remeasure-4):** remeasured on `main` at `7f2b85e`
+with the same method, six rounds per cell, after byte-level string search
+and a runtime builtin behind `std/json`'s `quote`.
+- **This section's absolute criterion is met in all twelve Nova readings:**
+  pinned at 12010.9–14557.6 req/sec, unpinned at 13200.4–15506.7. Every
+  cell, Bun's included, ran slower than in "(gate-remeasure-3)", for
+  reasons not measured, so these figures do not compare with earlier ones.
+- **`60-EXAMPLES.md` §5's ratio against Bun is not established:**
+  0.708–1.334 pinned and 0.822–1.279 unpinned, both straddling 1.0.
+
+The gate's two statements still disagree. Under any reading that counts §5,
+the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
+"AMENDMENT 2026-10-03 (gate-remeasure-4)".
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

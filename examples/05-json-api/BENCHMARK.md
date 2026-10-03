@@ -366,6 +366,19 @@ Every cell, Bun's included, ran much faster than in earlier runs, for
 reasons not measured, so these absolute figures do not compare with them.
 See "AMENDMENT 2026-10-02 (gate-remeasure-3)".
 
+**Amended 2026-10-03 (gate-remeasure-4):** the same method on `main` at
+`7f2b85e`, after "(byte-search)" and "(json-quote)", with six rounds per
+cell instead of three. Its figures supersede "(gate-remeasure-3)"'s as the
+gate's recorded status:
+- **Absolute:** met in all twelve Nova readings, pinned 12010.9–14557.6
+  req/sec and unpinned 13200.4–15506.7.
+- **Ratio:** not established under either condition. Pinned it is
+  0.708–1.334 and unpinned 0.822–1.279; both straddle 1.0.
+
+Every cell, Bun's included, ran slower than in "(gate-remeasure-3)", for
+reasons not measured, so these absolute figures do not compare with it.
+See "AMENDMENT 2026-10-03 (gate-remeasure-4)".
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
@@ -4409,6 +4422,211 @@ A sixth mutant was added after verification and was not predicted; see
     allocations cost less to collect in the server's heap. It was not
     measured.
 - **One host, Windows.**
+
+## AMENDMENT 2026-10-03 (gate-remeasure-4): the Phase 2 gate on `main` at `7f2b85e`
+
+This reruns both of the gate's criteria after "(json-quote)", with
+"(gate-remeasure-3)"'s method: ten users, 200 connections, 30 s after a 5 s
+warmup, four cells alternated. Since `012ca55`, the functional code changes
+are "(byte-search)"'s and "(json-quote)"'s; "(alloc-fast-path)" landed tests
+only.
+
+**Six rounds per cell, not three.**
+- **Why:** after three rounds, the unpinned ranges overlapped, and the
+  pinned ones cleared each other by 1.0% at the extremes. Three more rounds
+  of all four cells followed. The rule is borrowed from
+  `docs/superpowers/plans/2026-10-01-gc-page-heap.md`, where it governs
+  before/after gain claims: "If the ranges overlap, take three more of
+  each and report all readings."
+- **What the extension could do:** under the extremes rule, added readings
+  only widen ranges. So rounds 4–6 could break the pinned result, but could
+  never make the unpinned one disjoint.
+- **Decided in advance:** before rounds 4–6 ran, the six-round result was
+  written down as the headline, with the three-round result reported beside
+  it as the one that matches "(gate-remeasure-3)"'s method.
+
+**The absolute criterion is met in every reading.** All twelve Nova readings
+clear `nova-spec/00-MASTER-SPEC.md` §3's 10,000 req/sec. Pinned to one core
+they ran at 12010.9–14557.6, and unpinned at 13200.4–15506.7. That is
+20.1–55.1% above the line.
+
+**The ratio against Bun is not established under either pinning
+condition.**
+- **Pinned**, the headline condition in `docs/benchmarks/README.md`: A/C
+  is 0.708–1.334 from the ranges' extremes, which straddles the 1.0
+  `nova-spec/60-EXAMPLES.md` §5 asks for.
+  - Round by round it is 1.101, 1.174, 1.066, 0.858, 1.033 and 0.934, so
+    Nova was ahead in four rounds of six.
+- **Unpinned:** B/D is 0.822–1.279, which also straddles 1.0.
+  - Round by round it is 1.039, 0.965, 1.058, 1.112, 1.062 and 1.065, so
+    Nova was ahead in five rounds of six.
+- **Over the first three rounds alone**, pinned was 1.010–1.269, wholly
+  above 1.0. Nova's slowest pinned reading, 12010.9, was above Bun's
+  fastest, 11887.2. All three of Bun's pinned readings in rounds 4–6,
+  13155.8–16971.5, are above that Nova reading. Unpinned was 0.822–1.221
+  over three rounds, straddling.
+- **Bun's readings spread more than Nova's.**
+  - Pinned: 1.56x against Nova's 1.21x.
+  - Unpinned: 1.33x against Nova's 1.17x.
+
+§3's absolute criterion is met under either condition. §5's ratio is not
+established under either, so the gate is still not met.
+
+**Against "(gate-remeasure-3)", the pinned rounds sit higher, but the
+ranges overlap, so no move is established.**
+- **There:** the three pinned rounds were 0.928–0.947, median 0.929, and
+  Nova was behind in every one. The extremes were 0.886–0.993.
+- **Here:** the six pinned rounds were 0.858–1.174, median 1.049. The
+  extremes, 0.708–1.334, contain gate3's.
+- **The two overlap on every view.** Round 6's 0.934 sits inside gate3's
+  rounds, and round 4's 0.858 below them. The rule borrowed above says not
+  to claim a gain on overlapping ranges.
+- **Unpinned**, the six rounds were 0.965–1.112, median 1.060, against
+  gate3's 0.935–1.049, median 0.979. These overlap too.
+- Medians are not the criterion; they only describe where the rounds fell.
+
+**Every cell ran slower than in "(gate-remeasure-3)", Bun's too, whose code
+did not change.** From the ranges' extremes:
+- Bun pinned fell to 0.55x–0.91x of its readings there, and Bun unpinned
+  to 0.62x–0.86x.
+- Nova pinned fell to 0.65x–0.82x, and Nova unpinned to 0.66x–0.89x.
+- The generator's self-test ceiling fell only to 0.945x, from 104971.2 to
+  99242.4.
+- Why is not measured.
+
+So, as "(gate-remeasure-3)" found in the other direction, absolute figures
+from different runs are not comparable here.
+
+### The cells, in run order
+
+| reading | round | cell | side | pinned | mask read back | req/sec |
+|---|---|---|---|---|---|---|
+| 1 | 1 | A | Nova | core 0 | 1 | 12010.9 |
+| 2 | 1 | C | Bun | core 0 | 1 | 10910.6 |
+| 3 | 1 | B | Nova | no | 4095 | 13200.4 |
+| 4 | 1 | D | Bun | no | 4095 | 12703.0 |
+| 5 | 2 | A | Nova | core 0 | 1 | 13849.0 |
+| 6 | 2 | C | Bun | core 0 | 1 | 11801.0 |
+| 7 | 2 | B | Nova | no | 4095 | 15506.7 |
+| 8 | 2 | D | Bun | no | 4095 | 16064.0 |
+| 9 | 3 | A | Nova | core 0 | 1 | 12672.5 |
+| 10 | 3 | C | Bun | core 0 | 1 | 11887.2 |
+| 11 | 3 | B | Nova | no | 4095 | 13695.7 |
+| 12 | 3 | D | Bun | no | 4095 | 12945.7 |
+| 13 | 4 | A | Nova | core 0 | 1 | 14557.6 |
+| 14 | 4 | C | Bun | core 0 | 1 | 16971.5 |
+| 15 | 4 | B | Nova | no | 4095 | 13485.0 |
+| 16 | 4 | D | Bun | no | 4095 | 12121.8 |
+| 17 | 5 | A | Nova | core 0 | 1 | 13586.6 |
+| 18 | 5 | C | Bun | core 0 | 1 | 13155.8 |
+| 19 | 5 | B | Nova | no | 4095 | 13303.6 |
+| 20 | 5 | D | Bun | no | 4095 | 12522.4 |
+| 21 | 6 | A | Nova | core 0 | 1 | 12556.8 |
+| 22 | 6 | C | Bun | core 0 | 1 | 13438.3 |
+| 23 | 6 | B | Nova | no | 4095 | 13522.4 |
+| 24 | 6 | D | Bun | no | 4095 | 12699.1 |
+
+- **Every reading was `errors=0`.**
+- **Each server was a fresh process.** After it printed its listening line
+  and before seeding, it was pinned or left alone. Its affinity mask was
+  then read back and logged.
+
+| cell | six rounds | ratio | rounds 1–3 | ratio |
+|---|---|---|---|---|
+| A, Nova pinned | 12010.9–14557.6 | | 12010.9–13849.0 | |
+| B, Nova unpinned | 13200.4–15506.7 | | 13200.4–15506.7 | |
+| C, Bun pinned | 10910.6–16971.5 | A/C 0.708–1.334 | 10910.6–11887.2 | A/C 1.010–1.269 |
+| D, Bun unpinned | 12121.8–16064.0 | B/D 0.822–1.279 | 12703.0–16064.0 | B/D 0.822–1.221 |
+
+**The load generator was not the limit.**
+- **Ceiling:** the self-test, taken after the equivalence check and before
+  the matrix, reached 99242.4 req/sec. The fastest reading, Bun's 16971.5,
+  is 17.1% of that.
+- **Command:** `nova-bench-http --self-test --connections 200 --duration
+  30 --warmup 5`.
+- **Calibration:** the self-test recorded `errors=0`, and every connection
+  completed requests (`conn_min=5183`, `conn_max=31178`). That is cleaner
+  than "(gate-remeasure-3)"'s, which had `errors=72` and `conn_min=0`.
+  - Its `elapsed_ms` is 34693, while every cell's is 30023–30042. Why is
+    not known.
+- **Binary:** `target/release/nova-bench-http.exe`, SHA-256
+  `d17062335e988c18…`, the same file "(gate-remeasure)",
+  "(gate-remeasure-2)" and "(gate-remeasure-3)" used.
+
+**These predictions were written before any throughput reading.**
+- **The predictions file was created at 14:00:36**, the time its first
+  `date` line also records. The addendum moved its modification time to
+  14:10:57. So that the original predictions were left unedited then is
+  from this session.
+- **The other files' modification times:**
+  - 14:01:05 for the release `nova`, rebuilt from `7f2b85e`;
+  - 14:01:13 for the gate binary;
+  - 14:01:42 for the equivalence log;
+  - 14:02:25 for the self-test log.
+
+The first run's log has rounds 1–3 ending at 14:10:16. The predictions
+file's addendum is dated 14:10:57, and the second run's log has rounds 4–6
+starting at 14:11:02.
+
+| prediction | measured | verdict |
+|---|---|---|
+| A: 11,000–22,000 | six rounds 12010.9–14557.6; rounds 1–3 12010.9–13849.0 | within |
+| C: 10,000–22,000 | six rounds 10910.6–16971.5; rounds 1–3 10910.6–11887.2 | within |
+| B: 11,000–23,000 | six rounds and rounds 1–3 both 13200.4–15506.7 | within |
+| D: 10,000–22,000 | six rounds 12121.8–16064.0; rounds 1–3 12703.0–16064.0 | within |
+| rounds 1–3, pinned round by round: 0.98–1.08, at least two of three at or above 1.0 | 1.101, 1.174, 1.066 | wrong on the band, two of three above it; right that at least two were at or above 1.0 |
+| rounds 1–3, pinned extremes straddle 1.0 | 1.010–1.269 | wrong: wholly above |
+| rounds 1–3, unpinned round by round: 0.98–1.18, at least two of three at or above 1.0 | 1.039, 0.965, 1.058 | one of three below the band; right that two were at or above 1.0 |
+| rounds 1–3, unpinned extremes straddle 1.0 or lie above it | 0.822–1.221 | right: straddles |
+| rounds 1–3: all six Nova readings above 10k | all six | right |
+| rounds 1–3: "the ratio criterion is NOT established as met under BOTH conditions (at least one condition's ranges overlap Bun's)" | unpinned overlaps | right |
+| addendum, six rounds: pinned does not stay disjoint above 1.0 | 0.708–1.334 | right |
+| addendum, six rounds: unpinned still straddles 1.0 | 0.822–1.279 | right |
+| addendum: all twelve Nova readings above 10k | all twelve | right |
+
+The pinned three-round prediction was wrong, and the addendum's six-round
+one was right. The addendum was written after seeing the first three
+rounds.
+
+### Identity of each side, and the payload
+
+- **Nova:** `examples/05-json-api`, built by the release `nova` from
+  `7f2b85e`; that is from this session.
+  - `json-api.exe` is 702,464 bytes, SHA-256 `3316d6665e2b2197…`. The same
+    binary ran in every Nova reading.
+  - **A SHA names a file, not a source tree.** A second build of the same
+    source, seconds later, came out at a different SHA-256,
+    `62277e6e16fe9f44…`, first differing at byte 273. That build was
+    deleted, so this is from this session. It means this binary's SHA
+    differing from "(json-quote)"'s `after` server's does not by itself
+    show a different program.
+- **Bun:** `docs/benchmarks/bun-server.js`, SHA-256 `f95426e14e22034c…`,
+  the same file as before, run by bun 1.3.0. The version is from this
+  session.
+- **The payload.** Ten users were seeded by the same `curl` POSTs on each
+  side. Every reading on both sides served the same 604-byte body, SHA-256
+  `3ff5004bf26139cc…`.
+- **Equivalence was run first**, against the `json-api.exe` built for this
+  run: `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+  The log does not record the binary's path. The scratch script that ran
+  it, `run.sh`, passes the `json-api.exe` in this run's directory.
+
+### What this does not settle
+
+- **Which statement of the gate governs.** As of `7f2b85e`, no tracked
+  file settles it.
+- **How the ratio could be settled on this host.** Under the extremes
+  rule, added readings only widen ranges, so more rounds of one run cannot
+  turn an overlap into a disjoint result. That needs a separate run, a
+  quieter host, or a different criterion. Nothing here measured what makes
+  Bun's readings spread 1.56x pinned.
+- **Whether the pinned ratio moved since "(gate-remeasure-3)", and if so
+  how much of it is "(json-quote)".** The runs also differ by
+  "(byte-search)" and by the host's speed.
+- **Why every cell ran slower than in "(gate-remeasure-3)".** It was not
+  measured.
+- **Any host but this one.** Every figure here is from this development
+  host, Windows, with the load generator on the same machine.
 
 ## What was measured, and with what
 
