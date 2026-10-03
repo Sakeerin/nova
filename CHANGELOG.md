@@ -396,6 +396,25 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
 ### Changed
+- **The Phase 2 gate's ratio against Bun is judged by twelve paired
+  rounds.** `docs/adr/0021-gate-ratio-paired-rounds.md` records the
+  decision.
+  - Each round is one Nova and one Bun reading back to back, pinned to
+    core 0, and the order alternates between rounds.
+  - A round counts for Nova only if Nova's req/sec is at least a margin
+    times Bun's. The margin is Bun's response bytes over Nova's, never
+    below 1.0, re-measured each run. On the sizes last measured it is
+    about 1.055, because Bun's `Date` header favours Nova.
+  - The ratio is met if Nova clears the margin in 10 or more of the 12,
+    not met if it falls short in 10 or more, and inconclusive otherwise.
+  - Unpinned rounds are reported and do not decide.
+  - Within one run, the range-extremes reading used until now cannot
+    resolve an overlap, because added readings only widen ranges.
+    Earlier runs are not re-judged.
+  - These files carry dated notes:
+    - `nova-spec/60-EXAMPLES.md` §5 and `nova-spec/00-MASTER-SPEC.md`;
+    - `docs/benchmarks/README.md` and `examples/05-json-api/BENCHMARK.md`;
+    - `docs/superpowers/specs/2026-09-11-bun-ratio-design.md`.
 - **`std/json`'s `quote` escapes in one runtime pass.** A new std-only
   builtin, `json_quote(s)` (`Builtin::STD_ONLY` 76 → 77), backs it. Its
   runtime function copies the string's bytes into one buffer, escaping as

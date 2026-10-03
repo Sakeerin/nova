@@ -126,7 +126,11 @@ quotient Nova/Bun comes out higher than like-for-like. On a criterion Nova
 has to clear at 1.0, a bias inflating Nova's side is the one that could
 manufacture a pass. So it is **stated beside the ratio with its byte count**,
 and a ratio within a few percent of 1.0 must be read against it rather than
-reported as a pass.
+reported as a pass. [Amended 2026-10-03:
+`docs/adr/0021-gate-ratio-paired-rounds.md` builds this into the gate's
+criterion as a margin. A round counts for Nova only if Nova's req/sec is at
+least *m* times Bun's, where *m* is Bun's response bytes over Nova's, never
+below 1.0.]
 
 Stripping `Date` from Bun's output is deliberately **not** attempted: it is
 what `Bun.serve` does, and making Bun unrepresentative to flatter the

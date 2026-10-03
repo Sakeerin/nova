@@ -608,6 +608,30 @@ the first three rounds alone the pinned ratio was 1.010–1.269, wholly above
 is not established. See `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+### Judging the ratio: twelve paired rounds
+
+**Added 2026-10-03.** `docs/adr/0021-gate-ratio-paired-rounds.md` decides how a
+run's readings show §5's ratio:
+- **Twelve rounds, fixed before the run.** A run is never extended.
+- **Each round** takes one Nova and one Bun reading per pinning condition,
+  back to back, each a fresh process.
+- **The order alternates.** Odd rounds run Nova pinned, Bun pinned, Nova
+  unpinned, Bun unpinned. Even rounds run Bun first in each pair.
+- **A margin for wire framing.** A round counts for Nova only if Nova's
+  req/sec is at least *m* times Bun's, where *m* is Bun's response bytes
+  over Nova's, never below 1.0. That charges the 37-byte `Date` difference
+  under "What each figure may be quoted for" below at its full share of
+  the response. Each run measures both sizes again.
+- **Pinned decides.** The ratio is met if Nova clears the margin in 10 or
+  more of the 12 pinned rounds, not met if it falls short in 10 or more,
+  and inconclusive otherwise.
+- **Unpinned** is run and reported, and does not decide.
+
+The range-extremes reading the amendments above use is no longer the
+criterion. Under it, added readings only widen ranges, so within one run
+an overlap can never resolve. Ranges and extremes are still recorded, as
+description.
+
 ### The CPU-usage observation
 
 Process affinity sets the default for every thread, but a thread can
