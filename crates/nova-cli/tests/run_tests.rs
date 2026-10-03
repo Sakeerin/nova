@@ -8654,11 +8654,14 @@ fn json_round_trip_run() {
 }
 
 /// `json_round_trip.nova` with `NOVA_GC_STRESS=1`, a collection on every
-/// allocation. Since 2026-10-03 `json_quote`, `str_concat_n`, `str_join` and
-/// `str_concat` allocate their result's GC buffer first and only then read
-/// their arguments' bytes into it. Those bytes must survive the collection
-/// that allocation can run, and a missed root shows up as wrong text, not a
-/// crash.
+/// allocation. Since 2026-10-03 `json_quote` and `str_concat`, both reached
+/// here, allocate their result's GC buffer first and only then read their
+/// arguments' bytes into it. Those bytes must survive the collection that
+/// allocation can run, and a missed root shows up as wrong text, not a crash.
+/// `str_concat_n` and `str_join` work the same way and are covered under
+/// stress by `interpolation_nary_under_gc_stress` and
+/// `strings_under_gc_stress`. It discriminates only where the collector frees
+/// memory, which is Windows.
 #[test]
 fn json_round_trip_under_gc_stress() {
     let expected =
@@ -8675,8 +8678,8 @@ fn json_round_trip_under_gc_stress() {
 }
 
 /// `json_stringify_escapes.nova` with `NOVA_GC_STRESS=1`, for the same reason
-/// as `json_round_trip_under_gc_stress`: every short escape and the `\u00XX`
-/// form are written after `json_quote` allocates.
+/// as `json_round_trip_under_gc_stress`. Its `\"`, `\\`, `\n` and `\t` escapes,
+/// and its `\u00XX` ones, are written after `json_quote` allocates.
 #[test]
 fn json_stringify_escapes_under_gc_stress() {
     let expected =
@@ -8687,6 +8690,24 @@ fn json_stringify_escapes_under_gc_stress() {
         .env("NOVA_GC_STRESS", "1")
         .arg("run")
         .arg(repo_root().join("tests/runtime/json_stringify_escapes.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `json_parse_strings.nova` with `NOVA_GC_STRESS=1`, for the three short
+/// escapes `json_stringify_escapes.nova` does not write: `\r`, `\b` and
+/// `\f`, each re-rendered by `json_quote` after it allocates.
+#[test]
+fn json_parse_strings_under_gc_stress() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_parse_strings.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_parse_strings.nova"))
         .assert()
         .success()
         .stdout(expected);

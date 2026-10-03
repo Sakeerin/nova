@@ -151,10 +151,10 @@ builtins! {
     /// for each string first. Std-only.
     StrIndexOf,
     /// `json_quote(s: String) -> String` — `s` as a JSON string literal,
-    /// quotation marks included, escaped in one pass over its bytes. Backs
-    /// `std/json`'s `quote`, which used to scan a [`Builtin::StrChars`]
-    /// array and rebuild any string that needed escaping character by
-    /// character. Std-only.
+    /// quotation marks included: the escaped length counted, then the result
+    /// written once. Backs `std/json`'s `quote`, which used to scan a
+    /// [`Builtin::StrChars`] array and rebuild any string that needed escaping
+    /// character by character. Std-only.
     JsonQuote,
     /// `str_to_upper(s: String) -> String` — full Unicode uppercase. Backs
     /// `std/strings`' `String::to_upper`. Whole-string rather than
