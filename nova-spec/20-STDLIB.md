@@ -742,7 +742,7 @@ its 2026-08-25 amendment.
    and `Object` arms used to perform. Each of them appends into a `Vec<Char>`
    and drains once through `vec_chars_to_string`, so none is quadratic in what
    it emits. [Amended 2026-10-03: `quote` no longer accumulates at all; the
-   runtime builtin `json_quote` builds its result in one pass.] The
+   runtime builtin `json_quote` writes its result once.] The
    mechanical check, which the module's own comment tells a reader to run
    rather than trust: `grep -n 'out = "${out}' std/json/lib.nova`
    must match nothing but text a comment quotes for illustration.

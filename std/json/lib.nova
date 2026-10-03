@@ -520,9 +520,9 @@ fn vec_chars_to_string(b: Vec<Char>) -> String {
 // Escape `s` as a JSON string literal, quotes included: `"` and `\` take a
 // backslash, the five control characters with a short escape take it, and
 // every other control character below `0x20` becomes `\u00XX` in lowercase
-// hex (RFC 8259). A runtime builtin does it in one pass over the bytes. It
-// used to scan a `[Char]` here and rebuild any string that needed escaping
-// one character at a time.
+// hex (RFC 8259). A runtime builtin does it: it counts the escaped length,
+// then writes the result once. It used to scan a `[Char]` here and rebuild
+// any string that needed escaping one character at a time.
 fn quote(s: String) -> String { json_quote(s) }
 
 // Parse `s` as JSON. `JsonError::at` is a character index -- a count of Unicode

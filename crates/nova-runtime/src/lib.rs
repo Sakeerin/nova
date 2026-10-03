@@ -162,7 +162,8 @@ pub(crate) struct Fill<'a> {
 
 impl Fill<'_> {
     /// Append `bytes`. Past the buffer's end this panics rather than write
-    /// out of bounds.
+    /// out of bounds, and from an `extern "C"` builtin that panic aborts the
+    /// process.
     pub(crate) fn put(&mut self, bytes: &[u8]) {
         self.out[self.at..self.at + bytes.len()].copy_from_slice(bytes);
         self.at += bytes.len();
@@ -270,6 +271,9 @@ pub unsafe extern "C" fn nova_rt_eprintln(s: *const NovaStr) {
 }
 
 /// Concatenate two strings into a new string value.
+///
+/// GC safety: `a`'s and `b`'s bytes are read after the result's buffer is
+/// allocated, kept alive across it as [`gc_str_filled`] describes.
 ///
 /// # Safety
 /// `a` and `b` must be valid `NovaStr` pointers.
