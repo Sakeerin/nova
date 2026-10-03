@@ -4077,6 +4077,159 @@ These predictions were written before the profiling build existed:
   sampled build's shares.
 - **One host, Windows, three runs.**
 
+## AMENDMENT 2026-10-03 (alloc-fast-path): a trimmed allocation path with no established cut in allocation's cost
+
+"(reprofile-2)" put allocation proper at 7.6–8.5 us per ten-user request.
+`docs/superpowers/specs/2026-10-03-alloc-fast-path-design.md` designed two
+trims of `gc::alloc` that keep what it promises:
+- **One `HEAP` borrow per allocation instead of two.** The threshold test
+  and the stress flag move inside the borrow that takes the slot. No
+  `Layout` check is made for a small request.
+- **Constant-size zeroing for the eight smallest slot classes,** in place
+  of a `memset` call.
+
+Both were implemented, tested and measured. **Together they did not cut
+allocation's cost measurably, so the code did not land.** Only the two
+together were profiled and timed per allocation; each alone ran only on
+the server, which could not resolve 2% at the time. What landed is the four
+characterization tests written first, the spec and plan with outcome
+notes, and this record.
+
+**Results:**
+- **A same-session profile establishes no reduction.** The base and the
+  branch were profiled alternately, three sampled runs each.
+  - Allocation proper ran at 13.9–15.1% of the server thread on the base
+    and 13.7–14.0% on the branch. The ranges overlap, by 0.1 point: all
+    three branch readings sit at the bottom of the base's range.
+  - The zeroing moved rather than vanished: `memset` fell from 1.9–2.2% to
+    0.7%, while `Pages::alloc_slot`, now holding the inline stores, rose
+    from 4.3–4.7% to 5.8–6.3%.
+  - `gc::alloc`'s own code fell from 3.7–4.7% to 2.1–2.4%, but a new
+    `Heap::allocate` frame took 1.1–1.2%.
+- **Inlining that frame did not help either.** A third variant marked
+  `Heap::allocate` `#[inline(always)]`, and its frame left the map.
+  Profiled alternately with the base again, allocation proper was
+  13.8–14.7% against 14.0–15.0%. `gc::alloc`'s own code rose back to
+  3.0–3.2%. The variant was not kept.
+  - In those alternated sampled runs the inlined variant was also disjointly
+    slower than the base: 13279.6–13727.8 against 13902.7–14758.6 req/sec.
+    That is three runs each, with the sampler running, so it is reported,
+    not relied on.
+- **Per allocation, nothing is disjoint.** Over five alternated runs of a
+  picosecond harness:
+  - a two-field record took 17.7–20.7 ns before and 16.0–18.9 after;
+  - `"${i}"` took 77.6–87.6 ns before and 73.6–86.0 after. It was faster
+    in all five pairs, by 1.8–6.1%, but the ranges overlap.
+- **The server's first answer was not reproduced.**
+  - Six alternated pairs, `before` always first, had `after` slower in all
+    six: 12742.2–12950.0 against 13016.0–13336.8 req/sec. Noise was low
+    during those pairs, so `before` always running first stays a candidate
+    cause.
+  - Five builds then ran alternately over three rounds. They were the
+    original `before`, the base rebuilt, the single borrow alone, the
+    zeroing alone, and both. Their ranges all overlapped, `after` at
+    12599.2–12989.6 inside `before`'s 12560.7–13495.8.
+  - Three more pairs with `after` first swung from 11745.1 to 18746.5
+    req/sec across six consecutive runs; the first run of a pair was faster
+    in 2 of 3.
+  - So the host's noise at the time exceeded a 2% effect, and no
+    code-level cause for the first answer was found.
+
+### How it was measured
+
+- **Builds.** Release toolchains from `cb4a80a` (the base) and from the
+  branch's commits, with the sibling `NAME` and `NAME.exe` deleted before
+  every `nova build`. The plain binaries' sizes and SHA-256s are in the
+  scratch logs, and the sampled builds' sizes in each run log. Every plain
+  server binary was 702,464 bytes, each with a different hash; the sampled
+  builds were 739,328 bytes.
+- **Per allocation:** a scratch Nova harness, never committed, times
+  5,000,000 iterations each of `P { a: i, b: i + 1 }` and `"${i}"` and
+  prints picoseconds per iteration. Five alternated runs per binary, one
+  fresh process each, with the checks `5000000` and `chars=` the same in
+  every run. A first version printed whole nanoseconds: records 17, 17, 17
+  before against 16, 16, 18 after, and `"${i}"` 74–75 against 72–73.
+- **Server:** ten users, 200 connections, `--warmup 5 --duration 15`, one
+  fresh process per reading, every reading `errors=0`, every body the same
+  604 bytes. `bun docs/benchmarks/bun-equivalence.js` passed against the
+  branch's server first.
+- **Profiles:** "(reprofile-2)"'s sampler and method, base and branch built
+  with their own symbol maps and run alternately.
+  - Allocation proper is `gc::alloc`'s inclusive share minus the
+    collector's instance. In each build that instance was confirmed as the
+    `LocalKey::with` that is the parent of the sweep and mark samples.
+  - The base's samples from the first comparison were overwritten when the
+    base was rerun for the second. Their figures here come from this
+    session's printed analysis, not from a file.
+  - The sampler patch was reverted after each build.
+  - A third run set of the branch, sampled before the alternated
+    comparison and from the same binary, read 13.94–14.36%. It is left out
+    because it was not alternated with the base.
+
+These predictions were written before any fast-path measurement binary was
+built. They name the first, whole-nanosecond harness of 2,000,000
+iterations and three runs, so the rows use its figures:
+
+| prediction | measured | verdict |
+|---|---|---|
+| a record: before 20–60 ns, after 10–30% lower, disjoint | 17, 17, 17 ns before; 16, 16, 18 after | wrong: below, and not disjoint |
+| `"${i}"`: before 80–200 ns, after 5–20% lower | 74–75 ns before; 1.4–4.0% lower per pair | wrong: below on both |
+| server after 2–6% above before, ranges likely overlap | first six pairs after slower in all six; not reproduced | wrong |
+| `memset` under `alloc_slot` from 2.1–2.6% to under 1% | 0.7% | right; the cost moved into `alloc_slot` |
+| the second `LocalKey::with` instance gone or under 1% | 2.3–2.5% | wrong |
+| `gc::alloc`, collection included, 17–21% | 20.2–20.8% | within; the base read 20.0–22.2% in the same session |
+
+### Per allocation, ps, in run order
+
+| run | record before | after | `"${i}"` before | after |
+|---|---|---|---|---|
+| 1 | 19424 | 15971 | 80845 | 76387 |
+| 2 | 17684 | 18910 | 87597 | 85978 |
+| 3 | 20695 | 17199 | 79681 | 76379 |
+| 4 | 17822 | 17864 | 78596 | 73820 |
+| 5 | 17990 | 16217 | 77578 | 73587 |
+
+### The profiles, % of the server thread, in run order
+
+| | base, first | branch | base, second | inlined |
+|---|---|---|---|---|
+| allocation proper | 14.35, 15.13, 13.93 | 13.74, 14.03, 13.98 | 13.98, 14.65, 14.96 | 14.72, 13.80, 14.20 |
+| `memset` | 2.17, 1.94, 2.19 | 0.68, 0.73, 0.73 | 2.09, 2.05, 2.19 | 0.65, 0.58, 0.68 |
+| `Pages::alloc_slot` | 4.70, 4.30, 4.57 | 5.83, 6.28, 5.92 | 4.54, 5.01, 4.94 | 6.26, 6.05, 6.26 |
+| `gc::alloc`, its own code | 3.99, 4.69, 3.67 | 2.35, 2.14, 2.21 | 3.59, 4.17, 3.78 | 3.12, 3.00, 3.22 |
+| `Heap::allocate` | — | 1.14, 1.19, 1.20 | — | — |
+
+### What landed
+
+- **`every_class_hands_out_a_zeroed_slot_over_stale_bytes`** checks all 24
+  classes, where an existing test covered only the 64-byte one. On the base
+  it fails when a slot is zeroed only 8 bytes deep.
+- **`the_crossing_allocation_collects_before_taking_its_slot`** pins that
+  the allocation reaching `next_gc` collects before taking its slot. On the
+  base it fails with `>` in place of `>=`, and when collection never runs.
+- **`small_sizes_are_always_describable`** pins that `heap_layout` accepts
+  `SMALL_MAX`. A `heap_layout` rejecting 2,048 bytes fails it when run
+  alone; in a full run that mutant aborts the test process through
+  `alloc`'s abort path first.
+- **`small_max_takes_a_slot_and_one_byte_more_takes_the_large_path`** pins
+  the boundary. `<` for `<=` in `alloc` fails it, and the existing
+  `sizes_over_small_max_take_the_large_path` too.
+- **The every-class test adds what the old one lacked.** Zeroing at most 64
+  bytes fails it and passes the existing 64-byte test.
+- **The gates pass** on the tests-only branch: `cargo test --locked
+  --workspace`, clippy with `-D warnings`, and rustfmt.
+
+### What this does not settle
+
+- **Where allocation's cost really goes.** The trims moved cost between
+  frames. On the base the slot search with its zeroing is 6.2–7.1% of the
+  thread; that and the thread-local access are left. Changing them needs a structural
+  design: handing out runs of free slots, or skipping zeroing for leaves
+  the runtime fills at once. The spec set both aside.
+- **The server-level effect of any of it.** At the time, readings of
+  identical binaries varied by more than a 2% effect.
+- **One host, Windows.**
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
