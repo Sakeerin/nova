@@ -2813,8 +2813,10 @@ fn strings_build_standalone() {
 /// allocates again to build the result string, and that intermediate array
 /// must stay live across the second allocation. A missed root here is
 /// silently wrong text, not a crash. `join` no longer decodes: since
-/// 2026-10-02 the runtime builtin `str_join` copies its parts' bytes before
-/// it allocates its result.
+/// 2026-10-02 the runtime builtin `str_join` builds it. Since 2026-10-03 that
+/// builtin allocates its result's buffer before it copies the parts in, so
+/// this fixture's `join` calls also check that the parts survive that
+/// allocation.
 #[test]
 fn strings_under_gc_stress() {
     let expected = std::fs::read_to_string(repo_root().join("tests/runtime/strings.stdout"))
@@ -8646,6 +8648,45 @@ fn json_round_trip_run() {
     nova()
         .arg("run")
         .arg(repo_root().join("tests/runtime/json_round_trip.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `json_round_trip.nova` with `NOVA_GC_STRESS=1`, a collection on every
+/// allocation. Since 2026-10-03 `json_quote`, `str_concat_n`, `str_join` and
+/// `str_concat` allocate their result's GC buffer first and only then read
+/// their arguments' bytes into it. Those bytes must survive the collection
+/// that allocation can run, and a missed root shows up as wrong text, not a
+/// crash.
+#[test]
+fn json_round_trip_under_gc_stress() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_round_trip.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_round_trip.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// `json_stringify_escapes.nova` with `NOVA_GC_STRESS=1`, for the same reason
+/// as `json_round_trip_under_gc_stress`: every short escape and the `\u00XX`
+/// form are written after `json_quote` allocates.
+#[test]
+fn json_stringify_escapes_under_gc_stress() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/json_stringify_escapes.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_GC_STRESS", "1")
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/json_stringify_escapes.nova"))
         .assert()
         .success()
         .stdout(expected);
