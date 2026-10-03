@@ -379,6 +379,16 @@ Every cell, Bun's included, ran slower than in "(gate-remeasure-3)", for
 reasons not measured, so these absolute figures do not compare with it.
 See "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+**Amended 2026-10-03 (gate-ratio-criterion):** the ratio against Bun is
+now judged by twelve paired pinned rounds, per
+`docs/adr/0021-gate-ratio-paired-rounds.md`. A round counts for Nova only
+if Nova's req/sec over Bun's is at least a margin for Bun's `Date` header:
+Bun's response bytes over Nova's, never below 1.0, re-measured each run,
+and about 1.055 on the sizes last measured. The ratio is met if Nova clears
+it in 10 or more of the 12, not met if it falls short in 10 or more, and
+inconclusive otherwise. The status above is not re-judged: none of the runs
+above took twelve rounds.
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings

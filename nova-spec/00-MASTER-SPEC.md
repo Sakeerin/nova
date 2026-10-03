@@ -479,6 +479,12 @@ The gate's two statements still disagree. Under any reading that counts §5,
 the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+**Amended 2026-10-03 (gate-ratio-criterion):** `60-EXAMPLES.md` §5's ratio
+is now judged by twelve paired pinned rounds, with a margin for Bun's
+`Date` header, per `docs/adr/0021-gate-ratio-paired-rounds.md`. This
+section's absolute criterion is unchanged. Which of the two statements
+governs is still not settled.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 

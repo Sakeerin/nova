@@ -390,6 +390,21 @@ first and all nine exchanges matching:
 **The gate is still NOT met**, because the ratio is not established. Full
 account in `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-4)".
 
+**Amended 2026-10-03 (gate-ratio-criterion):** how this section's ratio is
+judged is now decided in `docs/adr/0021-gate-ratio-paired-rounds.md`.
+- **A run takes twelve rounds.** Each round is one Nova and one Bun reading
+  back to back, pinned to core 0, and the order alternates between rounds.
+- **A margin for wire framing.** A round counts for Nova only if Nova's
+  req/sec is at least *m* times Bun's, where *m* is Bun's response bytes
+  over Nova's, never below 1.0, re-measured each run. On the sizes last
+  measured *m* is about 1.055, because Bun's `Date` header favours Nova.
+- **The verdict:** met if Nova clears the margin in 10 or more of the 12,
+  not met if it falls short in 10 or more, and inconclusive otherwise.
+- **Unpinned rounds** are run and reported, and do not decide.
+
+The range-extremes reading every ratio measurement above used is no longer
+the criterion. Those measurements are not re-judged.
+
 `src/main.nova`:
 ```nova
 import std/http
