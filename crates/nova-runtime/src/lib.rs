@@ -106,11 +106,45 @@ pub struct NovaStr {
 /// reproducing `NovaStr { len, ptr }`'s layout a second time, which is
 /// precisely the drift class this shared helper exists to avoid.
 pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
-    let len = s.len();
+    // SAFETY: the writer puts exactly `s.len()` bytes of valid UTF-8.
+    unsafe { gc_str_filled(s.len(), |out| out.put(s.as_bytes())) }
+}
+
+/// Allocate a GC string of exactly `len` bytes, let `fill` write them
+/// straight into its byte buffer, then allocate the header.
+///
+/// The builtins that build a result from their arguments use this rather
+/// than collecting into a Rust `String` and calling [`gc_str`]. That buffer
+/// cost a system-heap allocation, a free and a second copy per call: in
+/// `examples/05-json-api/BENCHMARK.md`'s "(reprofile-3)", the three largest
+/// such builtins spent 3.5–3.6% of the server thread in the system heap.
+///
+/// GC safety: `fill` runs after the buffer's allocation, which can run a
+/// collection, so whatever it reads from the GC heap must still be reachable
+/// then. A caller's arguments are: a pointer held in the caller's frame or in
+/// a callee-saved register is a root, and marking is range-based, so a
+/// pointer into a string's bytes keeps their buffer alive (`gc.rs`'s module
+/// doc comment). [`nova_rt_str_chars`] relies on the same. The buffer itself
+/// is held in this frame across the header's allocation.
+///
+/// # Safety
+/// `fill` must write exactly `len` bytes of valid UTF-8 through
+/// [`Fill::put`]. Writing more panics. Writing fewer leaves zero bytes in the
+/// string, which a debug build catches.
+pub(crate) unsafe fn gc_str_filled(len: usize, fill: impl FnOnce(&mut Fill<'_>)) -> *mut NovaStr {
     // A non-traced byte buffer holding the UTF-8 bytes.
     let buf = gc::alloc(len.max(1), false);
-    // SAFETY: `buf` has `len.max(1)` writable bytes.
-    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), buf, len) };
+    // SAFETY: `buf` has `len.max(1)` writable bytes that nothing else refers
+    // to yet.
+    let mut out = Fill {
+        out: unsafe { std::slice::from_raw_parts_mut(buf, len) },
+        at: 0,
+    };
+    fill(&mut out);
+    debug_assert_eq!(
+        out.at, len,
+        "a GC string's writer filled a different length than it asked for"
+    );
     let node = gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
     // SAFETY: `node` points to a fresh `NovaStr`-sized allocation.
     unsafe {
@@ -118,6 +152,21 @@ pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
         (*node).ptr = buf;
     }
     node
+}
+
+/// The write position in a byte buffer [`gc_str_filled`] sized exactly.
+pub(crate) struct Fill<'a> {
+    out: &'a mut [u8],
+    at: usize,
+}
+
+impl Fill<'_> {
+    /// Append `bytes`. Past the buffer's end this panics rather than write
+    /// out of bounds.
+    pub(crate) fn put(&mut self, bytes: &[u8]) {
+        self.out[self.at..self.at + bytes.len()].copy_from_slice(bytes);
+        self.at += bytes.len();
+    }
 }
 
 /// Test-only: allocate a `Bytes` payload, for a test that hands a runtime
@@ -226,10 +275,11 @@ pub unsafe extern "C" fn nova_rt_eprintln(s: *const NovaStr) {
 /// `a` and `b` must be valid `NovaStr` pointers.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr) -> *mut NovaStr {
-    let mut s = String::with_capacity((*a).len as usize + (*b).len as usize);
-    s.push_str(as_str(a));
-    s.push_str(as_str(b));
-    gc_str(&s)
+    let (a, b) = (as_str(a), as_str(b));
+    gc_str_filled(a.len() + b.len(), |out| {
+        out.put(a.as_bytes());
+        out.put(b.as_bytes());
+    })
 }
 
 /// Concatenate every string in `parts` into one new string: the n-ary form
@@ -237,12 +287,11 @@ pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr
 ///
 /// One copy of each part and one result, two GC objects, where pairwise
 /// concatenation made a new string per part, each copying everything built
-/// so far.
+/// so far. Each part is copied straight into the result's buffer.
 ///
-/// GC safety: every part's bytes are copied into the Rust `String` before
-/// this function's first GC allocation (in `gc_str`), so a collection
-/// triggered while building the result cannot free anything still being
-/// read. `nova_rt_str_concat` relies on the same ordering.
+/// GC safety: the parts are read after the result's buffer is allocated.
+/// `parts`, held in this frame, keeps the array and so every part alive
+/// across that allocation, as [`gc_str_filled`] describes.
 ///
 /// # Safety
 /// `parts` must point to a Nova array `{ len: i64, elems… }` whose element
@@ -252,29 +301,24 @@ pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr
 pub unsafe extern "C" fn nova_rt_str_concat_n(parts: *const u8) -> *mut NovaStr {
     let words = parts as *const i64;
     let n = (*words).max(0) as usize;
-    let mut total = 0usize;
-    for i in 0..n {
-        let p = *words.add(1 + i) as *const NovaStr;
-        total += (*p).len as usize;
-    }
-    let mut s = String::with_capacity(total);
-    for i in 0..n {
-        let p = *words.add(1 + i) as *const NovaStr;
-        s.push_str(as_str(p));
-    }
-    gc_str(&s)
+    let part = |i: usize| as_str(*words.add(1 + i) as *const NovaStr);
+    let total = (0..n).map(|i| part(i).len()).sum();
+    gc_str_filled(total, |out| {
+        for i in 0..n {
+            out.put(part(i).as_bytes());
+        }
+    })
 }
 
 /// Join every string in `parts` with `sep` between each pair: the body of
 /// `std/strings`' `String.join`.
 ///
-/// One copy of each part and separator into a buffer sized up front, then
-/// one result. The Nova-level `join` it replaces walked every part
+/// One copy of each part and separator, straight into the result's buffer,
+/// sized up front. The Nova-level `join` it replaces walked every part
 /// character by character into a character array.
 ///
-/// GC safety: every byte is copied into the Rust `String` before this
-/// function's first GC allocation (in `gc_str`), the same ordering
-/// [`nova_rt_str_concat_n`] relies on.
+/// GC safety: the parts and `sep` are read after the result's buffer is
+/// allocated, kept alive across it as in [`nova_rt_str_concat_n`].
 ///
 /// # Safety
 /// `sep` must be a valid `NovaStr` pointer. `parts` must point to a Nova
@@ -285,20 +329,16 @@ pub unsafe extern "C" fn nova_rt_str_join(sep: *const NovaStr, parts: *const u8)
     let words = parts as *const i64;
     let n = (*words).max(0) as usize;
     let sep = as_str(sep);
-    let mut total = sep.len() * n.saturating_sub(1);
-    for i in 0..n {
-        let p = *words.add(1 + i) as *const NovaStr;
-        total += (*p).len as usize;
-    }
-    let mut s = String::with_capacity(total);
-    for i in 0..n {
-        if i > 0 {
-            s.push_str(sep);
+    let part = |i: usize| as_str(*words.add(1 + i) as *const NovaStr);
+    let total = sep.len() * n.saturating_sub(1) + (0..n).map(|i| part(i).len()).sum::<usize>();
+    gc_str_filled(total, |out| {
+        for i in 0..n {
+            if i > 0 {
+                out.put(sep.as_bytes());
+            }
+            out.put(part(i).as_bytes());
         }
-        let p = *words.add(1 + i) as *const NovaStr;
-        s.push_str(as_str(p));
-    }
-    gc_str(&s)
+    })
 }
 
 /// The character index of the first occurrence of `needle` in `haystack`,
@@ -339,43 +379,61 @@ pub unsafe extern "C" fn nova_rt_str_index_of(
 /// boundary. The Nova-level `quote` this replaces built a `[Char]` and
 /// scanned it character by character.
 ///
-/// GC safety: every byte is copied into the Rust `String` before `gc_str`
-/// allocates, the ordering [`nova_rt_str_concat_n`] relies on.
+/// The escaped length is counted first, so the result is written once,
+/// straight into its GC buffer.
+///
+/// GC safety: `s`'s bytes are read after the result's buffer is allocated,
+/// kept alive across it as [`gc_str_filled`] describes.
 ///
 /// # Safety
 /// `s` must be a valid `NovaStr` pointer.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_json_quote(s: *const NovaStr) -> *mut NovaStr {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let src = as_str(s);
-    let mut out = String::with_capacity(src.len() + 2);
-    out.push('"');
-    let mut start = 0;
-    for (i, &b) in src.as_bytes().iter().enumerate() {
-        let short = match b {
-            b'"' => "\\\"",
-            b'\\' => "\\\\",
-            b'\n' => "\\n",
-            b'\r' => "\\r",
-            b'\t' => "\\t",
-            0x08 => "\\b",
-            0x0c => "\\f",
-            0x00..=0x1f => "",
-            _ => continue,
-        };
-        out.push_str(&src[start..i]);
-        if short.is_empty() {
-            out.push_str("\\u00");
-            out.push(HEX[(b >> 4) as usize] as char);
-            out.push(HEX[(b & 15) as usize] as char);
-        } else {
-            out.push_str(short);
+    let src = as_str(s).as_bytes();
+    // What each escape adds to its one source byte: one more byte for a
+    // two-byte escape, five more for `\u00XX`.
+    let extra: usize = src
+        .iter()
+        .map(|&b| match b {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 1,
+            0x00..=0x1f => 5,
+            _ => 0,
+        })
+        .sum();
+    gc_str_filled(src.len() + 2 + extra, |out| {
+        out.put(b"\"");
+        let mut start = 0;
+        for (i, &b) in src.iter().enumerate() {
+            let short: &[u8] = match b {
+                b'"' => b"\\\"",
+                b'\\' => b"\\\\",
+                b'\n' => b"\\n",
+                b'\r' => b"\\r",
+                b'\t' => b"\\t",
+                0x08 => b"\\b",
+                0x0c => b"\\f",
+                0x00..=0x1f => b"",
+                _ => continue,
+            };
+            out.put(&src[start..i]);
+            if short.is_empty() {
+                out.put(&[
+                    b'\\',
+                    b'u',
+                    b'0',
+                    b'0',
+                    HEX[(b >> 4) as usize],
+                    HEX[(b & 15) as usize],
+                ]);
+            } else {
+                out.put(short);
+            }
+            start = i + 1;
         }
-        start = i + 1;
-    }
-    out.push_str(&src[start..]);
-    out.push('"');
-    gc_str(&out)
+        out.put(&src[start..]);
+        out.put(b"\"");
+    })
 }
 
 /// Compare two strings for byte equality.
@@ -747,9 +805,30 @@ pub unsafe extern "C" fn nova_rt_str_to_float(s: *const NovaStr) -> f64 {
 }
 
 /// Format an `Int` as a string.
+///
+/// The digits are written on the stack and copied once into GC memory,
+/// rather than through `to_string`'s heap `String`.
 #[no_mangle]
 pub extern "C" fn nova_rt_int_to_str(v: i64) -> *mut NovaStr {
-    gc_str(&v.to_string())
+    // Twenty bytes hold `i64::MIN`: a sign and nineteen digits.
+    let mut text = [0u8; 20];
+    let mut at = text.len();
+    let mut rest = v.unsigned_abs();
+    loop {
+        at -= 1;
+        text[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        at -= 1;
+        text[at] = b'-';
+    }
+    let text = &text[at..];
+    // SAFETY: the writer puts exactly `text.len()` ASCII bytes.
+    unsafe { gc_str_filled(text.len(), |out| out.put(text)) }
 }
 
 /// Format a `Float` as a string.
@@ -1105,6 +1184,22 @@ mod tests {
         }
     }
 
+    /// Every digit count from one to nineteen, both signs, and both ends of
+    /// `i64`, against Rust's own formatting. `i64::MIN` has no positive
+    /// counterpart, so a sign handled by negating the value overflows there.
+    #[test]
+    fn int_to_str_matches_rust_at_every_digit_count_and_both_ends() {
+        let mut cases = vec![0, i64::MAX, i64::MIN, i64::MIN + 1];
+        let mut p: i64 = 1;
+        for _ in 0..19 {
+            cases.extend([p, p - 1, -p, 1 - p]);
+            p = p.saturating_mul(10);
+        }
+        for v in cases {
+            unsafe { assert_eq!(to_string(nova_rt_int_to_str(v)), v.to_string(), "{v}") };
+        }
+    }
+
     #[test]
     fn bool_to_str_formats() {
         unsafe {
@@ -1249,6 +1344,24 @@ mod tests {
                     let got = as_str(nova_rt_str_join(make_str(sep), str_array(parts)));
                     assert_eq!(got, parts.join(sep), "sep {sep:?} parts {parts:?}");
                 }
+            }
+        }
+    }
+
+    /// Against Rust's own concatenation, with either side empty and with
+    /// multi-byte text on both.
+    #[test]
+    fn concat_keeps_both_sides_whole() {
+        unsafe {
+            for (a, b) in [
+                ("", ""),
+                ("", "x"),
+                ("x", ""),
+                ("foo", "bar"),
+                ("日本", "🦀é"),
+            ] {
+                let got = as_str(nova_rt_str_concat(make_str(a), make_str(b)));
+                assert_eq!(got, format!("{a}{b}"), "{a:?} + {b:?}");
             }
         }
     }
