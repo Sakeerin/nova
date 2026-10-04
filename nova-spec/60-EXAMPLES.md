@@ -92,7 +92,7 @@ anyway.** `nova check` stops on line 1, where `import std/http` is `P0001`.
 Every construct the listing uses is inventoried, with its diagnostic and a route
 that ran, in `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`
 §3. A `Server` router written in Nova served `Hello from Nova!` on
-`0.0.0.0:3000`. The second clause is open: nothing defines what "exits cleanly
+`0.0.0.0:3000` on this Windows host. The second clause is open: nothing defines what "exits cleanly
 on SIGTERM" means, and the runtime observes no signal (§3.3 there). The listing
 above is unchanged.
 
@@ -168,15 +168,15 @@ async fn main() {
 **Gate:** Full CLI cycle works (add → list → done → list).
 
 **Recorded 2026-10-04 (branch `examples-03-04-inventory`): this listing does
-not compile as written, and the one thing today's Nova has no route for is the
-program's arguments.** `nova check` stops on line 1, where `import std/fs` is
-`P0001`. The closest program today's Nova accepts ran the add → list → done →
-list cycle over four separate processes, with each command read from a file
-instead of argv. `args()` does not exist and has no portable route,
-`exit(code)` exists only through FFI, and `nova run` cannot pass arguments
-through. The full inventory is
-`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §4. The listing
-above is unchanged.
+not compile as written, and the one thing today's Nova has no portable route
+for is the program's arguments.** `nova check` stops on line 1, where
+`import std/fs` is `P0001`. A program today's Nova accepts, using no FFI, ran
+the add → list → done → list cycle on this Windows host, one process per
+command, with each command read from a file instead of argv. `args()` does not
+exist; a built exe on Windows can read argv only through FFI, and `nova run`
+cannot pass arguments through. `exit(code)` exists only through FFI. The full
+inventory is `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`
+§4. The listing above is unchanged.
 
 ---
 
@@ -324,6 +324,14 @@ rather than this sentence. `Map` has `keys()` and no `values()`
 ids ascending from 1 instead of iterating values. The `Handler` type alias
 still does not parse, so there is nothing for `Server.get`/`.post` to be built
 on. There is no `?` operator. None of those moved here.
+
+**Recorded 2026-10-04 (branch `examples-03-04-inventory`): the `Handler` alias
+is not what stands between `std/http` and a `Server.get`.** It still does not
+parse. But a router over `fn(Request) -> Response` fields, written in today's
+Nova, served §3's routes on this Windows host, and an async handler held as
+`fn(Request) -> Future<Response>` and awaited at dispatch also ran. Neither
+needs the alias. See
+`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1 and §3.2.
 
 **AMENDED 2026-09-11: this section's own criterion, the ratio against Bun,
 is no longer unmeasured.** Four cells, two replicates each, `/users`, a

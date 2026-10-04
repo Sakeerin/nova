@@ -222,6 +222,12 @@ in code or records; none is fixed here.
 3. **A hung connection is silent.** An untimed `Wait::Io` is never reported as a deadlock
    (`task.rs:1006-1009`), and `block_on` cannot return while any task is parked (`task.rs:992-994`),
    so there is no graceful-shutdown path.
+
+   > **AMENDED 2026-10-04 (branch `examples-03-04-inventory`).** This holds for an
+   > untimed wait. An `accept` polled under `std/time`'s `timeout` with a stop
+   > condition, with every connection's reads bounded the same way, lets `main`
+   > return and the process exit 0, and that ran. See
+   > `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.3.
 4. **Inter-task channels are the deadlock landmine, not mutexes.** `std/sync` waits by spinning
    `yield_now().await`; a `Mutex` never held across an `.await` can never freeze anything, but
    `recv` on an empty channel spins unconditionally, so a consumer waiting on a socket-parked

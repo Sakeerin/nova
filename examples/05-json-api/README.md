@@ -5,9 +5,12 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
 ## What this demonstrates
 
 - Routing without a router type: a `match` over `req.method` and a
-  `req.path.split("/")`. `nova-spec/20-STDLIB.md`'s own
-  `pub type Handler = async fn(Request) -> Response` does not parse today, so
-  there is nothing here for `Server.get`/`.post` to be built on. **The split
+  `req.path.split("/")`. `std/http` ships no router type.
+  `nova-spec/20-STDLIB.md`'s own `pub type Handler = async fn(Request) -> Response`
+  still does not parse, but a router does not need it: one over
+  `fn(Request) -> Response` fields runs in today's Nova
+  (`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.2).
+  **The split
   has to test the resource segment and not only the segment count** --
   `/users/1` splits to `["", "users", "1"]` and so does `/foo/1` to
   `["", "foo", "1"]`, so counting alone serves `/<anything>/<int>` as a user
