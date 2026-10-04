@@ -566,18 +566,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **What blocks the two Phase 2 gate examples that do not exist yet,
   `03-http-server` and `04-todo-cli`, is now inventoried construct by
   construct.** Neither `nova-spec/60-EXAMPLES.md` listing compiles as written:
-  each stops on line 1 with `P0001` at `import std/...`.
+  each stops on line 1 with `P0001` at `import std/...`. Measured on this
+  development host, Windows.
   - §3's first gate clause is reachable in today's Nova: a `Server` router
     written in Nova served `Hello from Nova!` on `0.0.0.0:3000`. Its second
     clause, "exits cleanly on SIGTERM", is undefined, and the runtime observes
     no signal.
-  - §4's add → list → done → list cycle ran over four processes, with each
-    command read from a file. What has no portable route is the program's
-    arguments: there is no `args()`, `exit(code)` exists only through FFI, and
-    `nova run` cannot pass arguments through.
-  - Found while probing, and not fixed here: a built executable drops a
-    trailing partial line written through std/io's `stdout().write(...)`
-    when `main` returns, where `nova run` keeps it.
+  - §4's add → list → done → list cycle ran with one process per command,
+    each command read from a file. What has no portable route is the
+    program's arguments: there is no `args()`, and `nova run` cannot pass
+    arguments through. Separately, `exit(code)` exists only through FFI.
+  - Found while probing, and not fixed here: a built (Cranelift) executable
+    drops a trailing partial line written through std/io's
+    `stdout().write(...)` when `main` returns, where `nova run` keeps it.
 
   Details are in
   `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`.
