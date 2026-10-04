@@ -451,9 +451,11 @@ scattered far less than "(gate-remeasure-6)"'s, though not less than
 "(gate-remeasure-5)"'s, for reasons not measured; the ADR judges each run
 alone. This verdict is on the gate's own statement, a req/sec ratio,
 judged by that ADR's method. It does not cover every bullet of the
-methodology below: every reading was warm, a fresh server measured for
-30 s after a 5 s warmup, so no cold run was measured, and
-`nova-bench-http` records no p50, p95 or p99 latency. Full account in
+methodology below: the load came from `nova-bench-http`, not `wrk -t8`,
+because `wrk` does not run on this host, as the 2026-09-03 amendment above
+records, though at the same 200 connections for 30 s; every reading was
+warm, a fresh server measured for 30 s after a 5 s warmup, so no cold run
+was measured; and `nova-bench-http` records no p50, p95 or p99 latency. Full account in
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
 `src/main.nova`:
