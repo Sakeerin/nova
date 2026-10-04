@@ -45,10 +45,12 @@ commands, Python for scratch analysis.
   script that matches multi-line text handle `\r\n`.
 - **Run Python with `-X utf8`.** This host's Python 3.13 writes redirected
   stdout in cp874 and raises on characters such as `−`, `≥` and `§`.
-- **The `*_build_standalone` tests link `target/debug/nova_runtime.lib`,
-  which `cargo test` does not rebuild.** Run `cargo build --locked -p
-  nova-runtime` after a runtime change and before any `nova-cli` test run
-  whose standalone results are to count.
+- **Every `nova-cli` test that runs `nova build` (the `build_and_run`
+  helper's callers, the `*_build_standalone` family and others) links
+  `target/debug/nova_runtime.lib`, which `cargo test` does not rebuild.**
+  Run `cargo build --locked -p nova-runtime` after a runtime change and
+  before any `nova-cli` test run whose built-executable results are to
+  count.
 - Gates: `cargo fmt --all --check`, `cargo clippy --locked --workspace
   --all-targets --all-features -- -D warnings`, and `cargo test --locked
   --workspace`, all passing.
@@ -383,8 +385,9 @@ module's own `a_bytes_value_is_tracked_at_its_full_size` for the same
 reasoning applied to a `Bytes` object)". Rewrap to 80 columns as the file
 does.
 
-Afterwards, `grep -n "a_bytes_buffer_above\|has_a_scanned_header" crates/`
-must print nothing.
+Afterwards, `git grep -n "a_bytes_buffer_above\|has_a_scanned_header" --
+crates/` must print nothing and exit 1 (no match). Any line it prints is a
+reference that was missed; exit 2 means the check itself failed.
 
 - [ ] **Step 3: Run the new tests and watch them fail**
 
@@ -443,9 +446,9 @@ pub(crate) const STR_HEADER: usize = std::mem::size_of::<NovaStr>();
 /// object. The size saturates, so an overflowing `len` reaches `gc::alloc`'s
 /// size-limit abort instead of wrapping to a too-small object.
 ///
-/// One object instead of a scanned header over a separate leaf buffer: in
-/// `examples/05-json-api/BENCHMARK.md`'s "(alloc-mix)", string buffers were
-/// 67.0 of 300.9 allocations per ten-user request.
+/// One allocation where there were two: in
+/// `examples/05-json-api/BENCHMARK.md`'s "(alloc-mix)", the second (the
+/// bytes) was 67.0 of 300.9 allocations per ten-user request.
 pub(crate) fn alloc_str_object(len: usize) -> (*mut NovaStr, *mut u8) {
     let size = STR_HEADER.saturating_add(len.max(1));
     let base = gc::alloc(size, false);
@@ -586,9 +589,12 @@ cd /d/Projects/nona/nova && cargo test --locked -p nova-runtime 2>&1 | grep -E "
 ```
 
 Expected: `0 failed` on every `test result` line. The `cargo build -p
-nova-runtime` refreshes `target/debug/nova_runtime.lib`, which the three
-matching `*_build_standalone` tests (`strings`, `fs_not_found`, `bytes_api`)
-link; without it they link a pre-change runtime and pass regardless.
+nova-runtime` refreshes `target/debug/nova_runtime.lib`, which every test
+that runs `nova build` links. Under this step's filters those are
+`strings_build_standalone`, `fs_not_found_build_standalone`,
+`bytes_api_build_standalone`, and the build half of
+`record_literal_inside_an_interpolation_runs`. Without the rebuild, those
+builds link a pre-change runtime and pass regardless.
 
 - [ ] **Step 9: Commit the code and its tests together**
 
@@ -913,7 +919,7 @@ or paragraph, separated by one space. Never change the sentence itself.
 | same (5020) | "the argument `nova_rt_str_chars` already relies on." | `[Amended 2026-10-04: since "(one-alloc-strings)" there is one allocation, not a first of two.]` |
 | `CHANGELOG.md` (502) | "Output is unchanged." (the end of the "Five string builtins write their result straight into GC memory" bullet) | `[Amended 2026-10-04: since one allocation per string, the GC buffer and its header are one object.]` |
 | same (574) | "two-object string that copied everything built so far." | `[Amended 2026-10-04: since one allocation per string, a runtime string is one object.]` |
-| same (3951) | "rather than a second Rust struct with the identical layout." | `[Amended 2026-10-04: since one allocation per string, a String or Bytes value is one leaf object, its header followed inline by its bytes.]` |
+| same (3951) | "rather than a second Rust struct with the identical layout." | `[Amended 2026-10-04: since one allocation per string, a runtime-made String or Bytes value is one leaf object, its header followed inline by its bytes; a String literal's header is a 16-byte leaf pointing at static data.]` |
 
 `docs/benchmarks/README.md`: insert a new paragraph after the one ending
 "so nothing here establishes allocation as the cause." (line 903), before
@@ -978,8 +984,11 @@ cd /d/Projects/nona/nova && python -X utf8 /tmp/gcm/oas/docsweep.py > /tmp/gcm/o
 Expected: no `SWEEP-INCOMPLETE` and no traceback (either means the sweep
 stopped part-way and must be re-run, not counted), and every `[CHECK]` line
 is one of five kinds:
-- this change's own new wording ("header followed inline", "one leaf
-  object");
+- this change's own new wording: any line containing "header followed
+  inline" or "one leaf object", plus the `Ty::Bytes` doc in
+  `crates/nova-hir/src/lib.rs` ("`{len, ptr}` GC leaf header", 1 hit) and
+  the `std/bytes/lib.nova` module comment ("`{len, ptr}` leaf header", 1
+  hit);
 - a restatement the spec deliberately leaves (spec §6: `CHANGELOG.md`
   34-35 and 1947-1949, ADR 0019:338-340, `BENCHMARK.md:1067-1072`, the
   `docs/benchmarks/README.md:101-104`, `docs/benchmarks/server.nova:18-19`);
@@ -1115,9 +1124,9 @@ with per-pair ratios, and a split by order.
 - [ ] **Step 4: Confirm the object count with the scratch counters**
 
 The alloc-mix patch touches only `gc.rs`, whose code this change leaves
-alone. Task 4 adds one line to its module doc, which moves the patch's
-hunks (at line 107 and later) down by one line; `git apply` accepts that
-offset. So it applies:
+alone. Task 4 grows its module doc by two lines (a 2-line sentence
+becomes 4), which moves the patch's hunks (at line 107 and later) down by
+two lines; `git apply` accepts that offset. So it applies:
 
 ```bash
 cd /d/Projects/nona/nova && git apply /tmp/gcm/mix/alloc-mix.patch && cargo build --release --locked 2>&1 | tail -1 && G=/tmp/gcm/oas && rm -f $G/m $G/m.exe && ./target/release/nova.exe build examples/05-json-api/src/main.nova -o $G/m.exe 2>&1 | tail -1 && sed 's#/tmp/gcm/mix#/tmp/gcm/oas#g' /tmp/gcm/mix/run.sh > $G/run_mix.sh && chmod +x $G/run_mix.sh && rm -f $G/runs.log && for r in 1 2 3; do $G/run_mix.sh $r; done; git checkout -- crates/nova-runtime/src/gc.rs && cargo build --release --locked 2>&1 | tail -1 && git status --short
