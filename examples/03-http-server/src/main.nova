@@ -1,0 +1,38 @@
+// Phase 2's gate example in `nova-spec/60-EXAMPLES.md` section 3: an HTTP
+// server with two routes that exits cleanly on SIGTERM.
+//
+// **This is not that section's listing, deliberately.** The listing is kept
+// as the aspiration it was, the precedent `examples/05-json-api` set, and
+// this serves the same two routes in the Nova that exists. Every
+// substitution, and the evidence for it, is in
+// `docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md`
+// section 3.
+//
+// **"Exits cleanly" means graceful,** by the user's decision of 2026-10-04.
+// On SIGTERM or SIGINT (Ctrl+Break or Ctrl+C on Windows) `listen` stops
+// accepting, the requests already in flight are finished, and the process
+// exits 0. A second signal ends it at once. See `std/http`'s
+// `Server::listen` and docs/adr/0022-process-shutdown-signals.md.
+//
+// **The log line comes before the server is ready.** It is written before
+// `listen` binds the port and installs the signal handler, so readiness
+// means the port accepts a connection.
+
+// `{"status":"ok"}`. Built from a `Map` because a map literal is `P0001`; it
+// has one key, so `Map`'s per-process ordering cannot reorder it.
+fn status_ok() -> JsonValue {
+    let mut m: Map<String, JsonValue> = Map::new()
+    m.insert("status", String("ok"))
+    Object(m)
+}
+
+async fn main() {
+    Log::init()
+
+    let app = Server::new()
+        .get("/", |_| Response::text(200, "Hello from Nova!"))
+        .get("/health", |_| Response::json(status_ok()))
+
+    Log::info("listening on :3000")
+    app.listen("0.0.0.0:3000").await.unwrap()
+}
