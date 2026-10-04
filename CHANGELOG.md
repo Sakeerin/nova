@@ -489,8 +489,34 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-04 (reprofile-4)".
+- **What a ten-user request allocates, counted.** A scratch count by size
+  class and scan flag, on `45d05b0`, three runs.
+  - 300.91-300.94 objects per request; 66.98 of them leaves, 22.3%, which
+    the code shows are all string and `Bytes` buffers.
+  - 77.7% of objects are in the 16-byte class; no object is above 2,048
+    bytes.
+  - 11,742-11,758 bytes zeroed per request, 39.5-39.6% of them in leaves.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-04 (alloc-mix)".
+- **One allocation per runtime string, measured.**
+  - A ten-user request allocates 233.94-234.00 objects, against
+    300.91-300.94; about 71 literal headers per request are now leaves.
+  - Per call, all four are disjoint. `stringify` of a clean email went
+    from 79.7-82.8 to 65.4-66.6 ns, and `users_json` at ten users from
+    4031.4-4578.2 to 3289.8-3383.4 ns.
+  - The ten-user server's ranges overlap, 14892.1-15178.5 against
+    14846.5-15874.0 req/sec over six alternated pairs, so no gain is
+    claimed.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-04 (one-alloc-strings)".
 
 ### Changed
+- **Each runtime string is one leaf GC object.** `String` and `Bytes`
+  values made at run time were a scanned header over a separate leaf
+  buffer; now the header and bytes share one leaf object, built by
+  `alloc_str_object`. Literal headers are leaves too. Output is unchanged.
 - **Five string builtins write their result straight into GC memory.**
   `json_quote`, `str_concat_n`, `str_join`, `str_concat` and `int_to_str`
   used to build a Rust `String` and copy it into a GC buffer. A new runtime

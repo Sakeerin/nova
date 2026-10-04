@@ -5016,8 +5016,8 @@ heap, building a Rust `String` that `gc_str` then copied into a GC buffer.
 - **The change:** a new runtime helper, `gc_str_filled`, allocates the GC
   byte buffer at its exact final length and lets the caller write into it.
   [Amended 2026-10-04: since "(one-alloc-strings)" the buffer and its header
-  are one object.] Five builtins now use it: `json_quote`, `str_concat_n`, `str_join`,
-  `str_concat` and `int_to_str`.
+  are one object.] Five builtins now use it: `json_quote`, `str_concat_n`,
+  `str_join`, `str_concat` and `int_to_str`.
 - **What each call saves:** one system-heap allocation, one free and one
   copy.
   - `json_quote` now counts its escaped length before it writes.
@@ -5775,6 +5775,278 @@ system calls, the system heap and `nova_rt_str_concat_n` fell.
 - **What either structural allocation candidate would save.** Neither was
   tried.
 - **One host, Windows, three runs.**
+
+## AMENDMENT 2026-10-04 (alloc-mix): what a ten-user request allocates
+
+"(reprofile-4)" put allocation, collection included, at 22.6–24.7% of the
+json-api's server thread, and named two untried candidates. Before choosing
+between them, a scratch count of what one ten-user `GET /users` request
+allocates, by size class and scan flag, on `main` at `45d05b0`.
+
+**Results, per request, three runs:**
+- **300.91–300.94 objects.** The three runs agree to 0.03 objects.
+- **66.98 of them are leaves (`scan = false`), 22.3%.** From the code, not
+  counted: outside tests, the only leaf allocations at `45d05b0` are string
+  and `Bytes` byte buffers, from `gc_str_filled` and `gc_bytes`.
+- **77.7% of objects are in the 16-byte class:** 197.94 scanned and 35.99
+  leaf per request.
+- **11,742–11,758 bytes zeroed per request** (the slot for a small object,
+  the exact size for a large one), 39.5–39.6% of them in leaves; 10,646–10,657
+  bytes requested.
+- **No large objects** (above 2,048 bytes).
+- **One collection every 176.91–176.92 requests.**
+
+**What it implies, derived, not measured:**
+- Skipping the zeroing of leaves their caller fills completely is worth at
+  most about 1% of the thread: "(reprofile-4)" put `memset` zeroing at
+  2.3–2.7%, and leaves are 39.5–39.6% of the bytes zeroed.
+- Handing out free slots in runs has no ceiling these counts can set.
+- Making each runtime string one object removes a header per string
+  buffer: about 67 of 301 allocations per request, 22%. That was chosen;
+  see "(one-alloc-strings)" below.
+
+### How it was measured
+
+- **The counters.** A scratch patch to `gc.rs`, never committed, adds
+  cumulative counts to `gc::alloc` per size class (24 classes and large) and
+  scan flag: objects, zeroed bytes and requested bytes. Under
+  `NOVA_GC_DEBUG` it prints them as one `nova-gc-mix:` line per collection.
+- **Per request** is the last collection's totals over the load generator's
+  request count. Allocations after the last collection are not counted, and
+  the ten seeding `POST`s and one `GET` are counted but are not requests;
+  with about 2,075 collections and 364,000 requests per run, each is under
+  0.1%.
+- **The load:** ten users seeded, 200 connections, `--duration 15
+  --warmup 0`, three fresh processes. Every run was `errors=0` with a
+  604-byte body.
+- **The binary:** 704,000 bytes, SHA-256 `1a904e3f8fca0ccb…`, built from
+  `45d05b0` with the patch. Its throughput, 24,230.0–24,678.5 req/sec with
+  the counters on and no warmup, is not a performance figure.
+- **Ordering.** The predictions' modification time is 08:47:56, the
+  binary's 08:48:41 and the first run's log 08:49:33. The patch file was
+  saved at 08:50:17, after the runs, from the working tree that was built;
+  that is from this session.
+
+These predictions were written before the counters existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| 300–520 objects per request | 300.91–300.94 | within, at the bottom |
+| leaf objects 8–20% of all | 22.3% | above |
+| 15–40 KB zeroed per request | 11.7 KB | below |
+| leaves 30–60% of the bytes zeroed | 39.5–39.6% | within |
+| at least 40% of objects in the 16-byte class | 77.7% | within |
+| 0–3 large objects per request | 0 | within |
+
+The per-class counts are in "(one-alloc-strings)"'s table below, beside the
+counts after that change.
+
+## AMENDMENT 2026-10-04 (one-alloc-strings): one leaf object per runtime string
+
+"(alloc-mix)" found 67.0 of 300.9 allocations per ten-user request were
+string byte buffers, each paired with a 16-byte scanned header.
+- **The change:** a runtime-made `String` or `Bytes` value is now one leaf
+  GC object of `16 + max(len, 1)` bytes: the `NovaStr` header at offset 0
+  and the bytes inline at offset 16, where its `ptr` points. A new runtime
+  helper, `alloc_str_object`, builds it for both `gc_str_filled` and
+  `gc_bytes`. A literal's header, from `nova_rt_str_new`, is still
+  allocated alone, but as a 16-byte leaf, since its `ptr` targets static
+  data.
+- **Why the collector still keeps every string alive:** a leaf is never
+  traced, so no header keeps a separate buffer alive any more, and none
+  needs to. The bytes share the header's object, and marking is
+  range-based, so a pointer into the bytes keeps the whole object alive.
+  This rests on one invariant, now documented on `NovaStr`: a `ptr` never
+  points into another GC object. The design is
+  `docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`.
+- **Output is unchanged.**
+
+**Results:**
+- **A request allocates 234 objects instead of 301:** 233.94–234.00,
+  against 300.91–300.94 in "(alloc-mix)".
+- **Per call, all four are disjoint.**
+  - `stringify` of the clean name went from 76.4–116.7 to 61.2–65.9 ns, a
+    14.8–47.3% cut per pair. One `before` reading, 116.7 ns, sits well above
+    the other four, 76.4–81.2; the other four pairs cut 14.8–24.6%.
+  - `stringify` of the clean email went from 79.7–82.8 to 65.4–66.6 ns,
+    16.9–21.0%.
+  - `stringify` of the escaped string went from 87.1–101.7 to 71.7–75.0 ns,
+    13.9–28.4%.
+  - `users_json` at ten users went from 4031.4–4578.2 to 3289.8–3383.4 ns,
+    18.1–26.1%.
+- **The ten-user server's ranges overlap, so no gain is claimed.**
+  - Over six alternated pairs, before ran at 14892.1–15178.5 req/sec and
+    after at 14846.5–15874.0.
+  - After was faster in five pairs of six; per pair, after over before was
+    0.993–1.046.
+  - The three `before`-first pairs gave disjoint ranges, 2.4–4.1% faster
+    per pair. The three `after`-first pairs overlapped, −0.7 to +4.6%.
+
+### What a request allocates now
+
+The "(alloc-mix)" counters, re-applied to this change's tree, three runs:
+- **233.94–234.00 objects per request**, the runs agreeing to 0.06.
+- **Leaves rose from 66.98 to 137.95–137.99. Scanned objects fell from
+  233.93–233.96 to 95.99–96.01.**
+- Derived: the scanned count fell by about 137.9. That is the 67.0
+  runtime-string headers, now inside their strings' objects, plus about
+  70.9 literal headers per request, now 16-byte leaves. The leaf count
+  rose by 71.0, the same literal headers. All of the scanned change is in
+  the 16-byte class, 197.94 to 60.00; every other scanned class is
+  unchanged.
+- Each runtime string's object is 16 bytes larger than its old buffer, so
+  most string objects moved up one class.
+- **Zeroed bytes fell from 11,742–11,758 to 11,678–11,698 per request**,
+  0.4–0.7%; requested bytes from 10,646–10,657 to 10,514–10,527.
+- **Collection cadence is unchanged:** one collection every 176.61–176.86
+  requests, against 176.91–176.92.
+- No large objects, before or after.
+- The instrumented server ran at 16,302.7–16,728.2 req/sec here, against
+  24,230.0–24,678.5 in "(alloc-mix)" about two hours earlier. With the
+  counters on and no warmup, neither is a performance figure, and they are
+  not compared.
+
+Objects per request by size class, from each set's first run:
+
+| class (bytes) | leaf before | leaf after | scanned before | scanned after |
+|---|---|---|---|---|
+| 16 | 35.99 | 70.99 | 197.94 | 60.00 |
+| 32 | 11.00 | 35.99 | 8.00 | 8.00 |
+| 48 | 2.00 | 11.00 | 5.00 | 5.00 |
+| 64 | 11.00 | 3.00 | 10.00 | 10.00 |
+| 80 | 3.00 | 10.00 | 7.00 | 7.00 |
+| 96 | 0.00 | 3.00 | 1.00 | 1.00 |
+| 112 | 0.00 | 0.00 | 2.00 | 2.00 |
+| 192 | 0.00 | 0.00 | 2.00 | 2.00 |
+| 640 | 3.00 | 3.00 | 0.00 | 0.00 |
+| 768 | 1.00 | 1.00 | 0.00 | 0.00 |
+| 1536 | 0.00 | 0.00 | 1.00 | 1.00 |
+
+### How it was measured
+
+- **Per call:** "(json-quote)"'s scratch Nova harness, never committed,
+  which prints picoseconds per call, as in "(gc-direct-strings)".
+  - Its copies of the example's code are as of `b0b606a`; the example's
+    source has not changed since.
+  - `before` is 524,288 bytes, SHA-256 `d9ea44c7f67042ae…`; `after` is
+    524,288 bytes, SHA-256 `524376abea440cc3…`.
+  - They were alternated, five runs each, one fresh process per run, with
+    `before` first in runs 1, 3 and 5. Every run printed the same output
+    lengths and the same escaped sample.
+- **Server:** ten users, a 604-byte body, 200 connections,
+  `--warmup 5 --duration 15`.
+  - `before` is 701,440 bytes, SHA-256 `4d0fd5ceff2265ba…`; `after` is
+    701,440 bytes, SHA-256 `4e1190b047ae4b88…`.
+  - One fresh process per reading. Every reading was `errors=0`, and every
+    body the same, SHA-256 `3ff5004bf26139cc…`.
+  - `bun docs/benchmarks/bun-equivalence.js` passed against `after` first:
+    all 9 exchanges match.
+- **Object count:** the "(alloc-mix)" patch applied to `8aaa71e`'s tree,
+  with the same load and method; `git apply` accepted the two-line offset
+  the rewritten `gc.rs` module doc adds. The binary is 704,000 bytes,
+  SHA-256 `e9142d8734e03cde…`. The patch was then reverted and the release
+  build restored.
+- **Provenance.** The scratch binaries log records the release `nova`'s
+  SHA-256 beside the commit it was built from: `98df827a618421e6…` from
+  `66ae3f5` for `before`, whose code is `45d05b0`'s, and
+  `e3acc0112bd33ab3…` from `8aaa71e` for `after`. That the binaries were
+  built by those is from this session. The equivalence log does not name
+  its binary.
+- **Ordering.** The predictions' modification time is 10:23:46, and the
+  `before` binaries' 10:24:03. The code commit, `c94834a`, is dated
+  10:27:24. The `after` binaries were built at 10:34:40, and the per-call
+  and server runs ran from 10:34:53 to 10:39:30.
+
+These predictions were written before any of the change existed:
+
+| prediction | measured | verdict |
+|---|---|---|
+| 225–245 objects per request | 233.94–234.00 | within |
+| scanned objects fall from 233.9 by 67 + L and leaves rise from 67.0 by L, where L is the literal headers per request, L ≥ 40 | scanned fell by about 137.9, leaves rose by 71.0, so L ≈ 71 | right |
+| scanned ≤ 127, leaves ≥ 107, scanned 16-byte objects ≤ 91 | 96.0, 138.0 and 60.00 | within |
+| clean name: after 10–30% lower, disjoint | 14.8–47.3% lower, disjoint | four of five pairs within, one above at 47.3%, the pair with the 116.7 ns `before` |
+| clean email: after 10–30% lower, disjoint | 16.9–21.0% lower, disjoint | within |
+| escaped string: after 8–25% lower, disjoint | 13.9–28.4% lower, disjoint | three of five pairs within, two above at 25.4% and 28.4% |
+| `users_json`: after 12–30% lower, disjoint | 18.1–26.1% lower, disjoint | within |
+| server after 1–6% above before per pair; the ranges may overlap | −0.7% to +4.6% per pair, overlapping | five of six pairs within, one below at −0.7% |
+| five named mutants each fail their listed tests, with exit codes checked | all five did | right |
+
+### Per call, ps, in run order
+
+| run | first | name before | after | email before | after | escaped before | after | `users_json` before | after |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | before | 77355 | 65890 | 81650 | 66591 | 87084 | 74997 | 4031383 | 3300160 |
+| 2 | after | 78068 | 61721 | 80570 | 66389 | 88165 | 72400 | 4105630 | 3361032 |
+| 3 | before | 116666 | 61501 | 80499 | 65751 | 96049 | 71695 | 4358927 | 3358336 |
+| 4 | after | 76406 | 62108 | 79703 | 66251 | 101713 | 72834 | 4578157 | 3383377 |
+| 5 | before | 81188 | 61182 | 82759 | 65392 | 90623 | 72359 | 4250792 | 3289817 |
+
+### Server, in run order
+
+| pair | order | before | after | after / before |
+|---|---|---|---|---|
+| 1 | before first | 15020.0 | 15628.8 | 1.041 |
+| 2 | before first | 15001.0 | 15359.5 | 1.024 |
+| 3 | before first | 14892.1 | 15341.9 | 1.030 |
+| 4 | after first | 15178.5 | 15874.0 | 1.046 |
+| 5 | after first | 15014.6 | 15487.8 | 1.032 |
+| 6 | after first | 14947.1 | 14846.5 | 0.993 |
+
+### Correctness
+
+- **New tests, each watched failing before the change:**
+  - in `lib.rs`: `a_runtime_string_is_one_leaf_object_with_its_bytes_inline`
+    (through `gc_str` and through `nova_rt_str_concat`, at lengths 0, 2,
+    113, 2032, 2033 and 2048, either side of the 2,048-byte small-object
+    limit), `a_literal_header_is_a_sixteen_byte_leaf`,
+    `an_empty_strings_pointer_lies_inside_its_own_object`, and
+    `a_runtime_string_reached_only_through_its_bytes_survives_a_collection`,
+    which collects with only a pointer into the bytes as a root, at their
+    start and at their last byte, and checks an unrooted control is freed;
+  - in `bytes.rs`: `a_bytes_value_is_one_leaf_object_with_its_bytes_inline`
+    and `a_bytes_value_is_tracked_at_its_full_size`, replacing the two
+    tests that pinned the old layout, plus
+    `a_string_from_bytes_is_one_leaf_object_with_its_bytes_inline` and
+    `a_bytes_slice_of_a_combined_object_is_its_own_leaf_object`.
+- **Five named mutants each fail.** Each was run under two commands:
+  `cargo test --locked -p nova-runtime --lib`, and
+  `cargo test --locked -p nova-cli --test run_tests -- json strings bytes`.
+  Exit codes and result lines were checked.
+  - **The object left `scan = true`:** 6 new tests fail.
+  - **The header's `ptr` at `base + 8` while the bytes are written at
+    `base + 16`:** the runtime test binary aborts (exit `0xc0000409`) after
+    6 tests fail, and 25 fixture tests fail. Because of the abort, the two
+    named layout tests and the liveness test were rerun alone. The layout
+    tests fail at the pointer assertion; the liveness test aborts at its
+    content assertion, where formatting the misread bytes panics.
+  - **`max(len, 1)` dropped:** 4 new tests fail, the layout tests at length
+    0 and the empty-pointer test.
+  - **`main`'s two-object `gc_bytes` restored:** the 4 `Bytes` layout tests
+    fail.
+  - **The literal header left scanned:** the literal test fails.
+  - Under the four layout-only mutants, all 33 fixture tests pass.
+- **The gates pass** on `8aaa71e`. A scratch log records the base commit
+  and each step's exit code:
+  - `cargo test --locked --workspace`: 1189 passed, 0 failed, 8 ignored;
+  - `cargo clippy --locked --workspace --all-targets --all-features -- -D
+    warnings`: exit 0;
+  - `cargo fmt --all --check`: exit 0.
+
+  The tests that run `nova build` link `target/debug/nova_runtime.lib`,
+  which `cargo test` does not rebuild, so `cargo build --locked -p
+  nova-runtime` ran first.
+
+### What this does not settle
+
+- **The gate.** Neither criterion was rerun.
+- **Whether the server gained.** Every per-call cut is disjoint, but the
+  server's ranges overlap. A gain of a few percent may exist; these six
+  pairs do not establish it.
+- **Memory in other workloads.** Here the bytes zeroed per request fell
+  0.4–0.7%. A string whose length sits just under a class boundary now
+  costs up to 240 bytes more, and lengths 2,033–2,048 take the large-object
+  path; neither occurs in this workload, and neither is measured.
+- **One host, Windows.**
 
 ## What was measured, and with what
 
