@@ -27,16 +27,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolation. It is tracked because the harness that produced this
   project's existing per-call figures lived outside the repository and no
   longer exists, so those figures cannot be reproduced from a checkout.
-- **A source guard pins the `NovaStr` pointer invariant.** Since every
-  string header became a leaf, a `ptr` pointing into another GC object
-  would not keep it alive. The test
-  `only_the_two_builders_write_a_novastr_ptr` scans the production code of
-  every runtime source file, found by walking `src` at test time, so a new
-  module is covered. It fails on a `.ptr =` write outside
-  `alloc_str_object` and `nova_rt_str_new`, or on a `NovaStr` struct
-  literal. Four mutants each fail it, a new module file among them. The
-  rule that `gc_str_filled`'s `fill` does not allocate is now documented
-  as a convention, not an invariant.
+- **A source guard pins where a `NovaStr`'s pointer may be written.**
+  Since every string header became a leaf, a `ptr` pointing into another
+  GC object would not keep it alive.
+  - The test `only_the_two_builders_write_a_novastr_ptr` scans the
+    production code of every `.rs` file under the runtime's `src`. It
+    finds them by walking the directory at test time, so a new module is
+    covered.
+  - It fails on a `.ptr =` assignment outside `alloc_str_object` and
+    `nova_rt_str_new`, a mutable borrow of a `.ptr`, a `NovaStr` struct
+    literal or `impl` block, or any production call to `nova_rt_str_new`,
+    the way a zero-copy slice would reach it.
+  - Six mutants each fail it: a new module file, and a slice through
+    `nova_rt_str_new`, are among them. A `.ptr ==` comparison passes, as it
+    should.
+  - It is a text scan, not a proof; its doc lists what it cannot see.
+
+  The rule that `gc_str_filled`'s `fill` does not allocate is now
+  documented as a convention, not an invariant.
 
 ### Measured
 - **Eager header materialisation and body accumulation now carry figures.**
