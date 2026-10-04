@@ -93,14 +93,59 @@ pub mod task;
 mod time;
 
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
+///
+/// A runtime-made `String` or `Bytes` value is **one leaf GC object**: this
+/// header at offset 0, and its bytes inline at offset 16, where `ptr` points
+/// ([`alloc_str_object`]). A string literal's header from
+/// [`nova_rt_str_new`] is a 16-byte leaf whose `ptr` targets static data.
+///
+/// **Invariant: `ptr` never points into another GC object.** Every header is
+/// a leaf, so the collector never traces `ptr`. A header that pointed into a
+/// different GC object would not keep it alive. A future zero-copy slice or
+/// view must not reuse this type with a leaf header.
+///
+/// **Invariant: [`gc_str_filled`]'s `fill` must not allocate GC memory.**
+/// Every current writer only calls [`Fill::put`].
 #[repr(C)]
 pub struct NovaStr {
     pub len: u64,
     pub ptr: *const u8,
 }
 
-/// Store a Rust string as a GC-managed `NovaStr` value (its bytes copied into a
-/// GC leaf buffer, the header a scanned object that keeps the buffer alive).
+/// The size of a [`NovaStr`] header, and the offset of a runtime-made
+/// string's bytes inside its one object.
+pub(crate) const STR_HEADER: usize = std::mem::size_of::<NovaStr>();
+
+/// Allocate one leaf GC object for a `String` or `Bytes` value of `len` bytes:
+/// the [`NovaStr`] header at offset 0, written here, then room for the bytes
+/// at offset [`STR_HEADER`], which the caller fills. Returns the header and
+/// the address of the bytes.
+///
+/// `max(len, 1)` keeps `ptr` inside the object even when `len` is 0; without
+/// it an empty value's `ptr` would sit one past a 16-byte slot, in the next
+/// object. The size saturates, so an overflowing `len` reaches `gc::alloc`'s
+/// size-limit abort instead of wrapping to a too-small object.
+///
+/// One allocation where there were two: in
+/// `examples/05-json-api/BENCHMARK.md`'s "(alloc-mix)", the second (the
+/// bytes) was 67.0 of 300.9 allocations per ten-user request.
+pub(crate) fn alloc_str_object(len: usize) -> (*mut NovaStr, *mut u8) {
+    let size = STR_HEADER.saturating_add(len.max(1));
+    let base = gc::alloc(size, false);
+    let node = base as *mut NovaStr;
+    // SAFETY: `base` has `size` writable bytes: the header and at least one
+    // byte after it.
+    let bytes = unsafe { base.add(STR_HEADER) };
+    // SAFETY: as above; nothing else refers to this object yet.
+    unsafe {
+        (*node).len = len as u64;
+        (*node).ptr = bytes;
+    }
+    (node, bytes)
+}
+
+/// Store a Rust string as a GC-managed `NovaStr` value: one leaf object
+/// holding the header and, inline after it, a copy of the bytes.
 ///
 /// `pub(crate)`, not private: `fs`'s `gc_message` reuses this rather than
 /// reproducing `NovaStr { len, ptr }`'s layout a second time, which is
@@ -110,8 +155,9 @@ pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
     unsafe { gc_str_filled(s.len(), |out| out.put(s.as_bytes())) }
 }
 
-/// Allocate a GC string of exactly `len` bytes, let `fill` write them
-/// straight into its byte buffer, then allocate the header.
+/// Allocate a GC string of exactly `len` bytes as one leaf object -- the
+/// header, then the bytes inline ([`alloc_str_object`]) -- and let `fill`
+/// write the bytes straight into it.
 ///
 /// The builtins that build a result from their arguments use this rather
 /// than collecting into a Rust `String` and calling [`gc_str`]. That buffer
@@ -119,25 +165,25 @@ pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
 /// `examples/05-json-api/BENCHMARK.md`'s "(reprofile-3)", the three largest
 /// such builtins spent 3.5–3.6% of the server thread in the system heap.
 ///
-/// GC safety: `fill` runs after the buffer's allocation, which can run a
-/// collection, so whatever it reads from the GC heap must still be reachable
-/// then. A caller's arguments are: a pointer held in the caller's frame or in
-/// a callee-saved register is a root, and marking is range-based, so a
-/// pointer into a string's bytes keeps their buffer alive (`gc.rs`'s module
-/// doc comment). [`nova_rt_str_chars`] relies on the same. The buffer itself
-/// is held in this frame across the header's allocation.
+/// GC safety: there is one allocation, and `fill` runs after it. That
+/// allocation can run a collection, so whatever `fill` reads from the GC heap
+/// must still be reachable then. A caller's arguments are: a pointer held in
+/// the caller's frame or in a callee-saved register is a root, and marking is
+/// range-based, so a pointer into a string's bytes keeps that string's whole
+/// object alive (`gc.rs`'s module doc comment). [`nova_rt_str_chars`] relies
+/// on the same. **`fill` must not allocate GC memory**; every writer only
+/// calls [`Fill::put`].
 ///
 /// # Safety
 /// `fill` must write exactly `len` bytes of valid UTF-8 through
 /// [`Fill::put`]. Writing more panics. Writing fewer leaves zero bytes in the
 /// string, which a debug build catches.
 pub(crate) unsafe fn gc_str_filled(len: usize, fill: impl FnOnce(&mut Fill<'_>)) -> *mut NovaStr {
-    // A non-traced byte buffer holding the UTF-8 bytes.
-    let buf = gc::alloc(len.max(1), false);
-    // SAFETY: `buf` has `len.max(1)` writable bytes that nothing else refers
-    // to yet.
+    let (node, bytes) = alloc_str_object(len);
+    // SAFETY: `alloc_str_object` reserved `len` writable bytes at `bytes`
+    // that nothing else refers to yet.
     let mut out = Fill {
-        out: unsafe { std::slice::from_raw_parts_mut(buf, len) },
+        out: unsafe { std::slice::from_raw_parts_mut(bytes, len) },
         at: 0,
     };
     fill(&mut out);
@@ -145,12 +191,6 @@ pub(crate) unsafe fn gc_str_filled(len: usize, fill: impl FnOnce(&mut Fill<'_>))
         out.at, len,
         "a GC string's writer filled a different length than it asked for"
     );
-    let node = gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
-    // SAFETY: `node` points to a fresh `NovaStr`-sized allocation.
-    unsafe {
-        (*node).len = len as u64;
-        (*node).ptr = buf;
-    }
     node
 }
 
@@ -201,14 +241,16 @@ pub(crate) unsafe fn as_str<'a>(s: *const NovaStr) -> &'a str {
 
 /// Create a string value from raw bytes (used for string literals).
 ///
+/// The header is a 16-byte **leaf**: its `ptr` targets static literal data,
+/// which the collector never frees, so tracing it could never reach a GC
+/// object. That depends on this function's safety contract.
+///
 /// # Safety
 /// `ptr` must point to `len` bytes of valid UTF-8 that outlive the program
-/// (string literal data emitted by codegen).
+/// (string literal data emitted by codegen), never into the GC heap.
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_str_new(ptr: *const u8, len: u64) -> *mut NovaStr {
-    // The bytes are static string-literal data (never freed); only the header
-    // is GC-managed.
-    let node = gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
+    let node = gc::alloc(STR_HEADER, false) as *mut NovaStr;
     (*node).len = len;
     (*node).ptr = ptr;
     node
@@ -1223,6 +1265,106 @@ mod tests {
             *block.add(1 + i) = *p as i64;
         }
         block as *const u8
+    }
+
+    /// The lengths every layout test covers: empty, short, one whose
+    /// `16 + len` crosses a class boundary, the largest that stays a small
+    /// object (`16 + 2032 = 2048`), the first that goes to the large path, and
+    /// a large one at a class size.
+    const STR_LENGTHS: [usize; 6] = [0, 2, 113, 2032, 2033, 2048];
+
+    /// `len` ASCII bytes with a static lifetime, so `make_str` can take them.
+    fn text_of(len: usize) -> &'static str {
+        let s: String = "abcdefghij".repeat(len / 10 + 1)[..len].to_string();
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// One leaf object per runtime string: the header at its start, the bytes
+    /// inline at offset 16
+    /// (`docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`).
+    unsafe fn assert_one_leaf_string(s: *mut NovaStr, expected: &str) {
+        let len = expected.len();
+        assert_eq!(
+            gc::object_info(s as usize),
+            Some((16 + len.max(1), false)),
+            "len {len}: one leaf object of 16 + max(len, 1) bytes"
+        );
+        assert_eq!(
+            (*s).ptr as usize,
+            s as usize + 16,
+            "len {len}: bytes inline at offset 16"
+        );
+        assert_eq!((*s).len, len as u64, "len {len}");
+        assert_eq!(as_str(s), expected, "len {len}");
+    }
+
+    #[test]
+    fn a_runtime_string_is_one_leaf_object_with_its_bytes_inline() {
+        for len in STR_LENGTHS {
+            let expected = text_of(len);
+            unsafe {
+                assert_one_leaf_string(gc_str(expected), expected);
+                // `gc_str_filled` through a builtin, the text split across two
+                // literals.
+                let (a, b) = expected.split_at(len / 2);
+                assert_one_leaf_string(nova_rt_str_concat(make_str(a), make_str(b)), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn a_literal_header_is_a_sixteen_byte_leaf() {
+        unsafe {
+            let s = make_str("literal");
+            assert_eq!(gc::object_info(s as usize), Some((16, false)));
+            assert_eq!(as_str(s), "literal");
+        }
+    }
+
+    #[test]
+    fn an_empty_strings_pointer_lies_inside_its_own_object() {
+        unsafe {
+            let s = gc_str("");
+            let base = s as usize;
+            let ptr = (*s).ptr as usize;
+            let size = gc::object_info(base).expect("a live object").0;
+            assert!(
+                base + 16 <= ptr && ptr < base + size,
+                "ptr {ptr:#x} must lie in [{:#x}, {:#x})",
+                base + 16,
+                base + size
+            );
+        }
+    }
+
+    /// A string reached only through a pointer into its bytes -- at offset 16
+    /// and at its last byte -- survives a collection, with an unrooted control
+    /// swept. Explicit roots, so it is deterministic on every platform.
+    #[test]
+    fn a_runtime_string_reached_only_through_its_bytes_survives_a_collection() {
+        for len in [2usize, 113, 2033] {
+            let expected = text_of(len);
+            unsafe {
+                let s = gc_str(expected);
+                let control = gc_str(expected);
+                assert!(gc::object_info(s as usize).is_some(), "len {len}");
+                assert!(gc::object_info(control as usize).is_some(), "len {len}");
+                for k in [0, len - 1] {
+                    gc::sweep_with_roots_for_test(&[(*s).ptr as usize + k]);
+                    assert_eq!(
+                        gc::object_info(s as usize),
+                        Some((16 + len, false)),
+                        "len {len} k {k}: the whole object survives"
+                    );
+                }
+                assert_eq!(
+                    gc::object_info(control as usize),
+                    None,
+                    "len {len}: the unrooted control is swept"
+                );
+                assert_eq!(as_str(s), expected, "len {len}");
+            }
+        }
     }
 
     #[test]
