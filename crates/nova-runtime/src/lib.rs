@@ -102,10 +102,16 @@ mod time;
 /// **Invariant: `ptr` never points into another GC object.** Every header is
 /// a leaf, so the collector never traces `ptr`. A header that pointed into a
 /// different GC object would not keep it alive. A future zero-copy slice or
-/// view must not reuse this type with a leaf header.
+/// view must not reuse this type with a leaf header. Only
+/// [`alloc_str_object`] and [`nova_rt_str_new`] write a `ptr`, and the test
+/// `only_the_two_builders_write_a_novastr_ptr` fails if anything else in
+/// this crate does.
 ///
-/// **Invariant: [`gc_str_filled`]'s `fill` must not allocate GC memory.**
-/// Every current writer only calls [`Fill::put`].
+/// **A convention, not an invariant: [`gc_str_filled`]'s `fill` does not
+/// allocate GC memory.** Memory safety does not depend on it, since the new
+/// object stays reachable from `gc_str_filled`'s own frame across `fill`.
+/// It keeps `fill` cheap, and its liveness argument to the one allocation
+/// before it. Every current writer only calls [`Fill::put`].
 #[repr(C)]
 pub struct NovaStr {
     pub len: u64,
@@ -172,8 +178,8 @@ pub(crate) fn gc_str(s: &str) -> *mut NovaStr {
 /// the caller's frame or in a callee-saved register is a root, and marking is
 /// range-based, so a pointer into a string's bytes keeps that string's whole
 /// object alive (`gc.rs`'s module doc comment). [`nova_rt_str_chars`] relies
-/// on the same. **`fill` must not allocate GC memory**; every writer only
-/// calls [`Fill::put`].
+/// on the same. By convention `fill` does not allocate GC memory (see
+/// [`NovaStr`]); every writer only calls [`Fill::put`].
 ///
 /// # Safety
 /// `fill` must write exactly `len` bytes of valid UTF-8 through
@@ -1365,6 +1371,116 @@ mod tests {
                 );
                 assert_eq!(as_str(s), expected, "len {len}");
             }
+        }
+    }
+
+    /// Every `.rs` file under this crate's `src`, found by walking the
+    /// directory at test time, so a module added later is scanned without
+    /// anyone listing it.
+    fn runtime_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("the crate's src directory is readable")
+                .map(|e| e.expect("a readable directory entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("a readable source file");
+                    out.push((path.display().to_string(), text.replace("\r\n", "\n")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut out,
+        );
+        out
+    }
+
+    /// A file's production code: the lines before the first line that is
+    /// exactly `mod tests {`, with comment lines dropped. Matching the whole
+    /// line, not a substring, keeps a mention of `mod tests {` in a comment
+    /// from cutting the scan short.
+    fn production_code(source: &str) -> String {
+        source
+            .lines()
+            .take_while(|l| l.trim() != "mod tests {")
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **The `NovaStr` pointer invariant, pinned.** Every header is a leaf, so
+    /// the collector never traces a `NovaStr`'s `ptr`: a header pointing into
+    /// another GC object would not keep it alive. That holds because only
+    /// [`alloc_str_object`] (`ptr` = its own bytes) and [`nova_rt_str_new`]
+    /// (`ptr` = static literal data) ever write a `ptr`.
+    ///
+    /// This scans the production code of every runtime source file for the
+    /// two ways safe-looking code would break that -- a `.ptr =` write
+    /// anywhere else, or a `NovaStr` built as a struct literal -- so a
+    /// zero-copy view or slice reusing `NovaStr` fails here. It cannot see a
+    /// raw write at an offset (`*(p as *mut *const u8).add(1) = ...`) or code
+    /// outside this crate; both code generators only call `nova_rt_str_new`.
+    #[test]
+    fn only_the_two_builders_write_a_novastr_ptr() {
+        let sources = runtime_sources();
+        // Coverage floor: a scan that found nothing would pass vacuously.
+        assert!(
+            sources.len() >= 14,
+            "scanned only {} runtime source files",
+            sources.len()
+        );
+        let lib_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("lib.rs")
+            .display()
+            .to_string();
+        let lib = sources
+            .iter()
+            .find(|(p, _)| *p == lib_path)
+            .expect("lib.rs is among the scanned files");
+
+        for (path, source) in &sources {
+            let code = production_code(source);
+            let writes = code.matches(".ptr =").count() + code.matches(".ptr=").count();
+            if *path == lib_path {
+                assert_eq!(
+                    writes, 2,
+                    "{path}: exactly two `.ptr =` writes, one per builder"
+                );
+            } else {
+                assert_eq!(
+                    writes, 0,
+                    "{path}: writes a `NovaStr`'s `ptr` outside the two builders"
+                );
+            }
+            let literals = code.matches("NovaStr {").count()
+                - code.matches("struct NovaStr {").count()
+                - code.matches("*mut NovaStr {").count()
+                - code.matches("*const NovaStr {").count();
+            assert_eq!(
+                literals, 0,
+                "{path}: builds or implements `NovaStr` outside its definition"
+            );
+        }
+
+        let code = production_code(&lib.1);
+        for builder in ["fn alloc_str_object(", "fn nova_rt_str_new("] {
+            let start = code.find(builder).expect("the builder exists");
+            let end = start
+                + code[start..]
+                    .find("\n}\n")
+                    .expect("the builder's closing brace");
+            assert_eq!(
+                code[start..end].matches(".ptr =").count(),
+                1,
+                "`{builder}` writes `ptr` exactly once"
+            );
         }
     }
 
