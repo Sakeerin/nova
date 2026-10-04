@@ -6112,9 +6112,14 @@ next lever with current figures.
 - **Socket system calls are 71.1–72.0% of the server thread,** against
   58.7–61.0% in "(reprofile-4)". The send path alone is 60.6–61.2%, 25.2–25.5
   us per request; the receive path is 10.3–10.8%.
-- **Everything else, the Nova-side work, is 11.6–12.0 us per request,**
-  against 17.4–18.2 in "(reprofile-4)": disjoint, and about a third less.
-  Per-request figures across the two runs carry a confound, below.
+- **Everything outside the socket system calls is 11.6–12.0 us per
+  request,** against 17.4–18.2 in "(reprofile-4)": disjoint, and about a
+  third less. It is wall time, and holds Nova's runtime, compiled code and
+  allocator, any time the thread was descheduled outside a system call, and
+  the socket libraries' own user-mode code, 1.10–1.50% of the thread or
+  0.46–0.62 us per request. Without that last part it is 11.0–11.4 us,
+  against 16.8–17.6, still disjoint. Per-request figures across the two
+  runs carry a confound, below.
 - **Allocation, collection included, is 15.7–16.4% of the thread, 6.5–6.8 us
   per request,** against 22.6–24.7% and 10.4–10.9 us.
   - The collector is 6.25–6.56%, 2.6–2.7 us, against 3.0–3.3 us.
@@ -6123,33 +6128,48 @@ next lever with current figures.
     2.4–2.5%, zeroing (`memset`) 1.8–1.9%, the second thread-local lookup
     1.2–1.3%, and the closure call 0.6–0.7%.
 - **`handle`, without the collector's samples, is 11.1–11.6%, 4.6–4.8 us.**
-  Within it, `user_json` is 7.6–8.0%, 3.2–3.3 us, and `Response.to_bytes`
+  Within it, `user_json` is 7.6–8.0%, 3.1–3.3 us, and `Response.to_bytes`
   3.3–3.6%, 1.4–1.5 us.
 - **`read_request`, either of its frames, is 15.4–17.9%;** without its
   `gc::alloc` samples 12.8–13.2%, most of it the receive path.
 - **The system heap is 1.03–1.08%.**
 
-**Suggested, not measured:** no Nova-side item now exceeds allocation,
-collection included, at 6.5–6.8 us. Its largest separable parts are the
-collector, 2.6–2.7 us, and finding a slot, about 1.4–1.5 us. The send path,
-at 25 us, is a system call: "(native-floor)" measured one loopback
-`send()` at about 34 us or more in plain Rust on this host, two days
-earlier.
+**Suggested, not measured:** among the frames compared here, once each
+frame's own `gc::alloc` samples are set aside, no Nova-side item now
+exceeds allocation, collection included, at 6.5–6.8 us. Its largest
+separable parts are the collector, 2.6–2.7 us, and finding a slot, about
+1.4–1.5 us. Inclusive over both its frames, `read_request` is 6.4–7.4 us,
+larger than allocation in runs 1 and 3, but most of that is its receive
+calls and its own allocation; without its `gc::alloc` samples it is
+5.3–5.5 us. The send path, at 25 us, is a system call: in each run
+99.6–99.8% of its samples end in `ntdll!ZwDeviceIoControlFile`.
+"(native-floor)" measured one loopback `send()` in plain Rust on this host
+at 33.5–60.3 us, two days earlier. This run's figure is below that, as
+"(fixed-profile)"'s 25.5–32.7 us was, and "(fixed-profile)" left that
+difference unsettled, so that measurement does not bound this one.
 
 **The confound.** This run is about five and a half hours after
 "(reprofile-4)", and the host's state was not recorded. The send path's
-cost per request rose from 19.3–21.3 to 25.2–25.5 us although no change
-since touched it, so the host moved too. That is why the Nova-side drop,
-and allocation proper's fall by about 45% when "(one-alloc-strings)"
-removed 22% of allocations, are not attributed to the code change alone.
+cost per request rose from 19.3–21.3 to 25.2–25.5 us, while the receive
+path's fell from 5.7–6.9 to 4.3–4.5 us. No change since touched the send
+call itself, but "(one-alloc-strings)" changed the buffer it sends from: a
+`Bytes` value is now one leaf object with its payload inline after its
+header, where it was a scanned header over a separate leaf buffer. The
+unrecorded host state could have moved these costs. So could that buffer
+change, or the faster server's effect on the load generator, which shares
+the host and is the send's loopback peer. Which of them did is not
+separated. That is why the drop outside the socket system calls, and
+allocation proper's fall by about 45% when "(one-alloc-strings)" removed
+22% of allocations, are not attributed to the code change alone.
 
 ### How it was measured
 
 - **The binary.** The json-api, built by the release `nova` from `7e1b1e0`
   with "(sampled-profile)"'s scratch sampler patch applied. It is 737,792
   bytes, SHA-256 `4d2797f851022236…`, linked with a symbol map.
-  - The patch file is the one "(reprofile-3)" and "(reprofile-4)" used; that
-    is from this session. It applied cleanly and was reverted afterwards.
+  - The patch file is the one "(reprofile-3)" and "(reprofile-4)" used, and
+    it applied cleanly; both are from this session, not from a file. It was
+    reverted afterwards, which the rebuild below bears out.
   - A json-api built by the rebuilt release `nova` then came out at 701,440
     bytes, SHA-256 `185b6342a83f05c6…`, with no map and without the string
     `NOVA_PROF_SAMPLE`.
@@ -6159,16 +6179,25 @@ removed 22% of allocations, are not attributed to the code change alone.
   req/sec. The sampler's own cost is not measured.
 - **The sampler** took 9935–9940 samples per 15 s load window.
 - **The analysis:** "(reprofile-4)"'s scripts, copied unchanged.
-  - Every symbol name they look for is in this build's map, checked before
-    any share was read.
+  - Every name they look for inside the json-api image is in this build's
+    map, which can be re-checked against the map file. No script or log
+    records that check, or that it came before any share was read; that is
+    from this session.
   - The collector's instance was identified as before. `ce5e268d0d359845`
     had 15–23 collection-leaf samples a run, out of 621–652. One other,
-    `b136050d1cde226a`, had 2–8, which were all of its samples, and is not
-    counted as the collector.
-  - In run 2 the collections fell under `handle` (3.80% of the thread)
-    rather than under `read_request`, which raises run 2's `handle`,
-    `users_json` and `user_json` rows below. Without the collector's
-    samples those three agree across the runs.
+    `b136050d1cde226a`, had 2–8, which were all of its samples in runs 1
+    and 3 and 4 of its 5 in run 2, and is not counted as the collector.
+  - In run 2 the collections fell in different places: 3.80% of the
+    thread under `handle`, within `users_json`; 1.32% under
+    `Response.to_bytes`; and 1.14% under `read_request`'s `$poll` frame,
+    within `parse_request_head`. In runs 1 and 3, 3.42% and 3.38% sat
+    under `read_request`'s plain frame, which the `read_request` row below
+    does not count. So run 2's `handle`, `users_json`, `user_json`,
+    `nova_rt_json_quote`, `nova_rt_str_concat_n`, `Response.to_bytes`,
+    `read_request` and `parse_request_head` rows carry collections the
+    other runs' rows do not. Without the collector's samples those rows
+    agree across the runs; `nocoll.py`, a read-only script added to the
+    kit for this record, gives them.
   - Per-request figures are a share times that run's `1e6 / rps`.
 - **Ordering.** The predictions' modification time is 12:53:49, the
   profiling binary's 12:54:18, and the end of the first run's samples
@@ -6182,18 +6211,18 @@ These predictions were written before the profiling build existed:
 | send path 42–49% | 60.6–61.2% | wrong: above |
 | `gc::alloc`, collection included, 17–22% | 15.7–16.4% | wrong: below |
 | the collector's instance 6.0–8.5% | 6.25–6.56% | within |
-| `users_json` 12–16% | 9.7–14.1% | one run within, two below |
-| `user_json` 9.5–12.5% | 7.6–10.2% | one run within, two below |
-| `nova_rt_json_quote` 3.5–5.5% | 2.3–3.7% | one run within, two below |
-| `nova_rt_str_concat_n` 2.0–3.0% | 1.7–3.0% | none within: two below, one above at 3.04% |
-| `Response.to_bytes` 3.4–4.8% | 3.3–4.8% | two runs within, one below at 3.30% |
+| `users_json` 12–16% | 9.7–14.1%; without the collector's samples 9.68–10.30% | wrong: below in all three runs without the collector's samples; run 2's 14.10 is within only because 3.80 points of collections fell under it |
+| `user_json` 9.5–12.5% | 7.6–10.2%; without the collector's samples 7.59–8.00% | wrong: below in all three runs without the collector's samples; run 2's 10.18 includes 2.40 points of collections |
+| `nova_rt_json_quote` 3.5–5.5% | 2.3–3.7%; without the collector's samples 2.31–2.65% | wrong: below in all three runs without the collector's samples; run 2's 3.71 includes 1.07 points of collections |
+| `nova_rt_str_concat_n` 2.0–3.0% | 1.7–3.0%; without the collector's samples 1.66–1.86% | wrong: below in all three runs without the collector's samples; run 2's 3.04 includes 1.38 points of collections |
+| `Response.to_bytes` 3.4–4.8% | 3.3–4.8%; without the collector's samples 3.30–3.62% | two runs within, one below at 3.30%, either way |
 | `read_request` 19–23% | 14.1–15.4% | wrong: below |
 | system heap 1.2–1.8% | 1.03–1.08% | wrong: below |
 | allocation proper 5.5–7.0 us per request | 3.9–4.2 | wrong: below |
 | collector 2.8–3.6 us per request | 2.6–2.7 | wrong: below |
 | throughput with the sampler 15,000–27,000 | 23989.0–24099.2 | within |
 | allocation proper falls by roughly the share of allocations removed, about a fifth | it fell by about 45%, across a host-state change | wrong: it fell further |
-| the collector does not move | its share is within the earlier range; its cost per request fell from 3.0–3.3 to 2.6–2.7 us | share: right; per request: it fell a little |
+| the collector does not move | its share fell from 6.67–7.59% to 6.25–6.56%, disjoint, though within the predicted 6.0–8.5%; its cost per request fell from 3.0–3.3 to 2.6–2.7 us, disjoint; both across a host-state change | wrong: it fell, by share and per request |
 | the send path stays the largest single item | 60.6–61.2% | right |
 | allocation, collection included, stays the largest Nova-side item that is not a caller of the rest | `gc::alloc` 15.7–16.4%; `read_request`'s frame 14.1–15.4% and `handle` 11.1–15.3% call into it | right |
 
@@ -6222,12 +6251,17 @@ These predictions were written before the profiling build existed:
 
 ### What this does not settle
 
-- **Why the send path's cost rose.** No change since "(reprofile-4)" touched
-  it, and the host's state was not recorded.
-- **How much of the Nova-side drop is the code.** Allocation proper fell by
+- **Why the socket paths' costs moved, in opposite directions.** The send
+  path's cost per request rose from 19.3–21.3 to 25.2–25.5 us, and the
+  receive path's fell from 5.7–6.9 to 4.3–4.5 us. No change since
+  "(reprofile-4)" touched the send call, but "(one-alloc-strings)" changed
+  the layout of the buffer it sends from. The host's state was not
+  recorded, and the load generator shares the host.
+- **How much of the drop outside the socket system calls is the code.** Allocation proper fell by
   more than the share of allocations removed, across the same host change.
 - **Whether the unsampled build splits the same way.**
 - **The gate.** Neither criterion was rerun.
+- **One host, Windows, three runs.**
 
 ## What was measured, and with what
 
