@@ -479,6 +479,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-03 (aa-interleaved)".
+- **The json-api's server thread, sampled again after the GC-direct string
+  builtins.**
+  - The system heap fell to 1.50-1.55% of the thread, from 4.7-4.9%.
+  - Allocation, collection included, is 22.6-24.7%, 10.4-10.9 us per
+    request; allocation proper, without the collector, is 7.4-7.5 us.
+  - Inside `nova_rt_json_quote`, about half the samples now sit under
+    `gc::alloc`, and no system-heap leaf remains.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-04 (reprofile-4)".
 
 ### Changed
 - **Five string builtins write their result straight into GC memory.**
