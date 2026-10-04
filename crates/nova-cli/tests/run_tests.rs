@@ -2807,7 +2807,8 @@ fn strings_build_standalone() {
 /// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation) —
 /// the reason this gate exists. `str_chars` and `str_from_chars` introduce
 /// two new allocation shapes reachable from a builtin: a scanned array of
-/// scalars, and a leaf byte buffer plus a scanned header. Every method built
+/// scalars, and a string, which was a leaf byte buffer plus a scanned header
+/// and since 2026-10-04 is one leaf object holding both. Every method built
 /// on them (`slice`, `split`, the trim family, `repeat`, `reverse`,
 /// `to_upper`/`to_lower`) decodes to an intermediate `[Char]` and then
 /// allocates again to build the result string, and that intermediate array
@@ -6709,7 +6710,7 @@ fn bytes_api_build_standalone() {
 /// allocation) -- the other half of the byte-type plan's `nova build` /
 /// `NOVA_GC_STRESS=1` definition-of-done gap. `to_ints`/`from_ints` allocate a
 /// fresh scanned array block, `slice`/`concat`/`bytes_from_ints` each allocate
-/// a fresh header and leaf buffer, and `index_of`/`contains` hold both
+/// a fresh `Bytes` object, and `index_of`/`contains` hold both
 /// operands' arrays live across a Nova-level loop -- so a collection forced on
 /// every allocation exercises every new intrinsic's rooting, not only the
 /// four already covered by `bytes_basics`/`bytes_len`.
@@ -6810,8 +6811,8 @@ fn fs_bytes_roundtrip_run() {
 }
 
 /// The same fixture again with `NOVA_GC_STRESS=1` (collect on every
-/// allocation). `nova_rt_fs_read` stashes a freshly allocated `Bytes` header
-/// and leaf buffer into the current task's `Slot::Buffer` entry, GC-rooting it
+/// allocation). `nova_rt_fs_read` stashes a freshly allocated `Bytes` object
+/// into the current task's `Slot::Buffer` entry, GC-rooting it
 /// for exactly the span between the intrinsic call and the wrapper's own read
 /// of that slot (`crates/nova-runtime/src/fs.rs`) -- the same rooting
 /// contract `fs_read_dir_under_gc_stress` exists to exercise for

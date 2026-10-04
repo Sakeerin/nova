@@ -499,7 +499,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   allocation, a free and a copy per call. The sources are now read after
   the result's allocation, kept alive by the conservative scan, and two
   `std/json` fixtures also run under `NOVA_GC_STRESS`. Output is
-  unchanged.
+  unchanged. [Amended 2026-10-04: since one allocation per string, the GC
+  buffer and its header are one object.]
 - **The Phase 2 gate's ratio against Bun is judged by twelve paired
   rounds.** `docs/adr/0021-gate-ratio-paired-rounds.md` records the
   decision.
@@ -571,7 +572,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **String interpolation of three or more parts is joined once, not
   pairwise.** The MIR lowering used to make *n* - 1 calls to
   `nova_rt_str_concat` for an *n*-part interpolation, each building a new
-  two-object string that copied everything built so far. It now makes one
+  two-object string that copied everything built so far. [Amended
+  2026-10-04: since one allocation per string, a runtime string is one
+  object.] It now makes one
   `MakeArray` of the parts and one call to a new `nova_rt_str_concat_n`,
   which copies each part once. Two-part interpolations keep the pairwise
   call, and output is byte-identical. `user_json`'s 7-part interpolation
@@ -3948,7 +3951,11 @@ asserts the compiler it runs.
   - **`Bytes` is a new nullary `hir::Ty` variant mapping to `MirTy::Ptr`**,
     represented exactly as `String` is: a scanned `{len, ptr}` header over a
     GC **leaf** buffer, reusing `crate::NovaStr` rather than a second Rust
-    struct with the identical layout. `Bytes` and `String` are therefore
+    struct with the identical layout. [Amended 2026-10-04: since one
+    allocation per string, a runtime-made String or Bytes value is one leaf
+    object, its header followed inline by its bytes; a String literal's
+    header is a 16-byte leaf pointing at static data.] `Bytes` and `String`
+    are therefore
     structurally identical and semantically distinct — same representation,
     but `String` carries a UTF-8 guarantee and `Bytes` does not, and nothing
     converts between them implicitly. `Bytes` reaches codegen as the same

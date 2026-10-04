@@ -1495,7 +1495,10 @@ Probing what remained showed how strings are paid for:
   byte buffer;
 - evaluating a string literal allocates one header;
 - an interpolation of *n* parts made *n* − 1 pairwise concatenations, each
-  a new two-object string copying everything built so far.
+  a new two-object string copying everything built so far. [Amended
+  2026-10-04: since "(one-alloc-strings)" a runtime string is one object
+  holding its header and bytes; these bullets describe the build measured
+  here.]
 
 Branch `nary-interpolation` lowers every interpolation of three or more
 parts to one heap array of the parts and one `nova_rt_str_concat_n`, which
@@ -1509,7 +1512,9 @@ with the ranges disjoint, and the gate is still not met.**
 
 An interpolation of *n* ≥ 3 parts saves 2(*n* − 1) − 3 = 2*n* − 5 objects
 per execution. That is *n* − 1 two-object concatenations replaced by one
-array and one two-object result. Literal headers and conversions are
+array and one two-object result. [Amended 2026-10-04: since
+"(one-alloc-strings)" a runtime string is one object; this arithmetic
+describes the build measured here.] Literal headers and conversions are
 unchanged.
 
 | site | parts | runs per request | saving |
@@ -2226,7 +2231,9 @@ These predictions were written before anything was built:
   - Of that, 0.67–0.71 is allocating and zeroing its 4096-byte buffer.
   - The other 0.98–1.07 is not broken down. It includes copying the data
     into a GC byte buffer and making its `NovaStr` node, two allocations
-    also counted under allocation. It also includes freeing the buffer,
+    also counted under allocation. [Amended 2026-10-04: since
+    "(one-alloc-strings)" that buffer and node are one allocation.] It also
+    includes freeing the buffer,
     the handle-table lookup and the timers. An allocation in it can also
     run a collection, which is then counted under the collector as well.
 
@@ -5008,7 +5015,8 @@ and `nova_rt_int_to_str` spent 3.5–3.6% of the server thread in the system
 heap, building a Rust `String` that `gc_str` then copied into a GC buffer.
 - **The change:** a new runtime helper, `gc_str_filled`, allocates the GC
   byte buffer at its exact final length and lets the caller write into it.
-  Five builtins now use it: `json_quote`, `str_concat_n`, `str_join`,
+  [Amended 2026-10-04: since "(one-alloc-strings)" the buffer and its header
+  are one object.] Five builtins now use it: `json_quote`, `str_concat_n`, `str_join`,
   `str_concat` and `int_to_str`.
 - **What each call saves:** one system-heap allocation, one free and one
   copy.
@@ -5017,7 +5025,8 @@ heap, building a Rust `String` that `gc_str` then copied into a GC buffer.
 - **What changed for the collector:** the sources are now read after the
   result's first allocation, not before. They stay alive because a pointer
   held in the caller's frame or a callee-saved register is a root, the
-  argument `nova_rt_str_chars` already relies on.
+  argument `nova_rt_str_chars` already relies on. [Amended 2026-10-04: since
+  "(one-alloc-strings)" there is one allocation, not a first of two.]
 - **Output is unchanged.**
 
 **Results:**

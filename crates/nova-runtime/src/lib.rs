@@ -7,7 +7,7 @@
 //! [`symbols`].
 //!
 //! **Memory:** heap values (records, sums, arrays, closures, strings, and
-//! byte buffers) are managed by a conservative mark-and-sweep garbage
+//! `Bytes`) are managed by a conservative mark-and-sweep garbage
 //! collector — see [`gc`] and `docs/adr/0002-phase1-leaking-allocator.md`.
 //! All heap allocation routes through [`gc::alloc`], which reclaims
 //! unreachable objects.
@@ -331,9 +331,9 @@ pub unsafe extern "C" fn nova_rt_str_concat(a: *const NovaStr, b: *const NovaStr
 /// Concatenate every string in `parts` into one new string: the n-ary form
 /// string interpolation of three or more parts lowers to.
 ///
-/// One copy of each part and one result, two GC objects, where pairwise
-/// concatenation made a new string per part, each copying everything built
-/// so far. Each part is copied straight into the result's buffer.
+/// One copy of each part into one result, where pairwise concatenation made
+/// a new string per part, each copying everything built so far. Each part is
+/// copied straight into the result's bytes.
 ///
 /// GC safety: the parts are read after the result's buffer is allocated.
 /// `parts`, held in this frame, keeps the array and so every part alive

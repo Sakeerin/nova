@@ -22,7 +22,9 @@
 //!
 //! Marking is range-based, so interior pointers (e.g. an array-element address
 //! held transiently) keep their containing object alive. Objects flagged
-//! `scan = false` (string byte buffers) are leaves and are not traced.
+//! `scan = false` are leaves and are not traced: strings and `Bytes` (a
+//! runtime-made value is one object holding its header and bytes; a string
+//! literal's is a 16-byte header pointing at static data).
 //!
 //! **Small objects live in size-class pages; large ones do not.** An object of
 //! `pages::SMALL_MAX` bytes or less takes a slot in a 64 KiB page of one size

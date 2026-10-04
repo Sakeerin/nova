@@ -128,7 +128,7 @@ sweep really frees, so addresses are reused. Nothing may key a persistent table 
 - `Float` (default) = `f64`
 - `Bool` = `i8`
 - `Char` = `u32` (Unicode scalar)
-- `String` = heap object: `{ len: usize, data: ptr<u8> }` UTF-8
+- `String` = one leaf heap object: a `{ len: u64, ptr }` header with the UTF-8 bytes inline after it, at offset 16, where `ptr` points; a string literal is a 16-byte leaf header whose `ptr` targets static data
 - Tuple = struct of fields, no header if monomorphized & on stack
 - Records = boxed by default (header + fields)
 - Sum types = tagged union: `{ tag: u32, payload: union { ... } }`
@@ -136,6 +136,7 @@ sweep really frees, so addresses are reused. Nothing may key a persistent table 
 ### 2.3 String Encoding
 - UTF-8, immutable
 - Slicing returns `Str` (view) — no copy
+- [Amended 2026-10-04: no `Str` view type is implemented, and `String` and `Bytes` slices copy. A future view must not be a `NovaStr` with a leaf header, because the collector never traces a leaf header's `ptr` (`docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md` §4.5).]
 - `String` (owned) vs `Str` (borrowed) — like Rust's `String`/`&str`
 
 ---
@@ -170,7 +171,9 @@ Roots come from exactly three places:
 
 Marking is **range-based**, so an interior pointer (an array-element address held
 transiently, say) keeps its containing object alive. Objects allocated with `scan =
-false` — string byte buffers — are leaves and are never traced.
+false` — strings and `Bytes`: a runtime-made value is one object holding its header
+and bytes, a string literal's is a 16-byte header pointing at static data — are
+leaves and are never traced.
 
 **A sweep really frees, so an address is not a durable identity for an object.** Unmarked
 memory goes back to the system allocator rather than into an arena this module keeps, so

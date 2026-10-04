@@ -30,8 +30,9 @@ pub enum Ty {
     String,
     /// An immutable byte buffer.
     ///
-    /// Structurally identical to [`Ty::String`] -- both are a scanned
-    /// `{len, ptr}` header over a GC leaf buffer -- and semantically distinct:
+    /// Structurally identical to [`Ty::String`] -- both are a `{len, ptr}` GC
+    /// leaf header; a runtime-made value's bytes follow it inline in the same
+    /// object, a `String` literal's are static data -- and semantically distinct:
     /// only `String` carries a UTF-8 guarantee. Nothing converts between them
     /// implicitly. This reaches codegen as the same opaque `MirTy::Ptr` every
     /// other heap pointer already lowers to, so neither backend needs an arm
