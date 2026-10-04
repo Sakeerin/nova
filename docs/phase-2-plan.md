@@ -304,8 +304,11 @@ the third run judged under `docs/adr/0021-gate-ratio-paired-rounds.md`:
   all 12 pinned rounds, where 10 are needed. Unpinned, which does not
   decide, it cleared it in all 12 too.
 
-The gate is met on this host, under the absolute reading and under the
-one that counts the Bun ratio. See
+The `examples/05-json-api` benchmark gate is met on this host, under the
+absolute reading and under the one that counts the Bun ratio.
+`nova-spec/60-EXAMPLES.md` §3 (`03-http-server`) and §4 (`04-todo-cli`)
+are also labelled Phase 2 gates; neither exists under `examples/` and
+nothing here judges them, so this does not say Phase 2 is complete. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
 ### 2.5 — `std/test` (+ `nova test`) and hardening

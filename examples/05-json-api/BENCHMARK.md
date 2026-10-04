@@ -6335,7 +6335,10 @@ though not less than "(gate-remeasure-5)"'s.**
 - The pinned extremes ratio, Nova's slowest reading over Bun's fastest, is
   1.054–1.305, and the unpinned one 1.101–1.286. So in both conditions
   Nova's slowest reading beat Bun's fastest, the test the extremes rule set
-  before ADR 0021, which no earlier recorded run met. Pinned, that lower
+  before ADR 0021. No earlier recorded run met it over all its readings;
+  "(gate-remeasure-4)"'s first three rounds met it pinned, 1.010–1.269,
+  before its six rounds took the pinned range to 0.708–1.334. Pinned, that
+  lower
   end is 14198.0 against 13474.5, 1.0537, just under the 1.0547 margin.
   This is description; the ADR decides by rounds.
 - Why the host was steadier is not measured, and its state was not
@@ -6445,14 +6448,19 @@ reading.**
 - **The host's fast speed level.** Every Bun reading here, 12475.4–13736.7,
   is at or just above the slow cluster "(aa-noise)" found for the same
   `bun-server.js`, 12453.3–13546.3, and none is near its fast one,
-  17829.0–22803.5. Nova's readings fall in that record's slow cluster and
-  the band above it, though it measured an earlier build. So this run is
+  17829.0–22803.5. Nova's readings, 14198.0–16301.7, run from that
+  record's Nova slow cluster, 14121.5–14895.2, up through the span of the
+  four readings it found between its clusters, 15258.7–16700.1: four fall in
+  the slow cluster, seventeen in that span, and three, 14999.0, 15128.3 and
+  15146.2, in the gap between the two. None is near its fast cluster,
+  20557.2–23407.8, though that record measured an earlier build. So this
+  run is
   consistent with the host at its slow level throughout; that is inferred,
   not measured. In "(gate-remeasure-6)", on `b24379e`, the seven rounds
   whose Bun pinned reading was 17477.0 or more had pinned ratios of
   0.907–1.168, and three of them fell short of the margin. Whether this
-  build clears it at the fast level is not measured. One host state across
-  all twelve rounds also makes them one sample of that state.
+  build clears it at the fast level is not measured. If the host held one
+  state across all twelve rounds, as inferred, they are one sample of it.
 - **Whether "(one-alloc-strings)" moved the pinned ratio.** The median
   pinned round ratio was 1.176 here and 1.112 in "(gate-remeasure-6)", the
   only earlier run whose code differs from this one's by that change alone.
