@@ -35,13 +35,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     finds them by walking the directory at test time, so a new module is
     covered.
   - It fails on a `.ptr =` assignment outside `alloc_str_object` and
-    `nova_rt_str_new`, a mutable borrow of a `.ptr`, a `NovaStr` struct
+    `nova_rt_str_new`, a `.ptr` whose address is taken, a `NovaStr` struct
     literal or `impl` block, or any production call to `nova_rt_str_new`,
     the way a zero-copy slice would reach it.
-  - Six mutants each fail it: a new module file, and a slice through
-    `nova_rt_str_new`, are among them. A `.ptr ==` comparison passes, as it
-    should.
-  - It is a text scan, not a proof; its doc lists what it cannot see.
+  - Seven mutants each fail it: a new module file, a slice through
+    `nova_rt_str_new` and a write through `addr_of!(..).cast_mut()` are
+    among them. A `.ptr ==` comparison passes, as it should.
+  - It is a text scan, not a proof; its doc names some of what it cannot
+    see.
 
   The rule that `gc_str_filled`'s `fill` does not allocate is now
   documented as a convention, not an invariant.
