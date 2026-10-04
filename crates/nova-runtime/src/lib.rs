@@ -81,6 +81,10 @@ mod net;
 /// callers are both in this crate, `task.rs` (for `wait`) and `net.rs` (for
 /// `set_nonblocking` and `wait`).
 mod poll;
+/// The process-wide shutdown flag `std/http`'s `Server::listen` polls (see
+/// its module doc and `docs/adr/0022-process-shutdown-signals.md`). `pub`,
+/// unlike [`time`], so `tests/signal_*.rs` can drive it.
+pub mod signal;
 /// `pub`, not private like [`gc`]: `task`'s ABI constants (`PollFn`,
 /// `POLL_READY`, `STATE_SLOT_TAG`, `STATE_SLOT_TEMPS`) are not all read by
 /// this crate's own runtime logic -- some exist purely as the documented
@@ -1216,6 +1220,10 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_log_set_config",
             log::nova_rt_log_set_config as *const u8,
+        ),
+        (
+            "nova_rt_shutdown_requested",
+            signal::nova_rt_shutdown_requested as *const u8,
         ),
     ]
 }
