@@ -1,0 +1,5 @@
+GET / -> 200 Hello from Nova!
+GET /health -> 200 application/json 15 {"status":"ok"}
+GET /echo -> 200 /echo
+GET /nope -> 404
+POST / -> 404

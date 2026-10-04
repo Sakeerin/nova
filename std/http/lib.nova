@@ -2,18 +2,22 @@
 //
 // Compiled as an implicit module and glob-imported into every user module, so
 // these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
-// The transport is `std/net`: this module parses and serialises, and never
-// opens a socket itself.
+// The transport is `std/net`. Parsing and serialising never open a socket;
+// `Server::listen`, at the end of this file, binds one and is the only code
+// here that does.
 //
-// **What v1 is, against `nova-spec/20-STDLIB.md` section 6.** That section
-// specifies a router (`Server::new().get(path, handler)`) over
-// `pub type Handler = async fn(Request) -> Response`. That alias does not
-// parse -- measured, `P0001: expected type (in type alias), found async` --
-// so v1 ships no router and no client. It loses less than it sounds: handler
-// code sits inside the caller's own accept loop, which is already an async
-// context, so it may `await` freely. A router would have *added* a constraint.
-// See docs/adr/0019-offset-table-intrinsic-boundary.md and that section's own
-// dated amendment.
+// **What ships, against `nova-spec/20-STDLIB.md` section 6.** That section
+// specifies a router over `pub type Handler = async fn(Request) -> Response`.
+// That alias does not parse -- measured, `P0001: expected type (in type
+// alias), found async` -- and a type alias of any kind is `E0900`, so
+// `Server` at the end of this file types each handler inline as
+// `fn(Request) -> Response`. A handler is therefore synchronous: it builds
+// its response without awaiting. Only GET routes ship, and there is no
+// client. `Server::listen` shuts down gracefully on SIGTERM or SIGINT
+// (Ctrl+Break or Ctrl+C on Windows); see its own comment and
+// docs/adr/0022-process-shutdown-signals.md. See also
+// docs/adr/0019-offset-table-intrinsic-boundary.md and section 6's own dated
+// amendments.
 //
 // **Parsing is one intrinsic and it returns offsets, not values.**
 // `http_parse_request` hands back a flat `[Int]` table of byte offsets into
@@ -26,27 +30,30 @@
 // field names are case-insensitive, so a `Map` keyed on the raw casing would
 // answer `get("content-length")` differently depending on what the peer sent.
 //
-// **Two limitations below share one cause: this module reads exactly one
-// request's worth of bytes per connection turn and trusts `Content-Length`
-// to say where that ends.**
+// **Two limitations of `read_request` below share one cause: it reads
+// exactly one request's worth of bytes per connection turn and trusts
+// `Content-Length` to say where that ends.** `Server` shares the first and
+// not the second: it keeps one buffer per connection, so it answers
+// pipelined requests in order.
 //
-// - `Content-Length` is the only framing v1 understands. Chunked
+// - `Content-Length` is the only framing either understands. Chunked
 //   transfer-encoding is neither supported nor detected, so a chunked
 //   request's body is left on the connection and is misread as the next
 //   request.
-// - Bytes already read past the current request's body are discarded, so a
-//   pipelined request is lost and its connection deadlocks rather than
-//   merely going unsupported. See `read_request`'s own doc comment for the
-//   exact wording this needs.
+// - `read_request` discards bytes already read past the current request's
+//   body, so a pipelined request is lost and its connection deadlocks rather
+//   than merely going unsupported. See `read_request`'s own doc comment for
+//   the exact wording this needs.
 //
 // **A third limitation, with a different cause.** Neither `conn.read` call
 // in `read_request` below carries a timeout, so a peer that connects and
 // then sends nothing -- or sends a partial head or body and stops -- holds
 // the task serving it parked forever. `std/net::TcpStream::read_timeout`
-// already exists (`std/net/lib.nova`) and was not used here; see
+// already exists (`std/net/lib.nova`) and was not used there; see
 // `read_request`'s own doc comment for the reasoning, and
 // docs/adr/0019-offset-table-intrinsic-boundary.md's Consequences section
-// for the same gap recorded against that ADR.
+// for the same gap recorded against that ADR. `Server` does not share this
+// one either: every wait in its `serve` is bounded.
 
 // The request method. `Unknown` carries the raw token rather than discarding
 // it: a request may carry any method a peer invents, and the parser must not
@@ -353,6 +360,18 @@ impl Response {
 
     pub fn not_found() -> Response { Response::text(404, "not found") }
 
+    // `200 OK` carrying `v` as JSON text, with `content-type` and
+    // `content-length` set. It takes the name section 6 gives a client-side
+    // decoder (`json<T: FromJson>(self)`): there is no client, and one type
+    // cannot have both, so the constructor has it.
+    pub fn json(v: JsonValue) -> Response {
+        let body = bytes_from_string(stringify(v))
+        let mut h: Map<String, String> = Map::new()
+        h.insert("content-length", "${body.len()}")
+        h.insert("content-type", "application/json")
+        Response { status: 200, headers: h, body: body }
+    }
+
     // The response as it goes on the wire.
     //
     // No intrinsic backs this: a response is a status line, a header block and
@@ -442,8 +461,8 @@ fn reason_phrase(status: Int) -> String {
 // The transport half: reading a request off a connection and writing a
 // response back onto one, honouring keep-alive. `std/net`'s `TcpStream` is
 // the only socket type either function below touches, through the `Read` and
-// `Write` impls that module defines for it -- this module still never opens
-// one itself.
+// `Write` impls that module defines for it -- neither function opens one.
+// Only `Server::listen`, at the end of this file, binds a listener.
 
 // Read one request from `conn`, honouring keep-alive: the caller loops, and
 // this reads exactly one request's head and body, leaving anything after it
@@ -728,4 +747,268 @@ pub async fn write_response(conn: TcpStream, resp: Response) -> Result<Int, IoEr
         sent = sent + n
     }
     Ok(total)
+}
+
+// ---------------------------------------------------------------------------
+// The router: `Server`.
+//
+// Written in Nova over the pieces above. Handlers are `fn(Request) ->
+// Response` values -- this module's header says why not section 6's
+// `Handler` alias -- so a handler is synchronous: it builds its response
+// without awaiting.
+
+// How often `Server::listen` and every connection it serves look at the
+// shutdown flag, in milliseconds. A signal is noticed within one tick.
+const SERVER_TICK_MS: Int = 100
+
+// How long one request may take, in milliseconds: from the moment `serve`
+// takes it up until its response has been written. A stalled client is
+// dropped at this deadline, so a shutdown always finishes.
+const SERVER_REQUEST_MS: Int = 10000
+
+// A routing table and nothing else. Build one with `Server::new()` and `get`,
+// then `listen`.
+pub record Server {
+    routes: Vec<Route>
+}
+
+// One GET route: an exact path, and the handler that answers it.
+record Route {
+    path: String
+    handler: fn(Request) -> Response
+}
+
+// A request read off a connection, and the bytes that followed it: a
+// pipelined next request, or the start of one.
+record InFlight {
+    req: Request
+    rest: Bytes
+}
+
+impl Server {
+    pub fn new() -> Server { Server { routes: Vec::new() } }
+
+    // Adds a GET route. Takes `self` rather than `mut self`, and returns
+    // `Server` rather than section 6's `Self`: a `mut self` call on the
+    // temporary `Server::new()` returns is `E0060`, and `Self` as a type in an
+    // impl block is `E0001`.
+    pub fn get(self, path: String, handler: fn(Request) -> Response) -> Server {
+        let mut rs = self.routes
+        rs.push(Route { path: path, handler: handler })
+        Server { routes: rs }
+    }
+
+    // The response to `req`: the handler of the GET route whose path equals
+    // `req.path` exactly, or `Response::not_found()` for any other path or
+    // method. Socket-free, so a test can call it directly.
+    pub fn dispatch(self, req: Request) -> Response {
+        match req.method {
+            Get => {
+                let mut i = 0
+                while i < self.routes.len() {
+                    match self.routes.get(i) {
+                        Some(r) => {
+                            if r.path == req.path {
+                                // Bound to a local first: calling a fn-typed
+                                // field directly, `r.handler(req)`, is `E0014`.
+                                let h = r.handler
+                                return h(req)
+                            }
+                        }
+                        None => {}
+                    }
+                    i = i + 1
+                }
+                Response::not_found()
+            }
+            _ => Response::not_found()
+        }
+    }
+
+    // Serves `addr` until the process is asked to stop: SIGTERM or SIGINT on
+    // Unix, Ctrl+Break or Ctrl+C on Windows.
+    //
+    // **Graceful.** On the first such signal it stops accepting within one
+    // tick, closes the listener, and returns `Ok(())`. Connections are not
+    // touched: each finishes the request it has started -- pipelined ones
+    // included -- within that request's deadline, and an idle one closes at
+    // its next tick. A second signal ends the process at once, by the
+    // signal's default action.
+    //
+    // **It returns before those connections finish.** Their tasks run on
+    // alongside any code after `.await`, and the process exits only once
+    // `block_on`'s implicit join has finished them
+    // (docs/adr/0009-async-execution-model.md).
+    //
+    // **The signal handler is installed by the first `listen`, before `bind`,
+    // and stays installed for the rest of the process.** So a client that can
+    // connect can also stop the server gracefully. But a program that recovers
+    // from this function's `Err` and keeps running swallows its next signal,
+    // and only a second one ends it; docs/adr/0022-process-shutdown-signals.md
+    // records why.
+    //
+    // **Errors.** A failed `bind` or `accept` returns `Err`. An accept error
+    // closes the listener first and leaves the connections running; the flag
+    // is not set, so they keep being served.
+    pub async fn listen(self, addr: String) -> Result<(), IoError> {
+        let _ = shutdown_requested()
+        let l = match bind(addr) {
+            Ok(l) => l
+            Err(e) => return Err(e)
+        }
+        // The flag is checked on every turn, not only when an accept times
+        // out: under steady traffic the timeout arm may never run. The accept
+        // is polled under `timeout` because a bare one never returns without a
+        // connection, and closing the listener under it does not wake it.
+        while !shutdown_requested() {
+            match timeout(Duration::from_millis(SERVER_TICK_MS), l.accept()).await {
+                Ok(r) => {
+                    match r {
+                        Ok(conn) => {
+                            let _ = spawn(serve(self, conn))
+                        }
+                        Err(e) => {
+                            let _ = l.close().await
+                            return Err(e)
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        let _ = l.close().await
+        Ok(())
+    }
+}
+
+// One connection, for its whole life, with one buffer it keeps throughout.
+//
+// - **Idle (buffer empty):** waits for a request's first bytes one tick at a
+//   time. EOF closes; a timeout closes once the shutdown flag is set and
+//   otherwise keeps waiting.
+// - **In flight (buffer not empty):** a request is taken up -- its deadline
+//   starts now -- read to completion by `read_in_flight`, and answered. The
+//   response is written under the same deadline, so a peer that stops
+//   reading cannot hold the connection forever either.
+// - **After an answer:** bytes left in the buffer are the next request,
+//   answered even after a stop, because they are in flight. With the buffer
+//   empty, the connection closes if the flag is set and goes idle otherwise.
+//
+// Anything else that goes wrong -- EOF mid-request, a read or write error, a
+// malformed head, an oversized body, a deadline passing -- closes this
+// connection without a response, and touches no other.
+async fn serve(s: Server, conn: TcpStream) {
+    let mut buf = bytes_from_string("")
+    let mut open = true
+    while open {
+        if buf.len() == 0 {
+            match conn.read_timeout(4096, SERVER_TICK_MS).await {
+                Ok(chunk) => {
+                    if chunk.len() == 0 {
+                        open = false
+                    } else {
+                        buf = chunk
+                    }
+                }
+                Err(e) => {
+                    match e.kind {
+                        TimedOut => {
+                            if shutdown_requested() { open = false }
+                        }
+                        _ => open = false
+                    }
+                }
+            }
+        } else {
+            let started = Instant::now()
+            match read_in_flight(conn, buf, started).await {
+                Some(f) => {
+                    buf = f.rest
+                    let left = SERVER_REQUEST_MS - started.elapsed().as_millis()
+                    match timeout(Duration::from_millis(left), write_response(conn, s.dispatch(f.req))).await {
+                        Ok(w) => {
+                            match w {
+                                Ok(n) => {
+                                    if buf.len() == 0 && shutdown_requested() { open = false }
+                                }
+                                Err(e) => open = false
+                            }
+                        }
+                        Err(_) => open = false
+                    }
+                }
+                None => open = false
+            }
+        }
+    }
+    let _ = conn.close().await
+}
+
+// The request at the front of `first`, reading more from `conn` as needed, or
+// `None` to close the connection. The head is parsed from at most
+// `max_head_bytes` of the buffer, so bytes buffered behind it -- a body, or a
+// pipelined request -- never count against the head's own limit.
+async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant) -> Option<InFlight> {
+    let limits = Limits::default()
+    let mut buf = first
+    let mut head: Option<Request> = None
+    while head.is_none() {
+        let window = head_window(buf, limits.max_head_bytes)
+        match parse_request_head(window, limits) {
+            Ok(maybe) => head = maybe
+            Err(_) => return None
+        }
+        if head.is_none() {
+            // A head still incomplete at `max_head_bytes` never will be.
+            if window.len() >= limits.max_head_bytes { return None }
+            match read_more(conn, 4096, started).await {
+                Some(chunk) => buf = buf.concat(chunk)
+                None => return None
+            }
+        }
+    }
+    let req = match head {
+        Some(r) => r
+        None => return None
+    }
+    // `parse_request_head` returned `Ok(Some(_))` on this same window, so its
+    // offset table has status 0 and its last element is where the body starts.
+    let t = parse_offsets(head_window(buf, limits.max_head_bytes))
+    let body_start = t[t.len() - 1]
+    let want = match content_length_of(req, limits.max_body_bytes) {
+        Ok(n) => n
+        Err(_) => return None
+    }
+    if want > limits.max_body_bytes { return None }
+    let end = body_start + want
+    while buf.len() < end {
+        match read_more(conn, end - buf.len(), started).await {
+            Some(chunk) => buf = buf.concat(chunk)
+            None => return None
+        }
+    }
+    Some(InFlight {
+        req: Request { method: req.method, path: req.path, headers: req.headers, body: buf.slice(body_start, end) },
+        rest: buf.slice(end, buf.len())
+    })
+}
+
+// Up to `max` more bytes for the request taken up at `started`, or `None` at
+// EOF, on a read error, or once that request's deadline has passed.
+async fn read_more(conn: TcpStream, max: Int, started: Instant) -> Option<Bytes> {
+    let left = SERVER_REQUEST_MS - started.elapsed().as_millis()
+    if left <= 0 { return None }
+    match conn.read_timeout(max, left).await {
+        Ok(chunk) => {
+            if chunk.len() == 0 { return None }
+            Some(chunk)
+        }
+        Err(_) => None
+    }
+}
+
+// The first `max` bytes of `buf`, or all of it if it is shorter.
+fn head_window(buf: Bytes, max: Int) -> Bytes {
+    if buf.len() <= max { return buf }
+    buf.slice(0, max)
 }

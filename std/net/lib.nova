@@ -279,7 +279,11 @@ impl TcpListener {
     // `TcpStream::read_timeout`, so a task waiting here waits until a
     // connection arrives or the process ends; an untimed wait is never
     // reported as a deadlock, and `block_on` cannot return while any task is
-    // parked, so there is no graceful-shutdown path through this.
+    // parked. A graceful shutdown therefore polls this under `std/time`'s
+    // `timeout` instead of awaiting it bare, and closes the listener only
+    // once the abandoned accept has returned: closing it under a parked
+    // accept does not wake that accept. `std/http`'s `Server::listen` is that
+    // shape.
     //
     // Errors as `IoError { kind: Other }` on a closed, stale or forged
     // listener, and on a `TcpListener` whose `fd` actually names a connected

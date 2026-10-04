@@ -9486,6 +9486,24 @@ fn http_keepalive_run() {
         .stdout(expected);
 }
 
+/// `std/http`'s `Server::dispatch` and `Response::json`, socket-free: exact
+/// GET routes, a handler that reads its request, 404 for an unknown path and
+/// for a non-GET method, and the JSON response's headers and bytes. Design:
+/// docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md §7.2.
+#[test]
+fn http_server_dispatch_run() {
+    let expected =
+        std::fs::read_to_string(repo_root().join("tests/runtime/http_server_dispatch.stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/http_server_dispatch.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
 /// The benchmark's two halves still work together: the Nova server starts,
 /// prints its port, and `nova-bench-http` drives keep-alive requests against
 /// it with no errors.
