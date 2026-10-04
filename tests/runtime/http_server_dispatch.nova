@@ -1,0 +1,45 @@
+// `std/http`'s `Server::dispatch` and `Response::json`, with no socket.
+// `examples/03-http-server` drives the same routes over TCP; this pins the
+// routing and the JSON response's bytes on their own.
+
+fn status_ok() -> JsonValue {
+    let mut m: Map<String, JsonValue> = Map::new()
+    m.insert("status", String("ok"))
+    Object(m)
+}
+
+fn request(method: Method, path: String) -> Request {
+    Request { method: method, path: path, headers: Map::new(), body: bytes_from_string("") }
+}
+
+fn body_text(r: Response) -> String {
+    match r.body.to_string() {
+        Some(s) => s
+        None => "<not utf-8>"
+    }
+}
+
+fn header(r: Response, name: String) -> String {
+    match r.headers.get(name) {
+        Some(v) => v
+        None => "<absent>"
+    }
+}
+
+fn main() {
+    let app = Server::new()
+        .get("/", |_| Response::text(200, "Hello from Nova!"))
+        .get("/health", |_| Response::json(status_ok()))
+        .get("/echo", |r: Request| Response::text(200, r.path))
+
+    let a = app.dispatch(request(Get, "/"))
+    println("GET / -> ${a.status} ${body_text(a)}")
+    let b = app.dispatch(request(Get, "/health"))
+    println("GET /health -> ${b.status} ${header(b, "content-type")} ${header(b, "content-length")} ${body_text(b)}")
+    let c = app.dispatch(request(Get, "/echo"))
+    println("GET /echo -> ${c.status} ${body_text(c)}")
+    let d = app.dispatch(request(Get, "/nope"))
+    println("GET /nope -> ${d.status}")
+    let e = app.dispatch(request(Post, "/"))
+    println("POST / -> ${e.status}")
+}
