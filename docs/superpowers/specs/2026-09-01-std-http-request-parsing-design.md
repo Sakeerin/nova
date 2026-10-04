@@ -24,6 +24,16 @@ Deliberately not here:
   That type alias does not parse — measured, `P0001: expected type (in type alias), found async`.
   Deferred until the language can name an async function type. §3 explains why
   the loop-based shape loses nothing in the meantime.
+
+  [Amended 2026-10-04, branch `examples-03-04-inventory`: two sentences in this
+  section are narrower than they read. **The router does not have to wait for
+  an async function type.** `60-EXAMPLES.md` §3's handlers are synchronous, and
+  a router over `fn(Request) -> Response` fields, written in today's Nova,
+  served that listing's routes. **The sentence above this list blames `04-todo-cli`
+  on `std/http`'s absence, but that listing uses no `std/http`.** What 04 lacks
+  is chiefly the program's arguments. Both are recorded in
+  `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`, §3.2 and
+  §4.3.]
 - **The client.** `get`, `post`, `Response::json`, `HttpError` in that same
   section. A separate problem with no gate dependency.
 - **HTTPS, HTTP/2, chunked transfer-encoding, and request pipelining.**

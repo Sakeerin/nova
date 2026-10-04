@@ -86,6 +86,16 @@ drift is in two spec files, not one — while `examples/` on disk holds
 `03-producer-consumer` instead. Measured directly (`ls examples/`), not
 recalled.
 
+**Recorded 2026-10-04 (branch `examples-03-04-inventory`): this listing does
+not compile as written, and its first gate clause is reachable in today's Nova
+anyway.** `nova check` stops on line 1, where `import std/http` is `P0001`.
+Every construct the listing uses is inventoried, with its diagnostic and a route
+that ran, in `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`
+§3. A `Server` router written in Nova served `Hello from Nova!` on
+`0.0.0.0:3000`. The second clause is open: nothing defines what "exits cleanly
+on SIGTERM" means, and the runtime observes no signal (§3.3 there). The listing
+above is unchanged.
+
 ---
 
 ## 4. `04-todo-cli` (Phase 2 gate)
@@ -156,6 +166,17 @@ async fn main() {
 ```
 
 **Gate:** Full CLI cycle works (add → list → done → list).
+
+**Recorded 2026-10-04 (branch `examples-03-04-inventory`): this listing does
+not compile as written, and the one thing today's Nova has no route for is the
+program's arguments.** `nova check` stops on line 1, where `import std/fs` is
+`P0001`. The closest program today's Nova accepts ran the add → list → done →
+list cycle over four separate processes, with each command read from a file
+instead of argv. `args()` does not exist and has no portable route,
+`exit(code)` exists only through FFI, and `nova run` cannot pass arguments
+through. The full inventory is
+`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §4. The listing
+above is unchanged.
 
 ---
 
