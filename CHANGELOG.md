@@ -27,6 +27,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   isolation. It is tracked because the harness that produced this
   project's existing per-call figures lived outside the repository and no
   longer exists, so those figures cannot be reproduced from a checkout.
+- **A source guard pins the `NovaStr` pointer invariant.** Since every
+  string header became a leaf, a `ptr` pointing into another GC object
+  would not keep it alive. The test
+  `only_the_two_builders_write_a_novastr_ptr` scans the production code of
+  every runtime source file, found by walking `src` at test time, so a new
+  module is covered. It fails on a `.ptr =` write outside
+  `alloc_str_object` and `nova_rt_str_new`, or on a `NovaStr` struct
+  literal. Four mutants each fail it, a new module file among them. The
+  rule that `gc_str_filled`'s `fill` does not allocate is now documented
+  as a convention, not an invariant.
 
 ### Measured
 - **Eager header materialisation and body accumulation now carry figures.**

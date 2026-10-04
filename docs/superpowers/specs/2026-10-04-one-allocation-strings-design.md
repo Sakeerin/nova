@@ -135,7 +135,9 @@ base + 16  the bytes, len of them
 The GC-safety comment changes from "the buffer is held in this frame across
 the header's allocation" to: there is now one allocation; `fill` runs after
 it and must not allocate GC memory; whatever `fill` reads from the GC heap
-stays alive because the caller's pointers are roots (unchanged).
+stays alive because the caller's pointers are roots (unchanged). [Amended
+2026-10-04: the no-allocation rule is a convention, not a memory-safety
+requirement; see the note at the end of §4.5.]
 
 ### 4.3 `gc_bytes`
 
@@ -164,6 +166,16 @@ comment (`lib.rs:202-206`) says that the leaf flag depends on it.
 
 Neither invariant can be pinned by a test (§5); both are stated where a
 future change would break them.
+
+[Amended 2026-10-04, after merge as PR #90: both sentences above were
+wrong, as the branch's final review found. The first invariant is now
+pinned by a source guard, `only_the_two_builders_write_a_novastr_ptr` in
+`crates/nova-runtime/src/lib.rs`. It scans the production code of every
+runtime source file and fails on a `.ptr =` write outside
+`alloc_str_object` and `nova_rt_str_new`, or on a `NovaStr` struct
+literal. The second is a convention, not a memory-safety invariant: the
+new object stays reachable from `gc_str_filled`'s own frame across `fill`.
+The `NovaStr` doc comment now says so.]
 
 ### 4.6 Cost by length
 
@@ -226,7 +238,9 @@ read taken earlier from the GC heap.
 
 **Deliberately not tested:** the header-first order and the rule that
 `fill` must not allocate (§4.2, §4.5). Neither has an observable effect a
-test could catch.
+test could catch. [Amended 2026-10-04: the `ptr` invariant of §4.5, which
+this section did not list, is now pinned by a source guard; see the note
+at the end of §4.5.]
 
 **Named mutants, each run with exit codes and result lines checked:**
 
