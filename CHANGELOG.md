@@ -530,6 +530,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-04 (one-alloc-strings)".
+- **The json-api's server thread, sampled again after one allocation per
+  string.**
+  - Socket system calls are 71.1-72.0% of the thread; the send path alone
+    is 60.6-61.2%, 25.2-25.5 us per request.
+  - The Nova-side work is 11.6-12.0 us per request, against 17.4-18.2 in
+    "(reprofile-4)"; the send path's cost rose between the runs too, so the
+    drop is not attributed to the code alone.
+  - Allocation, collection included, is 15.7-16.4%, 6.5-6.8 us per
+    request: the collector 2.6-2.7 us and allocation proper 3.9-4.2 us.
+
+  Details are in `examples/05-json-api/BENCHMARK.md`,
+  "AMENDMENT 2026-10-04 (reprofile-5)".
 
 ### Changed
 - **Each runtime string is one leaf GC object.** `String` and `Bytes`
