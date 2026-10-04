@@ -536,9 +536,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is 60.6-61.2%, 25.2-25.5 us per request.
   - Everything outside the socket system calls is 11.6-12.0 us per
     request, against 17.4-18.2 in "(reprofile-4)"; without the socket
-    libraries' own user-mode code, 11.0-11.4 against 16.8-17.6. The send
-    path's cost rose and the receive path's fell between the runs, so the
-    drop is not attributed to the code alone.
+    libraries' own user-mode code, 11.0-11.4 against 16.8-17.6. The runs
+    are about five and a half hours apart and the host's state was not
+    recorded; the send path's cost rose and the receive path's fell, for
+    reasons not separated. So the drop is not attributed to the code alone.
   - Allocation, collection included, is 15.7-16.4%, 6.5-6.8 us per
     request: the collector 2.6-2.7 us and allocation proper 3.9-4.2 us.
 
