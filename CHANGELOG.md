@@ -534,8 +534,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   string.**
   - Socket system calls are 71.1-72.0% of the thread; the send path alone
     is 60.6-61.2%, 25.2-25.5 us per request.
-  - The Nova-side work is 11.6-12.0 us per request, against 17.4-18.2 in
-    "(reprofile-4)"; the send path's cost rose between the runs too, so the
+  - Everything outside the socket system calls is 11.6-12.0 us per
+    request, against 17.4-18.2 in "(reprofile-4)"; without the socket
+    libraries' own user-mode code, 11.0-11.4 against 16.8-17.6. The send
+    path's cost rose and the receive path's fell between the runs, so the
     drop is not attributed to the code alone.
   - Allocation, collection included, is 15.7-16.4%, 6.5-6.8 us per
     request: the collector 2.6-2.7 us and allocation proper 3.9-4.2 us.
