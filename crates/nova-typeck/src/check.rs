@@ -3982,7 +3982,8 @@ impl<'a> Checker<'a> {
             | Builtin::TimeNowEpochNanos
             | Builtin::LogConfigLevel
             | Builtin::LogConfigToStderr
-            | Builtin::LogSetConfig => "",
+            | Builtin::LogSetConfig
+            | Builtin::ShutdownRequested => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7294,6 +7295,7 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::LogConfigLevel => (vec![], Ty::Int),
         Builtin::LogConfigToStderr => (vec![], Ty::Int),
         Builtin::LogSetConfig => (vec![Ty::Int, Ty::Int], Ty::Unit),
+        Builtin::ShutdownRequested => (vec![], Ty::Bool),
     }
 }
 
@@ -15453,6 +15455,10 @@ mod tests {
                     (vec![Ty::Int, Ty::Int], Ty::Unit),
                     "`log_set_config(level, to_stderr)` in `std/log`'s `Log::init_with`",
                 ),
+                Builtin::ShutdownRequested => (
+                    (vec![], Ty::Bool),
+                    "`shutdown_requested()` in `std/http`'s `Server::listen` and `serve`",
+                ),
             }
         }
         for b in Builtin::ALL {
@@ -15508,6 +15514,19 @@ mod tests {
                 "{name} must be an STD_ONLY builtin"
             );
         }
+    }
+
+    /// `shutdown_requested` is `STD_ONLY` and typed `() -> Bool`: only
+    /// `std/http`'s `Server` may read the shutdown flag, and reading it is
+    /// what installs the signal handler (docs/adr/0022).
+    #[test]
+    fn shutdown_requested_is_std_only_and_returns_bool() {
+        let b = nova_resolver::Builtin::STD_ONLY
+            .iter()
+            .copied()
+            .find(|b| b.name() == "shutdown_requested")
+            .expect("shutdown_requested must be an STD_ONLY builtin");
+        assert_eq!(builtin_signature(b), (vec![], Ty::Bool));
     }
 
     /// The shared arity/argument path all builtins now go through, exercised

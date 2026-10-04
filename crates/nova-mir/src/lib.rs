@@ -505,6 +505,9 @@ rt_funcs! {
     /// `(i64 level, i64 to_stderr) -> unit` — install a logger configuration,
     /// overwriting any previous one.
     LogSetConfig,
+    /// `() -> i8` — whether a termination signal has been received; the first
+    /// call installs the handler (`crates/nova-runtime/src/signal.rs`).
+    ShutdownRequested,
 }
 
 impl RtFunc {
@@ -601,6 +604,7 @@ impl RtFunc {
             RtFunc::LogConfigLevel => "nova_rt_log_config_level",
             RtFunc::LogConfigToStderr => "nova_rt_log_config_to_stderr",
             RtFunc::LogSetConfig => "nova_rt_log_set_config",
+            RtFunc::ShutdownRequested => "nova_rt_shutdown_requested",
         }
     }
 
@@ -787,6 +791,7 @@ impl RtFunc {
             RtFunc::LogConfigLevel => (vec![], MirTy::I64),
             RtFunc::LogConfigToStderr => (vec![], MirTy::I64),
             RtFunc::LogSetConfig => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
+            RtFunc::ShutdownRequested => (vec![], MirTy::I8),
         }
     }
 }
