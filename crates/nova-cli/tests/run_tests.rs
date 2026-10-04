@@ -10031,3 +10031,162 @@ fn json_api_example_serves_its_routes() {
         "GET /users with two users: the separator and the ascending id walk"
     );
 }
+
+/// THROWAWAY SPIKE (branch `spike-ci-signal-delivery`, never merged). It
+/// measures whether a `cargo test` process can deliver a termination request
+/// to a `nova run` server child on each CI runner, before the
+/// `examples/03-http-server` graceful-shutdown design commits to it.
+///
+/// It asserts TODAY's default disposition, because the runtime installs no
+/// handler yet: on Unix the child dies by signal 15; on Windows it exits with
+/// `0xC000013A`, an unhandled CTRL_BREAK. A pass means the request reached the
+/// child. Every outcome is printed so a failure can be read from the CI log.
+#[test]
+fn spike_ci_signal_delivery_reaches_a_nova_run_server() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"));
+    cmd.arg("run")
+        .arg(repo_root().join("docs/benchmarks/server.nova"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP: the child leads its own console process
+        // group, so a CTRL_BREAK aimed at it never reaches cargo or this test.
+        cmd.creation_flags(0x0000_0200);
+    }
+    let mut child = cmd.spawn().expect("spawn nova run server.nova");
+    let pid = child.id();
+
+    // Drain both streams on threads for the child's whole life: a server
+    // that writes after its first line must never meet a closed pipe.
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let out_thread = std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        if let Some(first) = lines.next() {
+            let _ = tx.send(first);
+        }
+        lines.collect::<Vec<_>>().join("\n")
+    });
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    let first = rx
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or_default();
+    if !first.contains("listening on") {
+        let _ = child.kill();
+        let status = child.wait();
+        let err = err_thread.join().unwrap_or_default();
+        panic!("SPIKE: no ready line; got {first:?}; status {status:?}; stderr {err:?}");
+    }
+    // Let the server reach its parked accept before the request arrives.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (sent, detail) = send_termination_request(pid);
+    eprintln!(
+        "SPIKE: os={} pid={pid} sent={sent} {detail}",
+        std::env::consts::OS
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let waited = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break Some(s),
+            None if Instant::now() >= deadline => break None,
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    let status = match waited {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let s = child.wait().expect("wait after kill");
+            let out = out_thread.join().unwrap_or_default();
+            let err = err_thread.join().unwrap_or_default();
+            panic!(
+                "SPIKE RESULT: the request did not end the child within 10 s \
+                 (sent={sent}, {detail}); force-killed: {s:?}; stdout={out:?} stderr={err:?}"
+            );
+        }
+    };
+    let out = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
+    eprintln!(
+        "SPIKE: status={status:?} code={:?} stdout={out:?} stderr={err:?}",
+        status.code()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "SPIKE RESULT: expected death by SIGTERM (no handler yet); got {status:?}"
+        );
+    }
+    #[cfg(windows)]
+    {
+        let code = status.code().expect("an exit code on Windows");
+        assert_eq!(
+            code as u32, 0xC000_013A,
+            "SPIKE RESULT: expected 0xC000013A (unhandled CTRL_BREAK); got {code} = {:#x}",
+            code as u32
+        );
+    }
+}
+
+/// SIGTERM to the child. `kill` comes from the C library std already links,
+/// so no dev-dependency (and no `Cargo.lock` change under `--locked`).
+#[cfg(unix)]
+fn send_termination_request(pid: u32) -> (bool, String) {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let pid = i32::try_from(pid).expect("a pid fits in i32");
+    assert!(pid > 0, "never signal pid 0 or a group");
+    let rc = unsafe { kill(pid, 15) };
+    let os = std::io::Error::last_os_error();
+    (
+        rc == 0,
+        format!("kill(pid, SIGTERM) rc={rc} last_os_error={os}"),
+    )
+}
+
+/// CTRL_BREAK to the child's own process group, whose id is the child's pid
+/// because it was spawned with CREATE_NEW_PROCESS_GROUP. Never group 0: that
+/// would deliver to every process on the console, cargo and this test
+/// included. Hand-declared from kernel32, so no dev-dependency.
+#[cfg(windows)]
+fn send_termination_request(pid: u32) -> (bool, String) {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+        fn GetLastError() -> u32;
+        fn GetConsoleWindow() -> *mut core::ffi::c_void;
+    }
+    assert_ne!(pid, 0, "never group 0");
+    let console_window = unsafe { !GetConsoleWindow().is_null() };
+    let rc = unsafe { GenerateConsoleCtrlEvent(1, pid) };
+    let err = if rc == 0 {
+        unsafe { GetLastError() }
+    } else {
+        0
+    };
+    (
+        rc != 0,
+        format!(
+            "GenerateConsoleCtrlEvent(CTRL_BREAK, {pid}) rc={rc} GetLastError={err} \
+             console_window={console_window}"
+        ),
+    )
+}
