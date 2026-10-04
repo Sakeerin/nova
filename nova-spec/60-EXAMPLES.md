@@ -447,8 +447,13 @@ the equivalence check re-run first and all nine exchanges matching:
   readings, pinned 14198.0–16277.5 req/sec and unpinned 15128.3–16301.7.
 
 **The gate is met**, on this development host. This run's pinned rounds
-scattered far less than the two before it, for reasons not measured;
-the ADR judges each run alone. Full account in
+scattered far less than "(gate-remeasure-6)"'s, though not less than
+"(gate-remeasure-5)"'s, for reasons not measured; the ADR judges each run
+alone. This verdict is on the gate's own statement, a req/sec ratio,
+judged by that ADR's method. It does not cover every bullet of the
+methodology below: every reading was warm, a fresh server measured for
+30 s after a 5 s warmup, so no cold run was measured, and
+`nova-bench-http` records no p50, p95 or p99 latency. Full account in
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
 `src/main.nova`:
