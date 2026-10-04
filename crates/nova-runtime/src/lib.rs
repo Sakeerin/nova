@@ -106,8 +106,9 @@ mod time;
 /// [`alloc_str_object`] and [`nova_rt_str_new`] write a `ptr`, and nothing
 /// in this crate's production code calls `nova_rt_str_new`. The test
 /// `only_the_two_builders_write_a_novastr_ptr` checks both by scanning the
-/// source text; its doc lists what such a scan cannot see. What the code
-/// generators pass to `nova_rt_str_new` rests on its `# Safety` contract.
+/// source text; its doc names some of what such a scan cannot see. What the
+/// code generators pass to `nova_rt_str_new` rests on its `# Safety`
+/// contract.
 ///
 /// **A convention, not an invariant: [`gc_str_filled`]'s `fill` does not
 /// allocate GC memory.** Memory safety does not depend on it, since the new
@@ -1438,18 +1439,21 @@ mod tests {
     /// This scans the production code of every `.rs` file under the crate's
     /// `src` and fails on any of:
     /// - a `.ptr =` assignment outside those two builders;
-    /// - a `.ptr` on a line that also borrows mutably (`&mut `,
-    ///   `addr_of_mut!`, `&raw mut`), the start of a write through
-    ///   `ptr::write`, `mem::replace` or `mem::swap`;
+    /// - a `.ptr` on a line that also takes an address (`&mut `,
+    ///   `addr_of_mut!`, `addr_of!`, `&raw `), the start of a write through
+    ///   `ptr::write`, `mem::replace`, `mem::swap` or a `cast_mut`;
     /// - a `NovaStr` struct literal, or an `impl` block on it;
     /// - a call to `nova_rt_str_new` from this crate's production code, so a
     ///   zero-copy slice cannot hand it a pointer into a GC string. Its only
     ///   callers are the code generators, for string literals.
     ///
-    /// It is a text scan, not a proof. It cannot see a raw write at an offset
-    /// (`*(p as *mut *const u8).add(1) = ...`), a header copied whole
-    /// (`ptr::read`, `copy_nonoverlapping`), a write split across lines, or
-    /// code outside this crate.
+    /// It is a text scan, not a proof, and what it cannot see is open-ended.
+    /// Among it: a raw write at an offset (`*(p as *mut *const u8).add(1) =
+    /// ...`), a header copied whole or built from raw words (`ptr::read`,
+    /// `copy_nonoverlapping`, `transmute`), a call to `nova_rt_str_new`
+    /// through a function pointer or alias, anything reached through a
+    /// renamed path (`use ... as`, a type alias), a write split across lines,
+    /// and code outside this crate.
     #[test]
     fn only_the_two_builders_write_a_novastr_ptr() {
         let sources = runtime_sources();
@@ -1495,12 +1499,15 @@ mod tests {
                 .lines()
                 .filter(|l| {
                     l.contains(".ptr")
-                        && ["&mut ", "addr_of_mut!", "&raw mut"]
+                        && ["&mut ", "addr_of_mut!", "addr_of!", "&raw "]
                             .iter()
                             .any(|b| l.contains(b))
                 })
                 .count();
-            assert_eq!(borrows, 0, "{path}: borrows a `NovaStr`'s `ptr` mutably");
+            assert_eq!(
+                borrows, 0,
+                "{path}: takes the address of a `NovaStr`'s `ptr`"
+            );
             // lib.rs holds the definition; nothing in production code calls it.
             let calls = code.matches("nova_rt_str_new(").count();
             let definitions = usize::from(*path == lib_path);

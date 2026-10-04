@@ -167,20 +167,21 @@ comment (`lib.rs:202-206`) says that the leaf flag depends on it.
 Neither invariant can be pinned by a test (§5); both are stated where a
 future change would break them.
 
-[Amended 2026-10-04, after merge as PR #90: the sentence above was wrong
-on both counts, as the branch's final review found. Where a `NovaStr`'s
-`ptr` may be written can be pinned. A source guard,
+[Amended 2026-10-04, after merge as PR #90: the sentence above needs two
+corrections, as the branch's final review found. The first invariant
+itself is still not pinned by any test, but where a `NovaStr`'s `ptr` may
+be written, which it rests on, is pinned by a source guard,
 `only_the_two_builders_write_a_novastr_ptr` in
-`crates/nova-runtime/src/lib.rs`, scans the production code of every `.rs`
-file under the runtime's `src`. It fails on a `.ptr =` assignment outside
-`alloc_str_object` and `nova_rt_str_new`, a mutable borrow of a `.ptr`, a
-`NovaStr` struct literal or `impl` block, or any production call to
-`nova_rt_str_new`. It is a text scan, not a proof; its doc lists what it
-cannot see. What the code generators pass to `nova_rt_str_new` still rests
-on that function's `# Safety` contract. The second rule is a convention,
-not a memory-safety invariant: the new object stays reachable from
-`gc_str_filled`'s own frame across `fill`. The `NovaStr` doc comment now
-says so.]
+`crates/nova-runtime/src/lib.rs`. It scans the production code of every
+`.rs` file under the runtime's `src`, and fails on a `.ptr =` assignment
+outside `alloc_str_object` and `nova_rt_str_new`, a `.ptr` whose address
+is taken, a `NovaStr` struct literal or `impl` block, or any production
+call to `nova_rt_str_new`. It is a text scan, not a proof; its doc names
+some of what it cannot see. What the code generators pass to
+`nova_rt_str_new` still rests on that function's `# Safety` contract. The
+second rule is not a memory-safety invariant at all but a convention: the
+new object stays reachable from `gc_str_filled`'s own frame across
+`fill`. The `NovaStr` doc comment now says so.]
 
 ### 4.6 Cost by length
 
