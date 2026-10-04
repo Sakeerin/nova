@@ -2,10 +2,11 @@
 //!
 //! # Representation, and why there is no `NovaBytes` struct
 //!
-//! A `Bytes` value is a [`crate::NovaStr`] — a scanned `{len, ptr}` header over
-//! a GC **leaf** buffer. That is not an approximation: `String` and `Bytes` have
-//! the *same* layout and differ only in that `String` carries a UTF-8
-//! guarantee, which lives in the type system rather than the representation.
+//! A `Bytes` value is a [`crate::NovaStr`] — one GC **leaf** object, a
+//! `{len, ptr}` header followed inline by the bytes `ptr` points at. That is
+//! not an approximation: `String` and `Bytes` have the *same* layout and
+//! differ only in that `String` carries a UTF-8 guarantee, which lives in the
+//! type system rather than the representation.
 //!
 //! **A second struct with the same fields would be a second copy of a layout,
 //! which is the drift class this project has already shipped a miscompile
@@ -20,24 +21,23 @@
 
 use crate::NovaStr;
 
-/// Store `bytes` as a GC-managed `Bytes` value: the payload in a **leaf**
-/// buffer, the header a **scanned** object that keeps the buffer alive.
+/// Store `bytes` as a GC-managed `Bytes` value: one **leaf** object holding
+/// the header and, inline after it, a copy of the payload.
 ///
 /// The sibling of `crate::gc_str`, differing only in taking `&[u8]` rather than
-/// `&str`. Both produce the identical layout, deliberately.
+/// `&str`. Both build through [`crate::alloc_str_object`], so the layout is
+/// identical by construction.
+///
+/// GC safety: three callers (`nova_rt_bytes_from_string`,
+/// `nova_rt_bytes_to_string_unchecked`, `nova_rt_bytes_slice`) pass a slice of
+/// a live GC string, read here after this function's allocation. It stays
+/// alive across that allocation because the caller's slice pointer is a root
+/// and marking is range-based (`gc.rs`'s module doc comment).
 pub(crate) fn gc_bytes(bytes: &[u8]) -> *mut NovaStr {
-    let len = bytes.len();
-    // A non-traced buffer: bytes are never pointers, so tracing them would
-    // retain arbitrary heap objects that merely look like addresses.
-    let buf = crate::gc::alloc(len.max(1), false);
-    // SAFETY: `buf` has `len.max(1)` writable bytes.
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len) };
-    let node = crate::gc::alloc(std::mem::size_of::<NovaStr>(), true) as *mut NovaStr;
-    // SAFETY: `node` points to a fresh `NovaStr`-sized allocation.
-    unsafe {
-        (*node).len = len as u64;
-        (*node).ptr = buf;
-    }
+    let (node, dst) = crate::alloc_str_object(bytes.len());
+    // SAFETY: `alloc_str_object` reserved `bytes.len()` writable bytes at
+    // `dst`, inside a fresh object that cannot overlap `bytes`.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len()) };
     node
 }
 
@@ -98,8 +98,8 @@ pub unsafe extern "C" fn nova_rt_bytes_is_utf8(b: *const NovaStr) -> i8 {
 #[no_mangle]
 pub unsafe extern "C" fn nova_rt_bytes_to_string_unchecked(b: *const NovaStr) -> *mut NovaStr {
     // SAFETY: forwarding this function's own contract. `gc_bytes` allocates a
-    // fresh header and buffer and copies `b`'s bytes into it, rather than
-    // reusing `b`'s own storage.
+    // fresh object and copies `b`'s bytes into it, rather than reusing `b`'s
+    // own storage.
     gc_bytes(unsafe { as_bytes(b) })
 }
 
@@ -248,30 +248,77 @@ pub unsafe extern "C" fn nova_rt_bytes_eq(a: *const NovaStr, b: *const NovaStr) 
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_bytes_value_has_a_scanned_header_over_a_leaf_buffer() {
-        let b = gc_bytes(&[1, 2, 3]);
+    /// One leaf object per `Bytes` value: the header at its start, the payload
+    /// inline at offset 16
+    /// (`docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`).
+    unsafe fn assert_one_leaf_bytes(b: *mut NovaStr, expected: &[u8]) {
+        let len = expected.len();
         assert_eq!(
             crate::gc::object_info(b as usize),
-            Some((std::mem::size_of::<NovaStr>(), true)),
-            "the header must be SCANNED, or the collector frees the buffer under it"
+            Some((16 + len.max(1), false)),
+            "len {len}: one leaf object of 16 + max(len, 1) bytes"
         );
-        // SAFETY: `b` is the live header `gc_bytes` just built.
-        let buf = unsafe { (*b).ptr };
         assert_eq!(
-            crate::gc::object_info(buf as usize),
-            // `gc::alloc` floors every request to at least 8 bytes
-            // (`let size = size.max(8);`, `gc.rs`) regardless of the `scan`
-            // flag or caller, so a 3-byte payload is tracked at size 8, not a
-            // literal 3. `Bytes::len` is unaffected -- it reads the *header's*
-            // own `len` field (set to `3` below by `gc_bytes`), never this
-            // allocator bookkeeping. **Measured, not copied from the plan
-            // as-is**: the plan's literal `Some((3, false))` was run first and
-            // failed with `left: Some((8, false))`; see the Task 2 report.
-            Some((8, false)),
-            "the buffer must be a LEAF: bytes are not pointers, and tracing them \
-             would retain arbitrary objects that merely look like addresses"
+            (*b).ptr as usize,
+            b as usize + 16,
+            "len {len}: bytes inline at offset 16"
         );
+        assert_eq!((*b).len, len as u64, "len {len}");
+        assert_eq!(as_bytes(b), expected, "len {len}");
+    }
+
+    const BYTES_LENGTHS: [usize; 6] = [0, 2, 113, 2032, 2033, 2048];
+
+    fn payload_of(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[test]
+    fn a_bytes_value_is_one_leaf_object_with_its_bytes_inline() {
+        for len in BYTES_LENGTHS {
+            let payload = payload_of(len);
+            // SAFETY: `gc_bytes` returns a live header.
+            unsafe { assert_one_leaf_bytes(gc_bytes(&payload), &payload) };
+        }
+    }
+
+    /// **Review finding I1, restated for one object.** A payload above 16
+    /// bytes makes the tracked size, `16 + len`, discriminate an allocation
+    /// that ignores `len`. Hardcoding the size to `17` must fail here; for any
+    /// payload over one byte that mutation is a heap-buffer overflow, since
+    /// the copy still writes `len` bytes.
+    #[test]
+    fn a_bytes_value_is_tracked_at_its_full_size() {
+        let b = gc_bytes(&[7u8; 32]);
+        assert_eq!(
+            crate::gc::object_info(b as usize),
+            Some((16 + 32, false)),
+            "a 32-byte payload is one object of 16 + 32 bytes"
+        );
+    }
+
+    #[test]
+    fn a_string_from_bytes_is_one_leaf_object_with_its_bytes_inline() {
+        for len in BYTES_LENGTHS {
+            let text: String = "abcdefghij".repeat(len / 10 + 1)[..len].to_string();
+            // SAFETY: the bytes are ASCII, so valid UTF-8.
+            unsafe {
+                let s = nova_rt_bytes_to_string_unchecked(gc_bytes(text.as_bytes()));
+                assert_one_leaf_bytes(s, text.as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn a_bytes_slice_of_a_combined_object_is_its_own_leaf_object() {
+        let payload = payload_of(113);
+        // SAFETY: `gc_bytes` returns a live header.
+        unsafe {
+            let b = gc_bytes(&payload);
+            let s = nova_rt_bytes_slice(b, 10, 50);
+            assert_ne!(s, b, "a slice is a fresh object, never a view");
+            assert_one_leaf_bytes(s, &payload[10..50]);
+        }
     }
 
     /// **Decided before execution.** An earlier draft of this plan left
@@ -293,34 +340,6 @@ mod tests {
         }
     }
 
-    /// **Review finding I1.** Every payload above (and the `bytes_basics`
-    /// Nova fixture's) is 1-3 bytes, entirely under `gc::alloc`'s 8-byte
-    /// floor (`let size = size.max(8);`, `gc.rs`), so the buffer's tracked
-    /// size reads 8 whether the request was correct or wrong by up to seven
-    /// bytes — no assertion using only those payloads can tell the two
-    /// apart. Proven, not assumed: hardcoding `gc_bytes`'s buffer allocation
-    /// to `crate::gc::alloc(1, false)`, ignoring `len` entirely, left the
-    /// whole suite (including `a_bytes_value_has_a_scanned_header_over_a_
-    /// leaf_buffer` above) green — and for any payload actually over 8 bytes
-    /// that mutation is a real heap-buffer overflow, since the
-    /// `copy_nonoverlapping` right after it still copies the full `len`
-    /// bytes into an 8-byte allocation. A payload above the floor is
-    /// required so the buffer's tracked size has a value other than 8 to be
-    /// wrong about.
-    #[test]
-    fn a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size() {
-        let payload = [7u8; 32];
-        let b = gc_bytes(&payload);
-        // SAFETY: `b` is the live header `gc_bytes` just built.
-        let buf = unsafe { (*b).ptr };
-        assert_eq!(
-            crate::gc::object_info(buf as usize),
-            Some((32, false)),
-            "a payload above the allocator's 8-byte floor must be tracked at \
-             its own exact size, not merely at the floor"
-        );
-    }
-
     /// **Review finding M2.** Before this, the only exercise of
     /// `nova_rt_bytes_len` was the `bytes_basics` fixture's single 2-byte
     /// string — one data point, which cannot distinguish "returns the real
@@ -330,11 +349,9 @@ mod tests {
     /// `size_of::<NovaStr>()`, and that one *does* already die against the
     /// existing fixture, since 16 != 2 — so the hardcoded-constant gap was
     /// the only one left open). Two different real lengths rule out a
-    /// constant; the second clears `gc::alloc`'s 8-byte floor so this
-    /// doubles as a second, independent probe of the same floor
-    /// `a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size`
-    /// exercises, this time through the header's `len` field rather than
-    /// `object_info`.
+    /// constant; the second is the 32-byte payload
+    /// `a_bytes_value_is_tracked_at_its_full_size` probes through
+    /// `object_info`, read here through the header's `len` field instead.
     #[test]
     fn bytes_len_reports_the_real_length_for_more_than_one_size() {
         unsafe {
@@ -349,8 +366,8 @@ mod tests {
     /// above `gc::alloc`'s 8-byte floor (`gc.rs`, `size.max(8)`), so the
     /// tracked size can actually discriminate a correct allocation from a
     /// wrong one -- a payload at or under the floor could not (see this
-    /// module's own `a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size`
-    /// for the same reasoning applied to `gc_bytes`'s buffer).
+    /// module's own `a_bytes_value_is_tracked_at_its_full_size` for the same
+    /// reasoning applied to a `Bytes` object).
     #[test]
     fn to_ints_writes_the_array_layout_codegen_expects() {
         let b = gc_bytes(&[7, 8]);
