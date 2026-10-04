@@ -167,15 +167,20 @@ comment (`lib.rs:202-206`) says that the leaf flag depends on it.
 Neither invariant can be pinned by a test (§5); both are stated where a
 future change would break them.
 
-[Amended 2026-10-04, after merge as PR #90: both sentences above were
-wrong, as the branch's final review found. The first invariant is now
-pinned by a source guard, `only_the_two_builders_write_a_novastr_ptr` in
-`crates/nova-runtime/src/lib.rs`. It scans the production code of every
-runtime source file and fails on a `.ptr =` write outside
-`alloc_str_object` and `nova_rt_str_new`, or on a `NovaStr` struct
-literal. The second is a convention, not a memory-safety invariant: the
-new object stays reachable from `gc_str_filled`'s own frame across `fill`.
-The `NovaStr` doc comment now says so.]
+[Amended 2026-10-04, after merge as PR #90: the sentence above was wrong
+on both counts, as the branch's final review found. Where a `NovaStr`'s
+`ptr` may be written can be pinned. A source guard,
+`only_the_two_builders_write_a_novastr_ptr` in
+`crates/nova-runtime/src/lib.rs`, scans the production code of every `.rs`
+file under the runtime's `src`. It fails on a `.ptr =` assignment outside
+`alloc_str_object` and `nova_rt_str_new`, a mutable borrow of a `.ptr`, a
+`NovaStr` struct literal or `impl` block, or any production call to
+`nova_rt_str_new`. It is a text scan, not a proof; its doc lists what it
+cannot see. What the code generators pass to `nova_rt_str_new` still rests
+on that function's `# Safety` contract. The second rule is a convention,
+not a memory-safety invariant: the new object stays reachable from
+`gc_str_filled`'s own frame across `fill`. The `NovaStr` doc comment now
+says so.]
 
 ### 4.6 Cost by length
 
@@ -238,9 +243,9 @@ read taken earlier from the GC heap.
 
 **Deliberately not tested:** the header-first order and the rule that
 `fill` must not allocate (§4.2, §4.5). Neither has an observable effect a
-test could catch. [Amended 2026-10-04: the `ptr` invariant of §4.5, which
-this section did not list, is now pinned by a source guard; see the note
-at the end of §4.5.]
+test could catch. [Amended 2026-10-04: where a `NovaStr`'s `ptr` may be
+written, which the §4.5 invariant rests on and this section did not list,
+is now pinned by a source guard; see the note at the end of §4.5.]
 
 **Named mutants, each run with exit codes and result lines checked:**
 

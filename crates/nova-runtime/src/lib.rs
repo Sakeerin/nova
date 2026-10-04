@@ -103,9 +103,11 @@ mod time;
 /// a leaf, so the collector never traces `ptr`. A header that pointed into a
 /// different GC object would not keep it alive. A future zero-copy slice or
 /// view must not reuse this type with a leaf header. Only
-/// [`alloc_str_object`] and [`nova_rt_str_new`] write a `ptr`, and the test
-/// `only_the_two_builders_write_a_novastr_ptr` fails if anything else in
-/// this crate does.
+/// [`alloc_str_object`] and [`nova_rt_str_new`] write a `ptr`, and nothing
+/// in this crate's production code calls `nova_rt_str_new`. The test
+/// `only_the_two_builders_write_a_novastr_ptr` checks both by scanning the
+/// source text; its doc lists what such a scan cannot see. What the code
+/// generators pass to `nova_rt_str_new` rests on its `# Safety` contract.
 ///
 /// **A convention, not an invariant: [`gc_str_filled`]'s `fill` does not
 /// allocate GC memory.** Memory safety does not depend on it, since the new
@@ -1414,18 +1416,40 @@ mod tests {
             .join("\n")
     }
 
-    /// **The `NovaStr` pointer invariant, pinned.** Every header is a leaf, so
-    /// the collector never traces a `NovaStr`'s `ptr`: a header pointing into
-    /// another GC object would not keep it alive. That holds because only
-    /// [`alloc_str_object`] (`ptr` = its own bytes) and [`nova_rt_str_new`]
-    /// (`ptr` = static literal data) ever write a `ptr`.
+    /// `.ptr =` and `.ptr=` assignments in `code`, not counting a `==`
+    /// comparison that starts the same way.
+    fn ptr_assignments(code: &str) -> usize {
+        [".ptr =", ".ptr="]
+            .iter()
+            .map(|needle| {
+                code.match_indices(needle)
+                    .filter(|(i, m)| !code[i + m.len()..].starts_with('='))
+                    .count()
+            })
+            .sum()
+    }
+
+    /// **Where a `NovaStr`'s `ptr` may be written, pinned.** Every header is a
+    /// leaf, so the collector never traces a `ptr`: a header pointing into
+    /// another GC object would not keep it alive. Only [`alloc_str_object`]
+    /// (`ptr` = its own bytes) and [`nova_rt_str_new`] (`ptr` = its caller's
+    /// pointer, static literal data by its `# Safety` contract) write one.
     ///
-    /// This scans the production code of every runtime source file for the
-    /// two ways safe-looking code would break that -- a `.ptr =` write
-    /// anywhere else, or a `NovaStr` built as a struct literal -- so a
-    /// zero-copy view or slice reusing `NovaStr` fails here. It cannot see a
-    /// raw write at an offset (`*(p as *mut *const u8).add(1) = ...`) or code
-    /// outside this crate; both code generators only call `nova_rt_str_new`.
+    /// This scans the production code of every `.rs` file under the crate's
+    /// `src` and fails on any of:
+    /// - a `.ptr =` assignment outside those two builders;
+    /// - a `.ptr` on a line that also borrows mutably (`&mut `,
+    ///   `addr_of_mut!`, `&raw mut`), the start of a write through
+    ///   `ptr::write`, `mem::replace` or `mem::swap`;
+    /// - a `NovaStr` struct literal, or an `impl` block on it;
+    /// - a call to `nova_rt_str_new` from this crate's production code, so a
+    ///   zero-copy slice cannot hand it a pointer into a GC string. Its only
+    ///   callers are the code generators, for string literals.
+    ///
+    /// It is a text scan, not a proof. It cannot see a raw write at an offset
+    /// (`*(p as *mut *const u8).add(1) = ...`), a header copied whole
+    /// (`ptr::read`, `copy_nonoverlapping`), a write split across lines, or
+    /// code outside this crate.
     #[test]
     fn only_the_two_builders_write_a_novastr_ptr() {
         let sources = runtime_sources();
@@ -1447,7 +1471,7 @@ mod tests {
 
         for (path, source) in &sources {
             let code = production_code(source);
-            let writes = code.matches(".ptr =").count() + code.matches(".ptr=").count();
+            let writes = ptr_assignments(&code);
             if *path == lib_path {
                 assert_eq!(
                     writes, 2,
@@ -1467,6 +1491,23 @@ mod tests {
                 literals, 0,
                 "{path}: builds or implements `NovaStr` outside its definition"
             );
+            let borrows = code
+                .lines()
+                .filter(|l| {
+                    l.contains(".ptr")
+                        && ["&mut ", "addr_of_mut!", "&raw mut"]
+                            .iter()
+                            .any(|b| l.contains(b))
+                })
+                .count();
+            assert_eq!(borrows, 0, "{path}: borrows a `NovaStr`'s `ptr` mutably");
+            // lib.rs holds the definition; nothing in production code calls it.
+            let calls = code.matches("nova_rt_str_new(").count();
+            let definitions = usize::from(*path == lib_path);
+            assert_eq!(
+                calls, definitions,
+                "{path}: calls `nova_rt_str_new` from production code"
+            );
         }
 
         let code = production_code(&lib.1);
@@ -1477,7 +1518,7 @@ mod tests {
                     .find("\n}\n")
                     .expect("the builder's closing brace");
             assert_eq!(
-                code[start..end].matches(".ptr =").count(),
+                ptr_assignments(&code[start..end]),
                 1,
                 "`{builder}` writes `ptr` exactly once"
             );
