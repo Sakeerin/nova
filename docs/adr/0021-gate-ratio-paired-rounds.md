@@ -168,6 +168,9 @@ that; a range comparison throws it away.
   `nova-spec/00-MASTER-SPEC.md` §3's absolute 10k criterion governs. See
   `docs/benchmarks/README.md`, "Where the gate is specified
   inconsistently".
+  [Amended 2026-10-04 (gate-remeasure-7): on `6fda78b` both statements
+  are met, so this open question does not change that run's verdict. See
+  `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".]
 - **A run costs 48 readings.** On this host that is about 31 minutes of
   readings, and about 32 with the equivalence check and the self-test.
 - **The first run judged this way** is the next gate remeasurement.
