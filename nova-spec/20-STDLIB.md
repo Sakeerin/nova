@@ -231,12 +231,12 @@ module std.io
 // unimplemented: the byte-type design spec settles Nova's byte I/O as
 // buffer-RETURNING instead, so references are off this roadmap permanently
 // (docs/superpowers/specs/2026-08-12-byte-type-design.md §1, §6 -- nothing
-// in the remaining increments needs them). `Bytes` (a scanned `{len, ptr}`
-// header over a GC leaf buffer, `std/bytes`) is the concrete buffer type:
-// `std/fs`'s `read`/`write` below in §5 already ship against it --
-// `Result<Bytes, IoError>` and `content: Bytes`, not the `[u8]` shown there
-// -- and `open`/`File`/these two traits do too, now that all three are
-// built (2026-08-14, both amendments below). See
+// in the remaining increments needs them). `Bytes` (one GC leaf object, a
+// `{len, ptr}` header followed inline by its bytes, `std/bytes`) is the
+// concrete buffer type: `std/fs`'s `read`/`write` below in §5 already ship
+// against it -- `Result<Bytes, IoError>` and `content: Bytes`, not the
+// `[u8]` shown there -- and `open`/`File`/these two traits do too, now that
+// all three are built (2026-08-14, both amendments below). See
 // docs/adr/0011-io-error-kinds.md for the §5 deviation this left, since
 // closed.
 //

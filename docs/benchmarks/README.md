@@ -902,6 +902,16 @@ consistent with ~900 ns per allocation is consistent with other mechanisms
 of similar size regardless, so nothing here establishes allocation as the
 cause.
 
+**Amended 2026-10-04:** the source reading above counts each `String` as
+one allocation. Until 2026-10-04 a runtime `String` was two, a 16-byte
+header and a separate byte buffer, so that reading undercounted. Since one
+allocation per string
+(`docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`) it
+is one. The figure's restatements (`CHANGELOG.md`, ADR 0019,
+`examples/05-json-api/BENCHMARK.md`, this file's own "20 GC allocations
+for ten headers' strings", `docs/benchmarks/server.nova`) are left as they
+are; ADR 0019 already points readers here.
+
 ### Amplification, on matched populations
 
 Nine extra headers, from the one-header shape to the ten-header shape, in

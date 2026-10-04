@@ -3,9 +3,10 @@
 // Compiled as an implicit module and glob-imported into every user module, so
 // these names need no `import` (see docs/adr/0004-stdlib-compile-model.md).
 //
-// `Bytes` is an immutable byte buffer. It shares `String`'s representation -- a
-// scanned header over a leaf buffer -- and differs in carrying no encoding
-// guarantee. Nothing converts between them implicitly.
+// `Bytes` is an immutable byte buffer. It shares `String`'s representation --
+// a `{len, ptr}` leaf header, and every `Bytes` value is one object with its
+// bytes inline after it -- and differs in carrying no encoding guarantee.
+// Nothing converts between them implicitly.
 //
 // This module follows `std/strings`' structure: a small intrinsic core with the
 // searching and bounds checking done here in Nova, rather than one intrinsic per
