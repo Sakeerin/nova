@@ -5590,23 +5590,36 @@ Rounds alternated: Nova round 1, Bun round 1, Nova round 2, and so on.
 
 "(reprofile-3)" sampled the json-api on `ef43fdf`. Since then,
 "(gc-direct-strings)" has made five string builtins write straight into
-GC memory. This run samples it again on `a465dfc`, with the same sampler
-and scripts, to pick the next lever. The code it measures is the same as
-"(gate-remeasure-6)"'s.
+GC memory. This run samples a sampled build of it three times on
+`a465dfc`, with the same sampler and scripts, to pick the next lever. The
+code it measures is the same as "(gate-remeasure-6)"'s.
 
 **Results:**
 - **The system heap fell to 1.50–1.55% of the server thread,** from
   4.7–4.9%.
-  - What remains, charging each heap sample to its nearest runtime caller:
-    `net::try_read` 0.57–0.81%, `nova_rt_bytes_concat` 0.34–0.48%, and
-    `str::to_lowercase` 0.20–0.27%.
+  - The three largest of its nearest runtime callers are `net::try_read` at
+    0.57–0.81%, `nova_rt_bytes_concat` at 0.34–0.48%, and
+    `str::to_lowercase` at 0.20–0.27%. The other 0.18–0.21% is spread over
+    five to seven callers, none above 0.07%.
   - `nova_rt_json_quote`, `nova_rt_str_concat_n` and `nova_rt_int_to_str`
     no longer appear among its callers.
-- **Allocation, collection included, is the largest Nova-side cost of any
-  function that does not call into the rest.**
+- **Allocation, collection included, is the largest Nova-side item among
+  the frames compared here, in every run.**
   - `gc::alloc` is 22.6–24.7% of the thread, 10.4–10.9 us per request.
+  - `read_request` is 20.8–22.9% inclusive, but 13.5–14.8 points of that
+    are socket receive calls, and 3.0–3.2 points sit under `gc::alloc`
+    itself. Without its `gc::alloc` samples it is 17.8–19.8%. Inclusive, it
+    was above `gc::alloc` in run 1, at 22.93% against 22.58%.
+  - The other frames compared are `stringify` at 4.4–6.3%,
+    `Response.to_bytes` at 3.9–4.7%, `users_json` at 14.7–16.5% and
+    `user_json` at 11.5–13.5%. `handle`, which calls them, is 16.3–18.0%.
+  - Frames that call into everything, such as `serve` at 97.3–97.5% and
+    `write_stream` at 45.2–46.5%, mostly socket system calls, are not
+    compared.
+- **The collector and allocation proper:**
   - The collector's instance, `LocalKey::with` `ce5e268d0d359845` as
-    before, is 6.7–7.6%, or 3.0–3.3 us. All of it sits under `gc::alloc`.
+    before, is 6.7–7.6% of the thread, or 3.0–3.3 us. All of it sits under
+    `gc::alloc`.
   - The rest, allocation proper, is 15.9–17.4%, 7.4–7.5 us. Charged by
     leaf, its parts are:
     - finding a slot, 5.8–7.1%;
@@ -5614,33 +5627,45 @@ and scripts, to pick the next lever. The code it measures is the same as
     - zeroing (`memset`), 2.3–2.7%;
     - the second `LocalKey::with` instance, `d03a43526a1fdc50`, 2.0–2.5%;
     - `FnOnce::call_once`, 1.1–1.3%.
-  - `read_request`, its receive calls included, is 20.8–22.9%. It was
-    above `gc::alloc` in run 1, at 22.93% against 22.58%. Frames that call
-    into the rest, such as `handle` at 16.3–18.0%, are not compared here.
-- **Inside the string builtins, allocation is now about half.**
-  - Of `nova_rt_json_quote`'s samples, 50.5–52.2% land in its own code (two
-    passes over the bytes and the writes), and 47–48% sit under
-    `gc::alloc`. No system-heap leaf remains.
-  - Of `nova_rt_str_concat_n`'s samples in run 1, 62% sit under
-    `gc::alloc`.
-- **The stable items, per request, without the collector's samples where a
-  frame carried any:**
+- **Collections now land in the same place every run.** Nearly all of the
+  collector's samples, 6.7–7.6 points of the thread, sit under the plain
+  `read_request.357` frame. That is outside the `read_request.357$poll`
+  frame the table's `read_request` row measures. No other frame compared
+  here carries more than 0.01 points of them.
+- **Inside the string builtins, allocation is now half or more of each.**
+  - **`nova_rt_json_quote`:** 46.5–47.9% of its samples sit under
+    `gc::alloc`, and no system-heap leaf remains.
+    - 50.5–52.2% land in its own symbol. The map has no separate symbol for
+      `gc_str_filled`, `Fill::put` or the fill closure, so they are inlined
+      there. Reading the source, that symbol holds the counting pass, the
+      escaping pass and the writes' bookkeeping.
+    - 1.2–2.4% land in a `vcruntime140` leaf the resolver names
+      `__NLG_Return2`, not under `gc::alloc`.
+  - **`nova_rt_str_concat_n`:** 61.0–68.6% sit under `gc::alloc`.
+  - **`nova_rt_int_to_str`:** 83.2–89.0% sit under `gc::alloc`.
+- **The stable items, per request.** Except where marked, none of these
+  carried more than 0.01 points of the collector's samples.
   - socket system calls, self: 58.7–61.0% of the thread, 25.1–28.2 us. The
     send path alone is 44.6–46.0%, 19.3–21.3 us, and the receive path
     13.5–14.8%, 5.7–6.9 us;
   - `user_json`: 11.5–13.5%, 5.3–5.9 us;
   - `nova_rt_json_quote`: 4.1–6.0%, 1.9–2.5 us;
-  - `Response.to_bytes`: 3.9–4.7%, 1.8–2.1 us;
-  - `parse_request_head`: 3.6–4.0%, 1.6–1.8 us.
-- **The host was in a different state from "(reprofile-3)"'s run.** Here
-  the send path was cheaper and the receive path costlier: 44.6–46.0%
-  against 55.6–56.0%, and 13.5–14.8% against 9.7–10.1%. Per-request
-  microseconds therefore do not compare across the two runs; shares within
-  a run do.
+  - `Response.to_bytes`, without its one collector sample in runs 2 and 3:
+    3.9–4.7%, 1.8–2.0 us;
+  - `parse_request_head`: 3.6–3.9%, 1.6–1.8 us.
+- **The send and receive paths' shares moved against "(reprofile-3)"'s
+  run, and the host's state was not recorded.**
+  - The send path was 44.6–46.0% against 55.6–56.0%, and the receive path
+    13.5–14.8% against 9.6–10.1%.
+  - So per-request microseconds do not compare across the two runs, while
+    shares within a run do.
+  - The non-send part of the thread grew 1.22–1.26 times its earlier share.
+    Allocation proper grew more, from 10.9–11.3% to 15.9–17.4%, 1.41–1.60
+    times. Why is not measured.
 
 **What this suggests, not measured:** with the system heap mostly gone,
-allocation is the lever left that every builtin and every Nova
-interpolation shares.
+allocation is the lever left that every string-producing builtin and every
+Nova interpolation shares.
 - "(alloc-fast-path)", a single borrow per allocation with inline
   zeroing, established no reduction.
 - Two structural candidates it named remain untried: handing out free
@@ -5662,11 +5687,14 @@ interpolation shares.
   served the 604-byte body. With the sampler they ran at 21597.8–23521.7
   req/sec. The sampler's own cost is not measured.
 - **The sampler** took 9693–9766 samples per 15 s load window.
-- **The analysis:** "(reprofile-3)"'s scripts, unchanged.
+- **The analysis:** "(reprofile-3)"'s scripts, unchanged, and one new
+  read-only script for the decompositions above.
   - This build's symbol names match that run's, such as `quote.288`, so
     the inclusive-share script needed no edit.
   - The collector's instance was identified as before. `ce5e268d0d359845`
-    had 15–24 collection-leaf samples a run, out of 651–736.
+    had 15–24 collection-leaf samples a run, out of 651–736. One other,
+    `b136050d1cde226a`, had 3–7, which were all of its samples, and is not
+    counted as the collector.
   - Per-request figures are a share times that run's `1e6 / rps`.
 - **Ordering.** The predictions' modification time is 07:17:01, the
   profiling binary's 07:17:31, and the end of the first run's samples
@@ -5686,10 +5714,15 @@ These predictions were written before the profiling build existed:
 | `read_request`, receives included, 13–17% | 20.8–22.9% | wrong: above |
 | throughput with the sampler 15,000–26,000 | 21597.8–23521.7 | within |
 | the system heap stops being a lever, under 3% | 1.50–1.55% | right |
-| allocation stays the largest Nova-side item that does not call into the rest | `gc::alloc` 22.6–24.7% against `read_request` 20.8–22.9% | right in two runs of three; in run 1 `read_request` was larger |
+| allocation, collection included, stays the largest Nova-side item that is not a caller of the rest | `gc::alloc` 22.6–24.7%; `read_request` 20.8–22.9% inclusive, mostly receive calls, and 17.8–19.8% without its own `gc::alloc` samples | right; inclusive of its receive calls, `read_request` was larger in run 1 |
+| the next candidates are allocation itself, `read_request`'s head parsing, and `Response.to_bytes` | `gc::alloc` 22.6–24.7%; `parse_request_head` 3.6–3.9%; `Response.to_bytes` 3.9–4.7%; `nova_rt_json_quote`, unnamed, 4.1–6.0% | partly: allocation leads, but `nova_rt_json_quote` is above both other candidates in every run |
 
-The send path's share fell by about ten points against "(reprofile-3)", and
-most other shares rose.
+The send path's share fell by about ten points against "(reprofile-3)",
+and the receive path's rose by about four. Of this table's other rows,
+`gc::alloc` and `read_request` rose clear of their earlier ranges.
+`nova_rt_json_quote`, and `user_json` without the collector's samples,
+rose in runs 2 and 3 only. Socket
+system calls, the system heap and `nova_rt_str_concat_n` fell.
 
 ### The runs, inclusive % of the server thread
 
@@ -5717,7 +5750,9 @@ most other shares rose.
 ### What this does not settle
 
 - **Why the send and receive paths' shares moved.** The host's state was
-  not recorded.
+  not recorded, and the code also changed between the two runs.
+- **Why allocation proper's share rose more than the rest of the non-send
+  thread did.**
 - **Whether the unsampled build splits the same way.** These are a
   sampled build's shares.
 - **What either structural allocation candidate would save.** Neither was
