@@ -5844,7 +5844,7 @@ counts after that change.
 ## AMENDMENT 2026-10-04 (one-alloc-strings): one leaf object per runtime string
 
 "(alloc-mix)" found 67.0 of 300.9 allocations per ten-user request were
-string byte buffers, each paired with a 16-byte scanned header.
+string and `Bytes` byte buffers, each paired with a 16-byte scanned header.
 - **The change:** a runtime-made `String` or `Bytes` value is now one leaf
   GC object of `16 + max(len, 1)` bytes: the `NovaStr` header at offset 0
   and the bytes inline at offset 16, where its `ptr` points. A new runtime
@@ -5859,11 +5859,12 @@ string byte buffers, each paired with a 16-byte scanned header.
   This rests on one invariant, now documented on `NovaStr`: a `ptr` never
   points into another GC object. The design is
   `docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`.
-- **Output is unchanged in every check below:** all twelve server
-  readings, `before` and `after`, returned the same body (SHA-256
-  `3ff5004bf26139cc…`); every per-call run printed the same output lengths
-  and the same escaped sample; `after` matched Bun in all 9 equivalence
-  exchanges; and the workspace suite passes, 1189/0/8.
+- **Output is unchanged in every check below:** in all twelve server
+  readings, `before` and `after`, the one `GET /users` made before the load
+  returned the same body (SHA-256 `3ff5004bf26139cc…`), and the load counted
+  no errors (it checks status, not body); every per-call run printed the
+  same output lengths and the same escaped sample; `after` matched Bun in
+  all 9 equivalence exchanges; and the workspace suite passes, 1189/0/8.
 
 **Results:**
 - **A request allocates 234 objects instead of 301:** 233.94–234.00,
@@ -5921,7 +5922,11 @@ per request: before, the 48/64 rows were 2.00/11.00 in run 1 and
 3.00/10.00 in runs 2 and 3; after, the 64/80 rows were 3.00/10.00 in runs
 1 and 3 and 2.00/11.00 in run 2. So one pair of runs does not trace
 individual strings row by row. Paired as before run 2 against after run 1,
-every runtime string below 640 bytes moved up exactly one class.
+every per-request runtime string in the 16- to 80-byte classes moved up
+exactly one class, and the 640- and 768-byte rows stayed put. Once per
+process, which the table rounds to 0.00, 2 leaves moved from the 96- to
+the 112-byte class and 20 from the 192- to the 224-byte class, but 10
+averaging 135.3 bytes stayed in the 160-byte class at 151.3.
 
 | class (bytes) | leaf before | leaf after | scanned before | scanned after |
 |---|---|---|---|---|
@@ -5974,8 +5979,9 @@ every runtime string below 640 bytes moved up exactly one class.
 - **Sibling names.** Each `nova build -o` here, for `bc_*`, `srv_*` and
   the object count's `m`, was preceded by deleting both `NAME` and
   `NAME.exe`, as the plan's build commands do. No log records the deletion;
-  that is from this session. No extensionless sibling of any of these
-  binaries is in the scratch directory.
+  that is from this session. That no extensionless sibling of any of these
+  binaries was left in `/tmp/gcm/oas`, where they were built, is also from
+  this session; no log records a listing.
 - **Ordering.** The predictions are the plan's own Task 1 text. It was
   first committed in `fb183a5` (09:36:37) and given its current wording in
   `e4afac4` (09:54:44), which replaced an earlier "scanned 16-byte objects
@@ -5986,8 +5992,8 @@ every runtime string below 640 bytes moved up exactly one class.
   dated 10:27:24. The `after` binaries were built at 10:34:40, and the
   per-call and server runs ran from 10:34:53 to 10:39:30.
 
-These predictions were written before any of the change was in the tree,
-built or measured:
+These predictions were written before any of the change was applied to
+the runtime's source, built or measured:
 
 | prediction | measured | verdict |
 |---|---|---|
@@ -6056,10 +6062,13 @@ built or measured:
   - **The literal header left scanned:** the literal test fails.
   - Under each of the other four mutants, all 33 fixture tests pass. Two
     of them, `strings_build_standalone` and `bytes_api_build_standalone`,
-    link `target/debug/nova_runtime.lib`, which no mutant rebuilt: under
-    the `ptr` mutant, which corrupts string content, both still passed. So
-    they did not run the mutated runtime; the other 31 ran it through the
-    JIT.
+    link `target/debug/nova_runtime.lib`. Under the `ptr` mutant, which
+    corrupts string content, both still passed while `strings_run` and
+    `bytes_api_run` failed, so they did not run the mutated runtime; that
+    no mutant rebuilt the library is from this session. A third,
+    `bytes_reserved_declaration_is_rejected`, runs only `nova check` and
+    executes no runtime code. The other 30 ran the mutated runtime through
+    the JIT.
 - **The gates pass** on `8aaa71e`. A scratch log records the base commit
   and each step's exit code:
   - `cargo test --locked --workspace`: 1189 passed, 0 failed, 8 ignored;
@@ -6079,13 +6088,17 @@ built or measured:
   pairs do not establish it.
 - **Memory in other workloads.** Here the bytes zeroed per request fell
   0.4–0.7%. A string whose length sits just under a class boundary now
-  costs up to 240 bytes more, and lengths 2,033–2,048 take the large-object
-  path. Per request, neither occurs here: the per-request leaves above 112
-  bytes stay in their 640- and 768-byte classes, and there are no large
-  objects. Once per process, 20 leaf objects averaging 189.2 bytes,
-  allocated before the first collection and never again, moved from the
-  192- to the 224-byte class, 16 bytes more each. Neither cost is measured
-  in another workload.
+  costs up to 240 bytes more, net of the header it saves, and lengths
+  2,033–2,048 take the large-object path. Per request, neither cost is paid
+  here. Every per-request runtime string that moved up a class had held a
+  buffer in a class of at most 80 bytes, where classes are 16 bytes apart,
+  so each move costs exactly the 16-byte header it saves; the per-request
+  leaves above 112 bytes stay in their 640- and 768-byte classes; and there
+  are no large objects. Once per process, 20 leaf objects averaging 189.2
+  bytes, allocated before the first collection and not again up to the
+  last one (the count reads 20 at every collection in all six runs), moved
+  from the 192- to the 224-byte class, 16 bytes more each. Neither cost is
+  measured in another workload.
 - **One host, Windows.**
 
 ## What was measured, and with what
