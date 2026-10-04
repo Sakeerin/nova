@@ -6128,7 +6128,8 @@ next lever with current figures.
     2.4–2.5%, zeroing (`memset`) 1.8–1.9%, the second thread-local lookup
     1.2–1.3%, and the closure call 0.6–0.7%.
 - **`handle`, without the collector's samples, is 11.1–11.6%, 4.6–4.8 us.**
-  Within it, `user_json` is 7.6–8.0%, 3.1–3.3 us, and `Response.to_bytes`
+  Within it, `user_json` is 7.6–8.0%, 3.1–3.3 us. `Response.to_bytes`,
+  which `serve` calls on `handle`'s result and so is not inside it, is
   3.3–3.6%, 1.4–1.5 us.
 - **`read_request`, either of its frames, is 15.4–17.9%;** without its
   `gc::alloc` samples 12.8–13.2%, most of it the receive path.
@@ -6156,8 +6157,10 @@ call itself, but "(one-alloc-strings)" changed the buffer it sends from: a
 `Bytes` value is now one leaf object with its payload inline after its
 header, where it was a scanned header over a separate leaf buffer. The
 unrecorded host state could have moved these costs. So could that buffer
-change, or the faster server's effect on the load generator, which shares
-the host and is the send's loopback peer. Which of them did is not
+change, or the higher throughput these runs saw under the same sampler,
+23989.0–24099.2 req/sec against "(reprofile-4)"'s 21597.8–23521.7, itself
+not attributed, through its effect on the load generator, which shares the
+host and is the send's loopback peer. Which of them did is not
 separated. That is why the drop outside the socket system calls, and
 allocation proper's fall by about 45% when "(one-alloc-strings)" removed
 22% of allocations, are not attributed to the code change alone.
@@ -6189,15 +6192,20 @@ allocation proper's fall by about 45% when "(one-alloc-strings)" removed
     and 3 and 4 of its 5 in run 2, and is not counted as the collector.
   - In run 2 the collections fell in different places: 3.80% of the
     thread under `handle`, within `users_json`; 1.32% under
-    `Response.to_bytes`; and 1.14% under `read_request`'s `$poll` frame,
+    `Response.to_bytes`, outside `handle`; and 1.14% under `read_request`'s
+    `$poll` frame,
     within `parse_request_head`. In runs 1 and 3, 3.42% and 3.38% sat
     under `read_request`'s plain frame, which the `read_request` row below
     does not count. So run 2's `handle`, `users_json`, `user_json`,
     `nova_rt_json_quote`, `nova_rt_str_concat_n`, `Response.to_bytes`,
     `read_request` and `parse_request_head` rows carry collections the
-    other runs' rows do not. Without the collector's samples those rows
-    agree across the runs; `nocoll.py`, a read-only script added to the
-    kit for this record, gives them.
+    other runs' rows do not, apart from one collector sample under run 1's
+    `Response.to_bytes`. Without the collector's samples those rows agree
+    across the runs; `nocoll.py`, a read-only script added to the kit for
+    this record, gives them. It also gives the share of the send path's
+    samples that end in `ntdll!ZwDeviceIoControlFile`, which no copied
+    script counts, and the socket libraries' own self time. Run on
+    "(reprofile-4)"'s samples, it gives that run's figures compared here.
   - Per-request figures are a share times that run's `1e6 / rps`.
 - **Ordering.** The predictions' modification time is 12:53:49, the
   profiling binary's 12:54:18, and the end of the first run's samples
@@ -6221,8 +6229,8 @@ These predictions were written before the profiling build existed:
 | allocation proper 5.5–7.0 us per request | 3.9–4.2 | wrong: below |
 | collector 2.8–3.6 us per request | 2.6–2.7 | wrong: below |
 | throughput with the sampler 15,000–27,000 | 23989.0–24099.2 | within |
-| allocation proper falls by roughly the share of allocations removed, about a fifth | it fell by about 45%, across a host-state change | wrong: it fell further |
-| the collector does not move | its share fell from 6.67–7.59% to 6.25–6.56%, disjoint, though within the predicted 6.0–8.5%; its cost per request fell from 3.0–3.3 to 2.6–2.7 us, disjoint; both across a host-state change | wrong: it fell, by share and per request |
+| allocation proper falls by roughly the share of allocations removed, about a fifth | it fell by about 45%, over five and a half hours with the host's state unrecorded | wrong: it fell further |
+| the collector does not move | its share fell from 6.67–7.59% to 6.25–6.56%, disjoint, though within the predicted 6.0–8.5%; its cost per request fell from 3.0–3.3 to 2.6–2.7 us, disjoint; both over the same interval, with the host's state unrecorded | wrong: it fell, by share and per request |
 | the send path stays the largest single item | 60.6–61.2% | right |
 | allocation, collection included, stays the largest Nova-side item that is not a caller of the rest | `gc::alloc` 15.7–16.4%; `read_request`'s frame 14.1–15.4% and `handle` 11.1–15.3% call into it | right |
 
@@ -6257,8 +6265,10 @@ These predictions were written before the profiling build existed:
   "(reprofile-4)" touched the send call, but "(one-alloc-strings)" changed
   the layout of the buffer it sends from. The host's state was not
   recorded, and the load generator shares the host.
-- **How much of the drop outside the socket system calls is the code.** Allocation proper fell by
-  more than the share of allocations removed, across the same host change.
+- **How much of the drop outside the socket system calls is the code.**
+  Allocation proper fell by more than the share of allocations removed,
+  over the same interval; the confound above does not separate the code
+  from the host's state or the buffer layout's effects.
 - **Whether the unsampled build splits the same way.**
 - **The gate.** Neither criterion was rerun.
 - **One host, Windows, three runs.**
