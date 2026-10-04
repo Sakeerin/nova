@@ -875,6 +875,14 @@ builtins! {
     /// logger configuration, overwriting any previous one, via
     /// `nova_rt_log_set_config`. Std-only.
     LogSetConfig,
+    /// `shutdown_requested() -> Bool` — whether the process has been asked to
+    /// stop: the first SIGTERM or SIGINT on Unix, CTRL_BREAK or CTRL_C on
+    /// Windows. The first call installs the handler that sets it, so a
+    /// program that never calls this keeps every signal's default action.
+    /// Read by `std/http`'s `Server::listen` and its connections, once per
+    /// tick. Runtime symbol `nova_rt_shutdown_requested`
+    /// (`crates/nova-runtime/src/signal.rs`, docs/adr/0022). Std-only.
+    ShutdownRequested,
 }
 
 impl Builtin {
@@ -969,6 +977,7 @@ impl Builtin {
             Builtin::LogConfigLevel => "log_config_level",
             Builtin::LogConfigToStderr => "log_config_to_stderr",
             Builtin::LogSetConfig => "log_set_config",
+            Builtin::ShutdownRequested => "shutdown_requested",
         }
     }
 
@@ -996,7 +1005,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 77] = [
+    pub const STD_ONLY: [Builtin; 78] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1074,6 +1083,7 @@ impl Builtin {
         Builtin::LogConfigLevel,
         Builtin::LogConfigToStderr,
         Builtin::LogSetConfig,
+        Builtin::ShutdownRequested,
     ];
 }
 

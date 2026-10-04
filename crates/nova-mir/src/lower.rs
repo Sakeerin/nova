@@ -779,6 +779,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::LogConfigLevel => Lowering::Runtime(RtFunc::LogConfigLevel),
                     Builtin::LogConfigToStderr => Lowering::Runtime(RtFunc::LogConfigToStderr),
                     Builtin::LogSetConfig => Lowering::Runtime(RtFunc::LogSetConfig),
+                    Builtin::ShutdownRequested => Lowering::Runtime(RtFunc::ShutdownRequested),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {
