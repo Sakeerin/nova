@@ -1,8 +1,9 @@
 # One allocation per runtime string — design
 
 **Date:** 2026-10-04
-**Status:** approved in conversation, section by section; this document is
-the written spec for review.
+**Status:** approved in conversation, section by section, then checked
+against the code by a verification workflow (4 checkers, 22 findings, 21
+upheld and applied); this document is the written spec for review.
 **Scope:** `crates/nova-runtime` only — `lib.rs` (`gc_str_filled`,
 `gc_str`, `nova_rt_str_new`, `NovaStr`), `bytes.rs` (`gc_bytes`), their
 tests, and the documentation that describes the string representation.
@@ -11,10 +12,10 @@ tests, and the documentation that describes the string representation.
 
 `examples/05-json-api/BENCHMARK.md`'s "(reprofile-4)" put allocation,
 collection included, at 22.6–24.7% of the json-api's server thread, and
-allocation proper at about 7.4 us per ten-user request. "(alloc-fast-path)"
-tried to make each allocation cheaper — one heap borrow instead of two,
-constant-size zeroing — and established no reduction: the cost moved
-between frames.
+allocation proper at 7.4–7.5 us (15.9–17.4% of the thread) per ten-user
+request. "(alloc-fast-path)" tried to make each allocation cheaper — one
+heap borrow instead of two, constant-size zeroing — and established no
+reduction: the cost moved between frames.
 
 This design attacks the **count** of allocations instead. A measurement made
 for it (§7.1, to be recorded as "(alloc-mix)") found, per ten-user
@@ -63,9 +64,13 @@ Established by two read-only mapping passes, each with a critic, on
 1. **Only three sites write a `NovaStr`'s `ptr`:** `gc_str_filled`
    (`lib.rs:152`), `gc_bytes` (`bytes.rs:39`) and `nova_rt_str_new`
    (`lib.rs:213`, static literal data). Every conversion between `String`
-   and `Bytes` copies through `gc_bytes`. No code generator reads or writes
-   header fields; both backends only call `nova_rt_str_new` with a static
-   pointer, and every codegen `nova_rt_alloc(16)` is a closure fat pointer.
+   and `Bytes` copies through `gc_bytes`. No generated code allocates or
+   fills a `NovaStr`: both backends only call `nova_rt_str_new` with a
+   static pointer. The only allocation with a fixed size of 16 is a closure
+   fat pointer (Cranelift `lib.rs:621`, LLVM `lib.rs:449`). Every other
+   `nova_rt_alloc` is a record, sum, array or closure environment sized
+   from its fields. That size can also be 16, but none of them is a string
+   header.
 2. **Every production read** of a string's bytes goes through `as_str`
    (`lib.rs:197`) or `bytes::as_bytes` (`bytes.rs:48`), which read only
    `ptr` and `len`.
@@ -78,14 +83,18 @@ Established by two read-only mapping passes, each with a critic, on
    `gc.rs:534-563`): a word anywhere inside a small slot, or inside a large
    object's `[addr, addr + size)`, marks the whole object. A leaf is marked
    but never traced (`pages.rs:307-313`, `gc.rs:548-560`).
-6. **Six sites hold only a bytes pointer across a GC allocation** and rely
-   on it keeping the bytes alive: `nova_rt_str_chars`, the `gc_str_filled`
-   callers whose `fill` reads their arguments (concat, concat_n, join,
-   json_quote), `nova_rt_http_parse_request`, and the three `gc_bytes`
-   callers that pass a slice of a live string (`bytes_from_string`,
-   `bytes_to_string_unchecked`, `bytes_slice`). With one object per string
-   a bytes pointer keeps the whole string alive, which is at least as
-   strong.
+6. **Ten functions hold only a bytes pointer across a GC allocation** and
+   rely on it keeping the bytes alive:
+   - `nova_rt_str_chars` and `nova_rt_bytes_to_ints`, each of which
+     allocates its array block while holding the source's bytes;
+   - the four `gc_str_filled` callers whose `fill` reads their arguments:
+     concat, concat_n, join and json_quote;
+   - `nova_rt_http_parse_request`;
+   - the three `gc_bytes` callers that pass a slice of a live string:
+     `bytes_from_string`, `bytes_to_string_unchecked` and `bytes_slice`.
+
+   With one object per string, a bytes pointer keeps the whole string
+   alive, which is at least as strong.
 
 ## 4. Design
 
@@ -111,9 +120,14 @@ base + 16  the bytes, len of them
 
 1. Compute the size as `16usize.saturating_add(len.max(1))`. An overflow
    becomes `usize::MAX`, which `gc::alloc`'s `heap_layout` check rejects
-   with the existing size-limit abort, never a too-small object.
+   with the existing size-limit abort, never a too-small object. A caller
+   whose own length arithmetic wrapped to a small value is still caught by
+   `Fill::put`'s bounds check, as today.
 2. `gc::alloc(size, false)` once.
-3. **Write the header first:** `len` and `ptr = base + 16`.
+3. Write the header: `len` and `ptr = base + 16`. Writing it before `fill`
+   is a convention, not a requirement any test can observe: during `fill`
+   nothing reads the header, the collector never reads a leaf's words, and
+   `base` is held in the frame either way.
 4. Build `Fill { out: from_raw_parts_mut(base + 16, len), at: 0 }`, run
    `fill`, and keep the existing `debug_assert_eq!(out.at, len)`.
 5. Return `base` as the `*mut NovaStr`.
@@ -137,7 +151,7 @@ same commit**, keeping their "identical layout, deliberately" contract.
 The literal header becomes a 16-byte **leaf**. Its `ptr` targets static
 data, which the collector never frees; tracing it never reached a GC
 object. Its `# Safety` contract already requires static data; the doc
-comment says that the leaf flag depends on it.
+comment (`lib.rs:202-206`) says that the leaf flag depends on it.
 
 ### 4.5 Invariants, documented on `NovaStr`
 
@@ -147,6 +161,9 @@ comment says that the leaf flag depends on it.
   must not reuse `NovaStr` with a leaf header.
 - **`gc_str_filled`'s `fill` must not allocate GC memory.** Every current
   `fill` only calls `Fill::put`.
+
+Neither invariant can be pinned by a test (§5); both are stated where a
+future change would break them.
 
 ### 4.6 Cost by length
 
@@ -169,35 +186,57 @@ slot or the exact large size, so collection cadence shifts with it.
 
 ## 5. Tests, written first
 
-**Rewritten:** `bytes.rs`'s
-`a_bytes_value_has_a_scanned_header_over_a_leaf_buffer` and
-`a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size` assert
-the two-object layout through `object_info` and must be rewritten for the
-new layout. `object_info` answers only for an object's exact start, and
-reports the post-floor requested size.
+**Rewritten and renamed:** `bytes.rs`'s
+`a_bytes_value_has_a_scanned_header_over_a_leaf_buffer` becomes
+`a_bytes_value_is_one_leaf_object_with_its_bytes_inline`, and
+`a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size` becomes
+`a_bytes_value_is_tracked_at_its_full_size`. They assert the new layout
+through `object_info`, which answers only for an object's exact start and
+reports the post-floor requested size. The doc comments that name or
+describe these tests are rewritten in the same commit: `bytes.rs:296-310`,
+`333-337` and `351-353`.
 
-**New, each watched failing before the change:**
+**New, each watched failing before the change.** In what follows,
+`expected` is the Rust `&'static str` the string was built from, never a
+read taken earlier from the GC heap.
 
-1. For `gc_str`, `gc_str_filled` (through a builtin such as
-   `nova_rt_str_concat`), `gc_bytes` and `nova_rt_bytes_to_string_unchecked`:
-   `object_info(s) == Some((16 + max(len, 1), false))` and
-   `(*s).ptr == s + 16`, for a short length, a length above the 8-byte floor,
-   and the empty string.
+1. **Layout of every helper.** For `gc_str`, `gc_str_filled` (through
+   `nova_rt_str_concat`), `gc_bytes` and `nova_rt_bytes_to_string_unchecked`,
+   at `len` of 0, 2, a length whose `16 + len` crosses a class boundary
+   (for example 113), and 2033 (the large path):
+   - `gc::object_info(s as usize) == Some((16 + max(len, 1), false))`;
+   - `(*s).ptr as usize == s as usize + 16`;
+   - `(*s).len == len as u64`, and the bytes read back equal `expected`.
 2. A literal header from `nova_rt_str_new` is `Some((16, false))`.
-3. An empty string's `ptr` lies inside its own object.
-4. **Liveness through the bytes pointer:** a runtime string reached only by
-   `(*s).ptr` (or `ptr + k`) survives a collection run with that word as
-   its only root, through `sweep_with_roots_for_test`. Its header and bytes
-   read back unchanged.
+3. **An empty string's `ptr` lies inside its own object,** both bounds:
+   `s as usize + 16 <= ptr as usize` and
+   `(ptr as usize) < s as usize + gc::object_info(s as usize).unwrap().0`.
+4. **Liveness through the bytes pointer,** at `len` of 2, 113 and 2033:
+   - (a) before: `gc::object_info(s as usize).is_some()`;
+   - (b) run `gc::sweep_with_roots_for_test(&[(*s).ptr as usize + k])` with
+     `0 <= k < max(len, 1)` (for the empty string, only `k = 0`);
+   - (c) after: `gc::object_info(s as usize) == Some((16 + max(len, 1),
+     false))`, the liveness assertion. Today it returns `None`, because the
+     header's slot is freed;
+   - (d) control: a second runtime string left out of the roots has
+     `object_info == None` afterwards;
+   - (e) only then, `as_str(s) == expected`.
+
+   It uses explicit roots, so it runs deterministically on every platform.
+
+**Deliberately not tested:** the header-first order and the rule that
+`fill` must not allocate (§4.2, §4.5). Neither has an observable effect a
+test could catch.
 
 **Named mutants, each run with exit codes and result lines checked:**
 
 | mutant | expected to fail |
 |---|---|
 | a runtime string's object left `scan = true` | new test 1 |
-| `ptr = base + 8` | new tests 1 and 4, and the JSON fixtures |
+| the header's `ptr` set to `base + 8` while `fill` still writes at `base + 16` | new test 1, test 4 through its content comparison, and the existing content tests and JSON fixtures |
 | `max(len, 1)` dropped | new tests 1 and 3 |
 | only `gc_str_filled` changed, `gc_bytes` left two-object | new test 1 for `gc_bytes` |
+| `nova_rt_str_new` left `scan = true` | new test 2 |
 
 **Unchanged and expected to pass:** the full workspace suite, including
 every `NOVA_GC_STRESS` fixture. Those discriminate only on Windows, where
@@ -207,24 +246,45 @@ the collector frees memory.
 
 **Rewritten, because they state the representation in the present tense:**
 
-- runtime comments: `gc.rs:25`, `lib.rs:9-10`, `103`, `114`, `122-128`,
-  `135`, `207-210`, `292-294`, `327-328`, and `bytes.rs:5-6`, `22-30`,
-  `101`;
+- runtime comments:
+  - `gc.rs:25`;
+  - `lib.rs:9-10`, `102-103`, `113-114`, `122-128`, `135`, `202-206` and
+    `209-210`, and `NovaStr`'s doc, which gains the §4.5 invariant;
+  - `bytes.rs:5-6`, `23-24`, `26-27`, `30-31` and `101`, plus the test doc
+    comments named in §5.
 - `crates/nova-hir/src/lib.rs:33-34`;
 - `std/bytes/lib.nova:6-7`;
-- `nova-spec/13-RUNTIME.md:105`, `173`, `214` and
-  `nova-spec/20-STDLIB.md:235`;
+- `nova-spec/13-RUNTIME.md`:
+  - `131` ("`String` = heap object: `{ len: usize, data: ptr<u8> }`"),
+    rewritten to say one object with the bytes inline at base + 16;
+  - `136-139`, given a note that a future `Str` view must not be a
+    `NovaStr` with a leaf header (§4.5);
+  - `173` ("string byte buffers — are leaves").
+- `nova-spec/20-STDLIB.md:234-235`;
 - the doc comments on tests in `crates/nova-cli/tests/run_tests.rs` at
   about `2809-2810`, `6711-6712` and `6813-6814`.
 
-**Given dated notes, not rewritten, as historical records:**
-`CHANGELOG.md:3949-3951`; `examples/05-json-api/BENCHMARK.md`'s per-request
-object counts (`1494-1497`, `2227-2229`, `5010`); and
-`docs/benchmarks/README.md:878-899`'s allocations-per-header arithmetic.
+Optional rewording, still true under one object: the "result's buffer"
+sentences at `lib.rs:275-276`, `296-298`, `320`, `324-325` and `387-390`.
 
-The implementation step re-runs a gutter-normalising sweep for "header"
-near "buffer" across tracked files, because a line-oriented grep can miss
-wrapped phrasing.
+**Given dated notes, not rewritten:** statements in historical records that
+a string is a header plus a separate buffer:
+
+- `examples/05-json-api/BENCHMARK.md`: `1494-1498`, `1510-1512`,
+  `2227-2229`, `5009-5010` and `5017-5018`;
+- `CHANGELOG.md`: `496-500`, `573-574` and `3949-3951`;
+- `docs/benchmarks/README.md:878-899`, the canonical statement of the
+  allocations-per-header arithmetic. Its restatements are left as they are,
+  because ADR 0019:341 already points readers to the README: `CHANGELOG.md`
+  `34-35` and `1947-1949`, ADR 0019:338-340, `BENCHMARK.md:1067-1072`, the
+  example's `README.md:101-104`, and `docs/benchmarks/server.nova:18-19`.
+
+**The implementation step re-runs a gutter-normalising sweep,** because a
+line-oriented grep can miss wrapped phrasing. Its terms: "two-object", "two
+objects", "two allocations", "`NovaStr` node", "header over", "leaf buffer",
+"string byte buffer", "GC buffer", "{len, ptr}", "{ len, data", and
+"header" near "buffer". Hits where "header" means an HTTP header are set
+aside.
 
 ## 7. Measurement
 
@@ -263,7 +323,7 @@ Predictions are written before any of the change exists. Then:
   bytes-pointer liveness deterministically on every platform.
 - **Lengths 2033–2048 move to the large path,** with its per-collection
   sort and linear `object_info`. Rare in this workload: no large objects
-  were seen.
+  were seen. Tests 1 and 4 cover the move.
 
 ## 9. Out of scope
 
