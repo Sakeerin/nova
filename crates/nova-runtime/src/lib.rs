@@ -127,9 +127,9 @@ pub(crate) const STR_HEADER: usize = std::mem::size_of::<NovaStr>();
 /// size-limit abort instead of wrapping to a too-small object.
 ///
 /// One allocation where there were two: in
-/// `examples/05-json-api/BENCHMARK.md`'s "(alloc-mix)", string buffers were
-/// 67.0 of 300.9 allocations per ten-user request, each with a separate
-/// header.
+/// `examples/05-json-api/BENCHMARK.md`'s "(alloc-mix)", `String` and `Bytes`
+/// buffers were 67.0 of 300.9 allocations per ten-user request, each with a
+/// separate header.
 pub(crate) fn alloc_str_object(len: usize) -> (*mut NovaStr, *mut u8) {
     let size = STR_HEADER.saturating_add(len.max(1));
     let base = gc::alloc(size, false);
