@@ -418,6 +418,21 @@ The host's speed fell during the run, not steadily, and the pinned round
 ratios scattered from 0.907 to 1.517. See
 "AMENDMENT 2026-10-03 (gate-remeasure-6)".
 
+**Amended 2026-10-04 (gate-remeasure-7):** the third run judged under
+ADR 0021, on `main` at `6fda78b`, after "(one-alloc-strings)". Its figures
+supersede "(gate-remeasure-6)"'s as the gate's recorded status:
+- **Absolute:** met in all 24 Nova readings, pinned 14198.0–16277.5
+  req/sec and unpinned 15128.3–16301.7.
+- **Ratio: met.** The margin was again 713/676, about 1.0547. Nova
+  cleared it in all 12 pinned rounds, where 10 are needed, and was faster
+  in plain req/sec in all 12.
+- **Unpinned, which does not decide,** Nova cleared the margin in 12 of 12.
+
+So on `6fda78b` both of the gate's statements are met, on this development
+host, Windows, with the load generator on the same machine. The heading
+above, "still not met", and its table record the 2026-09-12 measurement
+and are kept as they were. See "AMENDMENT 2026-10-04 (gate-remeasure-7)".
+
 **Figures superseded by this amendment, kept visible rather than
 deleted.** The 2026-09-11 amendment's ten-user range of 1875.2 to 3108.5
 req/sec is now measured at 2868.2 to 3392.4 over six fresh-process readings
@@ -6305,17 +6320,29 @@ Which statement governs, the question ADR 0021 left open, does not change
 this verdict, since both are met. The ADR says each run's verdict stands
 for the code it measured.
 
-**This run's pinned rounds scattered far less than the two before it.**
+**This run's pinned rounds scattered far less than "(gate-remeasure-6)"'s,
+though not less than "(gate-remeasure-5)"'s.**
 - The standard deviation of the log pinned round ratio was 0.054, against
-  0.146 in "(gate-remeasure-6)" and 0.139 for the same server against
-  itself in "(aa-noise)". Unpinned it was 0.014, against 0.085.
+  0.146 in "(gate-remeasure-6)" and 0.040 in "(gate-remeasure-5)", the
+  latter computed here from that run's readings. For the same server
+  against itself, "(aa-noise)" found 0.139, most of it from one pair;
+  without that pair, 0.074. Unpinned it was 0.014 here, against 0.085 and
+  0.114.
 - Nova's pinned readings spread 1.15x and Bun's 1.08x, against 1.54x and
-  1.59x in "(gate-remeasure-6)". Every reading here is between 12475.4 and
-  16301.7; that run's fastest was 22200.2.
+  1.59x in "(gate-remeasure-6)" and 1.91x and 2.01x in "(gate-remeasure-5)".
+  Every reading here is between 12475.4 and 16301.7; "(gate-remeasure-6)"'s
+  fastest was 22200.2.
+- The pinned extremes ratio, Nova's slowest reading over Bun's fastest, is
+  1.054–1.305, and the unpinned one 1.101–1.286. So in both conditions
+  Nova's slowest reading beat Bun's fastest, the test the extremes rule set
+  before ADR 0021, which no earlier recorded run met. Pinned, that lower
+  end is 14198.0 against 13474.5, 1.0537, just under the 1.0547 margin.
+  This is description; the ADR decides by rounds.
 - Why the host was steadier is not measured, and its state was not
   recorded. The ADR judges each run alone; a noisier run of this same code
-  could have come out inconclusive, and the closest round's 0.6% is the
-  margin this verdict had.
+  could have come out inconclusive. The verdict needed 10 of 12, so three
+  rounds would have had to fall short of the margin; the three closest,
+  rounds 7, 6 and 9, cleared it by 0.6%, 2.5% and 6.1%.
 
 ### The rounds, in run order
 
@@ -6351,9 +6378,13 @@ for the code it measured.
 - **Calibration:** every self-test connection completed requests
   (`conn_min=1166`, `conn_max=40810`), a stronger calibration than
   "(gate-remeasure-6)"'s. Its `elapsed_ms` was 32738, longer than the
-  cells' 30020–30029.
+  cells' 30020–30029. Why is not known; "(gate-remeasure-4)"'s was 34693
+  and "(gate-remeasure-5)"'s 36424, while "(gate-remeasure-6)"'s 30032 was
+  in line with its cells. The ceiling is requests over that elapsed time,
+  so it already accounts for the overrun.
 - **Binary:** `target/release/nova-bench-http.exe`, SHA-256
-  `d17062335e988c18…`, the same file the earlier gate runs used.
+  `d17062335e988c18…`, the same file "(gate-remeasure)" through
+  "(gate-remeasure-6)" used.
 
 **These predictions were written before any build, byte measurement or
 reading.**
@@ -6387,12 +6418,15 @@ reading.**
     "(reprofile-5)"'s sampler patch was reverted. `6fda78b` changed docs
     only, and the release `nova` and runtime library kept their 12:55
     modification times through the `cargo build --release` before the gate
-    build. The commit each was built from is from this session.
+    build. That the build ran, and the commit each was built from, are from
+    this session.
   - `json-api.exe` is 701,440 bytes, SHA-256 `26b93cc19898ba77…`, and does
     not contain the sampler's `NOVA_PROF_SAMPLE` string. The same binary
     ran in every Nova reading.
 - **Bun:** `docs/benchmarks/bun-server.js`, SHA-256 `f95426e14e22034c…`,
-  the same file as before, run by bun 1.3.0.
+  the same file as before, run by bun 1.3.0. The version is from
+  `bun --version` in this session, after the run; no file of this run
+  records it.
 - **The payload.** Ten users were seeded by the same `curl` POSTs on each
   side. Every reading on both sides served the same 604-byte body, SHA-256
   `3ff5004bf26139cc…`.
@@ -6404,12 +6438,34 @@ reading.**
 
 ### What this does not settle
 
-- **Why the pinned rounds scattered so much less than before.** The host's
-  state was not recorded in any of the three runs.
+- **Why the pinned rounds scattered so much less than in
+  "(gate-remeasure-6)".** "(gate-remeasure-5)"'s round ratios were no more
+  scattered than these, 0.040, though its readings spread 1.91x and 2.01x.
+  The host's state was not recorded in any of the three runs.
+- **The host's fast speed level.** Every Bun reading here, 12475.4–13736.7,
+  is at or just above the slow cluster "(aa-noise)" found for the same
+  `bun-server.js`, 12453.3–13546.3, and none is near its fast one,
+  17829.0–22803.5. Nova's readings fall in that record's slow cluster and
+  the band above it, though it measured an earlier build. So this run is
+  consistent with the host at its slow level throughout; that is inferred,
+  not measured. In "(gate-remeasure-6)", on `b24379e`, the seven rounds
+  whose Bun pinned reading was 17477.0 or more had pinned ratios of
+  0.907–1.168, and three of them fell short of the margin. Whether this
+  build clears it at the fast level is not measured. One host state across
+  all twelve rounds also makes them one sample of that state.
 - **Whether "(one-alloc-strings)" moved the pinned ratio.** The median
-  pinned round ratio was 1.176 here, 1.112 in "(gate-remeasure-6)" and
-  1.079 in "(gate-remeasure-5)", but the runs' noise differed, and the ADR
-  judges each run alone.
+  pinned round ratio was 1.176 here and 1.112 in "(gate-remeasure-6)", the
+  only earlier run whose code differs from this one's by that change alone.
+  But that run's pinned rounds scattered far more, 0.146 against 0.054.
+  "(gate-remeasure-5)"'s 1.079 predates "(gc-direct-strings)" as well. Its
+  rounds scattered about as little as these, 0.040, but its host sped up
+  mid-run: Nova's pinned readings spread 1.91x against 1.15x here.
+  "(one-alloc-strings)"'s own ten-user server pairs overlapped, 0.993–1.046
+  after over before, so no server gain was claimed for it. The ADR judges
+  each run alone.
+- **Cold runs and latency percentiles.** `nova-spec/60-EXAMPLES.md` §5's
+  methodology names both; every reading here was warm, and the generator
+  records no p50, p95 or p99.
 - **The pinned condition's unmeasured confound.** Pinning puts each server
   on core 0, which the load generator's threads may also use.
 - **The margin's basis.** The 37 bytes of Bun's `Date` header are charged

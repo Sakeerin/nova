@@ -520,9 +520,14 @@ the gate is not met. Full account in `examples/05-json-api/BENCHMARK.md`,
   1.0547 margin in all 12 pinned rounds, where 10 are needed. Unpinned,
   which does not decide, it cleared it in all 12 too.
 
-Both of the gate's statements are now met, so Phase 2's gate is met on
-this development host, Windows, with the load generator on the same
-machine. Full account in `examples/05-json-api/BENCHMARK.md`,
+Both of the gate's statements are now met, so the `examples/05-json-api`
+benchmark gate under Phase 2 below is met, on this development host,
+Windows, with the load generator on the same machine. That gate line asks
+for "benchmark hardware", which the spec does not define; these figures
+are from this host. `60-EXAMPLES.md` §3 (`03-http-server`) and §4
+(`04-todo-cli`) are also labelled Phase 2 gates; neither exists under
+`examples/` and nothing here judges them, so this does not say Phase 2 is
+complete. Full account in `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
 ### Phase 0 — Foundation (week 1–4)

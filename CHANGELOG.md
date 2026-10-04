@@ -545,8 +545,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-04 (reprofile-5)".
-- **The Phase 2 gate is met, on `6fda78b`.** The third run judged under
-  ADR 0021, after one allocation per string.
+- **The Phase 2 benchmark gate for `examples/05-json-api` is met, on
+  `6fda78b`.** The third run judged under ADR 0021, after one allocation
+  per string.
   - Nova cleared the 1.0547 byte margin against Bun in all 12 pinned
     rounds, where 10 are needed, at round ratios of 1.061-1.261, median
     1.176. Unpinned, which does not decide, it cleared it in all 12 too.
@@ -554,9 +555,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     unpinned 15128.3-16301.7.
   - So both of the gate's statements are met, on this development host,
     Windows, with the load generator on the same machine.
-  - This run's pinned rounds scattered far less than the two before it, a
-    standard deviation of the log ratio of 0.054 against 0.146, for
-    reasons not measured. The closest round cleared the margin by 0.6%.
+  - This run's pinned round ratios scattered far less than
+    "(gate-remeasure-6)"'s, a standard deviation of the log ratio of 0.054
+    against 0.146, though not less than "(gate-remeasure-5)"'s 0.040, for
+    reasons not measured. The verdict needed 10 of 12; the three closest
+    rounds cleared the margin by 0.6%, 2.5% and 6.1%.
 
   Details are in `examples/05-json-api/BENCHMARK.md`,
   "AMENDMENT 2026-10-04 (gate-remeasure-7)".
