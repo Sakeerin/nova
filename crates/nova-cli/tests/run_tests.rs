@@ -10049,3 +10049,676 @@ fn json_api_example_serves_its_routes() {
         "GET /users with two users: the separator and the ascending id walk"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `examples/03-http-server`: the Phase 2 gate in `nova-spec/60-EXAMPLES.md` §3.
+// Design: docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md
+// §7.3, and the plan's Review Focus.
+
+/// The example binds the fixed port 3000 the gate names, so every test that
+/// runs it holds this lock: libtest runs tests on parallel threads, and two
+/// servers cannot both have the port.
+static PORT_3000: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+const HTTP03_ADDR: &str = "127.0.0.1:3000";
+
+fn lock_port_3000() -> std::sync::MutexGuard<'static, ()> {
+    PORT_3000
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn http03_addr() -> std::net::SocketAddr {
+    HTTP03_ADDR.parse().expect("a valid socket address")
+}
+
+/// Fails the calling test unless nothing is listening on port 3000.
+fn assert_port_3000_free() {
+    use std::time::Duration;
+    if let Ok(s) = std::net::TcpStream::connect_timeout(&http03_addr(), Duration::from_millis(500))
+    {
+        drop(s);
+        panic!("something is already listening on {HTTP03_ADDR}; free port 3000 and re-run");
+    }
+    if let Err(e) = std::net::TcpListener::bind("0.0.0.0:3000") {
+        panic!("cannot bind 0.0.0.0:3000 ({e}); free port 3000 and re-run");
+    }
+}
+
+/// An exit status in a form that names both a signal death (Unix) and a
+/// Windows status code in hex.
+fn describe_status(s: &std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = s.signal() {
+            return format!("killed by signal {sig}");
+        }
+    }
+    match s.code() {
+        Some(c) => format!("exit code {c} ({:#x})", c as u32),
+        None => format!("{s:?}"),
+    }
+}
+
+/// SIGTERM to the child. Hand-declared, so no dev-dependency and no
+/// `Cargo.lock` change. Measured on all three CI runners by the 2026-10-04
+/// spike (draft PR #95).
+#[cfg(unix)]
+fn send_termination_request(pid: u32) -> Result<(), String> {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let pid = i32::try_from(pid).map_err(|e| format!("pid {pid}: {e}"))?;
+    if pid <= 0 {
+        return Err(format!("refusing to signal pid {pid}"));
+    }
+    // SAFETY: `kill` takes two plain integers and touches no memory.
+    let rc = unsafe { kill(pid, 15) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "kill(pid, SIGTERM) failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+/// CTRL_BREAK to the child's own console process group, whose id is the
+/// child's pid because it was spawned with CREATE_NEW_PROCESS_GROUP. Never
+/// group 0, which would reach every process on the console, cargo and this
+/// test included. Hand-declared, as on Unix.
+#[cfg(windows)]
+fn send_termination_request(pid: u32) -> Result<(), String> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+    }
+    if pid == 0 {
+        return Err("refusing to signal process group 0".to_string());
+    }
+    // SAFETY: `GenerateConsoleCtrlEvent` takes two plain integers.
+    let rc = unsafe { GenerateConsoleCtrlEvent(1, pid) };
+    if rc != 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "GenerateConsoleCtrlEvent(CTRL_BREAK, {pid}) failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+/// A running `nova run examples/03-http-server/src/main.nova`. Both of its
+/// output streams are drained on threads for its whole life: a closed stdout
+/// pipe aborts a later `println` (measured), and an undrained full one can
+/// block. Dropping it kills a server that is still running, so a test that
+/// panics part-way never leaves one on port 3000.
+struct Http03Server {
+    child: std::process::Child,
+    stdout: Option<std::thread::JoinHandle<String>>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+}
+
+impl Http03Server {
+    fn spawn() -> Self {
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"));
+        cmd.arg("run")
+            .arg(repo_root().join("examples/03-http-server/src/main.nova"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NEW_PROCESS_GROUP: the child leads its own console
+            // group, so a CTRL_BREAK aimed at it never reaches this test.
+            cmd.creation_flags(0x0000_0200);
+        }
+        let mut child = cmd.spawn().expect("spawn nova run on the 03 example");
+        let mut out = child.stdout.take().expect("stdout was piped");
+        let mut err = child.stderr.take().expect("stderr was piped");
+        let stdout = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = out.read_to_string(&mut s);
+            s
+        });
+        let stderr = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = err.read_to_string(&mut s);
+            s
+        });
+        Http03Server {
+            child,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Waits until the port accepts a connection. `listen` installs the
+    /// signal handler before `bind`, so from then on a signal is handled
+    /// gracefully. The probe connection is dropped at once; the server reads
+    /// its end of stream and closes it.
+    fn wait_until_accepting(&mut self) {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            if let Ok(s) =
+                std::net::TcpStream::connect_timeout(&http03_addr(), Duration::from_millis(500))
+            {
+                drop(s);
+                return;
+            }
+            if let Ok(Some(status)) = self.child.try_wait() {
+                let (out, err) = self.streams();
+                panic!(
+                    "the example exited before listening: {}; stdout={out:?} stderr={err:?}",
+                    describe_status(&status)
+                );
+            }
+            if Instant::now() >= deadline {
+                self.kill_and_panic("the example never accepted on 127.0.0.1:3000 within 120 s");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Waits up to `limit` for the process to exit.
+    fn wait_for_exit(&mut self, limit: std::time::Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match self.child.try_wait().expect("try_wait") {
+                Some(s) => return Some(s),
+                None if std::time::Instant::now() >= deadline => return None,
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// Both streams. Call only once the process has exited.
+    fn streams(&mut self) -> (String, String) {
+        let out = self
+            .stdout
+            .take()
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let err = self
+            .stderr
+            .take()
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        (out, err)
+    }
+
+    fn kill_and_panic(&mut self, why: &str) -> ! {
+        let _ = self.child.kill();
+        let status = self.child.wait();
+        let (out, err) = self.streams();
+        panic!("{why}; force-killed: {status:?}; stdout={out:?} stderr={err:?}");
+    }
+}
+
+impl Drop for Http03Server {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// One client connection to the example. It reads responses framed by
+/// `content-length`, and keeps any bytes past one response for the next.
+struct Http03Conn {
+    sock: std::net::TcpStream,
+    pending: Vec<u8>,
+}
+
+/// One response: status, header values by lower-cased name, and body.
+struct Http03Response {
+    status: u16,
+    headers: std::collections::HashMap<String, String>,
+    body: String,
+}
+
+impl Http03Conn {
+    fn open() -> Self {
+        let sock = std::net::TcpStream::connect(HTTP03_ADDR).expect("connect to 127.0.0.1:3000");
+        let limit = Some(std::time::Duration::from_secs(10));
+        sock.set_read_timeout(limit).expect("set_read_timeout");
+        sock.set_write_timeout(limit).expect("set_write_timeout");
+        Http03Conn {
+            sock,
+            pending: Vec::new(),
+        }
+    }
+
+    fn send(&mut self, bytes: &str) {
+        use std::io::Write;
+        self.sock
+            .write_all(bytes.as_bytes())
+            .expect("write to the example");
+    }
+
+    /// The next whole response, or a description of what arrived instead.
+    fn response(&mut self) -> Result<Http03Response, String> {
+        use std::io::Read;
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(head_end) = self
+                .pending
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|i| i + 4)
+            {
+                let head = String::from_utf8_lossy(&self.pending[..head_end]).to_string();
+                let mut lines = head.split("\r\n");
+                let status = lines
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .ok_or_else(|| format!("no status line in {head:?}"))?;
+                let mut headers = std::collections::HashMap::new();
+                for line in lines {
+                    if let Some((name, value)) = line.split_once(':') {
+                        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                    }
+                }
+                let len: usize = headers
+                    .get("content-length")
+                    .and_then(|v| v.parse().ok())
+                    .ok_or_else(|| format!("no content-length in {head:?}"))?;
+                if self.pending.len() >= head_end + len {
+                    let body = String::from_utf8_lossy(&self.pending[head_end..head_end + len])
+                        .to_string();
+                    self.pending.drain(..head_end + len);
+                    return Ok(Http03Response {
+                        status,
+                        headers,
+                        body,
+                    });
+                }
+            }
+            match self.sock.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(format!(
+                        "peer closed mid-response; had {:?}",
+                        String::from_utf8_lossy(&self.pending)
+                    ))
+                }
+                Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    return Err(format!(
+                        "read failed: {e}; had {:?}",
+                        String::from_utf8_lossy(&self.pending)
+                    ))
+                }
+            }
+        }
+    }
+
+    /// `Ok` once the server has closed this connection: a read returns end of
+    /// stream, or a reset, with nothing else pending.
+    fn closed_by_server(&mut self) -> Result<(), String> {
+        use std::io::Read;
+        if !self.pending.is_empty() {
+            return Err(format!(
+                "unexpected bytes: {:?}",
+                String::from_utf8_lossy(&self.pending)
+            ));
+        }
+        let mut chunk = [0u8; 64];
+        match self.sock.read(&mut chunk) {
+            Ok(0) => Ok(()),
+            Ok(n) => Err(format!(
+                "expected end of stream, got {:?}",
+                String::from_utf8_lossy(&chunk[..n])
+            )),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(format!("expected end of stream, got error {e}")),
+        }
+    }
+}
+
+/// The next response on `conn`, or the test fails with the server's streams.
+fn http03_response(server: &mut Http03Server, conn: &mut Http03Conn, what: &str) -> Http03Response {
+    match conn.response() {
+        Ok(r) => r,
+        Err(e) => server.kill_and_panic(&format!("{what}: {e}")),
+    }
+}
+
+/// Waits until a fresh connection to the example is refused, which proves
+/// `listen` saw the shutdown flag and closed its listener. A refusal takes
+/// about 2 s on Windows (measured), so each attempt allows 3 s.
+fn wait_until_refused() -> Result<(), String> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match std::net::TcpStream::connect_timeout(&http03_addr(), Duration::from_secs(3)) {
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(()),
+            Ok(s) => drop(s),
+            Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            return Err("the listener was still accepting 15 s after the signal".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The gate: both routes; a body on a keep-alive connection; pipelining; a
+/// malformed request; a request that straddles the signal; idle connections
+/// closed after it; then exit 0.
+#[test]
+fn http_server_example_serves_and_exits_cleanly() {
+    use std::time::Duration;
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn();
+    server.wait_until_accepting();
+
+    // Routes, on one keep-alive connection K.
+    let mut k = Http03Conn::open();
+    k.send("GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    let hello = http03_response(&mut server, &mut k, "GET /");
+    assert_eq!(hello.status, 200);
+    assert_eq!(hello.body, "Hello from Nova!");
+    k.send("GET /health HTTP/1.1\r\nhost: x\r\n\r\n");
+    let health = http03_response(&mut server, &mut k, "GET /health");
+    assert_eq!(health.status, 200);
+    assert_eq!(
+        health.headers.get("content-type").map(String::as_str),
+        Some("application/json")
+    );
+    assert_eq!(
+        health.headers.get("content-length").map(String::as_str),
+        Some("15")
+    );
+    assert_eq!(health.body, r#"{"status":"ok"}"#);
+
+    // A body is consumed exactly, so the connection stays usable (Review Focus 3).
+    k.send("POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 3\r\n\r\nabc");
+    let post = http03_response(&mut server, &mut k, "POST / with a body");
+    assert_eq!(post.status, 404, "only GET routes ship");
+    k.send("GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+    let again = http03_response(&mut server, &mut k, "GET / after a body");
+    assert_eq!(again.body, "Hello from Nova!");
+    // K now stays open and idle across the signal.
+
+    // Pipelining: two requests in one write, answered in order.
+    let mut p = Http03Conn::open();
+    p.send("GET / HTTP/1.1\r\nhost: x\r\n\r\nGET /health HTTP/1.1\r\nhost: x\r\n\r\n");
+    let first = http03_response(&mut server, &mut p, "pipelined GET /");
+    let second = http03_response(&mut server, &mut p, "pipelined GET /health");
+    assert_eq!(first.body, "Hello from Nova!");
+    assert_eq!(second.body, r#"{"status":"ok"}"#);
+
+    // A malformed request closes its connection with no response (Review Focus 4).
+    let mut m = Http03Conn::open();
+    m.send("this is not http\r\n\r\n");
+    if let Err(e) = m.closed_by_server() {
+        server.kill_and_panic(&format!("malformed request: {e}"));
+    }
+
+    // In flight: half a head, a pause past one tick so the server holds it,
+    // the signal, proof the server saw it, and only then the rest.
+    let mut f = Http03Conn::open();
+    f.send("GET / HTTP/1.1\r\nho");
+    std::thread::sleep(Duration::from_millis(300));
+    if let Err(e) = send_termination_request(server.pid()) {
+        server.kill_and_panic(&format!("could not deliver the signal: {e}"));
+    }
+    if let Err(e) = wait_until_refused() {
+        server.kill_and_panic(&e);
+    }
+    f.send("st: x\r\n\r\n");
+    let in_flight = http03_response(&mut server, &mut f, "the request straddling the signal");
+    assert_eq!(in_flight.status, 200);
+    assert_eq!(in_flight.body, "Hello from Nova!");
+    if let Err(e) = f.closed_by_server() {
+        server.kill_and_panic(&format!("after the in-flight answer: {e}"));
+    }
+
+    // Idle connections were closed after the signal.
+    if let Err(e) = k.closed_by_server() {
+        server.kill_and_panic(&format!("idle keep-alive K: {e}"));
+    }
+    if let Err(e) = p.closed_by_server() {
+        server.kill_and_panic(&format!("idle pipelining P: {e}"));
+    }
+
+    let status = match server.wait_for_exit(Duration::from_secs(10)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the example did not exit within 10 s of finishing"),
+    };
+    let (out, err) = server.streams();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+    assert!(err.contains("listening on :3000"), "stderr: {err:?}");
+}
+
+/// A second signal while a request is still in flight takes the default
+/// action at once, well before that request's 10 s deadline.
+#[test]
+fn http_server_example_second_signal_forces_exit() {
+    use std::time::Duration;
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn();
+    server.wait_until_accepting();
+
+    let mut stalled = Http03Conn::open();
+    stalled.send("GET / HTTP/1.1\r\nho");
+    std::thread::sleep(Duration::from_millis(300));
+    if let Err(e) = send_termination_request(server.pid()) {
+        server.kill_and_panic(&format!("could not deliver the first signal: {e}"));
+    }
+    // Unix merges a second SIGTERM sent while the first is pending, so wait
+    // for proof the first was handled before sending the second.
+    if let Err(e) = wait_until_refused() {
+        server.kill_and_panic(&e);
+    }
+    if let Err(e) = send_termination_request(server.pid()) {
+        server.kill_and_panic(&format!("could not deliver the second signal: {e}"));
+    }
+    let status = match server.wait_for_exit(Duration::from_secs(5)) {
+        Some(s) => s,
+        None => server.kill_and_panic("a second signal did not end the process within 5 s"),
+    };
+    let (out, err) = server.streams();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "{}; stdout={out:?} stderr={err:?}",
+            describe_status(&status)
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            status.code().map(|c| c as u32),
+            Some(0xC000_013A),
+            "{}; stdout={out:?} stderr={err:?}",
+            describe_status(&status)
+        );
+    }
+    drop(stalled);
+}
+
+/// A request that stalls mid-head across the signal is held until its 10 s
+/// deadline and then dropped, so the drain always finishes and the process
+/// still exits 0 (Review Focus 1).
+#[test]
+fn http_server_example_drops_a_stalled_request_at_its_deadline() {
+    use std::time::{Duration, Instant};
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn();
+    server.wait_until_accepting();
+
+    let mut stalled = Http03Conn::open();
+    stalled.send("GET / HTTP/1.1\r\nho");
+    std::thread::sleep(Duration::from_millis(300));
+    let signalled = Instant::now();
+    if let Err(e) = send_termination_request(server.pid()) {
+        server.kill_and_panic(&format!("could not deliver the signal: {e}"));
+    }
+    let status = match server.wait_for_exit(Duration::from_secs(20)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the stalled request held the process past 20 s"),
+    };
+    let took = signalled.elapsed();
+    let (out, err) = server.streams();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+    assert!(
+        took >= Duration::from_secs(8),
+        "exited {took:?} after the signal: the stalled request was not held to its deadline"
+    );
+    if let Err(e) = stalled.closed_by_server() {
+        panic!("the stalled connection was not closed by the server: {e}");
+    }
+}
+
+/// With port 3000 taken, the example fails at once with a nonzero exit and
+/// the generic unwrap message, rather than hanging (design §6; Review Focus 5).
+#[test]
+fn http_server_example_fails_fast_when_the_port_is_taken() {
+    use std::time::Duration;
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let _holder = std::net::TcpListener::bind("0.0.0.0:3000").expect("hold port 3000");
+    let mut server = Http03Server::spawn();
+    let status = match server.wait_for_exit(Duration::from_secs(120)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the example did not exit with port 3000 already taken"),
+    };
+    let (out, err) = server.streams();
+    assert!(
+        !status.success(),
+        "it must fail: {}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+    assert!(
+        err.contains("called `unwrap` on an `Err` value"),
+        "stderr: {err:?}"
+    );
+}
+
+/// A server that never calls `Server::listen` installs no handler, so a
+/// termination request still ends it by the default action (design §7.4;
+/// Review Focus 2). `docs/benchmarks/server.nova` is such a server. This is
+/// the 2026-10-04 spike's measurement (draft PR #95), kept. It passes before
+/// this branch exists, by design: it pins behaviour that must not change.
+#[test]
+fn a_server_that_never_calls_listen_keeps_the_default_signal_action() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"));
+    cmd.arg("run")
+        .arg(repo_root().join("docs/benchmarks/server.nova"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0200);
+    }
+    let mut child = cmd
+        .spawn()
+        .expect("spawn nova run docs/benchmarks/server.nova");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let out_thread = std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        if let Some(first) = lines.next() {
+            let _ = tx.send(first);
+        }
+        lines.collect::<Vec<_>>().join("\n")
+    });
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let err_thread = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+
+    let first = rx
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or_default();
+    if !first.contains("listening on") {
+        let _ = child.kill();
+        let status = child.wait();
+        let err = err_thread.join().unwrap_or_default();
+        panic!("no ready line; got {first:?}; status {status:?}; stderr {err:?}");
+    }
+    // Let the server reach its parked accept before the request arrives.
+    std::thread::sleep(Duration::from_millis(500));
+    if let Err(e) = send_termination_request(child.id()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("could not deliver the request: {e}");
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("try_wait") {
+            break s;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let s = child.wait();
+            panic!("the request did not end the server within 10 s; force-killed: {s:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let out = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            status.signal(),
+            Some(15),
+            "{}; stdout={out:?} stderr={err:?}",
+            describe_status(&status)
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            status.code().map(|c| c as u32),
+            Some(0xC000_013A),
+            "{}; stdout={out:?} stderr={err:?}",
+            describe_status(&status)
+        );
+    }
+}
