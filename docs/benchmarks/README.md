@@ -628,6 +628,14 @@ were the tighter of the two, so pinning to core 0, which the load generator
 may share, does not by itself account for it; neither run tests that. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-03 (gate-remeasure-6)".
 
+**Amended 2026-10-04 (gate-remeasure-7):** on `main` at `6fda78b`, the
+two conditions agreed. Pinned, which decides under `docs/adr/0021-gate-ratio-paired-rounds.md`,
+Nova cleared the 1.0547 margin in all 12 rounds, a met verdict; its
+pinned round ratios ran from 1.061 to 1.261, a standard deviation of the
+log ratio of 0.054 against "(gate-remeasure-6)"'s 0.146. Unpinned it
+cleared it in 12 of 12, at 1.139–1.197. Why this run scattered so much
+less is not measured. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
+
 ### Judging the ratio: twelve paired rounds
 
 **Added 2026-10-03.** `docs/adr/0021-gate-ratio-paired-rounds.md` decides how a

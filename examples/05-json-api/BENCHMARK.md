@@ -6273,6 +6273,151 @@ These predictions were written before the profiling build existed:
 - **The gate.** Neither criterion was rerun.
 - **One host, Windows, three runs.**
 
+## AMENDMENT 2026-10-04 (gate-remeasure-7): the Phase 2 gate on `main` at `6fda78b`, after "(one-alloc-strings)"
+
+The third gate run judged by `docs/adr/0021-gate-ratio-paired-rounds.md`,
+with "(gate-remeasure-6)"'s method and scripts.
+- **Code:** since `b24379e`, "(one-alloc-strings)" made each runtime string
+  one leaf GC object. Everything else that landed was docs and tests.
+- **Rounds:** twelve, fixed in advance, each a pinned pair and then an
+  unpinned pair. Odd rounds ran Nova first and even rounds Bun first.
+- **Pinned decides,** with a margin for Bun's `Date` header.
+
+**§5's ratio is met.**
+- **The margin:** measured before the first reading, Nova's `/users`
+  response was again 676 bytes and Bun's 713, so the margin is 713/676,
+  about 1.0547.
+- **Nova cleared it in all 12 pinned rounds.** The ADR needs 10. It cleared
+  6 of 6 in the rounds it ran first and 6 of 6 in the rounds Bun ran first.
+- **Nova was faster in plain req/sec in all 12.**
+- **The pinned round ratios were 1.061–1.261, median 1.176.** The closest
+  round, 7, cleared the margin by 0.6%.
+- **Unpinned, which does not decide, Nova cleared the margin in all 12
+  rounds,** at 1.139–1.197, median 1.177.
+
+**§3's absolute criterion is met in every reading.** All 24 Nova readings
+clear `nova-spec/00-MASTER-SPEC.md` §3's 10,000 req/sec: pinned at
+14198.0–16277.5, unpinned at 15128.3–16301.7.
+
+**So both of the gate's statements are met on `6fda78b`,** on this
+development host, Windows, with the load generator on the same machine.
+Which statement governs, the question ADR 0021 left open, does not change
+this verdict, since both are met. The ADR says each run's verdict stands
+for the code it measured.
+
+**This run's pinned rounds scattered far less than the two before it.**
+- The standard deviation of the log pinned round ratio was 0.054, against
+  0.146 in "(gate-remeasure-6)" and 0.139 for the same server against
+  itself in "(aa-noise)". Unpinned it was 0.014, against 0.085.
+- Nova's pinned readings spread 1.15x and Bun's 1.08x, against 1.54x and
+  1.59x in "(gate-remeasure-6)". Every reading here is between 12475.4 and
+  16301.7; that run's fastest was 22200.2.
+- Why the host was steadier is not measured, and its state was not
+  recorded. The ADR judges each run alone; a noisier run of this same code
+  could have come out inconclusive, and the closest round's 0.6% is the
+  margin this verdict had.
+
+### The rounds, in run order
+
+| round | order | Nova pinned | Bun pinned | pinned ratio | clears 1.0547 | Nova unpinned | Bun unpinned | unpinned ratio |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Nova first | 14206.1 | 12475.4 | 1.139 | yes | 15546.0 | 12985.5 | 1.197 |
+| 2 | Bun first | 15917.6 | 12908.0 | 1.233 | yes | 15346.1 | 13233.6 | 1.160 |
+| 3 | Nova first | 16277.5 | 13361.1 | 1.218 | yes | 15981.5 | 13583.8 | 1.177 |
+| 4 | Bun first | 14999.0 | 13275.4 | 1.130 | yes | 15370.3 | 13491.8 | 1.139 |
+| 5 | Nova first | 15302.9 | 12740.4 | 1.201 | yes | 15800.2 | 13479.6 | 1.172 |
+| 6 | Bun first | 14245.1 | 13170.2 | 1.082 | yes | 15146.2 | 12678.6 | 1.195 |
+| 7 | Nova first | 14198.0 | 13380.2 | 1.061 | yes | 15532.2 | 13150.3 | 1.181 |
+| 8 | Bun first | 16076.5 | 12749.5 | 1.261 | yes | 15128.3 | 13029.2 | 1.161 |
+| 9 | Nova first | 14821.8 | 13248.6 | 1.119 | yes | 15999.2 | 13658.1 | 1.171 |
+| 10 | Bun first | 15835.1 | 13445.4 | 1.178 | yes | 16177.6 | 13736.7 | 1.178 |
+| 11 | Nova first | 15823.5 | 13474.5 | 1.174 | yes | 16196.5 | 13655.5 | 1.186 |
+| 12 | Bun first | 15976.6 | 13136.6 | 1.216 | yes | 16301.7 | 13692.7 | 1.191 |
+
+### How it was measured
+
+**The method was ADR 0021's, as "(gate-remeasure-6)" ran it.**
+- **Readings:** ten users seeded, 200 connections, 30 s after a 5 s warmup,
+  one fresh server process per reading, 48 readings. Every one reported
+  `errors=0`, and every cell's `elapsed_ms` was 30020–30029.
+- **Pinning:** the affinity mask was read back after it was set. Every
+  pinned reading reports 1, and every unpinned one 4095.
+- **The order** in the log matches the ADR's, reading for reading.
+
+**The load generator was not the limit.**
+- **Ceiling:** the self-test, taken after the byte measurement and before
+  the first reading, reached 106821.8 req/sec with `errors=0`. The fastest
+  reading, Nova's 16301.7, is 15.3% of that.
+- **Calibration:** every self-test connection completed requests
+  (`conn_min=1166`, `conn_max=40810`), a stronger calibration than
+  "(gate-remeasure-6)"'s. Its `elapsed_ms` was 32738, longer than the
+  cells' 30020–30029.
+- **Binary:** `target/release/nova-bench-http.exe`, SHA-256
+  `d17062335e988c18…`, the same file the earlier gate runs used.
+
+**These predictions were written before any build, byte measurement or
+reading.**
+- **The predictions file's modification time is 13:55:45**, matching the
+  `date` line it ends with.
+- **The other files' modification times:**
+  - 13:56:02 for the gate binary;
+  - 13:56:11 for the equivalence log;
+  - 13:56:17 for the byte measurement's log;
+  - 13:56:56 for the self-test log.
+- **The run's log** has it starting at 13:56:09 and ending at 14:27:52.
+
+| prediction | measured | verdict |
+|---|---|---|
+| response bytes: Nova 676, Bun 713; m = 1.0547 | 676 and 713; 1.0547 | right |
+| pinned round ratios roughly 0.90–1.40, median 1.08–1.18 | 1.061–1.261, median 1.176 | within |
+| pinned rounds clearing m: 7–11 of 12 | 12 | wrong: above |
+| verdict: inconclusive and met about equally likely; not met very unlikely | met | met was one of the two outcomes given even odds |
+| unpinned rounds clearing m: 9–12 of 12 | 12 | within |
+| all 24 Nova readings above 10k | all 24 | right |
+| Nova pinned 12,000–30,000 | 14198.0–16277.5 | within |
+| Bun pinned 11,000–27,000 | 12475.4–13474.5 | within |
+| Nova unpinned 12,000–30,000 | 15128.3–16301.7 | within |
+| Bun unpinned 11,000–27,000 | 12678.6–13736.7 | within |
+
+### Identity of each side, and the payload
+
+- **Nova:** `examples/05-json-api`, built by the release `nova`, SHA-256
+  `e1e3e9577a9f41f7…`.
+  - That `nova` was last rebuilt at 12:55:54 from `7e1b1e0`'s code, after
+    "(reprofile-5)"'s sampler patch was reverted. `6fda78b` changed docs
+    only, and the release `nova` and runtime library kept their 12:55
+    modification times through the `cargo build --release` before the gate
+    build. The commit each was built from is from this session.
+  - `json-api.exe` is 701,440 bytes, SHA-256 `26b93cc19898ba77…`, and does
+    not contain the sampler's `NOVA_PROF_SAMPLE` string. The same binary
+    ran in every Nova reading.
+- **Bun:** `docs/benchmarks/bun-server.js`, SHA-256 `f95426e14e22034c…`,
+  the same file as before, run by bun 1.3.0.
+- **The payload.** Ten users were seeded by the same `curl` POSTs on each
+  side. Every reading on both sides served the same 604-byte body, SHA-256
+  `3ff5004bf26139cc…`.
+- **The byte measurement** was "(gate-remeasure-6)"'s: a fresh server per
+  side, seeded the same way, and one `GET /users` saved with `curl -s -D`.
+  Nova's head was 72 bytes and Bun's 109; both bodies were 604.
+- **Equivalence was run first**, against this run's `json-api.exe`:
+  `EQUIVALENCE OK: all 9 exchanges match on status and body bytes`.
+
+### What this does not settle
+
+- **Why the pinned rounds scattered so much less than before.** The host's
+  state was not recorded in any of the three runs.
+- **Whether "(one-alloc-strings)" moved the pinned ratio.** The median
+  pinned round ratio was 1.176 here, 1.112 in "(gate-remeasure-6)" and
+  1.079 in "(gate-remeasure-5)", but the runs' noise differed, and the ADR
+  judges each run alone.
+- **The pinned condition's unmeasured confound.** Pinning puts each server
+  on core 0, which the load generator's threads may also use.
+- **The margin's basis.** The 37 bytes of Bun's `Date` header are charged
+  at their full share of the response, which the ADR expects to err
+  against Nova; their real cost is not measured.
+- **Any host but this one.** Every figure here is from this development
+  host, Windows, with the load generator on the same machine.
+
 ## What was measured, and with what
 
 Every parameter below belongs to the figure. A req/sec number for a list
