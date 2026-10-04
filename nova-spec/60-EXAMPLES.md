@@ -329,8 +329,12 @@ on. There is no `?` operator. None of those moved here.
 is not what stands between `std/http` and a `Server.get`.** It still does not
 parse. But a router over `fn(Request) -> Response` fields, written in today's
 Nova, served §3's routes on this Windows host, and an async handler held as
-`fn(Request) -> Future<Response>` and awaited at dispatch also ran. Neither
-needs the alias. See
+`fn(Request) -> Future<Response>` and awaited at dispatch also ran, though not
+served over HTTP. Neither needs the alias. This listing's own handlers are
+`async |..|` closures, and async closures do not exist: `nova check` stops on
+them with `P0001`, found `async`. So its `.get`/`.post` calls would not compile
+as written even on a router that takes async handlers; what ran in their place
+is a named `async fn` held in the field. See
 `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1 and §3.2.
 
 **AMENDED 2026-09-11: this section's own criterion, the ratio against Bun,

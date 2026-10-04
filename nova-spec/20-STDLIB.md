@@ -466,7 +466,8 @@ that one blocker is gone.
 **Recorded 2026-10-04 (branch `examples-03-04-inventory`): the proviso
 "provided its handlers stay synchronous" is narrower than what runs.** An async
 handler held in a `fn(Request) -> Future<Response>` field, called and awaited at
-dispatch, ran with no compiler change. The `async fn` type alias above and async
+dispatch, ran on this Windows host with no compiler change, though not served
+over HTTP. The `async fn` type alias above and async
 closures (`async |..|`) still do not exist. See
 `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1.
 
