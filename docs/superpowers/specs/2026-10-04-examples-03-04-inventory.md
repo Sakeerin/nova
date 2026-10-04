@@ -18,8 +18,13 @@ are always written with the file name, as in `60-EXAMPLES.md` §3.
 
 - **The verbatim listings first.** Both listings were extracted byte for byte from
   `60-EXAMPLES.md` as it stood at `3f4fdfb`: lines 65-77 for its §3 and 97-155 for
-  its §4. This record's note under its §3 moves the §4 listing to 107-165. Both
-  were run through `nova check`, and both fail on their first line (§2).
+  its §4. The note this branch adds under `60-EXAMPLES.md` §3 moves that file's §4
+  listing to 107-165. Both were run through `nova check`, and both fail on their
+  first line (§2).
+- **Line numbers in `20-STDLIB.md` are cited as they stand on this branch.** The
+  note it adds under that file's §6 amendment moved every line after 465 down by
+  8. So 495-496, 509, 519, 548 and 1715-1716 here were 487-488, 501, 511, 540 and
+  1707-1708 at `3f4fdfb`; 232-234 did not move.
 - **Then a fan-out of probes.** Nine probe groups, one per family of constructs,
   each wrote and ran its own programs:
   - imports;
@@ -46,16 +51,16 @@ are always written with the file name, as in `60-EXAMPLES.md` §3.
   - The nine groups and the gap round compiled or ran 233 probe programs. The
     verifiers' own probes are not in that count.
 - **Re-run by the controller, not taken on report:**
-  - every code in the two tables below, and the `Self` code in §3.2, from 46
-    one-construct programs. Each program is valid except for the construct named,
-    so each code belongs to that construct alone;
+  - every code in the two tables below, and the codes in §3.1's list and §3.2,
+    from 48 one-construct programs. Each program is valid except for the construct
+    named, so each code belongs to that construct alone;
   - the router in §3.2;
   - the cycle in §4.2;
   - the stdout defect in §5;
-  - the async-handler spelling in §3.1.
+  - the two async-handler programs in §3.1.
 - **Finding ids are labels, not links.** The Findings column and the ids in
   parentheses name findings in the fan-out's output, which is not tracked. The
-  first letter is the group:
+  prefix before the hyphen is the group:
   - A imports, B the HTTP builder, C the SIGTERM lifecycle;
   - D declarations and JSON, E the process surface;
   - F1 Option and String, F2 iteration and mutation;
@@ -70,7 +75,10 @@ construct into an otherwise valid program and run `nova check`:
 - expressions in `fn main`, or in an `async fn main` where the construct awaits;
 - any record or typed helper fn the construct needs, declared beside it.
 
-Where the spelling probed differs from the listing's, the Diagnostic cell says so.
+A probe declares its own receivers and names its own variables, so a message can
+name `t`, `v`, `Vec<Int>` or `?3` where the listing would name something else.
+Where the construct itself was probed in another spelling, the Diagnostic cell
+says so.
 
 ---
 
@@ -113,24 +121,29 @@ The code column comes from one program per construct (§1).
 | `http.Server.new()` | no | `Server::new()` is `E0900` "module-qualified paths", because with no `Server` type the path reads as a module path. `Response.text(..)`, a `.` call on a type, is `E0001` cannot find `Response` | a user-level router: §3.2 | std (`std/http/lib.nova`, writable in Nova); spec drift for `http.` and for `.` on a type | B-1, B-2, B-3 |
 | `.get(...)` continuation lines starting with `.` | **yes** | — | — | — | B-4 |
 | `\|_\| ...` handler closures | **yes** | ok | — | — | B-7 |
-| a handler that reads a field of its unannotated request, `\|req\| req.path` (not in `60-EXAMPLES.md` §3, but any real route) | no | `E0014` cannot access field `path` on `?0` | annotate `\|req: Request\|`, pass `req` straight to a typed fn, or rebind it with a typed `let` | typechecker: `check_closure` (`check.rs:4582`) checks the body with no expected type | B-8, F1-3, G-R1 |
+| a handler that reads a field of its unannotated request before anything in its body has fixed that type, `\|req\| req.path` (not in `60-EXAMPLES.md` §3, but any real route) | no | `E0014` cannot access field `path` on `?0` | annotate `\|req: Request\|`, pass `req` straight to a typed fn, or rebind it with a typed `let` | typechecker: `check_closure` (`check.rs:4582`) checks the body with no expected type | B-8, F1-3, G-R1 |
 | `Response.text("Hello from Nova!")`, one argument | no | probed as `Response::text("...")`: `E0016` takes 2 arguments. The `.` spelling is `E0001`, as in the `http.Server.new()` row | `Response::text(200, "...")` | std or spec: three meanings disagree, see §5 | B-9 |
-| `Response.json(...)` | no | probed as `Response::json(..)`: `E0001` no variant `json` on type `Response`. The `.` spelling is `E0001` cannot find `Response` | an `impl Response { pub fn json(v: JsonValue) -> Response }` in user code; ran | std (`std/http/lib.nova`); conflicts with `20-STDLIB.md:487` | B-10, B-R7 |
+| `Response.json(...)` | no | probed as `Response::json(..)`: `E0001` no variant `json` on type `Response`. The `.` spelling is `E0001` cannot find `Response`, as in the `http.Server.new()` row | an `impl Response { pub fn json(v: JsonValue) -> Response }` in user code; ran | std (`std/http/lib.nova`); conflicts with `20-STDLIB.md:495` | B-10, B-R7 |
 | `{ "status": "ok" }` | no | `P0001` | `Map::new()`, `insert`, then `Object(m)` | parser and typechecker; no spec chapter defines a map literal | B-11 |
 | `app.listen(addr).await.unwrap()` | **yes** (shape) | — | an `async fn listen(self, ...)` in an impl, awaited and unwrapped | — | B-12, B-15 |
 
-Not in `60-EXAMPLES.md` §3, but in the API it assumes: `20-STDLIB.md:511`'s
+Not in `60-EXAMPLES.md` §3, but in the API it assumes: `20-STDLIB.md:519`'s
 `pub type Handler = async fn(Request) -> Response`.
 - The async alias is `P0001`, and a sync alias is `E0900`: type aliases are not
   supported yet.
 - The working spelling for a synchronous handler is `fn(Request) -> Response`,
   written inline, and `60-EXAMPLES.md` §3's handlers are all synchronous (B-16).
 - **An async handler needs no compiler change either.** It is stored as
-  `fn(Request) -> Future<Response>` and awaited at dispatch. Re-run by the
-  controller: a named `async fn` that awaits a `sleep`, held in a record field of
-  that type, bound to a local, called and awaited, returned `200 users at /users`
-  (B-16's route, B-R8).
-- Async closures, `async |..|`, do not exist (B-16).
+  `fn(Request) -> Future<Response>`, then called and awaited. The controller
+  re-ran two programs, neither served over HTTP:
+  - a named `async fn` that awaits a `sleep`, held in a record field of that
+    type, bound to a local, called and awaited, returned `200 users at /users`
+    (B-16's route, B-R8);
+  - a router whose `async fn dispatch` walks a `Vec<Route>`, matches the path and
+    awaits the stored handler printed `200 users at /users`, and `404` for an
+    unknown path.
+- Async closures do not exist: `async |n: Int| n + 1` is `P0001`, found `async`
+  (B-16).
 
 ### 3.2 First gate clause, `curl http://localhost:3000/` returns `Hello from Nova!`: reached by a substitute
 
@@ -156,33 +169,35 @@ only. curl's happy-eyeballs timer starts the IPv4 attempt about 200 ms later,
 while the `::1` attempt is still pending; that attempt is refused only after
 about 2 s (GAP-3). Binding `[::]` as well removes the delay.
 
-Four things the router needed beyond the listing:
+Three things the router needed beyond the listing:
 - **The `get` builder takes `self`, not `mut self`.** A `mut self` call on the
   temporary `Server::new()` returns is `E0060`.
-- **`get` returns `Server`, not the `-> Self` that `20-STDLIB.md:501` gives.**
+- **`get` returns `Server`, not the `-> Self` that `20-STDLIB.md:509` gives.**
   `Self` as a type is `E0001`, cannot find type `Self`, in an inherent impl and
   in a trait impl alike; the controller re-ran both. It is bound only inside trait
   declarations (B-6).
 - **A fn-typed field is bound to a local before it is called.** `r.handler(req)`
   is `E0014` (B-14).
-- **`std/http` is compiled into `nova.exe`.** Moving the router there means a
-  compiler rebuild (D-R5).
+
+Moving the router into `std/http` means a compiler rebuild, because std is
+compiled into `nova.exe` (D-R5).
 
 ### 3.3 Second gate clause, "Process exits cleanly on SIGTERM": undefined, and not observable
 
 - **The runtime installs no signal or console-control handler.** The searches
   for `sigaction`, `SIGTERM`, `SetConsoleCtrlHandler`, `ctrlc` and
   `tokio::signal`, over `crates/nova-runtime` and `Cargo.lock`, find none (C-1).
-- **On this host, with no handler installed, the forced terminations ended the
-  process outright and the polite ones did not** (C-8 to C-12, C-R3):
-  - Git Bash `kill -TERM` gave 143.
-  - `CTRL_BREAK` gave `0xC000013A`. So did `CTRL_C`, but only once the Ctrl-C
-    ignore flag that children inherit here had been reset. With the flag
-    inherited, the process was still alive afterwards (C-12, C-R3).
-  - `taskkill /F` gave 1.
-  - A plain `taskkill` was refused as "can only be terminated forcefully", and
-    the server kept serving (C-8). Git Bash `kill -INT` also left it serving
-    (C-10).
+- **On this host, with no handler installed, no termination reached any Nova
+  code: each either ended the process outright or did not end it at all** (C-8
+  to C-12, C-R3):
+  - Ended it: Git Bash `kill -TERM` gave 143, ending the process from outside,
+    so no handler could see it (C-10). `taskkill /F` gave 1 (C-9). `CTRL_BREAK`
+    gave `0xC000013A` (C-11). `CTRL_C` gave `0xC000013A`, but only once the
+    Ctrl-C ignore flag that children inherit here had been reset (C-12, C-R3).
+  - Did not end it: a plain `taskkill` was refused as "can only be terminated
+    forcefully", and the server kept serving (C-8). `CTRL_C` with the flag
+    inherited left the process alive (C-12, C-R3), and so did Git Bash
+    `kill -INT`, still alive after 3 s (C-10).
   - Unix was not measured. With no handler, the default disposition applies,
     which is reasoning, not a measurement.
 - **`main` returning does not end a server.** `block_on` "implicitly joins
@@ -227,7 +242,7 @@ Four things the router needed beyond the listing:
 | `json.parse(s).and_then(\|v\| ...)` | **yes**, without `json.` | — | `parse(s).and_then(...)` | — | D-12 |
 | `Vec::<Todo>::from_json(v)` | no | the turbofish is `P0001` (`Vec::<Int>::new()`: chained comparison). There is no `FromJson for Vec` | the expected type drives inference with no turbofish, plus a decoder for the array | parser (turbofish); std (`impl<T: FromJson> FromJson for Vec<T>`, ran as user code) | D-7, D-8 |
 | `todos.to_json()` | no | `E0014` no method `to_json` on `Vec<Int>` (on `[Int]` too) | interpolate each record, escaping through `stringify(String(..))`, as 05 does; or a generic `array_to_json<T: ToJson>` or `impl<T: ToJson> ToJson for Vec<T>`, both ran as user code | std, for `Vec<T>`. An impl on `[T]` is refused: `E0010` impl blocks are only supported on named types | D-6, D-13, G-12 |
-| `json.stringify_pretty(v, 2)` | no | `E0001` cannot find function | write it: about 30-45 lines of Nova, ran, and `parse` reads its output back | std (`std/json/lib.nova`). The signature is already declared at `20-STDLIB.md:540` | A-8, D-10, GAP-4 |
+| `json.stringify_pretty(v, 2)` | no | probed as `stringify_pretty(..)`: `E0001` cannot find function. The `json.` spelling is `E0001` cannot find `json` | write it: about 30-45 lines of Nova, ran, and `parse` reads its output back | std (`std/json/lib.nova`). The signature is already declared at `20-STDLIB.md:548` | A-8, D-10, GAP-4 |
 | `fs.write_string(..).await.unwrap()` | **yes**, without `fs.` | — | — | — | G-4 |
 | `args()` | no | `E0001` cannot find function `args` | **none portable**: see §4.3 | runtime builtin, std/process, cli, codegen | A-2, E-3, E-8, G-8 |
 | `argv.get(1)` | on an array, no | `E0014` no method `get` on `[String]` | have `args()` return `Vec<String>`, whose `get` returns `Option` | std (the return type) | F1-1 |
@@ -279,7 +294,7 @@ host:
     `__p___argc`/`__p___argv` FFI (E-R1).
   - An FFI `getenv` reads an environment variable on this host under both
     `nova run` and a built exe (E-R2). That is an input channel, not argv.
-  - **Why none of these is portable.** Every argv route that ran uses symbols
+  - **Why no argv route is portable.** Every argv route that ran uses symbols
     only Windows has: `__p___argc`/`__p___argv`, or `GetCommandLineA` for the raw
     command line. Nova has no conditional compilation (the known attribute set is
     `test`), so one example source cannot carry a per-OS route. Linux and macOS
@@ -288,7 +303,8 @@ host:
   (`crates/nova-cli/src/cmd/run.rs:11-15`) has only `file`.
   - `nova run src/main.nova add foo` exits 2 on an unexpected argument.
   - `nova run -- 20` takes `20` as the FILE.
-- **`02-fibonacci`'s own gate is unmet for the same reasons.**
+- **`02-fibonacci`'s own gate is unmet too, and could not be met today for the
+  same reasons.**
   - `60-EXAMPLES.md:55` asks for `nova run -- 20` to print `fib(20) = 6765`,
     and that has never been met.
   - The example has hard-coded `let n = 10` since the Phase 0 skeleton, and it
@@ -310,7 +326,7 @@ host:
 
 - **The spec contradicts itself in at least five places these listings touch:**
   - **Import paths.** The `11-PARSER.md:67,171` grammar has `import path` with
-    `::` paths, and `20-STDLIB.md:1707-1708` says Nova has no import statements
+    `::` paths, and `20-STDLIB.md:1715-1716` says Nova has no import statements
     and no qualified paths. Both `60-EXAMPLES.md` §3 and §4 write
     `import std/...`.
   - **Const types.** The `11-PARSER.md:65` grammar requires a const's type;
@@ -319,7 +335,7 @@ host:
     iterates a `[T]`, the same assumption `60-EXAMPLES.md` §4 makes, and it fails
     in the same way (F2-R3).
   - **`Response::json` and `Response::text` have opposite meanings.**
-    `20-STDLIB.md:487-488` declares them as client-side decoders,
+    `20-STDLIB.md:495-496` declares them as client-side decoders,
     `60-EXAMPLES.md` §3 uses them as constructors, and `std/http/lib.nova:346`
     has `text(status, s)` (B-9, B-10).
   - **References.** `20-STDLIB.md:232-234` puts references "off this roadmap
@@ -337,18 +353,20 @@ host:
     `60-EXAMPLES.md` §4's listing uses no `std/http` (H-17).
   - Several records give the unparseable `Handler` alias as the reason no
     `Server.get` can exist, though §3.1 and §3.2 show a router needs no alias.
-  - This branch amends these docs. The README's sentence is rewritten in place,
-    and the rest get dated notes:
-    - `examples/05-json-api/README.md`;
-    - a paragraph among `60-EXAMPLES.md` §5's amendments;
-    - `20-STDLIB.md` §6's amendment;
-    - the 2026-09-01 design above;
+  - This branch amends these docs:
+    - `examples/05-json-api/README.md`, whose sentence is rewritten in place;
+    - a paragraph among `60-EXAMPLES.md` §5's amendments, with a dated note;
+    - `20-STDLIB.md` §6's amendment, with a dated note;
+    - the 2026-09-01 design above, with dated notes in its §1 and §3;
     - `docs/superpowers/specs/2026-08-23-std-net-listener-design.md`, which says
-      there is "no graceful-shutdown path".
-  - Two std source comments say the same and are not amended here, because std
-    is compiled into `nova.exe`:
-    - `std/http/lib.nova:10-14`;
-    - `std/net/lib.nova:278-282`.
+      there is "no graceful-shutdown path", with a dated note.
+  - Other records repeat these claims and are not amended here. That covers
+    design specs, plans and a CHANGELOG entry from before this branch, found by
+    `git grep` for `Handler` near `P0001` or "does not parse". It is not a
+    claim that no other record says it. Two std source comments are among them,
+    left alone because std is compiled into `nova.exe`:
+    - `std/http/lib.nova:10-14` (the alias);
+    - `std/net/lib.nova:278-282` (no graceful-shutdown path).
 - **A defect found while probing, which predates this work.**
   - A built executable drops a trailing partial line written with
     `stdout().write(...)` when `main` returns. `nova run` keeps it, so the JIT and
@@ -376,7 +394,7 @@ listings:
 
 The fourth, `03-producer-consumer`, has no listing.
 
-None of the language features §3 and §4 assume blocks either gate:
+None of the language features inventoried in §3 and §4 blocks either gate:
 - `@derive`;
 - nested literal patterns;
 - closure parameter inference;

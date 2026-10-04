@@ -226,7 +226,7 @@ in code or records; none is fixed here.
    > **AMENDED 2026-10-04 (branch `examples-03-04-inventory`).** This holds for an
    > untimed wait. An `accept` polled under `std/time`'s `timeout` with a stop
    > condition, with every connection's reads bounded the same way, lets `main`
-   > return and the process exit 0, and that ran. See
+   > return and the process exit 0, and that ran on this Windows host. See
    > `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.3.
 4. **Inter-task channels are the deadlock landmine, not mutexes.** `std/sync` waits by spinning
    `yield_now().await`; a `Mutex` never held across an `.await` can never freeze anything, but

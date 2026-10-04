@@ -8,7 +8,7 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
   `req.path.split("/")`. `std/http` ships no router type.
   `nova-spec/20-STDLIB.md`'s own `pub type Handler = async fn(Request) -> Response`
   still does not parse, but a router does not need it: one over
-  `fn(Request) -> Response` fields runs in today's Nova
+  `fn(Request) -> Response` fields ran in today's Nova on this Windows host
   (`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.2).
   **The split
   has to test the resource segment and not only the segment count** --

@@ -33,8 +33,9 @@ Deliberately not here:
   [Amended 2026-10-04, branch `examples-03-04-inventory`: **the router does not
   have to wait for an async function type.** A router over
   `fn(Request) -> Response` fields, written in today's Nova, served
-  `60-EXAMPLES.md` §3's routes, and an async handler held as
-  `fn(Request) -> Future<Response>` and awaited at dispatch also ran. See
+  `60-EXAMPLES.md` §3's routes on this Windows host, and an async handler held
+  as `fn(Request) -> Future<Response>` and awaited at dispatch also ran, though
+  not served over HTTP. See
   `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1 and
   §3.2.]
 - **The client.** `get`, `post`, `Response::json`, `HttpError` in that same
@@ -104,6 +105,15 @@ Verified against the compiler before relying on any of it:
 The first two are stronger than expected and are what make a future router
 possible without a compiler change, provided handlers are synchronous. They are
 recorded here because the spec's §6 assumes the opposite.
+
+[Amended 2026-10-04, branch `examples-03-04-inventory`: the proviso "provided
+handlers are synchronous" is narrower than what runs, and a router need not cost
+handlers their `await`. A handler field typed `fn(Request) -> Future<Response>`,
+holding a named `async fn` that awaits, was called and awaited at dispatch on
+this Windows host with no compiler change, though not served over HTTP. What a
+router still costs is the inline spelling: async closures (`async |..|`) do not
+exist, so a handler that awaits needs a named `async fn`. See
+`docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1.]
 
 ---
 
