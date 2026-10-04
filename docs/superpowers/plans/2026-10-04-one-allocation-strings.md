@@ -14,7 +14,8 @@ leaf object of `16 + max(len, 1)` bytes and writes the header, with
 `bytes::gc_bytes` both build on it, so the two layouts are identical by
 construction. `nova_rt_str_new`'s literal header becomes a 16-byte leaf.
 Nothing else changes: not `NovaStr`'s fields, not `as_str`/`as_bytes`, not
-`gc.rs`, not any code generator.
+`gc.rs`'s code (Task 4 rewrites one sentence of its module doc), not any
+code generator.
 
 **Tech Stack:** Rust (workspace at `D:\Projects\nona\nova`, MSRV 1.78 in
 CI), the runtime crate `crates/nova-runtime`, Git Bash on Windows 11 for
@@ -34,8 +35,20 @@ commands, Python for scratch analysis.
 - Two invariants are documented on `NovaStr`: `ptr` never points into
   another GC object, and `gc_str_filled`'s `fill` must not allocate GC
   memory (spec §4.5).
-- No change to `NovaStr`'s fields, `as_str`, `as_bytes`, `gc.rs`,
-  `gc/pages.rs`, or any code generator (spec §2).
+- No change to `NovaStr`'s fields, `as_str`, `as_bytes`, or any code
+  generator (spec §2), and no change to the code of `gc.rs` or `gc/pages.rs`
+  (spec §9: the collector is out of scope). `gc.rs`'s module doc comment IS
+  rewritten, by Task 4, as spec §6 requires.
+- **This checkout's working tree is CRLF** (`core.autocrlf=true`; `git
+  ls-files --eol` shows `i/lf w/crlf`). Git Bash's `grep` and `sed` do not
+  show the `\r`, so check line endings with Python on raw bytes, and make any
+  script that matches multi-line text handle `\r\n`.
+- **Run Python with `-X utf8`.** This host's Python 3.13 writes redirected
+  stdout in cp874 and raises on characters such as `−`, `≥` and `§`.
+- **The `*_build_standalone` tests link `target/debug/nova_runtime.lib`,
+  which `cargo test` does not rebuild.** Run `cargo build --locked -p
+  nova-runtime` after a runtime change and before any `nova-cli` test run
+  whose standalone results are to count.
 - Gates: `cargo fmt --all --check`, `cargo clippy --locked --workspace
   --all-targets --all-features -- -D warnings`, and `cargo test --locked
   --workspace`, all passing.
@@ -86,12 +99,17 @@ commands, Python for scratch analysis.
 ```bash
 mkdir -p /tmp/gcm/oas && cd /tmp/gcm/oas && cat > predict.txt <<'EOF'
 Predictions, written before any code for one-alloc-strings exists (branch one-alloc-strings
-from main 45d05b0; only the spec is committed). Change: every runtime-made String and Bytes
+from main 45d05b0; only the spec and this plan are committed). Change: every runtime-made String and Bytes
 is one leaf GC object (header + bytes inline) instead of a scanned header plus a leaf buffer;
 literal headers become leaves.
 
 Object count per ten-user GET /users request ("(alloc-mix)" counters, 3 runs, 15 s, no
-warmup): 225-245 objects (before: 300.9); scanned 16-byte objects fall by 60-75.
+warmup): 225-245 objects (before: 300.9). Scanned objects fall from 233.9 by
+67 + L and leaf objects rise from 67.0 by L, where the 67 are the runtime-string
+headers (one per leaf buffer) and L is the literal headers evaluated per request,
+which become leaves. L >= 40, since user_json alone has four literal parts per
+user. So scanned <= 127, leaf >= 107, and scanned objects of the 16-byte class
+fall from 197.9 to <= 91.
 Per call (ps harness, 5 alternated runs each, fresh process per run):
 - stringify_name: after 10-30% lower than before, disjoint
 - stringify_email: after 10-30% lower, disjoint
@@ -251,10 +269,19 @@ existing helpers (`to_string`, `make_str`, `str_array`):
 
 - [ ] **Step 2: Rewrite and add the `bytes.rs` tests**
 
-In `crates/nova-runtime/src/bytes.rs`, inside `mod tests`, replace the whole
-of `a_bytes_value_has_a_scanned_header_over_a_leaf_buffer`, and the whole of
-`a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size` with its
-doc comment (the "**Review finding I1.**" block), with:
+In `crates/nova-runtime/src/bytes.rs`, inside `mod tests`:
+- delete `a_bytes_value_has_a_scanned_header_over_a_leaf_buffer` (lines
+  251-275, `#[test]` through its closing brace);
+- delete `a_bytes_buffer_above_the_gc_floor_is_tracked_at_its_exact_size`
+  together with its "**Review finding I1.**" doc comment (lines 296-322);
+- **keep** `is_utf8_distinguishes_valid_bytes_from_invalid` and its
+  "**Decided before execution.**" doc comment (lines 277-294), unchanged;
+- insert the block below where the first deleted test was.
+
+Afterwards `grep -c is_utf8_distinguishes_valid_bytes_from_invalid
+crates/nova-runtime/src/bytes.rs` prints 1.
+
+The block:
 
 ```rust
     /// One leaf object per `Bytes` value: the header at its start, the payload
@@ -372,9 +399,14 @@ The bytes-slice test fails on `object_info`. Nothing fails to compile.
 
 - [ ] **Step 4: Implement `alloc_str_object` and `gc_str_filled`**
 
-In `crates/nova-runtime/src/lib.rs`, replace `NovaStr`'s doc comment, and
-everything from `gc_str`'s doc comment through the end of `gc_str_filled`,
-with:
+In `crates/nova-runtime/src/lib.rs`, replace lines 95-155 with the block
+below: everything from `/// A Nova string value` through the closing brace
+of `gc_str_filled`, **the `#[repr(C)] pub struct NovaStr` definition
+included**, because the block carries its own copy of the struct. Keep
+`Fill` and everything after it. Afterwards `grep -c '^pub struct NovaStr'
+crates/nova-runtime/src/lib.rs` prints 1.
+
+The block:
 
 ```rust
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
@@ -550,10 +582,13 @@ Expected: all 8 tests pass, `test result: ok. 8 passed`.
 - [ ] **Step 8: Run the runtime crate and the string, JSON and bytes fixtures**
 
 ```bash
-cd /d/Projects/nona/nova && cargo test --locked -p nova-runtime 2>&1 | grep -E "test result|FAILED|panicked" | head; cargo test --locked -p nova-cli --test run_tests -- json strings interpolation bytes fs 2>&1 | grep -E "test result|FAILED" | head
+cd /d/Projects/nona/nova && cargo test --locked -p nova-runtime 2>&1 | grep -E "test result|FAILED|panicked" | head; cargo build --locked -p nova-runtime 2>&1 | tail -1; cargo test --locked -p nova-cli --test run_tests -- json strings interpolation bytes fs 2>&1 | grep -E "test result|FAILED" | head
 ```
 
-Expected: `0 failed` on every `test result` line.
+Expected: `0 failed` on every `test result` line. The `cargo build -p
+nova-runtime` refreshes `target/debug/nova_runtime.lib`, which the three
+matching `*_build_standalone` tests (`strings`, `fs_not_found`, `bytes_api`)
+link; without it they link a pre-change runtime and pass regardless.
 
 - [ ] **Step 9: Commit the code and its tests together**
 
@@ -597,17 +632,22 @@ Write `/tmp/gcm/_once/mutate_oas.py` with this content:
 import io
 import os
 import subprocess
+import sys
 
+sys.stdout.reconfigure(encoding='utf-8')
 os.chdir('D:/Projects/nona/nova')
 LIB = 'crates/nova-runtime/src/lib.rs'
 BYT = 'crates/nova-runtime/src/bytes.rs'
 GC_BYTES_START = 'pub(crate) fn gc_bytes(bytes: &[u8]) -> *mut NovaStr {\n'
 
 
-def fn_span(src, start_marker):
-    """The span of the function that starts at `start_marker`, through its closing brace."""
-    start = src.index(start_marker)
-    return start, src.index('\n}\n', start) + 2
+def fn_span(src, start_marker, nl='\n'):
+    """The span of the function that starts at `start_marker`, through its closing brace.
+
+    `nl` is the file's own line ending: this checkout's working tree is CRLF.
+    """
+    start = src.index(start_marker.replace('\n', nl))
+    return start, src.index(nl + '}' + nl, start) + len(nl) + 1
 
 
 # Mutant 4's body is `main`'s own two-object `gc_bytes`, read from git, not retyped.
@@ -633,14 +673,16 @@ CMDS = [
     ['cargo', 'test', '--locked', '-p', 'nova-cli', '--test', 'run_tests', '--', 'json', 'strings', 'bytes'],
 ]
 orig = {p: io.open(p, encoding='utf-8', newline='').read() for p in (LIB, BYT)}
+# Fail before mutating anything if mutant 4's marker is missing.
+fn_span(orig[BYT], GC_BYTES_START, '\r\n' if '\r\n' in orig[BYT] else '\n')
 try:
     for name, path, old, new in M:
         src = orig[path]
+        nl = '\r\n' if '\r\n' in src else '\n'
         if old is None:
-            start, end = fn_span(src, GC_BYTES_START)
-            mutated = src[:start] + OLD_GC_BYTES + src[end:]
+            start, end = fn_span(src, GC_BYTES_START, nl)
+            mutated = src[:start] + OLD_GC_BYTES.replace('\n', nl) + src[end:]
         else:
-            nl = '\r\n' if '\r\n' in src else '\n'
             o = old.replace('\n', nl)
             if src.count(o) != 1:
                 print(name, 'ANCHOR', src.count(o), flush=True)
@@ -666,7 +708,7 @@ print('restored:', repr(subprocess.run(['git', 'status', '--short'], capture_out
 - [ ] **Step 2: Run it, then defuse it**
 
 ```bash
-python /tmp/gcm/_once/mutate_oas.py 2>&1 | tee /tmp/gcm/oas/mutations.log; mv /tmp/gcm/_once/mutate_oas.py /tmp/gcm/_once/mutate_oas.py.applied
+python -X utf8 /tmp/gcm/_once/mutate_oas.py 2>&1 | tee /tmp/gcm/oas/mutations.log; mv /tmp/gcm/_once/mutate_oas.py /tmp/gcm/_once/mutate_oas.py.applied
 ```
 
 Expected, each mutant failing at least what the spec names:
@@ -683,8 +725,16 @@ Mutant 4 swaps in `main`'s own `gc_bytes`, read with `git show`, so the
 mutant is exactly the code before this change, not a retyped copy.
 
 The final line is `restored: ''`. Any `ANCHOR` line means an anchor failed
-to match after `cargo fmt`. Fix the anchor in a copy of the script under
-`/tmp/gcm/_once/` and rerun only that mutant.
+to match after `cargo fmt`. A Python traceback, or a missing `restored:`
+line, means the run stopped part-way: the mutants after the one that raised
+did not run, and `mv` renames the script anyway. In either case fix the
+cause in a copy under `/tmp/gcm/_once/`, rerun only the mutants that did not
+report, rename that copy to `*.applied`, and confirm `git status --short` is
+empty. Do not count a partial log as complete.
+
+The second command's `*_build_standalone` tests link
+`target/debug/nova_runtime.lib`, which no mutant rebuilds, so only the JIT
+and unit-test results say anything about a mutant.
 
 No commit.
 
@@ -719,6 +769,17 @@ the present tense and this change makes it false, so it is rewritten here.
 The sweep in Step 3 adds the term "two GC objects", because the spec's
 term "two objects" does not match it.
 
+**Second plan ruling:** spec §6 lists the restatement at
+`docs/benchmarks/README.md:101-104` ("20 GC allocations for ten headers'
+strings") as "the example's `README.md:101-104`".
+`examples/05-json-api/README.md` never mentions allocation, so this plan
+names the right file.
+
+**Third plan ruling:** a string literal is not one object holding its
+bytes. Its header is a 16-byte leaf pointing at static data (spec §4.4).
+So the rewrites below say "runtime-made" wherever they describe `String`
+values.
+
 - [ ] **Step 1: Rewrite the present-tense descriptions**
 
 Make each replacement exactly. Where the new text is longer, rewrap the
@@ -730,8 +791,9 @@ rest of that paragraph to the file's existing width.
 BEFORE  //! held transiently) keep their containing object alive. Objects flagged
         //! `scan = false` (string byte buffers) are leaves and are not traced.
 AFTER   //! held transiently) keep their containing object alive. Objects flagged
-        //! `scan = false` (strings and `Bytes`, each one object holding its header
-        //! and bytes) are leaves and are not traced.
+        //! `scan = false` are leaves and are not traced: strings and `Bytes` (a
+        //! runtime-made value is one object holding its header and bytes; a string
+        //! literal's is a 16-byte header pointing at static data).
 ```
 
 `crates/nova-runtime/src/lib.rs`, crate doc:
@@ -759,9 +821,9 @@ AFTER   /// One copy of each part into one result, where pairwise concatenation 
 ```text
 BEFORE      /// Structurally identical to [`Ty::String`] -- both are a scanned
             /// `{len, ptr}` header over a GC leaf buffer -- and semantically distinct:
-AFTER       /// Structurally identical to [`Ty::String`] -- both are one GC leaf
-            /// object, a `{len, ptr}` header followed inline by its bytes -- and
-            /// semantically distinct:
+AFTER       /// Structurally identical to [`Ty::String`] -- both are a `{len, ptr}` GC
+            /// leaf header; a runtime-made value's bytes follow it inline in the same
+            /// object, a `String` literal's are static data -- and semantically distinct:
 ```
 
 `std/bytes/lib.nova`:
@@ -770,15 +832,15 @@ AFTER       /// Structurally identical to [`Ty::String`] -- both are one GC leaf
 BEFORE  // `Bytes` is an immutable byte buffer. It shares `String`'s representation -- a
         // scanned header over a leaf buffer -- and differs in carrying no encoding
 AFTER   // `Bytes` is an immutable byte buffer. It shares `String`'s representation --
-        // one leaf object, a header followed inline by its bytes -- and differs in
-        // carrying no encoding
+        // a `{len, ptr}` leaf header, and every `Bytes` value is one object with its
+        // bytes inline after it -- and differs in carrying no encoding
 ```
 
 `nova-spec/13-RUNTIME.md:131`:
 
 ```text
 BEFORE  - `String` = heap object: `{ len: usize, data: ptr<u8> }` UTF-8
-AFTER   - `String` = one leaf heap object: a `{ len: u64, ptr }` header with the UTF-8 bytes inline after it, at offset 16, where `ptr` points
+AFTER   - `String` = one leaf heap object: a `{ len: u64, ptr }` header with the UTF-8 bytes inline after it, at offset 16, where `ptr` points; a string literal is a 16-byte leaf header whose `ptr` targets static data
 ```
 
 `nova-spec/13-RUNTIME.md`, §2.3 "String Encoding": add one bullet directly
@@ -794,7 +856,8 @@ after "- Slicing returns `Str` (view) — no copy":
 BEFORE  transiently, say) keeps its containing object alive. Objects allocated with `scan =
         false` — string byte buffers — are leaves and are never traced.
 AFTER   transiently, say) keeps its containing object alive. Objects allocated with `scan =
-        false` — strings and `Bytes`, each one object holding its header and bytes — are
+        false` — strings and `Bytes`: a runtime-made value is one object holding its header
+        and bytes, a string literal's is a 16-byte header pointing at static data — are
         leaves and are never traced.
 ```
 
@@ -863,8 +926,8 @@ header and a separate byte buffer, so that reading undercounted. Since one
 allocation per string
 (`docs/superpowers/specs/2026-10-04-one-allocation-strings-design.md`) it
 is one. The figure's restatements (`CHANGELOG.md`, ADR 0019,
-`examples/05-json-api/BENCHMARK.md` and `README.md`,
-`docs/benchmarks/server.nova`) are left as they are; ADR 0019 already
+`examples/05-json-api/BENCHMARK.md`, this file's own "20 GC allocations for
+ten headers' strings", `docs/benchmarks/server.nova`) are left as they are; ADR 0019 already
 points readers here.
 ```
 
@@ -876,6 +939,9 @@ Write `/tmp/gcm/oas/docsweep.py` with the Write tool. It is read-only.
 """Read-only: every tracked mention of the two-object string layout, wrap-tolerant."""
 import re
 import subprocess
+import sys
+
+sys.stdout.reconfigure(encoding='utf-8')
 
 ROOT = 'D:/Projects/nona/nova/'
 files = subprocess.run(['git', 'ls-files'], capture_output=True, text=True, cwd=ROOT).stdout.split()
@@ -906,18 +972,32 @@ print('hits:', total)
 Run it:
 
 ```bash
-cd /d/Projects/nona/nova && python /tmp/gcm/oas/docsweep.py > /tmp/gcm/oas/docsweep.log; grep -c '^\[CHECK\]' /tmp/gcm/oas/docsweep.log; grep '^\[CHECK\]' /tmp/gcm/oas/docsweep.log
+cd /d/Projects/nona/nova && python -X utf8 /tmp/gcm/oas/docsweep.py > /tmp/gcm/oas/docsweep.log; tail -1 /tmp/gcm/oas/docsweep.log | grep -q '^hits:' || echo SWEEP-INCOMPLETE; grep -c '^\[CHECK\]' /tmp/gcm/oas/docsweep.log; grep '^\[CHECK\]' /tmp/gcm/oas/docsweep.log
 ```
 
-Expected: every `[CHECK]` line is one of three kinds:
+Expected: no `SWEEP-INCOMPLETE` and no traceback (either means the sweep
+stopped part-way and must be re-run, not counted), and every `[CHECK]` line
+is one of five kinds:
 - this change's own new wording ("header followed inline", "one leaf
   object");
 - a restatement the spec deliberately leaves (spec §6: `CHANGELOG.md`
   34-35 and 1947-1949, ADR 0019:338-340, `BENCHMARK.md:1067-1072`, the
-  example's `README.md:101-104`, `docs/benchmarks/server.nova:18-19`);
-- a historical record whose note sits beyond the 600-character window.
+  `docs/benchmarks/README.md:101-104`, `docs/benchmarks/server.nova:18-19`);
+- a historical record whose note sits beyond the 600-character window;
+- an HTTP header, which spec §6 sets aside: `CHANGELOG.md:95`,
+  `examples/05-json-api/BENCHMARK.md:1059`, the `ERR_*` constants in
+  `crates/nova-runtime/src/http.rs`, `HttpErrorKind` in `std/http/lib.nova`,
+  and `tests/runtime/http_*.nova`;
+- a statement still true under one object, left as it is:
+  `crates/nova-runtime/src/fs.rs:134`, `crates/nova-runtime/src/bytes.rs:49`,
+  `tests/runtime/fs_bytes_roundtrip.nova:12`, `CHANGELOG.md:3978`,
+  `crates/nova-cli/tests/run_tests.rs:8658`, the spec's optional "result's
+  buffer" sentences (`crates/nova-runtime/src/lib.rs` near 387), and
+  `examples/05-json-api/BENCHMARK.md:5679`, a historical proposal.
 
-Fix any other `[CHECK]` line, then re-run. Note the final `[CHECK]` count
+Fix any other `[CHECK]` line that states the two-object layout in the
+present tense, or a historical statement of it with no dated note, then
+re-run. Note the final `[CHECK]` count
 for the record.
 
 - [ ] **Step 4: Commit the documentation**
@@ -954,7 +1034,7 @@ Expected: `git status --short` lists only the ten files named above.
 - [ ] **Step 1: Run fmt, clippy and the full suite**
 
 ```bash
-cd /d/Projects/nona/nova && { echo "base $(git rev-parse --short HEAD) branch $(git branch --show-current)"; git status --short; cargo fmt --all --check; echo "fmt exit $?"; cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tail -2; echo "clippy exit ${PIPESTATUS[0]}"; cargo test --locked --workspace > /tmp/gcm/oas/suite.log 2>&1; echo "test exit $?"; grep '^test result' /tmp/gcm/oas/suite.log | awk '{p+=$4; f+=$6; i+=$8} END {print "passed",p,"failed",f,"ignored",i}'; grep -E "FAILED|panicked" /tmp/gcm/oas/suite.log | head -5; } 2>&1 | tee /tmp/gcm/oas/gates.log
+cd /d/Projects/nona/nova && { echo "base $(git rev-parse --short HEAD) branch $(git branch --show-current)"; git status --short; cargo fmt --all --check; echo "fmt exit $?"; cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tail -2; echo "clippy exit ${PIPESTATUS[0]}"; cargo build --locked -p nova-runtime 2>&1 | tail -1; cargo test --locked --workspace > /tmp/gcm/oas/suite.log 2>&1; echo "test exit $?"; grep '^test result' /tmp/gcm/oas/suite.log | awk '{p+=$4; f+=$6; i+=$8} END {print "passed",p,"failed",f,"ignored",i}'; grep -E "FAILED|panicked" /tmp/gcm/oas/suite.log | head -5; } 2>&1 | tee /tmp/gcm/oas/gates.log
 ```
 
 Expected: `fmt exit 0`, `clippy exit 0`, `test exit 0`, and
@@ -1034,8 +1114,10 @@ with per-pair ratios, and a split by order.
 
 - [ ] **Step 4: Confirm the object count with the scratch counters**
 
-The alloc-mix patch touches only `gc.rs`, which this change leaves alone,
-so it applies:
+The alloc-mix patch touches only `gc.rs`, whose code this change leaves
+alone. Task 4 adds one line to its module doc, which moves the patch's
+hunks (at line 107 and later) down by one line; `git apply` accepts that
+offset. So it applies:
 
 ```bash
 cd /d/Projects/nona/nova && git apply /tmp/gcm/mix/alloc-mix.patch && cargo build --release --locked 2>&1 | tail -1 && G=/tmp/gcm/oas && rm -f $G/m $G/m.exe && ./target/release/nova.exe build examples/05-json-api/src/main.nova -o $G/m.exe 2>&1 | tail -1 && sed 's#/tmp/gcm/mix#/tmp/gcm/oas#g' /tmp/gcm/mix/run.sh > $G/run_mix.sh && chmod +x $G/run_mix.sh && rm -f $G/runs.log && for r in 1 2 3; do $G/run_mix.sh $r; done; git checkout -- crates/nova-runtime/src/gc.rs && cargo build --release --locked 2>&1 | tail -1 && git status --short
@@ -1045,8 +1127,15 @@ Then copy `/tmp/gcm/mix/analyze.py` to `/tmp/gcm/oas/analyze_mix.py`.
 Change its `G` from `'C:/Users/SAKEER~1/AppData/Local/Temp/gcm/mix/'` to
 `'C:/Users/SAKEER~1/AppData/Local/Temp/gcm/oas/'`, then run it.
 
-Expected: about 234 objects per request; the 16-byte scanned count falls by
-about 67; `git status` clean; the release build restored.
+Expected: about 234 objects per request. Scanned objects fall from 233.9
+by 67 + L and leaf objects rise from 67.0 by L, where L is the literal
+headers evaluated per request (L >= 40: `user_json` alone has four literal
+parts per user). No 16-byte scanned object comes from a string (spec §7.2
+item 1). Derive L from the scanned drop and record it. Record zeroed bytes
+per request, the per-class table and requests per collection (`requests=`
+over `collections=` on each `runs.log` line) beside the "(alloc-mix)"
+figures (11,742–11,758 zeroed bytes; 176.9 requests per collection),
+whichever way they move. `git status` clean; the release build restored.
 
 - [ ] **Step 5: Write the record and commit it before verification**
 
@@ -1069,7 +1158,10 @@ Insert two amendments before "## What was measured, and with what" in
    - the change;
    - the per-call results;
    - the server results with order split;
-   - the object count after;
+   - the object count after, with L derived, zeroed bytes per request, the
+     per-class table and requests per collection, each beside the
+     "(alloc-mix)" before figures (spec §8: size-class shifts and collection
+     cadence are measured, not assumed);
    - how it was measured, with binary sizes and SHAs, ordering timestamps,
      the predictions table from Task 1, and the per-call and server tables;
    - correctness: the new tests, the mutants from Task 3, and the gates
