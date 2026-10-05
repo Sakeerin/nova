@@ -12,8 +12,9 @@
 //! crosses a growth threshold (or on every allocation under `NOVA_GC_STRESS`,
 //! used to shake out root-scanning bugs). Roots come from:
 //!
-//! - **callee-saved registers**, flushed onto the stack by the `setjmp` shim in
-//!   `gc_stack.c` (caller-saved registers hold no live root at a call boundary);
+//! - **callee-saved registers**, flushed onto the stack by the register-spill
+//!   shim in `gc_stack.c` (caller-saved registers hold no live root at a call
+//!   boundary);
 //! - **the stack**, scanned from the current frame up to the thread's base;
 //! - **explicitly registered roots** ([`add_root`]/[`remove_root`]), for
 //!   objects reachable from neither: a suspended async task's state is owned
@@ -48,9 +49,11 @@
 //! that a reader who needs it has somewhere to be pointed at instead of a copy
 //! to compare.
 //!
-//! Precise stack bounds are currently only implemented on Windows; on other
-//! platforms collection is skipped (allocations leak, as before — never
-//! unsafe).
+//! The stack scan needs the calling thread's stack top, which `stack_base`
+//! finds on Windows, glibc Linux and macOS
+//! (`docs/adr/0024-gc-stack-bounds-on-unix.md`). On any other platform
+//! collection is skipped: allocations leak until exit, which is never unsafe,
+//! and `NOVA_GC_DEBUG` says so once per thread.
 
 use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
 use std::cell::RefCell;
@@ -406,11 +409,21 @@ fn maybe_collect(incoming: usize) {
 }
 
 fn collect() {
-    // Capture the stack base once; give up (leak) on unsupported platforms.
+    // Capture the stack base once; give up (leak) on unsupported platforms,
+    // and say so once per thread under `NOVA_GC_DEBUG`. `eprintln!` allocates
+    // only through the system allocator, never this heap.
     let base = HEAP.with(|h| {
         let mut h = h.borrow_mut();
         if h.base == 0 {
-            h.base = stack_base().unwrap_or(usize::MAX);
+            h.base = stack_base().unwrap_or_else(|| {
+                if debug() {
+                    eprintln!(
+                        "nova-gc: no stack bounds on this platform; \
+                         collection is disabled and every allocation leaks"
+                    );
+                }
+                usize::MAX
+            });
         }
         h.base
     });
@@ -565,7 +578,8 @@ fn mark_word(
 }
 
 /// Push every aligned machine word in `[lo, hi)` as a candidate root. Called
-/// from the `setjmp` shim with the register buffer and stack range.
+/// by `gc_stack.c`'s register-spill shim, with a range that starts below the
+/// spilled registers and ends at the stack top.
 ///
 /// # Safety
 /// `[lo, hi)` must be a readable range of this thread's own stack.
@@ -601,10 +615,47 @@ fn stack_base() -> Option<usize> {
     (high > low).then_some(high)
 }
 
-#[cfg(not(windows))]
+/// The calling thread's stack top on glibc Linux, from `pthread_getattr_np`:
+/// its lowest address plus its size. On the main thread glibc reads
+/// `/proc/self/maps` for this, and fails without `/proc`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn stack_base() -> Option<usize> {
-    // Precise stack bounds for non-Windows platforms are a follow-up; until
-    // then collection is skipped there.
+    // SAFETY: `pthread_getattr_np` fills `attr` for the calling thread, and
+    // `pthread_attr_getstack` reads the stack's lowest address and size from
+    // it. `attr` is destroyed before returning.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let rc = libc::pthread_attr_getstack(&attr, &mut addr, &mut size);
+        libc::pthread_attr_destroy(&mut attr);
+        if rc != 0 || addr.is_null() || size == 0 {
+            return None;
+        }
+        Some(addr as usize + size)
+    }
+}
+
+/// The calling thread's stack top on macOS, which `pthread_get_stackaddr_np`
+/// reports directly.
+#[cfg(target_os = "macos")]
+fn stack_base() -> Option<usize> {
+    // SAFETY: reads the calling thread's own stack top.
+    let top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) };
+    (!top.is_null()).then_some(top as usize)
+}
+
+/// No stack bounds on this platform: `collect()` skips collection, and every
+/// allocation lives until the process exits.
+#[cfg(not(any(
+    windows,
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos"
+)))]
+fn stack_base() -> Option<usize> {
     None
 }
 
@@ -964,6 +1015,57 @@ mod tests {
             "removing an address that was never registered changed the registry"
         );
         remove_root(obj);
+    }
+
+    /// On every platform that implements stack bounds, the top lies above
+    /// this frame, and within a plausible stack size of it.
+    #[cfg(any(
+        windows,
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn stack_base_lies_above_the_current_frame() {
+        let local = 0u8;
+        let here = std::ptr::addr_of!(local) as usize;
+        let base = stack_base().expect("this platform implements stack bounds");
+        assert!(
+            base > here,
+            "top {base:#x} must lie above this frame {here:#x}"
+        );
+        assert!(
+            base - here < 1 << 30,
+            "top {base:#x} is implausibly far above {here:#x}"
+        );
+    }
+
+    /// The top is the calling thread's own: on a thread spawned with a
+    /// 256 KiB stack, it lies less than 1 MiB above a local in that thread.
+    /// A version that returned another thread's top would fail, because
+    /// thread stacks are separate mappings far more than 1 MiB apart.
+    #[cfg(any(
+        windows,
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos"
+    ))]
+    #[test]
+    fn stack_base_is_the_calling_threads_own() {
+        const STACK: usize = 256 * 1024;
+        let (base, here) = std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn(|| {
+                let local = 0u8;
+                (stack_base(), std::ptr::addr_of!(local) as usize)
+            })
+            .expect("spawn a thread")
+            .join()
+            .expect("join it");
+        let base = base.expect("this platform implements stack bounds");
+        assert!(base > here, "top {base:#x} must lie above {here:#x}");
+        assert!(
+            base - here < 4 * STACK,
+            "top {base:#x} is not this thread's: {here:#x}"
+        );
     }
 
     /// Tests exercising the real, stack-scanning `collect()` (every test

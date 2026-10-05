@@ -1640,9 +1640,8 @@ fn gc_live_object_counts(stderr: &str) -> Vec<u64> {
 /// The GC reclaims garbage: a loop allocating far more than the heap threshold
 /// keeps a bounded live set (rather than accumulating, as the old leaking
 /// allocator did). Verified through the `NOVA_GC_DEBUG` collection log.
-/// Windows-only: precise stack bounds (and thus collection) are currently
-/// implemented there.
-#[cfg(windows)]
+/// It runs wherever `gc::stack_base` has an implementation, which includes
+/// every CI operating system (`docs/adr/0024-gc-stack-bounds-on-unix.md`).
 #[test]
 fn gc_reclaims_garbage() {
     let dir = std::env::temp_dir().join("nova-gc-reclaim");
