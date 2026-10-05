@@ -77,9 +77,10 @@ const ERR_INVALID_RANGE: i64 = 4;
 /// Keys, nonces and tokens run to tens of bytes, so this is generous by
 /// orders of magnitude for every intended use, and it is checked before
 /// anything is allocated. What it guards is platform-dependent: ADR 0002 is
-/// superseded by a mark-and-sweep collector that reclaims, but precise stack
-/// bounds are implemented on Windows only, and the other platforms still
-/// fall back to leak-until-exit until their stack-bounds query lands.
+/// superseded by a mark-and-sweep collector that reclaims, but only where
+/// `gc.rs`'s `stack_base` has an implementation
+/// (`docs/adr/0024-gc-stack-bounds-on-unix.md` names the platforms); on any
+/// other platform allocations still leak until exit.
 const MAX_RANDOM_BYTES: usize = 64 * 1024;
 
 /// Status for the tag-check operation when the tag does not match.

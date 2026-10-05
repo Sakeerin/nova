@@ -201,9 +201,9 @@ const MAX_RENDER_DEPTH: Int = 100_000
 //     paragraph retracts;
 //   - heap exhaustion still aborts the process without a `JsonError`,
 //     because `gc::alloc` calls `handle_alloc_error` and no alloc-error hook
-//     is installed; there is no collect-and-retry on that path, and off
-//     Windows the collector is a no-op, so nothing is reclaimed until the
-//     process exits;
+//     is installed; there is no collect-and-retry on that path, and where
+//     `gc.rs`'s `stack_base` has no implementation the collector is a no-op,
+//     so nothing is reclaimed until the process exits;
 //   - a WIDE cycle can reach that same allocator abort BEFORE it reaches the
 //     named panic, because the work list grows with depth times container
 //     width rather than with depth alone. `MAX_RENDER_DEPTH`'s own note

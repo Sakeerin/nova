@@ -633,6 +633,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`.
 
 ### Changed
+- **CI: the advisory GC-scan step runs every test binary, and clippy lints
+  macOS.** The advisory `cargo test -- --ignored` step gained
+  `--no-fail-fast`. Without it, ubuntu's run stopped at the first test binary
+  with a failure, `nova-cli`'s `run_tests` (through `extern_ffi_run`, issue
+  #3), before `nova-runtime`'s GC scan tests ever ran. Clippy gained a
+  `macos-latest` leg, because `gc.rs` now has `#[cfg(target_os = "macos")]`
+  code that no other leg compiles.
 - **Each runtime string is one leaf GC object.** `String` and `Bytes`
   values made at run time were a scanned header over a separate leaf
   buffer; now the header and bytes share one leaf object, built by
@@ -855,6 +862,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   edited.
 
 ### Fixed
+- **The garbage collector now runs on Linux and macOS, not only on Windows.**
+  Until now `gc.rs`'s `stack_base()` returned `None` everywhere else, so
+  `collect()` returned before marking and every allocation lived until the
+  process exited: a server on Linux or macOS grew with every request. The
+  calling thread's stack top now comes from `pthread_getattr_np` and
+  `pthread_attr_getstack` on glibc Linux, and from `pthread_get_stackaddr_np`
+  on macOS. On GCC and Clang the register-spill shim also calls
+  `__builtin_unwind_init`, because glibc's and Apple's `setjmp` scramble some
+  of the registers they save. Any other platform still skips collection, and
+  under `NOVA_GC_DEBUG` now says so once per thread. The GC tests that were
+  Windows-only now build everywhere. Two new tests send 3,000 requests to
+  `examples/03-http-server`, each on its own connection, one client at a time
+  and then eight at once, and require every collection to stay under 1,000
+  and 2,000 live objects respectively. Decision:
+  `docs/adr/0024-gc-stack-bounds-on-unix.md`.
 - **A spawned task whose handle is never joined no longer keeps its state
   alive for the life of the process.** The executor now releases a spawned
   task's GC root when the task completes; only `block_on`'s own root keeps

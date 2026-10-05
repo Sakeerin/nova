@@ -590,6 +590,11 @@ and heap exhaustion still aborts the process without a `JsonError`, because
 `gc::alloc` calls `handle_alloc_error` with no alloc-error hook installed, with
 no collect-and-retry on that path and with the collector a no-op off Windows.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the collector is no
+longer a no-op on glibc Linux and macOS (`docs/adr/0024-gc-stack-bounds-on-unix.md`), only on other
+platforms. The residual stands: heap exhaustion still aborts, with no
+collect-and-retry.
+
 **The accumulator passage's closing claim is retracted, in the same terms the
 code uses.** It closed: "Neither is fixable without a growable string buffer the
 language does not have (`String` has no `+`, `E0013`), so neither is capped."

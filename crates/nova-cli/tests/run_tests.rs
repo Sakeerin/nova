@@ -1229,7 +1229,7 @@ fn interpolation_nary_run() {
 /// The same fixture with `NOVA_GC_STRESS=1` (collect on every allocation), so
 /// a part or the parts array freed before the concatenation reads it shows up
 /// as wrong output or a crash. It discriminates only where the collector frees
-/// memory, which is Windows.
+/// memory: wherever `gc::stack_base` has an implementation (ADR 0024).
 #[test]
 fn interpolation_nary_under_gc_stress() {
     let expected =
@@ -1263,8 +1263,8 @@ fn interpolation_nary_under_gc_stress() {
 /// (`nova-runtime`) pins.
 ///
 /// **What it does not prove: soundness.** It discriminates only where the
-/// collector frees memory, which is Windows (`gc::stack_base` is `None`
-/// elsewhere). Even there, conservative over-retention can let it pass with
+/// collector frees memory, which is wherever `gc::stack_base` has an
+/// implementation (ADR 0024). Even there, conservative over-retention can let it pass with
 /// the rooting wrong, for the reason `gate_async_tasks_under_gc_stress`
 /// documents. The release itself is pinned deterministically on every
 /// platform by `nova-runtime`'s `a_spawned_tasks_root_is_released_at_completion`.
@@ -8685,7 +8685,7 @@ fn json_round_trip_run() {
 /// `str_concat_n` and `str_join` work the same way and are covered under
 /// stress by `interpolation_nary_under_gc_stress` and
 /// `strings_under_gc_stress`. It discriminates only where the collector frees
-/// memory, which is Windows.
+/// memory: wherever `gc::stack_base` has an implementation (ADR 0024).
 #[test]
 fn json_round_trip_under_gc_stress() {
     let expected =
