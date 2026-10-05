@@ -1622,6 +1622,21 @@ fn build_and_run(source: &str, exe_name: &str) -> String {
     String::from_utf8(out).expect("program output is UTF-8")
 }
 
+/// The live-object count of every collection in a `NOVA_GC_DEBUG` log, in
+/// order. Each collection logs
+/// `nova-gc: collection C freed F bytes, L objects live (B bytes)`, and this
+/// returns the `L`s.
+fn gc_live_object_counts(stderr: &str) -> Vec<u64> {
+    stderr
+        .lines()
+        .filter(|line| line.starts_with("nova-gc: collection"))
+        .filter_map(|line| {
+            let rest = &line[line.find(" bytes, ")? + " bytes, ".len()..];
+            rest.split(' ').next()?.parse().ok()
+        })
+        .collect()
+}
+
 /// The GC reclaims garbage: a loop allocating far more than the heap threshold
 /// keeps a bounded live set (rather than accumulating, as the old leaking
 /// allocator did). Verified through the `NOVA_GC_DEBUG` collection log.
@@ -1660,15 +1675,10 @@ fn gc_reclaims_garbage() {
     );
     // The live object count reported by every collection must stay small —
     // proof that garbage is reclaimed rather than accumulated.
-    let mut max_live = 0u64;
-    for line in stderr.lines() {
-        if let Some(i) = line.find(" bytes, ") {
-            let rest = &line[i + " bytes, ".len()..];
-            if let Some(n) = rest.split(' ').next().and_then(|s| s.parse::<u64>().ok()) {
-                max_live = max_live.max(n);
-            }
-        }
-    }
+    let max_live = gc_live_object_counts(&stderr)
+        .into_iter()
+        .max()
+        .unwrap_or(0);
     assert!(
         max_live > 0 && max_live < 1000,
         "live set should stay bounded, saw {max_live} live objects:\n{stderr}"
@@ -10240,11 +10250,17 @@ struct Http03Server {
 
 impl Http03Server {
     fn spawn() -> Self {
+        Self::spawn_with_env(&[])
+    }
+
+    /// As [`Http03Server::spawn`], with `env` set in the child's environment.
+    fn spawn_with_env(env: &[(&str, &str)]) -> Self {
         use std::io::Read;
         use std::process::Stdio;
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"));
         cmd.arg("run")
             .arg(repo_root().join("examples/03-http-server/src/main.nova"))
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -10781,6 +10797,116 @@ fn http_server_example_fails_fast_when_the_port_is_taken() {
         err.contains("called `unwrap` on an `Err` value"),
         "stderr: {err:?}"
     );
+}
+
+/// Stops the example with a termination request and returns the live-object
+/// count of every collection it logged. The server must have been started
+/// with `NOVA_GC_DEBUG=1`, and must exit 0: a crash under collection is a
+/// failure here, not a pass.
+fn http03_stop_for_live_counts(server: &mut Http03Server) -> Vec<u64> {
+    use std::time::Duration;
+    if let Err(e) = send_termination_request(server.pid()) {
+        server.kill_and_panic(&format!("could not deliver the signal: {e}"));
+    }
+    let status = match server.wait_for_exit(Duration::from_secs(10)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the example did not exit within 10 s of the signal"),
+    };
+    let (out, err) = server.streams();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+    gc_live_object_counts(&err)
+}
+
+/// Fails unless at least 10 collections ran across `requests`, so the bound
+/// is checked across the whole run rather than only at its start, and unless
+/// every one of them kept fewer than `bound` objects live.
+fn assert_live_set_bounded(live: &[u64], requests: usize, bound: u64) {
+    assert!(
+        live.len() >= 10,
+        "expected at least 10 collections over {requests} requests, saw {}: {live:?}",
+        live.len()
+    );
+    let max = live.iter().copied().max().unwrap_or(0);
+    assert!(
+        max < bound,
+        "the live set must stay bounded: a collection reported {max} live objects, \
+         the bound is {bound} (all {} collections: {live:?})",
+        live.len()
+    );
+}
+
+/// Phase 2's "server-side apps work", measured on the collector: 3,000
+/// requests, each on a connection of its own, leave a bounded live set. Every
+/// connection is a task the server spawns and the executor releases when it
+/// finishes, so a root that outlived its task would leave at least one more
+/// object live per connection. The design measured 38-109 live objects on
+/// Windows and on Linux
+/// (docs/superpowers/specs/2026-10-05-gc-unix-stack-bounds-design.md §2.4);
+/// the bound is about 10x that, and a leak of one object per connection
+/// crosses it after about 1,000 connections.
+#[test]
+fn http_server_example_keeps_a_bounded_live_set() {
+    const REQUESTS: usize = 3_000;
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn_with_env(&[("NOVA_GC_DEBUG", "1")]);
+    server.wait_until_accepting();
+    for i in 0..REQUESTS {
+        let mut conn = Http03Conn::open();
+        conn.send("GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+        let r = http03_response(&mut server, &mut conn, &format!("request {i}"));
+        assert_eq!(r.status, 200, "request {i}");
+    }
+    let live = http03_stop_for_live_counts(&mut server);
+    assert_live_set_bounded(&live, REQUESTS, 1_000);
+}
+
+/// The same property with eight clients at once, 375 connections each: more
+/// tasks are alive at a time, so the live set sits higher, but it must still
+/// stay flat. Measured on Linux while planning this test: 61-544 live objects
+/// across 22 collections, flat
+/// (docs/superpowers/plans/2026-10-05-gc-unix-stack-bounds.md, Review Focus
+/// 1). A leak of one object per connection would add 3,000.
+#[test]
+fn http_server_example_keeps_a_bounded_live_set_under_concurrent_clients() {
+    const CLIENTS: usize = 8;
+    const PER_CLIENT: usize = 375;
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn_with_env(&[("NOVA_GC_DEBUG", "1")]);
+    server.wait_until_accepting();
+    let clients: Vec<_> = (0..CLIENTS)
+        .map(|c| {
+            std::thread::spawn(move || -> Result<(), String> {
+                for i in 0..PER_CLIENT {
+                    let mut conn = Http03Conn::open();
+                    conn.send("GET / HTTP/1.1\r\nhost: x\r\n\r\n");
+                    let r = conn
+                        .response()
+                        .map_err(|e| format!("client {c}, request {i}: {e}"))?;
+                    if r.status != 200 {
+                        return Err(format!("client {c}, request {i}: status {}", r.status));
+                    }
+                }
+                Ok(())
+            })
+        })
+        .collect();
+    for client in clients {
+        let outcome = client
+            .join()
+            .unwrap_or_else(|_| Err("a client thread panicked".to_string()));
+        if let Err(e) = outcome {
+            server.kill_and_panic(&e);
+        }
+    }
+    let live = http03_stop_for_live_counts(&mut server);
+    assert_live_set_bounded(&live, CLIENTS * PER_CLIENT, 2_000);
 }
 
 /// A server that never calls `Server::listen` installs no handler, so a
