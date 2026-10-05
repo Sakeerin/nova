@@ -3,3 +3,6 @@ GET /health -> 200 application/json 15 {"status":"ok"}
 GET /echo -> 200 /echo
 GET /nope -> 404
 POST / -> 404
+s1: /a 200 /b 200 /c 404
+s2: /a 200 /b 404 /c 200
+base: /a 200 /b 404 /c 404

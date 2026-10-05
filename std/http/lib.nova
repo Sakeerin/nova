@@ -792,8 +792,21 @@ impl Server {
     // `Server` rather than section 6's `Self`: a `mut self` call on the
     // temporary `Server::new()` returns is `E0060`, and `Self` as a type in an
     // impl block is `E0001`.
+    //
+    // The new server gets a copy of the route table, and `self` is left
+    // alone. A `Vec` is shared, not copied, on assignment, so pushing onto
+    // `self.routes` would add the route to every server built from the same
+    // base as well.
     pub fn get(self, path: String, handler: fn(Request) -> Response) -> Server {
-        let mut rs = self.routes
+        let mut rs: Vec<Route> = Vec::new()
+        let mut i = 0
+        while i < self.routes.len() {
+            match self.routes.get(i) {
+                Some(r) => rs.push(r)
+                None => {}
+            }
+            i = i + 1
+        }
         rs.push(Route { path: path, handler: handler })
         Server { routes: rs }
     }

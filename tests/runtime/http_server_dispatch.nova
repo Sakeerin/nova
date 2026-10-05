@@ -26,6 +26,10 @@ fn header(r: Response, name: String) -> String {
     }
 }
 
+fn status_of(s: Server, path: String) -> Int {
+    s.dispatch(request(Get, path)).status
+}
+
 fn main() {
     let app = Server::new()
         .get("/", |_| Response::text(200, "Hello from Nova!"))
@@ -42,4 +46,13 @@ fn main() {
     println("GET /nope -> ${d.status}")
     let e = app.dispatch(request(Post, "/"))
     println("POST / -> ${e.status}")
+
+    // `get` leaves its receiver alone, so two servers built from one base do
+    // not share the routes added to each other.
+    let base = Server::new().get("/a", |_| Response::text(200, "a"))
+    let s1 = base.get("/b", |_| Response::text(200, "b"))
+    let s2 = base.get("/c", |_| Response::text(200, "c"))
+    println("s1: /a ${status_of(s1, "/a")} /b ${status_of(s1, "/b")} /c ${status_of(s1, "/c")}")
+    println("s2: /a ${status_of(s2, "/a")} /b ${status_of(s2, "/b")} /c ${status_of(s2, "/c")}")
+    println("base: /a ${status_of(base, "/a")} /b ${status_of(base, "/b")} /c ${status_of(base, "/c")}")
 }
