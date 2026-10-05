@@ -108,6 +108,13 @@ unbuilt:**
    project's own CI (ubuntu, macos, windows) exists to catch before it
    ships.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`): reason 2 no longer
+holds.** Collection runs on glibc Linux and macOS as well as Windows now
+(`docs/adr/0024-gc-stack-bounds-on-unix.md`); other platforms still skip it. Close-on-collect stays
+foreclosed by reason 1 alone, which is unchanged: `fd: Int` still makes it
+impossible. This note does not revisit the decision, and a `File` still needs
+an explicit `close`.
+
 **Consequence to state plainly rather than bury:** a long-running program
 that opens files in a loop and forgets to close them will exhaust file
 descriptors, on every platform, and no collection will save it. That is the
@@ -137,6 +144,9 @@ its own.
   gap — would have to change first; neither is this increment's to fix, and
   neither is `File`'s alone (the second blocks any collect-time GC hook,
   system-wide, not only this one).
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the second has
+  changed (see the note under the two reasons); the first has not, so this
+  still needs the collector first.
 
 ## Alternatives considered
 
@@ -165,6 +175,10 @@ its own.
   automatically on one of three supported platforms and leaking
   unboundedly on the other two is a worse thing to ship, silently, than a
   uniform documented leak.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the platform
+  reason given here, and the cookie alternative's "collection still would not
+  run off Windows" above, are gone (ADR 0024). Revisiting either alternative
+  is not part of that change.
 
 ## References
 
@@ -179,6 +193,8 @@ its own.
   declines to use), `stack_base` (the Windows-only precise-bounds gap)
   **Amended 2026-10-01 (gc-page-heap):** that call is gone; see the
   amendment under Context and ADR 0020.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** `stack_base` is
+  no longer Windows-only (ADR 0024).
 - `crates/nova-runtime/src/task.rs`: `forget_freed_state`, and (for the
   pointer-identity pattern `File` declined) the `task-identity` branch's
   redesign of `JoinHandle<T>`, recorded in

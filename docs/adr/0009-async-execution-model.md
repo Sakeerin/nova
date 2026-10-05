@@ -443,6 +443,10 @@ afterwards.
   **Amended 2026-10-01 (gc-page-heap):** that per-object hook no longer
   exists (ADR 0020), so the question it raised is moot. ADR 0012's decision
   stands.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the platform gap
+  this paragraph cites is closed too: collection runs on glibc Linux and
+  macOS as well as Windows (`docs/adr/0024-gc-stack-bounds-on-unix.md`). ADR 0012's decision still
+  stands, on its one remaining reason.
 - **Each `yield_now()` costs four allocations** — `yield_now` is itself an `async
   fn` wrapping a builtin, so a state object and a fat pointer for each of the two
   layers. Nothing caches or pools them.

@@ -186,6 +186,21 @@ The next allocation of its size class can take the same address, so the
 property above holds more strongly than before. Only larger objects still go
 back to the system allocator. ADR 0020 records the decision.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`): which platforms collect,
+and how registers are flushed.** The stack scan needs the calling thread's
+stack top. `gc.rs`'s `stack_base()` finds it on three platforms:
+`GetCurrentThreadStackLimits` on Windows, `pthread_getattr_np` with
+`pthread_attr_getstack` on glibc Linux, and `pthread_get_stackaddr_np` on
+macOS. Until this date only Windows had it, and every other platform skipped
+collection, so every allocation leaked until exit. Any other platform still
+does, and under `NOVA_GC_DEBUG` it prints
+`nova-gc: no stack bounds on this platform; collection is disabled and every allocation leaks`
+once per thread. On GCC and Clang the register flush above is no longer
+`setjmp` alone, because glibc's and Apple's `setjmp` scramble some of the
+registers they save: `gc_stack.c` also calls `__builtin_unwind_init()` and
+scans from a deeper frame. MSVC keeps the `setjmp`-only path. ADR 0024 records
+the decision.
+
 ### 3.2 MMTk — NOT BUILT, an aspiration
 Modular, precise, generational; better latency and throughput. It is recorded here as
 intent, not as specification.

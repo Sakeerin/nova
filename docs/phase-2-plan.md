@@ -34,6 +34,10 @@ There is also known Phase-1 drift to reconcile: **chumsky 0.9 → 0.10**, add
 **`salsa`** for incremental compilation, write **`fuzz/`** targets, and add
 **precise GC stack bounds** for non-Windows.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** that last item is done
+for glibc Linux and macOS (`docs/adr/0024-gc-stack-bounds-on-unix.md`); other platforms still skip
+collection.
+
 ## 3. Key decisions (recommend now, confirm before building)
 
 These are genuine forks that shape the whole phase — like the LLVM-backend
@@ -333,6 +337,8 @@ still routes by hand, because `Server` matches exact paths and `GET` only.
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
 - Fold in the drift cleanup: chumsky 0.10, `salsa` scaffolding, `fuzz/` targets
   for lexer/parser, non-Windows GC stack bounds.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the GC stack bounds
+  are done for glibc Linux and macOS (ADR 0024); the rest of this item is not.
 - Optional: `std/crypto` (ring), `std/fs`, `std/process`, `std/regex` as the
   server example demands.
 
@@ -346,6 +352,8 @@ still routes by hand, because `Server` matches exact paths and `GET` only.
 - **GC:** dynamic collections and async state machines add new heap shapes and
   long-lived roots — re-validate the conservative collector as those land, and
   finish non-Windows stack bounds so CI on Linux exercises real collection.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** done: CI on Linux
+  and macOS exercises real collection (ADR 0024).
 
 ## 6. Top risks
 

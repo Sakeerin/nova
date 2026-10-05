@@ -765,6 +765,11 @@ its 2026-08-25 amendment.
    `handle_alloc_error` and no alloc-error hook is installed. There is no
    collect-and-retry on that path, and off Windows the collector is a no-op, so
    nothing is reclaimed until the process exits.
+
+   **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** the collector is no
+   longer a no-op on glibc Linux and macOS (`docs/adr/0024-gc-stack-bounds-on-unix.md`), only on other
+   platforms. The rest stands: heap exhaustion still aborts, with no
+   collect-and-retry.
 2. **The string accumulators are linear in what they emit. Read the roster, not
    a count of it.** RETRACTED: "Nova has no growable string buffer (`String`
    has no `+`, `E0013`), so neither is fixable without a language change."

@@ -35,10 +35,10 @@
 // defect.
 //
 // This needs `NOVA_GC_STRESS=1` to discriminate, and discriminates only where
-// the collector runs: `stack_base()` has an implementation on Windows and
-// returns `None` elsewhere, so on other platforms `collect()` returns before
-// marking, nothing is ever freed, no address is ever recycled, and this
-// program aborts whether or not the entry is pruned.
+// the collector runs: wherever `gc.rs`'s `stack_base()` has an implementation
+// (`docs/adr/0024-gc-stack-bounds-on-unix.md`). Where it returns `None`,
+// `collect()` returns before marking, nothing is ever freed, no address is
+// ever recycled, and this program aborts whether or not the entry is pruned.
 // `a_swept_states_key_is_dropped_so_a_recycled_address_cannot_misresolve`
 // (`nova-runtime`) covers the same property deterministically and everywhere.
 

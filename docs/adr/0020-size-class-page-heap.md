@@ -42,6 +42,10 @@ and the collector at 93.8–101.6 µs of a ten-user request. The gate allows
 The collector stays conservative, non-moving and thread-local, and still
 skips collection off Windows.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** collection runs on
+glibc Linux and macOS as well now (`docs/adr/0024-gc-stack-bounds-on-unix.md`); other platforms still
+skip it.
+
 ## Alternatives rejected
 
 - **Mixed-size blocks with an object-start bitmap (Immix-style).** No

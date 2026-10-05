@@ -455,6 +455,16 @@ checked against the PR's run:
 The advisory step should then show about 50 `test result:` lines on every OS. CI
 reports 8 checks instead of 7, with the new `Clippy (macos-latest)`.
 
+**Amended 2026-10-05 (plan `docs/superpowers/plans/2026-10-05-gc-unix-stack-bounds.md`):**
+the plan adds a second leak test, for §5.7's item 3:
+`http_server_example_keeps_a_bounded_live_set_under_concurrent_clients`, with
+8 client threads of 375 connections each, and every collection under 2,000
+live objects. It was measured on Linux while the plan was written (spike
+`9aad29f`, debug `nova`): 61–544 live objects across 22 collections, flat.
+1, 4 and 16 clients gave 39–104, 88–294 and 77–1,052. Each predicted count
+above gains one passed test: ubuntu 1216 / 0 / 9, macOS 1217 / 0 / 8, windows
+1222 / 0 / 8.
+
 ### 5.7 Review Focus
 
 The five conditions most likely to bite a person using this, which no test above

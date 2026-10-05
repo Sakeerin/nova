@@ -121,6 +121,9 @@ amendment).
   alternatives — a completion port can be polled from the same thread that
   already owns `PARKED`/`QUEUE` — so this is left declined on scope, not
   re-argued on thread-locality grounds it does not actually turn on.
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** `stack_base()` is
+  no longer Windows-only (`docs/adr/0024-gc-stack-bounds-on-unix.md`); as this bullet says, that never
+  decided this alternative.
 - **A zero-timeout poll after every task turn**, matching `wake_due`'s own
   per-turn cadence exactly instead of confining the real wait to the
   drained-queue point. Declined on cost, per the Decision section above: a
@@ -256,6 +259,9 @@ amendment).
   precise bounds and why collection does not run at all off Windows —
   the same property this decision's second alternative (IOCP) notes does not
   itself decide the question, unlike the first
+  **Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** collection runs on
+  glibc Linux and macOS too now (ADR 0024); ADR 0012 records what that changes
+  for its own decision.
 - `docs/adr/0022-process-shutdown-signals.md` (2026-10-04) — a process-wide
   shutdown flag set by a signal handler. It leaves this ADR's first rejected
   alternative rejected: the handler stores an atomic and never signals the

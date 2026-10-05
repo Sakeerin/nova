@@ -12,6 +12,11 @@ Precise stack bounds are implemented on Windows today; other platforms fall
 back to the original leak-until-exit behavior described below until their
 stack-bounds query is added.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** glibc Linux and macOS
+have their stack-bounds query now, so they collect too (`docs/adr/0024-gc-stack-bounds-on-unix.md`).
+Any other platform still falls back to leak-until-exit. On GCC and Clang the
+register spill is no longer `setjmp` alone; ADR 0024 says why.
+
 ## Context
 
 `nova-spec/13-RUNTIME.md` §3.1 specifies bdwgc (Boehm) as the Phase 1 MVP

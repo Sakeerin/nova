@@ -49,6 +49,20 @@ precise stack bounds on Windows, and elsewhere `collect()` returns before
 marking anything, which would make every `is_some()` assertion pass vacuously
 and every `is_none()` assertion fail outright.
 
+**Amended 2026-10-05 (branch `gc-unix-stack-bounds`):** none of the eight is
+`#[cfg(windows)]` any more, and neither module in the table above is.
+`stack_base()` has glibc Linux and macOS versions now (`docs/adr/0024-gc-stack-bounds-on-unix.md`).
+All eight stay `#[ignore]`d for the reason below. CI's advisory `--ignored`
+step runs them on every OS, after gaining `--no-fail-fast`: on ubuntu it had
+stopped at the first failing test binary, `nova-cli`'s `run_tests`, before
+reaching `nova-runtime`. The first run off Windows was the 2026-10-05 spike
+(draft PR #98), on macOS. The four `is_some()` tests passed, and three of the
+four `is_none()` tests failed, every one by over-retention, the direction this
+ADR describes. The first run on Linux, the same day in a local Docker
+container (x86-64, debug), passed all eight, in one run. The `setjmp` shim
+named under Context describes the MSVC path only now; on GCC and Clang it also
+calls `__builtin_unwind_init` (ADR 0024).
+
 ## The mechanism, as measured
 
 **The four `is_none()` tests intermittently fail** — in debug as well as
