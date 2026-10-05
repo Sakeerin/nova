@@ -1,0 +1,18 @@
+// `std/process`'s `args()` under `nova run`: index 0 is FILE as written on
+// the command line, and every argument after `--` arrives as given, one with
+// spaces and an empty one included. Run from the repository root by
+// `process_args_run` in `crates/nova-cli/tests/run_tests.rs`, as
+// `nova run tests/runtime/process_args.nova -- one "two words" ""`.
+
+fn main() {
+    let argv = args()
+    println("count: ${argv.len()}")
+    let mut i = 0
+    while i < argv.len() {
+        match argv.get(i) {
+            Some(a) => println("[${a}]")
+            None => {}
+        }
+        i = i + 1
+    }
+}

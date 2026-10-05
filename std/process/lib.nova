@@ -1,0 +1,37 @@
+// Nova standard library -- the running process: its arguments, and a way to
+// end it with a status.
+//
+// Compiled as an implicit module and glob-imported into every user module, so
+// `args()` and `exit(1)` need no `import` (docs/adr/0004-stdlib-compile-model.md).
+// A program's own `args` or `exit` shadows these.
+//
+// Of `nova-spec/20-STDLIB.md`'s module-index entry, "spawn, env, args", only
+// `args` ships, with `exit`; `spawn` and `env` do not exist. See that file's
+// section 17, and docs/adr/0023-program-arguments.md.
+
+// The program's arguments. Index 0 is the program itself: under
+// `nova run [FILE] -- ARGS` it is FILE as written (`src/main.nova` when
+// defaulted), and in a built executable it is whatever the OS reports. The
+// arguments after `--`, or a built executable's own, follow from index 1. One
+// that is not valid Unicode has U+FFFD in place of its bad bytes.
+pub fn args() -> Vec<String> {
+    let mut v: Vec<String> = Vec::new()
+    let n = process_arg_count()
+    let mut i = 0
+    while i < n {
+        v.push(process_arg(i))
+        i = i + 1
+    }
+    v
+}
+
+// Ends the process now with `code`, after flushing stdout. Tasks still running
+// are not joined. The OS truncates `code`: Unix keeps its low 8 bits, so
+// `exit(256)` is 0 and `exit(-1)` is 255; Windows keeps 32. Under `nova run` it
+// ends the `nova` process itself.
+//
+// Typed `-> ()` because Nova has no never type: code after `exit(..)`
+// type-checks, and never runs.
+pub fn exit(code: Int) {
+    process_exit(code)
+}
