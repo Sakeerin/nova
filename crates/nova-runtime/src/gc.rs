@@ -326,7 +326,9 @@ pub(crate) fn object_info(addr: usize) -> Option<(usize, bool)> {
 /// (`docs/adr/0010-conservative-scan-root-test-gating.md`) for an invariant
 /// that is really about this `Vec`'s contents, and could pass on an
 /// accidental stack root. Reading the registry directly is deterministic and
-/// platform-independent, where a `collect()`-based assertion is neither.
+/// works on every platform; a `collect()`-based assertion is neither, since
+/// the scan can over-retain and does not run where `stack_base` has no
+/// implementation.
 #[cfg(test)]
 pub(crate) fn root_count(addr: usize) -> usize {
     PINNED.with(|p| p.borrow().iter().filter(|&&a| a == addr).count())
@@ -359,15 +361,12 @@ pub(crate) fn root_count(addr: usize) -> usize {
 /// changes their frame relationship to `collect()` for no reason; keeping it
 /// is not evidence that they pass.
 ///
-/// `#[cfg(windows)]` matches its only callers: `task.rs`'s
-/// `root_registration` tests, themselves gated to Windows because
-/// `stack_base` below only has a real implementation there (off Windows,
-/// `collect()` returns before marking anything, so those assertions would
-/// pass or fail for the wrong reason rather than exercising this at all).
-/// Without this gate the function has no caller at all off Windows and
-/// reads as dead code there under `-D warnings`.
+/// Its only callers are `task.rs`'s `root_registration` tests, which are
+/// compiled on every platform and run under `--ignored`. Where `stack_base`
+/// has no implementation, `collect()` returns before marking anything, so
+/// their assertions would pass or fail for the wrong reason; no CI platform
+/// is such a platform (`docs/adr/0024-gc-stack-bounds-on-unix.md`).
 #[cfg(test)]
-#[cfg(windows)]
 #[inline(always)]
 pub(crate) fn collect_for_test() {
     collect();
@@ -380,7 +379,7 @@ pub(crate) fn collect_for_test() {
 ///
 /// The difference from [`collect_for_test`] is the whole reason this exists.
 /// That one runs the real cycle, so what survives depends on the conservative
-/// stack scan -- which has an implementation on Windows alone, and which
+/// stack scan -- which runs only where `stack_base` has an implementation, and which
 /// intermittently reads a stale word in an already-returned frame as a root
 /// (`docs/adr/0010-conservative-scan-root-test-gating.md`, which owns that
 /// finding and the gating it forced). Handing the root set in makes "was this
@@ -760,8 +759,9 @@ mod tests {
     }
 
     /// The allocation whose slot would reach `next_gc` collects first, then
-    /// takes its slot: the count it leaves is its own slot alone. Holds off
-    /// Windows too, where `collect()` resets the count and returns.
+    /// takes its slot: the count it leaves is its own slot alone. Holds on a
+    /// platform without stack bounds too, where `collect()` resets the count
+    /// and returns.
     #[test]
     fn the_crossing_allocation_collects_before_taking_its_slot() {
         reset();
@@ -968,9 +968,9 @@ mod tests {
 
     // The two tests below exercise `add_root`/`remove_root`'s own bookkeeping
     // (via `PINNED`'s length) directly, without going through `collect()`, so
-    // -- unlike the tests in `mod registry` below -- they run on every
-    // platform, including the two (Linux, macOS) where `collect()` itself is
-    // a no-op (see `mod registry`'s doc comment).
+    // -- unlike the `#[ignore]`d tests in `mod registry` below -- they are
+    // deterministic, and they hold even where `collect()` is a no-op for want
+    // of stack bounds (see `mod registry`'s doc comment).
 
     #[test]
     fn registering_the_same_address_twice_requires_removing_it_twice() {
@@ -1074,38 +1074,30 @@ mod tests {
     /// scan, surviving repeated collections, and its roots traced rather than
     /// merely marked.
     ///
-    /// **Gated to Windows.** `stack_base` (Windows implementation at `:419`;
-    /// the `#[cfg(not(windows))]` stub returning `None` is at `:432`) only
-    /// implements precise stack bounds on Windows; off it, `collect()`
-    /// (`:264`, early return at `:273-275`) sets `alloc_since_gc = 0` and
-    /// returns *before* even looking at `PINNED` -- no scan, no mark, no
-    /// sweep, on any platform this collector doesn't yet support. Off
-    /// Windows, every `is_none()` assertion in this module (checking that
-    /// something was swept) would fail outright, and every `is_some()`
-    /// assertion (checking that something survived) would pass vacuously --
-    /// identically to what `add_root` being `{}` would produce, which is the
-    /// one thing a test in this file must never do. This is derived by
-    /// inspection of `stack_base`/`collect()` above, not run on Linux or
-    /// macOS; it does not need to be, since the mechanism (`collect()` never
-    /// reaching `PINNED`) applies uniformly to every test below regardless of
-    /// which assertion it makes. Not hypothetical either way:
-    /// `.github/workflows/ci.yml` runs `cargo test --workspace --all-features`
-    /// on `ubuntu-latest`, `windows-latest`, and `macos-latest`, so this would
-    /// land red (and green for the wrong reason) on two of three CI jobs.
+    /// **Not gated to a platform.** Until 2026-10-05 this module was
+    /// `#[cfg(windows)]`, because only Windows had a `stack_base`
+    /// implementation; glibc Linux and macOS have one now
+    /// (`docs/adr/0024-gc-stack-bounds-on-unix.md`). Where `stack_base` has
+    /// none, `collect()` sets `alloc_since_gc = 0` and returns *before* even
+    /// looking at `PINNED` -- no scan, no mark, no sweep -- so every
+    /// `is_none()` assertion in this module (checking that something was
+    /// swept) would fail outright, and every `is_some()` assertion (checking
+    /// that something survived) would pass vacuously, identically to what
+    /// `add_root` being `{}` would produce, which is the one thing a test in
+    /// this file must never do. No CI platform is such a platform.
     /// `collect_with_roots` was considered as a platform-independent
     /// alternative and rejected: it bypasses `collect()`'s `PINNED`-seeding
     /// step entirely, which is the one thing this module needs to prove, so a
     /// `collect_with_roots`-based version would only re-test what
     /// `transitive_marking_keeps_referenced_objects` (above) already covers.
     ///
-    /// **Unconditionally `#[ignore]`d, in debug and release alike** --
-    /// independently of the Windows gate above, and no longer only under
-    /// `--release` as this comment used to say. `collect()`'s conservative
+    /// **Unconditionally `#[ignore]`d, in debug and release alike** -- no
+    /// longer only under `--release` as this comment used to say.
+    /// `collect()`'s conservative
     /// stack scan is also intermittently flaky in debug, under the test
     /// parallelism CI actually runs at: a stale stack word in an
     /// already-returned frame is read as a conservative root, well above the
-    /// scanned range's low end (so *not* `&regs`, the register-flush buffer
-    /// the `setjmp` shim seeds at the start of its own frame, which sits at
+    /// scanned range's low end (so *not* the registers `gc_stack.c` spills at
     /// that low end). Mechanism identified, not fixed. The full account --
     /// the isolating experiment, the measured rates, which frame the
     /// retaining word sits in, and two attempted remedies (a deliberate
@@ -1120,12 +1112,10 @@ mod tests {
     /// half would strip the negative control from the paired `is_some()`
     /// tests, leaving a green "the registered root survived" assertion that
     /// would also pass against a collector that frees nothing at all -- the
-    /// same ungated-canary pattern a Critical review finding flagged, and the
-    /// same pairing principle the Windows gate above exists for. Each test's
+    /// same ungated-canary pattern a Critical review finding flagged. Each test's
     /// own `#[ignore]` reason says which of the two it is, so that is not
     /// restated here. Reachable with `cargo test -- --ignored`, which CI runs
     /// as an advisory, `continue-on-error` step.
-    #[cfg(windows)]
     mod registry {
         use super::*;
 
@@ -1140,8 +1130,8 @@ mod tests {
         /// call has to survive that call, and this collector's own definition
         /// of "conservative" (module doc comment, top of file) means the
         /// compiler necessarily preserves a surviving value somewhere the
-        /// scanner looks: a stack slot, or a callee-saved register the
-        /// `setjmp` shim flushes to one. A plain `usize` copy of the address
+        /// scanner looks: a stack slot, or a callee-saved register
+        /// `gc_stack.c` spills to one. A plain `usize` copy of the address
         /// is bit-identical to a real pointer to it, so it is then
         /// indistinguishable from a genuine root -- which would make
         /// `object_info` report the object alive whether or not the registry
@@ -1215,7 +1205,7 @@ mod tests {
             //    must survive the call, and this collector's own definition of
             //    "conservative" (module doc comment) means a `usize` that survives
             //    a call is necessarily preserved somewhere the scanner looks --
-            //    a stack slot, or a callee-saved register the setjmp shim flushes
+            //    a stack slot, or a callee-saved register `gc_stack.c` spills
             //    to one. A plain copy, bit-identical to the object's address, is
             //    then an accidental root in its own right. Fixed by carrying it
             //    across as `hide(addr)` instead of `addr` (see `hide`'s doc
@@ -1440,7 +1430,7 @@ mod tests {
             // Unconditionally ignored (debug and release) alongside its
             // negative control below, not because this test itself is known to
             // fail on its own, but because running it without that control
-            // would be exactly the pattern this file's Windows gate exists to
+            // would be exactly the pattern this file's pairing rule exists to
             // prevent: an `is_some()` assertion with no paired `is_none()` to
             // prove the collector can free anything at all.
             let (parent_addr, child_addr) = setup_parent_and_child(true);

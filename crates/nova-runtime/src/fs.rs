@@ -381,12 +381,9 @@ pub(crate) fn release_task_slots(id: i64) {
 /// only as far as pinning all three needed, not into a general-purpose
 /// helper.
 ///
-/// `#[cfg(test)]` only, not also `#[cfg(windows)]`: every caller of this
-/// function is an ordinary, cross-platform `task.rs` test, the same
-/// reasoning `set_current_for_test`'s own doc comment gives for itself --
-/// contrast `gc::collect_for_test`, whose *only* callers genuinely are
-/// `#[cfg(windows)]`, which is why that one carries the platform gate and
-/// this one must not.
+/// `#[cfg(test)]` only: every caller of this function is an ordinary,
+/// cross-platform `task.rs` test, the same reasoning
+/// `set_current_for_test`'s own doc comment gives for itself.
 #[cfg(test)]
 pub(crate) fn stash_for_test(id: i64, slot: Slot, ptr: *mut NovaStr) {
     let previous = crate::task::current_task();
