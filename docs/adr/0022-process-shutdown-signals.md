@@ -56,8 +56,11 @@ Four facts constrain any handler:
 5. **The handler never wakes the executor.** It stores the atomic and returns.
    Nova code reads the flag at its own deadlines: `Server::listen` polls
    `accept` under `timeout` every 100 ms, and every connection bounds its
-   waits. Shutdown therefore takes at most one tick, plus the requests already
-   in flight, each capped at 10 s.
+   waits. A connection reads nothing more for a request it takes up after the
+   stop, so a client that keeps pipelining cannot extend the drain. Shutdown
+   therefore takes at most one tick, plus the requests already in flight
+   (those taken up before the stop, and those already received whole), each
+   capped at 10 s.
 
 ## Alternatives considered
 
