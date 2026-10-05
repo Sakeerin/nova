@@ -10874,3 +10874,196 @@ fn a_server_that_never_calls_listen_keeps_the_default_signal_action() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `examples/04-todo-cli`: the Phase 2 gate in `nova-spec/60-EXAMPLES.md` §4.
+// Design: docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md
+// §7.4, and the plan's Review Focus.
+
+/// A fresh, empty directory for one 04 test. `todos.json` lives in the
+/// working directory, so no two tests may share one. Each tag is unique to
+/// its test, so removing a stale one races with no sibling.
+fn todo_workdir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("nova-todo-{}-{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("todo work dir");
+    dir
+}
+
+/// `nova run examples/04-todo-cli/src/main.nova -- ARGS`, in `dir`.
+fn todo_run(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    nova()
+        .current_dir(dir)
+        .arg("run")
+        .arg(repo_root().join("examples/04-todo-cli/src/main.nova"))
+        .arg("--")
+        .args(args)
+        .output()
+        .expect("run nova")
+}
+
+/// `examples/04-todo-cli` built into `bin`.
+fn todo_build(bin: &std::path::Path) -> std::path::PathBuf {
+    let exe = bin.join(format!("todo{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(repo_root().join("examples/04-todo-cli/src/main.nova"))
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    exe
+}
+
+/// The built `exe`, run in `dir` with real argv.
+fn todo_exe(exe: &std::path::Path, dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(exe)
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run the built todo")
+}
+
+fn stdout_of(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+}
+
+fn stderr_of(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n")
+}
+
+/// The gate's cycle, add → list → done → list, through `run`: every step's
+/// output, then the file. `add buy milk` is two arguments and `add "walk
+/// dog"` is one; both must store a two-word title.
+fn todo_cycle(dir: &std::path::Path, run: &dyn Fn(&[&str]) -> std::process::Output) {
+    let step = |args: &[&str], want: &str| {
+        let out = run(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {:?}; stderr={}",
+            out.status,
+            stderr_of(&out)
+        );
+        assert_eq!(stdout_of(&out), want, "{args:?}");
+    };
+    step(&["add", "buy", "milk"], "added: 1\n");
+    step(&["add", "walk dog"], "added: 2\n");
+    step(&["list"], "[ ] 1: buy milk\n[ ] 2: walk dog\n");
+    step(&["done", "1"], "");
+    step(&["list"], "[x] 1: buy milk\n[ ] 2: walk dog\n");
+    let file = std::fs::read_to_string(dir.join("todos.json")).expect("todos.json written");
+    assert_eq!(
+        file,
+        r#"[{"id":1,"title":"buy milk","done":true},{"id":2,"title":"walk dog","done":false}]"#
+    );
+}
+
+/// The gate under `nova run`.
+#[test]
+fn todo_cli_cycle_under_nova_run() {
+    let dir = todo_workdir("run-cycle");
+    todo_cycle(&dir, &|args| todo_run(&dir, args));
+}
+
+/// The gate as a built executable, whose arguments come from the OS argv:
+/// the measurement of docs/adr/0023's decision 3 on each CI operating system.
+#[test]
+fn todo_cli_cycle_as_a_built_executable() {
+    let bin = todo_workdir("built-bin");
+    let exe = todo_build(&bin);
+    let dir = todo_workdir("built-cycle");
+    todo_cycle(&dir, &|args| todo_exe(&exe, &dir, args));
+}
+
+/// A Thai title survives the arguments, `todos.json` and `list` (Review
+/// Focus 1).
+fn todo_thai(dir: &std::path::Path, run: &dyn Fn(&[&str]) -> std::process::Output) {
+    let title = "ซื้อนม";
+    let added = run(&["add", title]);
+    assert!(added.status.success(), "add: {}", stderr_of(&added));
+    assert_eq!(stdout_of(&run(&["list"])), format!("[ ] 1: {title}\n"));
+    let file = std::fs::read_to_string(dir.join("todos.json")).expect("todos.json written");
+    assert_eq!(
+        file,
+        format!("[{{\"id\":1,\"title\":\"{title}\",\"done\":false}}]")
+    );
+}
+
+#[test]
+fn todo_cli_keeps_a_thai_title_under_nova_run() {
+    let dir = todo_workdir("thai-run");
+    todo_thai(&dir, &|args| todo_run(&dir, args));
+}
+
+#[test]
+fn todo_cli_keeps_a_thai_title_as_a_built_executable() {
+    let bin = todo_workdir("thai-bin");
+    let exe = todo_build(&bin);
+    let dir = todo_workdir("thai-built");
+    todo_thai(&dir, &|args| todo_exe(&exe, &dir, args));
+}
+
+/// No command, or an unknown one: the usage line on stderr, exit 1, and no
+/// file written.
+#[test]
+fn todo_cli_without_a_command_prints_usage_and_exits_1() {
+    let dir = todo_workdir("usage");
+    for args in [&[][..], &["frobnicate"][..]] {
+        let out = todo_run(&dir, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            stderr_of(&out),
+            "usage: todo {add <title> | list | done <id>}\n",
+            "{args:?}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    assert!(!dir.join("todos.json").exists());
+}
+
+/// A `todos.json` that is not JSON, or not a list of todos, is refused by
+/// every command and never written (Review Focus 3).
+#[test]
+fn todo_cli_refuses_a_corrupt_todos_json_and_leaves_it_alone() {
+    let dir = todo_workdir("corrupt");
+    let cases: [(&str, &[&str]); 4] = [
+        ("{not json", &["list"]),
+        ("{not json", &["add", "x"]),
+        ("{not json", &["done", "1"]),
+        (r#"[{"id":1}]"#, &["list"]),
+    ];
+    for (content, args) in cases {
+        std::fs::write(dir.join("todos.json"), content).expect("write the corrupt file");
+        let out = todo_run(&dir, args);
+        assert_eq!(out.status.code(), Some(1), "{content:?} {args:?}");
+        let err = stderr_of(&out);
+        assert!(
+            err.starts_with("todo: cannot use todos.json: "),
+            "{content:?} {args:?}: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("todos.json")).expect("still there"),
+            content,
+            "{content:?} {args:?} must leave the file alone"
+        );
+    }
+}
+
+/// `done` with an id no todo has, or one that is not a number, changes
+/// nothing and prints nothing.
+#[test]
+fn todo_cli_done_with_an_unknown_id_changes_nothing() {
+    let dir = todo_workdir("unknown-id");
+    assert!(todo_run(&dir, &["add", "a"]).status.success());
+    let before = std::fs::read(dir.join("todos.json")).expect("written");
+    for id in ["99", "x", ""] {
+        let out = todo_run(&dir, &["done", id]);
+        assert!(out.status.success(), "{id:?}: {}", stderr_of(&out));
+        assert!(out.stdout.is_empty(), "{id:?}");
+        assert_eq!(
+            std::fs::read(dir.join("todos.json")).expect("still there"),
+            before,
+            "{id:?}"
+        );
+    }
+}
