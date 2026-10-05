@@ -4,3 +4,4 @@
 *.orig
 .env
 .env.local
+/examples/04-todo-cli/todos.json

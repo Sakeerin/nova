@@ -1,0 +1,247 @@
+// Phase 2's gate example in `nova-spec/60-EXAMPLES.md` section 4: a todo list
+// kept in `todos.json`, driven by the command line.
+//
+// **This is not that section's listing, deliberately.** The listing is kept
+// as the aspiration it was, the precedent `examples/05-json-api` set, and this
+// runs the same cycle in the Nova that exists. Every substitution, and the
+// evidence for it, is in
+// `docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md` section 3.
+//
+// Two behaviours differ from the listing by the user's decision of
+// 2026-10-05: a `todos.json` that does not parse is refused rather than
+// overwritten, and `add`'s title is every argument after it.
+
+record Todo { id: Int, title: String, done: Bool }
+
+const DB_PATH: String = "todos.json"
+
+const USAGE: String = "usage: todo {add <title> | list | done <id>}"
+
+// ---------------------------------------------------------------------------
+// JSON, by hand: there is no `@derive`.
+
+fn field(m: Map<String, JsonValue>, k: String) -> Result<JsonValue, JsonError> {
+    match m.get(k) {
+        Some(v) => Ok(v)
+        None => Err(JsonError { msg: "missing field ${k}", at: 0 })
+    }
+}
+
+fn todo_of(m: Map<String, JsonValue>) -> Result<Todo, JsonError> {
+    let id = match field(m, "id") {
+        Ok(v) => {
+            match Int::from_json(v) {
+                Ok(n) => n
+                Err(e) => return Err(e)
+            }
+        }
+        Err(e) => return Err(e)
+    }
+    let title = match field(m, "title") {
+        Ok(v) => {
+            match String::from_json(v) {
+                Ok(s) => s
+                Err(e) => return Err(e)
+            }
+        }
+        Err(e) => return Err(e)
+    }
+    let done = match field(m, "done") {
+        Ok(v) => {
+            match Bool::from_json(v) {
+                Ok(b) => b
+                Err(e) => return Err(e)
+            }
+        }
+        Err(e) => return Err(e)
+    }
+    Ok(Todo { id: id, title: title, done: done })
+}
+
+impl FromJson for Todo {
+    fn from_json(v: JsonValue) -> Result<Todo, JsonError> {
+        match v {
+            Object(m) => todo_of(m)
+            _ => Err(JsonError { msg: "expected an object", at: 0 })
+        }
+    }
+}
+
+fn todos_of(v: JsonValue) -> Result<Vec<Todo>, JsonError> {
+    match v {
+        Array(items) => {
+            let mut out: Vec<Todo> = Vec::new()
+            let mut i = 0
+            while i < items.len() {
+                match Todo::from_json(items[i]) {
+                    Ok(t) => out.push(t)
+                    Err(e) => return Err(e)
+                }
+                i = i + 1
+            }
+            Ok(out)
+        }
+        _ => Err(JsonError { msg: "expected a list of todos", at: 0 })
+    }
+}
+
+fn todo_json(t: Todo) -> String {
+    let done = if t.done { "true" } else { "false" }
+    "{\"id\":${t.id},\"title\":${stringify(String(t.title))},\"done\":${done}}"
+}
+
+fn todos_json(todos: Vec<Todo>) -> String {
+    let mut parts = [""; todos.len()]
+    let mut i = 0
+    for t in todos.iter() {
+        parts[i] = todo_json(t)
+        i = i + 1
+    }
+    "[${",".join(parts)}]"
+}
+
+// ---------------------------------------------------------------------------
+// The file.
+
+// Reports `todos.json` as unusable and ends the program with status 1,
+// leaving the file as it is. Typed to return a list so it can stand in a
+// `match` arm; it never returns.
+fn bad_file(reason: String) -> Vec<Todo> {
+    eprintln("todo: cannot use ${DB_PATH}: ${reason}")
+    exit(1)
+    Vec::new()
+}
+
+// The stored list, or an empty one when there is no file. A file that cannot
+// be read, parsed or decoded is never treated as empty: that would let the
+// next save overwrite it.
+async fn load_todos() -> Vec<Todo> {
+    if !exists(DB_PATH).await {
+        return Vec::new()
+    }
+    match read_to_string(DB_PATH).await {
+        Ok(text) => {
+            match parse(text) {
+                Ok(v) => {
+                    match todos_of(v) {
+                        Ok(todos) => todos
+                        Err(e) => bad_file(e.msg)
+                    }
+                }
+                Err(e) => bad_file(e.msg)
+            }
+        }
+        Err(e) => bad_file(e.message)
+    }
+}
+
+async fn save_todos(todos: Vec<Todo>) {
+    match write_string(DB_PATH, todos_json(todos)).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln("todo: cannot write ${DB_PATH}: ${e.message}")
+            exit(1)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The commands.
+
+// Every argument after `add`, joined with single spaces, so `add buy milk` and
+// `add "buy milk"` store the same title; `untitled` if there are none.
+fn title_of(argv: Vec<String>) -> String {
+    let n = argv.len() - 2
+    if n <= 0 {
+        return "untitled"
+    }
+    let mut words = [""; n]
+    let mut i = 0
+    while i < n {
+        match argv.get(i + 2) {
+            Some(w) => {
+                words[i] = w
+            }
+            None => {}
+        }
+        i = i + 1
+    }
+    " ".join(words)
+}
+
+fn next_id(todos: Vec<Todo>) -> Int {
+    let mut top = 0
+    for t in todos.iter() {
+        if t.id > top {
+            top = t.id
+        }
+    }
+    top + 1
+}
+
+// `s` as an Int, or 0, which no todo has. It goes through `std/json`'s
+// `parse`, as `examples/05-json-api`'s `path_id` does, so ` 7 ` and `7.0`
+// count as 7 too.
+fn id_of(s: String) -> Int {
+    match parse(s) {
+        Ok(v) => {
+            match Int::from_json(v) {
+                Ok(n) => n
+                Err(_) => 0
+            }
+        }
+        Err(_) => 0
+    }
+}
+
+async fn cmd_add(argv: Vec<String>) {
+    let title = title_of(argv)
+    let mut todos = load_todos().await
+    let id = next_id(todos)
+    todos.push(Todo { id: id, title: title, done: false })
+    save_todos(todos).await
+    println("added: ${id}")
+}
+
+async fn cmd_list() {
+    let todos = load_todos().await
+    for t in todos.iter() {
+        let mark = if t.done { "[x]" } else { "[ ]" }
+        println("${mark} ${t.id}: ${t.title}")
+    }
+}
+
+// Marks todo `id` done. Records alias, so setting `done` on the loop's
+// rebound copy sets it on the todo inside the `Vec`. An unknown id changes
+// nothing, as in the listing.
+async fn cmd_done(argv: Vec<String>) {
+    let id = match argv.get(2) {
+        Some(s) => id_of(s)
+        None => 0
+    }
+    let todos = load_todos().await
+    for t in todos.iter() {
+        if t.id == id {
+            let mut u = t
+            u.done = true
+        }
+    }
+    save_todos(todos).await
+}
+
+async fn main() {
+    let argv = args()
+    let cmd = match argv.get(1) {
+        Some(c) => c
+        None => ""
+    }
+    match cmd {
+        "add" => cmd_add(argv).await
+        "list" => cmd_list().await
+        "done" => cmd_done(argv).await
+        _ => {
+            eprintln(USAGE)
+            exit(1)
+        }
+    }
+}
