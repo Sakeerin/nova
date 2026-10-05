@@ -34,9 +34,11 @@ Four facts constrain any handler:
 1. **A process-wide flag.** `crates/nova-runtime/src/signal.rs` holds one
    `static AtomicBool`. One `STD_ONLY` builtin, `shutdown_requested() -> Bool`,
    reads it. Its first call installs the handler, through a `Once`.
-2. **Opt-in and permanent.** Only `std/http`'s `Server::listen` calls it, once
-   before `bind`.
-   - A program that never does keeps every signal's default action.
+2. **Opt-in and permanent.** Only `std/http`'s `Server` calls it. `listen`
+   calls it first before `bind`, which installs the handler, and then on every
+   turn of its accept loop. Each connection calls it at its idle ticks and
+   after each answer.
+   - A program that never calls `listen` keeps every signal's default action.
    - Once installed, the handler stays. A program that recovers from
      `listen`'s `Err` and keeps running swallows its next signal.
 3. **Which inputs.**
