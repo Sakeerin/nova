@@ -174,8 +174,9 @@ pub fn exit(code: Int) {
 ### 4.4 CLI and driver
 
 - **`nova run [FILE] [-- ARGS...]`.** `RunCmd` gains
-  `#[arg(last = true)] args: Vec<String>`. Everything after `--` goes to the
-  program.
+  `#[arg(last = true)] args: Vec<OsString>`. Everything after `--` goes to the
+  program. `OsString`, not `String`: clap rejects a `String` argument that is
+  not valid UTF-8, and §4.2 converts such an argument lossily instead.
 - **The list is `[FILE, ARGS...]`,** with FILE as written, or `src/main.nova`
   when defaulted. `nova run -- 20` gives `["src/main.nova", "20"]`. Without
   `--`, `args()` has exactly one element.
@@ -288,9 +289,11 @@ existing guards over every builtin cover the other sites.
   `nova run FILE -- one "two words" ""`, prints the count, then each argument in
   brackets. Its `.stdout` fixture proves index 0 is FILE, and that spaces and
   the empty argument survive.
-- `tests/runtime/process_exit.nova` prints `partial` with `print` and no
-  newline, then calls `exit(3)`. The process must exit with status 3, and
-  stdout must be exactly `partial`: `exit` flushed it.
+- `tests/runtime/process_exit.nova` writes `partial` with `std/io`'s
+  `stdout().write`, which only stages it in the line buffer, and no newline,
+  then calls `exit(3)`. The process must exit with status 3, and stdout must be
+  exactly `partial`: only `exit`'s flush can deliver it. (`print` flushes on
+  every call, so it would pass even with an `exit` that never flushed.)
 
 ### 7.4 End to end (`crates/nova-cli/tests/run_tests.rs`)
 
