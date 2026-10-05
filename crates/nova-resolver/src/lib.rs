@@ -883,6 +883,19 @@ builtins! {
     /// tick. Runtime symbol `nova_rt_shutdown_requested`
     /// (`crates/nova-runtime/src/signal.rs`, docs/adr/0022). Std-only.
     ShutdownRequested,
+    /// `process_arg_count() -> Int` — how many arguments the program has,
+    /// counting the program itself at index 0. Runtime symbol
+    /// `nova_rt_process_arg_count` (`crates/nova-runtime/src/process.rs`,
+    /// docs/adr/0023). Std-only.
+    ProcessArgCount,
+    /// `process_arg(i: Int) -> String` — argument `i`, or the empty string
+    /// for an index out of range. Runtime symbol `nova_rt_process_arg`.
+    /// Std-only.
+    ProcessArg,
+    /// `process_exit(code: Int) -> unit` — ends the process with `code`
+    /// after flushing stdout, and never returns. Runtime symbol
+    /// `nova_rt_process_exit`. Std-only.
+    ProcessExit,
 }
 
 impl Builtin {
@@ -978,6 +991,9 @@ impl Builtin {
             Builtin::LogConfigToStderr => "log_config_to_stderr",
             Builtin::LogSetConfig => "log_set_config",
             Builtin::ShutdownRequested => "shutdown_requested",
+            Builtin::ProcessArgCount => "process_arg_count",
+            Builtin::ProcessArg => "process_arg",
+            Builtin::ProcessExit => "process_exit",
         }
     }
 
@@ -1005,7 +1021,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 78] = [
+    pub const STD_ONLY: [Builtin; 81] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1084,6 +1100,9 @@ impl Builtin {
         Builtin::LogConfigToStderr,
         Builtin::LogSetConfig,
         Builtin::ShutdownRequested,
+        Builtin::ProcessArgCount,
+        Builtin::ProcessArg,
+        Builtin::ProcessExit,
     ];
 }
 

@@ -3983,7 +3983,10 @@ impl<'a> Checker<'a> {
             | Builtin::LogConfigLevel
             | Builtin::LogConfigToStderr
             | Builtin::LogSetConfig
-            | Builtin::ShutdownRequested => "",
+            | Builtin::ShutdownRequested
+            | Builtin::ProcessArgCount
+            | Builtin::ProcessArg
+            | Builtin::ProcessExit => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -7296,6 +7299,9 @@ fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::LogConfigToStderr => (vec![], Ty::Int),
         Builtin::LogSetConfig => (vec![Ty::Int, Ty::Int], Ty::Unit),
         Builtin::ShutdownRequested => (vec![], Ty::Bool),
+        Builtin::ProcessArgCount => (vec![], Ty::Int),
+        Builtin::ProcessArg => (vec![Ty::Int], Ty::String),
+        Builtin::ProcessExit => (vec![Ty::Int], Ty::Unit),
     }
 }
 
@@ -15459,6 +15465,18 @@ mod tests {
                     (vec![], Ty::Bool),
                     "`shutdown_requested()` in `std/http`'s `Server::listen` and `serve`",
                 ),
+                Builtin::ProcessArgCount => (
+                    (vec![], Ty::Int),
+                    "`process_arg_count()` in `std/process`'s `args`",
+                ),
+                Builtin::ProcessArg => (
+                    (vec![Ty::Int], Ty::String),
+                    "`process_arg(i)` in `std/process`'s `args`",
+                ),
+                Builtin::ProcessExit => (
+                    (vec![Ty::Int], Ty::Unit),
+                    "`process_exit(code)` in `std/process`'s `exit`",
+                ),
             }
         }
         for b in Builtin::ALL {
@@ -15527,6 +15545,24 @@ mod tests {
             .find(|b| b.name() == "shutdown_requested")
             .expect("shutdown_requested must be an STD_ONLY builtin");
         assert_eq!(builtin_signature(b), (vec![], Ty::Bool));
+    }
+
+    /// The three `std/process` builtins are `STD_ONLY` and typed as
+    /// `std/process/lib.nova` calls them (docs/adr/0023).
+    #[test]
+    fn the_process_builtins_are_std_only_with_their_signatures() {
+        for (name, sig) in [
+            ("process_arg_count", (vec![], Ty::Int)),
+            ("process_arg", (vec![Ty::Int], Ty::String)),
+            ("process_exit", (vec![Ty::Int], Ty::Unit)),
+        ] {
+            let b = nova_resolver::Builtin::STD_ONLY
+                .iter()
+                .copied()
+                .find(|b| b.name() == name)
+                .unwrap_or_else(|| panic!("{name} must be an STD_ONLY builtin"));
+            assert_eq!(builtin_signature(b), sig, "{name}");
+        }
     }
 
     /// The shared arity/argument path all builtins now go through, exercised

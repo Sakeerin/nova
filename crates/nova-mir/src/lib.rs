@@ -508,6 +508,13 @@ rt_funcs! {
     /// `() -> i8` — whether a termination signal has been received; the first
     /// call installs the handler (`crates/nova-runtime/src/signal.rs`).
     ShutdownRequested,
+    /// `() -> i64` — the program's argument count
+    /// (`crates/nova-runtime/src/process.rs`).
+    ProcessArgCount,
+    /// `(i64 i) -> ptr` — argument `i` as a `String`, or the empty string.
+    ProcessArg,
+    /// `(i64 code) -> unit` — `std::process::exit`; never returns.
+    ProcessExit,
 }
 
 impl RtFunc {
@@ -605,6 +612,9 @@ impl RtFunc {
             RtFunc::LogConfigToStderr => "nova_rt_log_config_to_stderr",
             RtFunc::LogSetConfig => "nova_rt_log_set_config",
             RtFunc::ShutdownRequested => "nova_rt_shutdown_requested",
+            RtFunc::ProcessArgCount => "nova_rt_process_arg_count",
+            RtFunc::ProcessArg => "nova_rt_process_arg",
+            RtFunc::ProcessExit => "nova_rt_process_exit",
         }
     }
 
@@ -792,6 +802,9 @@ impl RtFunc {
             RtFunc::LogConfigToStderr => (vec![], MirTy::I64),
             RtFunc::LogSetConfig => (vec![MirTy::I64, MirTy::I64], MirTy::Unit),
             RtFunc::ShutdownRequested => (vec![], MirTy::I8),
+            RtFunc::ProcessArgCount => (vec![], MirTy::I64),
+            RtFunc::ProcessArg => (vec![MirTy::I64], MirTy::Ptr),
+            RtFunc::ProcessExit => (vec![MirTy::I64], MirTy::Unit),
         }
     }
 }
