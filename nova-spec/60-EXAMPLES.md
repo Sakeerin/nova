@@ -96,6 +96,19 @@ that ran, in `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`
 on SIGTERM" means, and the runtime observes no signal (§3.3 there). The listing
 above is unchanged.
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`): the example now
+exists, beside `examples/03-producer-consumer`, and "exits cleanly" now means
+graceful.** `examples/03-http-server` serves `/` and `/health` through
+`std/http`'s new `Server`. On SIGTERM or SIGINT (Ctrl+Break or Ctrl+C on
+Windows) it stops accepting, finishes the requests already in flight, and
+exits 0; a second signal ends it at once. That definition is the user's
+decision of 2026-10-04, recorded in
+`docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md`, whose
+§3 lists every substitution the example makes for the listing above. The
+listing is unchanged, kept as the aspiration it was, as §5's is. This settles
+the 2026-09-01 drift note above only in part: `03-http-server` now exists on
+disk, and slot 03 holds two entries.
+
 ---
 
 ## 4. `04-todo-cli` (Phase 2 gate)
@@ -336,6 +349,18 @@ them with `P0001`, found `async`. So its `.get`/`.post` calls would not compile
 as written even on a router that takes async handlers; what ran in their place
 is a named `async fn` held in the field. See
 `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1 and §3.2.
+
+**Recorded 2026-10-04 (branch `examples-03-http-server`): `std/http` now has
+a `Server` with `get`.** The sentence above that there is "nothing for
+`Server.get`/`.post` to be built on" is no longer true of `get`; `post` still
+does not ship, and this listing's `async |..|` handlers still do not parse.
+Separately, two citations in the 2026-09-03 amendment above were already stale
+and are corrected here rather than edited in place. The `@derive` sentence it
+cites as `nova-spec/20-STDLIB.md:548` is in that file's §7 ("`@derive` for
+ToJson/FromJson is implemented as a compiler builtin (Phase 2)"), and the
+`pub type Handler` line it cites as `:504` is in §6's code block. Both are
+given by section here because that file's line numbers move whenever §6 gains
+a note.
 
 **AMENDED 2026-09-11: this section's own criterion, the ratio against Bun,
 is no longer unmeasured.** Four cells, two replicates each, `/users`, a
@@ -726,6 +751,12 @@ wrapped claim is absent, since a `grep` miss over wrapped prose is not evidence
 the claim is not there; and re-measure rather than trusting a figure recorded
 inside the file it counts.
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`): a second example
+follows this template.** `examples/03-http-server/README.md` does, beside
+`examples/05-json-api/README.md`. `01-hello-world`, `02-fibonacci` and
+`03-producer-consumer` still have no `README.md`. The durable check is still
+`ls examples/*/README.md` against `ls -d examples/*/`.
+
 ---
 
 ## 10. Test Coverage per Example
@@ -755,3 +786,13 @@ examples:
     - run: ./target/release/nova test
       working-directory: examples/${{ matrix.example }}
 ```
+
+**Recorded 2026-10-04 (branch `examples-03-http-server`): no example meets
+this section, `03-http-server` included.** Its tests live in
+`crates/nova-cli/tests/run_tests.rs`, not in an `examples/03-http-server/tests/`
+folder, for two reasons. `nova test` collects only `@test` functions reachable
+from `src/main.nova`, so a `tests/` folder is invisible to it. And Nova code
+cannot send a signal to another process, so a `nova test` could not test the
+gate's second clause. The CI job above does not exist in
+`.github/workflows/ci.yml`; the end-to-end tests run in its ordinary
+`cargo test` step on all three operating systems.
