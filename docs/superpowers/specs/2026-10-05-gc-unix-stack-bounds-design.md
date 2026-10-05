@@ -83,10 +83,14 @@ Rustfmt and MSRV passed.
 
 - **macOS:** 5 of the 8 GC scan tests passed. The 4 that check a registered root
   is kept all passed. 3 of the 4 that check an unreachable object is freed
-  failed, every one because the object survived:
-  - `an_unregistered_parent_and_child_are_swept` (`gc.rs:1451`);
-  - `remove_root_actually_unroots` (`gc.rs:1304`);
-  - `an_unspawned_tasks_state_is_swept` (`task.rs:5492`).
+  failed, every one because the object survived. Each panic line below is in the
+  spike commit `9aad29f`; the function's line on this branch follows it:
+  - `an_unregistered_parent_and_child_are_swept`: panicked at `gc.rs:1451`;
+    the function is at `gc.rs:1366`;
+  - `remove_root_actually_unroots`: panicked at `gc.rs:1304`; the function is at
+    `gc.rs:1208`;
+  - `an_unspawned_tasks_state_is_swept`: panicked at `task.rs:5492`; the
+    function is at `task.rs:5481`.
 
   Keeping too much is the safe failure, and it is the reason ADR 0010 gives for
   ignoring these tests.
@@ -394,9 +398,18 @@ tests. Like them, it runs under `nova run` only.
   Two mutants, neither committed, show §5.3's test discriminates:
   - (a) Windows' `stack_base()` returns `None`: the test must fail assertion 2.
   - (b) `gc::remove_root(state)` is skipped in `release_internal`
-    (`task.rs:901`) and in `take_output_internal` (`task.rs:969`), so finished
-    tasks stay rooted: the test must fail assertion 3. The plan records which of
-    the two the 03 server's connection tasks reach.
+    (`task.rs:901`), so finished tasks stay rooted: the test must fail
+    assertion 3.
+    - That is the path the 03 server's connection tasks take. They are spawns
+      (`let _ = spawn(serve(self, conn))`, `std/http/lib.nova:881`), and
+      `poll_one` releases every finished task's root through `release_internal`
+      (`task.rs:824`).
+    - The one exception is `block_on`'s root task. It keeps its root until
+      `take_output_internal` (`task.rs:969`) takes its output (`task.rs:155–161`,
+      `:932–937`).
+  - Each mutant must fail the assertion named for it, read from the panic
+    message. A mutant that aborts the server, or fails somewhere else, proves
+    nothing about that assertion.
 - **The register spill (§3.3) has no discriminating test.** No test can force a
   pointer to live only in a callee-saved register, so removing
   `__builtin_unwind_init` would probably fail none. The records say so (§6)
@@ -406,19 +419,27 @@ tests. Like them, it runs under `nova run` only.
 
 - Add `--no-fail-fast` to the advisory step:
   `cargo test --locked --workspace --all-features --no-fail-fast -- --ignored`.
-  One failing binary, today `extern_ffi_run` on Linux, then no longer stops the
-  step before `nova-runtime`.
-- Rewrite the step's comment. It says the eight tests "filter to zero tests on
-  the ubuntu and macos legs", and that once `gc::stack_base` grew a non-Windows
-  version the step would cover them everywhere with no CI change. §2.3 showed the
-  second claim false on ubuntu.
+  A failing test binary then no longer stops the step before `nova-runtime`.
+  Today that binary is `run_tests`, through `extern_ffi_run` on Linux.
+- Rewrite the step's comment (`ci.yml:42–69`). It says "All eight are
+  `#[cfg(windows)]`, so this filters to zero tests on the ubuntu and macos legs",
+  and that once `gc::stack_base` grew a non-Windows version the step would cover
+  them everywhere with no CI change. §2.3 showed the second claim false on
+  ubuntu.
+- **Add `macos-latest` to the clippy matrix.** This was added after the written
+  spec's verification, not in the approved sections. `ci.yml:91–92` justifies
+  having no macOS leg because "the tree has no `target_os = "macos"` or
+  `target_vendor = "apple"` cfg at all, so macos would lint exactly what ubuntu
+  does". §3.2's `#[cfg(target_os = "macos")]` makes that false: without the leg,
+  no CI job would lint the macOS `stack_base`. The comment is rewritten to
+  match. CI then reports 8 checks instead of 7.
 
 Before pushing:
 - `cargo test`, `cargo clippy --locked --all-targets --all-features -- -D warnings`
   and `cargo fmt --all -- --check`, on Windows and in the Linux container.
 - The macOS `stack_base` is type-checked and clippy'd through a scratch crate for
   `aarch64-apple-darwin`, as in the spike. `gc_stack.c` cannot be cross-compiled
-  for macOS on this host.
+  for macOS on this host. CI's new macOS clippy leg is the real check.
 
 ### 5.6 Predicted CI counts
 
@@ -431,7 +452,8 @@ checked against the PR's run:
 | macOS | 1212 / 0 / 0 | 1216 / 0 / 8 | as ubuntu |
 | windows | 1218 / 0 / 8 | 1221 / 0 / 8 | +3 passed (2 stack tests, the leak test) |
 
-The advisory step should then show about 50 `test result:` lines on every OS.
+The advisory step should then show about 50 `test result:` lines on every OS. CI
+reports 8 checks instead of 7, with the new `Clippy (macos-latest)`.
 
 ### 5.7 Review Focus
 
@@ -461,39 +483,77 @@ exercises:
     - the advisory step gains `--no-fail-fast`;
   - the evidence (§2, §5.3).
 - **Specs and plan, corrected in place:**
-  - `nova-spec/13-RUNTIME.md`: its GC section gains which platforms collect and
-    how each finds its stack top. It says nothing about platforms today.
+  - `nova-spec/13-RUNTIME.md`: its GC section (§3, `:144–253`) gains which
+    platforms collect and how each finds its stack top. It says nothing about
+    platforms today. `:165`'s "flushed onto the stack by a `setjmp` shim" is
+    rewritten for §3.3.
   - `nova-spec/20-STDLIB.md:766`: "off Windows the collector is a no-op".
   - `docs/phase-2-plan.md:35`, `:335` and `:348`: the "non-Windows GC stack
     bounds" item, marked done.
 - **ADRs, dated notes, bodies unchanged:**
-  - `0002:11`, `0013:119` and `:255–256`, `0018:591` and `0020:43`.
-  - `0010:47–48`: the eight tests now run on every OS in the advisory step, with
-    the macOS result.
-  - `0012:99–102`, with `:136`, `:145`, `:163` and `:179`: reason 2, "Collection
-    does not run at all off Windows", no longer holds. The decision stands on its
-    other reasons and isn't revisited here.
-- **Code comments that make the claim**, rewritten by the tasks that touch these
-  files:
-  - `gc.rs:51–52`, `:359–365`, `:605–607` and `:975–986`;
-  - `gc_stack.c`'s header;
-  - `task.rs:283`, `:2897` and `:5342–5346`;
-  - `run_tests.rs:1266` and `:1628`;
-  - `ci.yml:41–69`;
-  - `std/json/lib.nova:205` and `tests/runtime/recycled_task_state.nova:38`.
-- **`CHANGELOG.md`:** one entry under Unreleased. Six older statements, at
-  `:2467`, `:2950`, `:4260`, `:4721–4722`, `:4806` and `:4910`, sit in released
-  sections (0.1.0, alpha.1, alpha.2) and stay as history.
-- **Left alone:** the dated design specs and plans under `docs/superpowers/`,
-  which are records of their time.
-- **Sweep:** the records task ends with a set difference: every tracked file
-  still matching the claim phrases, minus the files the branch touched. Each file
-  left over must be explained. A multi-line search runs alongside it, because
-  grep is line-based and this list came from a line filter. The phrases:
-  `off Windows`, `non-Windows`, `Windows-only`, `only on Windows`,
-  `collection is skipped`, `skips collection`, `no-op off`,
-  `collector is a no-op`, `stack bounds`, `precise bounds`, `stack_base`,
-  `returns before marking`.
+  - `0002:9–13`, `0013:119` and `:255–256`, `0018:591` and `0020:42–43`.
+  - `0009:439–440`: "the platform gap that would make such a backstop dishonest"
+    is ADR 0012's reason 2, which no longer holds. ADR 0009 never names Windows,
+    so a phrase search misses this one.
+  - `0010:29`, `:38–39` (the table naming `#[cfg(windows)] mod registry` and
+    `#[cfg(windows)] mod root_registration`) and `:47–50`: the eight tests now
+    run on every OS in the advisory step, with the macOS result.
+  - `0012:75` ("Close-on-collect is foreclosed for two measured reasons"),
+    `:99–109` (reason 2, "Collection does not run at all off Windows"), `:136`,
+    `:145–147`, `:163–165` and `:179`. Reason 2 no longer holds. The decision
+    stands on its one remaining reason, reason 1 (`fd: Int`, `:78`), and isn't
+    revisited here.
+- **Code and test comments**, rewritten by the tasks that touch these files. The
+  first list makes the claim outright; the second describes the `setjmp`-only
+  spill that §3.3 replaces, or a gate §3.5 removes.
+  - **The claim:**
+    - `gc.rs:51–53`, `:321–326` ("where a `collect()`-based assertion is
+      neither"), `:359–365`, `:378–386`, `:604–609`, `:711–713`, `:917–922`,
+      `:975–1009`, `:1022` and `:1341`. `:975–992`'s own line references
+      (`:419`, `:432`, `:264`, `:273-275`) are stale already; they point at
+      `:591`, `:604`, `:408` and `:417–420`.
+    - `task.rs:281–283`, `:2895–2897` and `:5342–5350`.
+    - `fs.rs:384–389`, which contrasts its helper with `gc::collect_for_test`,
+      "whose *only* callers genuinely are `#[cfg(windows)]`".
+    - `crypto.rs:79–82`: "precise stack bounds are implemented on Windows only".
+    - `run_tests.rs:1231–1232` and `:8678–8679` ("It discriminates only where the
+      collector frees memory, which is Windows."), `:1265–1267` and `:1628–1630`.
+    - `ci.yml:42–69` and `:91–92` (§5.5).
+    - `std/json/lib.nova:204–205` and `tests/runtime/recycled_task_state.nova:37–41`.
+  - **The `setjmp`-only spill:**
+    - `gc_stack.c:1–13`, its header;
+    - `build.rs:1–4`, which says "`setjmp` is portable";
+    - `gc.rs:15–16`, `:566–568`, `:1002–1009` (the scan's low end is "`&regs`"),
+      `:1039–1044` and `:1113–1118`;
+    - `std/collections/lib.nova:419`.
+- **`CHANGELOG.md`:** one entry under Unreleased. Five older statements sit in
+  released sections (0.1.0, alpha.1, alpha.2) and stay as history: `:2950`,
+  `:4260`, `:4721–4722`, `:4806–4807` and `:4910–4911`.
+- **Left alone:**
+  - the dated design specs and plans under `docs/superpowers/`, which are records
+    of their time;
+  - `examples/05-json-api/BENCHMARK.md`, whose "One host, Windows" lines label
+    measurements and claim nothing about other platforms.
+- **How this list was built.** It is the union of a line-based phrase grep, a
+  read-only check of every claim by a fresh agent, and a proximity sweep: every
+  line naming a platform within three lines of a GC word, plus every `setjmp`
+  mention. Each method found entries the others missed. For example,
+  `crypto.rs:79–82` splits "stack bounds" across two lines, and `ci.yml:91–92`
+  has no GC word near it.
+- **Sweep at the end of the records task:**
+  1. Re-run all three searches: the phrases below, the proximity sweep, and
+     `git grep -n 'target_os = "macos"\|target_vendor'` for claims that no macOS
+     `cfg` exists.
+  2. Take the set difference: every file still matched, minus the files the
+     branch touched.
+  3. Every leftover file, and every remaining match inside a touched file, is
+     either fixed or explained in the PR.
+
+  The phrases: `off Windows`, `non-Windows`, `Windows-only`, `Windows only`,
+  `only on Windows`, `Windows alone`, `which is Windows`, `collection is skipped`,
+  `skips collection`, `no-op off`, `collector is a no-op`, `stack bounds`,
+  `stack-bounds`, `precise bounds`, `stack_base`, `returns before marking`,
+  `Windows gate`, `setjmp`.
 
 ## 7. Risks
 
@@ -532,7 +592,8 @@ exercises:
 2. §5.1's two tests, `gc_reclaims_garbage` and §5.3's test were each watched
    failing on Linux before the fix (§5.4). Mutants (a) and (b) each failed §5.3's
    test on Windows.
-3. Clippy with `-D warnings` and `cargo fmt --check` pass on all CI legs.
+3. Clippy with `-D warnings` passes on all three OSes, macOS included through
+   its new leg, and `cargo fmt --check` passes.
 4. The advisory step runs every test binary on every OS (about 50 `test result:`
    lines each).
 5. The records in §6 are amended, ADR 0024 exists, and the sweep leaves no
