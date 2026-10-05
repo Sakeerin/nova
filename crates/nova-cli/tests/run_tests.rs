@@ -33,7 +33,21 @@ fn gate_2_fibonacci_runs() {
         .arg(repo_root().join("examples/02-fibonacci/src/main.nova"))
         .assert()
         .success()
-        .stdout("fibonacci(10) = 55\n");
+        .stdout("fib(10) = 55\n");
+}
+
+/// `60-EXAMPLES.md` §2's gate, as written: `nova run -- 20` in the example's
+/// own directory prints `fib(20) = 6765`.
+#[test]
+fn gate_2_fibonacci_reads_its_argument() {
+    nova()
+        .current_dir(repo_root().join("examples/02-fibonacci"))
+        .arg("run")
+        .arg("--")
+        .arg("20")
+        .assert()
+        .success()
+        .stdout("fib(20) = 6765\n");
 }
 
 #[test]
