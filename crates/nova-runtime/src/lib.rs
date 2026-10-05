@@ -81,6 +81,10 @@ mod net;
 /// callers are both in this crate, `task.rs` (for `wait`) and `net.rs` (for
 /// `set_nonblocking` and `wait`).
 mod poll;
+/// The program's arguments and `exit`, behind `std/process` (see its module
+/// doc and `docs/adr/0023-program-arguments.md`). `pub` so the driver's JIT
+/// path can set the list, and so `tests/process_args_*.rs` can drive it.
+pub mod process;
 /// The process-wide shutdown flag `std/http`'s `Server::listen` polls (see
 /// its module doc and `docs/adr/0022-process-shutdown-signals.md`). `pub`,
 /// unlike [`time`], so `tests/signal_*.rs` can drive it.
@@ -1224,6 +1228,18 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_shutdown_requested",
             signal::nova_rt_shutdown_requested as *const u8,
+        ),
+        (
+            "nova_rt_process_arg_count",
+            process::nova_rt_process_arg_count as *const u8,
+        ),
+        (
+            "nova_rt_process_arg",
+            process::nova_rt_process_arg as *const u8,
+        ),
+        (
+            "nova_rt_process_exit",
+            process::nova_rt_process_exit as *const u8,
         ),
     ]
 }
