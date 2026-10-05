@@ -250,6 +250,14 @@ impl Response {
       Pipelined requests are in flight.
     - **Empty and the flag set:** close.
     - **Empty and the flag clear:** go idle, keeping the connection alive.
+
+    [Amended 2026-10-05, the branch's final review: "flag or not" left the
+    drain unbounded. A client that keeps pipelining never lets the buffer
+    empty, and each new head was read to completion, so the connection never
+    closed. A request taken up after the stop now gets no further reads: it is
+    answered only if it has already arrived whole, and otherwise the
+    connection closes. Requests taken up before the stop are unchanged.
+    Pinned by `http_server_example_bounds_the_drain_for_a_pipelining_client`.]
 - **`TICK` is 100 ms, and not configurable.**
   - **The probe behind it** had the same tick-polled accept loop and first-byte
     tick, with a sibling task setting the stop. Its `listen` returned within one

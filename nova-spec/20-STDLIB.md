@@ -482,7 +482,8 @@ narrower than the code block below.** `std/http` now has `Server` with
   Ctrl+C on Windows). It stops accepting within 100 ms and returns `Ok(())` as
   soon as accepting stops; each open connection then finishes the request it
   has started, within a 10 s deadline that also bounds the response's write.
-  A second signal ends the process. The first `listen` installs the signal
+  After the stop, a connection answers a pipelined request only if it has
+  already arrived whole, then closes. A second signal ends the process. The first `listen` installs the signal
   handler, through the `STD_ONLY` builtin `shutdown_requested`, and it stays
   installed; see `docs/adr/0022-process-shutdown-signals.md`.
 - `Server` answers pipelined requests in order. `read_request` still does not,

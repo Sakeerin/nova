@@ -843,10 +843,10 @@ impl Server {
     //
     // **Graceful.** On the first such signal it stops accepting within one
     // tick, closes the listener, and returns `Ok(())`. Connections are not
-    // touched: each finishes the request it has started -- pipelined ones
-    // included -- within that request's deadline, and an idle one closes at
-    // its next tick. A second signal ends the process at once, by the
-    // signal's default action.
+    // touched: each finishes the request it has started, and any pipelined
+    // request that has already arrived whole, within that request's deadline,
+    // then closes; an idle one closes at its next tick. A second signal ends
+    // the process at once, by the signal's default action.
     //
     // **It returns before those connections finish.** Their tasks run on
     // alongside any code after `.await`, and the process exits only once
@@ -902,9 +902,12 @@ impl Server {
 // - **In flight (buffer not empty):** a request is taken up -- its deadline
 //   starts now -- read to completion by `read_in_flight`, and answered. The
 //   response is written under the same deadline, so a peer that stops
-//   reading cannot hold the connection forever either.
+//   reading cannot hold the connection forever either. A request taken up
+//   after a stop gets no further reads: it is answered only if it has already
+//   arrived whole, so a peer that keeps sending cannot hold the connection
+//   open either.
 // - **After an answer:** bytes left in the buffer are the next request,
-//   answered even after a stop, because they are in flight. With the buffer
+//   answered even after a stop if they hold all of it. With the buffer
 //   empty, the connection closes if the flag is set and goes idle otherwise.
 //
 // Anything else that goes wrong -- EOF mid-request, a read or write error, a
@@ -934,7 +937,8 @@ async fn serve(s: Server, conn: TcpStream) {
             }
         } else {
             let started = Instant::now()
-            match read_in_flight(conn, buf, started).await {
+            let may_read = !shutdown_requested()
+            match read_in_flight(conn, buf, started, may_read).await {
                 Some(f) => {
                     buf = f.rest
                     let left = SERVER_REQUEST_MS - started.elapsed().as_millis()
@@ -960,8 +964,10 @@ async fn serve(s: Server, conn: TcpStream) {
 // The request at the front of `first`, reading more from `conn` as needed, or
 // `None` to close the connection. The head is parsed from at most
 // `max_head_bytes` of the buffer, so bytes buffered behind it -- a body, or a
-// pipelined request -- never count against the head's own limit.
-async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant) -> Option<InFlight> {
+// pipelined request -- never count against the head's own limit. With
+// `may_read` false, for a request taken up after a stop, nothing more is
+// read, and a request not already whole in `first` is `None`.
+async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant, may_read: Bool) -> Option<InFlight> {
     let limits = Limits::default()
     let mut buf = first
     let mut head: Option<Request> = None
@@ -974,6 +980,7 @@ async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant) -> Opti
         if head.is_none() {
             // A head still incomplete at `max_head_bytes` never will be.
             if window.len() >= limits.max_head_bytes { return None }
+            if !may_read { return None }
             match read_more(conn, 4096, started).await {
                 Some(chunk) => buf = buf.concat(chunk)
                 None => return None
@@ -995,6 +1002,7 @@ async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant) -> Opti
     if want > limits.max_body_bytes { return None }
     let end = body_start + want
     while buf.len() < end {
+        if !may_read { return None }
         match read_more(conn, end - buf.len(), started).await {
             Some(chunk) => buf = buf.concat(chunk)
             None => return None

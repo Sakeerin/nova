@@ -10606,6 +10606,81 @@ fn http_server_example_drops_a_stalled_request_at_its_deadline() {
     }
 }
 
+/// A client that keeps pipelining across the signal cannot hold the drain
+/// open. Every write below completes one request and starts the next, so the
+/// server's buffer is never empty after an answer; a request taken up after
+/// the stop must already be whole, so the server stops reading and closes
+/// this connection although the client is still sending. Found by the
+/// whole-branch review.
+#[test]
+fn http_server_example_bounds_the_drain_for_a_pipelining_client() {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    let _port = lock_port_3000();
+    assert_port_3000_free();
+    let mut server = Http03Server::spawn();
+    server.wait_until_accepting();
+
+    let mut conn = Http03Conn::open();
+    let mut feed = conn.sock.try_clone().expect("clone the client socket");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_feeding = Arc::clone(&stop);
+    let feeder = std::thread::spawn(move || {
+        let _ = feed.write_all(b"GET / HTTP/1.1\r\nho");
+        while !stop_feeding.load(Ordering::SeqCst) {
+            if feed
+                .write_all(b"st: x\r\n\r\nGET / HTTP/1.1\r\nho")
+                .is_err()
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+
+    // The stream is flowing before the signal.
+    for i in 0..3 {
+        let r = http03_response(&mut server, &mut conn, &format!("pipelined response {i}"));
+        assert_eq!(r.body, "Hello from Nova!");
+    }
+    if let Err(e) = send_termination_request(server.pid()) {
+        stop.store(true, Ordering::SeqCst);
+        server.kill_and_panic(&format!("could not deliver the signal: {e}"));
+    }
+    if let Err(e) = wait_until_refused() {
+        stop.store(true, Ordering::SeqCst);
+        server.kill_and_panic(&e);
+    }
+    // Answers to requests already taken up may still arrive; then the server
+    // must close the connection.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() >= deadline {
+            stop.store(true, Ordering::SeqCst);
+            server.kill_and_panic("a pipelining client was still being served 5 s after the stop");
+        }
+        match conn.response() {
+            Ok(r) => assert_eq!(r.body, "Hello from Nova!"),
+            Err(_) => break,
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    let _ = feeder.join();
+    let status = match server.wait_for_exit(Duration::from_secs(10)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the example did not exit after the pipelining connection"),
+    };
+    let (out, err) = server.streams();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+}
+
 /// With port 3000 taken, the example fails at once with a nonzero exit and
 /// the generic unwrap message, rather than hanging (design §6; Review Focus 5).
 #[test]
