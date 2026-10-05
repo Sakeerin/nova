@@ -103,8 +103,9 @@ through a JSON number, so it also accepts ` 20 ` and `2e1`, and rounds above
   `GetCommandLineW`. So a built executable's runtime can read its arguments
   itself. This is reasoned from std's implementation, not measured; §7.4's
   built-executable test on all three CI operating systems is its measurement.
-- **Builtins return primitives, and Nova composes them.** That is the
-  `STD_ONLY` pattern, with its twelve registration sites (ADR 0018).
+- **Builtins mostly return primitives, and Nova composes them,** through the
+  `STD_ONLY` pattern and its twelve registration sites (ADR 0018). One
+  exception: `fs_take_string_array` returns a runtime-built `[String]`.
 - **Every std module is glob-imported into every user module, and a user's own
   item shadows a std one** with no `E0002` clash (`import_std_module`,
   `crates/nova-resolver/src/lib.rs:1644-1650`). No `.nova` file in the tree
@@ -192,8 +193,10 @@ pub fn exit(code: Int) {
   quoting, and the variable leaks into every child process.
 - **`fn main(args: Vec<String>)`.** Rejected: it changes the language's `main`
   contract, and the listings call `args()`.
-- **A builtin returning `Vec<String>`.** Rejected: builtins return primitives,
-  and std builds collections in Nova.
+- **A builtin returning the whole list.** Rejected, though there is a
+  precedent: `fs_take_string_array` returns a runtime-built `[String]`. A count
+  and an index keep the runtime side to an `Int` and one `String` per call, and
+  `args()` builds its `Vec` in Nova either way.
 
 ## 5. The examples
 
