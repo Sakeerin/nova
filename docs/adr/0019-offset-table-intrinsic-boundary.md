@@ -439,7 +439,9 @@ can observe timing and adapt, and not claimed as cryptographic.
   than "unsupported").
   [Amended 2026-10-04, branch `examples-03-http-server`: the router now ships,
   as `Server` with `get` and `listen`, written in Nova over this module's own
-  pieces with no new intrinsic, and `Server` answers pipelined requests. The
+  pieces, and `Server` answers pipelined requests. Its parsing needs no new
+  intrinsic. `listen`'s graceful shutdown reads one new `STD_ONLY` builtin,
+  `shutdown_requested` (`docs/adr/0022-process-shutdown-signals.md`). The
   pipelining deadlock above remains true of `read_request`. See
   `nova-spec/20-STDLIB.md` §6's 2026-10-04 note.]
 - **Phase 2 is not complete, and this increment does not close it.**
