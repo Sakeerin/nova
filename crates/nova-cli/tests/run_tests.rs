@@ -10822,20 +10822,25 @@ fn http03_stop_for_live_counts(server: &mut Http03Server) -> Vec<u64> {
     gc_live_object_counts(&err)
 }
 
-/// Fails unless at least 10 collections ran across `requests`, so the bound
-/// is checked across the whole run rather than only at its start, and unless
-/// every one of them kept fewer than `bound` objects live.
+/// Fails unless every collection across `requests` kept fewer than `bound`
+/// objects live, and at least 10 collections ran, so the bound was checked
+/// across the whole run rather than only at its start. The bound is checked
+/// first: a leak grows the heap, which raises the next collection's
+/// threshold, so a leaking run also collects less often, and checking the
+/// count first would report the leak as too few collections (measured: a
+/// leaking 3,000-connection run collected 4 times, reaching 110,906 live
+/// objects).
 fn assert_live_set_bounded(live: &[u64], requests: usize, bound: u64) {
-    assert!(
-        live.len() >= 10,
-        "expected at least 10 collections over {requests} requests, saw {}: {live:?}",
-        live.len()
-    );
     let max = live.iter().copied().max().unwrap_or(0);
     assert!(
         max < bound,
         "the live set must stay bounded: a collection reported {max} live objects, \
          the bound is {bound} (all {} collections: {live:?})",
+        live.len()
+    );
+    assert!(
+        live.len() >= 10,
+        "expected at least 10 collections over {requests} requests, saw {}: {live:?}",
         live.len()
     );
 }
