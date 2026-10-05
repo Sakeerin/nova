@@ -278,9 +278,8 @@ pub(crate) fn current_task() -> Option<i64> {
 /// executor.
 ///
 /// Test-only because nothing in production may set `CURRENT` outside
-/// `poll_one`. Gated `#[cfg(test)]` rather than `#[cfg(windows)]`: its callers
-/// are `fs.rs`'s tests, which run on every platform, so unlike
-/// `gc::collect_for_test` this cannot read as dead code off Windows.
+/// `poll_one`. Gated `#[cfg(test)]` only: its callers are `fs.rs`'s tests,
+/// which run on every platform.
 #[cfg(test)]
 pub(crate) fn set_current_for_test(id: Option<i64>) {
     CURRENT.with(|c| c.set(id));
@@ -5339,15 +5338,14 @@ mod tests {
         );
     }
 
-    /// Windows-only, matching `gc.rs`'s own `mod registry` precedent, and for
-    /// the identical reason: both tests below call `gc::collect_for_test`,
-    /// which runs the real, stack-scanning `collect()`. `stack_base()`
-    /// (`gc.rs`) only has a real implementation on Windows; elsewhere it
-    /// returns `None`, so `collect()` returns before marking anything and an
+    /// Compiled on every platform, like `gc.rs`'s own `mod registry`, and for
+    /// the reason both were `#[cfg(windows)]` until 2026-10-05: both tests
+    /// below call `gc::collect_for_test`, which runs the real, stack-scanning
+    /// `collect()`, and that needs `stack_base()` (`gc.rs`). It has glibc
+    /// Linux and macOS versions now (`docs/adr/0024-gc-stack-bounds-on-unix.md`).
+    /// Where it has none, `collect()` returns before marking anything, so an
     /// `is_some()` assertion would pass vacuously while an `is_none()`
-    /// assertion would fail outright. `.github/workflows/ci.yml` runs
-    /// ubuntu, windows and macos, so leaving this ungated would land red on
-    /// two of three jobs and green on the third for the wrong reason.
+    /// assertion would fail outright.
     ///
     /// **Both tests below are also unconditionally `#[ignore]`d**, for the
     /// identical mechanism as `gc.rs`'s `mod registry` (see that module's doc
@@ -5371,7 +5369,6 @@ mod tests {
     /// `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`
     /// above -- which needs no collection, so it runs on every platform and
     /// in every CI job.
-    #[cfg(windows)]
     mod root_registration {
         use super::*;
 
