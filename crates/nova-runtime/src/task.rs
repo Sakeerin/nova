@@ -5371,7 +5371,6 @@ mod tests {
     /// `a_completed_tasks_state_stays_rooted_until_its_output_is_taken`
     /// above -- which needs no collection, so it runs on every platform and
     /// in every CI job.
-    #[cfg(windows)]
     mod root_registration {
         use super::*;
 

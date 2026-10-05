@@ -1625,9 +1625,7 @@ fn build_and_run(source: &str, exe_name: &str) -> String {
 /// The GC reclaims garbage: a loop allocating far more than the heap threshold
 /// keeps a bounded live set (rather than accumulating, as the old leaking
 /// allocator did). Verified through the `NOVA_GC_DEBUG` collection log.
-/// Windows-only: precise stack bounds (and thus collection) are currently
-/// implemented there.
-#[cfg(windows)]
+/// SPIKE: un-gated so it runs on Linux and macOS too.
 #[test]
 fn gc_reclaims_garbage() {
     let dir = std::env::temp_dir().join("nova-gc-reclaim");

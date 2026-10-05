@@ -364,7 +364,6 @@ pub(crate) fn root_count(addr: usize) -> usize {
 /// Without this gate the function has no caller at all off Windows and
 /// reads as dead code there under `-D warnings`.
 #[cfg(test)]
-#[cfg(windows)]
 #[inline(always)]
 pub(crate) fn collect_for_test() {
     collect();
@@ -601,16 +600,79 @@ fn stack_base() -> Option<usize> {
     (high > low).then_some(high)
 }
 
-#[cfg(not(windows))]
+/// SPIKE: the calling thread's stack origin on glibc Linux, from
+/// `pthread_getattr_np`: its lowest address plus its size.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn stack_base() -> Option<usize> {
-    // Precise stack bounds for non-Windows platforms are a follow-up; until
-    // then collection is skipped there.
+    // SAFETY: `pthread_getattr_np` fills `attr` for the calling thread, and
+    // `pthread_attr_getstack` reads the stack's lowest address and size from
+    // it. `attr` is destroyed before returning.
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let mut addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let rc = libc::pthread_attr_getstack(&attr, &mut addr, &mut size);
+        libc::pthread_attr_destroy(&mut attr);
+        if rc != 0 || addr.is_null() || size == 0 {
+            return None;
+        }
+        Some(addr as usize + size)
+    }
+}
+
+/// SPIKE: the calling thread's stack origin on macOS, which
+/// `pthread_get_stackaddr_np` reports directly as the stack's highest address.
+#[cfg(target_os = "macos")]
+fn stack_base() -> Option<usize> {
+    // SAFETY: reads the calling thread's own stack origin.
+    let top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) };
+    (!top.is_null()).then_some(top as usize)
+}
+
+#[cfg(not(any(
+    windows,
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos"
+)))]
+fn stack_base() -> Option<usize> {
+    // No implementation on this platform: collection is skipped.
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPIKE: on every platform with an implementation, the stack origin lies
+    /// above this frame, within a plausible stack size.
+    #[test]
+    fn stack_base_lies_above_the_current_frame() {
+        let local = 0u8;
+        let here = std::ptr::addr_of!(local) as usize;
+        match stack_base() {
+            Some(base) => {
+                assert!(
+                    base > here,
+                    "base {base:#x} must be above this frame {here:#x}"
+                );
+                assert!(
+                    base - here < 1 << 30,
+                    "base {base:#x} is implausibly far above {here:#x}"
+                );
+            }
+            None => assert!(
+                !cfg!(any(
+                    windows,
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos"
+                )),
+                "stack_base must be implemented on Windows, glibc Linux and macOS"
+            ),
+        }
+    }
 
     fn reset() {
         HEAP.with(|h| {
@@ -1023,7 +1085,6 @@ mod tests {
     /// own `#[ignore]` reason says which of the two it is, so that is not
     /// restated here. Reachable with `cargo test -- --ignored`, which CI runs
     /// as an advisory, `continue-on-error` step.
-    #[cfg(windows)]
     mod registry {
         use super::*;
 
