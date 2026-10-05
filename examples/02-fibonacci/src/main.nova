@@ -6,7 +6,28 @@ fn fibonacci(n: Int) -> Int {
     }
 }
 
+// The first argument as an Int, or 10 when it is absent or not a number. It
+// goes through `std/json`'s `parse`, since there is no `parse::<Int>()`, so
+// ` 20 ` and `2e1` also mean 20.
+fn arg_n() -> Int {
+    let argv = args()
+    match argv.get(1) {
+        Some(s) => {
+            match parse(s) {
+                Ok(v) => {
+                    match Int::from_json(v) {
+                        Ok(n) => n
+                        Err(_) => 10
+                    }
+                }
+                Err(_) => 10
+            }
+        }
+        None => 10
+    }
+}
+
 fn main() {
-    let n = 10
-    println("fibonacci(${n}) = ${fibonacci(n)}")
+    let n = arg_n()
+    println("fib(${n}) = ${fibonacci(n)}")
 }
