@@ -54,6 +54,14 @@ fn main() {
 
 **Gate:** `nova run -- 20` outputs `fib(20) = 6765`
 
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`): this gate is met, by an
+example written in today's Nova.** `nova run -- 20` in `examples/02-fibonacci`
+prints `fib(20) = 6765`; with no argument it prints `fib(10) = 55`. It needed
+`std/process`'s `args()` and `nova run`'s `--` pass-through, both added on that
+branch (`docs/adr/0023-program-arguments.md`). The listing is unchanged; its
+substitutions are in
+`docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md` §3.
+
 ---
 
 ## 3. `03-http-server` (Phase 2 gate)
@@ -190,6 +198,18 @@ exist; a built exe on Windows can read argv only through FFI, and `nova run`
 cannot pass arguments through. `exit(code)` exists only through FFI. The full
 inventory is `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md`
 §4. The listing above is unchanged.
+
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`): the example now exists,
+and its gate passes.** `examples/04-todo-cli` runs the add → list → done → list
+cycle under `nova run -- ...` and as a built executable, with `todos.json` in
+the working directory. What the note above found missing now exists:
+`std/process` gives `args()` and `exit(code)`, and `nova run [FILE] -- ARGS`
+passes arguments through (`docs/adr/0023-program-arguments.md`). Two behaviours
+differ from the listing by the user's decision of 2026-10-05: a `todos.json`
+that does not parse is refused rather than overwritten, and `add`'s title is
+every argument after it. Every substitution is in
+`docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md` §3. The
+listing above is unchanged.
 
 ---
 
@@ -757,6 +777,10 @@ follows this template.** `examples/03-http-server/README.md` does, beside
 `03-producer-consumer` still have no `README.md`. The durable check is still
 `ls examples/*/README.md` against `ls -d examples/*/`.
 
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`): a third example follows
+this template,** `examples/04-todo-cli/README.md`. The durable check is
+unchanged.
+
 ---
 
 ## 10. Test Coverage per Example
@@ -796,3 +820,8 @@ cannot send a signal to another process, so a `nova test` could not test the
 gate's second clause. The CI job above does not exist in
 `.github/workflows/ci.yml`; the end-to-end tests run in its ordinary
 `cargo test` step on all three operating systems.
+
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`):** `04-todo-cli`'s tests
+live in `crates/nova-cli/tests/run_tests.rs` too, for the first of the two
+reasons above. Whether any example meets this section is a check, not this
+note: `ls -d examples/*/tests/` against the CI job above.

@@ -70,6 +70,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inherited SIGINT or Ctrl+C ignore stays ignored. Programs that never call
   it keep every signal's default action. See
   `docs/adr/0022-process-shutdown-signals.md`.
+- **`examples/04-todo-cli`, the Phase 2 gate in `nova-spec/60-EXAMPLES.md`
+  §4.** It keeps a todo list in `todos.json` in the working directory, with
+  `add <title>`, `list` and `done <id>`. End-to-end tests on all three CI
+  operating systems run the add → list → done → list cycle under `nova run --`
+  and as a built executable. They also cover a Thai title, a corrupt
+  `todos.json` (refused with exit 1, the file untouched) and the usage error
+  (exit 1). The listing is kept as aspiration; the substitutions are in
+  `docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md` §3.
+- **`examples/02-fibonacci` meets its gate for the first time:** `nova run --
+  20` prints `fib(20) = 6765`. With no argument it prints `fib(10) = 55`, where
+  it used to print `fibonacci(10) = 55`.
+- **`std/process`: `args()` and `exit(code)`, over three new `STD_ONLY`
+  builtins (`STD_ONLY` 78 → 81).** `args()[0]` is the program: the source file
+  under `nova run`, the executable when built. `exit` flushes stdout and ends
+  the process with `code`, without joining running tasks. See
+  `docs/adr/0023-program-arguments.md`.
+- **`nova run [FILE] -- ARGS` passes arguments to the program.** Without `--`,
+  `args()` is `[FILE]`.
 
 ### Measured
 - **Eager header materialisation and body accumulation now carry figures.**
@@ -604,6 +622,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     each command read from a file. What has no portable route is the
     program's arguments: there is no `args()`, and `nova run` cannot pass
     arguments through. Separately, `exit(code)` exists only through FFI.
+    [Amended 2026-10-05, branch `examples-04-todo-cli`: `04-todo-cli` now
+    exists, `std/process` gives `args()` and `exit(code)`, and `nova run`
+    passes arguments through; see the bullets under Added.]
   - Found while probing, and not fixed here: a built (Cranelift) executable
     drops a trailing partial line written through std/io's
     `stdout().write(...)` when `main` returns, where `nova run` keeps it.

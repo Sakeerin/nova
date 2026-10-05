@@ -39,6 +39,10 @@ appended after §15 rather than inserted in module-index order (see §16's own
 opening note for why). `std/bytes`, `std/strings`, `std/regex` and
 `std/process` still have no dedicated numbered section below.
 
+**AMENDED 2026-10-05 (branch `examples-04-todo-cli`): `std/process` now has one,
+§17,** appended after §16 for the reason §16's opening note gives. Only `args`
+ships, with `exit`; `spawn` and `env` do not exist.
+
 ---
 
 ## 2. `std/core` — Foundational Types
@@ -1293,6 +1297,11 @@ of it. A sentence naming any Phase 2 module group as unstarted is wrong now;
 the durable check is `ls std/` against `00-MASTER-SPEC.md` §3's numbered list,
 not this sentence.
 
+**AMENDED 2026-10-05 (branch `examples-04-todo-cli`): one link further.**
+`$std.process` makes it **15 → 16** `STD_MODULES` entries and **16 → 17** files
+on disk with `STD_TEST_MODULE`, measured with `find std -name lib.nova`. See
+§17.
+
 **Started is not complete, and the correct successor sentence names what is
 missing inside the module rather than which group is missing.** What ships:
 SHA-256, SHA-512, HMAC-SHA-256, a constant-time HMAC tag check, random bytes
@@ -1487,6 +1496,12 @@ nothing here judges them, so this does not say Phase 2 is complete. See
 now exists under `examples/`, and end-to-end tests of both of its gate
 clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
 §3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
+
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`):** `04-todo-cli` now
+exists too, and end-to-end tests of its gate run on all three CI operating
+systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
+Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
+whether Phase 2 is complete.
 
 **This increment changed nothing in `std`, and the example routes around what
 is missing rather than closing it.** `$std.*` entry counts are untouched.
@@ -2430,6 +2445,9 @@ all. Appended here rather than inserted between §5 and §6 so no existing
 numbered section — several of which are cross-referenced by number
 elsewhere in this repository — has to be renumbered.
 
+**AMENDED 2026-10-05 (branch `examples-04-todo-cli`):** `std/process` now has
+a section, §17, appended after this one for the same reason.
+
 ```nova
 module std.net
 
@@ -2567,3 +2585,33 @@ and where it cannot, coverage falls back to the operation hanging. **A skip is
 silent**, so on a platform where the probe declines, coverage of that property
 is *unknown* rather than claimed. UDP and Unix sockets stay unbuilt, and
 `IoErrorKind` gains no variant.
+
+---
+
+## 17. `std/process`
+
+**Added 2026-10-05 (branch `examples-04-todo-cli`), numbered out of the
+module-index order** for the reason §16's opening note gives. Of that index's
+"spawn, env, args", only `args` ships, with an `exit`; `spawn` and `env` do not
+exist.
+
+```nova
+// The program's arguments. Index 0 is the program itself: under
+// `nova run [FILE] -- ARGS` it is FILE as written (`src/main.nova` when
+// defaulted); in a built executable, whatever the OS reports.
+pub fn args() -> Vec<String>
+
+// Ends the process now with `code`, after flushing stdout. Running tasks are
+// not joined. The OS truncates `code`: Unix keeps its low 8 bits.
+pub fn exit(code: Int)
+```
+
+- `nova run [FILE] -- ARGS` passes ARGS to the program. Without `--`, `args()`
+  is `[FILE]`.
+- An argument that is not valid Unicode arrives with U+FFFD in place of its bad
+  bytes.
+- Both are glob-imported like every std module, and a program's own `args` or
+  `exit` shadows them.
+- Three `STD_ONLY` builtins back them, `process_arg_count`, `process_arg` and
+  `process_exit`, so `STD_ONLY` grows from 78 to 81.
+- See `docs/adr/0023-program-arguments.md`.

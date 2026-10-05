@@ -535,6 +535,12 @@ now exists under `examples/`, and end-to-end tests of both of its gate
 clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
 §3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
 
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`):** `04-todo-cli` now
+exists too, and end-to-end tests of its gate run on all three CI operating
+systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
+Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
+whether Phase 2 is complete.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
@@ -870,3 +876,8 @@ holds two entries; nothing was renumbered, by the user's decision of
 `examples/03-http-server/README.md`; `01-hello-world`, `02-fibonacci` and
 `03-producer-consumer` still have none. The durable checks are still
 `ls -d examples/*/` and `ls examples/*/README.md`, not this note.]
+
+[Amended 2026-10-05, branch `examples-04-todo-cli`: `examples/04-todo-cli/` now
+exists, so Section 2's `04-todo-cli/` entry is no longer ahead of the disk
+either. A third example now has the §9 README, `examples/04-todo-cli/README.md`.
+The durable checks are unchanged.]

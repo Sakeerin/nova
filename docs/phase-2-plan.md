@@ -316,6 +316,12 @@ now exists under `examples/`, and end-to-end tests of both of its gate
 clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
 §3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
 
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`):** `04-todo-cli` now
+exists too, and end-to-end tests of its gate run on all three CI operating
+systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
+Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
+whether Phase 2 is complete.
+
 **Recorded 2026-10-04 (same branch): the router is built, and the HTTP client
 is not.** The bullet's "The router and the HTTP client are not yet built" and
 the 2026-09-10 amendment's "still not built" no longer hold for the router:
