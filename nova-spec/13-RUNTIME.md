@@ -577,6 +577,15 @@ own status.
 Each runtime function does have a stable C ABI signature and is documented at its
 definition, as this section originally said.
 
+**AMENDED 2026-10-05 (branch `examples-04-todo-cli`): two more runtime hooks,
+for a program's arguments and its exit.** `crates/nova-runtime/src/process.rs`
+holds the argument list `std/process`'s `args()` reads. `nova run` sets it from
+what follows `--`. In a built executable nothing sets it, and the runtime reads
+the OS's own argv through `std::env::args_os()`, which works without Rust's
+`main` on glibc, macOS and Windows. `exit(code)` calls `std::process::exit`,
+which flushes stdout and does not join running tasks. See
+`docs/adr/0023-program-arguments.md`.
+
 ## 8. WASM Runtime (Phase 4)
 
 For browser target:
@@ -814,3 +823,9 @@ nothing here judges them, so this does not say Phase 2 is complete. See
 now exists under `examples/`, and end-to-end tests of both of its gate
 clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
 §3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
+
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`):** `04-todo-cli` now
+exists too, and end-to-end tests of its gate run on all three CI operating
+systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
+Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
+whether Phase 2 is complete.

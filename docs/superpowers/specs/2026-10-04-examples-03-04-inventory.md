@@ -27,6 +27,13 @@ are now history.**
   line range for §4's listing: that branch also added a note under §3, which
   moves that listing again.
 
+**Recorded 2026-10-05 (branch `examples-04-todo-cli`): the argument findings in
+§2, §4.1 and §4.3 are history too.** `std/process` gives `args()` and `exit(code)`, `nova run
+[FILE] -- ARGS` passes arguments through, and a built executable's runtime reads
+the OS argv (`docs/adr/0023-program-arguments.md`). §6's steps 2 and 3 are done:
+`examples/04-todo-cli` exists, and `02-fibonacci`'s gate is met. The five std
+additions §6 step 3 lists were written around, not added.
+
 Bare section numbers (§2, §3.1, ...) are this record's own. The spec's sections
 are always written with the file name, as in `60-EXAMPLES.md` §3.
 
