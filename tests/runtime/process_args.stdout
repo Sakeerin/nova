@@ -1,0 +1,5 @@
+count: 4
+[tests/runtime/process_args.nova]
+[one]
+[two words]
+[]

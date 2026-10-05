@@ -429,11 +429,12 @@ fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
     }
 }
 
-/// Compile and immediately execute a file (`nova run`).
-pub fn run_file(path: &Path) -> Result<Outcome<()>> {
+/// Compile and immediately execute a file (`nova run`), with `args` as the
+/// program's arguments: `std/process`'s `args()` returns exactly this list.
+pub fn run_file(path: &Path, args: Vec<String>) -> Result<Outcome<()>> {
     match compile_file(path)? {
         Outcome::Ok(program) => {
-            program.run();
+            program.run_with_args(args);
             Ok(Outcome::Ok(()))
         }
         Outcome::Failed { errors } => Ok(Outcome::Failed { errors }),

@@ -12,6 +12,11 @@ use nova_driver::Outcome;
 pub struct RunCmd {
     /// Path to the Nova source file to run (default: src/main.nova).
     file: Option<PathBuf>,
+
+    /// Arguments for the program, after `--`: `nova run [FILE] -- ARGS...`.
+    /// The program's `args()` is FILE followed by these.
+    #[arg(last = true)]
+    args: Vec<std::ffi::OsString>,
 }
 
 #[derive(Args)]
@@ -43,7 +48,9 @@ fn default_file(file: Option<PathBuf>) -> PathBuf {
 
 pub fn run(cmd: RunCmd) -> Result<()> {
     let file = default_file(cmd.file);
-    match nova_driver::run_file(&file)? {
+    let mut args = vec![file.to_string_lossy().into_owned()];
+    args.extend(cmd.args.iter().map(|a| a.to_string_lossy().into_owned()));
+    match nova_driver::run_file(&file, args)? {
         Outcome::Ok(()) => Ok(()),
         Outcome::Failed { errors } => anyhow::bail!(
             "could not compile due to {errors} previous error{}",

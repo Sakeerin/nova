@@ -62,6 +62,14 @@ impl CompiledProgram {
         let entry: extern "C" fn() = unsafe { std::mem::transmute(self.main) };
         entry();
     }
+
+    /// Execute `main` with `args` as the program's arguments: the list
+    /// `std/process`'s `args()` returns. The runtime keeps the first list it
+    /// is given for the rest of the process (`nova_runtime::process`).
+    pub fn run_with_args(&self, args: Vec<String>) {
+        let _ = nova_runtime::process::set_args(args);
+        self.run();
+    }
 }
 
 /// JIT-compile a MIR module and return the runnable program.

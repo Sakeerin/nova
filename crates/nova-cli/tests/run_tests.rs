@@ -9504,6 +9504,69 @@ fn http_server_dispatch_run() {
         .stdout(expected);
 }
 
+/// `std/process`'s `args()` under `nova run FILE -- ARGS`: index 0 is FILE as
+/// written, and an argument with spaces and an empty one each arrive whole.
+/// Run from the repository root so FILE is a fixed relative path. Design:
+/// docs/superpowers/specs/2026-10-05-examples-04-todo-cli-design.md §7.3.
+#[test]
+fn process_args_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/process_args.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .current_dir(repo_root())
+        .arg("run")
+        .arg("tests/runtime/process_args.nova")
+        .arg("--")
+        .args(["one", "two words", ""])
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// Without `--`, `nova run` behaves as it always has, and `args()` is just
+/// FILE.
+#[test]
+fn process_args_without_a_separator_is_just_the_file() {
+    nova()
+        .current_dir(repo_root())
+        .arg("run")
+        .arg("tests/runtime/process_args.nova")
+        .assert()
+        .success()
+        .stdout("count: 1\n[tests/runtime/process_args.nova]\n");
+}
+
+/// `exit(3)` under `nova run`: the `nova` process ends with status 3, and the
+/// partial line written before it was flushed.
+#[test]
+fn process_exit_run() {
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/process_exit.nova"))
+        .assert()
+        .code(3)
+        .stdout("partial");
+}
+
+/// `exit(3)` in a built executable, where Rust's own `main` never ran: the
+/// status is 3 and the partial line is still flushed.
+#[test]
+fn process_exit_build_standalone() {
+    let dir = std::env::temp_dir().join(format!("nova-build-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let exe = dir.join(format!("process_exit{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(repo_root().join("tests/runtime/process_exit.nova"))
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    Command::new(&exe).assert().code(3).stdout("partial");
+    let _ = std::fs::remove_file(&exe);
+}
+
 /// The benchmark's two halves still work together: the Nova server starts,
 /// prints its port, and `nova-bench-http` drives keep-alive requests against
 /// it with no errors.
