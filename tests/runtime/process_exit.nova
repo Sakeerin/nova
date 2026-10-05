@@ -1,10 +1,12 @@
 // `exit(3)` ends the process at once with status 3, after flushing stdout.
-// `partial` has no newline, so only that flush can deliver it, and the line
-// after `exit` must never run. Run by `process_exit_run` and
+// `partial` is written with `std/io`'s `stdout().write`, which only stages
+// bytes in the line buffer, and it has no newline, so only `exit`'s own flush
+// can deliver it. `print` would prove nothing here: it flushes on every call.
+// The line after `exit` must never run. Run by `process_exit_run` and
 // `process_exit_build_standalone` in `crates/nova-cli/tests/run_tests.rs`.
 
-fn main() {
-    print("partial")
+async fn main() {
+    let _ = stdout().write(bytes_from_string("partial")).await
     exit(3)
     println(" never printed")
 }
