@@ -437,6 +437,11 @@ can observe timing and adapt, and not claimed as cryptographic.
   transfer-encoding, and request pipelining (a pipelined second request is
   silently consumed and the connection deadlocks, which is a sharper claim
   than "unsupported").
+  [Amended 2026-10-04, branch `examples-03-http-server`: the router now ships,
+  as `Server` with `get` and `listen`, written in Nova over this module's own
+  pieces with no new intrinsic, and `Server` answers pipelined requests. The
+  pipelining deadlock above remains true of `read_request`. See
+  `nova-spec/20-STDLIB.md` §6's 2026-10-04 note.]
 - **Phase 2 is not complete, and this increment does not close it.**
   `examples/05-json-api` and `docs/benchmarks/` still do not exist, and
   position 12 `std/crypto` is the one Phase 2 module group this tree still

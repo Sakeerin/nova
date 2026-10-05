@@ -228,6 +228,10 @@ in code or records; none is fixed here.
    > condition, with every connection's reads bounded the same way, lets `main`
    > return and the process exit 0, and that ran on this Windows host. See
    > `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.3.
+   >
+   > **AMENDED 2026-10-04 (branch `examples-03-http-server`).** `std/http`'s
+   > `Server::listen` is that shape, driven by a shutdown signal; see
+   > `docs/adr/0022-process-shutdown-signals.md`.
 4. **Inter-task channels are the deadlock landmine, not mutexes.** `std/sync` waits by spinning
    `yield_now().await`; a `Mutex` never held across an `.await` can never freeze anything, but
    `recv` on an empty channel spins unconditionally, so a consumer waiting on a socket-parked

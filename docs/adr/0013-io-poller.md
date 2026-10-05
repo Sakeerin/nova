@@ -256,3 +256,7 @@ amendment).
   precise bounds and why collection does not run at all off Windows —
   the same property this decision's second alternative (IOCP) notes does not
   itself decide the question, unlike the first
+- `docs/adr/0022-process-shutdown-signals.md` (2026-10-04) — a process-wide
+  shutdown flag set by a signal handler. It leaves this ADR's first rejected
+  alternative rejected: the handler stores an atomic and never signals the
+  executor, which still learns of the flag only at its next deadline

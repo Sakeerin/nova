@@ -311,6 +311,18 @@ are also labelled Phase 2 gates; neither exists under `examples/` and
 nothing here judges them, so this does not say Phase 2 is complete. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`):** `03-http-server`
+now exists under `examples/`, and end-to-end tests of both of its gate
+clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
+§3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
+
+**Recorded 2026-10-04 (same branch): the router is built, and the HTTP client
+is not.** The bullet's "The router and the HTTP client are not yet built" and
+the 2026-09-10 amendment's "still not built" no longer hold for the router:
+`std/http` now has `Server`, written in Nova, with GET routes and synchronous
+handlers (`nova-spec/20-STDLIB.md` §6's 2026-10-04 note). `examples/05-json-api`
+still routes by hand, because `Server` matches exact paths and `GET` only.
+
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
 - Fold in the drift cleanup: chumsky 0.10, `salsa` scaffolding, `fuzz/` targets

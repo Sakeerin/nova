@@ -46,6 +46,30 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   The rule that `gc_str_filled`'s `fill` does not allocate is now
   documented as a convention, not an invariant.
+- **`examples/03-http-server`, the Phase 2 gate in `nova-spec/60-EXAMPLES.md`
+  §3, beside `examples/03-producer-consumer`.** It serves `/`
+  (`Hello from Nova!`) and `/health` (`{"status":"ok"}`) on port 3000. On
+  SIGTERM or SIGINT (Ctrl+Break or Ctrl+C on Windows) it stops accepting,
+  finishes requests already in flight, and exits 0; a second signal ends it
+  at once. End-to-end tests on all three CI operating systems drive both
+  routes, a body on a keep-alive connection, pipelining, a malformed
+  request, a request that straddles the signal, a stalled request dropped
+  at its deadline, a taken port, and the second signal. The listing is kept
+  as aspiration; the substitutions are in
+  `docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md` §3.
+- **`std/http` gains a router: `Server` with `new`, `get`, `dispatch` and
+  `listen`, and a `Response::json` constructor, all written in Nova.**
+  Handlers are `fn(Request) -> Response`. `listen` polls the shutdown flag
+  every 100 ms, bounds every read and the response's write by a 10 s
+  per-request deadline, and answers pipelined requests in order.
+- **The runtime can be asked to stop: a process-wide shutdown flag behind
+  one new `STD_ONLY` builtin, `shutdown_requested()` (`STD_ONLY` 77 → 78).**
+  Its first call installs a SIGTERM/SIGINT handler (Unix) or a
+  console-control handler for Ctrl+Break/Ctrl+C (Windows); the handler only
+  stores an atomic. A second signal takes the default action, and an
+  inherited SIGINT or Ctrl+C ignore stays ignored. Programs that never call
+  it keep every signal's default action. See
+  `docs/adr/0022-process-shutdown-signals.md`.
 
 ### Measured
 - **Eager header materialisation and body accumulation now carry figures.**
@@ -571,7 +595,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - §3's first gate clause is reachable in today's Nova: a `Server` router
     written in Nova served `Hello from Nova!` on `0.0.0.0:3000`. Its second
     clause, "exits cleanly on SIGTERM", is undefined, and the runtime observes
-    no signal.
+    no signal. [Amended 2026-10-04, branch `examples-03-http-server`:
+    `examples/03-http-server` now exists, "exits cleanly" now means a graceful
+    exit 0, and the runtime observes SIGTERM and SIGINT (Ctrl+Break and Ctrl+C
+    on Windows) through an opt-in flag; see that example's bullet under Added.
+    `04-todo-cli` still does not exist.]
   - §4's add → list → done → list cycle ran with one process per command,
     each command read from a file. What has no portable route is the
     program's arguments: there is no `args()`, and `nova run` cannot pass
@@ -2005,6 +2033,9 @@ against 7. Left byte-identical above, per this file's convention.]
   increment forever and are deliberately left byte-identical: rewriting the
   delta to 14 → 15 would falsify a correct record of what this increment
   did.]
+  [Forward marker, 2026-10-04, branch `examples-03-http-server`: "with no
+  router" is true of this increment forever and stays as written. `std/http`
+  gained its router, `Server`, on that later branch.]
   One new intrinsic, `http_parse_request(buf: Bytes) -> [Int]`
   (`Builtin::STD_ONLY` 70 → 71), parsing an HTTP/1.1 request head into a
   flat table of **byte offsets into the caller's own buffer** — status

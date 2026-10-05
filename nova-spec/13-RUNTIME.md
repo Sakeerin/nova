@@ -278,6 +278,17 @@ FIFO round-robin (`task.rs`, the `QUEUE` doc comment), so a task re-queued by
 - Cooperation is real rather than nominal: a task that never reaches a suspension point
   is unpreemptable, and no watchdog can fire while it spins.
 
+**AMENDED 2026-10-04 (branch `examples-03-http-server`): the runtime can now
+be asked to stop, and the executor still does not know it.** A process-wide
+flag in `crates/nova-runtime/src/signal.rs` is set by the first SIGTERM or
+SIGINT (Ctrl+Break or Ctrl+C on Windows), through a handler that the first
+call to the `STD_ONLY` builtin `shutdown_requested()` installs. The handler
+only stores an atomic. It never wakes the executor, which keeps retrying an
+interrupted wait, so Nova code sees the flag at its next deadline;
+`std/http`'s `Server::listen` provides one every 100 ms. A program that never
+calls `shutdown_requested()` installs nothing and keeps every signal's default
+action. See `docs/adr/0022-process-shutdown-signals.md`.
+
 ### 4.2 Future Type
 A Nova `Future<T>` compiles to a state machine reached through one **frozen** C ABI:
 
@@ -332,6 +343,14 @@ Two things block the design as written, and both are structural rather than inci
   language can observe.
 - **The frozen poll ABI has no interrupt hook** (§4.2). There is no way to stop a task
   mid-flight, only to stop polling it.
+
+**AMENDED 2026-10-04 (branch `examples-03-http-server`): a graceful shutdown
+is not cancellation.** `std/http`'s `Server::listen` stops accepting once the
+shutdown flag is set (§4.1's 2026-10-04 note), and it stops nothing else. Each
+connection's task finishes the request it has started, bounded by that
+request's own deadline, and `block_on` returns only once those tasks complete.
+Nothing is interrupted mid-flight, so the gap this section records is
+unchanged.
 
 ### 4.5 Channels
 A **bounded** channel, written entirely in Nova over a private ring buffer, with no
@@ -790,3 +809,8 @@ absolute reading and under the one that counts the Bun ratio.
 are also labelled Phase 2 gates; neither exists under `examples/` and
 nothing here judges them, so this does not say Phase 2 is complete. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
+
+**Recorded 2026-10-04 (branch `examples-03-http-server`):** `03-http-server`
+now exists under `examples/`, and end-to-end tests of both of its gate
+clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
+§3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.

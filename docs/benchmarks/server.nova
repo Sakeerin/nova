@@ -1,8 +1,13 @@
-// The Nova server under benchmark. Not an example, and deliberately not named
-// `03-http-server`: that number and name have drifted from what `examples/`
-// holds, the drift is recorded as open in `nova-spec/00-MASTER-SPEC.md` and
-// `nova-spec/60-EXAMPLES.md`, and taking the reserved name for something the
-// spec does not describe would half-resolve it. See
+// The Nova server under benchmark. Not an example, and not named
+// `03-http-server`: that name is `examples/03-http-server`'s, the
+// `nova-spec/60-EXAMPLES.md` §3 gate. This used to say the name had drifted
+// from what `examples/` holds and that taking it here would half-resolve the
+// drift; amended 2026-10-04 (branch `examples-03-http-server`), because that
+// example now exists and both spec files record it in dated notes. This server
+// never calls `std/http`'s `Server::listen`, so it installs no signal handler
+// and the procedure still kills it;
+// `a_server_that_never_calls_listen_keeps_the_default_signal_action` in
+// `crates/nova-cli/tests/run_tests.rs` relies on that. See
 // `docs/superpowers/specs/2026-09-02-phase-2-gate-benchmark-design.md` section 3.
 //
 // **The response bytes are built ONCE, outside the accept loop, and reused.**

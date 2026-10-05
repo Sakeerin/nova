@@ -471,6 +471,32 @@ over HTTP. The `async fn` type alias above and async
 closures (`async |..|`) still do not exist. See
 `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1.
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`): the router ships,
+narrower than the code block below.** `std/http` now has `Server` with
+`new()`, `get(path, handler)`, `dispatch(req)` and `listen(addr)`, and
+`Response::json(v: JsonValue)`, all written in Nova.
+- `get` returns `Server`, not `Self`: `Self` as a type in an impl block is
+  `E0001`. Handlers are typed `fn(Request) -> Response` inline, because the
+  `Handler` alias below is still `P0001`, so a handler is synchronous.
+- `listen` shuts down gracefully on the first SIGTERM or SIGINT (Ctrl+Break or
+  Ctrl+C on Windows). It stops accepting within 100 ms and returns `Ok(())` as
+  soon as accepting stops; each open connection then finishes the request it
+  has started, within a 10 s deadline that also bounds the response's write.
+  A second signal ends the process. The first `listen` installs the signal
+  handler, through the `STD_ONLY` builtin `shutdown_requested`, and it stays
+  installed; see `docs/adr/0022-process-shutdown-signals.md`.
+- `Server` answers pipelined requests in order. `read_request` still does not,
+  so the "request pipelining" under "Not in v1" above now describes
+  `read_request` only.
+- `Response::json` is a constructor: status 200, `content-type:
+  application/json`, `content-length`. It takes the name this section's client
+  half gives a decoder, `json<T: FromJson>(self)`; one type cannot have both,
+  and the client still does not ship.
+- Not shipped: `post`, `put`, `delete`, `route`, `use_middleware`, path params,
+  the `Handler` and `Middleware` aliases, and the client.
+
+See `docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md`.
+
 ```nova
 module std.http
 
@@ -1455,6 +1481,11 @@ absolute reading and under the one that counts the Bun ratio.
 are also labelled Phase 2 gates; neither exists under `examples/` and
 nothing here judges them, so this does not say Phase 2 is complete. See
 `examples/05-json-api/BENCHMARK.md`, "AMENDMENT 2026-10-04 (gate-remeasure-7)".
+
+**Recorded 2026-10-04 (branch `examples-03-http-server`):** `03-http-server`
+now exists under `examples/`, and end-to-end tests of both of its gate
+clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
+§3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
 
 **This increment changed nothing in `std`, and the example routes around what
 is missing rather than closing it.** `$std.*` entry counts are untouched.

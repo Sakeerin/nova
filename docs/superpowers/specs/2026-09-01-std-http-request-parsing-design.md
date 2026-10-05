@@ -38,11 +38,16 @@ Deliberately not here:
   not served over HTTP. See
   `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1 and
   §3.2.]
+  [Amended 2026-10-04, branch `examples-03-http-server`: the router now ships
+  in `std/http` as `Server`; see `nova-spec/20-STDLIB.md` §6's 2026-10-04
+  note.]
 - **The client.** `get`, `post`, `Response::json`, `HttpError` in that same
   section. A separate problem with no gate dependency.
 - **HTTPS, HTTP/2, chunked transfer-encoding, and request pipelining.**
   Keep-alive *is* in scope: the gate is a throughput number and reconnecting per
   request would dominate it.
+  [Amended 2026-10-04, branch `examples-03-http-server`: `Server` now answers
+  pipelined requests; this item stays true of `read_request`.]
 
 ---
 
@@ -114,6 +119,10 @@ this Windows host with no compiler change, though not served over HTTP. What a
 router still costs is the inline spelling: async closures (`async |..|`) do not
 exist, so a handler that awaits needs a named `async fn`. See
 `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md` §3.1.]
+
+[Amended 2026-10-04, branch `examples-03-http-server`: the router shipped with
+synchronous handlers only: `Server`'s handlers are typed
+`fn(Request) -> Response`.]
 
 ---
 
@@ -399,6 +408,9 @@ Mutations that must fail, run and reported rather than predicted:
 ## 10. Out of scope, and known limitations
 
 - The router, the client, HTTPS, HTTP/2, chunked encoding, pipelining — §1.
+  [Amended 2026-10-04, branch `examples-03-http-server`: the router now
+  ships, and `Server` answers pipelined requests though `read_request` still
+  does not; see §1's notes.]
 - **Original header casing is not preserved.** Names are lower-cased on insert.
 - **`Content-Length` only.** A request without one is treated as bodiless.
 - **No `Expect: 100-continue` handling.**

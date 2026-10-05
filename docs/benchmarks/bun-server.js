@@ -2,9 +2,9 @@
 // `nova-spec/60-EXAMPLES.md` section 5 asks for.
 //
 // `Bun.serve` with a hand-written path match and NO router library, because
-// Nova's side is a raw `std/http` accept loop -- `std/http` has no router,
-// `pub type Handler = async fn(Request) -> Response` being P0001. Putting a
-// routing framework here would measure Nova against that framework.
+// Nova's side is a raw `std/http` accept loop -- `examples/05-json-api` routes
+// by hand rather than through `std/http`'s `Server`. Putting a routing
+// framework here would measure Nova against that framework.
 //
 // Response BODIES match the example's over the nine exchanges
 // `docs/benchmarks/bun-equivalence.js` checks and the example's golden

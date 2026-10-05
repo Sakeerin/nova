@@ -530,6 +530,11 @@ are from this host. `60-EXAMPLES.md` §3 (`03-http-server`) and §4
 complete. Full account in `examples/05-json-api/BENCHMARK.md`,
 "AMENDMENT 2026-10-04 (gate-remeasure-7)".
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`):** `03-http-server`
+now exists under `examples/`, and end-to-end tests of both of its gate
+clauses run on all three CI operating systems; see `nova-spec/60-EXAMPLES.md`
+§3. `04-todo-cli` still does not exist, so Phase 2 is still not complete.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
@@ -856,3 +861,12 @@ above is not narrowed by that addition. Section 2's tree above and
 `examples/` holds `03-producer-consumer`, and adding `05-json-api` touched
 neither. Section 2's tree does name `05-json-api/`, so that entry of it is no
 longer ahead of the disk.]
+
+[Amended 2026-10-04, branch `examples-03-http-server`: `examples/03-http-server/`
+now exists, beside `examples/03-producer-consumer/`, so Section 2's
+`03-http-server/` entry is no longer ahead of the disk either. Slot 03 now
+holds two entries; nothing was renumbered, by the user's decision of
+2026-10-04. A second example now has the §9 README,
+`examples/03-http-server/README.md`; `01-hello-world`, `02-fibonacci` and
+`03-producer-consumer` still have none. The durable checks are still
+`ls -d examples/*/` and `ls examples/*/README.md`, not this note.]

@@ -756,3 +756,7 @@ Two companion rules, from the same evidence:
   source, socket readiness, and the two footgun bullets this ADR's §1 gained
   in its 2026-08-16 amendment above, joining the deadline-starvation and
   livelock footguns this document already carried for the same reason
+- `docs/adr/0022-process-shutdown-signals.md` (2026-10-04) — the graceful
+  shutdown `std/http`'s `Server` builds on this ADR's implicit join: `listen`
+  stops accepting, and `block_on` returns once every connection's task has
+  finished its own bounded request

@@ -9,6 +9,24 @@ and the two Phase 2 gate examples that do not exist yet:
 `nova-spec/60-EXAMPLES.md` §3, `03-http-server`, and §4, `04-todo-cli`. Nothing
 in the repository changed to produce it. No probe program is kept.
 
+**Recorded 2026-10-04 (branch `examples-03-http-server`): parts of this record
+are now history.**
+- §2 and §3.3: the runtime now observes SIGTERM and SIGINT (Ctrl+Break and
+  Ctrl+C on Windows), through an opt-in flag
+  (`docs/adr/0022-process-shutdown-signals.md`), and `std/http`'s `Server`
+  turns it into a graceful exit.
+- §6: decision (i) is made, "exits cleanly" means graceful, and so are (ii),
+  beside `03-producer-consumer`, and (iii), the listing kept as aspiration.
+  Step 1 of the recommended order is done: `examples/03-http-server` exists.
+- §3.2 and §7: the router compiles inside `std/http`, so "whether it compiles
+  inside std is inferred" is settled.
+- Line numbers this record cites in `nova-spec/20-STDLIB.md` hold for this
+  record's own branch, as §1 says. The branch named above added a note under
+  that file's §6, which moves every later line again, so read those citations
+  by the text they quote. The same holds for §1's `nova-spec/60-EXAMPLES.md`
+  line range for §4's listing: that branch also added a note under §3, which
+  moves that listing again.
+
 Bare section numbers (§2, §3.1, ...) are this record's own. The spec's sections
 are always written with the file name, as in `60-EXAMPLES.md` §3.
 
