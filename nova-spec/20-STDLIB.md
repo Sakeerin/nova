@@ -2620,3 +2620,197 @@ pub fn exit(code: Int)
 - Three `STD_ONLY` builtins back them, `process_arg_count`, `process_arg` and
   `process_exit`, so `STD_ONLY` grows from 78 to 81.
 - See `docs/adr/0023-program-arguments.md`.
+
+---
+
+## 18. `std/strings`
+
+**Added 2026-10-06 (branch `phase-2-closeout`), numbered out of the
+module-index order** for the reason §16's opening note gives. `std/strings`
+shipped in Phase 2.2b
+(`docs/superpowers/specs/2026-07-27-phase-2-2b-strings-design.md`) with no
+section here. Its whole surface is one `impl String` block in
+`std/strings/lib.nova`, glob-imported into every module.
+
+```nova
+impl String {
+    // Whether this is "". Cheaper than `len() == 0`, which decodes the
+    // whole string.
+    pub fn is_empty(self) -> Bool
+
+    // The number of codepoints, not bytes. O(n).
+    pub fn len(self) -> Int
+
+    // The codepoints, in order. Index this array rather than calling
+    // `char_at` in a loop.
+    pub fn chars(self) -> [Char]
+
+    // The codepoint at `i`, or `None` when `i` is outside `0..len()`,
+    // negative indexes included.
+    pub fn char_at(self, i: Int) -> Option<Char>
+
+    // Codepoints `start..end`, `end` exclusive. Panics when `start` is
+    // negative, `end` is past the end, or `start` is after `end`.
+    pub fn slice(self, start: Int, end: Int) -> String
+
+    // The codepoints in reverse order.
+    pub fn reverse(self) -> String
+
+    // Whether `self` begins with `prefix`, codepoint for codepoint. An
+    // empty `prefix` always matches.
+    pub fn starts_with(self, prefix: String) -> Bool
+
+    // Whether `self` ends with `suffix`, codepoint for codepoint. An empty
+    // `suffix` always matches.
+    pub fn ends_with(self, suffix: String) -> Bool
+
+    // The codepoint index of the first occurrence of `needle`, or `None`.
+    // An empty `needle` is found at 0.
+    pub fn index_of(self, needle: String) -> Option<Int>
+
+    // Whether `needle` occurs anywhere in `self`. An empty `needle` always
+    // does.
+    pub fn contains(self, needle: String) -> Bool
+
+    // The pieces between non-overlapping occurrences of `sep`, left to
+    // right.
+    pub fn split(self, sep: String) -> [String]
+
+    // `parts`, with `self` between each two.
+    pub fn join(self, parts: [String]) -> String
+
+    // `self` without leading or trailing whitespace.
+    pub fn trim(self) -> String
+
+    // `self` without leading whitespace.
+    pub fn trim_start(self) -> String
+
+    // `self` without trailing whitespace.
+    pub fn trim_end(self) -> String
+
+    // `n` copies of `self`. Panics when `n` is negative.
+    pub fn repeat(self, n: Int) -> String
+
+    // Uppercase, by full Unicode case mapping.
+    pub fn to_upper(self) -> String
+
+    // Lowercase, by full Unicode case mapping.
+    pub fn to_lower(self) -> String
+}
+```
+
+- **Counting.** Every index and length is in codepoints, Unicode scalar
+  values, never bytes: `"café".len()` is 4, though the string is 5 bytes.
+  Nothing is grapheme-aware, so `reverse` separates a combining accent from
+  its letter.
+- **Cost.** Most methods decode the whole string into a `[Char]` first, so
+  `char_at` is O(n), and calling it for each index is quadratic. Call
+  `chars()` once and index the array. `index_of`, `contains` and `join` work
+  on the bytes, in the runtime.
+- **Out-of-range indexes.** `char_at` returns `None`, for a negative index
+  too. `slice` panics instead, as `Vec::set` does, because an index that must
+  be valid is the caller's bug. `start == end` gives "".
+- **`split`.** When `sep` does not occur, the result is one piece, the whole
+  string. Adjacent, leading and trailing separators each give an empty piece;
+  nothing is collapsed or trimmed. An empty `sep` splits into single
+  codepoints, and `"".split("")` is `[]`.
+- **`join` is called on the separator:** `",".join(parts)`. A free `join`
+  would be glob-imported into every module and take the name from user code.
+- **Whitespace,** for the `trim` family, is an explicit list rather than
+  Unicode's White_Space property: space, tab, line feed, carriage return,
+  U+00A0, U+2002, U+2003 and U+3000. A string of only whitespace trims to "".
+- **Case.** `to_upper` and `to_lower` use full Unicode case mapping, so the
+  codepoint count can change: `"ß".to_upper()` is `"SS"`, and
+  `"İ".to_lower()` is 2 codepoints.
+- **Builtins.** Eight `STD_ONLY` builtins back the module: `str_len_chars`,
+  `str_chars`, `str_from_chars`, `str_index_of`, `str_join`, `str_to_upper`,
+  `str_to_lower` and `char_to_int`.
+- **Tests.** `tests/runtime/strings.nova` runs under `nova run`,
+  `nova build` and `NOVA_GC_STRESS=1` (`strings_run`,
+  `strings_build_standalone`, `strings_under_gc_stress`). `slice`'s three
+  panics and `repeat`'s each have their own test:
+  `string_slice_negative_start_panics`, `string_slice_end_past_len_panics`,
+  `string_slice_start_after_end_panics` and
+  `string_repeat_negative_count_panics`.
+
+---
+
+## 19. `std/bytes`
+
+**Added 2026-10-06 (branch `phase-2-closeout`), numbered out of the
+module-index order** for the reason §16's opening note gives. `std/bytes`
+shipped on 2026-08-12
+(`docs/superpowers/specs/2026-08-12-byte-type-design.md`) with no section
+here. It is the index's "immutable byte buffers": no method changes a
+`Bytes`, and `slice` and `concat` return new ones.
+
+```nova
+impl Bytes {
+    // The number of bytes. `Bytes` has no encoding, so this is never a
+    // character count.
+    pub fn len(self) -> Int
+
+    // These bytes as a `String`, or `None` when they are not valid UTF-8.
+    pub fn to_string(self) -> Option<String>
+
+    // The byte at `i`, as an `Int` in `0..=255`, or `None` when `i` is
+    // outside `0..len()`, negative indexes included.
+    pub fn byte_at(self, i: Int) -> Option<Int>
+
+    // The bytes `start..end`, `end` exclusive, with both bounds clamped to
+    // `0..len()`. Bounds that cross give empty bytes. Never panics.
+    pub fn slice(self, start: Int, end: Int) -> Bytes
+
+    // These bytes followed by `other`'s.
+    pub fn concat(self, other: Bytes) -> Bytes
+
+    // Each byte as an `Int` in `0..=255`.
+    pub fn to_ints(self) -> [Int]
+
+    // The index of the first occurrence of `needle`, or `None`. An empty
+    // `needle` is found at 0.
+    pub fn index_of(self, needle: Bytes) -> Option<Int>
+
+    // Whether `needle` occurs anywhere in these bytes.
+    pub fn contains(self, needle: Bytes) -> Bool
+}
+
+// A `Bytes` holding `s`'s UTF-8 bytes.
+pub fn bytes_from_string(s: String) -> Bytes
+
+// A `Bytes` holding each element of `ints` as one byte. Aborts the process
+// when an element is outside `0..=255`.
+pub fn bytes_from_ints(ints: [Int]) -> Bytes
+
+// Equal when both hold the same bytes in the same order.
+impl Eq for Bytes {
+    fn eq(self, other: Bytes) -> Bool
+}
+```
+
+- **Representation.** A `Bytes` value has `String`'s representation, one GC
+  object with its bytes inline, but carries no encoding guarantee. Nothing
+  converts between the two implicitly: `to_string` and `bytes_from_string`
+  are the ways across.
+- **`slice` clamps where `String::slice` panics.** A `Bytes` length often
+  comes from outside the program, such as a file's contents, so a bad bound
+  gives a shorter result rather than ending the process. The byte-type design
+  records the difference as deliberate.
+- **Indexes.** `byte_at` returns `None` out of range, for a negative index
+  too, as `String::char_at` does.
+- **`bytes_from_ints`** aborts with `nova: panic: nova_rt_bytes_from_ints:
+  element out of range 0..=255` on a value outside the range.
+- **`Bytes` is a compiler-owned type name:** declaring `record Bytes` is
+  `E0089`.
+- **Builtins.** Ten `STD_ONLY` builtins back the module: `bytes_len`,
+  `bytes_is_utf8`, `bytes_to_string_unchecked`, `bytes_at`, `bytes_slice`,
+  `bytes_concat`, `bytes_to_ints`, `bytes_from_string_intrinsic`,
+  `bytes_from_ints_intrinsic` and `bytes_eq`. The two free functions call the
+  `_intrinsic` builtins because a builtin of their own name would collide
+  with them (`E0002`).
+- **Tests.** `tests/runtime/bytes_api.nova` runs under `nova run`,
+  `nova build` and `NOVA_GC_STRESS=1` (`bytes_api_run`,
+  `bytes_api_build_standalone`, `bytes_api_under_gc_stress`). The other tests
+  are `bytes_basics_run`, `bytes_from_ints_rejects_a_value_above_the_range`,
+  `bytes_from_ints_rejects_a_value_below_the_range` and
+  `bytes_reserved_declaration_is_rejected`.
