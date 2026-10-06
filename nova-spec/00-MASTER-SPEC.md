@@ -543,11 +543,12 @@ whether Phase 2 is complete.
 
 **Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
 `docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
-promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
-whether it shipped, and where it is recorded; what is not built goes to an
-unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
-every item of the master spec's §7 Definition of Done is met but the last,
-the `v0.2.0` tag.
+promise the master spec's §3, `docs/phase-2-plan.md` and
+`nova-spec/60-EXAMPLES.md` make for Phase 2, whether it shipped, and where it
+is recorded. What is not built goes to an unscheduled backlog, except `salsa`
+and fuzz targets, which go to Phase 3 and Phase 6. With that ADR and
+`nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
+Definition of Done is met but the last, the `v0.2.0` tag.
 
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
@@ -808,15 +809,16 @@ are not in `Cargo.lock`, and no crate depends on them.**
 - `chumsky`: the parser is hand-written;
   `docs/adr/0025-phase-2-boundary.md` decides it stays.
 - `salsa`: ADR 0025 maps it to Phase 3.
-- `inkwell`: the LLVM backend emits textual IR and calls `clang` or `llc`.
+- `inkwell`: the LLVM backend emits textual IR, which `nova-driver` compiles
+  with `clang` or `llc`.
 - `tokio`: `std/task` runs on Nova's own single-threaded executor
   (`docs/adr/0009-async-execution-model.md`).
 - `wasm-encoder` and `walrus`: for Phase 4's WASM backend, position 1.
 - `tower-lsp` and `rustyline`: for Phase 3's language server and REPL,
   positions 4 and 7.
 
-The workspace `Cargo.toml` also declares `chumsky = "0.9"` and
-`rustyline = "14"`, which no crate uses.
+The workspace `Cargo.toml` also declares three dependencies no crate uses:
+`chumsky = "0.9"`, `rustyline = "14"` and `serde_json = "1"`.
 
 ---
 

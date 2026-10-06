@@ -15,18 +15,23 @@ Accepted (2026-10-06). Branch `phase-2-closeout`
 5. an ADR records each decision that deviates from the spec;
 6. a `v0.{phase}.0` milestone is tagged.
 
-Phase 2, "Standard Library Core", makes its promises in two places:
+Phase 2, "Standard Library Core", makes its promises in three places:
 - **the master spec's §3:** the Phase 2 list of thirteen numbered entries,
   cited below as "position N", and the Phase 2 gate;
-- **`docs/phase-2-plan.md`:** sub-phases 2.0 to 2.5, each with a gate, its
-  §4 on how a sub-phase closes, and its §5's cross-cutting items.
+- **`docs/phase-2-plan.md`:** sub-phases 2.0 to 2.5, with a gate for each of
+  2.0 to 2.4; its §4, on how a sub-phase closes; and its §5's cross-cutting
+  items;
+- **`nova-spec/60-EXAMPLES.md`:** its §3, §4 and §5, which label
+  `03-http-server`, `04-todo-cli` and `05-json-api` as Phase 2 gates.
 
 `nova-spec/20-STDLIB.md` §1 names more, but it is headed "Module Index
 (v1.0)": it lists v1.0's standard library, of which Phase 2 builds a part.
-The inventory below includes the index's items that neither of the other two
-names, marked "index", so that what `v0.2.0` leaves out is explicit too.
+The inventory below includes the index's items that none of the three names,
+marked "index", so that what `v0.2.0` leaves out is explicit too.
 
 Earlier ADRs already narrowed Phase 2:
+- 0003: the module model, which defers `import … as`, qualified `m::name`
+  paths, nested module directories and re-exports;
 - 0009: `std/task` runs on Nova's own single-threaded executor, not Tokio;
 - 0014: the standard library's build order;
 - 0015: `std/fmt`'s scope;
@@ -57,13 +62,14 @@ On 2026-10-06 the user decided:
 
 "Position N" is the master spec's Phase 2 list, and "index" is 20-STDLIB §1.
 "2.N" is a sub-phase of `docs/phase-2-plan.md`, and "plan §N" is a section
-of it. A bare "§N" is a section of `nova-spec/20-STDLIB.md`.
+of it. "60-EXAMPLES §N" is a section of `nova-spec/60-EXAMPLES.md`. A bare
+"§N" is a section of `nova-spec/20-STDLIB.md`.
 
 | Promise | Source | Status | Record |
 |---|---|---|---|
 | `std/core` | position 1 | shipped | §2 |
 | `std/fmt`, `std/io` | position 2 | shipped | §3, §4; ADR 0015 |
-| `std/collections`: `Vec`, `Map`, `Set` | position 3 | shipped | §12 |
+| `std/collections`: `Vec`, `Map`, `Set`, iterators | position 3; 2.2 | shipped | §2 (`Iterator`), §12 |
 | `std/collections`: `Queue`, `Deque`, `Vec::with_capacity` | §12's code block; `Queue` also index and 2.2 | not built | §12; backlog |
 | `std/strings` | position 4 | shipped | §18 |
 | `std/fs` | position 5 | shipped | §5; ADR 0012 |
@@ -88,21 +94,30 @@ of it. A bare "§N" is a section of `nova-spec/20-STDLIB.md`.
 | `std/process`: `args`, `exit` | index; 2.5, optional | shipped | §17; ADR 0023 |
 | `std/process`: `spawn`, `env` | index; 2.5, optional | not built | §17; backlog |
 | `std/regex` | index; 2.5, optional | not built | backlog |
-| Gate: `examples/05-json-api` serves 10k+ req/sec on benchmark hardware, with the methodology in `docs/benchmarks/` | the master spec's Phase 2 gate | met, on this development host | ADR 0021; "benchmark hardware" decided here |
+| 2.0: the module system: `import` with glob and `{…}` lists, `pub`, multi-file programs | 2.0 | shipped | ADR 0003 |
+| 2.0: `import … as` | 2.0 | not built | ADR 0003, which also defers qualified `m::name` paths, nested module directories and re-exports; backlog |
+| 2.0: `extern` blocks and FFI intrinsics | 2.0 | shipped; under `nova run` on Linux an `extern` program fails with `E0902`, and that test is ignored (issue #3) | — |
+| 2.0: method-level generics, `where` clauses | 2.0 | shipped | — |
+| 2.0: the prelude | 2.0 | shipped | ADRs 0003, 0004 |
+| 2.1: the `?` operator, "if in scope" | 2.1 | not built: it parses, and type-checking rejects it as unsupported | backlog |
+| 2.2: growable memory through a runtime realloc-style intrinsic | 2.2 | not built as planned: collections grow by allocating a new array and copying | the 2.2a design |
+| Gate: `examples/05-json-api` serves 10k+ req/sec on benchmark hardware, with the methodology in `docs/benchmarks/` | the master spec's Phase 2 gate; 60-EXAMPLES §5 | met, on this development host | ADR 0021; "benchmark hardware" decided here |
+| Gate: `examples/03-http-server` | 60-EXAMPLES §3 | met: its end-to-end tests run on all three CI operating systems | ADR 0022 |
+| Gate: `examples/04-todo-cli` | 60-EXAMPLES §4 | met: its end-to-end tests run on all three CI operating systems | ADR 0023 |
 | 2.0's gate | 2.0 | met in parts, under Cranelift only | LLVM parity, below; backlog |
-| 2.1's gate | 2.1 | met as the 2.1 design narrowed it, under Cranelift | the 2.1 design's §2 |
+| 2.1's gate | 2.1 | met as the 2.1 design set it, under Cranelift | the 2.1 design's §1 |
 | 2.2's gate | 2.2 | GC stress met; no collections benchmark | backlog |
 | 2.3's gate | 2.3 | met by `examples/03-producer-consumer` | — |
 | 2.4's gate | 2.4 | met by `examples/05-json-api` | ADR 0021 |
 | 2.5: `std/test` and `nova test` | 2.5 | shipped | §11 |
 | 2.5: migrating the e2e fixtures to `nova test` | 2.5 | not done | backlog |
-| 2.5: chumsky 0.10 | 2.5; the master spec's Phase 0 position 6, and §6 | not adopted | decided here |
+| 2.5: chumsky 0.10 | 2.5; the master spec's Phase 0 position 6, and the master spec's §6 | not adopted | decided here |
 | 2.5: `salsa` scaffolding | 2.5; the master spec's §6 | not built | Phase 3 |
 | 2.5: `fuzz/` targets | 2.5; the master spec's §5.2; `nova-spec/50-TESTING.md` §1.7 | not built | Phase 6 |
 | 2.5: GC stack bounds off Windows | 2.5 | done for glibc Linux and macOS | ADR 0024 |
 | Every module's programs under both backends and `NOVA_GC_STRESS` | plan §5 | none under LLVM; per-module stress coverage not assessed | LLVM parity, below; backlog |
 | Both backends kept in lockstep | plan §5 | parity unverified | LLVM parity, below; backlog |
-| Sub-phases "independently gated, reviewed, and tagged" | plan §4 | gated and reviewed; tagged as four alphas | decided here |
+| Sub-phases "independently gated, reviewed, and tagged" | plan §4 | 2.0 to 2.4 gated; 2.5 had no gate; none tagged | decided here |
 
 **Status words:**
 - *Shipped:* a `v0.2.0` program can rely on it, within the limits its record
@@ -113,15 +128,16 @@ of it. A bare "§N" is a section of `nova-spec/20-STDLIB.md`.
 
 ### Deviations no earlier record decides
 
-Each section says what was promised and where, what exists, and why it waits
-or what is decided. Where a passage already says the item is unbuilt, the
-section cites it.
+Each section says what was promised and where, and what exists. Every
+deferred item waits for the backlog's one reason: it is built when a program
+needs it. Where a passage already says the item is unbuilt, the section cites
+it. Three sections make a decision.
 
 #### UDP and Unix sockets
 
 Position 9 names UDP, and the index names "TCP/UDP/Unix sockets". `std/net`
-ships TCP, both client and server (§16; ADR 0013). §16 records twice that
-UDP and Unix sockets remain unbuilt. Backlog.
+ships TCP, both client and server (§16; ADR 0013). §16 records that UDP and
+Unix sockets remain unbuilt. Backlog.
 
 #### The HTTP client
 
@@ -185,10 +201,12 @@ runs under both backends". What exists:
   When `clang` is not on `PATH`, it returns early and passes, having run
   nothing. The other two `--release` tests hide the toolchain on purpose and
   check the IR it leaves behind.
-- **"Both backends" in the sub-phase records means two Cranelift paths.** The
-  records name `nova run` and `nova build`, and both are Cranelift; only
-  `nova build --release` reaches LLVM. The module-system commit `8c37c79` and
-  the 2.1 design's gate both say so.
+- **Where a sub-phase record says a program runs "under both backends", it
+  means two Cranelift paths.** Those records name `nova run` and
+  `nova build`, and both are Cranelift; only `nova build --release` reaches
+  LLVM. The module-system commit `8c37c79` and the 2.1 design's gate both say
+  so. Elsewhere the phrase can mean the two codegen crates: the 2.2a plan
+  emits `ArrayAlloc` in both.
 - **2.0's features are tested separately.** `tests/runtime/modules/` is
   multi-file, with `import` and a generic function. `method_generics.nova`,
   `where_clauses.nova` and `extern_ffi.nova` test the other three features,
@@ -241,8 +259,9 @@ close-out changes no manifest.
 #### Per-sub-phase tags: decided, the four alpha tags stand in
 
 Plan §4's heading says each sub-phase is "independently gated, reviewed, and
-tagged". Each was gated and reviewed, and none was tagged. Four pre-release
-tags mark Phase 2's progress instead, `v0.2.0-alpha.1` to `v0.2.0-alpha.4`.
+tagged". 2.0 to 2.4 each had a gate, which the inventory reports on, and 2.5
+had none; no sub-phase was tagged. Four pre-release tags mark Phase 2's
+progress instead, `v0.2.0-alpha.1` to `v0.2.0-alpha.4`.
 
 **Decision:** those four stand in for per-sub-phase tags, and none is added
 after the fact.
@@ -269,16 +288,28 @@ These rows have no section above:
   `spawn` and `env` do not exist.
 - **The oneshot channel:** 2.3 names it beside `mpsc`, and its row is its
   record.
-- **2.1's gate.** The 2.1 design narrowed the sub-phase (its §2) to a program
-  that round-trips `Option` and `Result` and prints a custom `Display`, under
-  `nova run` and `nova build`. That gate is met. The plan's "rewrite the
-  Phase-1 examples" is not part of it, and nothing records it as done. This
-  ADR records the drop, and the narrowed gate stands.
+- **`import … as`:** ADR 0003 deferred it, with qualified `m::name` paths,
+  nested module directories and re-exports.
+- **The `?` operator:** 2.1 promised it "if in scope", and the 2.1 design left
+  it out; its row is its record.
+- **Growable memory:** the 2.2a design records why no realloc-style intrinsic
+  was needed: a collection grows by allocating a bigger array and copying
+  into it.
+- **`extern` under the JIT on Linux:** issue #3 tracks the `E0902`; under
+  `nova build`, `extern` programs run on every operating system.
+- **2.1's gate.** The 2.1 design narrowed the sub-phase (its §2) and set its
+  own gate (its §1): a program that round-trips `Option` and `Result` and
+  prints a custom `Display`, under `nova run` and `nova build`. That gate is
+  met. The plan's "rewrite the Phase-1 examples" is not part of it, and
+  nothing records it as done. This ADR records the drop, and the design's
+  gate stands.
 
 ### The backlog
 
 The backlog is unscheduled. Each item is built when a program needs it, and
 the list promises no date, no phase and no order.
+- The language: `import … as`, with ADR 0003's other deferred module
+  features; the `?` operator.
 - `std/net`: UDP; Unix sockets.
 - `std/http`: the client; a router beyond exact paths and `GET`.
 - `std/sync`: atomics; `RwLock`; a oneshot channel.
@@ -308,8 +339,11 @@ Met while closing Phase 2; recorded, not decided:
 ## Consequences
 
 - With 20-STDLIB §18 and §19 (Definition of Done item 3) and this ADR
-  (item 5), every item of §7's Definition of Done is met but the tag.
-  Tagging `v0.2.0` completes Phase 2 within this boundary.
+  (item 5), every item of the master spec's §7 Definition of Done is met but
+  the tag. Item 2's gate criteria are the master spec's Phase 2 gate and
+  60-EXAMPLES's three Phase 2 gates, and all of them are met. The plan's
+  sub-phase gates are its own, and the inventory reports each one, 2.0's as
+  met only in parts. Tagging `v0.2.0` completes Phase 2 within this boundary.
 - What a `v0.2.0` program can rely on is the "shipped" rows, within the
   limits their records state.
 - The backlog promises nothing.
@@ -322,14 +356,16 @@ Met while closing Phase 2; recorded, not decided:
 - The Phase 0 guides (`ARCHITECTURE.md`, `agent.md` and `skill.md`) and the
   parser's rustdoc are corrected in place instead, because they describe the
   code as it is now.
-- The workspace `Cargo.toml` still declares `chumsky = "0.9"` and
-  `rustyline = "14"`, which no crate uses.
+- The workspace `Cargo.toml` still declares `chumsky = "0.9"`,
+  `rustyline = "14"` and `serde_json = "1"`, which no crate uses.
 
 ## References
 
 - Spec: `docs/superpowers/specs/2026-10-06-phase-2-closeout-design.md`
-- `nova-spec/00-MASTER-SPEC.md` §3 and §7; `docs/phase-2-plan.md`
-- `nova-spec/20-STDLIB.md` §1, §6, §8, §12, §13, §16, §17, §18 and §19
-- `docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md`
-- ADRs 0001, 0009, 0013, 0014, 0015, 0016, 0017, 0018, 0019, 0021, 0023 and
-  0024
+- `nova-spec/00-MASTER-SPEC.md` §3 and §7; `docs/phase-2-plan.md`;
+  `nova-spec/60-EXAMPLES.md` §3 to §5
+- `nova-spec/20-STDLIB.md` §1 to §13 and §16 to §19
+- `docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md` and
+  `docs/superpowers/specs/2026-07-26-phase-2-2a-collections-design.md`
+- ADRs 0001, 0003, 0004, 0009, 0012, 0013, 0014, 0015, 0016, 0017, 0018,
+  0019, 0021, 0022, 0023 and 0024

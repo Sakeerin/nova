@@ -114,7 +114,7 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-codegen-cranelift` | Debug-mode object files | `cranelift` |
 | `nova-codegen-llvm` | Release-mode object files | — (textual LLVM IR, compiled by `clang` or `llc`) |
 | `nova-codegen-wasm` | WASM modules | `wasm-encoder`, `walrus` |
-| `nova-runtime` | GC + async runtime (Rust, linked) | — (its own single-threaded executor, ADR 0009) |
+| `nova-runtime` | GC + async runtime (Rust, linked) | `httparse`, `ring`; its own single-threaded executor (ADR 0009) |
 | `nova-driver` | Pipeline orchestration | all crates above |
 | `nova-cli` | `nova` binary, CLI arg parsing | `nova-driver`, `clap` |
 | `nova-fmt` | Opinionated formatter | `nova-ast` |

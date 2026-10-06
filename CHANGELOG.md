@@ -11,17 +11,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - **Phase 2's boundary is recorded, and two standard-library modules are
-  documented.** `docs/adr/0025-phase-2-boundary.md` lists every promise
-  Phase 2 made, whether it shipped, and where it is recorded. What was not
-  built goes to an unscheduled backlog, with `salsa` mapped to Phase 3 and
-  fuzzing to Phase 6. The ADR decides three questions the specs left open:
-  the hand-written parser stays, the four alpha tags stand in for
-  per-sub-phase tags, and "benchmark hardware" means this development host.
+  documented.** `docs/adr/0025-phase-2-boundary.md` lists every promise the
+  master spec's §3, `docs/phase-2-plan.md` and `nova-spec/60-EXAMPLES.md`
+  make for Phase 2, whether it shipped, and where it is recorded. What was
+  not built goes to an unscheduled backlog, except `salsa` and fuzzing, which
+  map to Phase 3 and Phase 6. The ADR makes three decisions: the hand-written
+  parser stays, the four alpha tags stand in for per-sub-phase tags, and
+  "benchmark hardware" means this development host.
   `nova-spec/20-STDLIB.md` gains §18 `std/strings` and §19 `std/bytes`.
   Dated notes point at the ADR from the master spec, `docs/phase-2-plan.md`
   and the specs for the lexer, parser, runtime, codegen, testing and standard
-  library. The Phase 0 guides' tables and the parser's rustdoc no longer name
-  crates the code does not use.
+  library. The Phase 0 guides no longer name chumsky, `inkwell`, `tokio`,
+  `salsa`, `hyper` or MMTk as what an existing crate uses, and the parser's
+  rustdoc no longer claims chumsky.
 - **`crates/nova-bench-http` can vary two request inputs: `--header
   NAME:VALUE` (repeatable) and `--body-bytes N`.** Each is validated — a
   header needs a non-empty, space-free name and a colon, neither half may

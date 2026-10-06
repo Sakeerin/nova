@@ -1514,14 +1514,6 @@ systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
 Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
 
-**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
-`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
-promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
-whether it shipped, and where it is recorded; what is not built goes to an
-unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
-every item of the master spec's §7 Definition of Done is met but the last,
-the `v0.2.0` tag.
-
 **This increment changed nothing in `std`, and the example routes around what
 is missing rather than closing it.** `$std.*` entry counts are untouched.
 `Map` still has `keys()` and no `values()`, so `users_json` walks ids ascending
@@ -1533,6 +1525,15 @@ example did establish about this section's surface**: `pub fn parse` plus
 code, which `nova-spec/60-EXAMPLES.md` §5 had recorded as absent from the
 language. That route predates this increment; see §5's own 2026-09-10
 amendment.
+
+**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
+promise the master spec's §3, `docs/phase-2-plan.md` and
+`nova-spec/60-EXAMPLES.md` make for Phase 2, whether it shipped, and where it
+is recorded. What is not built goes to an unscheduled backlog, except `salsa`
+and fuzz targets, which go to Phase 3 and Phase 6. With that ADR and
+`nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
+Definition of Done is met but the last, the `v0.2.0` tag.
 
 ---
 
@@ -2732,8 +2733,8 @@ impl String {
   string. Adjacent, leading and trailing separators each give an empty piece;
   nothing is collapsed or trimmed. An empty `sep` splits into single
   codepoints, and `"".split("")` is `[]`.
-- **`join` is called on the separator:** `",".join(parts)`. A free `join`
-  would be glob-imported into every module and take the name from user code.
+- **`join` is called on the separator:** `",".join(parts)`, rather than
+  being a free function glob-imported into every module.
 - **Whitespace,** for the `trim` family, is an explicit list rather than
   Unicode's White_Space property: space, tab, line feed, carriage return,
   U+00A0, U+2002, U+2003 and U+3000. A string of only whitespace trims to "".
@@ -2813,7 +2814,8 @@ impl Eq for Bytes {
 - **`slice` clamps where `String::slice` panics.** A `Bytes` length often
   comes from outside the program, such as a file's contents, so a bad bound
   gives a shorter result rather than ending the process. The byte-type design
-  records the difference as deliberate.
+  keeps the difference on purpose, and records the inconsistency between the
+  two as debt to revisit.
 - **Indexes.** `byte_at` returns `None` out of range, for a negative index
   too, as `String::char_at` does.
 - **`bytes_from_ints`** aborts with `nova: panic: nova_rt_bytes_from_ints:
@@ -2828,7 +2830,8 @@ impl Eq for Bytes {
   with them (`E0002`).
 - **Tests.** `tests/runtime/bytes_api.nova` runs under `nova run`,
   `nova build` and `NOVA_GC_STRESS=1` (`bytes_api_run`,
-  `bytes_api_build_standalone`, `bytes_api_under_gc_stress`). The other tests
-  are `bytes_basics_run`, `bytes_from_ints_rejects_a_value_above_the_range`,
+  `bytes_api_build_standalone`, `bytes_api_under_gc_stress`). The other
+  end-to-end tests are `bytes_basics_run`,
+  `bytes_from_ints_rejects_a_value_above_the_range`,
   `bytes_from_ints_rejects_a_value_below_the_range` and
   `bytes_reserved_declaration_is_rejected`.
