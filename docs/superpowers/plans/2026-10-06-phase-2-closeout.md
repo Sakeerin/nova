@@ -1634,7 +1634,7 @@ pushed only on the maintainer's word.
 
 Run: `cd /d/Projects/nona/nova && git fetch origin && git checkout main && git merge --ff-only origin/main && git log --oneline -1 && python -X utf8 C:/Users/SAKEER~1/AppData/Local/Temp/gcm/closeout/closeout_check.py adr records && git checkout -b release-0.2.0`
 
-Expected: `main` at the rebased close-out commits, both parts `OK`, and a new branch. If `closeout_check.py` is gone, skip it and say so.
+Expected: `main` at the rebased close-out commits, both parts `OK`, and a new branch. If `closeout_check.py` is gone, skip it and say so. Use the copy on disk, which Task 4 extended; Task 1's embedded block is its first version and now fails.
 
 - [ ] **R2. Bump the workspace crates from 0.1.0 to 0.2.0**
 

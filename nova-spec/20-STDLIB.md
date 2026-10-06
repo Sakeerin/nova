@@ -1527,11 +1527,12 @@ language. That route predates this increment; see §5's own 2026-09-10
 amendment.
 
 **Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
-`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
-promise the master spec's §3, `docs/phase-2-plan.md` and
-`nova-spec/60-EXAMPLES.md` make for Phase 2, whether it shipped, and where it
-is recorded. What is not built goes to an unscheduled backlog, except `salsa`
-and fuzz targets, which go to Phase 3 and Phase 6. With that ADR and
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory takes Phase 2's
+promises item by item from the master spec's §3, `docs/phase-2-plan.md` and
+`nova-spec/60-EXAMPLES.md` §3 to §5, adds the larger gaps in
+`nova-spec/20-STDLIB.md`'s own sections, and says whether each shipped and
+where it is recorded. Each item it lists as not built is on an unscheduled
+backlog, or mapped to Phase 3 or Phase 6. With that ADR and
 `nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
 Definition of Done is met but the last, the `v0.2.0` tag.
 
@@ -2728,7 +2729,8 @@ impl String {
   on the bytes, in the runtime.
 - **Out-of-range indexes.** `char_at` returns `None`, for a negative index
   too. `slice` panics instead, as `Vec::set` does, because an index that must
-  be valid is the caller's bug. `start == end` gives "".
+  be valid is the caller's bug. `slice(i, i)` gives "" for any `i` from 0 to
+  `len()`.
 - **`split`.** When `sep` does not occur, the result is one piece, the whole
   string. Adjacent, leading and trailing separators each give an empty piece;
   nothing is collapsed or trimmed. An empty `sep` splits into single
@@ -2777,7 +2779,7 @@ impl Bytes {
     pub fn byte_at(self, i: Int) -> Option<Int>
 
     // The bytes `start..end`, `end` exclusive, with both bounds clamped to
-    // `0..len()`. Bounds that cross give empty bytes. Never panics.
+    // `0..=len()`. Bounds that cross give empty bytes. Never panics.
     pub fn slice(self, start: Int, end: Int) -> Bytes
 
     // These bytes followed by `other`'s.
