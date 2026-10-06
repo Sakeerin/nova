@@ -592,6 +592,21 @@ exercises:
   executables, and none of their names mentions http, server, net, listen,
   socket or tcp.
 
+**Amended 2026-10-06 (final review):** every run above used debug builds, the
+only profile CI builds, so release builds were uncovered too. That matters
+because the register spill (§3.3) exists for optimized code. A release-profile
+run on Linux in Docker (x86-64) then passed:
+- the 17 stress tests, `gc_reclaims_garbage`, both leak tests and the two stack
+  tests;
+- `nova_test_under_gc_stress` once the release runtime library was built
+  (`cargo build --release -p nova-runtime`). `nova test` links that library,
+  and `cargo test --release` alone does not build it.
+
+One release-only failure is not this branch's:
+`task::tests::the_yield_futures_layout_is_the_one_the_abi_declares` fails on
+`main` (`a4eb388`) the same way, with the same 153,040-byte gap between the two
+function addresses it compares. macOS release builds remain uncovered.
+
 ## 9. Success criteria
 
 1. On ubuntu and macOS CI, the blocking `cargo test` step passes with collection

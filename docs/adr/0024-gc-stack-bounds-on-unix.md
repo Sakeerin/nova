@@ -72,7 +72,16 @@ Two facts constrain any design:
 - **The register spill has no discriminating test.** No test can force a
   pointer to live only in a callee-saved register, so removing
   `__builtin_unwind_init` would probably fail no test. The evidence is the
-  stress suite passing with collection live on Linux and macOS.
+  stress suite passing with collection live on Linux and macOS, in these
+  builds:
+  - **Debug**, the only profile CI builds: on Linux and macOS in the spike, and
+    on Linux in a local Docker container for this branch.
+  - **Release**, on Linux only, in Docker on 2026-10-06 (x86-64, the release
+    `nova` at 8,153,144 bytes). The 17 stress tests, `gc_reclaims_garbage`,
+    both leak tests and the two stack tests all passed. Optimized runtime code
+    is where a root can sit in a callee-saved register such as `rbp`, which
+    glibc's `setjmp` scrambles, so this is the profile the spill exists for.
+  - **macOS release builds have never collected under any test.**
 - **Any other platform still leaks**, as does glibc's main thread where `/proc`
   is unavailable, since glibc reads `/proc/self/maps` for it. The no-bounds line
   names the condition. No CI runner reaches it.
