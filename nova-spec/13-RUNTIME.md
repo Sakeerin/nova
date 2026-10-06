@@ -844,3 +844,11 @@ exists too, and end-to-end tests of its gate run on all three CI operating
 systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
 Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
+
+**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
+promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
+whether it shipped, and where it is recorded; what is not built goes to an
+unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
+every item of the master spec's §7 Definition of Done is met but the last,
+the `v0.2.0` tag.

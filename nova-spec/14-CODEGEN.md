@@ -41,6 +41,14 @@ TypedAst → HIR → MIR → CodegenIR
 - Optimization: O2 default, O3 with `-O3` flag, LTO with `--lto`
 - Use case: production binaries
 
+**Amended 2026-10-06 (branch `phase-2-closeout`): there is no `inkwell`.**
+`crates/nova-codegen-llvm` emits LLVM IR as text, and `nova-driver`'s
+`link.rs` passes it to `clang`, or to `llc` when `clang` is missing. That holds
+for §7's sketch and §9.1's `inkwell::debug_info` too. End to end, only hello
+world is built and run in release, by a test that passes without running
+anything when `clang` is not on `PATH`. Parity with the Cranelift backend is
+deferred: `docs/adr/0025-phase-2-boundary.md`.
+
 ### 2.3 WASM (browser target)
 - Crates: `wasm-encoder` (write modules), `walrus` (manipulate)
 - Target: `nova build --target wasm` and `nova bundle`

@@ -62,6 +62,11 @@ Location: `fuzz/fuzz_targets/`
 - `json.rs`: feed random bytes to JSON parser
 - Run via `cargo fuzz run <target>` continuously in CI
 
+**Amended 2026-10-06 (branch `phase-2-closeout`):** none of these targets
+exists, there is no `fuzz/` directory, and §4.2's nightly fuzz job is not in
+`.github/workflows/`. `docs/adr/0025-phase-2-boundary.md` maps fuzz targets
+to Phase 6, beside its security audit.
+
 ### 1.8 Benchmarks
 Location: `benches/` per crate
 - Use `criterion`

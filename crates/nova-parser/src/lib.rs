@@ -1,7 +1,8 @@
 //! Parser for the Nova programming language.
 //!
 //! Converts a `Vec<Spanned<Token>>` (from `nova-lexer`) into an `ast::File`.
-//! Uses `chumsky` for parser combinators with automatic error recovery.
+//! A hand-written recursive-descent parser: after an error it skips to the next
+//! item or statement boundary and keeps going.
 //!
 //! # Usage
 //!
@@ -28,9 +29,9 @@ use nova_lexer::Token;
 
 /// Parse a token stream into a `File` AST.
 ///
-/// Returns `Some(File)` even when errors are present (thanks to chumsky
-/// error recovery). Returns `None` only on catastrophic internal failures
-/// (in practice, extremely rare).
+/// Returns `Some(File)` even when errors are present: the parser skips to the
+/// next item or statement boundary after an error and keeps going. It
+/// currently never returns `None`.
 pub fn parse(tokens: &[Spanned<Token>], file: FileId) -> (Option<File>, Vec<ParseError>) {
     grammar::parse_file(tokens, file)
 }

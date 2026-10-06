@@ -38,7 +38,7 @@ nova-mir            → Mid-level IR
 | `nova-diagnostics` | Shared error reporting infrastructure |
 | `nova-lexer` | Source → tokens (uses `logos`) |
 | `nova-ast` | AST node type definitions |
-| `nova-parser` | Tokens → AST (uses `chumsky`) |
+| `nova-parser` | Tokens → AST (hand-written recursive descent) |
 | `nova-resolver` | Name resolution, module graph |
 | `nova-typeck` | Type inference and checking (HM + extensions) |
 | `nova-hir` | High-level IR, desugared AST |

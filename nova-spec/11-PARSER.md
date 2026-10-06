@@ -13,6 +13,19 @@
 - **Error recovery:** must produce partial AST + errors; never abort on first error
 - **Output:** `Spanned<Expr>`, `Spanned<Stmt>`, etc., with full span coverage
 
+**Amended 2026-10-06 (branch `phase-2-closeout`): the parser does not use
+chumsky.** It is hand-written recursive descent
+(`crates/nova-parser/src/grammar.rs`). Operator precedence comes from explicit
+layering, assignment down to postfix, not from a Pratt combinator. After an
+error the parser skips to the next item boundary (an item keyword such as
+`fn`, `pub` or `record`, or `}`) or statement boundary (`;` or `}`), the first
+two levels §5 lists, and `parse` currently always returns `Some`. So the
+first two bullets above, the grammar's "(Pratt)" label, §4's "rare with
+chumsky" and §5's `recover_with` describe a design that was not built. §7's
+fuzz target does not exist either: there is no `fuzz/` directory.
+`docs/adr/0025-phase-2-boundary.md` decides the hand-written parser stays, and
+maps fuzzing to Phase 6.
+
 ---
 
 ## 2. Formal Grammar (EBNF)
