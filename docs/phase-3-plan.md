@@ -127,6 +127,31 @@ departs from the master spec or from `40-TOOLING.md`.
    crates.io. Prefer embedding. If the spike shows embedding cannot work,
    3.0's spec picks another route and, with the user, adjusts 3.0's gate:
    a download needs a published release, which an unreleased commit lacks.
+
+   **Spike result, 2026-10-06:** both work on stable Cargo, without
+   artifact dependencies. The spike used small stand-ins for the runtime and
+   the CLI, not the real crates.
+   - **std:** `std/` itself becomes a crate, with a `Cargo.toml` and a
+     `lib.rs` that embeds its own files. `cargo package` then keeps all 17
+     `.nova` files, and its verification step builds the packaged copy on
+     its own.
+   - **The runtime:** the runtime crate declares `links`, and its build
+     script reports its source directory. The CLI's build script copies that
+     source, leaving out its packaged `Cargo.lock`, runs a nested offline
+     `cargo build --release` of the copy into a target directory of its own,
+     and embeds the library. An emulated crates.io install (packaged sources
+     only, dependencies patched to their unpacked copies, then `cargo
+     install`) produced a lone executable carrying a valid archive, on
+     Windows and on Linux. Without the lockfile step, a pinned version that
+     was not in the cache broke the nested build.
+   - **The cost:** the release runtime library is 14.6 MB on Windows and
+     30.2 MB on Linux, and 4.6 MB and 7.9 MB gzipped, against a 7.2 MB and
+     an 8.2 MB `nova`. Embedding it compressed roughly doubles `nova`.
+   - **Untested:** macOS, the real runtime inside the nested build, the
+     extra install time, and installs that cross-compile.
+
+   So 3.0 embeds the runtime, compressed, and the download route stays a
+   fallback.
 2. **`nova.toml`'s first scope (3.0).** Parse `[package]`, `[dependencies]`
    (registry versions and path dependencies) and `[dev-dependencies]`, and
    warn on any other key. Features, `[[bin]]`, `[lib]`, `[build]` and git
@@ -333,7 +358,8 @@ a PR, and a merge on the user's word.
 1. **Packaging `nova` for crates.io may break the runtime library and std's
    embedding** (§2 items 1 and 8), because Cargo's artifact dependencies are
    unstable and `cargo package` carries only files inside each crate. The
-   spike in §7 comes first.
+   spike found a route on stable Cargo (decision 1); 3.0 confirms it on
+   macOS and with the real runtime.
 2. **The LSP on broken code.** Today the front end stops before type
    checking on any parse or resolution error. 3.2 makes it continue, and its
    tests feed broken code on purpose.
@@ -358,3 +384,6 @@ and still build programs, when it is packaged and installed the way
 crates.io does it? Try it with `cargo package` and a local install before
 3.0's spec is written. Its answer picks the route for decision 1, and 3.0's
 spec and ADR 0026 follow.
+
+**Done 2026-10-06:** the spike's answer is under decision 1. The next step
+is 3.0's spec.
