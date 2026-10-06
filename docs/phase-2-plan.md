@@ -88,9 +88,9 @@ Ordered so every step is verifiable and unblocks the next. Each ends with the
 established loop: implement → tests → clippy/fmt → commit → adversarial-review
 workflow → fix findings.
 
-**Amended 2026-10-06 (branch `phase-2-closeout`):** each sub-phase was gated
-and reviewed, and none was tagged. Four pre-release tags, `v0.2.0-alpha.1` to
-`v0.2.0-alpha.4`, mark Phase 2's progress instead, and
+**Amended 2026-10-06 (branch `phase-2-closeout`):** 2.0 to 2.4 each had a
+gate, 2.5 had none, and no sub-phase was tagged. Four pre-release tags,
+`v0.2.0-alpha.1` to `v0.2.0-alpha.4`, mark Phase 2's progress instead, and
 `docs/adr/0025-phase-2-boundary.md` decides they stand in for per-sub-phase
 tags.
 
@@ -113,7 +113,7 @@ The foundation. No stdlib until this is solid.
   The four features are tested in separate programs
   (`tests/runtime/modules/`, `method_generics.nova`, `where_clauses.nova`,
   `extern_ffi.nova`), not in one. `docs/adr/0025-phase-2-boundary.md` puts
-  LLVM parity on its backlog.
+  LLVM parity on its backlog, with `import … as`, which ADR 0003 deferred.
 
 ### 2.1 — `std/core` + `std/fmt` + `std/io`
 - `Option<T>`, `Result<T,E>` with full method sets; core traits (`Eq`, `Ord`,
@@ -125,9 +125,11 @@ The foundation. No stdlib until this is solid.
   round-trips `Option`/`Result` and custom `Display`.
   **Amended 2026-10-06 (branch `phase-2-closeout`):** met as the 2.1 design
   narrowed it (`docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md`
-  §2): the round-trip and a custom `Display`, under `nova run` and
+  §1): the round-trip and a custom `Display`, under `nova run` and
   `nova build`, both Cranelift. The narrowed gate leaves out rewriting the
   Phase-1 examples, and `docs/adr/0025-phase-2-boundary.md` records the drop.
+  The `?` operator, promised "if in scope", was not built; it is on that
+  ADR's backlog.
 
 ### 2.2 — `std/collections` + `std/strings`
 - Growable memory support (runtime `realloc`-style intrinsic; GC must track
@@ -357,20 +359,21 @@ systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
 Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
 
-**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
-`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
-promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
-whether it shipped, and where it is recorded; what is not built goes to an
-unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
-every item of the master spec's §7 Definition of Done is met but the last,
-the `v0.2.0` tag.
-
 **Recorded 2026-10-04 (same branch): the router is built, and the HTTP client
 is not.** The bullet's "The router and the HTTP client are not yet built" and
 the 2026-09-10 amendment's "still not built" no longer hold for the router:
 `std/http` now has `Server`, written in Nova, with GET routes and synchronous
 handlers (`nova-spec/20-STDLIB.md` §6's 2026-10-04 note). `examples/05-json-api`
 still routes by hand, because `Server` matches exact paths and `GET` only.
+
+**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
+promise the master spec's §3, `docs/phase-2-plan.md` and
+`nova-spec/60-EXAMPLES.md` make for Phase 2, whether it shipped, and where it
+is recorded. What is not built goes to an unscheduled backlog, except `salsa`
+and fuzz targets, which go to Phase 3 and Phase 6. With that ADR and
+`nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
+Definition of Done is met but the last, the `v0.2.0` tag.
 
 **Amended 2026-10-06 (branch `phase-2-closeout`):** the gate is met
 (`docs/adr/0021-gate-ratio-paired-rounds.md`). What this sub-phase did not

@@ -1671,7 +1671,7 @@ If `--offline` cannot resolve, re-run `cargo update --workspace` without it and 
 
 - [ ] **R3. The "Phase 2 is complete" note, in the four gate-family files (R4)**
 
-Write a one-time script, in the same shape as Task 3's `t3_records.py`. It inserts this text after the boundary note in each of `nova-spec/00-MASTER-SPEC.md`, `13-RUNTIME.md`, `20-STDLIB.md` and `docs/phase-2-plan.md`. The anchor is the boundary note's last two lines, `every item of the master spec's §7 Definition of Done is met but the last,\nthe \`v0.2.0\` tag.\n`. Replace `<DATE>` with the day you run it.
+Write a one-time script, in the same shape as Task 3's `t3_records.py`. It inserts this text after the boundary note in each of `nova-spec/00-MASTER-SPEC.md`, `13-RUNTIME.md`, `20-STDLIB.md` and `docs/phase-2-plan.md`. The anchor is the boundary note's last line, `Definition of Done is met but the last, the \`v0.2.0\` tag.\n` (the fact-check rewrapped the note; see the ledger). Replace `<DATE>` with the day you run it.
 
 ```text
 

@@ -123,7 +123,7 @@ Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`
 | Skill | Notes |
 |---|---|
 | Garbage collection concepts | Mark-and-sweep, generational GC |
-| `mmtk` crate (or `bdwgc` bindings) | GC implementation |
+| Nova's own collector | Conservative mark-and-sweep over a size-class page heap (ADRs 0020, 0024) |
 | Nova's own executor | Single-threaded task scheduling, `async`/`await` (ADR 0009) |
 | `unsafe` Rust | Allocator, GC roots, FFI |
 | Panic handling | Unwinding vs. abort strategies |
