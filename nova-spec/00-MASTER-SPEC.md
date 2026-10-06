@@ -541,6 +541,14 @@ systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
 Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
 
+**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
+promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
+whether it shipped, and where it is recorded; what is not built goes to an
+unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
+every item of the master spec's §7 Definition of Done is met but the last,
+the `v0.2.0` tag.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
@@ -551,6 +559,9 @@ Files to create in order:
 4. `crates/nova-lexer/` — see [10-LEXER.md]
 5. `crates/nova-ast/` — AST node definitions
 6. `crates/nova-parser/` — see [11-PARSER.md], use **chumsky** (Pratt-style for expressions)
+   **Amended 2026-10-06 (branch `phase-2-closeout`):** the parser is
+   hand-written recursive descent, with no chumsky and no Pratt combinator;
+   `docs/adr/0025-phase-2-boundary.md` decides it stays.
 7. `crates/nova-cli/` — wires `nova parse <file>` for testing parser
 8. Snapshot testing harness (use `insta` crate)
 
@@ -694,6 +705,8 @@ This master file references these companions. Read them in order during implemen
 - Integration tests in `tests/` use `assert_cmd` to run `nova` binary
 - Property tests via `proptest` for parser, lexer, JSON
 - Fuzz targets in `fuzz/` for parser, lexer, JSON, regex
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** there is no `fuzz/`
+  directory; `docs/adr/0025-phase-2-boundary.md` maps fuzz targets to Phase 6.
 
 ### 5.3 Errors (user-facing)
 - Style: Elm/Rust quality. Every error has:
@@ -789,6 +802,21 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
+
+**Amended 2026-10-06 (branch `phase-2-closeout`): eight crates in this list
+are not in `Cargo.lock`, and no crate depends on them.**
+- `chumsky`: the parser is hand-written;
+  `docs/adr/0025-phase-2-boundary.md` decides it stays.
+- `salsa`: ADR 0025 maps it to Phase 3.
+- `inkwell`: the LLVM backend emits textual IR and calls `clang` or `llc`.
+- `tokio`: `std/task` runs on Nova's own single-threaded executor
+  (`docs/adr/0009-async-execution-model.md`).
+- `wasm-encoder` and `walrus`: for Phase 4's WASM backend, position 1.
+- `tower-lsp` and `rustyline`: for Phase 3's language server and REPL,
+  positions 4 and 7.
+
+The workspace `Cargo.toml` also declares `chumsky = "0.9"` and
+`rustyline = "14"`, which no crate uses.
 
 ---
 

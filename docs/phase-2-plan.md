@@ -2,6 +2,10 @@
 
 > Status: **draft** (2026-07-23). Derived from `nova-spec/00-MASTER-SPEC.md` §Phase 2
 > and `nova-spec/20-STDLIB.md` / `13-RUNTIME.md`. Supersedes nothing yet.
+>
+> **Amended 2026-10-06 (branch `phase-2-closeout`): closed.**
+> `docs/adr/0025-phase-2-boundary.md` records what each sub-phase below
+> shipped, what it deferred, and where each deferred item went.
 
 ## 1. Goal (from the spec)
 
@@ -84,6 +88,12 @@ Ordered so every step is verifiable and unblocks the next. Each ends with the
 established loop: implement → tests → clippy/fmt → commit → adversarial-review
 workflow → fix findings.
 
+**Amended 2026-10-06 (branch `phase-2-closeout`):** each sub-phase was gated
+and reviewed, and none was tagged. Four pre-release tags, `v0.2.0-alpha.1` to
+`v0.2.0-alpha.4`, mark Phase 2's progress instead, and
+`docs/adr/0025-phase-2-boundary.md` decides they stand in for per-sub-phase
+tags.
+
 ### 2.0 — Language completeness (compiler, no std yet)
 The foundation. No stdlib until this is solid.
 - **Module system**: `module`, `import` (+ `as`, `{…}` lists), a module graph in
@@ -97,6 +107,13 @@ The foundation. No stdlib until this is solid.
 - **Prelude** injection (auto-visible `Option`, `Result`, core traits).
 - **Gate:** a multi-file Nova program using `import`, a generic method, a `where`
   bound, and an `extern` runtime call compiles and runs under both backends.
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** met in parts. The
+  module-system commit, `8c37c79`, ran its programs under `nova run` and
+  `nova build`, and both are Cranelift; only `nova build --release` uses LLVM.
+  The four features are tested in separate programs
+  (`tests/runtime/modules/`, `method_generics.nova`, `where_clauses.nova`,
+  `extern_ffi.nova`), not in one. `docs/adr/0025-phase-2-boundary.md` puts
+  LLVM parity on its backlog.
 
 ### 2.1 — `std/core` + `std/fmt` + `std/io`
 - `Option<T>`, `Result<T,E>` with full method sets; core traits (`Eq`, `Ord`,
@@ -106,6 +123,11 @@ The foundation. No stdlib until this is solid.
   file/stdout/stderr abstractions.
 - **Gate:** rewrite the Phase-1 examples to use `std/core` + `std/io`; a program
   round-trips `Option`/`Result` and custom `Display`.
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** met as the 2.1 design
+  narrowed it (`docs/superpowers/specs/2026-07-25-phase-2-1-std-core-design.md`
+  §2): the round-trip and a custom `Display`, under `nova run` and
+  `nova build`, both Cranelift. The narrowed gate leaves out rewriting the
+  Phase-1 examples, and `docs/adr/0025-phase-2-boundary.md` records the drop.
 
 ### 2.2 — `std/collections` + `std/strings`
 - Growable memory support (runtime `realloc`-style intrinsic; GC must track
@@ -113,6 +135,10 @@ The foundation. No stdlib until this is solid.
 - Unicode-aware string ops (`std/strings`), building on the existing `NovaStr`.
 - **Gate:** a program building/mutating `Vec`/`Map` under GC stress
   (`NOVA_GC_STRESS`) with correct output; benchmark basic ops.
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** the stress half is met
+  (`collections_under_gc_stress`). No benchmark of collection operations
+  exists, and `Queue` was not built; both are on
+  `docs/adr/0025-phase-2-boundary.md`'s backlog.
 
 ### 2.3 — `std/task` (async) + `std/sync` + `std/time` + `std/log`
 - Async model per decision (1). `spawn`, `.await`, `block_on` in `main`;
@@ -120,6 +146,11 @@ The foundation. No stdlib until this is solid.
 - `Instant`/`Duration`/`sleep`; structured logging.
 - **Gate:** a concurrent producer/consumer example with channels and timers
   produces deterministic output.
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** met by
+  `examples/03-producer-consumer`. Of this sub-phase's list, `RwLock`,
+  atomics and a oneshot channel were not built, while a bounded `channel` was
+  (`docs/adr/0017-std-sync-channel-shape.md`).
+  `docs/adr/0025-phase-2-boundary.md` puts the three on its backlog.
 
 ### 2.4 — `std/net` + `std/http` + `std/json`
 - TCP/UDP over the Tokio wrapper; HTTP server (hyper internals) then client;
@@ -326,12 +357,25 @@ systems; see `nova-spec/60-EXAMPLES.md` §4. Every example that file labels a
 Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
 
+**Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
+promise the master spec's §3 and `docs/phase-2-plan.md` make for Phase 2,
+whether it shipped, and where it is recorded; what is not built goes to an
+unscheduled backlog. With that ADR and `nova-spec/20-STDLIB.md` §18 and §19,
+every item of the master spec's §7 Definition of Done is met but the last,
+the `v0.2.0` tag.
+
 **Recorded 2026-10-04 (same branch): the router is built, and the HTTP client
 is not.** The bullet's "The router and the HTTP client are not yet built" and
 the 2026-09-10 amendment's "still not built" no longer hold for the router:
 `std/http` now has `Server`, written in Nova, with GET routes and synchronous
 handlers (`nova-spec/20-STDLIB.md` §6's 2026-10-04 note). `examples/05-json-api`
 still routes by hand, because `Server` matches exact paths and `GET` only.
+
+**Amended 2026-10-06 (branch `phase-2-closeout`):** the gate is met
+(`docs/adr/0021-gate-ratio-paired-rounds.md`). What this sub-phase did not
+build, UDP, the HTTP client and a router beyond exact paths and `GET`, is on
+`docs/adr/0025-phase-2-boundary.md`'s backlog.
 
 ### 2.5 — `std/test` (+ `nova test`) and hardening
 - Test runner; migrate the compiler's e2e fixtures to `nova test` where sensible.
@@ -342,13 +386,30 @@ still routes by hand, because `Server` matches exact paths and `GET` only.
 - Optional: `std/crypto` (ring), `std/fs`, `std/process`, `std/regex` as the
   server example demands.
 
+**Amended 2026-10-06 (branch `phase-2-closeout`):** `std/test` and `nova test`
+shipped. The fixture migration was not done, and is on
+`docs/adr/0025-phase-2-boundary.md`'s backlog. ADR 0025 maps `salsa` to
+Phase 3 and `fuzz/` targets to Phase 6, and decides the hand-written parser
+stays rather than adopting chumsky. Of the optional modules, `std/crypto`,
+`std/fs` and `std/process` shipped, the last with `args` and `exit` only;
+`std/regex` did not.
+
 ## 5. Cross-cutting
 
 - **Testing:** every module gets Nova programs run under both backends and under
   `NOVA_GC_STRESS`; adversarial-review workflow after each substantial feature
   (it found real bugs in every Phase-1 feature except the GC).
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** not met for LLVM: the
+  only program any test builds with `--release` is hello world. Per-module
+  `NOVA_GC_STRESS` coverage was not assessed. LLVM parity is on
+  `docs/adr/0025-phase-2-boundary.md`'s backlog.
 - **Backends:** both Cranelift (debug) and LLVM-IR (release) must stay in lockstep;
   new MIR constructs (async state machines, FFI calls) need both.
+  **Amended 2026-10-06 (branch `phase-2-closeout`):** parity is unverified.
+  The LLVM backend's tests check its IR text, and end to end it builds and runs
+  only hello world, in a test that passes without running anything when
+  `clang` is missing. `docs/adr/0025-phase-2-boundary.md` puts parity on its
+  backlog.
 - **GC:** dynamic collections and async state machines add new heap shapes and
   long-lived roots — re-validate the conservative collector as those land, and
   finish non-Windows stack bounds so CI on Linux exercises real collection.

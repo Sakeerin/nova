@@ -106,15 +106,15 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-diagnostics` | Shared error types + rendering | `codespan-reporting` |
 | `nova-lexer` | `&str` → `Vec<Spanned<Token>>` | `logos` |
 | `nova-ast` | Pure data types — no logic | — |
-| `nova-parser` | Tokens → AST | `chumsky` |
+| `nova-parser` | Tokens → AST | — (hand-written recursive descent) |
 | `nova-resolver` | Name resolution, module graph | `nova-ast`, `nova-diagnostics` |
 | `nova-typeck` | HM type inference + checking | `nova-hir`, `nova-diagnostics` |
 | `nova-hir` | Desugared, typed AST | `nova-ast` |
 | `nova-mir` | 3-address IR | `nova-hir` |
 | `nova-codegen-cranelift` | Debug-mode object files | `cranelift` |
-| `nova-codegen-llvm` | Release-mode object files | `inkwell` |
+| `nova-codegen-llvm` | Release-mode object files | — (textual LLVM IR, compiled by `clang` or `llc`) |
 | `nova-codegen-wasm` | WASM modules | `wasm-encoder`, `walrus` |
-| `nova-runtime` | GC + async runtime (Rust, linked) | `tokio` |
+| `nova-runtime` | GC + async runtime (Rust, linked) | — (its own single-threaded executor, ADR 0009) |
 | `nova-driver` | Pipeline orchestration | all crates above |
 | `nova-cli` | `nova` binary, CLI arg parsing | `nova-driver`, `clap` |
 | `nova-fmt` | Opinionated formatter | `nova-ast` |

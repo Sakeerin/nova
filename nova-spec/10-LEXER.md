@@ -16,6 +16,12 @@
 
 **Decision:** Use `logos` for the lexer. Chumsky for parser only. `logos` is ~2-3x faster and has explicit token regex patterns.
 
+**Amended 2026-10-06 (branch `phase-2-closeout`):** the lexer uses `logos`, as
+decided. The parser does not use chumsky either: it is hand-written
+(`11-PARSER.md` §1's note), and `docs/adr/0025-phase-2-boundary.md` decides
+it stays. §7's fuzz target does not exist; there is no `fuzz/` directory, and
+ADR 0025 maps fuzzing to Phase 6.
+
 ---
 
 ## 2. Token Set

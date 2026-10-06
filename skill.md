@@ -44,11 +44,11 @@ Key types: `Token`, `Spanned<T>`, `LexError`.
 
 | Skill | Notes |
 |---|---|
-| `chumsky` 0.10 | Parser combinator library — read its guide first |
-| Pratt parsing | Expression precedence (used for binary ops) |
+| `nova-parser`'s own code | Hand-written, with no parser library — read `grammar.rs` first |
+| Precedence layering | One parsing level per precedence, assignment down to postfix |
 | EBNF grammars | The spec provides an EBNF grammar to implement |
 | Recursive descent | Top-down parsing strategy |
-| Error recovery | `chumsky` supports recovery combinators — use them |
+| Error recovery | Skip to the next item or statement boundary and keep going |
 | AST design | Immutable node types in `nova-ast` |
 
 Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`).
@@ -79,7 +79,7 @@ Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`
 | 3-address code / SSA | MIR is a 3-address-style IR |
 | Control flow graphs | Basic blocks and edges |
 | Lowering passes | Transforming one IR level to the next |
-| `salsa` incremental computation | Used for query-based compilation |
+| `salsa` incremental computation | Not used yet; planned for Phase 3's language server |
 | `indexmap`, `rustc-hash` | Efficient maps for IR nodes |
 
 ---
@@ -100,7 +100,7 @@ Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`
 
 | Skill | Notes |
 |---|---|
-| `inkwell` crate | Rust LLVM bindings |
+| Textual LLVM IR | The backend writes `.ll` text, which `clang` or `llc` compiles |
 | LLVM IR concepts | `Function`, `BasicBlock`, `Value`, `Builder` |
 | Optimization passes | `PassManager` setup |
 | LLVM types | `IntType`, `PointerType`, struct layout |
@@ -124,7 +124,7 @@ Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`
 |---|---|
 | Garbage collection concepts | Mark-and-sweep, generational GC |
 | `mmtk` crate (or `bdwgc` bindings) | GC implementation |
-| `tokio` async runtime | Task scheduling, `async`/`await` |
+| Nova's own executor | Single-threaded task scheduling, `async`/`await` (ADR 0009) |
 | `unsafe` Rust | Allocator, GC roots, FFI |
 | Panic handling | Unwinding vs. abort strategies |
 | FFI (`extern "C"`) | Exposing runtime functions to compiled code |
@@ -140,7 +140,7 @@ Written in Nova (Phase 2+). Skills:
 | Skill | Notes |
 |---|---|
 | Nova language itself | Eating our own dog food |
-| HTTP / TCP / UDP | `std/http`, `std/net` — backed by `hyper` in runtime |
+| HTTP / TCP | `std/http` over `httparse` (ADR 0019), `std/net` (TCP; no UDP yet) |
 | JSON | Custom parser + trait-based codec |
 | Cryptography | Wrap `ring` at the runtime layer |
 | Async patterns | All I/O is async |
@@ -227,7 +227,7 @@ You don't need a PhD, but these concepts appear throughout the codebase:
 | Concept | Where it matters |
 |---|---|
 | Hindley-Milner (Algorithm W) | `nova-typeck` |
-| Pratt parsing | `nova-parser` (expression precedence) |
+| Precedence layering | `nova-parser` (expression precedence) |
 | SSA form | `nova-mir` |
 | Register allocation | `nova-codegen-cranelift` / LLVM handles it |
 | Dataflow analysis | Future optimization passes |
@@ -244,7 +244,7 @@ You don't need a PhD, but these concepts appear throughout the codebase:
 | nova-diagnostics | ✓✓ | — | — | — | — | — |
 | nova-lexer | ✓✓ | logos | — | — | — | — |
 | nova-ast | ✓ | — | — | — | — | — |
-| nova-parser | ✓✓ | chumsky | — | — | — | — |
+| nova-parser | ✓✓ | hand-written | — | — | — | — |
 | nova-resolver | ✓✓ | — | ✓ | — | — | — |
 | nova-typeck | ✓✓ | — | ✓✓✓ | ✓ | — | — |
 | nova-hir | ✓✓ | — | ✓✓ | ✓✓ | — | — |

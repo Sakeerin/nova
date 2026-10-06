@@ -10,6 +10,18 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Phase 2's boundary is recorded, and two standard-library modules are
+  documented.** `docs/adr/0025-phase-2-boundary.md` lists every promise
+  Phase 2 made, whether it shipped, and where it is recorded. What was not
+  built goes to an unscheduled backlog, with `salsa` mapped to Phase 3 and
+  fuzzing to Phase 6. The ADR decides three questions the specs left open:
+  the hand-written parser stays, the four alpha tags stand in for
+  per-sub-phase tags, and "benchmark hardware" means this development host.
+  `nova-spec/20-STDLIB.md` gains §18 `std/strings` and §19 `std/bytes`.
+  Dated notes point at the ADR from the master spec, `docs/phase-2-plan.md`
+  and the specs for the lexer, parser, runtime, codegen, testing and standard
+  library. The Phase 0 guides' tables and the parser's rustdoc no longer name
+  crates the code does not use.
 - **`crates/nova-bench-http` can vary two request inputs: `--header
   NAME:VALUE` (repeatable) and `--body-bytes N`.** Each is validated — a
   header needs a non-empty, space-free name and a colon, neither half may
