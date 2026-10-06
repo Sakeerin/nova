@@ -551,6 +551,11 @@ backlog, or mapped to Phase 3 or Phase 6. With that ADR and
 `nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
 Definition of Done is met but the last, the `v0.2.0` tag.
 
+**Recorded 2026-10-06 (branch `release-0.2.0`): Phase 2 is complete as
+`v0.2.0`.** With the tag this release carries, every item of the master
+spec's §7 Definition of Done is met, within
+`docs/adr/0025-phase-2-boundary.md`'s boundary.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
