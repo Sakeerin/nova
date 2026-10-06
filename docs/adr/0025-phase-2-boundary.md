@@ -29,6 +29,11 @@ Phase 2, "Standard Library Core", makes its promises in three places:
 The inventory below includes the index's items that none of the three names,
 marked "index", so that what `v0.2.0` leaves out is explicit too.
 
+The sections for the modules that shipped often declare more than ships, and
+each records its own gaps. The inventory lists the larger of those gaps, such
+as `std/log`'s machine-readable output and `std/json`'s `@derive`, and leaves
+the rest to their sections.
+
 Earlier ADRs already narrowed Phase 2:
 - 0003: the module model, which defers `import … as`, qualified `m::name`
   paths, nested module directories and re-exports;
@@ -74,6 +79,7 @@ of it. "60-EXAMPLES §N" is a section of `nova-spec/60-EXAMPLES.md`. A bare
 | `std/strings` | position 4 | shipped | §18 |
 | `std/fs` | position 5 | shipped | §5; ADR 0012 |
 | `std/time`, `std/log` | position 6 | shipped | §9, §10 |
+| `std/log`: JSON output, file output, terminal detection | 2.3 ("structured logging"); index; §10's code block | not built: `Human` lines to stderr or stdout | §10; backlog |
 | `std/task` | position 7, "wrap Tokio" | shipped, on Nova's own single-threaded executor | ADR 0009 |
 | `std/task`: `spawn_blocking`, `JoinHandle::cancel` | §13's code block | not built | §13; backlog |
 | `std/sync`: `Mutex`, a bounded `channel` | position 8 | shipped | ADRs 0016, 0017 |
@@ -84,8 +90,10 @@ of it. "60-EXAMPLES §N" is a section of `nova-spec/60-EXAMPLES.md`. A bare
 | `std/http`: the server, over `httparse` | position 10 | shipped | §6; ADR 0019 |
 | `std/http`: the client | position 10; index | not built | §6; backlog |
 | `std/http`: a router beyond exact paths and `GET` | §6's code block; 2.4's notes | not built | §6; backlog |
-| `std/http`: HTTPS, HTTP/2, chunked transfer-encoding | §6 | not in v1, by §6's own statement | §6 |
+| `std/http`: HTTPS, HTTP/2, chunked transfer-encoding | §6 | not built | §6; backlog |
 | `std/json` | position 11 | shipped | §7; ADR 0018 |
+| `std/json`: `@derive(ToJson, FromJson)`, which §7 calls "a compiler builtin (Phase 2)" | §7 | not built | §7; ADR 0018; backlog |
+| `std/json`: `stringify_pretty` | §7's code block | not built | §7; ADR 0018; backlog |
 | `std/crypto`: SHA-256, SHA-512, HMAC-SHA-256, randomness | position 12 | shipped | §8 |
 | `std/crypto`: AEAD | index; §8's code block | not built | §8; ADR 0018; backlog |
 | `std/crypto`: BLAKE3 | §8's code block | refused by the `ring` backing | §8; backlog, with another backing |
@@ -96,11 +104,11 @@ of it. "60-EXAMPLES §N" is a section of `nova-spec/60-EXAMPLES.md`. A bare
 | `std/regex` | index; 2.5, optional | not built | backlog |
 | 2.0: the module system: `import` with glob and `{…}` lists, `pub`, multi-file programs | 2.0 | shipped | ADR 0003 |
 | 2.0: `import … as` | 2.0 | not built | ADR 0003, which also defers qualified `m::name` paths, nested module directories and re-exports; backlog |
-| 2.0: `extern` blocks and FFI intrinsics | 2.0 | shipped; under `nova run` on Linux an `extern` program fails with `E0902`, and that test is ignored (issue #3) | — |
+| 2.0: `extern` blocks and FFI intrinsics | 2.0 | shipped; under `nova run` on Linux, a call into libm such as `sqrt` fails with `E0902`, and that test is ignored (issue #3) | — |
 | 2.0: method-level generics, `where` clauses | 2.0 | shipped | — |
 | 2.0: the prelude | 2.0 | shipped | ADRs 0003, 0004 |
 | 2.1: the `?` operator, "if in scope" | 2.1 | not built: it parses, and type-checking rejects it as unsupported | backlog |
-| 2.2: growable memory through a runtime realloc-style intrinsic | 2.2 | not built as planned: collections grow by allocating a new array and copying | the 2.2a design |
+| 2.2: growable memory through a runtime realloc-style intrinsic | 2.2 | replaced: collections grow by allocating a new array and copying | the 2.2a design |
 | Gate: `examples/05-json-api` serves 10k+ req/sec on benchmark hardware, with the methodology in `docs/benchmarks/` | the master spec's Phase 2 gate; 60-EXAMPLES §5 | met, on this development host | ADR 0021; "benchmark hardware" decided here |
 | Gate: `examples/03-http-server` | 60-EXAMPLES §3 | met: its end-to-end tests run on all three CI operating systems | ADR 0022 |
 | Gate: `examples/04-todo-cli` | 60-EXAMPLES §4 | met: its end-to-end tests run on all three CI operating systems | ADR 0023 |
@@ -282,7 +290,9 @@ that needs a stronger claim defines its hardware before it measures.
 
 These rows have no section above:
 - **`spawn_blocking` and `JoinHandle::cancel`:** §13 gives the reasons.
-- **HTTPS, HTTP/2 and chunked transfer-encoding:** §6 puts them "Not in v1".
+- **HTTPS, HTTP/2 and chunked transfer-encoding:** §6 lists them as "Not in
+  v1", meaning its own first increment, beside the client; like the client,
+  they are on the backlog.
 - **`std/process`'s `spawn` and `env`, and `std/regex`:** 2.5 lists those
   modules as optional, "as the server example demands", and §17 records that
   `spawn` and `env` do not exist.
@@ -295,8 +305,13 @@ These rows have no section above:
 - **Growable memory:** the 2.2a design records why no realloc-style intrinsic
   was needed: a collection grows by allocating a bigger array and copying
   into it.
-- **`extern` under the JIT on Linux:** issue #3 tracks the `E0902`; under
-  `nova build`, `extern` programs run on every operating system.
+- **`std/log`'s JSON output, file output and terminal detection:** §10 calls
+  them a named next increment.
+- **`@derive(ToJson, FromJson)` and `stringify_pretty`:** §7 and ADR 0018
+  record both as unbuilt.
+- **`extern` under the JIT on Linux:** issue #3 tracks the `E0902` on libm
+  calls such as `sqrt`; under `nova build`, `extern` programs run on every
+  operating system.
 - **2.1's gate.** The 2.1 design narrowed the sub-phase (its §2) and set its
   own gate (its §1): a program that round-trips `Option` and `Result` and
   prints a custom `Display`, under `nova run` and `nova build`. That gate is
@@ -311,7 +326,10 @@ the list promises no date, no phase and no order.
 - The language: `import … as`, with ADR 0003's other deferred module
   features; the `?` operator.
 - `std/net`: UDP; Unix sockets.
-- `std/http`: the client; a router beyond exact paths and `GET`.
+- `std/http`: the client; a router beyond exact paths and `GET`; HTTPS;
+  HTTP/2; chunked transfer-encoding.
+- `std/json`: `@derive(ToJson, FromJson)`; `stringify_pretty`.
+- `std/log`: JSON output; file output; terminal detection.
 - `std/sync`: atomics; `RwLock`; a oneshot channel.
 - `std/collections`: `Queue`; `Deque`; `Vec::with_capacity`.
 - `std/task`: `spawn_blocking`; `JoinHandle::cancel`.

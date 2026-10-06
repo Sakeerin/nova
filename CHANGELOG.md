@@ -11,19 +11,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - **Phase 2's boundary is recorded, and two standard-library modules are
-  documented.** `docs/adr/0025-phase-2-boundary.md` lists every promise the
-  master spec's §3, `docs/phase-2-plan.md` and `nova-spec/60-EXAMPLES.md`
-  make for Phase 2, whether it shipped, and where it is recorded. What was
-  not built goes to an unscheduled backlog, except `salsa` and fuzzing, which
-  map to Phase 3 and Phase 6. The ADR makes three decisions: the hand-written
-  parser stays, the four alpha tags stand in for per-sub-phase tags, and
-  "benchmark hardware" means this development host.
-  `nova-spec/20-STDLIB.md` gains §18 `std/strings` and §19 `std/bytes`.
-  Dated notes point at the ADR from the master spec, `docs/phase-2-plan.md`
-  and the specs for the lexer, parser, runtime, codegen, testing and standard
-  library. The Phase 0 guides no longer name chumsky, `inkwell`, `tokio`,
-  `salsa`, `hyper` or MMTk as what an existing crate uses, and the parser's
-  rustdoc no longer claims chumsky.
+  documented.** `docs/adr/0025-phase-2-boundary.md` takes Phase 2's promises
+  item by item from the master spec's §3, `docs/phase-2-plan.md` and
+  `nova-spec/60-EXAMPLES.md` §3 to §5, adds the larger gaps in
+  `nova-spec/20-STDLIB.md`'s own sections, and says whether each shipped and
+  where it is recorded. What it lists as not built is on an unscheduled
+  backlog, except `salsa` and fuzzing, which map to Phase 3 and Phase 6. The
+  ADR makes three decisions: the hand-written parser stays, the four alpha
+  tags stand in for per-sub-phase tags, and "benchmark hardware" means this
+  development host. `nova-spec/20-STDLIB.md` gains §18 `std/strings` and
+  §19 `std/bytes`. Dated notes point at the ADR from the master spec,
+  `docs/phase-2-plan.md` and the specs for the lexer, parser, runtime,
+  codegen, testing and standard library. The Phase 0 guides no longer name
+  chumsky, `inkwell`, `tokio`, `salsa`, `hyper` or MMTk as what an existing
+  crate uses, and the parser's rustdoc no longer claims chumsky.
 - **`crates/nova-bench-http` can vary two request inputs: `--header
   NAME:VALUE` (repeatable) and `--body-bytes N`.** Each is validated — a
   header needs a non-empty, space-free name and a colon, neither half may

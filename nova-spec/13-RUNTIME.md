@@ -846,10 +846,11 @@ Phase 2 gate (§3, §4 and §5) now exists and passes. This note does not assess
 whether Phase 2 is complete.
 
 **Recorded 2026-10-06 (branch `phase-2-closeout`): Phase 2's boundary is
-`docs/adr/0025-phase-2-boundary.md`.** Its inventory table lists every
-promise the master spec's §3, `docs/phase-2-plan.md` and
-`nova-spec/60-EXAMPLES.md` make for Phase 2, whether it shipped, and where it
-is recorded. What is not built goes to an unscheduled backlog, except `salsa`
-and fuzz targets, which go to Phase 3 and Phase 6. With that ADR and
+`docs/adr/0025-phase-2-boundary.md`.** Its inventory takes Phase 2's
+promises item by item from the master spec's §3, `docs/phase-2-plan.md` and
+`nova-spec/60-EXAMPLES.md` §3 to §5, adds the larger gaps in
+`nova-spec/20-STDLIB.md`'s own sections, and says whether each shipped and
+where it is recorded. Each item it lists as not built is on an unscheduled
+backlog, or mapped to Phase 3 or Phase 6. With that ADR and
 `nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
 Definition of Done is met but the last, the `v0.2.0` tag.
