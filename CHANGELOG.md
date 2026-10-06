@@ -9,6 +9,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-06
+
+**Phase 2, "Standard Library Core", is complete**, within the boundary
+`docs/adr/0025-phase-2-boundary.md` records. This is the `v0.{phase}.0`
+milestone `nova-spec/00-MASTER-SPEC.md` §7 reserves for a completed phase.
+Every module group on the master spec's Phase 2 list ships, as far as that
+ADR's inventory records; `examples/05-json-api` serves 10k+ req/sec on the
+development host the gate was measured on; and the gate examples 03, 04 and
+05 exist and pass. Each item the ADR lists as not built is on its backlog,
+or mapped to Phase 3 or Phase 6. `nova --version` now reports 0.2.0.
+
 ### Added
 - **Phase 2's boundary is recorded, and two standard-library modules are
   documented.** `docs/adr/0025-phase-2-boundary.md` takes Phase 2's promises
