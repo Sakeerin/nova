@@ -830,7 +830,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "nova-ast"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nova-diagnostics",
  "serde",
@@ -839,11 +839,11 @@ dependencies = [
 
 [[package]]
 name = "nova-bench-http"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "nova-bundler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-diagnostics",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "nova-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "nova-codegen-cranelift"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "nova-codegen-llvm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-diagnostics",
@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "nova-codegen-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-diagnostics",
@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "nova-diagnostics"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ariadne",
  "codespan-reporting",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "nova-doc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-ast",
@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "nova-driver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "nova-fmt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-ast",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "nova-hir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nova-diagnostics",
  "nova-resolver",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "nova-lexer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "insta",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "nova-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-ast",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "nova-mir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nova-diagnostics",
  "nova-hir",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "nova-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "insta",
  "nova-ast",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "nova-pm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-diagnostics",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "nova-resolver"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "nova-ast",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "nova-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "nova-test"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "nova-diagnostics",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "nova-typeck"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap",
  "nova-ast",
