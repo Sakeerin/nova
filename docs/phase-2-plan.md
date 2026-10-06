@@ -377,6 +377,11 @@ backlog, or mapped to Phase 3 or Phase 6. With that ADR and
 `nova-spec/20-STDLIB.md` §18 and §19, every item of the master spec's §7
 Definition of Done is met but the last, the `v0.2.0` tag.
 
+**Recorded 2026-10-06 (branch `release-0.2.0`): Phase 2 is complete as
+`v0.2.0`.** With the tag this release carries, every item of the master
+spec's §7 Definition of Done is met, within
+`docs/adr/0025-phase-2-boundary.md`'s boundary.
+
 **Amended 2026-10-06 (branch `phase-2-closeout`):** the gate is met
 (`docs/adr/0021-gate-ratio-paired-rounds.md`). What this sub-phase did not
 build, UDP, the HTTP client and a router beyond exact paths and `GET`, is on
