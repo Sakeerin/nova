@@ -20,9 +20,10 @@
 // something derived from every call's result into a value that is
 // printed, so a reader can tell the loop ran.
 //
-// Build with a RELEASE `nova`: `find_runtime_lib` resolves the runtime
-// staticlib beside the `nova` executable, so a debug `nova` links the
-// debug runtime and depresses every figure here.
+// Build with a RELEASE `nova`. A debug `nova` links the debug runtime
+// staticlib beside it, which depresses every figure here; a release `nova`
+// links the release runtime it carries (ADR 0027). After editing the
+// runtime, rebuild `nova-cli` too, or that carried copy is stale.
 
 const ITERS: Int = 20000
 

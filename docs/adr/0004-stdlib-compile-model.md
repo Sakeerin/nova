@@ -5,6 +5,13 @@
 Accepted (2026-07-25). First increment of Phase 2.1 (`std/core`, Nova's first
 standard-library module).
 
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** std's sources now
+come from the `nova-std` crate (`std/lib.rs`), which embeds every
+`std/*/lib.nova` through paths inside its own package, so `cargo package`
+keeps them; `nova-resolver` no longer reaches outside its crate with
+`include_str!` (ADR 0027). The decision below stands: std is real Nova
+source, embedded in the compiler and compiled as implicit modules.
+
 ## Context
 
 `Option`/`Result` have existed since the Phase 1 prelude (see `22e7a64`) as a

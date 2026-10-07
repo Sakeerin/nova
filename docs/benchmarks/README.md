@@ -152,6 +152,12 @@ which runtime profile the compiled server links against and calls into at
 run time -- a `nova` out of `target/debug/` links the debug-profile runtime,
 and one out of `target/release/` links the release-profile one.
 
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** a release-profile
+`nova` now carries its own release runtime, and links it before the one
+beside it (ADR 0027), so the profile conclusion above stands. But after
+editing the runtime, rebuild `nova-cli` too, or set `NOVA_RUNTIME_LIB`.
+Otherwise the server links the copy embedded at nova-cli's last build.
+
 `nova build` separately has two code-generation backends for the *server
 program itself*: the default, Cranelift, and `--release`, which `nova build
 --help` describes in its own words as "Optimizing build via the LLVM backend

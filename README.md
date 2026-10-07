@@ -5,6 +5,24 @@
 
 ---
 
+## Install
+
+```bash
+cargo install --locked --git https://github.com/Sakeerin/nova nova-cli
+nova new hello
+cd hello
+nova run
+```
+
+`--locked` builds with the dependency versions this repository tests with.
+The install also builds Nova's runtime library and embeds it in `nova`, so
+the installed `nova` needs nothing beside it. It unpacks the library into
+`~/.nova/runtime/` the first time it links a program, and `NOVA_HOME` moves
+that directory. From the next release on, each GitHub release also carries
+ready-built archives for Linux, macOS and Windows.
+
+---
+
 ## How to use this bundle
 
 ### If you're using Claude Code:

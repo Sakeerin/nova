@@ -31,6 +31,11 @@ position 8 and in `14-CODEGEN.md` §9 (DWARF).
   returned 404 on crates.io on 2026-10-06. Release binaries are offered
   throughout. Whichever way it is installed, `nova` must be able to build
   and test without a checkout (decision 1).
+
+  **Amended 2026-10-07 (branch `phase-3-0-foundations`):** 3.0 adds a
+  22nd crate, `nova-std` (`std/`). Its name returned 404 from crates.io's
+  index on 2026-10-07. The README recommends `cargo install --locked
+  --git …`, which builds with the tested lockfile.
 - **Scope: the gate, `nova doc` and the full Phase 3 LSP.** The LSP covers
   every row `40-TOOLING.md` §3.1 marks Phase 3. The REPL and the debugger
   move to a recorded backlog (§3, decision 10).
@@ -53,15 +58,27 @@ position 8 and in `14-CODEGEN.md` §9 (DWARF).
    affected: its JIT resolves runtime calls against the runtime linked into
    `nova` itself (`nova-codegen-cranelift` registers
    `nova_runtime::symbols()`), and std is compiled in.
+
+   **Amended 2026-10-07 (branch `phase-3-0-foundations`):** resolved by
+   3.0. A release-profile `nova` carries its runtime library and unpacks
+   it to `$NOVA_HOME/runtime/` (ADR 0027).
 2. **Nothing is released yet.** `.github/workflows/release.yml` builds
    `nova` for four targets on each `v*` tag and uploads the binaries as
    workflow artifacts; it creates no GitHub release, so there is nothing to
    download from a release page.
+
+   **Amended 2026-10-07 (branch `phase-3-0-foundations`):** resolved in
+   `release.yml` by 3.0: each `v*` tag now gets a GitHub release with
+   per-target archives; the next tag is its first real run.
 3. **There is no project model.** There is no `nova.toml`, and no `nova new`
    or `nova init`. The CLI has `parse`, `run`, `build`, `check` and `test`
    (`crates/nova-cli/src/main.rs`). `run`, `build` and `check` default their
    file to `src/main.nova` in the current directory, `test` always uses that
    file, and `parse` requires one.
+
+   **Amended 2026-10-07 (branch `phase-3-0-foundations`):** 3.0 adds
+   `nova.toml`, `nova new`, `nova init` and project discovery; dependencies,
+   the lock file and `tests/` wait for 3.3.
 4. **Modules are files beside the entry file** (ADR 0003): `import m` globs
    module `m`'s public names, and `m` is `m.nova` next to the entry. ADR 0003
    defers `import … as`, qualified `m::name` paths, nested module
@@ -100,6 +117,10 @@ position 8 and in `14-CODEGEN.md` §9 (DWARF).
    - Dependencies between workspace crates are paths with no `version`.
    - The workspace `repository` field is still the spec's placeholder,
      `https://github.com/novalang/nova`.
+
+   **Amended 2026-10-07 (branch `phase-3-0-foundations`):** 3.0 removes the
+   first blocker, because std is now the crate `nova-std`; the other two
+   remain for 3.6.
 9. **The tooling crates are stubs.** `nova-fmt`, `nova-lsp`, `nova-pm`,
    `nova-doc` and `nova-test`, like Phase 4's `nova-bundler` and
    `nova-codegen-wasm`, each have a one-line `lib.rs` and a manifest. None of
@@ -108,6 +129,10 @@ position 8 and in `14-CODEGEN.md` §9 (DWARF).
    Each new dependency gets the scrutiny `httparse` and `ring` got (ADR 0019
    for `httparse`, and the note in `crates/nova-runtime/Cargo.toml` for
    `ring`).
+
+   **Amended 2026-10-07 (branch `phase-3-0-foundations`):** `nova-pm` now
+   parses `nova.toml` (3.0), and `flate2` and `semver` are in `Cargo.lock`;
+   `toml` no longer is.
 
 ## 3. Key decisions (recommended now, confirmed before building)
 
@@ -146,7 +171,8 @@ departs from the master spec or from `40-TOOLING.md`.
      was not in the cache broke the nested build.
    - **The cost:** the release runtime library is 14.6 MB on Windows and
      30.2 MB on Linux, and 4.6 MB and 7.9 MB gzipped, against a 7.2 MB and
-     an 8.2 MB `nova`. Embedding it compressed roughly doubles `nova`.
+     an 8.2 MB `nova`. Embedding it compressed grows `nova` by about two
+     thirds on Windows and doubles it on Linux.
    - **Untested:** macOS, the real runtime inside the nested build, the
      extra install time, and installs that cross-compile.
 
@@ -243,6 +269,8 @@ a PR, and a merge on the user's word.
   crates/nova-cli --root <temp dir>`, which installs `nova` with nothing
   beside it. Then `nova new demo`, and `nova run`, `nova build` and
   `nova test` inside `demo`, all succeed with no environment variable set.
+- **Spec:** `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`,
+  built on the branch `phase-3-0-foundations`.
 
 ### 3.1 — Formatter
 - A lexer mode that keeps comments, and `///` doc comments parsed and

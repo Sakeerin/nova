@@ -47,12 +47,14 @@ nova-mir            → Mid-level IR
 | `nova-codegen-llvm` | Optimized release backend |
 | `nova-codegen-wasm` | WebAssembly backend |
 | `nova-runtime` | GC, async runtime, panic handling |
+| `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler |
 | `nova-fmt` | Opinionated code formatter |
 | `nova-lsp` | Language Server Protocol implementation |
 | `nova-test` | Test runner |
-| `nova-pm` | Package manager |
+| `nova-pm` | Package manager: `nova.toml` parsing and project discovery so far |
 | `nova-bundler` | Frontend bundler |
 | `nova-doc` | Documentation generator |
+| `nova-bench-http` | Keep-alive HTTP load generator for benchmarking `std/http` |
 
 ## Key Design Decisions
 
