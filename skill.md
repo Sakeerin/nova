@@ -207,6 +207,12 @@ Written in Nova (Phase 2+). Skills:
 | `criterion` benchmarks | Performance regression tracking |
 | Fuzz testing (`cargo-fuzz`) | Targets for lexer, parser, JSON, regex |
 
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** the formatter's
+output is not an `insta` snapshot. Its tests compare each whole output with
+an exact string written beside its input, and check that formatting the
+output again changes nothing
+(`docs/superpowers/plans/2026-10-07-phase-3-1-formatter.md`, decision 14).
+
 ---
 
 ## 12. CI / Infrastructure
