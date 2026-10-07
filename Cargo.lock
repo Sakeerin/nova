@@ -964,6 +964,8 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "cc",
+ "crc32fast",
+ "flate2",
  "nova-ast",
  "nova-codegen-cranelift",
  "nova-codegen-llvm",

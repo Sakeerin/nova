@@ -7,6 +7,9 @@
 //! `nova build`, and `nova check`.
 
 mod link;
+mod runtime_cache;
+
+pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 
 use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
