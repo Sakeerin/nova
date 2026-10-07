@@ -25,6 +25,15 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Its `links` metadata hands build.rs the runtime's source directory (spec
+# docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §4.1).
+# The runtime is already linked into `nova` through nova-codegen-cranelift,
+# so this adds no code; only a direct dependent receives the metadata.
+nova-runtime = { path = "../nova-runtime" }
+
+[build-dependencies]
+flate2 = { workspace = true }
+crc32fast = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "GC and async runtime for Nova (linked into compiled binaries)"
+# `links` lets this crate's build script hand metadata to the crates that
+# depend on it: nova-cli's build script reads DEP_NOVA_RUNTIME_MANIFEST_DIR
+# to find this source and build the staticlib it embeds
+# (docs/adr/0027-runtime-and-std-in-an-installed-nova.md).
+links = "nova_runtime"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
