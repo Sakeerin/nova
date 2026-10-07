@@ -22,11 +22,7 @@ impl Bytes {
     // this fails, so an error kind would carry no information, and a byte type
     // should not depend on an I/O error type.
     pub fn to_string(self) -> Option<String> {
-        if bytes_is_utf8(self) {
-            Some(bytes_to_string_unchecked(self))
-        } else {
-            None
-        }
+        if bytes_is_utf8(self) { Some(bytes_to_string_unchecked(self)) } else { None }
     }
 
     // The byte at `i`, or `None` if `i` is out of range.

@@ -116,9 +116,7 @@ fn bad_file(reason: String) -> Vec<Todo> {
 // be read, parsed or decoded is never treated as empty: that would let the
 // next save overwrite it.
 async fn load_todos() -> Vec<Todo> {
-    if !exists(DB_PATH).await {
-        return Vec::new()
-    }
+    if !exists(DB_PATH).await { return Vec::new() }
     match read_to_string(DB_PATH).await {
         Ok(text) => {
             match parse(text) {
@@ -152,16 +150,12 @@ async fn save_todos(todos: Vec<Todo>) {
 // `add "buy milk"` store the same title; `untitled` if there are none.
 fn title_of(argv: Vec<String>) -> String {
     let n = argv.len() - 2
-    if n <= 0 {
-        return "untitled"
-    }
+    if n <= 0 { return "untitled" }
     let mut words = [""; n]
     let mut i = 0
     while i < n {
         match argv.get(i + 2) {
-            Some(w) => {
-                words[i] = w
-            }
+            Some(w) => { words[i] = w }
             None => {}
         }
         i = i + 1
@@ -171,11 +165,7 @@ fn title_of(argv: Vec<String>) -> String {
 
 fn next_id(todos: Vec<Todo>) -> Int {
     let mut top = 0
-    for t in todos.iter() {
-        if t.id > top {
-            top = t.id
-        }
-    }
+    for t in todos.iter() { if t.id > top { top = t.id } }
     top + 1
 }
 

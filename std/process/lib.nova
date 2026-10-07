@@ -32,6 +32,4 @@ pub fn args() -> Vec<String> {
 //
 // Typed `-> ()` because Nova has no never type: code after `exit(..)`
 // type-checks, and never runs.
-pub fn exit(code: Int) {
-    process_exit(code)
-}
+pub fn exit(code: Int) { process_exit(code) }

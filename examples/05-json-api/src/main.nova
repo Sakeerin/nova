@@ -132,9 +132,7 @@ fn json_response(status: Int, body: String) -> Response {
     Response { status: status, headers: h, body: b }
 }
 
-fn error_json(msg: String) -> String {
-    "{\"error\":${stringify(String(msg))}}"
-}
+fn error_json(msg: String) -> String { "{\"error\":${stringify(String(msg))}}" }
 
 // The absent `parse::<Int>()`, via `std/json`'s public `FromJson for Int`.
 fn path_id(seg: String) -> Option<Int> {
@@ -284,9 +282,7 @@ async fn main() {
 
     while true {
         match l.accept().await {
-            Ok(conn) => {
-                let h = spawn(serve(conn, store))
-            }
+            Ok(conn) => { let h = spawn(serve(conn, store)) }
             Err(e) => break
         }
     }

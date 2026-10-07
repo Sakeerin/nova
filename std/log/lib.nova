@@ -14,11 +14,7 @@ pub type LogFormat = | Human
 // file-write path; every `std/fs` write is `async fn` today.
 pub type LogOutput = | Stderr | Stdout
 
-pub record LogConfig {
-    pub level: LogLevel
-    pub format: LogFormat
-    pub output: LogOutput
-}
+pub record LogConfig { pub level: LogLevel, pub format: LogFormat, pub output: LogOutput }
 
 // The logger's namespace. An empty record because Nova has no free-standing
 // namespaces, and associated functions rather than top-level ones because a
@@ -31,7 +27,13 @@ pub record Log {}
 
 impl LogLevel {
     pub fn to_int(self) -> Int {
-        match self { Trace => 0, Debug => 1, Info => 2, Warn => 3, Error => 4 }
+        match self {
+            Trace => 0
+            Debug => 1
+            Info => 2
+            Warn => 3
+            Error => 4
+        }
     }
 
     pub fn label(self) -> String {
@@ -47,7 +49,10 @@ impl LogLevel {
 
 // `match` rather than `out == Stderr`: there is no equality on sum types.
 fn to_stderr_flag(out: LogOutput) -> Int {
-    match out { Stderr => 1, Stdout => 0 }
+    match out {
+        Stderr => 1
+        Stdout => 0
+    }
 }
 
 // Emit one line if `level` clears the configured threshold.
@@ -78,9 +83,7 @@ impl Log {
     // (`crates/nova-cli/tests/run_tests.rs`), which overwrites a
     // configuration wrong in both fields with a call to `init()` and checks
     // that the runtime's actual default comes back, not the wrong one.
-    pub fn init() {
-        Log::init_with(LogConfig { level: Info, format: Human, output: Stderr })
-    }
+    pub fn init() { Log::init_with(LogConfig { level: Info, format: Human, output: Stderr }) }
 
     // `config.format` is deliberately unread: `LogFormat` has one variant,
     // so there is nothing to branch on yet.
@@ -90,7 +93,7 @@ impl Log {
 
     pub fn trace(msg: String) { emit(Trace, msg) }
     pub fn debug(msg: String) { emit(Debug, msg) }
-    pub fn info(msg: String)  { emit(Info, msg) }
-    pub fn warn(msg: String)  { emit(Warn, msg) }
+    pub fn info(msg: String) { emit(Info, msg) }
+    pub fn warn(msg: String) { emit(Warn, msg) }
     pub fn error(msg: String) { emit(Error, msg) }
 }

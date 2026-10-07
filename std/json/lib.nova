@@ -67,9 +67,7 @@ const MAX_DEPTH: Int = 128
 // The depth rides with the value because the guard needs one per item; a bare
 // `Value(JsonValue)` cannot support it. `Pending` is a record rather than a
 // second payload on the variant because Nova rejects tuples (E0900).
-type Work =
-    | Chunk(String)
-    | Value(Pending)
+type Work = | Chunk(String) | Value(Pending)
 
 record Pending { v: JsonValue, d: Int }
 
@@ -458,9 +456,7 @@ pub fn stringify(v: JsonValue) -> String {
 // exactly zero; for either infinity it is NaN, and for NaN it is NaN, and NaN
 // compares unequal to everything including itself. This avoids needing an
 // `is_nan` the standard library does not have.
-fn number_to_json(n: Float) -> String {
-    if n - n != 0.0 { "null" } else { "${n}" }
-}
+fn number_to_json(n: Float) -> String { if n - n != 0.0 { "null" } else { "${n}" } }
 
 // A growable character buffer, appended to and drained once.
 //
@@ -599,9 +595,7 @@ impl P {
     // larger than, and citing either would reintroduce exactly the staleness
     // that replacement removed. Delete the guard and re-measure both together.
     fn fail(mut self, m: String) {
-        if self.err.is_none() {
-            self.err = Some(JsonError { msg: m, at: self.pos })
-        }
+        if self.err.is_none() { self.err = Some(JsonError { msg: m, at: self.pos }) }
     }
 
     fn at_end(self) -> Bool { self.pos >= self.cs.len() }
@@ -614,18 +608,14 @@ impl P {
     // even that one escaped -- so every caller that meets a NUL rejects it,
     // exactly as it rejects the end of the input. A caller that needs the two
     // told apart asks `at_end` instead.
-    fn peek(self) -> Char {
-        if self.at_end() { '\0' } else { self.cs[self.pos] }
-    }
+    fn peek(self) -> Char { if self.at_end() { '\0' } else { self.cs[self.pos] } }
 
     // Advance one character, never past the end, so `pos` stays a valid bound
     // for `span` below. Every caller in this module bumps only after `peek`
     // returned a real character, so today the guard is defensive rather than
     // load-bearing; it is written so that a scanner looping on `bump` cannot
     // walk off the array.
-    fn bump(mut self) {
-        if !self.at_end() { self.pos = self.pos + 1 }
-    }
+    fn bump(mut self) { if !self.at_end() { self.pos = self.pos + 1 } }
 
     // Characters `start..end` as a `String`, `end` exclusive.
     //
@@ -1189,13 +1179,16 @@ fn utf8_bytes(cp: Int) -> [Int] {
     if cp < 0 || cp > 0x10FFFF { return [0xFF] }
     if cp < 0x80 { return [cp] }
     if cp < 0x800 { return [0xC0 | (cp >> 6), 0x80 | (cp & 0x3F)] }
-    if cp < 0x10000 {
-        return [0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
-    }
+    if cp < 0x10000 { return [0xE0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)] }
     // `return`, not a bare trailing expression: after the `if` block above, a
     // statement starting `[` parses as an INDEX into that block's value and
     // fails on the first comma. Measured, not stylistic.
-    return [0xF0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3F), 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F)]
+    return [
+        0xF0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3F),
+        0x80 | ((cp >> 6) & 0x3F),
+        0x80 | (cp & 0x3F),
+    ]
 }
 
 // A `Vec` copied into the plain `[JsonValue]` that `Array` holds.
@@ -1255,8 +1248,13 @@ fn simple_escape(c: Char) -> Option<String> {
 // position -- `impl Default for Int { fn default() -> Int { 0 } }` at
 // `std/core/lib.nova` is what proves that compiles; every impl below follows
 // that form, not `Self`.
-pub trait ToJson { fn to_json(self) -> JsonValue }
-pub trait FromJson { fn from_json(v: JsonValue) -> Result<Self, JsonError> }
+pub trait ToJson {
+    fn to_json(self) -> JsonValue
+}
+
+pub trait FromJson {
+    fn from_json(v: JsonValue) -> Result<Self, JsonError>
+}
 
 // Every `from_json` below that returns `Err` uses `at: 0` -- see
 // `JsonError`'s own doc comment above for why a fixed placeholder is

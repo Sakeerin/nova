@@ -51,18 +51,14 @@
 // Non-UTF-8 contents are `InvalidData`, not a panic and not lossy replacement.
 pub async fn read_to_string(path: String) -> Result<String, IoError> {
     let status = fs_read_to_string(path)
-    if status == 0 {
-        return Ok(fs_take_string())
-    }
+    if status == 0 { return Ok(fs_take_string()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 // Write `content` to `path`, replacing any existing contents.
 pub async fn write_string(path: String, content: String) -> Result<(), IoError> {
     let status = fs_write_string(path, content)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -72,42 +68,32 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
 // encoding to violate.
 pub async fn read(path: String) -> Result<Bytes, IoError> {
     let status = fs_read(path)
-    if status == 0 {
-        return Ok(fs_take_bytes())
-    }
+    if status == 0 { return Ok(fs_take_bytes()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 // Write `content` to `path`, replacing any existing contents.
 pub async fn write(path: String, content: Bytes) -> Result<(), IoError> {
     let status = fs_write(path, content)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 // The OS's temporary-directory path, with no trailing separator guaranteed
 // either way -- join a name onto it the same way `fs_roundtrip` does.
-pub fn temp_dir() -> String {
-    fs_temp_dir()
-}
+pub fn temp_dir() -> String { fs_temp_dir() }
 
 // Whether `path` exists.
 //
 // Returns `Bool`, not `Result`, per `nova-spec/20-STDLIB.md` §5 — so a path that
 // exists but cannot be examined is indistinguishable from one that is absent.
-pub async fn exists(path: String) -> Bool {
-    fs_exists(path)
-}
+pub async fn exists(path: String) -> Bool { fs_exists(path) }
 
 // Create the directory `path`. The parent must already exist; use
 // `create_dir_all` otherwise. An existing `path` is `AlreadyExists`.
 pub async fn create_dir(path: String) -> Result<(), IoError> {
     let status = fs_create_dir(path)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -115,27 +101,21 @@ pub async fn create_dir(path: String) -> Result<(), IoError> {
 // way. Unlike `create_dir`, an existing `path` is not an error.
 pub async fn create_dir_all(path: String) -> Result<(), IoError> {
     let status = fs_create_dir_all(path)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 // Remove the file `path`.
 pub async fn remove_file(path: String) -> Result<(), IoError> {
     let status = fs_remove_file(path)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 // Remove the directory `path` and everything under it.
 pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
     let status = fs_remove_dir_all(path)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -151,12 +131,7 @@ pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
 // lists it, its metadata call fails), which this codebase has not measured
 // against on any platform -- constructing one needs admin rights on Windows,
 // where this was checked.
-pub record DirEntry {
-    pub name: String
-    pub path: String
-    pub is_file: Bool
-    pub is_dir: Bool
-}
+pub record DirEntry { pub name: String, pub path: String, pub is_file: Bool, pub is_dir: Bool }
 
 // List the entries in `path`, sorted by name.
 //
@@ -207,12 +182,12 @@ pub async fn read_dir(path: String) -> Result<[DirEntry], IoError> {
 // below, or build an exotic combination with `let mut o =
 // OpenOptions::default()` followed by field assignment.
 pub record OpenOptions {
-    read: Bool
-    write: Bool
-    append: Bool
-    truncate: Bool
-    create: Bool
-    create_new: Bool
+    read: Bool,
+    write: Bool,
+    append: Bool,
+    truncate: Bool,
+    create: Bool,
+    create_new: Bool,
 }
 
 // Every flag false. Passed to `open` as-is this fails -- measured:
@@ -221,25 +196,53 @@ pub record OpenOptions {
 // combination, not as an option set meant to be used directly.
 impl Default for OpenOptions {
     fn default() -> OpenOptions {
-        OpenOptions { read: false, write: false, append: false, truncate: false, create: false, create_new: false }
+        OpenOptions {
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
     }
 }
 
 impl OpenOptions {
     pub fn reading() -> OpenOptions {
-        OpenOptions { read: true, write: false, append: false, truncate: false, create: false, create_new: false }
+        OpenOptions {
+            read: true,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+        }
     }
 
     // Write + create + truncate: start this file fresh, creating it if it is
     // not there yet and discarding any content it already has.
     pub fn writing() -> OpenOptions {
-        OpenOptions { read: false, write: true, append: false, truncate: true, create: true, create_new: false }
+        OpenOptions {
+            read: false,
+            write: true,
+            append: false,
+            truncate: true,
+            create: true,
+            create_new: false,
+        }
     }
 
     // Append + create: add to this file, creating it if it is not there
     // yet, and leaving any content it already has in place.
     pub fn appending() -> OpenOptions {
-        OpenOptions { read: false, write: false, append: true, truncate: false, create: true, create_new: false }
+        OpenOptions {
+            read: false,
+            write: false,
+            append: true,
+            truncate: false,
+            create: true,
+            create_new: false,
+        }
     }
 }
 
@@ -259,10 +262,16 @@ pub record File { fd: Int }
 
 // Open `path` under `options`.
 pub async fn open(path: String, options: OpenOptions) -> Result<File, IoError> {
-    let status = file_open(path, options.read, options.write, options.append, options.truncate, options.create, options.create_new)
-    if status == 0 {
-        return Ok(File { fd: decode_count(fs_take_bytes()) })
-    }
+    let status = file_open(
+        path,
+        options.read,
+        options.write,
+        options.append,
+        options.truncate,
+        options.create,
+        options.create_new,
+    )
+    if status == 0 { return Ok(File { fd: decode_count(fs_take_bytes()) }) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -274,9 +283,7 @@ impl File {
     // table lookup a close performs simply removes nothing.
     pub async fn close(self) -> Result<(), IoError> {
         let status = file_close(self.fd)
-        if status == 0 {
-            return Ok(())
-        }
+        if status == 0 { return Ok(()) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 }
@@ -287,9 +294,7 @@ impl File {
 // operation is this function or `write_file`/`flush_file` below.
 async fn read_file(f: File, max: Int) -> Result<Bytes, IoError> {
     let status = file_read(f.fd, max)
-    if status == 0 {
-        return Ok(fs_take_bytes())
-    }
+    if status == 0 { return Ok(fs_take_bytes()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -303,17 +308,13 @@ impl Read for File {
 // second decoder.
 async fn write_file(f: File, buf: Bytes) -> Result<Int, IoError> {
     let status = file_write(f.fd, buf)
-    if status == 0 {
-        return Ok(decode_count(fs_take_bytes()))
-    }
+    if status == 0 { return Ok(decode_count(fs_take_bytes())) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
 async fn flush_file(f: File) -> Result<(), IoError> {
     let status = file_flush(f.fd)
-    if status == 0 {
-        return Ok(())
-    }
+    if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 

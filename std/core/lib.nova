@@ -10,57 +10,93 @@ pub type Result<T, E> = | Ok(T) | Err(E)
 
 impl<T> Option<T> {
     pub fn is_some(self) -> Bool {
-        match self { Some(_) => true, None => false }
+        match self {
+            Some(_) => true
+            None => false
+        }
     }
 
     pub fn is_none(self) -> Bool { !self.is_some() }
 
     pub fn map<U>(self, f: fn(T) -> U) -> Option<U> {
-        match self { Some(v) => Some(f(v)), None => None }
+        match self {
+            Some(v) => Some(f(v))
+            None => None
+        }
     }
 
     pub fn and_then<U>(self, f: fn(T) -> Option<U>) -> Option<U> {
-        match self { Some(v) => f(v), None => None }
+        match self {
+            Some(v) => f(v)
+            None => None
+        }
     }
 
     pub fn unwrap(self) -> T {
-        match self { Some(v) => v, None => panic("called `unwrap` on a `None` value") }
+        match self {
+            Some(v) => v
+            None => panic("called `unwrap` on a `None` value")
+        }
     }
 
     pub fn unwrap_or(self, default: T) -> T {
-        match self { Some(v) => v, None => default }
+        match self {
+            Some(v) => v
+            None => default
+        }
     }
 
     pub fn ok_or<E>(self, err: E) -> Result<T, E> {
-        match self { Some(v) => Ok(v), None => Err(err) }
+        match self {
+            Some(v) => Ok(v)
+            None => Err(err)
+        }
     }
 }
 
 impl<T, E> Result<T, E> {
     pub fn is_ok(self) -> Bool {
-        match self { Ok(_) => true, Err(_) => false }
+        match self {
+            Ok(_) => true
+            Err(_) => false
+        }
     }
 
     pub fn is_err(self) -> Bool { !self.is_ok() }
 
     pub fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {
-        match self { Ok(v) => Ok(f(v)), Err(e) => Err(e) }
+        match self {
+            Ok(v) => Ok(f(v))
+            Err(e) => Err(e)
+        }
     }
 
     pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
-        match self { Ok(v) => Ok(v), Err(e) => Err(f(e)) }
+        match self {
+            Ok(v) => Ok(v)
+            Err(e) => Err(f(e))
+        }
     }
 
     pub fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E> {
-        match self { Ok(v) => f(v), Err(e) => Err(e) }
+        match self {
+            Ok(v) => f(v)
+            Err(e) => Err(e)
+        }
     }
 
     pub fn unwrap(self) -> T {
-        match self { Ok(v) => v, Err(_) => panic("called `unwrap` on an `Err` value") }
+        match self {
+            Ok(v) => v
+            Err(_) => panic("called `unwrap` on an `Err` value")
+        }
     }
 
     pub fn unwrap_or(self, default: T) -> T {
-        match self { Ok(v) => v, Err(_) => default }
+        match self {
+            Ok(v) => v
+            Err(_) => default
+        }
     }
 }
 
@@ -102,20 +138,30 @@ impl<T, E> Result<T, E> {
 
 pub type Ordering = | Less | Equal | Greater
 
-pub trait Display { fn fmt(self) -> String }
+pub trait Display {
+    fn fmt(self) -> String
+}
 
-pub trait Debug { fn dbg(self) -> String }
+pub trait Debug {
+    fn dbg(self) -> String
+}
 
 pub trait Eq {
     fn eq(self, other: Self) -> Bool
     fn ne(self, other: Self) -> Bool { !self.eq(other) }
 }
 
-pub trait Ord: Eq { fn cmp(self, other: Self) -> Ordering }
+pub trait Ord: Eq {
+    fn cmp(self, other: Self) -> Ordering
+}
 
-pub trait Clone { fn clone(self) -> Self }
+pub trait Clone {
+    fn clone(self) -> Self
+}
 
-pub trait Default { fn default() -> Self }
+pub trait Default {
+    fn default() -> Self
+}
 
 // One-shot hashing: a value's hash is a single `Int`, not a stream folded into
 // a `Hasher` (ADR 0005 section 2). There is no `Hash for Float` on purpose:
@@ -139,7 +185,9 @@ pub trait Default { fn default() -> Self }
 //     loses half its range on exactly the keys that need distinguishing.
 //   - `mix64`'s guarantees are stated over its whole 64-bit result; nothing
 //     promises that any particular slice of it is uniform on its own.
-pub trait Hash { fn hash(self) -> Int }
+pub trait Hash {
+    fn hash(self) -> Int
+}
 
 // The iteration protocol, and the first trait in this file with an associated
 // type. `next` advances the iterator and yields the next element, or `None`
@@ -190,9 +238,7 @@ pub trait Iterator {
 
     // --- adapters (lazy: nothing is consumed until a consumer runs) ---
 
-    fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U> {
-        MapIter { it: self, f: f }
-    }
+    fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U> { MapIter { it: self, f: f } }
 
     fn filter(self, keep: fn(Self::Item) -> Bool) -> FilterIter<Self> {
         FilterIter { it: self, keep: keep }
@@ -355,7 +401,9 @@ impl<I: Iterator, U> Iterator for MapIter<I, U> {
     type Item = U
     fn next(mut self) -> Option<U> {
         let n = self.it.next()
-        if n.is_none() { None } else {
+        if n.is_none() {
+            None
+        } else {
             // Bound to a local first: `(self.f)(x)` is `E0014: no method f`.
             let g = self.f
             Some(g(n.unwrap()))
@@ -396,11 +444,25 @@ impl<I: Iterator> Iterator for FilterIter<I> {
     }
 }
 
-impl Display for Int    { fn fmt(self) -> String { "${self}" } }
-impl Display for Float  { fn fmt(self) -> String { "${self}" } }
-impl Display for Bool   { fn fmt(self) -> String { "${self}" } }
-impl Display for Char   { fn fmt(self) -> String { "${self}" } }
-impl Display for String { fn fmt(self) -> String { self } }
+impl Display for Int {
+    fn fmt(self) -> String { "${self}" }
+}
+
+impl Display for Float {
+    fn fmt(self) -> String { "${self}" }
+}
+
+impl Display for Bool {
+    fn fmt(self) -> String { "${self}" }
+}
+
+impl Display for Char {
+    fn fmt(self) -> String { "${self}" }
+}
+
+impl Display for String {
+    fn fmt(self) -> String { self }
+}
 
 // `Debug`'s contract is that its output is a *Nova literal* for the value, so
 // `Char` and `String` are quoted where `Display` is not. Nova's lexer accepts
@@ -412,9 +474,17 @@ impl Display for String { fn fmt(self) -> String { self } }
 // hole on `$` immediately followed by `{`, so a literal `$` left in the
 // output could silently reopen one when the output is pasted back as
 // source. `Char` never interpolates, so it needs no such rule.
-impl Debug for Int    { fn dbg(self) -> String { "${self}" } }
-impl Debug for Float  { fn dbg(self) -> String { "${self}" } }
-impl Debug for Bool   { fn dbg(self) -> String { "${self}" } }
+impl Debug for Int {
+    fn dbg(self) -> String { "${self}" }
+}
+
+impl Debug for Float {
+    fn dbg(self) -> String { "${self}" }
+}
+
+impl Debug for Bool {
+    fn dbg(self) -> String { "${self}" }
+}
 
 // The escape sequence for `c` inside a string literal, or `None` when `c`
 // needs none. Quoting differs between a `Char` literal and a `String`
@@ -440,11 +510,12 @@ fn escape_common(c: Char) -> Option<String> {
 // defeats the purpose.
 impl Debug for Char {
     fn dbg(self) -> String {
-        if self == '\'' { "'\\''" }
-        else {
+        if self == '\'' {
+            "'\\''"
+        } else {
             match escape_common(self) {
-                Some(e) => "'${e}'",
-                None => "'${self}'",
+                Some(e) => "'${e}'"
+                None => "'${self}'"
             }
         }
     }
@@ -480,8 +551,8 @@ impl Debug for String {
                 out = "${out}\\u{24}"
             } else {
                 match escape_common(c) {
-                    Some(e) => out = "${out}${e}",
-                    None => out = "${out}${c}",
+                    Some(e) => out = "${out}${e}"
+                    None => out = "${out}${c}"
                 }
             }
         }
@@ -489,20 +560,35 @@ impl Debug for String {
     }
 }
 
-impl Eq for Int    { fn eq(self, other: Int) -> Bool { self == other } }
+impl Eq for Int {
+    fn eq(self, other: Int) -> Bool { self == other }
+}
+
 // Not reflexive for NaN: `NaN == NaN` is `false`, so `eq(NaN, NaN)` is
 // `false` too (NaN is reachable, e.g. via `0.0 / 0.0`). See the `Ord for
 // Float` impl below for the related non-total-order caveat.
-impl Eq for Float  { fn eq(self, other: Float) -> Bool { self == other } }
-impl Eq for Bool   { fn eq(self, other: Bool) -> Bool { self == other } }
-impl Eq for Char   { fn eq(self, other: Char) -> Bool { self == other } }
-impl Eq for String { fn eq(self, other: String) -> Bool { self == other } }
+impl Eq for Float {
+    fn eq(self, other: Float) -> Bool { self == other }
+}
+
+impl Eq for Bool {
+    fn eq(self, other: Bool) -> Bool { self == other }
+}
+
+impl Eq for Char {
+    fn eq(self, other: Char) -> Bool { self == other }
+}
+
+impl Eq for String {
+    fn eq(self, other: String) -> Bool { self == other }
+}
 
 impl Ord for Int {
     fn cmp(self, other: Int) -> Ordering {
         if self < other { Less } else { if self == other { Equal } else { Greater } }
     }
 }
+
 impl Ord for Float {
     // Not a total order for NaN: `<` and `==` are both `false` whenever
     // either operand is NaN, so this falls through to `Greater` for any
@@ -513,21 +599,20 @@ impl Ord for Float {
         if self < other { Less } else { if self == other { Equal } else { Greater } }
     }
 }
+
 impl Ord for Char {
     fn cmp(self, other: Char) -> Ordering {
         if self < other { Less } else { if self == other { Equal } else { Greater } }
     }
 }
+
 impl Ord for Bool {
     // `<` is not defined for Bool; false sorts before true.
     fn cmp(self, other: Bool) -> Ordering {
-        if self {
-            if other { Equal } else { Greater }
-        } else {
-            if other { Less } else { Equal }
-        }
+        if self { if other { Equal } else { Greater } } else { if other { Less } else { Equal } }
     }
 }
+
 impl Ord for String {
     // String has neither length nor indexing in Nova, so ordering comes from
     // `str_cmp`, a compiler builtin backed by the runtime's byte-lexicographic
@@ -538,17 +623,45 @@ impl Ord for String {
     }
 }
 
-impl Clone for Int    { fn clone(self) -> Int { self } }
-impl Clone for Float  { fn clone(self) -> Float { self } }
-impl Clone for Bool   { fn clone(self) -> Bool { self } }
-impl Clone for Char   { fn clone(self) -> Char { self } }
-impl Clone for String { fn clone(self) -> String { self } }
+impl Clone for Int {
+    fn clone(self) -> Int { self }
+}
 
-impl Default for Int    { fn default() -> Int { 0 } }
-impl Default for Float  { fn default() -> Float { 0.0 } }
-impl Default for Bool   { fn default() -> Bool { false } }
-impl Default for Char   { fn default() -> Char { '\0' } }
-impl Default for String { fn default() -> String { "" } }
+impl Clone for Float {
+    fn clone(self) -> Float { self }
+}
+
+impl Clone for Bool {
+    fn clone(self) -> Bool { self }
+}
+
+impl Clone for Char {
+    fn clone(self) -> Char { self }
+}
+
+impl Clone for String {
+    fn clone(self) -> String { self }
+}
+
+impl Default for Int {
+    fn default() -> Int { 0 }
+}
+
+impl Default for Float {
+    fn default() -> Float { 0.0 }
+}
+
+impl Default for Bool {
+    fn default() -> Bool { false }
+}
+
+impl Default for Char {
+    fn default() -> Char { '\0' }
+}
+
+impl Default for String {
+    fn default() -> String { "" }
+}
 
 // The splitmix64 finalizer: three xor-shift/multiply rounds. `Map` selects
 // buckets with `hash & (cap - 1)`, so it is the *low* bits that must be
@@ -621,12 +734,23 @@ fn mix64(x: Int) -> Int {
 // A consequence worth stating where the reader meets it: an `Int`, `Bool` or
 // `Char` hashes to one value for the whole of a run and can hash to a
 // different one in the next run of the same program.
-impl Hash for Int    { fn hash(self) -> Int { mix64(self ^ int_hash_seed()) } }
-impl Hash for Bool   { fn hash(self) -> Int { if self { mix64(1 ^ int_hash_seed()) } else { mix64(0 ^ int_hash_seed()) } } }
+impl Hash for Int {
+    fn hash(self) -> Int { mix64(self ^ int_hash_seed()) }
+}
+
+impl Hash for Bool {
+    fn hash(self) -> Int {
+        if self { mix64(1 ^ int_hash_seed()) } else { mix64(0 ^ int_hash_seed()) }
+    }
+}
+
 // Hashes the Unicode scalar value, so it agrees with `Hash for Int` on that
 // codepoint. `char_to_int` is a compiler builtin because Nova has no `as`
 // casts and `Char` has no other conversion.
-impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self) ^ int_hash_seed()) } }
+impl Hash for Char {
+    fn hash(self) -> Int { mix64(char_to_int(self) ^ int_hash_seed()) }
+}
+
 // Seeded FNV-1a over the bytes then splitmix64's finalizer, in the runtime
 // (see the module note above), with its unsigned result reinterpreted as `Int`
 // — so it is the impl most obviously able to return a negative hash. See the
@@ -639,4 +763,6 @@ impl Hash for Char   { fn hash(self) -> Int { mix64(char_to_int(self) ^ int_hash
 // runtime. The `Int`, `Bool` and `Char` impls above are seeded too, from a
 // separate draw (`int_hash_seed`), so they are not stable across runs either;
 // what stays unseeded is `mix64`, which those impls XOR the seed in *ahead* of.
-impl Hash for String { fn hash(self) -> Int { str_hash(self) } }
+impl Hash for String {
+    fn hash(self) -> Int { str_hash(self) }
+}

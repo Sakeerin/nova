@@ -1,10 +1,4 @@
-fn fibonacci(n: Int) -> Int {
-    if n <= 1 {
-        n
-    } else {
-        fibonacci(n - 1) + fibonacci(n - 2)
-    }
-}
+fn fibonacci(n: Int) -> Int { if n <= 1 { n } else { fibonacci(n - 1) + fibonacci(n - 2) } }
 
 // The first argument as an Int, or 10 when it is absent or not a number. It
 // goes through `std/json`'s `parse`, since there is no `parse::<Int>()`, so

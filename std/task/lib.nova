@@ -115,9 +115,7 @@ pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {
 // `.await`, and nothing else in the language is a future that is not already
 // ready. Each call awaits a fresh one, so two tasks yielding at the same time
 // do not share a resume point.
-pub async fn yield_now() {
-    task_yield_future().await
-}
+pub async fn yield_now() { task_yield_future().await }
 
 // Run this thread's executor until every queued task has finished, and produce
 // `fut`'s value. The way async code is entered from sync code.
