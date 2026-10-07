@@ -1,24 +1,50 @@
 name: Release
 
+# On a `v*` tag: build the four targets, pack and smoke-test each archive,
+# and publish a GitHub release with the archives and SHA256SUMS. On a pull
+# request that changes how `nova` is built or released, run every job but
+# the publish, so a broken release shows before any tag exists (spec
+# docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §7).
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/**
+      - crates/nova-cli/build.rs
+      - crates/nova-cli/build_support.rs
+      - crates/nova-runtime/build.rs
+      - crates/nova-cli/Cargo.toml
+      - crates/nova-runtime/Cargo.toml
+      - Cargo.lock
+
+# Only `publish` may write to the repository.
+permissions:
+  contents: read
 
 jobs:
-  release:
-    name: Release (${{ matrix.target }})
+  build:
+    name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            smoke: true
+          # Cross-built on an Apple Silicon runner, as before. This design
+          # keeps that, so this archive is built but not run.
           - os: macos-latest
             target: x86_64-apple-darwin
+            smoke: false
           - os: macos-latest
             target: aarch64-apple-darwin
+            smoke: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            smoke: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -26,9 +52,105 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p nova-cli
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        run: cargo build --release --locked --target ${{ matrix.target }} -p nova-cli
+      - name: Pack the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          name="nova-$version-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/nova.exe" "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" > /dev/null)
+            echo "ARCHIVE=dist/$name.zip" >> "$GITHUB_ENV"
+          else
+            cp "target/${{ matrix.target }}/release/nova" "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            echo "ARCHIVE=dist/$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+      - name: Smoke-test the archive
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir -p "$unpacked"
+          case "$ARCHIVE" in
+            *.zip) 7z x -o"$unpacked" "$ARCHIVE" > /dev/null ;;
+            *) tar -C "$unpacked" -xzf "$ARCHIVE" ;;
+          esac
+          bash .github/scripts/gate.sh "$(ls -d "$unpacked"/nova-*)/nova" "$RUNNER_TEMP/smoke"
+      - uses: actions/upload-artifact@v4
         with:
-          name: nova-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/nova*
+          name: archive-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  prepare:
+    name: Prepare the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: release/dist
+          merge-multiple: true
+      - name: Checksums, notes, and the release command
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          count=$(ls release/dist | wc -l)
+          if [ "$count" -ne 4 ]; then
+            echo "::error::expected 4 archives, found $count"
+            ls release/dist
+            exit 1
+          fi
+          (cd release/dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+          bash .github/scripts/release-notes.sh "$version" CHANGELOG.md > release/notes.md
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::the tag $GITHUB_REF_NAME does not match nova-cli's version $version"
+              exit 1
+            fi
+            tag=$GITHUB_REF_NAME
+          else
+            tag="v$version"
+          fi
+          prerelease=""
+          case "$tag" in *-*) prerelease=" --prerelease" ;; esac
+          echo "publish runs: gh release create $tag --verify-tag --title \"Nova $version\" --notes-file notes.md$prerelease dist/*"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: prepare
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Create the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=()
+          case "$GITHUB_REF_NAME" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Nova $version" --notes-file release/notes.md \
+            ${prerelease[@]+"${prerelease[@]}"} release/dist/*
