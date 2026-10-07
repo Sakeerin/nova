@@ -48,7 +48,7 @@ nova-mir            → Mid-level IR
 | `nova-codegen-wasm` | WebAssembly backend |
 | `nova-runtime` | GC, async runtime, panic handling |
 | `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler |
-| `nova-fmt` | Opinionated code formatter |
+| `nova-fmt` | The formatter: prints the AST in one fixed layout, keeps every comment, and refuses output that would change the program (ADR 0028) |
 | `nova-lsp` | Language Server Protocol implementation |
 | `nova-test` | Test runner |
 | `nova-pm` | Package manager: `nova.toml` parsing and project discovery so far |

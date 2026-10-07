@@ -283,6 +283,8 @@ a PR, and a merge on the user's word.
   on an unformatted file and zero after formatting. CI then runs
   `nova fmt --check` on `std/` and `examples/`, once 3.1's spec has
   confirmed that no test depends on their line numbers.
+- **Spec:** `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`,
+  built on the branch `phase-3-1-formatter`.
 
 ### 3.2 — LSP core and the VSCode extension
 - The front end continues past errors: resolution and type checking run on

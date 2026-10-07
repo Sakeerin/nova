@@ -623,6 +623,10 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
 **Goal:** DX matches or exceeds Rust/Go.
 
 1. `crates/nova-fmt` — formatter (no options, only `--check`)
+   **Amended 2026-10-07 (branch `phase-3-1-formatter`):** built in Phase 3.1.
+   `nova fmt` also takes paths and `--stdin`, as `40-TOOLING.md` §2.3 asks;
+   `docs/adr/0028-the-formatter.md` reads "only `--check`" as "no style
+   options".
 2. `crates/nova-pm` — package manager + `nova.toml` parsing + lock file
 3. Registry server (separate repo `novalang/registry`) — Rust + Postgres + S3
 4. `crates/nova-lsp` — LSP server (use `tower-lsp`)
@@ -709,6 +713,11 @@ This master file references these companions. Read them in order during implemen
 ### 5.2 Testing
 - Every new module ships with unit tests in `#[cfg(test)] mod tests`
 - Snapshot tests via `insta` for parser, type errors, formatter output
+  **Amended 2026-10-07 (branch `phase-3-1-formatter`):** the formatter's
+  tests compare each whole output with an exact string written beside its
+  input, rather than an `insta` snapshot, and also check that formatting the
+  output again changes nothing
+  (`docs/superpowers/plans/2026-10-07-phase-3-1-formatter.md`, decision 14).
 - Integration tests in `tests/` use `assert_cmd` to run `nova` binary
 - Property tests via `proptest` for parser, lexer, JSON
 - Fuzz targets in `fuzz/` for parser, lexer, JSON, regex

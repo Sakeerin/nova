@@ -189,6 +189,22 @@ attr_args   = attr_arg { "," attr_arg } ;
 attr_arg    = ident [ "=" literal ] | literal ;
 ```
 
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** three changes to the
+grammar above (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`
+§4):
+- **Doc comments.** One or more `///` lines may come before an item, at the
+  top level or in a block; a trait member; an impl member; a record field; a
+  sum-type variant; or a function in an `extern` block. On a top-level item
+  they may come before, between or after its attributes. The node gains
+  `docs`, one entry per line. Anywhere else a `///` is an error: "a doc
+  comment must come right before an item, a field or a variant; use `//`
+  for a plain comment".
+- **`where`** takes a trailing comma before the `{`, `;` or `}` that ends
+  the clause.
+- **Pattern spans.** A parenthesised pattern, and the unit pattern `()`, are
+  spanned over their parentheses, as parenthesised expressions and types
+  already were.
+
 ---
 
 ## 3. AST Node Definitions (Rust)
