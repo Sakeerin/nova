@@ -44,6 +44,10 @@ pub struct WhereBound {
 /// A function or method declaration.
 #[derive(Debug, Clone)]
 pub struct Function {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub is_async: bool,
@@ -58,6 +62,10 @@ pub struct Function {
 /// A `record` (struct) declaration.
 #[derive(Debug, Clone)]
 pub struct Record {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
@@ -68,6 +76,10 @@ pub struct Record {
 /// A single field inside a `record { ... }` body.
 #[derive(Debug, Clone)]
 pub struct RecordField {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub vis: Visibility,
     pub name: Spanned<String>,
     pub ty: Spanned<Type>,
@@ -81,6 +93,10 @@ pub struct RecordField {
 /// ```
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
@@ -100,6 +116,10 @@ pub enum TypeDef {
 /// A variant of a sum type.
 #[derive(Debug, Clone)]
 pub struct Variant {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub name: Spanned<String>,
     /// Fields of a tuple-style variant, e.g. `Ok(T)` has one field.
     pub fields: Vec<Spanned<Type>>,
@@ -108,6 +128,10 @@ pub struct Variant {
 /// A `trait` declaration.
 #[derive(Debug, Clone)]
 pub struct TraitDecl {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
@@ -135,6 +159,8 @@ pub enum TraitItem {
     /// `where` clause on a trait is parsed here and rejected there. Parsing it
     /// gives a precise span and a real diagnostic instead of a syntax error.
     AssocType {
+        /// The `///` lines before it, as on the items above.
+        docs: Vec<Spanned<String>>,
         name: Spanned<String>,
         bounds: Vec<Spanned<Path>>,
     },
@@ -143,6 +169,10 @@ pub enum TraitItem {
 /// A function signature without a body.
 #[derive(Debug, Clone)]
 pub struct FunctionSig {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub is_async: bool,
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
@@ -154,6 +184,10 @@ pub struct FunctionSig {
 /// An `impl` block.
 #[derive(Debug, Clone)]
 pub struct ImplBlock {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub generics: Vec<crate::ty::TypeParam>,
     /// If `Some`, this is a trait impl: `impl Trait for Type`.
@@ -179,6 +213,10 @@ pub struct ImplBlock {
 /// instead of dropping it silently.
 #[derive(Debug, Clone)]
 pub struct AssocTypeBinding {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub name: Spanned<String>,
     pub ty: Spanned<Type>,
 }
@@ -186,6 +224,10 @@ pub struct AssocTypeBinding {
 /// A `const` declaration.
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: Spanned<String>,
@@ -196,6 +238,10 @@ pub struct ConstDecl {
 /// An `import` declaration.
 #[derive(Debug, Clone)]
 pub struct Import {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub path: Spanned<Path>,
     pub kind: ImportKind,
@@ -215,6 +261,10 @@ pub enum ImportKind {
 /// A `module` declaration (refers to another file).
 #[derive(Debug, Clone)]
 pub struct Module {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub path: Spanned<Path>,
 }
@@ -222,6 +272,10 @@ pub struct Module {
 /// An `extern` block for FFI declarations.
 #[derive(Debug, Clone)]
 pub struct ExternBlock {
+    /// The `///` lines before it, one entry per line, holding the text after
+    /// the `///` (spec
+    /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+    pub docs: Vec<Spanned<String>>,
     pub attrs: Vec<Attribute>,
     pub abi: Option<String>,
     pub items: Vec<ExternItem>,

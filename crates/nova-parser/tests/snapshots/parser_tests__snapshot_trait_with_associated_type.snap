@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Trait(
                     TraitDecl {
+                        docs: [],
                         attrs: [],
                         vis: Private,
                         name: Spanned {
@@ -25,6 +26,7 @@ Some(
                         where_clause: [],
                         items: [
                             AssocType {
+                                docs: [],
                                 name: Spanned {
                                     value: "Item",
                                     span: Span {
@@ -39,6 +41,7 @@ Some(
                             },
                             Required(
                                 FunctionSig {
+                                    docs: [],
                                     is_async: false,
                                     name: Spanned {
                                         value: "next",
