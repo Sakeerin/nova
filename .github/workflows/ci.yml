@@ -182,3 +182,38 @@ jobs:
       - run: cargo check --locked --workspace
         env:
           RUSTFLAGS: -D warnings
+
+  # The Phase 3.0 gate (spec
+  # docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §8):
+  # `nova`, installed with nothing beside it and no NOVA_ variable set,
+  # makes, runs, builds and tests a new project. `cargo install` builds with
+  # the release profile, so this is also the only job here that runs the
+  # nested runtime build (nova-cli's build.rs); the jobs above build debug.
+  install:
+    name: Installed nova (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install nova from this checkout
+        shell: bash
+        run: cargo install --locked --path crates/nova-cli --root "$RUNNER_TEMP/nova"
+      - name: Nothing but nova was installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -A "$RUNNER_TEMP/nova/bin"
+          case "$(ls -A "$RUNNER_TEMP/nova/bin")" in
+            nova|nova.exe) ;;
+            *) echo "::error::the install put more than nova into bin/"; exit 1 ;;
+          esac
+      - name: The installed nova makes, runs, builds and tests a project
+        shell: bash
+        run: bash .github/scripts/gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/gate" --test
+      - name: std survives packaging
+        run: cargo package -p nova-std --locked
