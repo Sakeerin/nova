@@ -68,7 +68,7 @@ impl<'c> Comments<'c> {
 
 /// How many spaces and tabs `s` starts with.
 fn spaces(s: &str) -> usize {
-    s.len() - s.trim_start_matches(|c| c == ' ' || c == '\t').len()
+    s.len() - s.trim_start_matches([' ', '\t']).len()
 }
 
 #[cfg(test)]

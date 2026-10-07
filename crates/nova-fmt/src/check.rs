@@ -57,7 +57,7 @@ pub(crate) fn fingerprint(file: &File) -> String {
     let mut file = file.clone();
     for run in import_runs(&file) {
         let items = &mut file.items[run];
-        items.sort_by(|a, b| import_key(&a.value).cmp(&import_key(&b.value)));
+        items.sort_by_key(|a| import_key(&a.value));
         for item in items {
             if let Item::Import(Import {
                 kind: ImportKind::List(names),
