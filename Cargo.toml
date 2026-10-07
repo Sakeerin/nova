@@ -57,3 +57,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # builds nothing but would still put zlib-rs in Cargo.lock.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 crc32fast = "1.4"
+
+# nova.toml (nova-pm). toml_edit's ImDocument keeps every key's and value's
+# position, which the M-coded diagnostics need; it was already in the
+# lockfile, through toml, and declares Rust 1.66. semver is the crate Cargo
+# itself uses for versions and requirements; 1.0.28 declares Rust 1.68 and
+# has no dependencies.
+semver = "1"
+toml_edit = "0.22"
