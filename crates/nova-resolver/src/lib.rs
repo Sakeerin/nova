@@ -1604,37 +1604,29 @@ pub fn resolve_program(
 /// glob-imported into every user module. Order is significant only in that it
 /// fixes module indices; user modules always come first, then these in the
 /// order listed here — `std/core` stays first so its module index is
-/// unchanged from when it was the only embedded module. Each is embedded at
-/// build time (`include_str!`, paths relative to this file) so the compiler
-/// stays a single self-contained executable. Each name is `$std.*`, not a
-/// valid identifier, so it can never collide with a user module name or be
-/// named in an `import`.
+/// unchanged from when it was the only embedded module. The sources come
+/// from the `nova-std` crate, which embeds `std/` at build time through
+/// paths inside its own package, so the compiler stays a single
+/// self-contained executable and `cargo package` keeps the files. Each name
+/// is `$std.*`, not a valid identifier, so it can never collide with a user
+/// module name or be named in an `import`.
 pub const STD_MODULES: [(&str, &str); 16] = [
-    ("$std.core", include_str!("../../../std/core/lib.nova")),
-    ("$std.bytes", include_str!("../../../std/bytes/lib.nova")),
-    ("$std.io", include_str!("../../../std/io/lib.nova")),
-    ("$std.fs", include_str!("../../../std/fs/lib.nova")),
-    (
-        "$std.collections",
-        include_str!("../../../std/collections/lib.nova"),
-    ),
-    (
-        "$std.strings",
-        include_str!("../../../std/strings/lib.nova"),
-    ),
-    ("$std.fmt", include_str!("../../../std/fmt/lib.nova")),
-    ("$std.task", include_str!("../../../std/task/lib.nova")),
-    ("$std.sync", include_str!("../../../std/sync/lib.nova")),
-    ("$std.net", include_str!("../../../std/net/lib.nova")),
-    ("$std.time", include_str!("../../../std/time/lib.nova")),
-    ("$std.json", include_str!("../../../std/json/lib.nova")),
-    ("$std.log", include_str!("../../../std/log/lib.nova")),
-    ("$std.http", include_str!("../../../std/http/lib.nova")),
-    ("$std.crypto", include_str!("../../../std/crypto/lib.nova")),
-    (
-        "$std.process",
-        include_str!("../../../std/process/lib.nova"),
-    ),
+    ("$std.core", nova_std::CORE),
+    ("$std.bytes", nova_std::BYTES),
+    ("$std.io", nova_std::IO),
+    ("$std.fs", nova_std::FS),
+    ("$std.collections", nova_std::COLLECTIONS),
+    ("$std.strings", nova_std::STRINGS),
+    ("$std.fmt", nova_std::FMT),
+    ("$std.task", nova_std::TASK),
+    ("$std.sync", nova_std::SYNC),
+    ("$std.net", nova_std::NET),
+    ("$std.time", nova_std::TIME),
+    ("$std.json", nova_std::JSON),
+    ("$std.log", nova_std::LOG),
+    ("$std.http", nova_std::HTTP),
+    ("$std.crypto", nova_std::CRYPTO),
+    ("$std.process", nova_std::PROCESS),
 ];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
@@ -1642,7 +1634,7 @@ pub const STD_MODULES: [(&str, &str); 16] = [
 /// iterates it and the driver allocates one `FileId` per entry, so a
 /// conditional member would make `FileId` allocation depend on which
 /// subcommand is running.
-pub const STD_TEST_MODULE: (&str, &str) = ("$std.test", include_str!("../../../std/test/lib.nova"));
+pub const STD_TEST_MODULE: (&str, &str) = ("$std.test", nova_std::TEST);
 
 /// Lex and parse one embedded std module. Its source ships with the compiler,
 /// so any failure is a compiler bug — but it is reported against `file_id` so
