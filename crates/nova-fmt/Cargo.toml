@@ -18,4 +18,5 @@ nova-diagnostics = { path = "../nova-diagnostics" }
 nova-ast = { path = "../nova-ast" }
 nova-lexer = { path = "../nova-lexer" }
 nova-parser = { path = "../nova-parser" }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
