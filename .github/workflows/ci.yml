@@ -39,6 +39,12 @@ jobs:
       - name: cargo test
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
+      # std/ and examples/ stay in nova fmt's layout (spec
+      # docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md §8).
+      # On Windows the checkout may hold CRLF files, which nova fmt keeps.
+      - name: nova fmt --check std examples
+        run: cargo run --locked -q -p nova-cli -- fmt --check std examples
+
       # The eight `#[ignore]`d GC root tests are the only coverage of `PINNED`
       # actually being HONOURED by a real collection -- the registry could be
       # populated perfectly and ignored by the marker, and only these eight
