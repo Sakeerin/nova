@@ -450,7 +450,7 @@ exists.
   - the lookup order, as a pure function.
 - **`nova-std`:** the embedded set matches the files on disk (§3).
 - **End to end,** in a new `crates/nova-cli/tests/project.rs` rather than
-  the 9,650-line `run_tests.rs`:
+  the 11,199-line `run_tests.rs`:
   - `new` writes exactly the template, and `run` prints the greeting;
   - `new` refuses a non-empty directory and a bad name;
   - `init` names the project after its directory, keeps an existing
@@ -485,8 +485,7 @@ exists.
   - §4.1: the parsed subset (§5);
   - §10: the cache under `~/.nova`.
 - **CHANGELOG:** `[Unreleased]`.
-- **ARCHITECTURE.md:** its crate list gains `nova-std`, and `nova-pm` is no
-  longer a stub.
+- **ARCHITECTURE.md:** its crate table gains `nova-std`.
 - **README.md** gains an Install section: `cargo install --locked --git
   https://github.com/Sakeerin/nova nova-cli`, and the archives on GitHub
   releases from the next tag on.
@@ -497,7 +496,7 @@ exists.
   - `include_str!` paths into `std/`;
   - `find_runtime_lib`'s two-step order;
   - "no `nova.toml`";
-  - `nova-pm` described as a stub;
+  - `nova-pm` described as a stub, as the plan's §2 item 9 does;
   - `release.yml` uploading artifacts only.
 
 ## 11. Risks
