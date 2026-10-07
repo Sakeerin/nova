@@ -9,6 +9,48 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Projects.** `nova new <name>` and `nova init [--name <name>]` write a
+  project: `nova.toml`, `.gitignore`, `README.md`, and a `src/main.nova`
+  whose one test passes. With no file argument, `run`, `build`, `check` and
+  `test` find the project by walking up to the nearest `nova.toml`. In a
+  project, `build` writes `target/debug/<name>`, or `target/release/<name>`
+  with `--release`.
+- **`nova.toml`** is parsed by `nova-pm`: `[package]`, where `name`,
+  `version` and `edition = "2026"` are required, plus `[dependencies]` and
+  `[dev-dependencies]`. Diagnostics point at the key or value at fault
+  (M0001–M0004), and unknown keys warn (M0006). Nothing resolves
+  dependencies yet, so a declared one is an error (M0005).
+- **An installed `nova` needs nothing beside it.**
+  - A release-profile build, which is what `cargo install` makes, builds
+    the runtime library and embeds it, gzip-compressed.
+  - `nova` unpacks it to `~/.nova/runtime/<version>-<crc32>/` the first
+    time it links; `NOVA_HOME` moves that directory.
+  - `NOVA_RUNTIME_LIB` still comes first, and `NOVA_EMBED_RUNTIME=1` or `0`
+    overrides the profile.
+
+  ADR 0027.
+- **`nova version`** prints the version, the target `nova` was built for,
+  and whether it carries its runtime.
+- **Releases.** Each `v*` tag gets a GitHub release with an archive per
+  target and `SHA256SUMS`. The archives are smoke-tested on the three
+  targets the runners execute. Pull requests that change how `nova` is
+  built run the same workflow, without the publish.
+- **CI** installs `nova` on all three systems and runs the gate script,
+  `.github/scripts/gate.sh`, against it.
+- **`std/` is the crate `nova-std`,** so `cargo package` keeps std's
+  sources.
+- **ADR 0026** records Phase 3's scope.
+
+### Changed
+
+- In a project, `nova build` without `-o` writes `target/debug/<name>`,
+  or `target/release/<name>` with `--release`, instead of `<file stem>` in
+  the current directory. Outside a project, and with a file argument,
+  nothing changes.
+- `nova-pm` no longer depends on `serde`, `toml`, `anyhow` or `tracing`.
+
 ## [0.2.0] - 2026-10-06
 
 **Phase 2, "Standard Library Core", is complete**, within the boundary

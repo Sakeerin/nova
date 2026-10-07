@@ -37,6 +37,16 @@ nova version                 Show version
 nova help [cmd]              Show help
 ```
 
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** `nova version`,
+`nova new <name>` and `nova init` exist. `nova init` also takes
+`--name <name>`, and defaults to the directory's own name. With no file
+argument, `run`, `build` and `check` find the project by walking up from the
+current directory to the nearest `nova.toml`, and so does `test`, which
+takes no file; outside any project they keep `src/main.nova`. In a project,
+`build` writes `target/debug/<name>`, and `build --release` writes
+`target/release/<name>`
+(`docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §6).
+
 ### 1.2 Project Template (`nova new`)
 
 ```
@@ -68,6 +78,17 @@ description = "A new Nova project"
 [build]
 target = "native"
 ```
+
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** `nova new` writes
+`nova.toml`, `.gitignore`, `README.md` and `src/main.nova`. Its `nova.toml`
+has only `name`, `version = "0.1.0"`, `edition = "2026"` and an empty
+`[dependencies]`:
+- no `authors` placeholder, which would be published as written;
+- no `description`;
+- no `[dev-dependencies]` or `[build]`.
+
+There is no `tests/` until Phase 3.3, and the template's one test is in
+`src/main.nova` (spec §6.3).
 
 ---
 
@@ -174,6 +195,18 @@ path = "src/main.nova"
 [lib]
 path = "src/lib.nova"
 ```
+
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** `nova-pm` parses
+three tables:
+- `[package]`: `name`, `version` and `edition` are required; `description`,
+  `license`, `repository`, `authors`, `keywords` and `categories` are
+  optional;
+- `[dependencies]` and `[dev-dependencies]`, whose entries are a version
+  requirement, or a table with `version` or `path`.
+
+Every other key warns (M0006) and is ignored. Nothing resolves dependencies
+before Phase 3.3, so a declared one is an error (M0005). Diagnostics
+M0001–M0006 point at the key or value at fault (spec §5).
 
 ### 4.2 Lock file (`nova.lock`)
 - TOML, similar to Cargo.lock
@@ -288,6 +321,13 @@ jobs:
 curl -sSf https://novalang.dev/install.sh | sh
 ```
 Downloads `nova` binary for detected platform, places in `~/.nova/bin/`, adds to PATH.
+
+**Amended 2026-10-07 (branch `phase-3-0-foundations`):** `~/.nova` also holds
+`runtime/<version>-<crc32>/`, where `nova` unpacks the runtime library it
+carries the first time it links a program; `NOVA_HOME` moves the whole
+directory. Until the install scripts exist (Phase 3.6),
+`cargo install --locked --git https://github.com/Sakeerin/nova nova-cli`
+installs a `nova` that needs nothing beside it (ADR 0027).
 
 ### 10.2 Windows
 ```powershell
