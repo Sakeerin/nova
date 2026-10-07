@@ -1,12 +1,14 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, run, build, check, test and version.
-//! Phase 0 implements `nova parse`; Phase 1 adds `nova run` (Cranelift JIT)
-//! and `nova check`.
+//! Dispatches to subcommands: parse, run, build, check, test, new, init and
+//! version. Phase 0 implemented `nova parse`, Phase 1 `nova run` (Cranelift
+//! JIT) and `nova check`, and Phase 3.0 the project commands (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`).
 
 mod cmd;
 mod embedded;
 mod project;
+mod template;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -34,6 +36,10 @@ enum Command {
     Check(cmd::run::CheckCmd),
     /// Compile and run `@test` functions, one process per test.
     Test(cmd::test::TestCmd),
+    /// Create a new project in a new directory.
+    New(cmd::new::NewCmd),
+    /// Make the current directory a project.
+    Init(cmd::new::InitCmd),
     /// Show the version, the target, and whether the runtime library is
     /// embedded.
     Version,
@@ -55,6 +61,8 @@ fn main() -> Result<()> {
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
         Command::Test(cmd) => cmd::test::run(cmd),
+        Command::New(cmd) => cmd::new::new(cmd),
+        Command::Init(cmd) => cmd::new::init(cmd),
         Command::Version => cmd::version::run(),
     }
 }
