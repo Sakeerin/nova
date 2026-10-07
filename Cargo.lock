@@ -990,6 +990,7 @@ dependencies = [
  "nova-diagnostics",
  "nova-lexer",
  "nova-parser",
+ "thiserror",
 ]
 
 [[package]]
