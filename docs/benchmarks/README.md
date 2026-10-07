@@ -455,7 +455,7 @@ different measurement window.
   per accepted connection, so `--connections 200` means 200 tasks
   cooperatively scheduled on that one thread, not 200 independent workers.
 - **No read timeout.** `read_request` parks with no deadline
-  (`std/http/lib.nova:450` discloses this directly, alongside why: the
+  (`std/http/lib.nova:461` discloses this directly, alongside why: the
   server's byte-valued limits never impose a temporal one). `std/net`'s own
   `TcpStream::read_timeout` exists and is not used here. What that costs, in
   that source's own terms: a peer that connects and sends nothing, or sends a
