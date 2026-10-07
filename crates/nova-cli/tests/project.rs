@@ -326,3 +326,169 @@ fn an_import_resolves_when_run_from_a_subdirectory() {
         .success()
         .stdout("from util\n");
 }
+
+const TEMPLATE_MAIN: &str = "fn greeting() -> String {\n    \"Hello, Nova!\"\n}\n\nfn main() {\n    println(greeting())\n}\n\n@test\nfn greeting_says_hello() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n";
+
+fn read(path: impl AsRef<Path>) -> String {
+    let path = path.as_ref();
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+#[test]
+fn new_writes_exactly_the_template_and_it_runs_and_tests() {
+    let dir = fresh_dir("new");
+    let out = nova()
+        .current_dir(&dir)
+        .args(["new", "demo"])
+        .assert()
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "created `demo`: nova.toml, .gitignore, README.md, src/main.nova\n"
+    );
+    let project = dir.join("demo");
+    assert_eq!(
+        read(project.join("nova.toml")),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n"
+    );
+    assert_eq!(read(project.join(".gitignore")), "/target\n");
+    assert_eq!(
+        read(project.join("README.md")),
+        "# demo\n\n`nova run` builds and runs `src/main.nova`; `nova test` runs its tests.\n"
+    );
+    assert_eq!(read(project.join("src").join("main.nova")), TEMPLATE_MAIN);
+    nova()
+        .current_dir(&project)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout("Hello, Nova!\n");
+    let tested = nova().current_dir(&project).arg("test").assert().success();
+    assert!(
+        stdout(&tested).contains("1 passed; 0 failed"),
+        "{}",
+        stdout(&tested)
+    );
+}
+
+#[test]
+fn new_refuses_a_non_empty_directory_and_bad_names() {
+    let dir = fresh_dir("new-refuses");
+    std::fs::create_dir_all(dir.join("taken")).unwrap();
+    std::fs::write(dir.join("taken").join("file.txt"), "x").unwrap();
+    let out = nova()
+        .current_dir(&dir)
+        .args(["new", "taken"])
+        .assert()
+        .failure();
+    assert!(
+        stderr(&out).contains("not an empty directory"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!dir.join("taken").join("nova.toml").exists());
+
+    // An empty directory is fine.
+    std::fs::create_dir_all(dir.join("empty")).unwrap();
+    nova()
+        .current_dir(&dir)
+        .args(["new", "empty"])
+        .assert()
+        .success();
+    assert!(dir.join("empty").join("nova.toml").is_file());
+
+    // Review Focus 5: a bad name is refused before anything touches the
+    // disk, names that look like paths included.
+    for bad in ["1abc", "a b", "con", "../nova-escape-test", "a/b"] {
+        let out = nova()
+            .current_dir(&dir)
+            .args(["new", bad])
+            .assert()
+            .failure();
+        let err = stderr(&out);
+        assert!(
+            err.contains("package name") || err.contains("reserves"),
+            "{bad}: {err}"
+        );
+    }
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["empty", "taken"]);
+    assert!(!dir.parent().unwrap().join("nova-escape-test").exists());
+}
+
+#[test]
+fn init_names_the_project_after_its_directory_and_reports_what_it_wrote() {
+    let dir = fresh_dir("init").join("my-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = nova().current_dir(&dir).arg("init").assert().success();
+    assert_eq!(
+        stdout(&out),
+        "wrote: nova.toml, .gitignore, README.md, src/main.nova\n"
+    );
+    assert!(read(dir.join("nova.toml")).contains("name = \"my-app\""));
+    nova()
+        .current_dir(&dir)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout("Hello, Nova!\n");
+}
+
+#[test]
+fn init_keeps_existing_files_and_says_so() {
+    let dir = fresh_dir("init-keeps").join("keeper");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join("main.nova"), HELLO).unwrap();
+    std::fs::write(dir.join("README.md"), "mine\n").unwrap();
+    let out = nova().current_dir(&dir).arg("init").assert().success();
+    assert_eq!(
+        stdout(&out),
+        "wrote: nova.toml, .gitignore\nkept: README.md, src/main.nova\n"
+    );
+    assert_eq!(read(dir.join("src").join("main.nova")), HELLO);
+    assert_eq!(read(dir.join("README.md")), "mine\n");
+    nova()
+        .current_dir(&dir)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout("hello from the project\n");
+}
+
+#[test]
+fn init_refuses_a_directory_that_already_has_a_manifest() {
+    let dir = fresh_dir("init-refuses").join("existing");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("nova.toml"), "# mine\n").unwrap();
+    let out = nova().current_dir(&dir).arg("init").assert().failure();
+    assert!(
+        stderr(&out).contains("already has a nova.toml"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(read(dir.join("nova.toml")), "# mine\n");
+    assert!(!dir.join("src").exists());
+}
+
+#[test]
+fn init_suggests_the_name_flag_for_a_bad_directory_name() {
+    let dir = fresh_dir("init-bad-name").join("1 bad name");
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = nova().current_dir(&dir).arg("init").assert().failure();
+    assert!(
+        stderr(&out).contains("nova init --name"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!dir.join("nova.toml").exists());
+    nova()
+        .current_dir(&dir)
+        .args(["init", "--name", "good"])
+        .assert()
+        .success();
+    assert!(read(dir.join("nova.toml")).contains("name = \"good\""));
+}
