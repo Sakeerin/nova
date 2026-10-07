@@ -6,6 +6,7 @@
 
 mod cmd;
 mod embedded;
+mod project;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
