@@ -39,6 +39,37 @@ pub fn lex(source: &str, file: FileId) -> (Vec<Spanned<Token>>, Vec<LexError>) {
     lexer.tokenize()
 }
 
+/// [`lex`], plus every comment it skipped, in source order: what the
+/// formatter needs to keep them (spec
+/// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §3.1).
+/// The tokens and errors are exactly `lex`'s.
+pub fn lex_with_comments(
+    source: &str,
+    file: FileId,
+) -> (Vec<Spanned<Token>>, Vec<Comment>, Vec<LexError>) {
+    let mut lexer = Lexer::new(source, file);
+    let (tokens, errors) = lexer.tokenize();
+    (tokens, lexer.comments, errors)
+}
+
+/// A comment the lexer skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Comment {
+    pub kind: CommentKind,
+    /// From `//` to the end of its line, without the line break or a `\r`
+    /// before it; or from `/*` through `*/`.
+    pub span: Span,
+}
+
+/// Which kind of comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `// …`, including `//// …`.
+    Line,
+    /// `/* … */`, which does not nest.
+    Block,
+}
+
 /// One open `${…}` interpolation hole.
 struct InterpFrame {
     /// Byte offset of the `$` in the `${` that opened this hole, for the
@@ -61,6 +92,8 @@ pub struct Lexer<'src> {
     interp: Vec<InterpFrame>,
     // Whether we are currently inside a string literal (between delimiters).
     in_string: bool,
+    // Every comment skipped so far, in source order.
+    comments: Vec<Comment>,
 }
 
 impl<'src> Lexer<'src> {
@@ -71,6 +104,7 @@ impl<'src> Lexer<'src> {
             pos: 0,
             interp: Vec::new(),
             in_string: false,
+            comments: Vec::new(),
         }
     }
 
@@ -109,9 +143,12 @@ impl<'src> Lexer<'src> {
     }
 
     /// Advance past whitespace, `//` line comments, and `/* */` block
-    /// comments. A `///` doc comment is *not* trivia — it is left for the
-    /// tokenizer to emit as a `DocComment`.
-    fn skip_trivia(&mut self) {
+    /// comments, recording each comment. A `///` doc comment, exactly three
+    /// slashes, is *not* trivia: it is left for the tokenizer to emit as a
+    /// `DocComment`. Four or more slashes make a plain comment, as in Rust. A
+    /// `/*` with no `*/` before the end of the file is an error (10-LEXER.md
+    /// §6).
+    fn skip_trivia(&mut self) -> Result<(), LexError> {
         let b = self.source.as_bytes();
         loop {
             while self.pos < b.len() {
@@ -120,29 +157,48 @@ impl<'src> Lexer<'src> {
                     _ => break,
                 }
             }
-            // Line comment `//...` (but not a `///` doc comment).
-            if self.pos + 1 < b.len()
-                && b[self.pos] == b'/'
-                && b[self.pos + 1] == b'/'
-                && !(self.pos + 2 < b.len() && b[self.pos + 2] == b'/')
-            {
+            if self.pos + 1 < b.len() && b[self.pos] == b'/' && b[self.pos + 1] == b'/' {
+                let doc = b.get(self.pos + 2) == Some(&b'/') && b.get(self.pos + 3) != Some(&b'/');
+                if doc {
+                    break;
+                }
+                let start = self.pos;
                 while self.pos < b.len() && b[self.pos] != b'\n' {
                     self.pos += 1;
                 }
+                let end = if self.pos > start && b[self.pos - 1] == b'\r' {
+                    self.pos - 1
+                } else {
+                    self.pos
+                };
+                self.comments.push(Comment {
+                    kind: CommentKind::Line,
+                    span: self.span(start, end),
+                });
                 continue;
             }
-            // Block comment `/* ... */` (non-nesting, matching the grammar).
             if self.pos + 1 < b.len() && b[self.pos] == b'/' && b[self.pos + 1] == b'*' {
+                let start = self.pos;
                 self.pos += 2;
                 while self.pos + 1 < b.len() && !(b[self.pos] == b'*' && b[self.pos + 1] == b'/') {
                     self.pos += 1;
                 }
-                // Consume the closing `*/` (or run to EOF if unterminated).
-                self.pos = (self.pos + 2).min(b.len());
+                if self.pos + 1 >= b.len() {
+                    self.pos = b.len();
+                    return Err(LexError::UnterminatedBlockComment(
+                        self.span(start, b.len()),
+                    ));
+                }
+                self.pos += 2;
+                self.comments.push(Comment {
+                    kind: CommentKind::Block,
+                    span: self.span(start, self.pos),
+                });
                 continue;
             }
             break;
         }
+        Ok(())
     }
 
     fn next_token(&mut self) -> Result<Option<Spanned<Token>>, LexError> {
@@ -159,7 +215,7 @@ impl<'src> Lexer<'src> {
         // here (not only inside `lex_logos`) because string and raw-string
         // literals are detected before `lex_logos`; a comment sitting right
         // before a `"`/`r"` would otherwise misdirect the dispatch.
-        self.skip_trivia();
+        self.skip_trivia()?;
 
         if self.pos >= self.source.len() {
             return Ok(None);
@@ -531,7 +587,9 @@ fn raw_to_token(raw: RawToken, slice: &str) -> Token {
         RawToken::Float(f) => Token::Float(f),
         RawToken::Int(n) => Token::Int(n),
         RawToken::Char(c) => Token::Char(c),
-        RawToken::DocComment => Token::DocComment(slice[3..].trim().to_owned()),
+        // Leading whitespace kept, so indentation inside a doc's Markdown
+        // survives; trailing whitespace, `\r` included, dropped (spec §3.2).
+        RawToken::DocComment => Token::DocComment(slice[3..].trim_end().to_owned()),
         RawToken::Ident => Token::Ident(slice.to_owned()),
     }
 }
