@@ -63,6 +63,14 @@ DOC_COMMENT   — /// rest of line, captured as token (passed to parser)
 
 Comments (`//`, `/* */`) are skipped, NOT emitted.
 
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** a doc comment is a
+line comment that starts with exactly three slashes; four or more make a
+plain comment, as in Rust. Its token carries the text after `///`, with its
+leading whitespace and without its trailing whitespace. `lex` still skips
+plain comments. `lex_with_comments` returns the same tokens, and every plain
+comment, line or block, with its span, for the formatter
+(`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §3).
+
 ---
 
 ## 3. String Interpolation Handling
@@ -136,6 +144,12 @@ Each becomes a `LexError` with span:
 - `InvalidUnicodeEscape`
 - `InvalidNumberLiteral`
 - `UnexpectedCharacter(char)`
+
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):**
+`UnterminatedBlockComment` is reported, spanning from the `/*` to the end of
+the file. Until 3.1 an unterminated `/*` silently commented out the rest of
+the file (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`
+§3.3).
 
 ---
 

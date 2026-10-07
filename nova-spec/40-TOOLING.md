@@ -47,6 +47,14 @@ takes no file; outside any project they keep `src/main.nova`. In a project,
 `target/release/<name>`
 (`docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §6).
 
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** `nova fmt` exists, as
+`nova fmt [PATH]... [--check] [--stdin]`. With no path it formats the
+project's `src/`, or `src/` outside a project when `src/main.nova` exists;
+paths may name files or directories. It exits 0, 1 when `--check` finds a
+file that would change, or 2 on any error. ADR 0028 reads the master spec's
+"only `--check`" as "no style options"
+(`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §7).
+
 ### 1.2 Project Template (`nova new`)
 
 ```
@@ -120,6 +128,27 @@ nova fmt --stdin      # read from stdin, write to stdout
 
 ### 2.4 EditorConfig integration
 Respects `.editorconfig` for line endings and final newline only.
+
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** §2.1 to §2.4 as built
+(`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §5 to §7;
+ADR 0028):
+- The 100 columns are counted in Unicode scalar values. A construct that
+  does not fit breaks in its own way, and a line holding something that
+  cannot break, such as a long string, may run past 100.
+- Imports are sorted within each run of consecutive `import` items, by path,
+  and each `{…}` list by name, in byte order. "std first" waits for packages
+  (3.3).
+- The author's parentheses are kept, one pair each. Statements print without
+  `;`, and match arms without `,`, except where the parser would otherwise
+  read two as one.
+- Every comment is kept, and every run checks its output: the same AST, the
+  same comments, or the file is left unchanged.
+- §2.3: paths may also name directories, and there may be several.
+- §2.4: `.editorconfig`'s `end_of_line` (`lf` or `crlf`) wins, then the
+  file's own line ending, then LF; one final newline unless
+  `insert_final_newline = false`. The files are found by walking up to one
+  with `root = true`, and EditorConfig's globs are matched, except numeric
+  ranges.
 
 ---
 

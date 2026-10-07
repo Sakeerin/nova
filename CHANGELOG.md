@@ -42,6 +42,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`std/` is the crate `nova-std`,** so `cargo package` keeps std's
   sources.
 - **ADR 0026** records Phase 3's scope.
+- **`nova fmt`** prints Nova source in one fixed layout: the project's
+  `src/`, or the files and directories given; `--check` lists each file that
+  would change and exits 1; `--stdin` formats standard input.
+  - It keeps every comment and the author's parentheses, and each file's
+    line endings unless `.editorconfig` says otherwise.
+  - It refuses, and leaves the file untouched, any output that would change
+    the program or lose a comment: every run parses its own output again.
+  - `nova-fmt`'s library offers the same through `format`, `format_file`
+    and `format_text`, for 3.2's language server.
+
+  ADR 0028.
+- **Doc comments.** `///` before an item, a trait or impl member, a record
+  field, a variant or an extern function documents it. Anywhere else it is
+  an error.
+- `nova_lexer::lex_with_comments` returns the tokens and every comment.
 
 ### Changed
 
@@ -50,6 +65,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the current directory. Outside a project, and with a file argument,
   nothing changes.
 - `nova-pm` no longer depends on `serde`, `toml`, `anyhow` or `tracing`.
+- `////` is a plain comment. It used to lex as a doc comment that no file
+  could contain.
+- An unterminated `/*` is an error, `UnterminatedBlockComment`, instead of
+  silently commenting out the rest of the file.
+- A `where` clause takes a trailing comma.
+- `std/` and `examples/` are formatted with `nova fmt`, and CI checks that
+  they stay so.
 
 ## [0.2.0] - 2026-10-06
 
