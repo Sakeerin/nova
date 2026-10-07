@@ -168,8 +168,7 @@ fn write(file: &Path, text: &str) -> std::io::Result<()> {
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let tmp = file.with_file_name(format!(".{name}.nova-fmt.tmp"));
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, file).map_err(|e| {
+    std::fs::rename(&tmp, file).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
-        e
     })
 }
