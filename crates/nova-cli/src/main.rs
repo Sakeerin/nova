@@ -1,9 +1,11 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, run, build, check, test, new, init and
-//! version. Phase 0 implemented `nova parse`, Phase 1 `nova run` (Cranelift
-//! JIT) and `nova check`, and Phase 3.0 the project commands (spec
-//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`).
+//! Dispatches to subcommands: parse, run, build, check, test, fmt, new,
+//! init and version. Phase 0 implemented `nova parse`, Phase 1 `nova run`
+//! (Cranelift JIT) and `nova check`, Phase 3.0 the project commands (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
+//! and Phase 3.1 `nova fmt` (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`).
 
 mod cmd;
 mod embedded;
@@ -36,6 +38,9 @@ enum Command {
     Check(cmd::run::CheckCmd),
     /// Compile and run `@test` functions, one process per test.
     Test(cmd::test::TestCmd),
+    /// Format Nova source files: the project's `src/`, or the files and
+    /// directories given.
+    Fmt(cmd::fmt::FmtCmd),
     /// Create a new project in a new directory.
     New(cmd::new::NewCmd),
     /// Make the current directory a project.
@@ -61,6 +66,8 @@ fn main() -> Result<()> {
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
         Command::Test(cmd) => cmd::test::run(cmd),
+        // Its exit code says more than success or failure (spec §7.2).
+        Command::Fmt(cmd) => std::process::exit(cmd::fmt::run(cmd)),
         Command::New(cmd) => cmd::new::new(cmd),
         Command::Init(cmd) => cmd::new::init(cmd),
         Command::Version => cmd::version::run(),
