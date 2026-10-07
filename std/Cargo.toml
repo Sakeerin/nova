@@ -1,0 +1,15 @@
+[package]
+name = "nova-std"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Nova standard library's sources, embedded for the compiler"
+
+[lib]
+path = "lib.rs"
+# Not a benchmark target: `cargo bench` would otherwise build this under
+# libtest's harness, which rejects criterion's `--output-format`. The
+# workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false

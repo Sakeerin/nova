@@ -1066,6 +1066,7 @@ dependencies = [
  "nova-diagnostics",
  "nova-lexer",
  "nova-parser",
+ "nova-std",
  "rustc-hash",
  "thiserror",
 ]
@@ -1083,6 +1084,10 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "nova-std"
+version = "0.2.0"
 
 [[package]]
 name = "nova-test"

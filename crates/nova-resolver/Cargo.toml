@@ -18,6 +18,8 @@ nova-diagnostics = { path = "../nova-diagnostics" }
 nova-ast = { path = "../nova-ast" }
 nova-lexer = { path = "../nova-lexer" }
 nova-parser = { path = "../nova-parser" }
+# std's sources (spec 2026-10-07-phase-3-0-foundations-design.md §3).
+nova-std = { path = "../../std" }
 indexmap = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }
