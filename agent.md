@@ -76,6 +76,11 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 ### Testing
 - Every module ships with `#[cfg(test)] mod tests { ... }`.
 - Parser, type-checker, and formatter output → snapshot tests via `insta`.
+  **Amended 2026-10-07 (branch `phase-3-1-formatter`):** not the
+  formatter's output: its tests compare each whole output with an exact
+  string written beside its input, and check that formatting the output
+  again changes nothing
+  (`docs/superpowers/plans/2026-10-07-phase-3-1-formatter.md`, decision 14).
 - Integration tests in `tests/` use `assert_cmd` to invoke the `nova` binary.
 
 ### Commits
@@ -203,6 +208,12 @@ Update snapshots with:
 ```powershell
 cargo insta review
 ```
+
+**Amended 2026-10-07 (branch `phase-3-1-formatter`):** the formatter's
+tests do not use `insta`. Each compares a whole output with an exact string
+written beside its input, and checks that formatting the output again
+changes nothing
+(`docs/superpowers/plans/2026-10-07-phase-3-1-formatter.md`, decision 14).
 
 Committed snapshots live in `crates/<crate>/src/snapshots/`.
 
