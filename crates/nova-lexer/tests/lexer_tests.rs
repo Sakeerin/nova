@@ -1,5 +1,6 @@
 use nova_diagnostics::FileDb;
-use nova_lexer::{lex, Token};
+use nova_lexer::{lex, lex_with_comments, CommentKind, Token};
+use std::path::{Path, PathBuf};
 
 fn tokens(source: &str) -> Vec<Token> {
     let mut db = FileDb::new();
@@ -507,4 +508,126 @@ fn interpolation_basics_still_lex() {
             Token::Eof,
         ]
     );
+}
+
+// === Comments, for the formatter (spec
+// docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md §3) ===
+
+/// Each comment `lex_with_comments` reports, as its kind and source text.
+fn comments(source: &str) -> Vec<(CommentKind, String)> {
+    let mut db = FileDb::new();
+    let file = db.add("<test>", source);
+    let (_, comments, errors) = lex_with_comments(source, file);
+    assert!(errors.is_empty(), "unexpected lex errors: {errors:?}");
+    comments
+        .iter()
+        .map(|c| {
+            (
+                c.kind,
+                source[c.span.start as usize..c.span.end as usize].to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn lex_with_comments_returns_each_comment_in_order() {
+    // The third sits just before a string, and the last ends the file with
+    // no newline after it.
+    assert_eq!(
+        comments("// one\nfn /* two */ main() { f(/* three */\"s\") } // four"),
+        vec![
+            (CommentKind::Line, "// one".to_owned()),
+            (CommentKind::Block, "/* two */".to_owned()),
+            (CommentKind::Block, "/* three */".to_owned()),
+            (CommentKind::Line, "// four".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_line_comments_span_stops_before_a_crlf() {
+    assert_eq!(
+        comments("// a\r\nfn main() {}\r\n"),
+        vec![(CommentKind::Line, "// a".to_owned())]
+    );
+}
+
+#[test]
+fn a_comment_inside_an_interpolation_hole_is_captured() {
+    assert_eq!(
+        comments("let s = \"${x /* c */}\""),
+        vec![(CommentKind::Block, "/* c */".to_owned())]
+    );
+}
+
+#[test]
+fn a_comment_marker_inside_a_string_is_not_a_comment() {
+    assert_eq!(
+        comments("let u = \"http://example.com/*x*/\" // real"),
+        vec![(CommentKind::Line, "// real".to_owned())]
+    );
+}
+
+#[test]
+fn four_slashes_make_a_plain_comment() {
+    let toks = tokens("//// ----\nfn f() {}");
+    assert!(matches!(toks[0], Token::Fn), "toks: {toks:?}");
+    assert_eq!(
+        comments("//// ----\nfn f() {}"),
+        vec![(CommentKind::Line, "//// ----".to_owned())]
+    );
+}
+
+#[test]
+fn doc_text_keeps_its_indentation_and_drops_trailing_whitespace() {
+    let toks = tokens("///   indented  \r\nfn f() {}");
+    assert_eq!(toks[0], Token::DocComment("   indented".to_owned()));
+}
+
+#[test]
+fn an_unterminated_block_comment_is_an_error() {
+    let (_, errors) = lex_all("fn main() {} /* never closed");
+    assert_eq!(errors, vec!["unterminated block comment".to_owned()]);
+}
+
+/// Every `.nova` file under `dir`, skipping `target/` and dot-directories.
+fn nova_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .expect("read a directory")
+        .map(|e| e.expect("read an entry"))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let kind = entry.file_type().expect("read an entry's type");
+        if kind.is_dir() {
+            if name != "target" && !name.starts_with('.') {
+                nova_files(&entry.path(), out);
+            }
+        } else if kind.is_file() && name.ends_with(".nova") {
+            out.push(entry.path());
+        }
+    }
+}
+
+#[test]
+fn lex_and_lex_with_comments_agree_on_every_nova_file() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    nova_files(&root, &mut files);
+    assert!(files.len() >= 168, "found only {} .nova files", files.len());
+    for path in files {
+        let text = std::fs::read_to_string(&path).expect("read a .nova file");
+        let mut db = FileDb::new();
+        let file = db.add("<corpus>", text.as_str());
+        let (plain, _) = lex(&text, file);
+        let (with, _, _) = lex_with_comments(&text, file);
+        let pairs = |toks: Vec<nova_diagnostics::Spanned<Token>>| {
+            toks.into_iter()
+                .map(|t| (t.value, t.span))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairs(plain), pairs(with), "{}", path.display());
+    }
 }
