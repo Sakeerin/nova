@@ -891,6 +891,7 @@ dependencies = [
  "nova-driver",
  "nova-lexer",
  "nova-parser",
+ "nova-pm",
  "nova-runtime",
  "tracing",
  "tracing-subscriber",

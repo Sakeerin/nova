@@ -13,7 +13,6 @@
 //! classifying it from the outside, by exit status and stderr, is what makes
 //! both possible (design doc `2026-08-05-nova-test-design.md` §5).
 
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
@@ -158,16 +157,13 @@ fn format_exit_code(code: i32) -> String {
     format!("code {code} (0x{:08X})", code as u32)
 }
 
-/// `nova test`'s only positional argument is the filter
-/// (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`, unlike
-/// `run`/`build`/`check`), so the entry file is always the project default.
-fn test_entry_file() -> PathBuf {
-    PathBuf::from("src/main.nova")
-}
-
 pub fn run(cmd: TestCmd) -> Result<()> {
-    let file = test_entry_file();
-    let (exe, tests) = nova_driver::build_test_binary(&file)?;
+    // `nova test`'s only positional argument is the filter
+    // (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`,
+    // unlike `run`/`build`/`check`), so it always works on the project
+    // around the current directory, or on `src/main.nova` outside any.
+    let mode = crate::project::mode(None)?;
+    let (exe, tests) = nova_driver::build_test_binary(mode.entry())?;
 
     // Enumerate by asking the compiled binary itself — exactly what a plain,
     // `NOVA_TEST_INDEX`-unset run of it prints to a human — rather than
