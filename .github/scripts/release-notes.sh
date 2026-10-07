@@ -16,7 +16,10 @@ notes=$(awk -v head="## [$1]" '
   index($0, "## [") == 1 { if (found) exit; found = (index($0, head) == 1); next }
   found { print }
 ' "$2")
-if ! printf '%s' "$notes" | grep -q '[^[:space:]]'; then
+# No pipe here: under pipefail, `printf … | grep -q` fails whenever grep
+# stops reading at its first match while printf still has more than a pipe
+# buffer to write, so a section over 64 KiB read as "no notes".
+if [ -z "${notes//[[:space:]]/}" ]; then
   echo "release-notes: $2 has no notes for $1" >&2
   exit 1
 fi
