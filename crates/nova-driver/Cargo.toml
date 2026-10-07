@@ -24,6 +24,10 @@ nova-hir = { path = "../nova-hir" }
 nova-mir = { path = "../nova-mir" }
 nova-codegen-cranelift = { path = "../nova-codegen-cranelift" }
 nova-codegen-llvm = { path = "../nova-codegen-llvm" }
+# Unpacking the runtime library nova-cli embeds (spec
+# 2026-10-07-phase-3-0-foundations-design.md §4.2).
+flate2 = { workspace = true }
+crc32fast = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 

@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::runtime_cache;
+
 use anyhow::{bail, Context, Result};
 // `anyhow!` is only invoked from `link_msvc`'s `#[cfg(windows)]` body below;
 // off Windows that function is the `unreachable!`-only stub, so an
@@ -83,22 +85,35 @@ fn runtime_lib_name() -> &'static str {
     }
 }
 
-/// Locate the runtime static library: `NOVA_RUNTIME_LIB` override first,
-/// then next to the `nova` executable (cargo places both the CLI binary
-/// and the staticlib in the same target directory; test binaries live one
-/// level deeper in `deps/`).
+/// Locate the runtime static library (spec
+/// `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`
+/// §4.2): `NOVA_RUNTIME_LIB` first, then the runtime this `nova` carries,
+/// unpacked to its cache, then the executable's neighbours.
 fn find_runtime_lib() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("NOVA_RUNTIME_LIB") {
-        let p = PathBuf::from(p);
-        if p.exists() {
-            return Ok(p);
-        }
-        bail!(
-            "NOVA_RUNTIME_LIB points to {}, which does not exist",
-            p.display()
-        );
-    }
-    let exe = std::env::current_exe().context("locating the nova executable")?;
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    runtime_cache::locate(
+        var("NOVA_RUNTIME_LIB"),
+        runtime_cache::embedded_runtime(),
+        || {
+            runtime_cache::cache_root(
+                var("NOVA_HOME"),
+                var("USERPROFILE"),
+                var("HOME"),
+                cfg!(windows),
+            )
+        },
+        || {
+            let exe = std::env::current_exe().context("locating the nova executable")?;
+            beside_exe(&exe)
+        },
+    )
+}
+
+/// The runtime library in the executable's directory or one of the two
+/// above it, where cargo leaves it in a checkout: the CLI binary and the
+/// staticlib share a target directory, and test binaries sit one level
+/// deeper, in `deps/`.
+fn beside_exe(exe: &Path) -> Result<PathBuf> {
     let name = runtime_lib_name();
     for dir in exe.ancestors().skip(1).take(3) {
         let candidate = dir.join(name);
@@ -107,8 +122,11 @@ fn find_runtime_lib() -> Result<PathBuf> {
         }
     }
     bail!(
-        "could not find the Nova runtime library ({name}) near {}; \
-         build it with `cargo build -p nova-runtime` or set NOVA_RUNTIME_LIB",
+        "could not find the Nova runtime library ({name}) near {}, and this nova does not \
+         carry one. Install nova with the release profile, which is `cargo install`'s \
+         default, or build it with NOVA_EMBED_RUNTIME=1; in a checkout, \
+         `cargo build -p nova-runtime` puts the library beside it. NOVA_RUNTIME_LIB can \
+         also name one.",
         exe.display()
     )
 }
@@ -185,4 +203,22 @@ fn run_linker(mut cmd: Command) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_nothing_beside_it_the_error_says_how_to_get_a_runtime() {
+        let dir = std::env::temp_dir().join(format!("nova-beside-exe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
+        let error = beside_exe(&dir.join("a/b/c/nova.exe"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("NOVA_EMBED_RUNTIME=1"), "{error}");
+        assert!(error.contains("NOVA_RUNTIME_LIB"), "{error}");
+        assert!(error.contains("cargo install"), "{error}");
+    }
 }
