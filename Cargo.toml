@@ -46,3 +46,14 @@ serde_json = "1"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The runtime library inside `nova`: nova-cli's build script compresses it,
+# and nova-driver unpacks it (docs/adr/0027-runtime-and-std-in-an-installed-nova.md).
+# flate2 is the standard gzip crate. 1.1.10 declares Rust 1.67, and it
+# brings miniz_oxide 0.9, adler2 and simd-adler32, which declare no
+# minimum, so the MSRV job is their check. All four are pure Rust, with no
+# C build. crc32fast was already in the lockfile. Default features are off:
+# flate2's `runtime_detection` names zlib-rs through a weak feature, which
+# builds nothing but would still put zlib-rs in Cargo.lock.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1.4"
