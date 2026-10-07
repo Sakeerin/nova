@@ -3,6 +3,7 @@
 
 mod check;
 mod doc;
+mod print;
 mod source;
 
 use nova_diagnostics::Diagnostic;
@@ -30,6 +31,18 @@ pub enum FormatError {
         /// Where the output first differs from the input.
         first_difference: String,
     },
+}
+
+/// Format `source`, naming it `<stdin>` in any diagnostics (spec §5.1).
+pub fn format(source: &str) -> Result<String, FormatError> {
+    format_named(source, "<stdin>")
+}
+
+/// Format `source`, naming it `name` in any diagnostics (spec §5.1): the
+/// canonical layout, with `\n` line endings and one final newline, checked
+/// against the input before it is returned (§5.5).
+pub fn format_named(source: &str, name: &str) -> Result<String, FormatError> {
+    format_with(source, name, print::print)
 }
 
 /// Format `source` with `print`, then check the output (spec §5.1, §5.5).
