@@ -776,7 +776,7 @@ impl<'a> Checker<'a> {
                         true,
                         f.is_async,
                     ),
-                    TraitItem::AssocType { name, bounds } => {
+                    TraitItem::AssocType { name, bounds, .. } => {
                         if !bounds.is_empty() {
                             self.unsupported(name.span, "trait bounds on an associated type");
                         }

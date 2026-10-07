@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Impl(
                     ImplBlock {
+                        docs: [],
                         attrs: [],
                         generics: [],
                         trait_: Some(
@@ -64,6 +65,7 @@ Some(
                         where_clause: [],
                         functions: [
                             Function {
+                                docs: [],
                                 attrs: [],
                                 vis: Private,
                                 is_async: false,
@@ -164,6 +166,7 @@ Some(
                         ],
                         consts: [
                             ConstDecl {
+                                docs: [],
                                 attrs: [],
                                 vis: Private,
                                 name: Spanned {
@@ -220,6 +223,7 @@ Some(
                         ],
                         assoc_types: [
                             AssocTypeBinding {
+                                docs: [],
                                 name: Spanned {
                                     value: "Item",
                                     span: Span {

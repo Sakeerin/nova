@@ -1,5 +1,7 @@
-use nova_ast::{File, Item, Visibility};
+use nova_ast::item::{ExternItem, TraitItem, TypeDef};
+use nova_ast::{File, Item, Stmt, Visibility};
 use nova_diagnostics::FileDb;
+use nova_diagnostics::Spanned;
 use nova_lexer::lex;
 use nova_parser::{parse, ParseError};
 
@@ -669,4 +671,204 @@ mod prop {
             let _ = parse(&tokens, file_id);
         }
     }
+}
+
+// === Doc comments (spec
+// docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md §4) ===
+
+const MISPLACED: &str = "a doc comment must come right before an item, a field or a variant; use `//` for a plain comment";
+
+fn docs(d: &[Spanned<String>]) -> Vec<&str> {
+    d.iter().map(|s| s.value.as_str()).collect()
+}
+
+#[test]
+fn docs_attach_to_each_kind_of_item() {
+    let src = "/// f\nfn f() {}\n/// r\nrecord R { x: Int }\n/// t\ntype T = Int\n\
+               /// tr\ntrait Tr {}\n/// i\nimpl R {}\n/// c\nconst C: Int = 1\n\
+               /// im\nimport m\n/// mo\nmodule n\n/// e\nextern \"C\" {}\n";
+    let (file, errors) = parse_str(src);
+    assert!(errors.is_empty(), "{errors:?}");
+    let got: Vec<Vec<&str>> = file
+        .items
+        .iter()
+        .map(|item| match &item.value {
+            Item::Function(x) => docs(&x.docs),
+            Item::Record(x) => docs(&x.docs),
+            Item::Type(x) => docs(&x.docs),
+            Item::Trait(x) => docs(&x.docs),
+            Item::Impl(x) => docs(&x.docs),
+            Item::Const(x) => docs(&x.docs),
+            Item::Import(x) => docs(&x.docs),
+            Item::Module(x) => docs(&x.docs),
+            Item::Extern(x) => docs(&x.docs),
+        })
+        .collect();
+    let want: Vec<Vec<&str>> = [" f", " r", " t", " tr", " i", " c", " im", " mo", " e"]
+        .iter()
+        .map(|d| vec![*d])
+        .collect();
+    assert_eq!(got, want);
+    // A documented item's span starts at its first doc line.
+    assert_eq!(file.items[0].span.start, 0);
+}
+
+#[test]
+fn docs_attach_to_members_fields_and_variants() {
+    let src = "trait Tr {\n    /// req\n    fn a(self)\n    /// prov\n    fn b(self) {}\n    \
+               /// assoc\n    type Item\n}\n\
+               impl Tr for R {\n    /// m\n    fn a(self) {}\n    /// k\n    const K: Int = 1\n    \
+               /// bind\n    type Item = Int\n}\n\
+               record R {\n    /// x\n    x: Int,\n}\n\
+               type T =\n    /// a\n    | A\n    | B\n\
+               extern \"C\" {\n    /// ext\n    fn ext(x: Int) -> Int\n}\n";
+    let (file, errors) = parse_str(src);
+    assert!(errors.is_empty(), "{errors:?}");
+    let Item::Trait(tr) = &file.items[0].value else {
+        panic!("{:?}", file.items[0])
+    };
+    let trait_docs: Vec<Vec<&str>> = tr
+        .items
+        .iter()
+        .map(|it| match it {
+            TraitItem::Required(sig) => docs(&sig.docs),
+            TraitItem::Provided(f) => docs(&f.docs),
+            TraitItem::AssocType { docs: d, .. } => docs(d),
+        })
+        .collect();
+    assert_eq!(
+        trait_docs,
+        vec![vec![" req"], vec![" prov"], vec![" assoc"]]
+    );
+    let Item::Impl(im) = &file.items[1].value else {
+        panic!("{:?}", file.items[1])
+    };
+    assert_eq!(docs(&im.functions[0].docs), vec![" m"]);
+    assert_eq!(docs(&im.consts[0].docs), vec![" k"]);
+    assert_eq!(docs(&im.assoc_types[0].docs), vec![" bind"]);
+    let Item::Record(r) = &file.items[2].value else {
+        panic!("{:?}", file.items[2])
+    };
+    assert_eq!(docs(&r.fields[0].docs), vec![" x"]);
+    let Item::Type(t) = &file.items[3].value else {
+        panic!("{:?}", file.items[3])
+    };
+    let TypeDef::Sum(variants) = &t.def else {
+        panic!("{:?}", t.def)
+    };
+    assert_eq!(docs(&variants[0].docs), vec![" a"]);
+    assert!(variants[1].docs.is_empty());
+    let Item::Extern(e) = &file.items[4].value else {
+        panic!("{:?}", file.items[4])
+    };
+    let ExternItem::Fn(sig) = &e.items[0];
+    assert_eq!(docs(&sig.docs), vec![" ext"]);
+}
+
+#[test]
+fn docs_may_come_between_attributes_on_a_top_level_item() {
+    let (file, errors) = parse_str("/// one\n@test\n/// two\nfn t() {}\n");
+    assert!(errors.is_empty(), "{errors:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("{:?}", file.items)
+    };
+    assert_eq!(docs(&f.docs), vec![" one", " two"]);
+    assert_eq!(f.attrs.len(), 1);
+}
+
+#[test]
+fn docs_attach_to_a_nested_item() {
+    let (file, errors) = parse_str("fn main() {\n    /// inner\n    fn helper() {}\n}\n");
+    assert!(errors.is_empty(), "{errors:?}");
+    let Item::Function(main) = &file.items[0].value else {
+        panic!("{:?}", file.items)
+    };
+    let Stmt::Item(item) = &main.body.value.stmts[0].value else {
+        panic!("{:?}", main.body.value.stmts)
+    };
+    let Item::Function(helper) = &**item else {
+        panic!("{item:?}")
+    };
+    assert_eq!(docs(&helper.docs), vec![" inner"]);
+}
+
+#[test]
+fn a_misplaced_doc_comment_is_an_error() {
+    for (place, src) in [
+        (
+            "before a let",
+            "fn main() {\n    /// no\n    let x = 1\n}\n",
+        ),
+        (
+            "before an expression statement",
+            "fn main() {\n    /// no\n    f()\n}\n",
+        ),
+        (
+            "before a match arm",
+            "fn main() {\n    match x {\n        /// no\n        _ => 1\n    }\n}\n",
+        ),
+        (
+            "before a parameter",
+            "fn f(\n    /// no\n    x: Int,\n) {}\n",
+        ),
+        (
+            "before a closing brace",
+            "fn main() {\n    f()\n    /// no\n}\n",
+        ),
+        (
+            "before a body's closing brace",
+            "trait T {\n    /// no\n}\n",
+        ),
+        ("at the end of the file", "fn main() {}\n/// no\n"),
+    ] {
+        let (_, errors) = parse_str(src);
+        let messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+        assert_eq!(messages, vec![MISPLACED.to_owned()], "{place}");
+    }
+}
+
+#[test]
+fn a_variant_list_does_not_take_the_next_items_doc() {
+    let (file, errors) = parse_str("type T = | A | B\n/// next\nfn f() {}\n");
+    assert!(errors.is_empty(), "{errors:?}");
+    let Item::Function(f) = &file.items[1].value else {
+        panic!("{:?}", file.items)
+    };
+    assert_eq!(docs(&f.docs), vec![" next"]);
+}
+
+#[test]
+fn a_trailing_comma_ends_a_where_clause() {
+    let (with, errors) = parse_str("fn f<T>(x: T) -> T where T: A, { x }\n");
+    assert!(errors.is_empty(), "{errors:?}");
+    let (without, errors) = parse_str("fn f<T>(x: T) -> T where T: A { x }\n");
+    assert!(errors.is_empty(), "{errors:?}");
+    let bounds = |file: &File| match &file.items[0].value {
+        Item::Function(f) => f.where_clause.len(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((bounds(&with), bounds(&without)), (1, 1));
+}
+
+#[test]
+fn a_parenthesised_pattern_spans_its_parentheses() {
+    let src = "fn main() {\n    let (x) = 1\n    let () = ()\n}\n";
+    let (file, errors) = parse_str(src);
+    assert!(errors.is_empty(), "{errors:?}");
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("{:?}", file.items)
+    };
+    let spans: Vec<&str> = f
+        .body
+        .value
+        .stmts
+        .iter()
+        .map(|s| match &s.value {
+            Stmt::Let { pattern, .. } => {
+                &src[pattern.span.start as usize..pattern.span.end as usize]
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(spans, vec!["(x)", "()"]);
 }

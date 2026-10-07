@@ -8,6 +8,7 @@ Some(
             Spanned {
                 value: Record(
                     Record {
+                        docs: [],
                         attrs: [],
                         vis: Private,
                         name: Spanned {
@@ -23,6 +24,7 @@ Some(
                         generics: [],
                         fields: [
                             RecordField {
+                                docs: [],
                                 vis: Private,
                                 name: Spanned {
                                     value: "x",
@@ -62,6 +64,7 @@ Some(
                                 },
                             },
                             RecordField {
+                                docs: [],
                                 vis: Private,
                                 name: Spanned {
                                     value: "y",

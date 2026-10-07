@@ -20,6 +20,11 @@ use nova_lexer::Token;
 
 use crate::ParseError;
 
+/// The error for a `///` that documents nothing (spec
+/// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
+const MISPLACED_DOC: &str =
+    "a doc comment must come right before an item, a field or a variant; use `//` for a plain comment";
+
 // ---------------------------------------------------------------------------
 // Parser state
 // ---------------------------------------------------------------------------
@@ -171,6 +176,102 @@ impl<'a> Parser<'a> {
             }
         }
     }
+
+    // --- Doc comments (spec §4) ---
+
+    /// Consume consecutive `///` lines and return them, in order.
+    fn take_docs(&mut self) -> Vec<Spanned<String>> {
+        let mut docs = Vec::new();
+        while let Token::DocComment(text) = self.peek().clone() {
+            let span = self.peek_span();
+            self.advance();
+            docs.push(Spanned::new(text, span));
+        }
+        docs
+    }
+
+    /// Report a `///` that documents nothing.
+    fn misplaced_doc(&mut self, span: Span) {
+        self.errors.push(ParseError::Custom {
+            message: MISPLACED_DOC.into(),
+            span,
+        });
+    }
+
+    /// Report and skip the `///` lines here, which document nothing. Returns
+    /// whether there were any.
+    fn reject_docs(&mut self) -> bool {
+        let docs = self.take_docs();
+        for d in &docs {
+            self.misplaced_doc(d.span);
+        }
+        !docs.is_empty()
+    }
+
+    /// The index of the first token at or after the cursor that is not a
+    /// `///` line.
+    fn docs_end(&self) -> usize {
+        let mut i = self.pos;
+        while matches!(
+            self.tokens.get(i).map(|t| &t.value),
+            Some(Token::DocComment(_))
+        ) {
+            i += 1;
+        }
+        i
+    }
+
+    /// Whether the token after any `///` lines is `tok`.
+    fn next_after_docs_is(&self, tok: &Token) -> bool {
+        self.tokens
+            .get(self.docs_end())
+            .is_some_and(|t| std::mem::discriminant(&t.value) == std::mem::discriminant(tok))
+    }
+
+    /// Whether the token at `i` starts an item that may appear inside a block.
+    fn is_item_start_at(&self, i: usize) -> bool {
+        let at = |k: usize| self.tokens.get(k).map(|t| &t.value);
+        matches!(
+            at(i),
+            Some(
+                Token::Fn
+                    | Token::Async
+                    | Token::Record
+                    | Token::Trait
+                    | Token::Impl
+                    | Token::Type
+                    | Token::Const
+                    | Token::Import
+                    | Token::Module
+                    | Token::Extern
+            )
+        ) || (matches!(at(i), Some(Token::Pub))
+            && matches!(
+                at(i + 1),
+                Some(
+                    Token::Fn
+                        | Token::Record
+                        | Token::Trait
+                        | Token::Type
+                        | Token::Const
+                        | Token::Impl
+                )
+            ))
+    }
+
+    /// A top-level item's docs and `@attributes`, which may be interleaved.
+    fn parse_item_prefix(&mut self) -> (Vec<Spanned<String>>, Vec<Attribute>) {
+        let mut docs = Vec::new();
+        let mut attrs = Vec::new();
+        loop {
+            docs.extend(self.take_docs());
+            if self.peek() != &Token::At {
+                break;
+            }
+            attrs.extend(self.parse_attributes());
+        }
+        (docs, attrs)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,65 +376,79 @@ impl<'a> Parser<'a> {
 
     fn try_parse_item(&mut self) -> Option<Spanned<Item>> {
         let start = self.peek_span();
-        let attrs = self.parse_attributes();
+        let (docs, attrs) = self.parse_item_prefix();
         let vis = self.parse_visibility();
 
         let item = match self.peek() {
             Token::Fn | Token::Async => {
                 let mut func = self.parse_function(vis)?;
                 func.attrs = attrs;
+                func.docs = docs;
                 Item::Function(func)
             }
             Token::Record => {
                 self.advance();
                 let mut record = self.parse_record(vis)?;
                 record.attrs = attrs;
+                record.docs = docs;
                 Item::Record(record)
             }
             Token::Type => {
                 self.advance();
                 let mut td = self.parse_type_decl(vis)?;
                 td.attrs = attrs;
+                td.docs = docs;
                 Item::Type(td)
             }
             Token::Trait => {
                 self.advance();
                 let mut tr = self.parse_trait_decl(vis)?;
                 tr.attrs = attrs;
+                tr.docs = docs;
                 Item::Trait(tr)
             }
             Token::Impl => {
                 self.advance();
                 let mut impl_ = self.parse_impl_block()?;
                 impl_.attrs = attrs;
+                impl_.docs = docs;
                 Item::Impl(impl_)
             }
             Token::Const => {
                 self.advance();
                 let mut c = self.parse_const_decl(vis)?;
                 c.attrs = attrs;
+                c.docs = docs;
                 Item::Const(c)
             }
             Token::Import => {
                 self.advance();
                 let mut imp = self.parse_import()?;
                 imp.attrs = attrs;
+                imp.docs = docs;
                 Item::Import(imp)
             }
             Token::Module => {
                 self.advance();
                 let mut m = self.parse_module()?;
                 m.attrs = attrs;
+                m.docs = docs;
                 Item::Module(m)
             }
             Token::Extern => {
                 self.advance();
                 let mut e = self.parse_extern_block()?;
                 e.attrs = attrs;
+                e.docs = docs;
                 Item::Extern(e)
             }
             _ => {
                 let span = self.peek_span();
+                if let Some(first) = docs.first() {
+                    // Docs with no item after them (spec §4).
+                    self.misplaced_doc(first.span);
+                    return None;
+                }
                 self.errors.push(ParseError::Expected {
                     expected: "item (fn, record, type, trait, impl, const, import, module, extern)"
                         .into(),
@@ -384,6 +499,7 @@ impl<'a> Parser<'a> {
         let body = self.parse_block("function body")?;
 
         Some(Function {
+            docs: Vec::new(),
             attrs: Vec::new(),
             vis,
             is_async,
@@ -411,6 +527,7 @@ impl<'a> Parser<'a> {
         };
         let where_clause = self.parse_where_clause_opt();
         Some(FunctionSig {
+            docs: Vec::new(),
             is_async,
             name,
             generics,
@@ -423,6 +540,9 @@ impl<'a> Parser<'a> {
     fn parse_params(&mut self) -> Vec<Param> {
         let mut params = Vec::new();
         while !self.check(&Token::RParen) && !self.is_at_end() {
+            if self.reject_docs() {
+                continue;
+            }
             if let Some(p) = self.parse_param() {
                 params.push(p);
             }
@@ -510,6 +630,14 @@ impl<'a> Parser<'a> {
             if self.eat(&Token::Comma).is_none() {
                 break;
             }
+            // A trailing comma (spec §4): the clause ends at the body or the
+            // end of a signature.
+            if matches!(
+                self.peek(),
+                Token::LBrace | Token::Semicolon | Token::RBrace
+            ) {
+                break;
+            }
         }
         bounds
     }
@@ -526,6 +654,13 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "record body")?;
         let mut fields = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            let docs = self.take_docs();
+            if self.check(&Token::RBrace) || self.is_at_end() {
+                if let Some(first) = docs.first() {
+                    self.misplaced_doc(first.span);
+                }
+                continue;
+            }
             let fvis = self.parse_visibility();
             let fname = match self.parse_ident("field name") {
                 Some(n) => n,
@@ -547,6 +682,7 @@ impl<'a> Parser<'a> {
             };
             self.eat(&Token::Comma);
             fields.push(RecordField {
+                docs,
                 vis: fvis,
                 name: fname,
                 ty: fty,
@@ -554,6 +690,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "record body")?;
         Some(Record {
+            docs: Vec::new(),
             attrs: Vec::new(),
             vis,
             name,
@@ -567,10 +704,14 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics_opt();
         self.expect(&Token::Eq, "type definition")?;
 
-        // Sum type: starts with `|`
-        let def = if self.check(&Token::Pipe) {
+        // Sum type: starts with `|`, after the first variant's docs if any.
+        // A variant's docs come before its `|`; docs with no `|` after them
+        // belong to whatever follows the type, so they are left for it.
+        let def = if self.next_after_docs_is(&Token::Pipe) {
             let mut variants = Vec::new();
-            while self.eat(&Token::Pipe).is_some() {
+            while self.next_after_docs_is(&Token::Pipe) {
+                let docs = self.take_docs();
+                self.advance(); // the `|`
                 let vname = match self.parse_ident("variant name") {
                     Some(n) => n,
                     None => break,
@@ -588,6 +729,7 @@ impl<'a> Parser<'a> {
                     self.eat(&Token::RParen);
                 }
                 variants.push(Variant {
+                    docs,
                     name: vname,
                     fields,
                 });
@@ -600,6 +742,7 @@ impl<'a> Parser<'a> {
 
         self.eat(&Token::Semicolon);
         Some(TypeDecl {
+            docs: Vec::new(),
             attrs: Vec::new(),
             vis,
             name,
@@ -619,6 +762,13 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "trait body")?;
         let mut items = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            let docs = self.take_docs();
+            if self.check(&Token::RBrace) || self.is_at_end() {
+                if let Some(first) = docs.first() {
+                    self.misplaced_doc(first.span);
+                }
+                continue;
+            }
             // An associated type declaration (`type Item` or `type Item:
             // Display`) must be handled before the speculative
             // `parse_function_sig()` below: that call expects `fn` as its
@@ -633,7 +783,7 @@ impl<'a> Parser<'a> {
                         Vec::new()
                     };
                     self.eat(&Token::Semicolon);
-                    items.push(TraitItem::AssocType { name, bounds });
+                    items.push(TraitItem::AssocType { docs, name, bounds });
                 } else {
                     self.sync_to_stmt_boundary();
                 }
@@ -643,19 +793,21 @@ impl<'a> Parser<'a> {
             let saved_pos = self.pos;
             let saved_errors_len = self.errors.len();
             let is_async = self.check(&Token::Async);
-            if let Some(sig) = self.parse_function_sig() {
+            if let Some(mut sig) = self.parse_function_sig() {
                 if self.check(&Token::LBrace) {
                     // Provided method — we need to re-parse as Function.
                     // Roll back and parse as full function.
                     self.pos = saved_pos;
                     self.errors.truncate(saved_errors_len);
                     let func_vis = Visibility::Private;
-                    if let Some(func) = self.parse_function(func_vis) {
+                    if let Some(mut func) = self.parse_function(func_vis) {
+                        func.docs = docs;
                         items.push(TraitItem::Provided(func));
                     }
                 } else {
                     // Required method — expect semicolon.
                     self.eat(&Token::Semicolon);
+                    sig.docs = docs;
                     items.push(TraitItem::Required(sig));
                 }
             } else {
@@ -665,6 +817,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "trait body")?;
         Some(TraitDecl {
+            docs: Vec::new(),
             attrs: Vec::new(),
             vis,
             name,
@@ -706,13 +859,21 @@ impl<'a> Parser<'a> {
         // `sync_to_item_boundary` nor `sync_to_stmt_boundary` provides it —
         // both stop *at* their boundary token without consuming it.
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            let docs = self.take_docs();
+            if self.check(&Token::RBrace) || self.is_at_end() {
+                if let Some(first) = docs.first() {
+                    self.misplaced_doc(first.span);
+                }
+                continue;
+            }
             // Captured before `parse_visibility` consumes it, so the `pub`
             // rejection in the `type` arm can point at the `pub` itself.
             let vis_span = self.peek_span();
             let vis = self.parse_visibility();
             match self.peek() {
                 Token::Fn | Token::Async => {
-                    if let Some(f) = self.parse_function(vis) {
+                    if let Some(mut f) = self.parse_function(vis) {
+                        f.docs = docs;
                         functions.push(f);
                     } else {
                         self.sync_to_item_boundary();
@@ -739,7 +900,7 @@ impl<'a> Parser<'a> {
                             if self.expect(&Token::Eq, "associated type binding").is_some() {
                                 if let Some(ty) = self.parse_type("associated type binding") {
                                     self.eat(&Token::Semicolon);
-                                    assoc_types.push(AssocTypeBinding { name, ty });
+                                    assoc_types.push(AssocTypeBinding { docs, name, ty });
                                 } else {
                                     self.sync_to_stmt_boundary();
                                 }
@@ -752,7 +913,8 @@ impl<'a> Parser<'a> {
                 }
                 Token::Const => {
                     self.advance();
-                    if let Some(c) = self.parse_const_decl(vis) {
+                    if let Some(mut c) = self.parse_const_decl(vis) {
+                        c.docs = docs;
                         consts.push(c);
                     } else {
                         self.sync_to_stmt_boundary();
@@ -784,6 +946,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "impl block")?;
         Some(ImplBlock {
+            docs: Vec::new(),
             attrs: Vec::new(),
             generics,
             trait_,
@@ -803,6 +966,7 @@ impl<'a> Parser<'a> {
         let value = self.parse_expr("const value")?;
         self.eat(&Token::Semicolon);
         Some(ConstDecl {
+            docs: Vec::new(),
             attrs: Vec::new(),
             vis,
             name,
@@ -842,6 +1006,7 @@ impl<'a> Parser<'a> {
 
         self.eat(&Token::Semicolon);
         Some(Import {
+            docs: Vec::new(),
             attrs: Vec::new(),
             path: Spanned::new(path, path_span),
             kind,
@@ -859,6 +1024,7 @@ impl<'a> Parser<'a> {
         );
         self.eat(&Token::Semicolon);
         Some(Module {
+            docs: Vec::new(),
             attrs: Vec::new(),
             path: Spanned::new(path, span),
         })
@@ -884,7 +1050,15 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "extern block")?;
         let mut items = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
-            if let Some(sig) = self.parse_function_sig() {
+            let docs = self.take_docs();
+            if self.check(&Token::RBrace) || self.is_at_end() {
+                if let Some(first) = docs.first() {
+                    self.misplaced_doc(first.span);
+                }
+                continue;
+            }
+            if let Some(mut sig) = self.parse_function_sig() {
+                sig.docs = docs;
                 self.eat(&Token::Semicolon);
                 items.push(ExternItem::Fn(sig));
             } else {
@@ -893,6 +1067,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&Token::RBrace, "extern block")?;
         Some(ExternBlock {
+            docs: Vec::new(),
             attrs: Vec::new(),
             abi,
             items,
@@ -1127,6 +1302,14 @@ impl<'a> Parser<'a> {
         let mut trailing: Option<Box<Spanned<Expr>>> = None;
 
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            // A `///` documents a nested item. Anywhere else in a block it is
+            // misplaced (spec §4).
+            if matches!(self.peek(), Token::DocComment(_))
+                && !self.is_item_start_at(self.docs_end())
+            {
+                self.reject_docs();
+                continue;
+            }
             // Check if this could be the trailing expression.
             // Parse a statement; if it's an expression without semicolon at the
             // block-final position, treat as trailing.
@@ -1175,31 +1358,8 @@ impl<'a> Parser<'a> {
             return self.parse_let_stmt();
         }
 
-        // Nested items
-        if matches!(
-            self.peek(),
-            Token::Fn
-                | Token::Async
-                | Token::Record
-                | Token::Trait
-                | Token::Impl
-                | Token::Type
-                | Token::Const
-                | Token::Import
-                | Token::Module
-                | Token::Extern
-        ) || (self.check(&Token::Pub) && {
-            // check next token
-            matches!(
-                self.tokens.get(self.pos + 1).map(|s| &s.value),
-                Some(Token::Fn)
-                    | Some(Token::Record)
-                    | Some(Token::Trait)
-                    | Some(Token::Type)
-                    | Some(Token::Const)
-                    | Some(Token::Impl)
-            )
-        }) {
+        // Nested items, documented or not (spec §4)
+        if self.is_item_start_at(self.docs_end()) {
             let item = self.try_parse_item()?;
             let span = item.span;
             return Some(Spanned::new(Stmt::Item(Box::new(item.value)), span));
@@ -1980,6 +2140,9 @@ impl<'a> Parser<'a> {
         self.expect(&Token::LBrace, "match body")?;
         let mut arms = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
+            if self.reject_docs() {
+                continue;
+            }
             if let Some(arm) = self.parse_match_arm(ctx) {
                 arms.push(arm);
             } else {
@@ -2023,6 +2186,9 @@ impl<'a> Parser<'a> {
         self.expect(&Token::Pipe, "closure")?;
         let mut params = Vec::new();
         while !self.check(&Token::Pipe) && !self.is_at_end() {
+            if self.reject_docs() {
+                continue;
+            }
             let is_mut = self.eat(&Token::Mut).is_some();
             let name = self.parse_ident("closure parameter")?;
             let ty = if self.eat(&Token::Colon).is_some() {
@@ -2235,12 +2401,17 @@ impl<'a> Parser<'a> {
             }
             Token::LParen => {
                 self.advance();
-                if self.eat(&Token::RParen).is_some() {
-                    return Some(Spanned::new(Pattern::Tuple(vec![]), start));
+                // Spans over the parentheses, as for expressions and types,
+                // so the formatter can keep them (spec §4).
+                if let Some(close) = self.eat(&Token::RParen) {
+                    return Some(Spanned::new(
+                        Pattern::Tuple(vec![]),
+                        start.merge(close.span),
+                    ));
                 }
                 let first = self.parse_pattern(ctx)?;
-                if self.eat(&Token::RParen).is_some() {
-                    return Some(Spanned::new(first.value, start));
+                if let Some(close) = self.eat(&Token::RParen) {
+                    return Some(Spanned::new(first.value, start.merge(close.span)));
                 }
                 let mut elems = vec![first];
                 while self.eat(&Token::Comma).is_some() && !self.check(&Token::RParen) {
