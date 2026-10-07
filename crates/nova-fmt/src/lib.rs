@@ -4,8 +4,12 @@
 mod check;
 mod comments;
 mod doc;
+mod editorconfig;
+mod file;
 mod print;
 mod source;
+
+pub use file::{format_file, format_text, FileError, Formatted, LineEnding};
 
 use nova_diagnostics::Diagnostic;
 
