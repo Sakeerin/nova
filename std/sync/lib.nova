@@ -71,9 +71,7 @@ pub record Mutex<T> { locked: Bool, value: T }
 pub record MutexGuard<T> { owner: Mutex<T>, released: Bool }
 
 impl<T> Mutex<T> {
-    pub fn new(value: T) -> Mutex<T> {
-        Mutex { locked: false, value: value }
-    }
+    pub fn new(value: T) -> Mutex<T> { Mutex { locked: false, value: value } }
 
     // Take the flag if it is free. Private: the two public entry points differ
     // only in what they do when it is not, and returning a `Bool` is what lets
@@ -94,11 +92,7 @@ impl<T> Mutex<T> {
     // receives the guard it needs; the caller that gets `None` has nothing it
     // could mistake for one.
     pub fn try_lock(mut self) -> Option<MutexGuard<T>> {
-        if self.take() {
-            Some(MutexGuard { owner: self, released: false })
-        } else {
-            None
-        }
+        if self.take() { Some(MutexGuard { owner: self, released: false }) } else { None }
     }
 
     // Take the lock, yielding to every other runnable task until it is free.
@@ -109,9 +103,7 @@ impl<T> Mutex<T> {
     // turn and can always release; which *waiter* wins afterwards is
     // unspecified, and this mutex makes no fairness guarantee.
     pub async fn lock(mut self) -> MutexGuard<T> {
-        while !self.take() {
-            yield_now().await
-        }
+        while !self.take() { yield_now().await }
         MutexGuard { owner: self, released: false }
     }
 }
@@ -137,9 +129,7 @@ impl<T> MutexGuard<T> {
     // because nothing unwinds across a poll boundary. A stale read is also the
     // harmless one of the three: it cannot corrupt the mutex, where a stale
     // `set` or `release` writes to it. Documented, not enforced.
-    pub fn get(self) -> T {
-        self.owner.value
-    }
+    pub fn get(self) -> T { self.owner.value }
 
     // Replace the guarded value -- the other half of the pair `Vec<T>` already
     // ships, `get` at `std/collections/lib.nova:49` with `set` at `:53`, and
@@ -218,6 +208,7 @@ pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 // has ever carried has been wrong, including the one it was written with.
 // Grep the quoted phrase.
 pub record Sender<T> { ch: Channel<T> }
+
 pub record Receiver<T> { ch: Channel<T> }
 
 // A bounded channel holding at most `buffer` values.
@@ -276,16 +267,12 @@ impl<T> Sender<T> {
     // Send if there is room. False when the channel is full OR closed; a
     // caller that needs to distinguish them should use `send`, which returns
     // false only for closed.
-    pub fn try_send(mut self, v: T) -> Bool {
-        self.ch.push(v)
-    }
+    pub fn try_send(mut self, v: T) -> Bool { self.ch.push(v) }
 
     // Refuse all further sends. Buffered values stay readable, so a producer
     // may close the instant it stops producing and the consumer still drains.
     // Idempotent: a second call sets an already-set flag.
-    pub fn close(mut self) {
-        self.ch.closed = true
-    }
+    pub fn close(mut self) { self.ch.closed = true }
 
     // Send, waiting while the channel is full. Returns false only when the
     // channel is closed -- unlike `try_send`, which also returns false when
@@ -308,9 +295,7 @@ impl<T> Sender<T> {
 impl<T> Receiver<T> {
     // Take a value if one is buffered. None means empty, and says nothing
     // about whether more will arrive -- `recv` is what distinguishes those.
-    pub fn try_recv(mut self) -> Option<T> {
-        self.ch.pop()
-    }
+    pub fn try_recv(mut self) -> Option<T> { self.ch.pop() }
 
     // Take the next value, waiting while the channel is empty and open.
     //

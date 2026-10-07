@@ -64,15 +64,7 @@
 // std module is glob-imported into every module, and whether two std modules
 // may export one variant name is not established on this tree. This increment
 // is not the place to find out.
-pub type Method =
-    | Get
-    | Post
-    | Put
-    | Delete
-    | Patch
-    | Head
-    | Options
-    | Unknown(String)
+pub type Method = | Get | Post | Put | Delete | Patch | Head | Options | Unknown(String)
 
 // Why a request head was rejected.
 //
@@ -102,10 +94,7 @@ pub type HttpErrorKind =
     | BodyTooLarge
     | Transport
 
-pub record HttpError {
-    pub kind: HttpErrorKind
-    pub message: String
-}
+pub record HttpError { pub kind: HttpErrorKind, pub message: String }
 
 // Map a parse status to its kind. The argument is the **negated** status the
 // intrinsic returned, so a status of `-3` arrives here as `3`.
@@ -154,11 +143,7 @@ pub fn http_error_kind_of(code: Int) -> HttpErrorKind {
 // nowhere for a caller's limit to arrive. The two fields here are checked on
 // this side, in addition. `max_body_bytes` is this side's alone: the intrinsic
 // returns `body_start` and never looks at the body.
-pub record Limits {
-    pub max_head_bytes: Int
-    pub max_header_count: Int
-    pub max_body_bytes: Int
-}
+pub record Limits { pub max_head_bytes: Int, pub max_header_count: Int, pub max_body_bytes: Int }
 
 impl Default for Limits {
     fn default() -> Limits {
@@ -169,10 +154,10 @@ impl Default for Limits {
 // A parsed request. `body` is the bytes after the head, already bounded by
 // `Content-Length` and by `Limits::max_body_bytes`.
 pub record Request {
-    pub method: Method
-    pub path: String
-    pub headers: Map<String, String>
-    pub body: Bytes
+    pub method: Method,
+    pub path: String,
+    pub headers: Map<String, String>,
+    pub body: Bytes,
 }
 
 // The raw offset table for `buf`, exactly as
@@ -214,7 +199,9 @@ pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>,
     }
     let n = t[6]
     if n > limits.max_header_count {
-        return Err(HttpError { kind: TooManyHeaders, message: "header count over max_header_count" })
+        return Err(
+            HttpError { kind: TooManyHeaders, message: "header count over max_header_count" },
+        )
     }
     let method = method_from(text_at(buf, t[1], t[2]))
     let path = text_at(buf, t[3], t[4])
@@ -335,11 +322,7 @@ fn method_from(token: String) -> Method {
 // cannot move instead: the exact status line, the exact tail (the blank line
 // and the body), and that each expected header line occurs somewhere
 // between them.
-pub record Response {
-    pub status: Int
-    pub headers: Map<String, String>
-    pub body: Bytes
-}
+pub record Response { pub status: Int, pub headers: Map<String, String>, pub body: Bytes }
 
 impl Response {
     // `200 OK` carrying `body`, with `content-length` set from it.
@@ -389,9 +372,7 @@ impl Response {
                 // skipped rather than emitted: see `is_crlf_free`'s own doc
                 // comment for why this is the right layer to refuse it.
                 Some(v) => {
-                    if is_crlf_free(k) && is_crlf_free(v) {
-                        head = "${head}${k}: ${v}\r\n"
-                    }
+                    if is_crlf_free(k) && is_crlf_free(v) { head = "${head}${k}: ${v}\r\n" }
                 }
                 None => head = head
             }
@@ -434,9 +415,7 @@ impl Response {
 // know whether a header was dropped needs to check its own data before
 // handing it to `Response`; silently dropping is still strictly safer than
 // the alternative of emitting it.
-fn is_crlf_free(s: String) -> Bool {
-    !s.contains("\r") && !s.contains("\n")
-}
+fn is_crlf_free(s: String) -> Bool { !s.contains("\r") && !s.contains("\n") }
 
 // The reason phrase for a status code. Unknown codes get the class's own
 // phrase rather than an empty string: HTTP/1.1 lets a client ignore the
@@ -619,7 +598,14 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
         body = body.concat(chunk)
     }
 
-    Ok(Request { method: req.method, path: req.path, headers: req.headers, body: body.slice(0, want) })
+    Ok(
+        Request {
+            method: req.method,
+            path: req.path,
+            headers: req.headers,
+            body: body.slice(0, want),
+        },
+    )
 }
 
 // `Content-Length`, or `Ok(0)` when the header is absent.
@@ -653,7 +639,12 @@ fn content_length_of(req: Request, max: Int) -> Result<Int, HttpError> {
     match req.headers.get("content-length") {
         Some(v) => match digits_to_int(v.trim(), max) {
             Some(n) => Ok(n)
-            None => Err(HttpError { kind: BadHeader, message: "Content-Length is not a valid non-negative integer" })
+            None => Err(
+                HttpError {
+                    kind: BadHeader,
+                    message: "Content-Length is not a valid non-negative integer",
+                },
+            )
         }
         None => Ok(0)
     }
@@ -741,9 +732,7 @@ pub async fn write_response(conn: TcpStream, resp: Response) -> Result<Int, IoEr
             Ok(n) => n
             Err(e) => return Err(e)
         }
-        if n <= 0 {
-            return Err(IoError { kind: Other, message: "write made no progress" })
-        }
+        if n <= 0 { return Err(IoError { kind: Other, message: "write made no progress" }) }
         sent = sent + n
     }
     Ok(total)
@@ -768,22 +757,14 @@ const SERVER_REQUEST_MS: Int = 10000
 
 // A routing table and nothing else. Build one with `Server::new()` and `get`,
 // then `listen`.
-pub record Server {
-    routes: Vec<Route>
-}
+pub record Server { routes: Vec<Route> }
 
 // One GET route: an exact path, and the handler that answers it.
-record Route {
-    path: String
-    handler: fn(Request) -> Response
-}
+record Route { path: String, handler: fn(Request) -> Response }
 
 // A request read off a connection, and the bytes that followed it: a
 // pipelined next request, or the start of one.
-record InFlight {
-    req: Request
-    rest: Bytes
-}
+record InFlight { req: Request, rest: Bytes }
 
 impl Server {
     pub fn new() -> Server { Server { routes: Vec::new() } }
@@ -877,9 +858,7 @@ impl Server {
             match timeout(Duration::from_millis(SERVER_TICK_MS), l.accept()).await {
                 Ok(r) => {
                     match r {
-                        Ok(conn) => {
-                            let _ = spawn(serve(self, conn))
-                        }
+                        Ok(conn) => { let _ = spawn(serve(self, conn)) }
                         Err(e) => {
                             let _ = l.close().await
                             return Err(e)
@@ -919,18 +898,10 @@ async fn serve(s: Server, conn: TcpStream) {
     while open {
         if buf.len() == 0 {
             match conn.read_timeout(4096, SERVER_TICK_MS).await {
-                Ok(chunk) => {
-                    if chunk.len() == 0 {
-                        open = false
-                    } else {
-                        buf = chunk
-                    }
-                }
+                Ok(chunk) => { if chunk.len() == 0 { open = false } else { buf = chunk } }
                 Err(e) => {
                     match e.kind {
-                        TimedOut => {
-                            if shutdown_requested() { open = false }
-                        }
+                        TimedOut => { if shutdown_requested() { open = false } }
                         _ => open = false
                     }
                 }
@@ -942,7 +913,10 @@ async fn serve(s: Server, conn: TcpStream) {
                 Some(f) => {
                     buf = f.rest
                     let left = SERVER_REQUEST_MS - started.elapsed().as_millis()
-                    match timeout(Duration::from_millis(left), write_response(conn, s.dispatch(f.req))).await {
+                    match timeout(
+                        Duration::from_millis(left),
+                        write_response(conn, s.dispatch(f.req)),
+                    ).await {
                         Ok(w) => {
                             match w {
                                 Ok(n) => {
@@ -967,7 +941,12 @@ async fn serve(s: Server, conn: TcpStream) {
 // pipelined request -- never count against the head's own limit. With
 // `may_read` false, for a request taken up after a stop, nothing more is
 // read, and a request not already whole in `first` is `None`.
-async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant, may_read: Bool) -> Option<InFlight> {
+async fn read_in_flight(
+    conn: TcpStream,
+    first: Bytes,
+    started: Instant,
+    may_read: Bool,
+) -> Option<InFlight> {
     let limits = Limits::default()
     let mut buf = first
     let mut head: Option<Request> = None
@@ -1008,10 +987,17 @@ async fn read_in_flight(conn: TcpStream, first: Bytes, started: Instant, may_rea
             None => return None
         }
     }
-    Some(InFlight {
-        req: Request { method: req.method, path: req.path, headers: req.headers, body: buf.slice(body_start, end) },
-        rest: buf.slice(end, buf.len())
-    })
+    Some(
+        InFlight {
+            req: Request {
+                method: req.method,
+                path: req.path,
+                headers: req.headers,
+                body: buf.slice(body_start, end),
+            },
+            rest: buf.slice(end, buf.len()),
+        },
+    )
 }
 
 // Up to `max` more bytes for the request taken up at `started`, or `None` at

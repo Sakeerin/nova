@@ -14,20 +14,12 @@
 // `nova_rt_panic_str` calls `std::process::abort()`. `@test(should_panic)` is
 // the supported way to assert that something panics.
 
-pub fn assert(cond: Bool, msg: String) {
-    if !cond {
-        panic("assertion failed: ${msg}")
-    }
-}
+pub fn assert(cond: Bool, msg: String) { if !cond { panic("assertion failed: ${msg}") } }
 
 pub fn assert_eq<T: Eq + Debug>(a: T, b: T) {
-    if a.ne(b) {
-        panic("assertion failed: ${a.dbg()} != ${b.dbg()}")
-    }
+    if a.ne(b) { panic("assertion failed: ${a.dbg()} != ${b.dbg()}") }
 }
 
 pub fn assert_ne<T: Eq + Debug>(a: T, b: T) {
-    if a.eq(b) {
-        panic("assertion failed: ${a.dbg()} == ${b.dbg()}")
-    }
+    if a.eq(b) { panic("assertion failed: ${a.dbg()} == ${b.dbg()}") }
 }

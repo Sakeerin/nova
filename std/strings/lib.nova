@@ -86,19 +86,17 @@ fn char_is_whitespace(c: Char) -> Bool {
     // `L0001: unexpected character '`). `char_to_int` is already a std-only
     // builtin, so an std module can compare codepoints directly.
     let v = char_to_int(c)
-    if v == 160 { return true }    // U+00A0 NO-BREAK SPACE
-    if v == 8194 { return true }   // U+2002 EN SPACE
-    if v == 8195 { return true }   // U+2003 EM SPACE
-    if v == 12288 { return true }  // U+3000 IDEOGRAPHIC SPACE
+    if v == 160 { return true } // U+00A0 NO-BREAK SPACE
+    if v == 8194 { return true } // U+2002 EN SPACE
+    if v == 8195 { return true } // U+2003 EM SPACE
+    if v == 12288 { return true } // U+3000 IDEOGRAPHIC SPACE
     false
 }
 
 // First index at or after 0 that is not whitespace; `cs.len()` if all of it is.
 fn trim_start_index(cs: [Char]) -> Int {
     let mut a = 0
-    while a < cs.len() {
-        if char_is_whitespace(cs[a]) { a = a + 1 } else { return a }
-    }
+    while a < cs.len() { if char_is_whitespace(cs[a]) { a = a + 1 } else { return a } }
     cs.len()
 }
 
@@ -106,9 +104,7 @@ fn trim_start_index(cs: [Char]) -> Int {
 // `floor`; `floor` if everything from there on is whitespace.
 fn trim_end_index(cs: [Char], floor: Int) -> Int {
     let mut b = cs.len()
-    while b > floor {
-        if char_is_whitespace(cs[b - 1]) { b = b - 1 } else { return b }
-    }
+    while b > floor { if char_is_whitespace(cs[b - 1]) { b = b - 1 } else { return b } }
     floor
 }
 

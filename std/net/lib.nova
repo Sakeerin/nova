@@ -57,9 +57,7 @@ pub record TcpStream { fd: Int }
 // this thread for the round trip.
 pub async fn connect(addr: String) -> Result<TcpStream, IoError> {
     let status = net_connect(addr).await
-    if status == 0 {
-        return Ok(TcpStream { fd: decode_count(fs_take_bytes()) })
-    }
+    if status == 0 { return Ok(TcpStream { fd: decode_count(fs_take_bytes()) }) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -71,9 +69,7 @@ impl TcpStream {
     // same no-op: the runtime's socket table lookup simply removes nothing.
     pub async fn close(self) -> Result<(), IoError> {
         let status = net_close(self.fd)
-        if status == 0 {
-            return Ok(())
-        }
+        if status == 0 { return Ok(()) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 
@@ -88,9 +84,7 @@ impl TcpStream {
     // room for a third argument.
     pub async fn read_timeout(self, max: Int, ms: Int) -> Result<Bytes, IoError> {
         let status = net_read_timeout(self.fd, max, ms).await
-        if status == 0 {
-            return Ok(fs_take_bytes())
-        }
+        if status == 0 { return Ok(fs_take_bytes()) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 }
@@ -103,9 +97,7 @@ impl TcpStream {
 // operation is this function, `write_stream` below, or `read_timeout` above.
 async fn read_stream(s: TcpStream, max: Int) -> Result<Bytes, IoError> {
     let status = net_read(s.fd, max).await
-    if status == 0 {
-        return Ok(fs_take_bytes())
-    }
+    if status == 0 { return Ok(fs_take_bytes()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -125,9 +117,7 @@ impl Read for TcpStream {
 // returned count itself.
 async fn write_stream(s: TcpStream, buf: Bytes) -> Result<Int, IoError> {
     let status = net_write(s.fd, buf).await
-    if status == 0 {
-        return Ok(decode_count(fs_take_bytes()))
-    }
+    if status == 0 { return Ok(decode_count(fs_take_bytes())) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -145,9 +135,7 @@ async fn write_stream(s: TcpStream, buf: Bytes) -> Result<Int, IoError> {
 // rather than maintained.) **If `std/net` ever grows write buffering, this
 // becomes load-bearing and needs a real intrinsic** — a future reader should
 // not mistake this for an oversight.
-async fn flush_stream(s: TcpStream) -> Result<(), IoError> {
-    Ok(())
-}
+async fn flush_stream(s: TcpStream) -> Result<(), IoError> { Ok(()) }
 
 impl Write for TcpStream {
     fn write(self, buf: Bytes) -> Future<Result<Int, IoError>> { write_stream(self, buf) }
@@ -186,9 +174,7 @@ pub record TcpListener { fd: Int }
 // `std/io`'s `io_error_kind_of` together, and is deliberately not done here.
 pub fn bind(addr: String) -> Result<TcpListener, IoError> {
     let status = net_listen(addr)
-    if status == 0 {
-        return Ok(TcpListener { fd: decode_count(fs_take_bytes()) })
-    }
+    if status == 0 { return Ok(TcpListener { fd: decode_count(fs_take_bytes()) }) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }
 
@@ -206,9 +192,7 @@ impl TcpListener {
     // remember which of two identically named socket methods needs `.await`.
     pub async fn close(self) -> Result<(), IoError> {
         let status = net_close(self.fd)
-        if status == 0 {
-            return Ok(())
-        }
+        if status == 0 { return Ok(()) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 
@@ -243,9 +227,7 @@ impl TcpListener {
     // "socket is not open" message, and no Nova code can tell the two apart.
     pub fn local_port(self) -> Result<Int, IoError> {
         let status = net_local_port(self.fd)
-        if status == 0 {
-            return Ok(decode_count(fs_take_bytes()))
-        }
+        if status == 0 { return Ok(decode_count(fs_take_bytes())) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 
@@ -294,9 +276,7 @@ impl TcpListener {
     // that test was added this comment asserted a boundary nothing checked.
     pub async fn accept(self) -> Result<TcpStream, IoError> {
         let status = net_accept(self.fd).await
-        if status == 0 {
-            return Ok(TcpStream { fd: decode_count(fs_take_bytes()) })
-        }
+        if status == 0 { return Ok(TcpStream { fd: decode_count(fs_take_bytes()) }) }
         Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
     }
 }

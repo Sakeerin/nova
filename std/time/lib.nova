@@ -22,7 +22,9 @@ pub record Instant { nanos: Int }
 pub record Duration { nanos: Int }
 
 const NANOS_PER_SEC: Int = 1_000_000_000
+
 const NANOS_PER_MILLI: Int = 1_000_000
+
 const NANOS_PER_MICRO: Int = 1_000
 
 // The largest argument each constructor can scale without overflowing an
@@ -45,12 +47,19 @@ const NANOS_PER_MICRO: Int = 1_000
 // same overflow (Rust's version takes an unsigned argument and so has no low
 // side to clamp).
 const MAX_SECS: Int = 9_223_372_036
+
 const MAX_MILLIS: Int = 9_223_372_036_854
+
 const MAX_MICROS: Int = 9_223_372_036_854_775
+
 const MAX_NANOS: Int = 9_223_372_036_854_775_807
+
 const MIN_SECS: Int = -MAX_SECS
+
 const MIN_MILLIS: Int = -MAX_MILLIS
+
 const MIN_MICROS: Int = -MAX_MICROS
+
 // One further from zero than `-MAX_NANOS`: `Int` is two's-complement, so its
 // negative range holds one more value than its positive range, and this is
 // that value -- the most-negative `Int` representable, computed rather than
@@ -60,14 +69,10 @@ const MIN_NANOS: Int = -MAX_NANOS - 1
 
 impl Instant {
     // The current reading of the monotonic clock.
-    pub fn now() -> Instant {
-        Instant { nanos: time_now_nanos() }
-    }
+    pub fn now() -> Instant { Instant { nanos: time_now_nanos() } }
 
     // How long since `self`. Zero if `self` is somehow in the future.
-    pub fn elapsed(self) -> Duration {
-        Instant::now().duration_since(self)
-    }
+    pub fn elapsed(self) -> Duration { Instant::now().duration_since(self) }
 
     // The span from `earlier` to `self`, **saturating at zero** so an elapsed
     // time can never come back negative when the arguments are the wrong way
@@ -117,15 +122,11 @@ impl Duration {
     }
 
     // Whole seconds, truncating. `from_millis(1500).as_secs()` is `1`.
-    pub fn as_secs(self) -> Int {
-        self.nanos / NANOS_PER_SEC
-    }
+    pub fn as_secs(self) -> Int { self.nanos / NANOS_PER_SEC }
 
     // Whole milliseconds, truncating. `from_micros(1).as_millis()` is `0`,
     // which `tests/runtime/time_conversions.nova` pins deliberately.
-    pub fn as_millis(self) -> Int {
-        self.nanos / NANOS_PER_MILLI
-    }
+    pub fn as_millis(self) -> Int { self.nanos / NANOS_PER_MILLI }
 }
 
 // Suspend the current task for at least `d`.
@@ -147,9 +148,7 @@ impl Duration {
 // returns early just re-parks on the same deadline instead of waking the
 // sleeper ahead of schedule. A non-positive `d` wakes immediately rather
 // than being rejected.
-pub async fn sleep(d: Duration) {
-    task_sleep_future_nanos(d.nanos).await
-}
+pub async fn sleep(d: Duration) { task_sleep_future_nanos(d.nanos).await }
 
 // What `task_timeout_future` reports when the inner future finished first.
 const TIMEOUT_COMPLETED: Int = 0

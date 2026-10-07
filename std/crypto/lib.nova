@@ -11,23 +11,19 @@
 // hasher, so a caller with more data than fits in one `Bytes` has no route
 // here.
 
-pub type CryptoErrorKind =
-    | EntropyUnavailable
-    | InvalidLength
-    | RequestTooLarge
-    | InvalidRange
+pub type CryptoErrorKind = | EntropyUnavailable | InvalidLength | RequestTooLarge | InvalidRange
 
-pub record CryptoError {
-    pub kind: CryptoErrorKind
-    pub message: String
-}
+pub record CryptoError { pub kind: CryptoErrorKind, pub message: String }
 
 // These four values are duplicated in `crates/nova-runtime/src/crypto.rs`.
 // Nothing ties the two sides together, so the fixtures assert a known vector
 // per operation: swapping two of these must fail a fixture.
 const OP_SHA256: Int = 0
+
 const OP_SHA512: Int = 1
+
 const OP_HMAC_SHA256: Int = 2
+
 const OP_HMAC_SHA256_VERIFY: Int = 3
 
 // The `1 => EntropyUnavailable` arm below is not exercised by any test in
@@ -91,13 +87,8 @@ pub fn hmac_sha256_verify(key: Bytes, data: Bytes, tag: Bytes) -> Bool {
 // ending the process.
 pub fn random_bytes(n: Int) -> Result<Bytes, CryptoError> {
     let status = crypto_random_bytes(n)
-    if status == 0 {
-        return Ok(fs_take_bytes())
-    }
-    Err(CryptoError {
-        kind: crypto_error_kind_of(status),
-        message: "random_bytes failed",
-    })
+    if status == 0 { return Ok(fs_take_bytes()) }
+    Err(CryptoError { kind: crypto_error_kind_of(status), message: "random_bytes failed" })
 }
 
 // A uniform integer in `min ..= max`.
@@ -106,11 +97,6 @@ pub fn random_bytes(n: Int) -> Result<Bytes, CryptoError> {
 // `min` above `max` is `InvalidRange`.
 pub fn random_int(min: Int, max: Int) -> Result<Int, CryptoError> {
     let status = crypto_random_int(min, max)
-    if status == 0 {
-        return Ok(decode_count(fs_take_bytes()))
-    }
-    Err(CryptoError {
-        kind: crypto_error_kind_of(status),
-        message: "random_int failed",
-    })
+    if status == 0 { return Ok(decode_count(fs_take_bytes())) }
+    Err(CryptoError { kind: crypto_error_kind_of(status), message: "random_int failed" })
 }
