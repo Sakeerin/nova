@@ -889,6 +889,7 @@ dependencies = [
  "nova-ast",
  "nova-diagnostics",
  "nova-driver",
+ "nova-fmt",
  "nova-lexer",
  "nova-parser",
  "nova-pm",

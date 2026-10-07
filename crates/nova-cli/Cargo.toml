@@ -22,6 +22,7 @@ nova-ast = { path = "../nova-ast" }
 nova-parser = { path = "../nova-parser" }
 nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
+nova-fmt = { path = "../nova-fmt" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
