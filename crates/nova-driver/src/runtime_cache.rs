@@ -235,8 +235,9 @@ mod tests {
     /// A fresh, empty directory under the system temp dir, unique to this
     /// test.
     fn fresh_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("nova-runtime-cache-{name}-{}", std::process::id()));
+        // A fixed name, so each run replaces the last run's directory: a name with
+        // the process id in it left one more behind on every run.
+        let dir = std::env::temp_dir().join(format!("nova-runtime-cache-{name}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

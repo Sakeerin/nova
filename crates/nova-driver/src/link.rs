@@ -211,7 +211,9 @@ mod tests {
 
     #[test]
     fn with_nothing_beside_it_the_error_says_how_to_get_a_runtime() {
-        let dir = std::env::temp_dir().join(format!("nova-beside-exe-{}", std::process::id()));
+        // A fixed name, so each run replaces the last run's directory: a name with
+        // the process id in it left one more behind on every run.
+        let dir = std::env::temp_dir().join("nova-beside-exe");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("a/b/c")).unwrap();
         let error = beside_exe(&dir.join("a/b/c/nova.exe"))

@@ -10,7 +10,9 @@ use nova_pm::{find_root, MANIFEST};
 /// No `nova.toml` sits above the temp dir on any machine this runs on
 /// (checked on 2026-10-07), so `find_root` finds only what a test writes.
 fn fresh_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nova-find-root-{name}-{}", std::process::id()));
+    // A fixed name, so each run replaces the last run's directory: a name with
+    // the process id in it left one more behind on every run.
+    let dir = std::env::temp_dir().join(format!("nova-find-root-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the test directory");
     dir

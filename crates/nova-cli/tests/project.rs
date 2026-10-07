@@ -31,7 +31,9 @@ fn version_reports_the_build_and_whether_the_runtime_is_embedded() {
 
 /// A fresh, empty directory under the system temp dir, unique to this test.
 fn fresh_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nova-project-{name}-{}", std::process::id()));
+    // A fixed name, so each run replaces the last run's directory: a name with
+    // the process id in it left one more behind on every run.
+    let dir = std::env::temp_dir().join(format!("nova-project-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the test directory");
     dir
