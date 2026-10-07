@@ -15,6 +15,7 @@ use nova_ast::{Item, Path};
 use nova_diagnostics::{Span, Spanned};
 use nova_lexer::{Comment, CommentKind, Token};
 
+use crate::comments::Comments;
 use crate::doc::{concat, if_break, nest, text, Doc};
 use crate::source::Source;
 
@@ -33,7 +34,10 @@ const CONTINUES: [Token; 7] = [
 /// Print `src`'s AST in the canonical layout (spec §6): `\n` line endings
 /// and exactly one final newline, or nothing for an input with nothing in it.
 pub(crate) fn print(src: &Source) -> String {
-    let mut printer = Printer { src };
+    let mut printer = Printer {
+        src,
+        comments: Comments::new(&src.comments),
+    };
     let doc = printer.file();
     let out = crate::doc::render(doc, crate::WIDTH);
     let body = out.trim_end();
@@ -47,6 +51,7 @@ pub(crate) fn print(src: &Source) -> String {
 /// Walks one input's AST into a document.
 pub(crate) struct Printer<'s, 't> {
     src: &'s Source<'t>,
+    comments: Comments<'s>,
 }
 
 /// How a vertical list spaces its elements (spec §5.3).
@@ -440,34 +445,77 @@ impl<'s, 't> Printer<'s, 't> {
             || self.src.text[c.span.end as usize..next as usize].contains('\n')
     }
 
-    // --- Comments (spec §5.4). Until Task 6 these place no comments, so an
-    // input with a comment fails the self-check. ---
+    // --- Comments (spec §5.4; the 3.1 plan's decision 5). ---
 
     /// Take every comment not yet printed that starts before `offset`.
-    fn take_comments_before(&mut self, _offset: u32) -> Vec<Comment> {
-        Vec::new()
+    fn take_comments_before(&mut self, offset: u32) -> Vec<Comment> {
+        self.comments.take_before(offset).to_vec()
     }
 
     /// Whether a comment not yet printed starts before `offset`.
-    fn has_comment_before(&self, _offset: u32) -> bool {
-        false
+    fn has_comment_before(&self, offset: u32) -> bool {
+        self.comments.next_starts_before(offset)
     }
 
     /// Drop the comments inside verbatim text, which prints them itself.
-    fn skip_comments_within(&mut self, _span: Span) {}
-
-    /// The comments before `offset`, for a place inside a line.
-    fn leading(&mut self, _offset: u32) -> Doc {
-        Doc::Nil
+    fn skip_comments_within(&mut self, span: Span) {
+        self.comments.take_before(span.end);
     }
 
-    /// The comments that end `offset`'s line.
-    fn trailing(&mut self, _offset: u32) -> Doc {
-        Doc::Nil
+    /// The comments before `offset`, for a place inside a line: each is
+    /// followed by a line break if it is a line comment or one followed it
+    /// in the source, and otherwise by a space.
+    fn leading(&mut self, offset: u32) -> Doc {
+        let taken = self.comments.take_before(offset);
+        let mut parts = Vec::new();
+        for (k, c) in taken.iter().enumerate() {
+            let next = taken.get(k + 1).map_or(offset, |n| n.span.start);
+            parts.push(self.comment_doc(c));
+            parts.push(if self.breaks_after(c, next) {
+                Doc::HardLine
+            } else {
+                text(" ")
+            });
+        }
+        concat(parts)
     }
 
-    /// The comments before `close`, each on its own line.
-    fn dangling(&mut self, _close: u32) -> Option<Doc> {
-        None
+    /// The comments that end `offset`'s line. A line comment waits for the
+    /// end of the line the printer is on, after any `,` printed there, and
+    /// breaks every group around it. A block comment follows after a
+    /// space.
+    fn trailing(&mut self, offset: u32) -> Doc {
+        let taken = self.comments.take_trailing(self.src.text, offset);
+        let mut parts = Vec::new();
+        for c in taken {
+            match c.kind {
+                CommentKind::Line => {
+                    let line = self.src.slice(c.span).trim_end();
+                    parts.push(Doc::LineSuffix(format!(" {line}")));
+                    parts.push(Doc::BreakParent);
+                }
+                CommentKind::Block => {
+                    parts.push(text(" "));
+                    parts.push(self.comment_doc(c));
+                }
+            }
+        }
+        concat(parts)
+    }
+
+    /// The comments before `close`, each on its own line, or `None`.
+    fn dangling(&mut self, close: u32) -> Option<Doc> {
+        let taken = self.comments.take_before(close);
+        if taken.is_empty() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        for (k, c) in taken.iter().enumerate() {
+            if k > 0 {
+                parts.push(Doc::HardLine);
+            }
+            parts.push(self.comment_doc(c));
+        }
+        Some(concat(parts))
     }
 }

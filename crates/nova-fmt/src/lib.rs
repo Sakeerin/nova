@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`).
 
 mod check;
+mod comments;
 mod doc;
 mod print;
 mod source;
