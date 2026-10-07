@@ -197,7 +197,7 @@ would allocate an array to do the identical work, via a compiler change,
 with nothing visible to any user — a pessimization, not a feature.
 `Formatter`'s body is elided above and described only as a "Format builder
 for Display impls" — there is no specified behaviour there to implement.
-`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:98`) and returns
+`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:141`) and returns
 a whole string in one call regardless, so any builder reachable from it is
 a longer, slower spelling of interpolation: a `mut self` accumulator (ADR
 0005 §1 — ten uses in shipped `std/collections`) is buildable inside `fmt`
@@ -1795,7 +1795,7 @@ or imports untouched." A top-level `pub fn error` would therefore make
 `std/log`'s own `error` unreachable in any module that defined its own,
 with no diagnostic anywhere — a logging call resolving to the wrong
 function is a worse failure than one that fails to compile.
-`std/strings/lib.nova:248-252` already declined this same trade for
+`std/strings/lib.nova:240-247` already declined this same trade for
 `join`, for the identical reason, stated in the source: "a top-level `pub
 fn` is glob-imported into every module and would take the name `join`
 from all user code." `Log` itself is an ordinary, empty, glob-imported

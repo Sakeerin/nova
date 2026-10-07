@@ -80,8 +80,8 @@ impl<T> Mutex<T> {
     //
     // (An earlier version of this comment gave the reason as `Option` having
     // "no `unwrap`". That is false: `Option::unwrap` is at
-    // `std/core/lib.nova:26` and std/core calls it six times, on five lines
-    // -- 255, 280, 297, 354 and 386, the last of which calls it twice.)
+    // `std/core/lib.nova:35` and std/core calls it six times, on five lines
+    // -- 308, 333, 350, 409 and 441, the last of which calls it twice.)
     fn take(mut self) -> Bool {
         if self.locked { return false }
         self.locked = true
@@ -170,7 +170,7 @@ impl<T> MutexGuard<T> {
 // has non-negative operands, which matters because Nova's `%` is a
 // TRUNCATING remainder -- `-7 % 3` is `-1`, not `2`. Any operation added
 // later that seeks backwards must re-establish this, or the wrap arithmetic
-// lands outside the array. `std/core/lib.nova:125` and
+// lands outside the array. `std/core/lib.nova:178` and
 // `std/collections/lib.nova:119` carry the same warning for hash bucketing.
 record Ring<T> { data: [T], head: Int, len: Int }
 
