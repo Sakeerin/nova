@@ -1,10 +1,11 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, build, run, fmt, lsp, test, doc, bundle.
+//! Dispatches to subcommands: parse, run, build, check, test and version.
 //! Phase 0 implements `nova parse`; Phase 1 adds `nova run` (Cranelift JIT)
 //! and `nova check`.
 
 mod cmd;
+mod embedded;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -32,6 +33,9 @@ enum Command {
     Check(cmd::run::CheckCmd),
     /// Compile and run `@test` functions, one process per test.
     Test(cmd::test::TestCmd),
+    /// Show the version, the target, and whether the runtime library is
+    /// embedded.
+    Version,
 }
 
 fn main() -> Result<()> {
@@ -42,6 +46,7 @@ fn main() -> Result<()> {
         )
         .init();
 
+    nova_driver::set_embedded_runtime(embedded::runtime());
     let cli = Cli::parse();
     match cli.command {
         Command::Parse(cmd) => cmd::parse::run(cmd),
@@ -49,5 +54,6 @@ fn main() -> Result<()> {
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
         Command::Test(cmd) => cmd::test::run(cmd),
+        Command::Version => cmd::version::run(),
     }
 }
