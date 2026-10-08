@@ -99,17 +99,21 @@ fn serve(
                 continue;
             }
             let before = published.remove(&job.project).unwrap_or_default();
-            let mut now = HashSet::new();
-            for p in results {
-                now.insert(p.uri.clone());
-                publish(p);
-            }
+            let now: HashSet<String> = results.iter().map(|p| p.uri.clone()).collect();
+            // Clear what the project no longer publishes for before sending
+            // what it does. A file's URI changes spelling when it is opened or
+            // closed (the server's `C:` against VS Code's `c%3A` on Windows),
+            // and a client that maps both to one file must end with the new
+            // diagnostics, not with the old spelling's clear.
             for uri in before.difference(&now) {
                 publish(Publish {
                     uri: uri.clone(),
                     version: None,
                     diagnostics: Vec::new(),
                 });
+            }
+            for p in results {
+                publish(p);
             }
             if !job.clear {
                 published.insert(job.project.clone(), now);

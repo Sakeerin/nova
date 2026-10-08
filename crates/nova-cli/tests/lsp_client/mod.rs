@@ -123,6 +123,25 @@ impl Client {
         self.unread.clear();
     }
 
+    /// What an editor shows for `uri` once every publish before the first
+    /// one for `sentinel` has arrived: the params of the last of them that
+    /// `same_uri` matches, as VS Code keeps one entry per normalised URI.
+    /// The server publishes in the order its jobs were submitted, so open
+    /// `sentinel` after the action under test. Clear the unread messages
+    /// before that action.
+    pub fn last_diagnostics_before(&mut self, uri: &str, sentinel: &str) -> Option<Value> {
+        let is_publish_for = |m: &Value, u: &str| {
+            m["method"] == "textDocument/publishDiagnostics"
+                && m["params"]["uri"].as_str().is_some_and(|p| same_uri(p, u))
+        };
+        self.wait_for(|m| is_publish_for(m, sentinel));
+        self.unread
+            .iter()
+            .filter(|m| is_publish_for(m, uri))
+            .last()
+            .map(|m| m["params"].clone())
+    }
+
     /// `shutdown`, then `exit`; returns the server's exit status.
     pub fn shutdown_and_exit(mut self) -> ExitStatus {
         self.request("shutdown", Value::Null);
