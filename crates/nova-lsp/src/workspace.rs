@@ -115,6 +115,27 @@ impl Workspace {
                 .collect(),
         }
     }
+
+    /// The projects the open documents belong to, each once.
+    pub fn projects(&self) -> Vec<ProjectKey> {
+        let mut out: Vec<ProjectKey> = Vec::new();
+        for doc in self.docs.values() {
+            let p = ProjectKey::of(&doc.path);
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// The open documents that belong to `project`.
+    pub fn open_in(&self, project: &ProjectKey) -> Vec<Document> {
+        self.docs
+            .values()
+            .filter(|d| project.holds(&d.path))
+            .cloned()
+            .collect()
+    }
 }
 
 /// The open buffers, read in place of their files; every other file comes
@@ -148,4 +169,76 @@ pub fn declares_main(text: &str) -> bool {
         .items
         .iter()
         .any(|i| matches!(&i.value, nova_ast::Item::Function(f) if f.name.value == "main"))
+}
+
+/// A project, or a loose file (spec §6.2). Two keys are equal when their
+/// paths' `PathKey`s are.
+#[derive(Debug, Clone)]
+pub enum ProjectKey {
+    /// A directory holding `nova.toml`, in its real spelling; its entry is
+    /// `src/main.nova`.
+    Root(PathBuf),
+    /// A file in no project: its own entry.
+    Loose(PathBuf),
+}
+
+impl ProjectKey {
+    /// The project `path` belongs to: the nearest directory above it that
+    /// holds `nova.toml`, as `nova run` finds it, or none.
+    pub fn of(path: &Path) -> ProjectKey {
+        let dir = path.parent().unwrap_or(path);
+        match nova_pm::find_root(dir) {
+            Some(root) => ProjectKey::Root(real_path(&root)),
+            None => ProjectKey::Loose(path.to_path_buf()),
+        }
+    }
+
+    /// The file the project's analysis starts from.
+    pub fn entry(&self) -> PathBuf {
+        match self {
+            ProjectKey::Root(dir) => dir.join("src").join("main.nova"),
+            ProjectKey::Loose(file) => file.clone(),
+        }
+    }
+
+    /// Whether `path` belongs to this project.
+    pub fn holds(&self, path: &Path) -> bool {
+        match self {
+            ProjectKey::Root(dir) => PathKey::of(path).is_under(&PathKey::of(dir)),
+            ProjectKey::Loose(file) => PathKey::of(path) == PathKey::of(file),
+        }
+    }
+
+    fn id(&self) -> (bool, PathKey) {
+        match self {
+            ProjectKey::Root(dir) => (true, PathKey::of(dir)),
+            ProjectKey::Loose(file) => (false, PathKey::of(file)),
+        }
+    }
+}
+
+impl PartialEq for ProjectKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl Eq for ProjectKey {}
+
+impl std::hash::Hash for ProjectKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
+
+/// `path`, canonicalised when it exists, without Windows' `\\?\` prefix, so
+/// that it is spelled as the file system spells it. The URIs of unopened
+/// files are made from paths built on it, and VS Code keeps an opened
+/// file's real spelling.
+pub fn real_path(path: &Path) -> PathBuf {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => real,
+    }
 }
