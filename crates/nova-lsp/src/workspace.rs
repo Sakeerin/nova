@@ -128,11 +128,13 @@ impl Workspace {
         out
     }
 
-    /// The open documents that belong to `project`.
+    /// The open documents that belong to `project`: those whose nearest
+    /// project it is. A file of a project nested inside another belongs to
+    /// the inner one alone (spec §6.2).
     pub fn open_in(&self, project: &ProjectKey) -> Vec<Document> {
         self.docs
             .values()
-            .filter(|d| project.holds(&d.path))
+            .filter(|d| ProjectKey::of(&d.path) == *project)
             .cloned()
             .collect()
     }
@@ -201,11 +203,16 @@ impl ProjectKey {
         }
     }
 
-    /// Whether `path` belongs to this project.
+    /// Whether a change to `path` can change this project's diagnostics: a
+    /// project reads the files under its directory, and a loose file's
+    /// analysis reads the modules beside it.
     pub fn holds(&self, path: &Path) -> bool {
         match self {
             ProjectKey::Root(dir) => PathKey::of(path).is_under(&PathKey::of(dir)),
-            ProjectKey::Loose(file) => PathKey::of(path) == PathKey::of(file),
+            ProjectKey::Loose(file) => match (path.parent(), file.parent()) {
+                (Some(a), Some(b)) => PathKey::of(a) == PathKey::of(b),
+                _ => false,
+            },
         }
     }
 

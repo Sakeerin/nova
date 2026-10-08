@@ -214,9 +214,13 @@ fn closing_an_unsaved_buffer_rechecks_from_disk() {
         json!({ "textDocument": { "uri": geometry_uri } }),
     );
     // main.nova is still open, so the project is re-checked, reading
-    // geometry.nova from disk.
-    let after = client.diagnostics(&geometry_uri, nonempty);
-    assert_eq!(codes(&after), ["E0010"]);
+    // geometry.nova from disk. What the editor ends with is the last
+    // publish for geometry.nova under any spelling of its URI.
+    let sentinel = sentinel(&mut client, "close");
+    let after = client
+        .last_diagnostics_before(&geometry_uri, &sentinel)
+        .expect("a publish for geometry.nova");
+    assert_eq!(codes(&after), ["E0010"], "{after}");
 }
 
 #[test]
@@ -572,4 +576,103 @@ fn latency_on_05_json_api() {
         edits.iter().chain(&completions).all(|&ms| ms <= bound),
         "the budget is {bound} ms for the median and the maximum"
     );
+}
+
+// === The final review's fixes ===
+
+/// Open a loose file in a directory of its own, and return its URI. Its
+/// publish comes after every publish of a job submitted before it.
+fn sentinel(client: &mut Client, name: &str) -> String {
+    let dir = fresh_dir(&format!("{name}-sentinel"));
+    let file = dir.join("main.nova");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+    let uri = file_uri(&file);
+    open(client, &uri, "fn main() {}\n");
+    uri
+}
+
+#[test]
+fn opening_a_reached_module_keeps_its_diagnostics() {
+    // geometry.nova is published under the server's spelling of its URI
+    // until it is opened, then under the client's. On Windows the two differ
+    // (`C:` and `c%3A`) while naming one file, so the old one's clear must
+    // not come after the new diagnostics.
+    let dir = project(
+        "open-reached",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY_BROKEN),
+        ],
+    );
+    let geometry_uri = file_uri(&dir.join("src").join("geometry.nova"));
+    let mut client = Client::start(&dir, false);
+    open(
+        &mut client,
+        &file_uri(&dir.join("src").join("main.nova")),
+        MAIN_IMPORTS_GEOMETRY,
+    );
+    client.diagnostics(&geometry_uri, nonempty);
+    client.clear_unread();
+    open(&mut client, &geometry_uri, GEOMETRY_BROKEN);
+    let sentinel = sentinel(&mut client, "open-reached");
+    let last = client
+        .last_diagnostics_before(&geometry_uri, &sentinel)
+        .expect("a publish for geometry.nova");
+    assert_eq!(codes(&last), ["E0010"], "{last}");
+}
+
+#[test]
+fn a_nested_project_owns_its_own_files() {
+    // `outer/nova.toml` and `outer/sub/nova.toml`: a file of `sub` belongs
+    // to `sub` alone, so `outer`'s analysis never publishes for it.
+    let outer = project("nested", &[("main.nova", "fn main() {}\n")]);
+    let sub = outer.join("sub");
+    std::fs::create_dir_all(sub.join("src")).unwrap();
+    std::fs::write(sub.join("nova.toml"), MANIFEST).unwrap();
+    let sub_main = sub.join("src").join("main.nova");
+    // No `fn main`: as its project's entry, it gets MIR's E0601.
+    std::fs::write(&sub_main, "fn helper() {}\n").unwrap();
+    let sub_uri = file_uri(&sub_main);
+    let mut client = Client::start(&outer, false);
+    open(&mut client, &sub_uri, "fn helper() {}\n");
+    client.diagnostics(&sub_uri, nonempty);
+    client.clear_unread();
+    open(
+        &mut client,
+        &file_uri(&outer.join("src").join("main.nova")),
+        "fn main() {}\n",
+    );
+    let sentinel = sentinel(&mut client, "nested");
+    // Opening the outer project's file need not publish for sub's at all;
+    // whatever is published for it must be sub's own E0601.
+    if let Some(last) = client.last_diagnostics_before(&sub_uri, &sentinel) {
+        assert_eq!(codes(&last), ["E0601"], "outer overwrote sub: {last}");
+    }
+}
+
+#[test]
+fn a_loose_file_is_rechecked_when_a_sibling_it_imports_changes() {
+    // No `nova.toml`, as in examples/: main.nova imports geometry.nova from
+    // beside it, and each is its own loose project.
+    let dir = fresh_dir("loose-siblings");
+    let main = dir.join("main.nova");
+    let geometry = dir.join("geometry.nova");
+    let main_text = "import geometry::{area}\nfn main() {\n    let x: Int = area()\n}\n";
+    std::fs::write(&main, main_text).unwrap();
+    std::fs::write(&geometry, GEOMETRY_FIXED).unwrap();
+    let main_uri = file_uri(&main);
+    let geometry_uri = file_uri(&geometry);
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &main_uri, main_text);
+    client.diagnostics(&main_uri, |p| p["version"] == 1 && !nonempty(p));
+    open(&mut client, &geometry_uri, GEOMETRY_FIXED);
+    // `area` now returns a String, which main.nova's `let x: Int` rejects.
+    change(
+        &mut client,
+        &geometry_uri,
+        2,
+        "pub fn area() -> String { \"s\" }\n",
+    );
+    let after = client.diagnostics(&main_uri, nonempty);
+    assert_eq!(codes(&after), ["E0010"], "{after}");
 }

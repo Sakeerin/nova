@@ -14,7 +14,7 @@ mod uri;
 mod workspace;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
@@ -138,7 +138,7 @@ impl Server<'_> {
                         self.workspace
                             .open(&uri, p.text_document.version, p.text_document.text)
                     {
-                        self.refresh(vec![ProjectKey::of(&path)]);
+                        self.refresh(self.affected(&path));
                     }
                 }
             }
@@ -152,7 +152,7 @@ impl Server<'_> {
                             self.workspace
                                 .change(&uri, p.text_document.version, change.text)
                         {
-                            self.refresh(vec![ProjectKey::of(&path)]);
+                            self.refresh(self.affected(&path));
                         }
                     }
                 }
@@ -160,7 +160,7 @@ impl Server<'_> {
             DidSaveTextDocument::METHOD => {
                 if let Ok(p) = serde_json::from_value::<lsp::DidSaveTextDocumentParams>(n.params) {
                     if let Some(path) = uri::document_path(&uri::text(&p.text_document.uri)) {
-                        self.refresh(vec![ProjectKey::of(&path)]);
+                        self.refresh(self.affected(&path));
                     }
                 }
             }
@@ -169,7 +169,7 @@ impl Server<'_> {
                     if let Some(doc) = self.workspace.close(&uri::text(&p.text_document.uri)) {
                         // Re-checked from disk if the project is still
                         // open; cleared if not.
-                        self.refresh(vec![ProjectKey::of(&doc.path)]);
+                        self.refresh(self.affected(&doc.path));
                     }
                 }
             }
@@ -252,6 +252,20 @@ impl Server<'_> {
 
     fn respond(&self, response: Response) {
         let _ = self.connection.sender.send(Message::Response(response));
+    }
+
+    /// The projects a change to `path` can affect: its own, and every open
+    /// project that holds it. A loose file's analysis reads the modules
+    /// beside it, so editing one re-checks the loose files that may import
+    /// it.
+    fn affected(&self, path: &Path) -> Vec<ProjectKey> {
+        let mut out = vec![ProjectKey::of(path)];
+        for project in self.workspace.projects() {
+            if project.holds(path) && !out.contains(&project) {
+                out.push(project);
+            }
+        }
+        out
     }
 
     /// Re-check `touched`, and clear each project that no open document
