@@ -9,7 +9,7 @@ mod file;
 mod print;
 mod source;
 
-pub use file::{format_file, format_text, FileError, Formatted, LineEnding};
+pub use file::{format_buffer, format_file, format_text, FileError, Formatted, LineEnding};
 
 use nova_diagnostics::Diagnostic;
 
