@@ -46,6 +46,9 @@ pub struct Package {
     pub authors: Vec<String>,
     pub keywords: Vec<String>,
     pub categories: Vec<String>,
+    /// Where `[package]` is, for a diagnostic about the package as a
+    /// whole (M0013, spec 3.3a §3.5).
+    pub span: Span,
 }
 
 /// One entry of `[dependencies]` or `[dev-dependencies]`: a version
@@ -55,6 +58,9 @@ pub struct Dependency {
     pub name: String,
     pub version: Option<semver::VersionReq>,
     pub path: Option<PathBuf>,
+    /// Where its `path` value is, when it has one: M0007 and M0009 point
+    /// there (spec 3.3a §3.5).
+    pub path_span: Option<Span>,
     /// The entry's key, where a diagnostic about the entry points.
     pub span: Span,
 }
@@ -180,6 +186,7 @@ impl Checker {
             authors,
             keywords,
             categories,
+            span: span(self.file, at),
         })
     }
 
@@ -303,6 +310,7 @@ impl Checker {
                 name: name.to_string(),
                 version: Some(version),
                 path: None,
+                path_span: None,
                 span: position,
             });
         }
@@ -319,6 +327,7 @@ impl Checker {
             return None;
         };
         self.unknown_keys(fields, &format!("{table}.{name}."), &["version", "path"]);
+        let path_span = fields.get("path").map(|item| span(self.file, item.span()));
         let version = match fields.get("version") {
             Some(item) => {
                 let text = self.string(item, &format!("{table}.{name}.version"))?;
@@ -355,6 +364,7 @@ impl Checker {
                 name: name.to_string(),
                 version,
                 path,
+                path_span,
                 span: position,
             }),
         }
