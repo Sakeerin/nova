@@ -129,9 +129,7 @@ pub fn analyze_program(
         return Ok(analysis);
     }
 
-    if !options.tests {
-        crate::strip_test_functions(&mut modules);
-    }
+    crate::strip_test_functions(&mut modules, options.tests);
     let std_files: Vec<FileId> = nova_resolver::STD_MODULES
         .iter()
         .map(|&(name, src)| {
@@ -180,8 +178,10 @@ pub fn analyze_program(
     // MIR lowering assumes a well-formed program (spec §3.3), and a
     // program without an entry `main` is checked as a module (3.3a §4.4).
     let module_only = options.module_only || !runs;
+    let mut module = checked.module;
     if !module_only && !has_error(&diagnostics) {
-        if let Err(mir) = nova_mir::lower_module(&checked.module) {
+        crate::keep_the_entry_main(&mut module, &resolved.definitions);
+        if let Err(mir) = nova_mir::lower_module(&module) {
             diagnostics.extend(mir);
         }
     }
@@ -190,7 +190,7 @@ pub fn analyze_program(
     }
     analysis.diagnostics = diagnostics;
     analysis.definitions = Some(resolved.definitions);
-    analysis.module = Some(checked.module);
+    analysis.module = Some(module);
     analysis.probe = checked.probe;
     Ok(analysis)
 }

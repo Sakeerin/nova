@@ -23,7 +23,8 @@ use nova_codegen_cranelift::CompiledProgram;
 use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity, Span};
 use nova_hir as hir;
 use nova_hir::Ty;
-use nova_resolver::{Builtin, DefId, ModuleSource, TestFn};
+use nova_pm::PackageId;
+use nova_resolver::{Builtin, Def, DefId, DefKind, Definitions, ModuleId, ModuleSource, TestFn};
 use program::Loaded;
 
 /// Outcome of a pipeline invocation that may fail with user errors.
@@ -199,6 +200,59 @@ pub fn build_program_release(program: Program, output: &Path) -> Result<Outcome<
 /// `build_test_binary` uses this to rename a user's own `main`, if the
 /// source declares one, so it cannot be mistaken for the synthesized one.
 const SHADOWED_USER_MAIN_NAME: &str = "main.shadowed_by_nova_test";
+
+/// What every function called `main` outside the entry module is renamed
+/// to (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+/// §4.6): a name the lexer cannot produce, like
+/// [`SHADOWED_USER_MAIN_NAME`].
+const NOT_THE_ENTRY_MAIN: &str = "main.not_the_entry";
+
+/// Rename every `main` declared outside the entry module, `ModuleId(0)`,
+/// so that `nova_mir::lower_module`'s search by name finds the entry's own
+/// `main`, or reports E0601 (spec 3.3a §4.6). A call reaches its function
+/// by `DefId`, so the rename breaks no call.
+fn keep_the_entry_main(module: &mut hir::Module, definitions: &Definitions) {
+    for function in &mut module.functions {
+        if function.name != "main" {
+            continue;
+        }
+        let def = definitions.defs().get(function.def_id.0 as usize);
+        if let Some(Def {
+            kind: DefKind::Fn { item_index },
+            ..
+        }) = def
+        {
+            if definitions.module_of(*item_index) != ModuleId(0) {
+                function.name = NOT_THE_ENTRY_MAIN.to_string();
+            }
+        }
+    }
+}
+
+/// Name each test of a `tests/` file `<file stem>::<function>` (spec 3.3a
+/// §4.6). The synthesized `main` prints these names as its inventory, so
+/// `nova test` and the binary agree on them.
+fn name_tests(tests: &mut [TestFn], definitions: &Definitions, modules: &[Loaded]) {
+    for test in tests {
+        let def = definitions.defs().get(test.def_id.0 as usize);
+        let Some(Def {
+            kind: DefKind::Fn { item_index },
+            ..
+        }) = def
+        else {
+            continue;
+        };
+        let module = definitions.module_of(*item_index).0 as usize;
+        if let Some(module) = modules.get(module).filter(|m| m.test_file) {
+            test.name = format!(
+                "{}::{}",
+                FrontendContext::module_name(&module.path),
+                test.name
+            );
+        }
+    }
+}
 
 /// Compile `path` as a test binary (`nova test`, Task 5): `main` is
 /// synthesized to dispatch to exactly one collected `@test` by index
@@ -606,9 +660,12 @@ impl FrontendContext {
         // same "does not exist in this build" semantics as Rust's
         // `#[cfg(test)]`. See `strip_test_functions`'s own doc comment for
         // why this must happen *before* resolution rather than after.
-        if !with_test_module {
-            strip_test_functions(&mut modules);
-        }
+        //
+        // Phase 3.3a: under `nova test` the root package's tests are
+        // kept and a dependency's stripped (spec
+        // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md
+        // §4.6).
+        strip_test_functions(&mut modules, with_test_module);
         // Register each embedded std module's source in the `FileDb` so a
         // syntax error inside one (a compiler bug, since they ship with the
         // compiler) is reported against a real, named file instead of
@@ -646,18 +703,28 @@ impl FrontendContext {
             return Ok(None);
         }
         let fresh_def_id = DefId(resolved.definitions.defs().len() as u32);
-        let tests = resolved.tests;
+        let mut tests = resolved.tests;
+        name_tests(&mut tests, &resolved.definitions, &modules);
 
         let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
         self.render(&checked.diagnostics);
         if self.errors > 0 {
             return Ok(None);
         }
-        Ok(Some((checked.module, tests, fresh_def_id)))
+        let mut module = checked.module;
+        keep_the_entry_main(&mut module, &resolved.definitions);
+        Ok(Some((module, tests, fresh_def_id)))
     }
 }
 
-/// Remove every top-level `@test` function from `modules`, in place.
+/// Remove top-level `@test` functions from `modules`, in place: from every
+/// module, or with `keep_root_tests` only from a dependency's (spec 3.3a
+/// §4.6). `nova test` and the language server keep the root package's
+/// tests, and a loose program's; a dependency's tests never run in its
+/// dependent's binary.
+///
+/// What follows was written when this ran only for `nova run`, `build`
+/// and `check`, and every module was the program's own.
 ///
 /// Only ever called with `with_test_module = false` (`nova run`/`build`/
 /// `check`; never `build_test_binary`'s `nova test` path). A `@test`
@@ -718,8 +785,12 @@ impl FrontendContext {
 /// invalid test signature is likewise uncaught outside `cargo test`. `nova
 /// test` validates every `@test` function's shape regardless, since this
 /// function is never called on that path.
-fn strip_test_functions(modules: &mut [Loaded]) {
+fn strip_test_functions(modules: &mut [Loaded], keep_root_tests: bool) {
     for module in modules.iter_mut() {
+        let root = matches!(module.package, None | Some(PackageId(0)));
+        if keep_root_tests && root {
+            continue;
+        }
         module.ast.items.retain(|item| {
             !matches!(
                 &item.value,

@@ -283,3 +283,120 @@ fn a_file_argument_in_src_reads_its_packages_manifest() {
         .success()
         .stdout("area 9\napp utils\n");
 }
+
+#[test]
+fn tests_are_named_by_file_and_run_in_sorted_order() {
+    let dir = fresh("test-names");
+    write(
+        &dir,
+        &[
+            ("nova.toml", manifest("shapes", "").as_str()),
+            (
+                "src/lib.nova",
+                "pub fn area() -> Int {\n    9\n}\n\n@test\nfn in_the_library() {\n    assert_eq(area(), 9)\n}\n",
+            ),
+            ("tests/b.nova", "import shapes\n\n@test\nfn second() {\n    assert_eq(area(), 9)\n}\n"),
+            ("tests/a.nova", "import shapes\n\n@test\nfn first() {\n    assert_eq(area(), 9)\n}\n"),
+        ],
+    );
+    let out = nova().current_dir(&dir).arg("test").assert().success();
+    let printed = stdout(&out);
+    let ran: Vec<&str> = printed
+        .lines()
+        .filter(|l| l.starts_with("test ") && l.ends_with(" ... ok"))
+        .collect();
+    assert_eq!(
+        ran,
+        [
+            "test in_the_library ... ok",
+            "test a::first ... ok",
+            "test b::second ... ok"
+        ],
+        "{printed}"
+    );
+    // The filter is a substring of the full name (spec §5.2).
+    let out = nova()
+        .current_dir(&dir)
+        .args(["test", "a::"])
+        .assert()
+        .success();
+    let printed = stdout(&out);
+    assert!(
+        printed.contains("running 1 test\n") && printed.contains("test a::first ... ok"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_dependencys_tests_do_not_run_in_its_dependent() {
+    let dir = fresh("dependency-tests");
+    write(
+        &dir.join("geom"),
+        &[
+            ("nova.toml", manifest("geom", "").as_str()),
+            (
+                "src/lib.nova",
+                "pub fn area() -> Int {\n    9\n}\n\n@test\nfn geom_checks_its_area() {\n    assert_eq(area(), 9)\n}\n",
+            ),
+        ],
+    );
+    let app = dir.join("app");
+    write(
+        &app,
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import geom\n\nfn main() {\n    println(\"${area()}\")\n}\n\n\
+                 @test\nfn app_checks_the_area() {\n    assert_eq(area(), 9)\n}\n",
+            ),
+        ],
+    );
+    let out = nova().current_dir(&app).arg("test").assert().success();
+    let printed = stdout(&out);
+    assert!(printed.contains("running 1 test\n"), "{printed}");
+    assert!(!printed.contains("geom_checks_its_area"), "{printed}");
+}
+
+#[test]
+fn the_entry_main_runs_when_a_dependency_also_has_one() {
+    // Review Focus 4, a guard: the type checker emits the entry module's
+    // functions first, so its `main` wins today, and the rename keeps it so.
+    let dir = fresh("two-mains");
+    write(
+        &dir.join("geom"),
+        &[
+            ("nova.toml", manifest("geom", "").as_str()),
+            (
+                "src/lib.nova",
+                "pub fn area() -> Int {\n    9\n}\n\nfn main() {\n    println(\"geom's demo\")\n}\n",
+            ),
+        ],
+    );
+    let app = dir.join("app");
+    write(
+        &app,
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import geom\n\nfn main() {\n    println(\"app ${area()}\")\n}\n",
+            ),
+        ],
+    );
+    nova()
+        .current_dir(&app)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout("app 9\n");
+    nova().current_dir(&app).arg("build").assert().success();
+    let exe = app
+        .join("target")
+        .join("debug")
+        .join(format!("app{}", std::env::consts::EXE_SUFFIX));
+    let out = std::process::Command::new(&exe)
+        .output()
+        .expect("run the build");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "app 9\n");
+}
