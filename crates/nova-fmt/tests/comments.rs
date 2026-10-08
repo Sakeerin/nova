@@ -149,3 +149,17 @@ fn a_multi_line_block_comment_keeps_its_inner_lines() {
         "fn main() {\n    /* one\n           two */\n    f()\n}\n",
     );
 }
+
+#[test]
+fn sorting_an_import_list_keeps_each_comment_with_its_name() {
+    // A name takes its comments with it when the list is sorted, as an
+    // import does in a sorted run (spec §6).
+    assert_formats(
+        "import m::{\n    b, // the b\n    a, // the a\n}\n",
+        "import m::{\n    a, // the a\n    b, // the b\n}\n",
+    );
+    assert_formats(
+        "import m::{\n    // about b\n    b,\n    a,\n}\n",
+        "import m::{\n    a,\n    // about b\n    b,\n}\n",
+    );
+}
