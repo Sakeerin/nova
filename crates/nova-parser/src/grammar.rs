@@ -43,6 +43,11 @@ struct Parser<'a> {
     /// into one token, so closing an inner list splits it: one `>` closes the
     /// inner list now, the remainder is recorded here for the enclosing list.
     pending_gt: usize,
+    /// The names of top-level items that failed to parse after their names
+    /// were read: `fn f(x: Int {` drops `f` (spec
+    /// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`
+    /// §3.2). The language server stops reporting their uses as unresolved.
+    dropped: Vec<Spanned<String>>,
 }
 
 impl<'a> Parser<'a> {
@@ -54,6 +59,7 @@ impl<'a> Parser<'a> {
             errors: Vec::new(),
             no_struct_literal: false,
             pending_gt: 0,
+            dropped: Vec::new(),
         }
     }
 
@@ -282,9 +288,18 @@ pub(crate) fn parse_file(
     tokens: &[Spanned<Token>],
     file: FileId,
 ) -> (Option<File>, Vec<ParseError>) {
+    let parsed = parse_recovering(tokens, file);
+    (Some(parsed.file), parsed.errors)
+}
+
+pub(crate) fn parse_recovering(tokens: &[Spanned<Token>], file: FileId) -> crate::Parsed {
     let mut p = Parser::new(tokens, file);
     let ast_file = p.parse_file();
-    (Some(ast_file), p.errors)
+    crate::Parsed {
+        file: ast_file,
+        errors: p.errors,
+        dropped: p.dropped,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -295,9 +310,11 @@ impl<'a> Parser<'a> {
     fn parse_file(&mut self) -> File {
         let mut items = Vec::new();
         while !self.is_at_end() {
+            let start = self.pos;
             match self.try_parse_item() {
                 Some(item) => items.push(item),
                 None => {
+                    self.note_dropped_item(start);
                     // Progress, guaranteed here rather than assumed from the
                     // two halves. `try_parse_item`'s fallthrough arm reports and
                     // returns `None` **without consuming** the offending token,
@@ -331,6 +348,26 @@ impl<'a> Parser<'a> {
             }
         }
         File { items }
+    }
+
+    /// The item that started at token `start` failed. If it got as far as
+    /// its name, remember the name (spec
+    /// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`
+    /// §3.2). Only the tokens the failed attempt consumed are read.
+    fn note_dropped_item(&mut self, start: usize) {
+        let consumed = &self.tokens[start..self.pos.min(self.tokens.len())];
+        let keyword = consumed.iter().position(|t| {
+            matches!(
+                t.value,
+                Token::Fn | Token::Record | Token::Type | Token::Trait | Token::Const
+            )
+        });
+        if let Some(k) = keyword {
+            if let Some(Token::Ident(name)) = consumed.get(k + 1).map(|t| &t.value) {
+                let span = consumed[k + 1].span;
+                self.dropped.push(Spanned::new(name.clone(), span));
+            }
+        }
     }
 
     /// Parse zero or more leading `@name` / `@name(a, b)` attributes.
@@ -1808,6 +1845,29 @@ impl<'a> Parser<'a> {
                             .map(|s| s.span)
                             .unwrap_or(cur_span);
                         expr = Spanned::new(Expr::Await(Box::new(expr)), start.merge(end));
+                    } else if !matches!(
+                        self.peek(),
+                        Token::Ident(_) | Token::SelfLower | Token::SelfUpper
+                    ) {
+                        // An unfinished `foo.` keeps its receiver, so an
+                        // editor can complete after the `.` (spec
+                        // docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md
+                        // §3.4). The error is the one `parse_ident` reports.
+                        self.errors.push(ParseError::Expected {
+                            expected: "identifier (in field access)".to_owned(),
+                            found: self.peek().description().to_owned(),
+                            span: self.peek_span(),
+                        });
+                        let dot_end = self.tokens[self.pos - 1].span.end;
+                        let gap = Span::new(dot_end, dot_end, self.file);
+                        expr = Spanned::new(
+                            Expr::Field {
+                                target: Box::new(expr),
+                                field: Spanned::new(String::new(), gap),
+                            },
+                            start.merge(gap),
+                        );
+                        break;
                     } else {
                         let field = self.parse_ident("field access")?;
                         let end = field.span;
