@@ -478,3 +478,98 @@ fn a_formatted_or_broken_buffer_gets_no_edit() {
     let (mut client, uri) = formattable("format-broken", "fn main( {\n");
     assert_eq!(format(&mut client, &uri)["result"], json!([]));
 }
+
+// === Task 14: the latency budget (spec §6.8, §9.5) ===
+
+use std::time::Instant;
+
+/// The largest example, which the budget is measured on.
+fn json_api() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
+        .join("05-json-api")
+        .join("src")
+        .join("main.nova")
+}
+
+/// Time `n` edits, each sent when no check is running, and `n` completions,
+/// on `05-json-api`. Returns each list in milliseconds, sorted.
+fn measure(n: usize) -> (Vec<u128>, Vec<u128>) {
+    let path = json_api();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let uri = file_uri(&path);
+    let mut client = Client::start(path.parent().unwrap(), false);
+    open(&mut client, &uri, &text);
+    client.diagnostics(&uri, |p| p["version"] == 1);
+    let mut edits = Vec::new();
+    for k in 0..n {
+        let version = 2 + k as i32;
+        let edited = format!("{text}// edit {k}\n");
+        let started = Instant::now();
+        change(&mut client, &uri, version, &edited);
+        client.diagnostics(&uri, |p| p["version"] == version);
+        edits.push(started.elapsed().as_millis());
+    }
+    // `self.users.` holds a `Map`: completion after it lists std's members.
+    let position = after(&text, "        self.users.");
+    let mut completions = Vec::new();
+    for _ in 0..n {
+        let started = Instant::now();
+        let response = complete(&mut client, &uri, position.clone());
+        completions.push(started.elapsed().as_millis());
+        assert!(
+            labels(&response).contains(&"insert".to_string()),
+            "{response}"
+        );
+    }
+    edits.sort_unstable();
+    completions.sort_unstable();
+    (edits, completions)
+}
+
+fn summary(name: &str, ms: &[u128]) -> String {
+    format!(
+        "{name}: median {} ms, max {} ms, of {}",
+        ms[ms.len() / 2],
+        ms[ms.len() - 1],
+        ms.len()
+    )
+}
+
+#[test]
+fn edits_and_completions_stay_within_the_ci_bound() {
+    // Gate item 8: 2 s each, with the debug binary.
+    let (edits, completions) = measure(3);
+    let bound = 2000;
+    assert!(
+        edits.iter().chain(&completions).all(|&ms| ms <= bound),
+        "{}; {}; the CI bound is {bound} ms",
+        summary("edits", &edits),
+        summary("completions", &completions)
+    );
+}
+
+#[test]
+#[ignore = "the development host's figure (spec §9.5): cargo test --release -p nova-cli --test lsp -- --ignored --nocapture latency"]
+fn latency_on_05_json_api() {
+    let (edits, completions) = measure(20);
+    // In a release build, the 200 ms budget. CI's advisory `--ignored` step
+    // runs this in a debug build, where only the 2 s CI bound applies.
+    let bound = if cfg!(debug_assertions) { 2000 } else { 200 };
+    let binary = assert_cmd::cargo::cargo_bin("nova");
+    let meta = std::fs::metadata(&binary).unwrap();
+    println!("{}", summary("edit to diagnostics", &edits));
+    println!("{}", summary("completion", &completions));
+    println!(
+        "binary {} ({} bytes, modified {:?})",
+        binary.display(),
+        meta.len(),
+        meta.modified().ok()
+    );
+    assert!(
+        edits.iter().chain(&completions).all(|&ms| ms <= bound),
+        "the budget is {bound} ms for the median and the maximum"
+    );
+}
