@@ -161,14 +161,44 @@ fn search(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
 
 /// Write `text` over `file` by way of a temporary file in the same
 /// directory, renamed over it, so that an interrupted run never leaves half
-/// a file (spec §7.1).
+/// a file (spec §7.1). A symbolic link is written through to the file it
+/// names, the file keeps its permissions, and a read-only file is refused.
 fn write(file: &Path, text: &str) -> std::io::Result<()> {
-    let name = file
+    let target = std::fs::canonicalize(file)?;
+    let permissions = std::fs::metadata(&target)?.permissions();
+    if permissions.readonly() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the file is read-only, so it was left unchanged",
+        ));
+    }
+    let name = target
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let tmp = file.with_file_name(format!(".{name}.nova-fmt.tmp"));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, file).inspect_err(|_| {
+    let tmp = target.with_file_name(format!(".{name}.nova-fmt.tmp"));
+    // Whatever has that name, perhaps left by an interrupted run, goes
+    // first, so the temporary file is always created new, never opened.
+    let _ = std::fs::remove_file(&tmp);
+    replace(&tmp, &target, text, permissions).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
+}
+
+/// Write `text` to the new file `tmp`, durably, with `permissions`, then
+/// rename it over `target`.
+fn replace(
+    tmp: &Path,
+    target: &Path,
+    text: &str,
+    permissions: std::fs::Permissions,
+) -> std::io::Result<()> {
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)?;
+    out.write_all(text.as_bytes())?;
+    out.sync_all()?;
+    drop(out);
+    std::fs::set_permissions(tmp, permissions)?;
+    std::fs::rename(tmp, target)
 }
