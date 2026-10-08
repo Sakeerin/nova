@@ -108,27 +108,34 @@ fn report(file: &str, e: &FormatError) {
 }
 
 /// The files to format, sorted (spec §7.1): the paths given, each
-/// directory searched for `*.nova`. With none, the project's `src/`, or
-/// outside a project `src/` if `src/main.nova` exists.
+/// directory searched for `*.nova`. With none, the project's `src/` and
+/// `tests/`, skipping a package nested in them (3.3a §5.4), or outside a
+/// project `src/` if `src/main.nova` exists.
 fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     if paths.is_empty() {
         let cwd =
             std::env::current_dir().map_err(|e| format!("reading the current directory: {e}"))?;
-        let src = match nova_pm::find_root(&cwd) {
-            Some(root) => root.join("src"),
-            None if Path::new("src/main.nova").is_file() => PathBuf::from("src"),
+        let (src, tests) = match nova_pm::find_root(&cwd) {
+            Some(root) => (root.join("src"), Some(root.join("tests"))),
+            None if Path::new("src/main.nova").is_file() => (PathBuf::from("src"), None),
             None => {
                 return Err("no project here, and no src/main.nova: \
                             name the files or directories to format"
                     .to_owned())
             }
         };
-        search(&src, &mut files).map_err(|e| format!("searching {}: {e}", src.display()))?;
+        search(&src, &mut files, true).map_err(|e| format!("searching {}: {e}", src.display()))?;
+        // A missing tests/ is not an error.
+        if let Some(tests) = tests.filter(|tests| tests.is_dir()) {
+            search(&tests, &mut files, true)
+                .map_err(|e| format!("searching {}: {e}", tests.display()))?;
+        }
     }
     for path in paths {
         if path.is_dir() {
-            search(path, &mut files).map_err(|e| format!("searching {}: {e}", path.display()))?;
+            search(path, &mut files, false)
+                .map_err(|e| format!("searching {}: {e}", path.display()))?;
         } else if path.is_file() {
             files.push(path.clone());
         } else {
@@ -142,15 +149,18 @@ fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 
 /// Every `*.nova` file under `dir`, but not in `target/`, in a directory
 /// whose name begins with `.`, or behind a symbolic link to a directory.
-fn search(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// With `skip_packages`, a directory holding a `nova.toml` is skipped too:
+/// it is another package (spec 3.3a §5.4).
+fn search(dir: &Path, files: &mut Vec<PathBuf>, skip_packages: bool) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if kind.is_dir() {
-            if name != "target" && !name.starts_with('.') {
-                search(&path, files)?;
+            let package = skip_packages && path.join(nova_pm::MANIFEST).is_file();
+            if name != "target" && !name.starts_with('.') && !package {
+                search(&path, files, skip_packages)?;
             }
         } else if name.ends_with(".nova") && (kind.is_file() || path.is_file()) {
             files.push(path);
