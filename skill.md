@@ -82,6 +82,11 @@ Key types: all AST nodes in `nova-ast` (e.g., `Expr`, `Stmt`, `Item`, `TypeExpr`
 | `salsa` incremental computation | Not used yet; planned for Phase 3's language server |
 | `indexmap`, `rustc-hash` | Efficient maps for IR nodes |
 
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** Phase 3.2's language
+server does without `salsa`: it re-checks the whole program on every change
+and meets its 200 ms budget. `salsa` waits until a later sub-phase misses
+the budget (`docs/adr/0029-the-language-server.md`).
+
 ---
 
 ## 6. Code Generation
@@ -167,6 +172,13 @@ Written in Nova (Phase 2+). Skills:
 | `tower-lsp` crate | Async LSP server framework |
 | Incremental parsing | Re-parse only changed regions |
 | `salsa` | Query-based incremental compilation |
+
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** as built in 3.2,
+`nova-lsp` uses `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not
+`tower-lsp`. It re-checks the whole program on every change, so it has no
+incremental parsing and no `salsa`. What it needs instead is
+`nova_driver::analyze` and the type checker's probe
+(`docs/adr/0029-the-language-server.md`).
 
 ### Package Manager (`nova-pm`)
 **Spec:** `nova-spec/40-TOOLING.md`

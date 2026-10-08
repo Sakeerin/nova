@@ -129,6 +129,11 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-doc` | Doc generator | `nova-ast` |
 | `nova-test` | Test runner | `nova-driver` |
 
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** `nova-lsp` is built
+on `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`, and it
+analyses through `nova-driver`'s `analyze`
+(`docs/adr/0029-the-language-server.md`).
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)
