@@ -24,6 +24,9 @@ nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
 nova-fmt = { path = "../nova-fmt" }
 nova-lsp = { path = "../nova-lsp" }
+# `nova add` and `nova remove` edit nova.toml, keeping its comments and
+# layout (spec docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.3).
+toml_edit = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

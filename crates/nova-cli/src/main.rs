@@ -49,6 +49,10 @@ enum Command {
     New(cmd::new::NewCmd),
     /// Make the current directory a project.
     Init(cmd::new::InitCmd),
+    /// Add a path dependency to nova.toml.
+    Add(cmd::deps::AddCmd),
+    /// Remove a dependency from nova.toml.
+    Remove(cmd::deps::RemoveCmd),
     /// Show the version, the target, and whether the runtime library is
     /// embedded.
     Version,
@@ -84,6 +88,8 @@ fn main() -> Result<()> {
         Command::Lsp => std::process::exit(cmd::lsp::run()),
         Command::New(cmd) => cmd::new::new(cmd),
         Command::Init(cmd) => cmd::new::init(cmd),
+        Command::Add(cmd) => cmd::deps::add(cmd),
+        Command::Remove(cmd) => cmd::deps::remove(cmd),
         Command::Version => cmd::version::run(),
     }
 }

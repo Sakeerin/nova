@@ -940,6 +940,7 @@ dependencies = [
  "nova-pm",
  "nova-runtime",
  "serde_json",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
 ]
