@@ -28,6 +28,10 @@ impl Sources for Cut {
     }
 }
 
+/// Per thread, the cut it is analysing, if any: its file, and its length in
+/// bytes.
+type InFlight = Arc<Mutex<Vec<Option<(PathBuf, usize)>>>>;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -76,8 +80,7 @@ fn cut_programs_never_panic_or_hang() {
         .min(8);
     let queue = Arc::new(Mutex::new(jobs));
     // What each thread is analysing, for the report if one hangs.
-    let current: Arc<Mutex<Vec<Option<(PathBuf, usize)>>>> =
-        Arc::new(Mutex::new(vec![None; threads]));
+    let current: InFlight = Arc::new(Mutex::new(vec![None; threads]));
     let (done, results) = mpsc::channel();
     for t in 0..threads {
         let queue = Arc::clone(&queue);
