@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
 use crate::usefulness;
-use crate::{display_ty, CheckOptions, CheckResult, ProbePoint, ProbeResult};
+use crate::{display_ty, CheckOptions, CheckResult, Member, MemberKind, ProbePoint, ProbeResult};
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -141,6 +141,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         probe: options.probe,
         probe_result: ProbeResult::default(),
         probe_pending: None,
+        probe_locals_pending: None,
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -286,11 +287,18 @@ struct Checker<'a> {
     probe: Option<ProbePoint>,
     probe_result: ProbeResult,
     probe_pending: Option<ProbePending>,
+    /// The locals in scope at the probe, with their types as inference had
+    /// them then; read with the function's final substitution.
+    probe_locals_pending: Option<Vec<(String, Ty)>>,
 }
 
-/// A receiver the probe met, before its function's inference is finished.
+/// What the probe met, before its function's inference is finished.
 struct ProbePending {
     receiver: Ty,
+    /// The function's bounds, for a type-parameter receiver.
+    bounds: Vec<Vec<DefId>>,
+    /// The module the access is in, for the visibility rule.
+    module: ModuleId,
 }
 
 /// Per-function checking state.
@@ -3070,12 +3078,21 @@ impl<'a> Checker<'a> {
     /// Apply the final substitution everywhere and report residual
     /// inference variables as E0011.
     fn finalize_function(&mut self, func: &mut hir::Function, icx: &InferCtx) {
-        // Spec 3.2 §4.1: the receiver the probe met in this function, read
-        // with the function's final substitution. The function is finalized
-        // before the closures lifted from it, so it takes the receiver even
-        // when the access was inside one of them.
+        // Spec 3.2 §4.1: what the probe met in this function, read with the
+        // function's final substitution. The function is finalized before
+        // the closures lifted from it, so it takes what the probe met even
+        // inside one of them.
         if let Some(pending) = self.probe_pending.take() {
-            self.probe_result.receiver = Some(icx.apply(&pending.receiver));
+            let receiver = icx.apply(&pending.receiver);
+            self.probe_result.members =
+                self.probe_members(&receiver, &pending.bounds, pending.module);
+            self.probe_result.receiver = Some(receiver);
+        }
+        if let Some(locals) = self.probe_locals_pending.take() {
+            self.probe_result.locals = locals
+                .into_iter()
+                .map(|(name, ty)| (name, icx.apply(&ty)))
+                .collect();
         }
         let mut residual: Vec<Span> = Vec::new();
         // Resolve the return type — for closures it may be an inference
@@ -3104,6 +3121,9 @@ impl<'a> Checker<'a> {
         fcx.scopes.push(FxHashMap::default());
         let mut stmts = Vec::new();
         for stmt in &block.stmts {
+            // Decision 4: the probe, between the block's start and this
+            // statement, sees the scope as it is before the statement.
+            self.probe_locals(fcx, span.file, span.start, stmt.span.start);
             match &stmt.value {
                 ast::Stmt::Let {
                     is_mut,
@@ -3176,6 +3196,8 @@ impl<'a> Checker<'a> {
             .trailing
             .as_ref()
             .map(|e| Box::new(self.check_expr(fcx, e)));
+        // Decision 4: anywhere else in the block sees all of its locals.
+        self.probe_locals(fcx, span.file, span.start, span.end);
         fcx.scopes.pop();
 
         let ty = trailing.as_ref().map(|e| e.ty.clone()).unwrap_or(Ty::Unit);
@@ -3478,6 +3500,8 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         }
         let name = path.segments[0].value.as_str();
+        // Spec 3.2 §4.1: a name at the probe sees these locals.
+        self.probe_locals(fcx, span.file, span.start, span.end);
         if let Some(local) = fcx.lookup(name) {
             let ty = fcx.locals[local.0 as usize].ty.clone();
             return hir::Expr {
@@ -5068,7 +5092,7 @@ impl<'a> Checker<'a> {
     /// be the empty one of an unfinished `x.`, or a name on a later line:
     /// `v.` then `println("x")` parses as `v.println("x")`. The first match
     /// wins, which in a chain `a.b.c` is the innermost.
-    fn probe_receiver(&mut self, recv_ty: &Ty, receiver: Span, name: Span) {
+    fn probe_receiver(&mut self, fcx: &FnCtx, recv_ty: &Ty, receiver: Span, name: Span) {
         let Some(p) = self.probe else {
             return;
         };
@@ -5078,7 +5102,181 @@ impl<'a> Checker<'a> {
         if name.file == p.file && receiver.end <= p.offset && p.offset <= name.end {
             self.probe_pending = Some(ProbePending {
                 receiver: recv_ty.clone(),
+                bounds: fcx.param_bounds.clone(),
+                module: self.cur_module,
             });
+        }
+    }
+
+    /// The members of `recv_ty` the probe offers, seen from module `from`
+    /// (spec 3.2 §4.2):
+    /// - its fields;
+    /// - its inherent methods that take `self`;
+    /// - the methods of the traits it implements;
+    /// - for a type parameter, its bounds' methods;
+    /// - for an array, `len`.
+    ///
+    /// A field or inherent method declared without `pub` is listed only
+    /// inside its own module. The first of a name wins, so an inherent method
+    /// hides a trait method of the same name, as `resolve_method_on` does.
+    fn probe_members(&self, recv_ty: &Ty, bounds: &[Vec<DefId>], from: ModuleId) -> Vec<Member> {
+        fn push(out: &mut Vec<Member>, m: Member) {
+            if !out.iter().any(|o| o.name == m.name) {
+                out.push(m);
+            }
+        }
+        let mut out = Vec::new();
+        match recv_ty {
+            Ty::Param(k) => {
+                for &tid in bounds.get(*k as usize).into_iter().flatten() {
+                    for m in self.trait_members(tid) {
+                        push(&mut out, m);
+                    }
+                }
+            }
+            Ty::Array(_) => push(
+                &mut out,
+                Member {
+                    name: "len".to_string(),
+                    kind: MemberKind::Method,
+                    decl: None,
+                },
+            ),
+            _ => {
+                if let Ty::Record { def_id, .. } = recv_ty {
+                    for m in self.record_members(*def_id, from) {
+                        push(&mut out, m);
+                    }
+                }
+                if let Some(head) = recv_ty.head() {
+                    let fits =
+                        |i: &&hir::ImplInfo| i.self_head == head && i.match_args(recv_ty).is_some();
+                    let inherent: Vec<DefId> = self
+                        .impls
+                        .iter()
+                        .filter(fits)
+                        .filter(|i| i.trait_id.is_none())
+                        .flat_map(|i| i.methods.iter().map(|(_, d)| *d))
+                        .filter(|d| !self.selfless.contains(d))
+                        .collect();
+                    for d in inherent {
+                        if let Some(m) = self.inherent_member(d, from) {
+                            push(&mut out, m);
+                        }
+                    }
+                    let traits: Vec<DefId> = self
+                        .impls
+                        .iter()
+                        .filter(fits)
+                        .filter_map(|i| i.trait_id)
+                        .collect();
+                    for tid in traits {
+                        for m in self.trait_members(tid) {
+                            push(&mut out, m);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A record's fields, as `from` may see them.
+    fn record_members(&self, record: DefId, from: ModuleId) -> Vec<Member> {
+        let DefKind::Record { item_index } = self.defs.def(record).kind else {
+            return Vec::new();
+        };
+        let ast::Item::Record(decl) = &self.file.items[item_index].value else {
+            return Vec::new();
+        };
+        let own = self.defs.module_of(item_index) == from;
+        decl.fields
+            .iter()
+            .filter(|f| own || matches!(f.vis, ast::Visibility::Pub))
+            .map(|f| Member {
+                name: f.name.value.clone(),
+                kind: MemberKind::Field,
+                decl: Some(f.ty.span),
+            })
+            .collect()
+    }
+
+    /// An inherent method, if `from` may see it.
+    fn inherent_member(&self, method: DefId, from: ModuleId) -> Option<Member> {
+        let loc = self.method_locs.get(&method)?;
+        let ast::Item::Impl(block) = &self.file.items[loc.item_index].value else {
+            return None;
+        };
+        let f = block.functions.get(loc.method_index)?;
+        let own = self.defs.module_of(loc.item_index) == from;
+        (own || matches!(f.vis, ast::Visibility::Pub)).then(|| Member {
+            name: f.name.value.clone(),
+            kind: MemberKind::Method,
+            decl: Some(f.name.span),
+        })
+    }
+
+    /// A trait's methods that take `self`, each with its name's span in the
+    /// trait's declaration.
+    fn trait_members(&self, trait_id: DefId) -> Vec<Member> {
+        let Some(t) = self.traits.iter().find(|t| t.def_id == trait_id) else {
+            return Vec::new();
+        };
+        let mut spans: FxHashMap<&str, Span> = FxHashMap::default();
+        if let DefKind::Trait { item_index } = self.defs.def(trait_id).kind {
+            if let ast::Item::Trait(decl) = &self.file.items[item_index].value {
+                for item in &decl.items {
+                    match item {
+                        TraitItem::Required(sig) => {
+                            spans.insert(sig.name.value.as_str(), sig.name.span);
+                        }
+                        TraitItem::Provided(f) => {
+                            spans.insert(f.name.value.as_str(), f.name.span);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        t.methods
+            .iter()
+            .filter(|m| m.has_self)
+            .map(|m| Member {
+                name: m.name.clone(),
+                kind: MemberKind::Method,
+                decl: spans.get(m.name.as_str()).copied(),
+            })
+            .collect()
+    }
+
+    /// The locals in scope now, innermost first, each name once, and within
+    /// one scope in name order, with their types as inference has them.
+    fn scope_snapshot(fcx: &FnCtx) -> Vec<(String, Ty)> {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut out = Vec::new();
+        for scope in fcx.scopes.iter().rev() {
+            let mut names: Vec<(&String, &LocalId)> = scope.iter().collect();
+            names.sort_by(|a, b| a.0.cmp(b.0));
+            for (name, id) in names {
+                if seen.insert(name.as_str()) {
+                    out.push((name.clone(), fcx.locals[id.0 as usize].ty.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Record the locals in scope if the probe's offset lies in `lo..=hi`
+    /// of `file` (decision 4). The first record wins.
+    fn probe_locals(&mut self, fcx: &FnCtx, file: nova_diagnostics::FileId, lo: u32, hi: u32) {
+        let Some(p) = self.probe else {
+            return;
+        };
+        if self.probe_locals_pending.is_some() || !self.probe_result.locals.is_empty() {
+            return;
+        }
+        if file == p.file && lo <= p.offset && p.offset <= hi {
+            self.probe_locals_pending = Some(Self::scope_snapshot(fcx));
         }
     }
 
@@ -5091,7 +5289,7 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         let recv = self.check_expr(fcx, target);
         let recv_ty = fcx.icx.apply(&recv.ty);
-        self.probe_receiver(&recv_ty, target.span, field.span);
+        self.probe_receiver(fcx, &recv_ty, target.span, field.span);
         // An unfinished `x.` has an empty name, and the parser has already
         // reported it (spec 3.2 §3.4).
         if field.value.is_empty() {
@@ -5416,7 +5614,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let recv_ty = fcx.icx.apply(&receiver.ty);
-        self.probe_receiver(&recv_ty, receiver.span, method.span);
+        self.probe_receiver(fcx, &recv_ty, receiver.span, method.span);
         if matches!(recv_ty, Ty::Error) {
             return error_expr(span);
         }
@@ -12883,6 +13081,7 @@ mod tests {
             probe: None,
             probe_result: ProbeResult::default(),
             probe_pending: None,
+            probe_locals_pending: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -12952,6 +13151,7 @@ mod tests {
             probe: None,
             probe_result: ProbeResult::default(),
             probe_pending: None,
+            probe_locals_pending: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -16447,5 +16647,81 @@ mod tests {
     fn without_a_probe_nothing_is_recorded() {
         let r = check_src("fn main() {\n    let s = \"a\"\n    let n = s.len()\n}\n");
         assert_eq!(r.probe, ProbeResult::default());
+    }
+
+    fn member_names(r: &CheckResult) -> Vec<&str> {
+        r.probe.members.iter().map(|m| m.name.as_str()).collect()
+    }
+
+    #[test]
+    fn members_of_a_record_in_its_own_module_include_private_fields() {
+        let (r, _) = probe_src(
+            "record P { x: Int, pub y: Int }\n\
+             fn main() {\n    let p = P { x: 1, y: 2 }\n    p.<|>\n}\n",
+        );
+        assert_eq!(member_names(&r), ["x", "y"]);
+        assert!(r.probe.members.iter().all(|m| m.kind == MemberKind::Field));
+        assert!(r.probe.members.iter().all(|m| m.decl.is_some()));
+    }
+
+    #[test]
+    fn members_of_a_std_vec_hide_its_internals_and_its_associated_functions() {
+        let (r, _) = probe_src("fn main() {\n    let v: Vec<Int> = Vec::new()\n    v.<|>\n}\n");
+        let names = member_names(&r);
+        for m in ["push", "len", "get"] {
+            assert!(names.contains(&m), "{m} missing from {names:?}");
+        }
+        // `data` is a std field without `pub`; `new` takes no `self`.
+        assert!(!names.contains(&"data"), "{names:?}");
+        assert!(!names.contains(&"new"), "{names:?}");
+        let push = r.probe.members.iter().find(|m| m.name == "push").unwrap();
+        assert_eq!(push.kind, MemberKind::Method);
+        assert!(push.decl.is_some());
+    }
+
+    #[test]
+    fn members_of_a_string_and_of_an_array() {
+        let (s, _) = probe_src("fn main() {\n    let n = \"a\".<|>\n}\n");
+        assert!(member_names(&s).contains(&"len"), "{:?}", member_names(&s));
+        let (a, _) = probe_src("fn main() {\n    let n = [1, 2].<|>\n}\n");
+        assert_eq!(member_names(&a), ["len"]);
+        assert_eq!(a.probe.members[0].decl, None);
+    }
+
+    #[test]
+    fn members_of_a_bounded_type_parameter_are_its_bounds_methods() {
+        let (r, _) = probe_src("fn f<T: Display>(t: T) -> String {\n    t.<|>\n}\nfn main() {}\n");
+        assert_eq!(member_names(&r), ["fmt"]);
+    }
+
+    #[test]
+    fn members_include_the_methods_of_traits_the_type_implements() {
+        let (r, _) = probe_src(
+            "record P { x: Int }\n\
+             impl Display for P {\n    fn fmt(self) -> String { \"p\" }\n}\n\
+             fn main() {\n    let p = P { x: 1 }\n    p.<|>\n}\n",
+        );
+        let names = member_names(&r);
+        assert!(names.contains(&"x") && names.contains(&"fmt"), "{names:?}");
+    }
+
+    #[test]
+    fn the_probe_records_locals_on_an_empty_line() {
+        let (r, _) = probe_src("fn main() {\n    let a = 1\n    let b = \"s\"\n    <|>\n}\n");
+        assert_eq!(
+            r.probe.locals,
+            vec![("a".to_string(), Ty::Int), ("b".to_string(), Ty::String)]
+        );
+    }
+
+    #[test]
+    fn the_probe_records_locals_at_a_name_innermost_first_each_once() {
+        let (r, _) = probe_src(
+            "fn main(n: Int) {\n    let a = 1\n    if true {\n        let a = \"s\"\n        a<|>\n    }\n}\n",
+        );
+        assert_eq!(
+            r.probe.locals,
+            vec![("a".to_string(), Ty::String), ("n".to_string(), Ty::Int)]
+        );
     }
 }
