@@ -5,9 +5,11 @@
 //! depends on this crate.
 
 pub mod files;
+pub mod line_index;
 pub mod render;
 
 pub use files::{FileDb, FileId};
+pub use line_index::LineIndex;
 
 /// A byte-range span inside a single source file.
 ///
