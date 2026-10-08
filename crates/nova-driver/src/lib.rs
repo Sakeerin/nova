@@ -6,12 +6,13 @@
 //! `nova-diagnostics`. This is the crate behind `nova run`,
 //! `nova build`, and `nova check`.
 
+mod analyze;
 mod link;
 mod runtime_cache;
 
+pub use analyze::{analyze, Analysis, DiskSources, Options, Probe, Sources};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 
-use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -480,77 +481,17 @@ impl FrontendContext {
     }
 
     /// Load, lex, and parse the entry module plus every module it transitively
-    /// `import`s (resolved to `<name>.nova` beside the entry). A module whose
-    /// file is missing is skipped here — the resolver reports the dangling
-    /// import against its `import` site. Lex/parse diagnostics are rendered.
+    /// `import`s (resolved to `<name>.nova` beside the entry), from disk. A
+    /// module whose file is missing is skipped here; the resolver reports the
+    /// dangling import against its `import` site. Lex and parse diagnostics
+    /// are rendered. The loading itself is [`analyze::load_program`], which
+    /// the language server shares.
     fn load_modules(&mut self) -> Result<Vec<(String, nova_ast::File)>> {
-        let dir = self
-            .entry
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        let mut out: Vec<(String, nova_ast::File)> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<(String, PathBuf)> = VecDeque::new();
-        queue.push_back((Self::module_name(&self.entry), self.entry.clone()));
-
-        while let Some((name, path)) = queue.pop_front() {
-            if !seen.insert(name.clone()) {
-                continue;
-            }
-            let is_entry = out.is_empty() && seen.len() == 1;
-            let source = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(e) if is_entry => {
-                    return Err(e).with_context(|| format!("failed to read {}", path.display()))
-                }
-                // A missing imported module: skip; the resolver flags the import.
-                Err(_) => continue,
-            };
-            let file_id = self.db.add(path.display().to_string(), source.as_str());
-
-            let (tokens, lex_errors) = nova_lexer::lex(&source, file_id);
-            let lex_diags: Vec<Diagnostic> = lex_errors
-                .iter()
-                .map(|e| {
-                    Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here")
-                })
-                .collect();
-            self.render(&lex_diags);
-
-            let (ast, parse_errors) = nova_parser::parse(&tokens, file_id);
-            let parse_diags: Vec<Diagnostic> = parse_errors
-                .iter()
-                .map(|e| {
-                    Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here")
-                })
-                .collect();
-            self.render(&parse_diags);
-
-            let Some(ast) = ast else {
-                continue;
-            };
-
-            // Queue imported modules (resolved beside the entry file). Only
-            // single-segment imports name a module file; qualified/nested paths
-            // (`a::b`) are unsupported and rejected by the resolver, so don't
-            // chase a file for them (which would surface as a confusing error
-            // against an unrelated module).
-            for item in &ast.items {
-                if let nova_ast::Item::Import(imp) = &item.value {
-                    let segments = &imp.path.value.segments;
-                    if let [seg] = segments.as_slice() {
-                        let mod_name = seg.value.clone();
-                        if !seen.contains(&mod_name) {
-                            let mod_path = dir.join(format!("{mod_name}.nova"));
-                            queue.push_back((mod_name, mod_path));
-                        }
-                    }
-                }
-            }
-            out.push((name, ast));
-        }
-        Ok(out)
+        let (loaded, diagnostics, _dropped) =
+            analyze::load_program(&self.entry, &DiskSources, &mut self.db)
+                .with_context(|| format!("failed to read {}", self.entry.display()))?;
+        self.render(&diagnostics);
+        Ok(loaded.into_iter().map(|m| (m.name, m.ast)).collect())
     }
 
     /// Run load → lex → parse → resolve → typecheck across all modules.
