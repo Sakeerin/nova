@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use nova_driver::Outcome;
+use nova_driver::{Outcome, Program, Roots};
 
 use crate::project::{self, Mode};
 
@@ -49,12 +49,22 @@ pub struct BuildCmd {
     release: bool,
 }
 
+/// The program's entry, which `nova run` passes as its first argument and
+/// `nova check` names.
+fn entry(program: &Program) -> PathBuf {
+    program
+        .roots
+        .first()
+        .map(|root| root.path.clone())
+        .unwrap_or_default()
+}
+
 pub fn run(cmd: RunCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
-    let file = mode.entry();
-    let mut args = vec![file.to_string_lossy().into_owned()];
+    let program = project::program_to_run(&mode)?;
+    let mut args = vec![entry(&program).to_string_lossy().into_owned()];
     args.extend(cmd.args.iter().map(|a| a.to_string_lossy().into_owned()));
-    match nova_driver::run_file(file, args)? {
+    match nova_driver::run_program(program, args)? {
         Outcome::Ok(()) => Ok(()),
         Outcome::Failed { errors } => anyhow::bail!(
             "could not compile due to {errors} previous error{}",
@@ -65,17 +75,20 @@ pub fn run(cmd: RunCmd) -> Result<()> {
 
 pub fn build(cmd: BuildCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
+    let program = project::program_to_run(&mode)?;
     let output = match (cmd.output, &mode) {
         (Some(output), _) => output,
-        (
-            None,
-            Mode::Project {
-                target_dir, name, ..
-            },
-        ) => {
+        (None, Mode::Project { target_dir, .. }) => {
             let dir = target_dir.join(if cmd.release { "release" } else { "debug" });
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-            dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+            if !program.has_errors() {
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+            dir.join(format!(
+                "{}{}",
+                project::package_name(&program),
+                std::env::consts::EXE_SUFFIX
+            ))
         }
         (None, Mode::File(file)) => {
             let stem = file
@@ -85,11 +98,10 @@ pub fn build(cmd: BuildCmd) -> Result<()> {
             PathBuf::from(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
         }
     };
-    let file = mode.entry();
     let built = if cmd.release {
-        nova_driver::build_file_release(file, &output)?
+        nova_driver::build_program_release(program, &output)?
     } else {
-        nova_driver::build_file(file, &output)?
+        nova_driver::build_program(program, &output)?
     };
     match built {
         Outcome::Ok(path) => {
@@ -105,10 +117,11 @@ pub fn build(cmd: BuildCmd) -> Result<()> {
 
 pub fn check(cmd: CheckCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
-    let file = mode.entry();
-    match nova_driver::check_file(file)? {
+    let program = mode.program(Roots::Check);
+    let entry = entry(&program);
+    match nova_driver::check_program(program)? {
         Outcome::Ok(()) => {
-            println!("ok: {}", file.display());
+            println!("ok: {}", entry.display());
             Ok(())
         }
         Outcome::Failed { errors } => {

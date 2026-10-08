@@ -186,13 +186,19 @@ fn paths_are_relative_at_the_root_and_absolute_from_a_subdirectory() {
     );
 }
 
+/// Phase 3.3a: a package with neither target is M0013 (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+/// §3.1).
 #[test]
 fn a_project_without_src_main_nova_names_the_missing_entry() {
     let dir = fresh_dir("no-entry");
     std::fs::write(dir.join("nova.toml"), manifest("demo")).unwrap();
     let out = nova().current_dir(&dir).arg("run").assert().failure();
     let err = stderr(&out);
-    assert!(err.contains("project `demo` has no src/main.nova"), "{err}");
+    assert!(
+        err.contains("M0013") && err.contains("has neither src/lib.nova nor src/main.nova"),
+        "{err}"
+    );
 }
 
 /// Passes before project mode exists, and must still pass after it: a file
