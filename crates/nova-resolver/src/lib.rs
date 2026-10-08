@@ -1333,6 +1333,62 @@ impl Definitions {
     }
 }
 
+/// What a name in a module's scope is bound to: what completion offers
+/// (spec `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`
+/// §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeEntry {
+    /// A value: a definition, a variant or a builtin.
+    Value(Res),
+    /// A record or a sum type.
+    Type(DefId),
+    /// A trait.
+    Trait(DefId),
+}
+
+impl Definitions {
+    /// Every name `module` can see, in all three namespaces:
+    /// - its own items;
+    /// - its imports;
+    /// - the builtins;
+    /// - std's glob-imported names.
+    ///
+    /// A module binds each name once per namespace, so a std name the
+    /// module shadows appears once, as the module's own. The result is
+    /// sorted by name, then values, types and traits, for a stable order.
+    pub fn names_in_scope(&self, module: ModuleId) -> Vec<(String, ScopeEntry)> {
+        let Some(scope) = self.modules.get(module.0 as usize) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, ScopeEntry)> = Vec::new();
+        out.extend(
+            scope
+                .values
+                .iter()
+                .map(|(n, r)| (n.clone(), ScopeEntry::Value(*r))),
+        );
+        out.extend(
+            scope
+                .types
+                .iter()
+                .map(|(n, d)| (n.clone(), ScopeEntry::Type(*d))),
+        );
+        out.extend(
+            scope
+                .traits
+                .iter()
+                .map(|(n, d)| (n.clone(), ScopeEntry::Trait(*d))),
+        );
+        let rank = |e: &ScopeEntry| match e {
+            ScopeEntry::Value(_) => 0,
+            ScopeEntry::Type(_) => 1,
+            ScopeEntry::Trait(_) => 2,
+        };
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(rank(&a.1).cmp(&rank(&b.1))));
+        out
+    }
+}
+
 /// A source module: a parsed file plus its module name (file stem).
 pub struct ModuleSource<'a> {
     pub name: String,
@@ -2974,5 +3030,61 @@ mod tests {
         let r = resolve_src("fn println() { }\n");
         assert_eq!(r.diagnostics.len(), 1);
         assert_eq!(r.diagnostics[0].code, "E0002");
+    }
+
+    // === Phase 3.2: names in scope (spec
+    // docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §4.3) ===
+
+    #[test]
+    fn names_in_scope_lists_items_imports_builtins_variants_and_std() {
+        let r = resolve_two(
+            "import lib::{area}\nrecord Point { x: Int }\nfn main() {}\n",
+            "pub fn area() -> Int { 1 }\n",
+        );
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let names = r.definitions.names_in_scope(ModuleId(0));
+        let has = |name: &str, kind: fn(&ScopeEntry) -> bool| {
+            names.iter().any(|(n, e)| n == name && kind(e))
+        };
+        assert!(has("main", |e| matches!(e, ScopeEntry::Value(Res::Def(_)))));
+        assert!(has("Point", |e| matches!(e, ScopeEntry::Type(_))));
+        assert!(has("area", |e| matches!(e, ScopeEntry::Value(Res::Def(_)))));
+        assert!(has("println", |e| matches!(
+            e,
+            ScopeEntry::Value(Res::Builtin(_))
+        )));
+        assert!(has("Some", |e| matches!(
+            e,
+            ScopeEntry::Value(Res::Variant(_, _))
+        )));
+        assert!(has("Vec", |e| matches!(e, ScopeEntry::Type(_))));
+        assert!(has("Display", |e| matches!(e, ScopeEntry::Trait(_))));
+        let mut sorted = names.clone();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            names.iter().map(|n| &n.0).collect::<Vec<_>>(),
+            sorted.iter().map(|n| &n.0).collect::<Vec<_>>(),
+            "sorted by name"
+        );
+    }
+
+    #[test]
+    fn a_std_name_the_module_shadows_is_listed_once_as_its_own() {
+        let r = resolve_two("record Vec { n: Int }\nfn main() {}\n", "pub fn f() {}\n");
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let vecs: Vec<DefId> = r
+            .definitions
+            .names_in_scope(ModuleId(0))
+            .into_iter()
+            .filter_map(|(n, e)| match e {
+                ScopeEntry::Type(id) if n == "Vec" => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(vecs.len(), 1, "{vecs:?}");
+        let DefKind::Record { item_index } = r.definitions.def(vecs[0]).kind else {
+            panic!("not a record");
+        };
+        assert_eq!(r.definitions.module_of(item_index), ModuleId(0));
     }
 }
