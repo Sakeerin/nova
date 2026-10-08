@@ -69,23 +69,33 @@ pub enum FileError {
 pub fn format_file(path: &Path) -> Result<Formatted, FileError> {
     let bytes = std::fs::read(path).map_err(FileError::Io)?;
     let original = String::from_utf8(bytes).map_err(|_| FileError::NotUtf8)?;
+    let formatted = format_buffer(path, &original).map_err(FileError::Format)?;
+    Ok(Formatted {
+        formatted,
+        original,
+    })
+}
+
+/// Format `text`, an editor's buffer for the file at `path`, as
+/// [`format_file`] would format that file if it held `text`. The
+/// `.editorconfig` that governs `path` sets the line ending and the final
+/// newline, and otherwise the buffer keeps its own (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §6.5).
+/// `path` need not exist.
+pub fn format_buffer(path: &Path, text: &str) -> Result<String, FormatError> {
     let settings = editorconfig::settings_for(&absolute(path));
     let ending = match settings.crlf {
         Some(true) => LineEnding::Crlf,
         Some(false) => LineEnding::Lf,
-        None => LineEnding::of(&original),
+        None => LineEnding::of(text),
     };
-    let mut lf =
-        crate::format_named(&original, &path.display().to_string()).map_err(FileError::Format)?;
-    // With `insert_final_newline = false`, the file ends in a newline only
+    let mut lf = crate::format_named(text, &path.display().to_string())?;
+    // With `insert_final_newline = false`, the text ends in a newline only
     // if it did (the 3.1 plan's decision 13).
-    if settings.insert_final_newline == Some(false) && !original.ends_with('\n') {
+    if settings.insert_final_newline == Some(false) && !text.ends_with('\n') {
         lf.pop();
     }
-    Ok(Formatted {
-        formatted: ending.apply(&lf),
-        original,
-    })
+    Ok(ending.apply(&lf))
 }
 
 /// Format `source` from standard input (spec §7.1): [`crate::format`]'s

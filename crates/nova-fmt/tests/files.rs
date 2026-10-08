@@ -114,3 +114,36 @@ fn format_text_keeps_the_inputs_line_ending() {
     assert_eq!(format_text(&crlf(UNFORMATTED)).unwrap(), crlf(FORMATTED));
     assert_eq!(format_text(UNFORMATTED).unwrap(), FORMATTED);
 }
+
+// === Phase 3.2: an editor's buffer (spec
+// docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §6.5) ===
+
+#[test]
+fn format_buffer_applies_the_editorconfig_that_governs_its_path() {
+    let dir = fresh_dir(
+        "buffer",
+        "\n[*.nova]\nend_of_line = crlf\n\n[keep.nova]\ninsert_final_newline = false\n",
+    );
+    // Neither file exists: the buffer is the text, and the path only
+    // chooses the `.editorconfig` sections.
+    let crlf = nova_fmt::format_buffer(&dir.join("main.nova"), UNFORMATTED).unwrap();
+    assert_eq!(crlf, FORMATTED.replace('\n', "\r\n"));
+    let keep =
+        nova_fmt::format_buffer(&dir.join("keep.nova"), "fn main() {\nprintln(\"hi\")\n}").unwrap();
+    assert_eq!(keep, "fn main() { println(\"hi\") }");
+}
+
+#[test]
+fn format_buffer_keeps_a_buffers_crlf() {
+    let dir = fresh_dir("buffer-crlf", "");
+    let out = nova_fmt::format_buffer(&dir.join("main.nova"), &UNFORMATTED.replace('\n', "\r\n"))
+        .unwrap();
+    assert_eq!(out, FORMATTED.replace('\n', "\r\n"));
+}
+
+#[test]
+fn format_buffer_refuses_a_syntax_error() {
+    let dir = fresh_dir("buffer-error", "");
+    let err = nova_fmt::format_buffer(&dir.join("main.nova"), "fn main( {\n").unwrap_err();
+    assert!(matches!(err, FormatError::Syntax { .. }), "{err:?}");
+}
