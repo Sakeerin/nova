@@ -35,3 +35,22 @@ use nova_lexer::Token;
 pub fn parse(tokens: &[Spanned<Token>], file: FileId) -> (Option<File>, Vec<ParseError>) {
     grammar::parse_file(tokens, file)
 }
+
+/// What [`parse_recovering`] returns.
+#[derive(Debug)]
+pub struct Parsed {
+    /// The file, with every item that parsed.
+    pub file: File,
+    pub errors: Vec<ParseError>,
+    /// The names of the top-level items dropped after their names were
+    /// read: `fn f(x: Int {` drops `f`.
+    pub dropped: Vec<Spanned<String>>,
+}
+
+/// [`parse`], also naming the items it dropped (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §3.2).
+/// The language server's analysis calls this; every other caller uses
+/// [`parse`], whose result is the same file and errors.
+pub fn parse_recovering(tokens: &[Spanned<Token>], file: FileId) -> Parsed {
+    grammar::parse_recovering(tokens, file)
+}

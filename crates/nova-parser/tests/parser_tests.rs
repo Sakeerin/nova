@@ -872,3 +872,68 @@ fn a_parenthesised_pattern_spans_its_parentheses() {
         .collect();
     assert_eq!(spans, vec!["(x)", "()"]);
 }
+
+// === Phase 3.2: recovery for the language server (spec
+// docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §3.2, §3.4) ===
+
+#[test]
+fn an_unfinished_member_access_keeps_its_receiver() {
+    let source = "fn main() {\n    v.\n}\n";
+    let (file, errors) = parse_str(source);
+    assert!(
+        matches!(&errors[..], [ParseError::Expected { expected, .. }]
+            if expected == "identifier (in field access)"),
+        "{errors:?}"
+    );
+    let Item::Function(f) = &file.items[0].value else {
+        panic!("{:?}", file.items);
+    };
+    let trailing = f.body.value.trailing.as_ref().expect("the body keeps `v.`");
+    let nova_ast::expr::Expr::Field { target, field } = &trailing.value else {
+        panic!("{:?}", trailing.value);
+    };
+    assert!(
+        matches!(&target.value, nova_ast::expr::Expr::Path(p) if p.segments[0].value == "v"),
+        "{:?}",
+        target.value
+    );
+    assert_eq!(field.value, "");
+    // The missing name is the empty span right after the `.`.
+    let dot_end = "fn main() {\n    v.".len() as u32;
+    assert_eq!((field.span.start, field.span.end), (dot_end, dot_end));
+}
+
+#[test]
+fn an_item_dropped_after_its_name_is_reported_by_name() {
+    let source = "fn f(x: Int {\n}\nfn g() {}\n";
+    let mut db = FileDb::new();
+    let id = db.add("dropped", source);
+    let (tokens, lex_errors) = lex(source, id);
+    assert!(lex_errors.is_empty(), "{lex_errors:?}");
+    let parsed = nova_parser::parse_recovering(&tokens, id);
+    assert!(!parsed.errors.is_empty());
+    let dropped: Vec<&str> = parsed.dropped.iter().map(|n| n.value.as_str()).collect();
+    assert_eq!(dropped, ["f"]);
+    // The item after it still parses.
+    assert!(parsed
+        .file
+        .items
+        .iter()
+        .any(|i| matches!(&i.value, Item::Function(f) if f.name.value == "g")));
+}
+
+#[test]
+fn parse_recovering_agrees_with_parse_on_a_clean_file() {
+    let source = "fn main() {\n    let v = 1\n    println(\"${v}\")\n}\n";
+    let mut db = FileDb::new();
+    let id = db.add("clean", source);
+    let (tokens, _) = lex(source, id);
+    let parsed = nova_parser::parse_recovering(&tokens, id);
+    let (file, errors) = parse(&tokens, id);
+    assert!(parsed.errors.is_empty() && errors.is_empty());
+    assert!(parsed.dropped.is_empty());
+    assert_eq!(
+        format!("{:?}", parsed.file),
+        format!("{:?}", file.expect("Some"))
+    );
+}
