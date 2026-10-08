@@ -151,7 +151,18 @@ impl<'s, 't> Printer<'s, 't> {
         match &e.value {
             Expr::Call { callee, args } => concat(vec![self.expr(callee), self.args(args, span)]),
             Expr::Field { target, field } => {
-                concat(vec![self.expr(target), text("."), self.name(field)])
+                let base = self.expr(target);
+                if !self.has_comment_before(field.span.start) {
+                    return concat(vec![base, self.dot(field)]);
+                }
+                // A comment before the `.` puts the access on a line of its
+                // own, indented once, after the comment (spec §5.4).
+                let trail = self.trailing(target.span.end);
+                concat(vec![
+                    base,
+                    trail,
+                    nest(concat(vec![Doc::HardLine, self.dot(field)])),
+                ])
             }
             Expr::Try(x) => concat(vec![self.expr(x), text("?")]),
             Expr::Await(x) => concat(vec![self.expr(x), text(".await")]),
@@ -221,12 +232,39 @@ impl<'s, 't> Printer<'s, 't> {
         let mut head = vec![self.expr(cur)];
         let mut tail = Vec::new();
         let mut called = false;
+        // Where the text printed so far ends in the source, when known.
+        let mut end = Some(cur.span.end);
         for s in &segs {
-            if matches!(s, Seg::Call(..)) {
-                tail.push(Doc::SoftLine);
-                called = true;
+            if let Seg::Call(name, ..) | Seg::Field(name) = s {
+                // A comment that ends the line before a step stays on that
+                // line. One on a line of its own leads the step, before its
+                // `.` (spec §5.4).
+                let commented = self.has_comment_before(name.span.start);
+                if let Some(at) = end {
+                    let t = self.trailing(at);
+                    if called {
+                        tail.push(t);
+                    } else {
+                        head.push(t);
+                    }
+                }
+                if matches!(s, Seg::Call(..)) {
+                    tail.push(Doc::SoftLine);
+                    called = true;
+                } else if commented {
+                    if called {
+                        tail.push(Doc::HardLine);
+                    } else {
+                        head.push(nest(Doc::HardLine));
+                    }
+                }
             }
             let d = self.seg(s);
+            end = match s {
+                Seg::Call(_, _, span) => Some(span.end),
+                Seg::Field(name) => Some(name.span.end),
+                Seg::Try | Seg::Await | Seg::Index(_) => None,
+            };
             if called {
                 tail.push(d);
             } else {
@@ -238,14 +276,22 @@ impl<'s, 't> Printer<'s, 't> {
 
     fn seg(&mut self, s: &Seg) -> Doc {
         match s {
-            Seg::Call(name, args, span) => {
-                concat(vec![text("."), self.name(name), self.args(args, *span)])
-            }
-            Seg::Field(name) => concat(vec![text("."), self.name(name)]),
+            Seg::Call(name, args, span) => concat(vec![self.dot(name), self.args(args, *span)]),
+            Seg::Field(name) => self.dot(name),
             Seg::Try => text("?"),
             Seg::Await => text(".await"),
             Seg::Index(i) => concat(vec![text("["), self.expr(i), text("]")]),
         }
+    }
+
+    /// `.name`, after any comments before it. They lead the step, so they go
+    /// before its `.` (spec §5.4).
+    fn dot(&mut self, name: &Spanned<String>) -> Doc {
+        concat(vec![
+            self.leading(name.span.start),
+            text("."),
+            text(name.value.clone()),
+        ])
     }
 
     /// A block's `{ … }`, after any comments before its `{`, without a group

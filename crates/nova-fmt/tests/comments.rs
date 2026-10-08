@@ -163,3 +163,25 @@ fn sorting_an_import_list_keeps_each_comment_with_its_name() {
         "import m::{\n    a,\n    // about b\n    b,\n}\n",
     );
 }
+
+#[test]
+fn a_comment_in_a_method_chain_stays_before_its_step() {
+    // An own-line comment leads the step after it, `.` and all (spec §5.4).
+    assert_stable(
+        "fn main() {\n    let app = Router::new()\n        // the root page\n        .get(\"/\", home)\n        .get(\"/health\", health)\n    serve(app)\n}\n",
+    );
+}
+
+#[test]
+fn an_end_of_line_comment_in_a_method_chain_stays_on_its_step() {
+    assert_stable(
+        "fn main() {\n    let app = Router::new() // the router\n        .get(\"/\", home) // the root page\n        .get(\"/health\", health)\n    serve(app)\n}\n",
+    );
+}
+
+#[test]
+fn a_comment_before_a_field_access_keeps_the_dot_with_its_name() {
+    assert_stable(
+        "fn main() {\n    let p = config\n        // the port\n        .port\n    serve(p)\n}\n",
+    );
+}
