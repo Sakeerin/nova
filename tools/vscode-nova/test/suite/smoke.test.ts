@@ -65,7 +65,7 @@ describe("the Nova extension", () => {
 
   it("formats a document", async () => {
     const uri = vscode.Uri.file(path.join(fixture, "src", "unformatted.nova"));
-    await vscode.workspace.openTextDocument(uri);
+    const doc = await vscode.workspace.openTextDocument(uri);
     const edits = await eventually("a formatting edit", async () => {
       const found = await vscode.commands.executeCommand<vscode.TextEdit[]>(
         "vscode.executeFormatDocumentProvider",
@@ -74,7 +74,19 @@ describe("the Nova extension", () => {
       );
       return found !== undefined && found.length > 0 ? found : undefined;
     });
-    assert.strictEqual(edits.length, 1);
-    assert.strictEqual(edits[0].newText, 'fn main() { println("hi") }\n');
+    // VS Code shrinks the server's one whole-document edit to minimal ones,
+    // so check the text they make, applied to the unchanged document from
+    // its end backwards.
+    let text = doc.getText();
+    const fromTheEnd = [...edits].sort(
+      (a, b) => doc.offsetAt(b.range.start) - doc.offsetAt(a.range.start),
+    );
+    for (const edit of fromTheEnd) {
+      text =
+        text.slice(0, doc.offsetAt(edit.range.start)) +
+        edit.newText +
+        text.slice(doc.offsetAt(edit.range.end));
+    }
+    assert.strictEqual(text, 'fn main() { println("hi") }\n');
   });
 });
