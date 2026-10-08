@@ -51,8 +51,8 @@ pub struct CheckOptions {
 /// probe's place holds nothing of its kind.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProbeResult {
-    /// At a member access whose receiver ends at or before the offset and
-    /// whose name ends at or after it: the receiver's type.
+    /// At a member access whose receiver ends before the offset and whose
+    /// name ends at or after it: the receiver's type.
     pub receiver: Option<Ty>,
     /// The receiver's fields and methods.
     pub members: Vec<Member>,

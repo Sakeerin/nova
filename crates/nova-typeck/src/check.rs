@@ -5087,11 +5087,13 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Spec 3.2 §4.1: if the probe's offset lies between a member access's
-    /// receiver and the end of its name, remember the receiver. The name may
-    /// be the empty one of an unfinished `x.`, or a name on a later line:
-    /// `v.` then `println("x")` parses as `v.println("x")`. The first match
-    /// wins, which in a chain `a.b.c` is the innermost.
+    /// Spec 3.2 §4.1: if the probe's offset lies after a member access's
+    /// receiver and no later than the end of its name, remember the receiver.
+    /// The name may be the empty one of an unfinished `x.`, or a name on a
+    /// later line: `v.` then `println("x")` parses as `v.println("x")`. At the
+    /// receiver's own end, as in `items|.len()`, the name is the receiver's,
+    /// so nothing is remembered. The first match wins, which in a chain
+    /// `a.b.c` is the innermost.
     fn probe_receiver(&mut self, fcx: &FnCtx, recv_ty: &Ty, receiver: Span, name: Span) {
         let Some(p) = self.probe else {
             return;
@@ -5099,7 +5101,7 @@ impl<'a> Checker<'a> {
         if self.probe_pending.is_some() || self.probe_result.receiver.is_some() {
             return;
         }
-        if name.file == p.file && receiver.end <= p.offset && p.offset <= name.end {
+        if name.file == p.file && receiver.end < p.offset && p.offset <= name.end {
             self.probe_pending = Some(ProbePending {
                 receiver: recv_ty.clone(),
                 bounds: fcx.param_bounds.clone(),
@@ -16641,6 +16643,19 @@ mod tests {
         );
         let receiver = r.probe.receiver.expect("a receiver");
         assert_eq!(display_ty(&receiver, &defs), "P");
+    }
+
+    #[test]
+    fn the_probe_at_the_end_of_a_receiver_records_names_not_its_members() {
+        // `items|.len()`, the cursor at the end of a receiver being edited:
+        // the name there is the receiver's, not the member's (spec §4.1).
+        let (r, _) = probe_src("fn main() {\n    let items = [1]\n    let n = items<|>.len()\n}\n");
+        assert_eq!(r.probe.receiver, None);
+        assert!(
+            r.probe.locals.iter().any(|(n, _)| n == "items"),
+            "{:?}",
+            r.probe.locals
+        );
     }
 
     #[test]
