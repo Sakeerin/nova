@@ -335,3 +335,65 @@ fn a_graph_error_stops_the_analysis_before_loading() {
     assert_eq!(codes(&a), ["M0007"], "{}", messages(&a));
     assert!(a.modules.is_empty());
 }
+
+#[test]
+fn an_entry_without_main_is_e0601_even_when_a_dependency_has_one() {
+    let dir = fresh("no-main");
+    write(
+        &dir.join("geom"),
+        &[
+            ("nova.toml", manifest("geom", "").as_str()),
+            (
+                "src/lib.nova",
+                "pub fn area() -> Int {\n    9\n}\n\nfn main() {\n    println(\"geom's demo\")\n}\n",
+            ),
+        ],
+    );
+    let app = dir.join("app");
+    write(
+        &app,
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import geom\n\nfn run() {\n    println(\"${area()}\")\n}\n",
+            ),
+        ],
+    );
+    let a = check(Program::for_package(&app, Roots::Program));
+    assert_eq!(codes(&a), ["E0601"], "{}", messages(&a));
+}
+
+#[test]
+fn a_dependencys_tests_are_stripped_and_the_roots_kept() {
+    let dir = fresh("strip");
+    write(
+        &dir.join("geom"),
+        &[
+            ("nova.toml", manifest("geom", "").as_str()),
+            (
+                "src/lib.nova",
+                "pub fn area() -> Int {\n    9\n}\n\n@test\nfn geom_checks_its_area() {\n    assert_eq(area(), 9)\n}\n",
+            ),
+        ],
+    );
+    let app = dir.join("app");
+    write(
+        &app,
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import geom\n\nfn main() {\n    println(\"${area()}\")\n}\n\n\
+                 @test\nfn app_checks_the_area() {\n    assert_eq(area(), 9)\n}\n",
+            ),
+        ],
+    );
+    let program = Program::for_package(&app, Roots::Test);
+    let a = analyze_program(program, &DiskSources, &options(true)).unwrap();
+    assert!(a.diagnostics.is_empty(), "{}", messages(&a));
+    let defs = a.definitions.as_ref().unwrap();
+    let defined = |name: &str| defs.defs().iter().any(|d| d.name == name);
+    assert!(defined("app_checks_the_area"));
+    assert!(!defined("geom_checks_its_area"));
+}
