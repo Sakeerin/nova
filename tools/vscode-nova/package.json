@@ -1,0 +1,78 @@
+{
+  "name": "nova",
+  "displayName": "Nova",
+  "description": "The Nova language: colouring, and diagnostics, completion and formatting from nova lsp.",
+  "version": "0.2.0",
+  "publisher": "sakeerin",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sakeerin/nova"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters"
+  ],
+  "activationEvents": [
+    "onLanguage:nova"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nova",
+        "aliases": ["Nova", "nova"],
+        "extensions": [".nova"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nova",
+        "scopeName": "source.nova",
+        "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Nova",
+      "properties": {
+        "nova.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "The nova executable to run as the language server. Empty means nova from PATH."
+        },
+        "nova.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the messages between VS Code and nova lsp."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "nova.restartServer",
+        "title": "Nova: Restart Language Server"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "node ./out/test/run.js"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.2"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "~1.91.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "mocha": "^12.0.3",
+    "typescript": "~5.9.3"
+  }
+}
