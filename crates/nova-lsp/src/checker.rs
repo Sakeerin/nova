@@ -7,10 +7,12 @@
 //! project was submitted while it ran, so a stale result is never shown.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 
-use nova_driver::{analyze, Analysis, Options, Sources};
+use nova_diagnostics::FileId;
+use nova_driver::{analyze_program, Analysis, Options, Program, Roots, Sources};
+use nova_pm::PackageId;
 
 use crate::convert;
 use crate::uri;
@@ -130,7 +132,12 @@ enum Failed {
     Panicked,
 }
 
-fn run(entry: &Path, overlay: &Overlay, module_only: bool) -> Result<Analysis, Failed> {
+fn run(program: Program, overlay: &Overlay, module_only: bool) -> Result<Analysis, Failed> {
+    let entry = program
+        .roots
+        .first()
+        .map(|root| root.path.clone())
+        .unwrap_or_default();
     let options = Options {
         keep_going: true,
         tests: true,
@@ -138,7 +145,7 @@ fn run(entry: &Path, overlay: &Overlay, module_only: bool) -> Result<Analysis, F
         probe: None,
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        analyze(entry, overlay, &options)
+        analyze_program(program, overlay, &options)
     })) {
         Ok(Ok(a)) => Ok(a),
         Ok(Err(e)) => {
@@ -153,9 +160,10 @@ fn run(entry: &Path, overlay: &Overlay, module_only: bool) -> Result<Analysis, F
 }
 
 /// The diagnostics `job` publishes (spec §6.2's ownership rule):
-/// - a project's analysis owns every module its entry reaches;
-/// - each open project file the entry does not reach is checked on its own,
-///   as a module;
+/// - a project's analysis, from its program, library and `tests/` (spec
+///   3.3a §6), owns its own package's modules;
+/// - each open project file it does not reach is checked on its own, as a
+///   module;
 /// - a loose file is its own entry, and a module unless it declares
 ///   `fn main`.
 ///
@@ -169,28 +177,30 @@ fn check(job: &Job) -> Option<Vec<Publish>> {
                 .read(file)
                 .map(|t| declares_main(&t))
                 .unwrap_or(true);
-            match run(file, &job.overlay, module_only) {
+            match run(Program::loose(file), &job.overlay, module_only) {
                 Ok(a) => publish_own(job, &a, false, &mut out),
                 Err(Failed::Panicked) => return None,
                 Err(Failed::Unreadable) => {}
             }
         }
-        ProjectKey::Root(_) => {
+        ProjectKey::Root(dir) => {
             let mut reached: Vec<PathKey> = Vec::new();
-            match run(&job.project.entry(), &job.overlay, false) {
+            // The program, the library and tests/, in test mode; a
+            // library alone is checked as a module (spec 3.3a §6).
+            match run(Program::for_package(dir, Roots::Test), &job.overlay, false) {
                 Ok(a) => {
                     reached = a.modules.iter().map(|(_, p)| PathKey::of(p)).collect();
                     publish_own(job, &a, true, &mut out);
                 }
                 Err(Failed::Panicked) => return None,
-                // No `src/main.nova`: every open file is checked on its own.
+                // Nothing to read: every open file is checked on its own.
                 Err(Failed::Unreadable) => {}
             }
             for doc in &job.open {
                 if reached.contains(&PathKey::of(&doc.path)) {
                     continue;
                 }
-                match run(&doc.path, &job.overlay, true) {
+                match run(Program::for_file(&doc.path), &job.overlay, true) {
                     Ok(a) => publish_own(job, &a, false, &mut out),
                     Err(Failed::Panicked) => return None,
                     Err(Failed::Unreadable) => {}
@@ -201,8 +211,9 @@ fn check(job: &Job) -> Option<Vec<Publish>> {
     Some(out)
 }
 
-/// One publish per file `analysis` owns: every module when `all`, else its
-/// entry alone.
+/// One publish per file `analysis` owns (spec 3.3a §6): with `all`, each
+/// module of the root package, else its entry alone. A dependency's files
+/// are its own project's to publish.
 fn publish_own(job: &Job, analysis: &Analysis, all: bool, out: &mut Vec<Publish>) {
     let Some(&(entry, _)) = analysis.modules.first() else {
         return;
@@ -215,10 +226,16 @@ fn publish_own(job: &Job, analysis: &Analysis, all: bool, out: &mut Vec<Publish>
         Some(doc) => doc.uri.clone(),
         None => uri::from_path(path),
     };
-    let owned = if all {
-        &analysis.modules[..]
+    let owned: Vec<&(FileId, PathBuf)> = if all {
+        analysis
+            .modules
+            .iter()
+            .zip(&analysis.module_packages)
+            .filter(|(_, package)| matches!(package, None | Some(PackageId(0))))
+            .map(|(module, _)| module)
+            .collect()
     } else {
-        &analysis.modules[..1]
+        analysis.modules.iter().take(1).collect()
     };
     for (file, path) in owned {
         let version = job

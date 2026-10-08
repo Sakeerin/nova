@@ -3,7 +3,7 @@
 
 mod lsp_client;
 
-use lsp_client::{file_uri, fresh_dir, Client};
+use lsp_client::{file_uri, fresh_dir, same_uri, Client};
 use serde_json::{json, Value};
 
 /// Thai and an emoji before the planted error, so a byte column and a
@@ -675,4 +675,81 @@ fn a_loose_file_is_rechecked_when_a_sibling_it_imports_changes() {
     );
     let after = client.diagnostics(&main_uri, nonempty);
     assert_eq!(codes(&after), ["E0010"], "{after}");
+}
+
+// === Phase 3.3a: packages (spec
+// docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §6, §7.4) ===
+
+const APP_MAIN: &str = "import geom\n\nfn main() {\n    let a: Int = area()\n}\n";
+
+/// `app`, which depends on `geom` by path, in one fresh directory. `geom`'s
+/// `src/lib.nova` is `lib`.
+fn app_and_library(name: &str, lib: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = fresh_dir(name);
+    let geom = dir.join("geom");
+    std::fs::create_dir_all(geom.join("src")).unwrap();
+    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
+    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    let manifest = format!(
+        "{}\n[dependencies]\ngeom = {{ path = \"../geom\" }}\n",
+        MANIFEST.replace("demo", "app")
+    );
+    std::fs::write(app.join("nova.toml"), manifest).unwrap();
+    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
+    (app, geom)
+}
+
+#[test]
+fn the_apps_analysis_publishes_nothing_for_its_dependency() {
+    let (app, _geom) = app_and_library("dependency-owner", GEOMETRY_BROKEN);
+    let main_uri = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start(&app, false);
+    open(&mut client, &main_uri, APP_MAIN);
+    client.diagnostics(&main_uri, |_| true);
+    // The first publish for one of geom's files, under any spelling (the
+    // app reads them as `app/../geom/...`), or for the sentinel, whose
+    // publish comes after everything the app's check sent.
+    let sentinel = sentinel(&mut client, "dependency-owner");
+    let first = client.wait_for(|m| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"].as_str().is_some_and(|u| {
+                same_uri(u, &sentinel)
+                    || u.ends_with("/geom/src/lib.nova")
+                    || u.ends_with("/geom/nova.toml")
+            })
+    });
+    let uri = first["params"]["uri"].as_str().unwrap();
+    assert!(
+        same_uri(uri, &sentinel),
+        "the app published for its dependency: {first}"
+    );
+}
+
+#[test]
+fn a_tests_file_gets_its_diagnostics() {
+    // A guard: the server already checked an unreached file on its own, and
+    // the driver finds a tests/ file's package (Task 4).
+    let dir = project("tests-file", &[("lib.nova", GEOMETRY_FIXED)]);
+    let text = "import demo\n\n@test\nfn area_is_text() {\n    let s: String = area()\n}\n";
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let file = dir.join("tests").join("api.nova");
+    std::fs::write(&file, text).unwrap();
+    let uri = file_uri(&file);
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let params = client.diagnostics(&uri, nonempty);
+    assert_eq!(codes(&params), ["E0010"], "{params}");
+}
+
+#[test]
+fn a_library_without_a_program_is_checked_as_a_module() {
+    // A guard: a library gets its own errors, and no E0601.
+    let dir = project("library-only", &[("lib.nova", GEOMETRY_BROKEN)]);
+    let uri = file_uri(&dir.join("src").join("lib.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, GEOMETRY_BROKEN);
+    let params = client.diagnostics(&uri, nonempty);
+    assert_eq!(codes(&params), ["E0010"], "{params}");
 }

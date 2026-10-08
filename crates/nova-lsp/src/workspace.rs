@@ -174,33 +174,24 @@ pub fn declares_main(text: &str) -> bool {
         .any(|i| matches!(&i.value, nova_ast::Item::Function(f) if f.name.value == "main"))
 }
 
-/// A project, or a loose file (spec §6.2). Two keys are equal when their
-/// paths' `PathKey`s are.
+/// A project, or a loose file (spec §6.2, and 3.3a §6). Two keys are equal
+/// when their paths' `PathKey`s are.
 #[derive(Debug, Clone)]
 pub enum ProjectKey {
-    /// A directory holding `nova.toml`, in its real spelling; its entry is
-    /// `src/main.nova`.
+    /// A package, by its directory in its real spelling. It owns the files
+    /// directly in its `src/` and `tests/`.
     Root(PathBuf),
     /// A file in no project: its own entry.
     Loose(PathBuf),
 }
 
 impl ProjectKey {
-    /// The project `path` belongs to: the nearest directory above it that
-    /// holds `nova.toml`, as `nova run` finds it, or none.
+    /// The project `path` belongs to: the package whose `src/` or `tests/`
+    /// it is directly in, as the driver finds it (spec 3.3a §4.1), or none.
     pub fn of(path: &Path) -> ProjectKey {
-        let dir = path.parent().unwrap_or(path);
-        match nova_pm::find_root(dir) {
-            Some(root) => ProjectKey::Root(real_path(&root)),
+        match nova_driver::package_of(path) {
+            Some((root, _)) => ProjectKey::Root(real_path(&root)),
             None => ProjectKey::Loose(path.to_path_buf()),
-        }
-    }
-
-    /// The file the project's analysis starts from.
-    pub fn entry(&self) -> PathBuf {
-        match self {
-            ProjectKey::Root(dir) => dir.join("src").join("main.nova"),
-            ProjectKey::Loose(file) => file.clone(),
         }
     }
 

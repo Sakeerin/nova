@@ -7,7 +7,7 @@ use std::path::Path;
 use lsp_types as lsp;
 use lsp_types::CompletionItemKind as Kind;
 use nova_diagnostics::FileId;
-use nova_driver::{analyze, Analysis, Options, Probe};
+use nova_driver::{analyze, analyze_program, Analysis, Options, Probe, Program, Roots};
 use nova_lexer::Token;
 use nova_resolver::{DefKind, ModuleId, Res, ScopeEntry};
 use nova_typeck::{Member, MemberKind};
@@ -35,8 +35,9 @@ pub fn complete(
 }
 
 /// The analysis that owns `path`, with the probe at `offset` (decision 9):
-/// its project's, if the entry reaches it, or else its own as a module.
-/// Completion needs no MIR, so `module_only` is always on.
+/// its project's analysis, if that reaches it, or else its own, which
+/// `Program::for_file` finds the package of (spec 3.3a §6). Completion needs
+/// no MIR, so `module_only` is always on.
 fn analysis_at(path: &Path, offset: u32, overlay: &Overlay) -> Option<Analysis> {
     let options = Options {
         keep_going: true,
@@ -48,8 +49,9 @@ fn analysis_at(path: &Path, offset: u32, overlay: &Overlay) -> Option<Analysis> 
         }),
     };
     let project = ProjectKey::of(path);
-    if let ProjectKey::Root(_) = project {
-        if let Some(a) = guarded(|| analyze(&project.entry(), overlay, &options).ok()) {
+    if let ProjectKey::Root(dir) = &project {
+        let program = Program::for_package(dir, Roots::Test);
+        if let Some(a) = guarded(|| analyze_program(program, overlay, &options).ok()) {
             if a.modules
                 .iter()
                 .any(|(_, p)| PathKey::of(p) == PathKey::of(path))
