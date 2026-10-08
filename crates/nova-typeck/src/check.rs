@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
 use crate::usefulness;
-use crate::{display_ty, CheckResult};
+use crate::{display_ty, CheckOptions, CheckResult, ProbePoint, ProbeResult};
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -112,6 +112,12 @@ struct MethodLoc {
 
 /// Type-check a parsed file against its resolved definitions.
 pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
+    check_with(file, defs, &CheckOptions::default())
+}
+
+/// [`check`], with the language server's probe (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §4.1).
+pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) -> CheckResult {
     let mut checker = Checker {
         file,
         defs,
@@ -132,6 +138,9 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
         type_arity: FxHashMap::default(),
         externs: Vec::new(),
         diagnostics: Vec::new(),
+        probe: options.probe,
+        probe_result: ProbeResult::default(),
+        probe_pending: None,
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -199,6 +208,7 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
             externs: checker.externs,
         },
         diagnostics: checker.diagnostics,
+        probe: checker.probe_result,
     }
 }
 
@@ -269,6 +279,18 @@ struct Checker<'a> {
     /// `extern` (FFI) function declarations, collected into the HIR module.
     externs: Vec<hir::ExternFn>,
     diagnostics: Vec<Diagnostic>,
+    /// The language server's probe (spec 3.2 §4.1), what it has found, and
+    /// the receiver it met in the function being checked. That receiver's
+    /// type is read when inference finishes the function
+    /// (`finalize_function`).
+    probe: Option<ProbePoint>,
+    probe_result: ProbeResult,
+    probe_pending: Option<ProbePending>,
+}
+
+/// A receiver the probe met, before its function's inference is finished.
+struct ProbePending {
+    receiver: Ty,
 }
 
 /// Per-function checking state.
@@ -3048,6 +3070,13 @@ impl<'a> Checker<'a> {
     /// Apply the final substitution everywhere and report residual
     /// inference variables as E0011.
     fn finalize_function(&mut self, func: &mut hir::Function, icx: &InferCtx) {
+        // Spec 3.2 §4.1: the receiver the probe met in this function, read
+        // with the function's final substitution. The function is finalized
+        // before the closures lifted from it, so it takes the receiver even
+        // when the access was inside one of them.
+        if let Some(pending) = self.probe_pending.take() {
+            self.probe_result.receiver = Some(icx.apply(&pending.receiver));
+        }
         let mut residual: Vec<Span> = Vec::new();
         // Resolve the return type — for closures it may be an inference
         // variable (normal functions carry a concrete signature type).
@@ -5034,6 +5063,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Spec 3.2 §4.1: if the probe's offset lies between a member access's
+    /// receiver and the end of its name, remember the receiver. The name may
+    /// be the empty one of an unfinished `x.`, or a name on a later line:
+    /// `v.` then `println("x")` parses as `v.println("x")`. The first match
+    /// wins, which in a chain `a.b.c` is the innermost.
+    fn probe_receiver(&mut self, recv_ty: &Ty, receiver: Span, name: Span) {
+        let Some(p) = self.probe else {
+            return;
+        };
+        if self.probe_pending.is_some() || self.probe_result.receiver.is_some() {
+            return;
+        }
+        if name.file == p.file && receiver.end <= p.offset && p.offset <= name.end {
+            self.probe_pending = Some(ProbePending {
+                receiver: recv_ty.clone(),
+            });
+        }
+    }
+
     fn check_field(
         &mut self,
         fcx: &mut FnCtx,
@@ -5043,6 +5091,12 @@ impl<'a> Checker<'a> {
     ) -> hir::Expr {
         let recv = self.check_expr(fcx, target);
         let recv_ty = fcx.icx.apply(&recv.ty);
+        self.probe_receiver(&recv_ty, target.span, field.span);
+        // An unfinished `x.` has an empty name, and the parser has already
+        // reported it (spec 3.2 §3.4).
+        if field.value.is_empty() {
+            return error_expr(span);
+        }
         if let Some((index, field_ty)) =
             self.record_field_index_and_ty(fcx, &recv_ty, &field.value, span)
         {
@@ -5362,6 +5416,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> hir::Expr {
         let recv_ty = fcx.icx.apply(&receiver.ty);
+        self.probe_receiver(&recv_ty, receiver.span, method.span);
         if matches!(recv_ty, Ty::Error) {
             return error_expr(span);
         }
@@ -12825,6 +12880,9 @@ mod tests {
             type_arity: FxHashMap::default(),
             externs: Vec::new(),
             diagnostics: Vec::new(),
+            probe: None,
+            probe_result: ProbeResult::default(),
+            probe_pending: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -12891,6 +12949,9 @@ mod tests {
             type_arity: FxHashMap::default(),
             externs: Vec::new(),
             diagnostics: Vec::new(),
+            probe: None,
+            probe_result: ProbeResult::default(),
+            probe_pending: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -16320,5 +16381,71 @@ mod tests {
         // boundary at the point the reader is looking at.
         let r = check_src("record Wrap { v: Int }\ntype Two = | A | B\nfn main() { }");
         assert!(!r.diagnostics.iter().any(|d| d.code == "E0089"));
+    }
+
+    // === Phase 3.2: the probe (spec
+    // docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §4.1) ===
+
+    /// Check `marked` with the probe where `<|>` stands, after removing the
+    /// marker. The module and each std module get their own `FileId`, so the
+    /// probe's offset cannot also land in std's code. Parse errors are
+    /// allowed, as the language server allows them.
+    fn probe_src(marked: &str) -> (CheckResult, Definitions) {
+        let offset = marked.find("<|>").expect("a `<|>` marks the probe") as u32;
+        let src = marked.replacen("<|>", "", 1);
+        let mut db = nova_diagnostics::FileDb::new();
+        let file = db.add("probe.nova", src.as_str());
+        let std_files: Vec<FileId> = nova_resolver::STD_MODULES
+            .iter()
+            .map(|&(name, source)| db.add(name, source))
+            .collect();
+        let (tokens, _) = lex(&src, file);
+        let parsed = nova_parser::parse_recovering(&tokens, file);
+        let module = nova_resolver::ModuleSource {
+            name: "main".to_string(),
+            file: &parsed.file,
+        };
+        let resolved = nova_resolver::resolve_program(&[module], &std_files, None);
+        let options = CheckOptions {
+            probe: Some(ProbePoint { file, offset }),
+        };
+        let checked = check_with(&resolved.file, &resolved.definitions, &options);
+        (checked, resolved.definitions)
+    }
+
+    #[test]
+    fn a_missing_member_name_adds_no_type_error() {
+        let (r, _) = probe_src("fn main() {\n    let s = \"a\"\n    s.<|>\n}\n");
+        assert!(error_codes(&r).is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn the_probe_records_the_receiver_after_a_dot() {
+        let (r, _) = probe_src("fn main() {\n    let s = \"a\"\n    s.<|>\n}\n");
+        assert_eq!(r.probe.receiver, Some(Ty::String));
+    }
+
+    #[test]
+    fn the_probe_reaches_a_name_on_the_next_line() {
+        // Newlines do not end a statement, so `v.` then `println("x")` is the
+        // call `v.println("x")`. The cursor is still after the `.`.
+        let (r, _) = probe_src("fn main() {\n    let v = 1\n    v.<|>\n    println(\"x\")\n}\n");
+        assert_eq!(r.probe.receiver, Some(Ty::Int));
+    }
+
+    #[test]
+    fn a_chain_records_the_innermost_receiver() {
+        let (r, defs) = probe_src(
+            "record Q { n: Int }\nrecord P { q: Q }\n\
+             fn main() {\n    let p = P { q: Q { n: 1 } }\n    let m = p.q<|>.n\n}\n",
+        );
+        let receiver = r.probe.receiver.expect("a receiver");
+        assert_eq!(display_ty(&receiver, &defs), "P");
+    }
+
+    #[test]
+    fn without_a_probe_nothing_is_recorded() {
+        let r = check_src("fn main() {\n    let s = \"a\"\n    let n = s.len()\n}\n");
+        assert_eq!(r.probe, ProbeResult::default());
     }
 }
