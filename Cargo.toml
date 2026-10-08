@@ -65,3 +65,15 @@ crc32fast = "1.4"
 # has no dependencies.
 semver = "1"
 toml_edit = "0.22"
+
+# The language server (spec
+# docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §6; ADR 0029).
+# lsp-server is rust-analyzer's synchronous framing crate. It is pinned
+# because 0.7.9 and every later release are edition 2024, which needs Rust
+# 1.85, above the 1.78 MSRV; 0.7.8 is edition 2021 and brings
+# crossbeam-channel and log. lsp-types 0.97.0 (edition 2018) holds the
+# protocol's types and brings fluent-uri 0.1, bitflags 1 and serde_repr.
+# Every crate these pull in declares Rust 1.71 or less, or nothing, so the
+# MSRV job is their check.
+lsp-server = "=0.7.8"
+lsp-types = "0.97"

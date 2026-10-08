@@ -23,6 +23,7 @@ nova-parser = { path = "../nova-parser" }
 nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
 nova-fmt = { path = "../nova-fmt" }
+nova-lsp = { path = "../nova-lsp" }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -40,3 +41,4 @@ crc32fast = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 insta = { workspace = true }
+serde_json = { workspace = true }

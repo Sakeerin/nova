@@ -1,11 +1,13 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, run, build, check, test, fmt, new,
-//! init and version. Phase 0 implemented `nova parse`, Phase 1 `nova run`
-//! (Cranelift JIT) and `nova check`, Phase 3.0 the project commands (spec
-//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
-//! and Phase 3.1 `nova fmt` (spec
-//! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`).
+//! Dispatches to subcommands: parse, run, build, check, test, fmt, lsp,
+//! new, init and version. Phase 0 implemented `nova parse`, Phase 1 `nova
+//! run` (Cranelift JIT) and `nova check`, Phase 3.0 the project commands
+//! (spec `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
+//! Phase 3.1 `nova fmt` (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`), and
+//! Phase 3.2 `nova lsp` (spec
+//! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`).
 
 mod cmd;
 mod embedded;
@@ -41,6 +43,8 @@ enum Command {
     /// Format Nova source files: the project's `src/`, or the files and
     /// directories given.
     Fmt(cmd::fmt::FmtCmd),
+    /// Run the language server over stdin and stdout (editors start it).
+    Lsp,
     /// Create a new project in a new directory.
     New(cmd::new::NewCmd),
     /// Make the current directory a project.
@@ -51,15 +55,23 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::WARN.into()),
-        )
-        .init();
+    let cli = Cli::parse();
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::WARN.into());
+    // Under `nova lsp`, stdout carries only protocol messages, so logs (and
+    // the `log` records tracing forwards, lsp-server's included) go to
+    // stderr (spec docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md
+    // §6.1). Every other command keeps its subscriber as it was.
+    if matches!(cli.command, Command::Lsp) {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
     nova_driver::set_embedded_runtime(embedded::runtime());
-    let cli = Cli::parse();
     match cli.command {
         Command::Parse(cmd) => cmd::parse::run(cmd),
         Command::Run(cmd) => cmd::run::run(cmd),
@@ -68,6 +80,8 @@ fn main() -> Result<()> {
         Command::Test(cmd) => cmd::test::run(cmd),
         // Its exit code says more than success or failure (spec §7.2).
         Command::Fmt(cmd) => std::process::exit(cmd::fmt::run(cmd)),
+        // Its exit code is the protocol's: 0 after `shutdown` then `exit`.
+        Command::Lsp => std::process::exit(cmd::lsp::run()),
         Command::New(cmd) => cmd::new::new(cmd),
         Command::Init(cmd) => cmd::new::init(cmd),
         Command::Version => cmd::version::run(),
