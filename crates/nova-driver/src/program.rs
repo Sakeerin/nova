@@ -516,10 +516,19 @@ impl<'a> Loader<'a> {
     /// Whether `dir` holds `<stem>.nova`, its name matching exactly (spec
     /// §4.3). A name the disk does not hold in any case may be an editor's
     /// unsaved buffer, read through `Sources`.
+    ///
+    /// An empty `dir`, a loose entry named without one (`nova run
+    /// main.nova`), is the current directory: `read_dir("")` fails on every
+    /// system, which would leave the case-insensitive read to decide.
     fn has(&mut self, dir: &Path, stem: &str) -> bool {
         let name = format!("{stem}.nova");
+        let listed = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
         let listing = self.listings.entry(dir.to_path_buf()).or_insert_with(|| {
-            std::fs::read_dir(dir)
+            std::fs::read_dir(listed)
                 .map(|entries| {
                     entries
                         .filter_map(Result::ok)
