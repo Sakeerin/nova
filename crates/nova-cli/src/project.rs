@@ -1,12 +1,13 @@
-//! Which file a command works on, and where `build` writes, now that a
-//! directory can be a project (spec
-//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §6).
+//! Which program a command works on, and where `build` writes (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §6,
+//! and for packages
+//! `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+//! §5.1).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use nova_diagnostics::{render, Diagnostic, FileDb, Severity};
-use nova_pm::Manifest;
+use nova_driver::{Program, Roots};
 
 /// What a command works on.
 pub enum Mode {
@@ -14,31 +15,32 @@ pub enum Mode {
     File(PathBuf),
     /// A project, found by walking up to its `nova.toml`.
     Project {
-        /// `src/main.nova`: relative when the current directory is the
-        /// project's root, as it has always been there, and absolute from
+        /// Its directory: empty when it is the current directory, so that
+        /// paths stay relative there as they always have, and absolute from
         /// anywhere else.
-        entry: PathBuf,
+        root: PathBuf,
         /// `target`, relative or absolute in the same way.
         target_dir: PathBuf,
-        /// The package's name, which `build` names its output after.
-        name: String,
     },
 }
 
 impl Mode {
-    /// The source file the command compiles.
-    pub fn entry(&self) -> &Path {
+    /// The program the command compiles: a file's (spec 3.3a §4.1), or the
+    /// project's with the roots `roots` names. The driver renders the
+    /// graph's diagnostics, so a manifest error stops the command there.
+    pub fn program(&self, roots: Roots) -> Program {
         match self {
-            Mode::File(file) => file,
-            Mode::Project { entry, .. } => entry,
+            Mode::File(file) => Program::for_file(file),
+            Mode::Project { root, .. } => Program::for_package(root, roots),
         }
     }
 }
 
 /// The mode for a command given `file`, or none. A file argument always
-/// means file mode, and no manifest is read. Otherwise the nearest
-/// `nova.toml` at or above the current directory makes a project; with
-/// none, `src/main.nova` stays the default.
+/// means file mode; it reads its package's manifest only when it is directly
+/// in a package's `src/` or `tests/` (spec 3.3a §4.1). Otherwise the
+/// nearest `nova.toml` at or above the current directory makes a project;
+/// with none, `src/main.nova` stays the default.
 pub fn mode(file: Option<PathBuf>) -> Result<Mode> {
     if let Some(file) = file {
         return Ok(Mode::File(file));
@@ -48,77 +50,34 @@ pub fn mode(file: Option<PathBuf>) -> Result<Mode> {
         return Ok(Mode::File(PathBuf::from("src/main.nova")));
     };
     // At the root, paths stay relative, exactly as before projects existed.
-    let base = if root == cwd {
-        PathBuf::new()
-    } else {
-        root.clone()
-    };
-    let manifest = read_manifest(&root, &base)?;
-    let entry = if base.as_os_str().is_empty() {
-        PathBuf::from("src/main.nova")
-    } else {
-        root.join("src").join("main.nova")
-    };
-    if !root.join("src").join("main.nova").is_file() {
-        bail!(
-            "project `{}` has no {}",
-            manifest.package.name,
-            entry.display()
-        );
-    }
+    let root = if root == cwd { PathBuf::new() } else { root };
     Ok(Mode::Project {
-        entry,
-        target_dir: base.join("target"),
-        name: manifest.package.name,
+        target_dir: root.join("target"),
+        root,
     })
 }
 
-/// Read and check `<root>/nova.toml`, rendering its diagnostics. Any error,
-/// a declared dependency (M0005) included, stops the command.
-fn read_manifest(root: &Path, base: &Path) -> Result<Manifest> {
-    let path = root.join(nova_pm::MANIFEST);
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let mut db = FileDb::new();
-    let file = db.add(
-        base.join(nova_pm::MANIFEST).display().to_string(),
-        source.as_str(),
-    );
-    let (manifest, mut diagnostics) = nova_pm::parse(&source, file);
-    if let Some(manifest) = &manifest {
-        diagnostics.extend(unresolved_dependencies(manifest));
+/// The program `nova run` and `nova build` compile. A project that is only
+/// a library has none, and is refused (spec 3.3a §5.1).
+pub fn program_to_run(mode: &Mode) -> Result<Program> {
+    let program = mode.program(Roots::Program);
+    if let (Mode::Project { .. }, Some(graph)) = (mode, &program.graph) {
+        let root = graph.root();
+        if !program.has_errors() && root.has_lib && !root.has_main {
+            bail!(
+                "`{}` is a library: it has no src/main.nova; `nova check` and `nova test` \
+                 work on it",
+                root.name
+            );
+        }
     }
-    if !diagnostics.is_empty() {
-        render::emit_all(&db, &diagnostics);
-    }
-    let errors = diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Error)
-        .count();
-    match manifest {
-        Some(manifest) if errors == 0 => Ok(manifest),
-        _ => bail!(
-            "could not read nova.toml due to {errors} previous error{}",
-            if errors == 1 { "" } else { "s" }
-        ),
-    }
+    Ok(program)
 }
 
-/// M0005, one per declared dependency: nothing resolves them before 3.3,
-/// and an `import` of one would otherwise fail later, and less clearly
-/// (spec §5.2). This is the one place 3.3 removes.
-fn unresolved_dependencies(manifest: &Manifest) -> Vec<Diagnostic> {
-    manifest
-        .dependencies
-        .iter()
-        .chain(&manifest.dev_dependencies)
-        .map(|dependency| {
-            Diagnostic::error(
-                "M0005",
-                format!("dependency `{}` cannot be used yet", dependency.name),
-            )
-            .with_primary_label(dependency.span, "declared here")
-            .with_note("this nova does not resolve dependencies; remove the entry for now")
-        })
-        .collect()
+/// The project's package name, which `nova build` names its output after.
+pub fn package_name(program: &Program) -> String {
+    program
+        .graph
+        .as_ref()
+        .map_or_else(|| "out".to_string(), |graph| graph.root().name.clone())
 }

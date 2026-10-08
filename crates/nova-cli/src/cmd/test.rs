@@ -163,7 +163,8 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // unlike `run`/`build`/`check`), so it always works on the project
     // around the current directory, or on `src/main.nova` outside any.
     let mode = crate::project::mode(None)?;
-    let (exe, tests) = nova_driver::build_test_binary(mode.entry())?;
+    let program = mode.program(nova_driver::Roots::Test);
+    let (exe, tests) = nova_driver::build_test_program(program)?;
 
     // Enumerate by asking the compiled binary itself — exactly what a plain,
     // `NOVA_TEST_INDEX`-unset run of it prints to a human — rather than
