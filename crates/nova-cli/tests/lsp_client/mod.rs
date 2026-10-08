@@ -118,6 +118,11 @@ impl Client {
         message["params"].clone()
     }
 
+    /// Forget every message read but not yet matched.
+    pub fn clear_unread(&mut self) {
+        self.unread.clear();
+    }
+
     /// `shutdown`, then `exit`; returns the server's exit status.
     pub fn shutdown_and_exit(mut self) -> ExitStatus {
         self.request("shutdown", Value::Null);
@@ -237,11 +242,21 @@ fn decode(s: &str) -> String {
 /// A fresh directory with a space and Thai in its path, so every URI is
 /// percent-encoded (Review Focus 2). Its name is fixed, so each run
 /// replaces the last.
+///
+/// It is spelled as the file system spells it, as an editor opens a file.
+/// The temp directory can be named another way: by an 8.3 short name on
+/// Windows (`C:\Users\RUNNER~1\...`), or through the `/var` symlink on
+/// macOS. The server names a file it publishes for unopened in its real
+/// spelling, which a URI built on the other would not match.
 pub fn fresh_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
         .join("nova lsp tests")
         .join(format!("โปรเจกต์-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create the test directory");
-    dir
+    let real = std::fs::canonicalize(&dir).expect("canonicalize the test directory");
+    match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) => PathBuf::from(rest),
+        None => real,
+    }
 }

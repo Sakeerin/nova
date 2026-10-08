@@ -11,16 +11,20 @@ mod convert;
 mod uri;
 mod workspace;
 
+use std::collections::HashSet;
+use std::path::PathBuf;
+
 use anyhow::Result;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types as lsp;
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
-    Notification as _, PublishDiagnostics,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+    DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
+use lsp_types::request::{RegisterCapability, Request as _};
 
 use checker::{Checker, Job, Publish};
-use workspace::Workspace;
+use workspace::{ProjectKey, Workspace};
 
 /// Serve over stdin and stdout until the client says `exit`. Returns the
 /// exit code: 0 after `shutdown` then `exit`, 1 for an `exit` without
@@ -35,7 +39,14 @@ pub fn run() -> Result<i32> {
 
 fn serve(connection: &Connection) -> Result<i32> {
     let (id, params) = connection.initialize_start()?;
-    let _params: lsp::InitializeParams = serde_json::from_value(params)?;
+    let params: lsp::InitializeParams = serde_json::from_value(params)?;
+    let can_watch = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|w| w.did_change_watched_files.as_ref())
+        .and_then(|d| d.dynamic_registration)
+        .unwrap_or(false);
     let result = serde_json::json!({
         "capabilities": capabilities(),
         "serverInfo": { "name": "nova lsp", "version": env!("CARGO_PKG_VERSION") },
@@ -62,7 +73,12 @@ fn serve(connection: &Connection) -> Result<i32> {
         connection,
         workspace: Workspace::default(),
         checker,
+        generation: 0,
+        active: HashSet::new(),
     };
+    if can_watch {
+        server.register_watcher();
+    }
     for message in &connection.receiver {
         match message {
             Message::Request(request) => {
@@ -98,6 +114,10 @@ struct Server<'c> {
     connection: &'c Connection,
     workspace: Workspace,
     checker: Checker,
+    /// Rises with every job submitted.
+    generation: u64,
+    /// The projects of the open documents, as of the last refresh.
+    active: HashSet<ProjectKey>,
 }
 
 impl Server<'_> {
@@ -106,9 +126,12 @@ impl Server<'_> {
             DidOpenTextDocument::METHOD => {
                 if let Ok(p) = serde_json::from_value::<lsp::DidOpenTextDocumentParams>(n.params) {
                     let uri = uri::text(&p.text_document.uri);
-                    self.workspace
-                        .open(&uri, p.text_document.version, p.text_document.text);
-                    self.check(&uri);
+                    if let Some(path) =
+                        self.workspace
+                            .open(&uri, p.text_document.version, p.text_document.text)
+                    {
+                        self.refresh(vec![ProjectKey::of(&path)]);
+                    }
                 }
             }
             DidChangeTextDocument::METHOD => {
@@ -117,28 +140,47 @@ impl Server<'_> {
                     let uri = uri::text(&p.text_document.uri);
                     // Full sync: the last change holds the whole text.
                     if let Some(change) = p.content_changes.into_iter().last() {
-                        self.workspace
-                            .change(&uri, p.text_document.version, change.text);
-                        self.check(&uri);
+                        if let Some(path) =
+                            self.workspace
+                                .change(&uri, p.text_document.version, change.text)
+                        {
+                            self.refresh(vec![ProjectKey::of(&path)]);
+                        }
                     }
                 }
             }
             DidSaveTextDocument::METHOD => {
                 if let Ok(p) = serde_json::from_value::<lsp::DidSaveTextDocumentParams>(n.params) {
-                    self.check(&uri::text(&p.text_document.uri));
+                    if let Some(path) = uri::document_path(&uri::text(&p.text_document.uri)) {
+                        self.refresh(vec![ProjectKey::of(&path)]);
+                    }
                 }
             }
             DidCloseTextDocument::METHOD => {
                 if let Ok(p) = serde_json::from_value::<lsp::DidCloseTextDocumentParams>(n.params) {
                     if let Some(doc) = self.workspace.close(&uri::text(&p.text_document.uri)) {
-                        self.checker.submit(Job {
-                            path: doc.path,
-                            uri: doc.uri,
-                            version: None,
-                            overlay: self.workspace.overlay(),
-                            clear: true,
-                        });
+                        // Re-checked from disk if the project is still
+                        // open; cleared if not.
+                        self.refresh(vec![ProjectKey::of(&doc.path)]);
                     }
+                }
+            }
+            DidChangeWatchedFiles::METHOD => {
+                if let Ok(p) = serde_json::from_value::<lsp::DidChangeWatchedFilesParams>(n.params)
+                {
+                    let paths: Vec<PathBuf> = p
+                        .changes
+                        .iter()
+                        .filter_map(|c| uri::to_path(&uri::text(&c.uri)))
+                        .collect();
+                    let manifest = paths.iter().any(|p| p.ends_with("nova.toml"));
+                    let touched: Vec<ProjectKey> = self
+                        .workspace
+                        .projects()
+                        .into_iter()
+                        .filter(|project| manifest || paths.iter().any(|p| project.holds(p)))
+                        .collect();
+                    self.refresh(touched);
                 }
             }
             _ => {}
@@ -158,17 +200,56 @@ impl Server<'_> {
         let _ = self.connection.sender.send(Message::Response(response));
     }
 
-    /// Queue a check of an open document.
-    fn check(&self, uri: &str) {
-        let Some(doc) = self.workspace.get(uri) else {
-            return;
-        };
+    /// Re-check `touched`, and clear each project that no open document
+    /// belongs to any more (spec §6.2).
+    fn refresh(&mut self, touched: Vec<ProjectKey>) {
+        let now: HashSet<ProjectKey> = self.workspace.projects().into_iter().collect();
+        let gone: Vec<ProjectKey> = self.active.difference(&now).cloned().collect();
+        for project in gone {
+            self.submit(project, true);
+        }
+        for project in touched {
+            if now.contains(&project) {
+                self.submit(project, false);
+            }
+        }
+        self.active = now;
+    }
+
+    fn submit(&mut self, project: ProjectKey, clear: bool) {
+        self.generation += 1;
+        let open = self.workspace.open_in(&project);
         self.checker.submit(Job {
-            path: doc.path.clone(),
-            uri: doc.uri.clone(),
-            version: Some(doc.version),
+            project,
+            generation: self.generation,
             overlay: self.workspace.overlay(),
-            clear: false,
+            open,
+            clear,
         });
+    }
+
+    /// Ask the client to watch `.nova` files and `nova.toml` (spec §6.1).
+    fn register_watcher(&self) {
+        let watchers = ["**/*.nova", "**/nova.toml"]
+            .iter()
+            .map(|glob| lsp::FileSystemWatcher {
+                glob_pattern: lsp::GlobPattern::String(glob.to_string()),
+                kind: None,
+            })
+            .collect();
+        let options = lsp::DidChangeWatchedFilesRegistrationOptions { watchers };
+        let params = lsp::RegistrationParams {
+            registrations: vec![lsp::Registration {
+                id: "nova-watch".to_string(),
+                method: DidChangeWatchedFiles::METHOD.to_string(),
+                register_options: serde_json::to_value(options).ok(),
+            }],
+        };
+        let request = Request::new(
+            lsp_server::RequestId::from("nova-watch".to_string()),
+            RegisterCapability::METHOD.to_string(),
+            params,
+        );
+        let _ = self.connection.sender.send(Message::Request(request));
     }
 }
