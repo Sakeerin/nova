@@ -74,6 +74,20 @@ enum LastComma {
     Never,
 }
 
+/// One element of a comma list, with the comments around it
+/// (`Printer::list_entries`).
+struct ListEntry {
+    start: u32,
+    /// Where the element ends in the source: after its comma, if it has one.
+    end: u32,
+    lead: Doc,
+    body: Doc,
+    /// The comments that end its line, before its comma.
+    trail: Doc,
+    /// The comments that end its line, after its comma.
+    after_comma: Doc,
+}
+
 /// How a comma list is printed (spec §6, "Comma lists").
 #[derive(Clone, Copy)]
 struct List {
@@ -323,10 +337,49 @@ impl<'s, 't> Printer<'s, 't> {
         list: List,
         items: &[T],
         extent: impl Fn(&Self, &T) -> (u32, u32),
-        mut print: impl FnMut(&mut Self, &T) -> Doc,
+        print: impl FnMut(&mut Self, &T) -> Doc,
         close_at: u32,
     ) -> Doc {
-        if items.is_empty() {
+        let entries = self.list_entries(items, extent, print);
+        self.assemble_list(list, entries, close_at)
+    }
+
+    /// Each element of a comma list with the comments around it, taken in
+    /// source order. A caller that reorders the elements reorders these, so
+    /// every comment stays with its element.
+    fn list_entries<T>(
+        &mut self,
+        items: &[T],
+        extent: impl Fn(&Self, &T) -> (u32, u32),
+        mut print: impl FnMut(&mut Self, &T) -> Doc,
+    ) -> Vec<ListEntry> {
+        let mut entries = Vec::new();
+        for item in items {
+            let (start, end) = extent(&*self, item);
+            let lead = self.leading(start);
+            let body = print(self, item);
+            let trail = self.trailing(end);
+            let comma_end = self.src.token_end(end, &Token::Comma);
+            let after_comma = match comma_end {
+                Some(at) => self.trailing(at),
+                None => Doc::Nil,
+            };
+            entries.push(ListEntry {
+                start,
+                end: comma_end.unwrap_or(end),
+                lead,
+                body,
+                trail,
+                after_comma,
+            });
+        }
+        entries
+    }
+
+    /// The comma list `comma_list` prints, from its elements in the order
+    /// they are to be printed.
+    fn assemble_list(&mut self, list: List, entries: Vec<ListEntry>, close_at: u32) -> Doc {
+        if entries.is_empty() {
             return match self.dangling(close_at) {
                 None => text(format!("{}{}", list.open, list.close)),
                 Some(d) => concat(vec![
@@ -344,18 +397,18 @@ impl<'s, 't> Printer<'s, 't> {
         };
         let mut inner = vec![edge.clone()];
         let mut prev_end = 0;
-        for (i, item) in items.iter().enumerate() {
-            let (start, end) = extent(&*self, item);
+        let count = entries.len();
+        for (i, e) in entries.into_iter().enumerate() {
             if i > 0 {
-                if list.blanks && self.src.blank_line_in(prev_end, start) {
+                if list.blanks && self.src.blank_line_in(prev_end, e.start) {
                     inner.push(Doc::HardLine);
                 }
                 inner.push(Doc::Line);
             }
-            inner.push(self.leading(start));
-            inner.push(print(self, item));
-            inner.push(self.trailing(end));
-            inner.push(if i + 1 < items.len() {
+            inner.push(e.lead);
+            inner.push(e.body);
+            inner.push(e.trail);
+            inner.push(if i + 1 < count {
                 text(",")
             } else {
                 match list.last {
@@ -364,11 +417,8 @@ impl<'s, 't> Printer<'s, 't> {
                     LastComma::Never => Doc::Nil,
                 }
             });
-            let comma_end = self.src.token_end(end, &Token::Comma);
-            if let Some(at) = comma_end {
-                inner.push(self.trailing(at));
-            }
-            prev_end = comma_end.unwrap_or(end);
+            inner.push(e.after_comma);
+            prev_end = e.end;
         }
         if let Some(d) = self.dangling(close_at) {
             inner.push(Doc::HardLine);

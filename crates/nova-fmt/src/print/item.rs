@@ -445,10 +445,6 @@ impl<'s, 't> Printer<'s, 't> {
                 parts.push(self.name(a));
             }
             ImportKind::List(names) => {
-                let mut names: Vec<&Spanned<String>> = names.iter().collect();
-                if sort {
-                    names.sort_by(|a, b| a.value.cmp(&b.value));
-                }
                 let after = names
                     .iter()
                     .map(|n| n.span.end)
@@ -456,13 +452,17 @@ impl<'s, 't> Printer<'s, 't> {
                     .unwrap_or(i.path.span.end);
                 let close = self.src.find_from(after, &Token::RBrace).unwrap_or(after);
                 parts.push(text("::"));
-                parts.push(group(self.comma_list(
-                    List::IMPORTS,
-                    &names,
-                    |_, n| (n.span.start, n.span.end),
-                    |p, n| p.name(n),
-                    close,
-                )));
+                // Each name takes its comments in source order and keeps
+                // them when the list is sorted, as an import does in a
+                // sorted run (spec §6).
+                let entries =
+                    self.list_entries(names, |_, n| (n.span.start, n.span.end), |p, n| p.name(n));
+                let mut keyed: Vec<_> = names.iter().map(|n| &n.value).zip(entries).collect();
+                if sort {
+                    keyed.sort_by_key(|k| k.0);
+                }
+                let entries = keyed.into_iter().map(|(_, e)| e).collect();
+                parts.push(group(self.assemble_list(List::IMPORTS, entries, close)));
             }
         }
         concat(parts)
