@@ -7,15 +7,17 @@
 //! - with `keep_going`, every stage runs whatever the earlier ones found;
 //! - its diagnostics are returned rather than printed.
 //!
-//! The CLI's entry points share [`load_program`] with it, through
-//! [`DiskSources`], and keep their own staged behaviour.
+//! The CLI's entry points share [`crate::program::load_program`] with it,
+//! through [`DiskSources`], and keep their own staged behaviour.
 
-use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use nova_diagnostics::{Diagnostic, FileDb, FileId, Severity};
+use nova_pm::{Graph, PackageId};
 use nova_resolver::{Definitions, ModuleSource};
 use nova_typeck::{CheckOptions, ProbePoint, ProbeResult};
+
+use crate::program::{load_program, Load, Program};
 
 /// Where `analyze` reads a module's text.
 pub trait Sources {
@@ -68,120 +70,67 @@ pub struct Analysis {
     /// The program's own modules, by the paths they were read from, in load
     /// order: `modules[i]` is `ModuleId(i)`.
     pub modules: Vec<(FileId, PathBuf)>,
+    /// Each module's package, parallel to `modules`. `None` for a loose
+    /// module (spec 3.3a §6).
+    pub module_packages: Vec<Option<PackageId>>,
+    /// The package graph, as far as it resolved.
+    pub graph: Option<Graph>,
     pub definitions: Option<Definitions>,
     /// The typed module, partial when errors were found.
     pub module: Option<nova_hir::Module>,
     pub probe: ProbeResult,
 }
 
-/// One module [`load_program`] read.
-pub(crate) struct Loaded {
-    pub name: String,
-    pub path: PathBuf,
-    pub file: FileId,
-    pub ast: nova_ast::File,
-}
-
-/// Read, lex and parse `entry` and every module it transitively imports,
-/// each `<name>.nova` beside the entry. A module that cannot be read is
-/// skipped: the resolver reports its `import`.
-///
-/// Returns:
-/// - the modules, in load order;
-/// - their lex and parse diagnostics, in the order the CLI has always
-///   printed them;
-/// - the names of the items the parser dropped.
-///
-/// `Err` only when the entry itself cannot be read.
-pub(crate) fn load_program(
-    entry: &Path,
-    sources: &dyn Sources,
-    db: &mut FileDb,
-) -> std::io::Result<(Vec<Loaded>, Vec<Diagnostic>, Vec<String>)> {
-    let dir = entry.parent().map(Path::to_path_buf).unwrap_or_default();
-    let mut out: Vec<Loaded> = Vec::new();
-    let mut diagnostics = Vec::new();
-    let mut dropped = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<(String, PathBuf)> = VecDeque::new();
-    queue.push_back((
-        crate::FrontendContext::module_name(entry),
-        entry.to_path_buf(),
-    ));
-
-    while let Some((name, path)) = queue.pop_front() {
-        if !seen.insert(name.clone()) {
-            continue;
-        }
-        let is_entry = out.is_empty() && seen.len() == 1;
-        let source = match sources.read(&path) {
-            Ok(s) => s,
-            Err(e) if is_entry => return Err(e),
-            // A missing imported module: skip; the resolver flags the import.
-            Err(_) => continue,
-        };
-        let file = db.add(path.display().to_string(), source.as_str());
-
-        let (tokens, lex_errors) = nova_lexer::lex(&source, file);
-        diagnostics.extend(lex_errors.iter().map(|e| {
-            Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here")
-        }));
-        let parsed = nova_parser::parse_recovering(&tokens, file);
-        diagnostics.extend(parsed.errors.iter().map(|e| {
-            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here")
-        }));
-        dropped.extend(parsed.dropped.into_iter().map(|n| n.value));
-
-        // Queue imported modules, resolved beside the entry. Only
-        // single-segment imports name a module file; the resolver rejects
-        // the others.
-        for item in &parsed.file.items {
-            if let nova_ast::Item::Import(imp) = &item.value {
-                if let [seg] = imp.path.value.segments.as_slice() {
-                    let mod_name = seg.value.clone();
-                    if !seen.contains(&mod_name) {
-                        let mod_path = dir.join(format!("{mod_name}.nova"));
-                        queue.push_back((mod_name, mod_path));
-                    }
-                }
-            }
-        }
-        out.push(Loaded {
-            name,
-            path,
-            file,
-            ast: parsed.file,
-        });
-    }
-    Ok((out, diagnostics, dropped))
-}
-
-/// Run the front end on `entry` for the language server (spec §3).
+/// Run the front end on `entry` for the language server (spec §3): the
+/// program [`Program::for_file`] finds for it.
 pub fn analyze(
     entry: &Path,
     sources: &dyn Sources,
     options: &Options,
 ) -> std::io::Result<Analysis> {
-    let mut db = FileDb::new();
-    let (loaded, mut diagnostics, dropped) = load_program(entry, sources, &mut db)?;
+    analyze_program(Program::for_file(entry), sources, options)
+}
+
+/// Run the front end on `program` (spec 3.3a §4.4, §6). MIR runs only
+/// when the program runs and `options.module_only` is off.
+pub fn analyze_program(
+    program: Program,
+    sources: &dyn Sources,
+    options: &Options,
+) -> std::io::Result<Analysis> {
+    let Program {
+        mut db,
+        graph,
+        roots,
+        runs,
+        mut diagnostics,
+    } = program;
+    let stop = |diags: &[Diagnostic]| !options.keep_going && has_error(diags);
+    let load = if stop(&diagnostics) {
+        Load::default()
+    } else {
+        load_program(graph.as_ref(), &roots, sources, &mut db)?
+    };
+    diagnostics.extend(load.diagnostics);
+    let dropped = load.dropped;
+    let mut modules = load.modules;
     let mut analysis = Analysis {
         db,
         diagnostics: Vec::new(),
-        modules: loaded.iter().map(|m| (m.file, m.path.clone())).collect(),
+        modules: modules.iter().map(|m| (m.file, m.path.clone())).collect(),
+        module_packages: modules.iter().map(|m| m.package).collect(),
+        graph,
         definitions: None,
         module: None,
         probe: ProbeResult::default(),
     };
-    let stop = |diags: &[Diagnostic]| !options.keep_going && has_error(diags);
     if stop(&diagnostics) {
         analysis.diagnostics = diagnostics;
         return Ok(analysis);
     }
 
-    let mut files: Vec<(String, nova_ast::File)> =
-        loaded.into_iter().map(|m| (m.name, m.ast)).collect();
     if !options.tests {
-        crate::strip_test_functions(&mut files);
+        crate::strip_test_functions(&mut modules);
     }
     let std_files: Vec<FileId> = nova_resolver::STD_MODULES
         .iter()
@@ -196,11 +145,14 @@ pub fn analyze(
         let file = analysis.db.add(format!("<std/{short}>"), src);
         (nova_resolver::STD_TEST_MODULE, file)
     });
-    let mut module_sources: Vec<ModuleSource> = files
+    let module_sources: Vec<ModuleSource> = modules
         .iter()
-        .map(|(name, file)| ModuleSource::new(name.clone(), file))
+        .map(|m| ModuleSource {
+            name: m.name.clone(),
+            file: &m.ast,
+            imports: m.imports.clone(),
+        })
         .collect();
-    nova_resolver::name_imports(&mut module_sources);
     let resolved = nova_resolver::resolve_program(&module_sources, &std_files, extra_std);
     diagnostics.extend(resolved.diagnostics);
     if stop(&diagnostics) {
@@ -225,8 +177,10 @@ pub fn analyze(
         &CheckOptions { probe },
     );
     diagnostics.extend(checked.diagnostics);
-    // MIR lowering assumes a well-formed program (spec §3.3).
-    if !options.module_only && !has_error(&diagnostics) {
+    // MIR lowering assumes a well-formed program (spec §3.3), and a
+    // program without an entry `main` is checked as a module (3.3a §4.4).
+    let module_only = options.module_only || !runs;
+    if !module_only && !has_error(&diagnostics) {
         if let Err(mir) = nova_mir::lower_module(&checked.module) {
             diagnostics.extend(mir);
         }

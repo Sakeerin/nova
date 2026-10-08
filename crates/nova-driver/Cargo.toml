@@ -22,6 +22,7 @@ nova-resolver = { path = "../nova-resolver" }
 nova-typeck = { path = "../nova-typeck" }
 nova-hir = { path = "../nova-hir" }
 nova-mir = { path = "../nova-mir" }
+nova-pm = { path = "../nova-pm" }
 nova-codegen-cranelift = { path = "../nova-codegen-cranelift" }
 nova-codegen-llvm = { path = "../nova-codegen-llvm" }
 # Unpacking the runtime library nova-cli embeds (spec

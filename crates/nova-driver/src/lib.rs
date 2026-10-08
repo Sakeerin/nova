@@ -8,9 +8,11 @@
 
 mod analyze;
 mod link;
+mod program;
 mod runtime_cache;
 
-pub use analyze::{analyze, Analysis, DiskSources, Options, Probe, Sources};
+pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Probe, Sources};
+pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 
 use std::hash::{Hash, Hasher};
@@ -22,6 +24,7 @@ use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity, Span};
 use nova_hir as hir;
 use nova_hir::Ty;
 use nova_resolver::{Builtin, DefId, ModuleSource, TestFn};
+use program::Loaded;
 
 /// Outcome of a pipeline invocation that may fail with user errors.
 pub enum Outcome<T> {
@@ -42,12 +45,21 @@ pub enum Outcome<T> {
 /// `12-TYPESYSTEM.md` §5.4. Without it `nova check` would call a program
 /// "well-formed" that `nova run` / `nova build` then reject.
 pub fn check_file(path: &Path) -> Result<Outcome<()>> {
-    let mut ctx = FrontendContext::load(path)?;
+    check_program(Program::for_file(path))
+}
+
+/// [`check_file`] on `program` (spec 3.3a §5.1). MIR runs only when the
+/// program runs: its entry is `src/main.nova`, or a loose file.
+pub fn check_program(program: Program) -> Result<Outcome<()>> {
+    let runs = program.runs;
+    let mut ctx = FrontendContext::new(program)?;
     let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
-    if let Err(diags) = nova_mir::lower_module(&module) {
-        ctx.render(&diags);
+    if runs {
+        if let Err(diags) = nova_mir::lower_module(&module) {
+            ctx.render(&diags);
+        }
     }
     if ctx.errors > 0 {
         Ok(Outcome::Failed { errors: ctx.errors })
@@ -58,7 +70,12 @@ pub fn check_file(path: &Path) -> Result<Outcome<()>> {
 
 /// Compile a file to native code via the Cranelift JIT.
 pub fn compile_file(path: &Path) -> Result<Outcome<CompiledProgram>> {
-    let mir = match lower_to_mir(path)? {
+    compile_program(Program::for_file(path))
+}
+
+/// [`compile_file`] on `program`.
+pub fn compile_program(program: Program) -> Result<Outcome<CompiledProgram>> {
+    let mir = match lower_to_mir(program)? {
         Outcome::Ok(mir) => mir,
         Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
     };
@@ -92,7 +109,12 @@ pub fn compile_file(path: &Path) -> Result<Outcome<CompiledProgram>> {
 /// `nova-runtime` static library through the platform linker, and removes
 /// the intermediate object on success.
 pub fn build_file(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
-    let mir = match lower_to_mir(path)? {
+    build_program(Program::for_file(path), output)
+}
+
+/// [`build_file`] on `program`.
+pub fn build_program(program: Program, output: &Path) -> Result<Outcome<PathBuf>> {
+    let mir = match lower_to_mir(program)? {
         Outcome::Ok(mir) => mir,
         Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
     };
@@ -133,7 +155,12 @@ fn intermediate(output: &Path, ext: &str) -> PathBuf {
 /// build. If no LLVM toolchain is found the generated `.ll` is left in place
 /// and a helpful error is returned.
 pub fn build_file_release(path: &Path, output: &Path) -> Result<Outcome<PathBuf>> {
-    let mir = match lower_to_mir(path)? {
+    build_program_release(Program::for_file(path), output)
+}
+
+/// [`build_file_release`] on `program`.
+pub fn build_program_release(program: Program, output: &Path) -> Result<Outcome<PathBuf>> {
+    let mir = match lower_to_mir(program)? {
         Outcome::Ok(mir) => mir,
         Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
     };
@@ -196,7 +223,17 @@ const SHADOWED_USER_MAIN_NAME: &str = "main.shadowed_by_nova_test";
 /// set without recompiling or re-deriving either the path or the inventory
 /// from the source again.
 pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
-    let mut ctx = FrontendContext::load(path)?;
+    build_test_program(Program::for_file(path))
+}
+
+/// [`build_test_binary`] on `program`: the test binary of its roots.
+pub fn build_test_program(program: Program) -> Result<(PathBuf, Vec<TestFn>)> {
+    let entry = program
+        .roots
+        .first()
+        .map(|root| root.path.clone())
+        .unwrap_or_default();
+    let mut ctx = FrontendContext::new(program)?;
     let Some((mut module, tests, fresh_def_id)) = ctx.check(true)? else {
         anyhow::bail!(
             "could not compile due to {} previous error{}",
@@ -236,11 +273,11 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
     // link error on Windows; a binary overwritten mid-execution on Unix).
     let dir = std::env::temp_dir()
         .join("nova-test-bin")
-        .join(path_fingerprint(path));
+        .join(path_fingerprint(&entry));
     std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let output = dir.join(format!(
         "{}{}",
-        FrontendContext::module_name(path),
+        FrontendContext::module_name(&entry),
         std::env::consts::EXE_SUFFIX
     ));
 
@@ -419,8 +456,8 @@ fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
 }
 
 /// Run the front end and MIR lowering, rendering any diagnostics.
-fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
-    let mut ctx = FrontendContext::load(path)?;
+fn lower_to_mir(program: Program) -> Result<Outcome<nova_mir::Module>> {
+    let mut ctx = FrontendContext::new(program)?;
     let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
@@ -436,7 +473,12 @@ fn lower_to_mir(path: &Path) -> Result<Outcome<nova_mir::Module>> {
 /// Compile and immediately execute a file (`nova run`), with `args` as the
 /// program's arguments: `std/process`'s `args()` returns exactly this list.
 pub fn run_file(path: &Path, args: Vec<String>) -> Result<Outcome<()>> {
-    match compile_file(path)? {
+    run_program(Program::for_file(path), args)
+}
+
+/// [`run_file`] on `program`.
+pub fn run_program(program: Program, args: Vec<String>) -> Result<Outcome<()>> {
+    match compile_program(program)? {
         Outcome::Ok(program) => {
             program.run_with_args(args);
             Ok(Outcome::Ok(()))
@@ -445,22 +487,46 @@ pub fn run_file(path: &Path, args: Vec<String>) -> Result<Outcome<()>> {
     }
 }
 
-/// Shared front-end state: file database plus error accounting.
+/// Shared front-end state: what to load, the file database, and error
+/// accounting.
 struct FrontendContext {
     db: FileDb,
-    entry: PathBuf,
+    graph: Option<nova_pm::Graph>,
+    roots: Vec<Root>,
     errors: usize,
 }
 
 impl FrontendContext {
-    fn load(path: &Path) -> Result<Self> {
-        // The entry file must exist; imported modules are resolved lazily.
-        std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        Ok(Self {
-            db: FileDb::new(),
-            entry: path.to_path_buf(),
+    /// Take `program`, rendering its graph's diagnostics. When they hold
+    /// no error, the entry must exist: imported modules are read lazily.
+    fn new(program: Program) -> Result<Self> {
+        let Program {
+            db,
+            graph,
+            roots,
+            diagnostics,
+            ..
+        } = program;
+        let mut ctx = FrontendContext {
+            db,
+            graph,
+            roots,
             errors: 0,
-        })
+        };
+        ctx.render(&diagnostics);
+        if ctx.errors == 0 {
+            let entry = ctx
+                .entry()
+                .context("nothing to compile: the package has no source file for this")?;
+            std::fs::File::open(entry)
+                .with_context(|| format!("failed to open {}", entry.display()))?;
+        }
+        Ok(ctx)
+    }
+
+    /// The first root.
+    fn entry(&self) -> Option<&Path> {
+        self.roots.first().map(|root| root.path.as_path())
     }
 
     fn render(&mut self, diagnostics: &[Diagnostic]) {
@@ -480,18 +546,16 @@ impl FrontendContext {
             .unwrap_or_else(|| "main".to_string())
     }
 
-    /// Load, lex, and parse the entry module plus every module it transitively
-    /// `import`s (resolved to `<name>.nova` beside the entry), from disk. A
-    /// module whose file is missing is skipped here; the resolver reports the
-    /// dangling import against its `import` site. Lex and parse diagnostics
-    /// are rendered. The loading itself is [`analyze::load_program`], which
-    /// the language server shares.
-    fn load_modules(&mut self) -> Result<Vec<(String, nova_ast::File)>> {
-        let (loaded, diagnostics, _dropped) =
-            analyze::load_program(&self.entry, &DiskSources, &mut self.db)
-                .with_context(|| format!("failed to read {}", self.entry.display()))?;
-        self.render(&diagnostics);
-        Ok(loaded.into_iter().map(|m| (m.name, m.ast)).collect())
+    /// Load, lex and parse every module the roots reach, from disk,
+    /// rendering the lex, parse and import diagnostics. The loading itself
+    /// is [`program::load_program`], which the language server shares.
+    fn load_modules(&mut self) -> Result<Vec<Loaded>> {
+        let entry = self.entry().map(Path::to_path_buf).unwrap_or_default();
+        let load =
+            program::load_program(self.graph.as_ref(), &self.roots, &DiskSources, &mut self.db)
+                .with_context(|| format!("failed to read {}", entry.display()))?;
+        self.render(&load.diagnostics);
+        Ok(load.modules)
     }
 
     /// Run load → lex → parse → resolve → typecheck across all modules.
@@ -519,6 +583,10 @@ impl FrontendContext {
         &mut self,
         with_test_module: bool,
     ) -> Result<Option<(nova_hir::Module, Vec<TestFn>, DefId)>> {
+        // The graph's errors were rendered by `new`.
+        if self.errors > 0 {
+            return Ok(None);
+        }
         let mut modules = self.load_modules()?;
         if self.errors > 0 {
             return Ok(None);
@@ -564,11 +632,14 @@ impl FrontendContext {
             let file_id = self.db.add(format!("<std/{short}>"), src);
             (nova_resolver::STD_TEST_MODULE, file_id)
         });
-        let mut sources: Vec<ModuleSource> = modules
+        let sources: Vec<ModuleSource> = modules
             .iter()
-            .map(|(name, file)| ModuleSource::new(name.clone(), file))
+            .map(|m| ModuleSource {
+                name: m.name.clone(),
+                file: &m.ast,
+                imports: m.imports.clone(),
+            })
             .collect();
-        nova_resolver::name_imports(&mut sources);
         let resolved = nova_resolver::resolve_program(&sources, &std_files, extra_std);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {
@@ -647,9 +718,9 @@ impl FrontendContext {
 /// invalid test signature is likewise uncaught outside `cargo test`. `nova
 /// test` validates every `@test` function's shape regardless, since this
 /// function is never called on that path.
-fn strip_test_functions(modules: &mut [(String, nova_ast::File)]) {
-    for (_, file) in modules.iter_mut() {
-        file.items.retain(|item| {
+fn strip_test_functions(modules: &mut [Loaded]) {
+    for module in modules.iter_mut() {
+        module.ast.items.retain(|item| {
             !matches!(
                 &item.value,
                 nova_ast::Item::Function(f) if f.attrs.iter().any(|a| a.name.value == "test")
