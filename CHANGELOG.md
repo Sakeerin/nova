@@ -116,8 +116,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declares one. That module's `main` used to run.
 - An import matches a file's name in its exact case on every system, so
   `import Utils` no longer loads `utils.nova` on Windows or macOS.
-- `nova run src/main.nova` inside a project reads its manifest and sees
-  its dependencies. Other file arguments are unchanged.
+- A file argument directly in a package's `src/` or `tests/`, such as
+  `nova run src/main.nova`, is a module of that package: it reads the
+  manifest and sees the dependencies, and a broken manifest stops it. So
+  `nova check src/lib.nova` checks the library as a module, where it used
+  to report E0601. Any other file argument is unchanged.
 - A declared dependency is no longer M0005 "cannot be used yet": a path
   dependency resolves, and a version-only one is M0005 "a registry
   dependency".
