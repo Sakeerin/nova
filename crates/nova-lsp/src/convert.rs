@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lsp_types as lsp;
-use nova_diagnostics::{Diagnostic, FileId, LineIndex, Severity, Span};
+use nova_diagnostics::{Diagnostic, FileId, Label, LineIndex, Severity, Span};
 use nova_driver::Analysis;
 use nova_pm::PackageId;
 
@@ -25,18 +25,26 @@ pub fn range(index: &LineIndex, start: u32, end: u32) -> lsp::Range {
     }
 }
 
-/// The LSP diagnostics `analysis` has for `file`.
+/// The LSP diagnostics `analysis` has for `file` (spec §6.3, and 3.3a §6).
 ///
-/// A diagnostic goes to the file of its primary label, or of its first label
-/// in one of the root package's own modules. One with no label there goes
-/// to `entry`'s first line, naming the place it has: the spec §6.3
-/// fallback, for E0601 and for labels in std or a dependency. Its other
-/// labels in the own modules become related information, under the URIs
-/// `uri_of` gives their paths.
+/// Each diagnostic is shown in one place:
+/// - the file of its primary label, or of its first label, among the root
+///   package's own modules;
+/// - else, given the project's `manifest`, that `nova.toml` for a label in
+///   it;
+/// - else, for a label in a dependency's file or manifest, the root's
+///   manifest entry through which the dependency is reached, its message
+///   naming where it really is, such as "(in geom: ../geom/src/lib.nova:3:5)";
+/// - else `entry`'s first line, naming the place it has: the 3.2
+///   fallback, for E0601 and for labels in std.
+///
+/// Its other labels in the own modules become related information, under
+/// the URIs `uri_of` gives their paths.
 pub fn diagnostics_for(
     analysis: &Analysis,
     file: FileId,
     entry: FileId,
+    manifest: Option<FileId>,
     uri_of: &dyn Fn(&Path) -> String,
 ) -> Vec<lsp::Diagnostic> {
     // A dependency's modules are its own project's (spec 3.3a §6).
@@ -50,22 +58,16 @@ pub fn diagnostics_for(
     let mut indexes: HashMap<FileId, LineIndex> = HashMap::new();
     let mut out = Vec::new();
     for d in &analysis.diagnostics {
-        let label = d
-            .labels
-            .iter()
-            .find(|l| l.primary && own.contains(&l.span.file))
-            .or_else(|| d.labels.iter().find(|l| own.contains(&l.span.file)));
-        let place = label.map_or(entry, |l| l.span.file);
-        if place != file {
+        let shown = shown(analysis, d, entry, manifest, &own);
+        if shown.file != file {
             continue;
         }
-        let at = match label {
-            Some(l) => span_range(analysis, &mut indexes, l.span),
-            None => span_range(analysis, &mut indexes, Span::point(0, entry)),
-        };
+        let at = span_range(analysis, &mut indexes, shown.at);
         let mut related = Vec::new();
         for other in &d.labels {
-            if label.is_some_and(|l| std::ptr::eq(l, other)) || !own.contains(&other.span.file) {
+            if shown.label.is_some_and(|l| std::ptr::eq(l, other))
+                || !own.contains(&other.span.file)
+            {
                 continue;
             }
             let Some((_, path)) = analysis.modules.iter().find(|(f, _)| *f == other.span.file)
@@ -88,12 +90,99 @@ pub fn diagnostics_for(
             severity: Some(severity(d.severity)),
             code: Some(lsp::NumberOrString::String(d.code.clone())),
             source: Some("nova".to_string()),
-            message: message(analysis, d, label.is_none()),
+            message: message(d, shown.suffix.as_deref()),
             related_information: (!related.is_empty()).then_some(related),
             ..Default::default()
         });
     }
     out
+}
+
+/// Where one diagnostic is shown.
+struct Shown<'d> {
+    file: FileId,
+    at: Span,
+    /// The label it is shown at, when that is one of its own.
+    label: Option<&'d Label>,
+    /// Where it really is, when it is shown somewhere else.
+    suffix: Option<String>,
+}
+
+fn shown<'d>(
+    analysis: &Analysis,
+    d: &'d Diagnostic,
+    entry: FileId,
+    manifest: Option<FileId>,
+    own: &[FileId],
+) -> Shown<'d> {
+    let label = d
+        .labels
+        .iter()
+        .find(|l| l.primary && own.contains(&l.span.file))
+        .or_else(|| d.labels.iter().find(|l| own.contains(&l.span.file)));
+    if let Some(l) = label {
+        return Shown {
+            file: l.span.file,
+            at: l.span,
+            label: Some(l),
+            suffix: None,
+        };
+    }
+    let first = d.labels.iter().find(|l| l.primary).or(d.labels.first());
+    if let (Some(manifest), Some(l)) = (manifest, first) {
+        if l.span.file == manifest {
+            return Shown {
+                file: manifest,
+                at: l.span,
+                label: Some(l),
+                suffix: None,
+            };
+        }
+        let graph = analysis.graph.as_ref();
+        let reached = package_of_file(analysis, l.span.file)
+            .filter(|package| *package != PackageId(0))
+            .and_then(|package| Some((package, graph?.reached_through(package)?)));
+        if let (Some(graph), Some((package, at))) = (graph, reached) {
+            let name = &graph.package(package).name;
+            return Shown {
+                file: manifest,
+                at,
+                label: None,
+                suffix: Some(format!("(in {name}: {})", place(analysis, l.span))),
+            };
+        }
+    }
+    Shown {
+        file: entry,
+        at: Span::point(0, entry),
+        label: None,
+        suffix: d
+            .labels
+            .first()
+            .map(|l| format!("(at {})", place(analysis, l.span))),
+    }
+}
+
+/// The package `file` belongs to: a module's, or a manifest's.
+fn package_of_file(analysis: &Analysis, file: FileId) -> Option<PackageId> {
+    if let Some(i) = analysis.modules.iter().position(|(f, _)| *f == file) {
+        return analysis.module_packages[i];
+    }
+    let graph = analysis.graph.as_ref()?;
+    graph
+        .packages
+        .iter()
+        .position(|p| p.manifest_file == file)
+        .map(|i| PackageId(i as u32))
+}
+
+/// `name:line:column` of where `span` starts.
+fn place(analysis: &Analysis, span: Span) -> String {
+    let name = analysis.db.get_name(span.file).unwrap_or("?");
+    match analysis.db.location(span.file, span.start) {
+        Some((line, column)) => format!("{name}:{line}:{column}"),
+        None => name.to_string(),
+    }
 }
 
 /// The LSP range of `span`, indexing its file's text once.
@@ -117,22 +206,17 @@ fn severity(s: Severity) -> lsp::DiagnosticSeverity {
     }
 }
 
-/// The message, its notes one per line, and for a diagnostic placed by the
-/// fallback, where it really points, such as `<std/core>:12:5`.
-fn message(analysis: &Analysis, d: &Diagnostic, fallback: bool) -> String {
+/// The message, its notes one per line, and where it really is when it is
+/// shown somewhere else, such as `(at <std/core>:12:5)`.
+fn message(d: &Diagnostic, suffix: Option<&str>) -> String {
     let mut m = d.message.clone();
     for note in &d.notes {
         m.push('\n');
         m.push_str(note);
     }
-    if fallback {
-        if let Some(l) = d.labels.first() {
-            let name = analysis.db.get_name(l.span.file);
-            let at = analysis.db.location(l.span.file, l.span.start);
-            if let (Some(name), Some((line, column))) = (name, at) {
-                m.push_str(&format!("\n(at {name}:{line}:{column})"));
-            }
-        }
+    if let Some(suffix) = suffix {
+        m.push('\n');
+        m.push_str(suffix);
     }
     m
 }

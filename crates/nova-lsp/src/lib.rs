@@ -186,7 +186,9 @@ impl Server<'_> {
                         .workspace
                         .projects()
                         .into_iter()
-                        .filter(|project| manifest || paths.iter().any(|p| project.holds(p)))
+                        .filter(|project| {
+                            manifest || paths.iter().any(|p| self.checker.reaches(project, p))
+                        })
                         .collect();
                     self.refresh(touched);
                 }
@@ -255,13 +257,14 @@ impl Server<'_> {
     }
 
     /// The projects a change to `path` can affect: its own, and every open
-    /// project that holds it. A loose file's analysis reads the modules
+    /// project that reaches it (spec 3.3a §6). A project reaches its
+    /// packages' directories; a loose file's analysis reads the modules
     /// beside it, so editing one re-checks the loose files that may import
     /// it.
     fn affected(&self, path: &Path) -> Vec<ProjectKey> {
         let mut out = vec![ProjectKey::of(path)];
         for project in self.workspace.projects() {
-            if project.holds(path) && !out.contains(&project) {
+            if self.checker.reaches(&project, path) && !out.contains(&project) {
                 out.push(project);
             }
         }

@@ -42,6 +42,9 @@ pub struct Checker {
     jobs: mpsc::Sender<Job>,
     /// The newest generation submitted for each project.
     newest: Arc<Mutex<HashMap<ProjectKey, u64>>>,
+    /// Each project's package directories, from its last published check
+    /// (spec 3.3a §6, decision 10).
+    dirs: Arc<Mutex<HashMap<ProjectKey, Vec<PathKey>>>>,
 }
 
 impl Checker {
@@ -49,12 +52,14 @@ impl Checker {
     pub fn spawn(publish: impl Fn(Publish) + Send + 'static) -> Checker {
         let (jobs, queue) = mpsc::channel::<Job>();
         let newest: Arc<Mutex<HashMap<ProjectKey, u64>>> = Arc::default();
+        let dirs: Arc<Mutex<HashMap<ProjectKey, Vec<PathKey>>>> = Arc::default();
         let seen = Arc::clone(&newest);
+        let written = Arc::clone(&dirs);
         std::thread::Builder::new()
             .name("nova-lsp-checker".to_string())
-            .spawn(move || serve(&queue, &seen, &publish))
+            .spawn(move || serve(&queue, &seen, &written, &publish))
             .expect("start the checker thread");
-        Checker { jobs, newest }
+        Checker { jobs, newest, dirs }
     }
 
     pub fn submit(&self, job: Job) {
@@ -64,11 +69,27 @@ impl Checker {
             .insert(job.project.clone(), job.generation);
         let _ = self.jobs.send(job);
     }
+
+    /// Whether a change to `path` can change `project`'s diagnostics (spec
+    /// 3.3a §6): it is under one of the project's package directories.
+    /// Before a project's first check is published, and for a loose file,
+    /// that is [`ProjectKey::holds`].
+    pub fn reaches(&self, project: &ProjectKey, path: &Path) -> bool {
+        let dirs = self.dirs.lock().expect("the dirs map");
+        match dirs.get(project) {
+            Some(dirs) if !dirs.is_empty() => {
+                let key = PathKey::of(path);
+                dirs.iter().any(|dir| key.is_under(dir))
+            }
+            _ => project.holds(path),
+        }
+    }
 }
 
 fn serve(
     queue: &mpsc::Receiver<Job>,
     newest: &Mutex<HashMap<ProjectKey, u64>>,
+    dirs: &Mutex<HashMap<ProjectKey, Vec<PathKey>>>,
     publish: &dyn Fn(Publish),
 ) {
     // The URIs each project last published for, to clear the ones it no
@@ -84,12 +105,12 @@ fn serve(
         }
         for job in latest {
             let results = if job.clear {
-                Some(Vec::new())
+                Some((Vec::new(), Vec::new()))
             } else {
                 check(&job)
             };
             // A panic keeps the last good diagnostics (spec §6.7).
-            let Some(results) = results else {
+            let Some((results, reached)) = results else {
                 continue;
             };
             let current = newest
@@ -117,8 +138,12 @@ fn serve(
             for p in results {
                 publish(p);
             }
-            if !job.clear {
+            let mut known = dirs.lock().expect("the dirs map");
+            if job.clear {
+                known.remove(&job.project);
+            } else {
                 published.insert(job.project.clone(), now);
+                known.insert(job.project.clone(), reached);
             }
         }
     }
@@ -167,9 +192,11 @@ fn run(program: Program, overlay: &Overlay, module_only: bool) -> Result<Analysi
 /// - a loose file is its own entry, and a module unless it declares
 ///   `fn main`.
 ///
-/// `None` after a panic.
-fn check(job: &Job) -> Option<Vec<Publish>> {
+/// The publishes, and the project's package directories; `None` after a
+/// panic.
+fn check(job: &Job) -> Option<(Vec<Publish>, Vec<PathKey>)> {
     let mut out = Vec::new();
+    let mut dirs: Vec<PathKey> = Vec::new();
     match &job.project {
         ProjectKey::Loose(file) => {
             let module_only = !job
@@ -184,11 +211,15 @@ fn check(job: &Job) -> Option<Vec<Publish>> {
             }
         }
         ProjectKey::Root(dir) => {
+            dirs.push(PathKey::of(dir));
             let mut reached: Vec<PathKey> = Vec::new();
             // The program, the library and tests/, in test mode; a
             // library alone is checked as a module (spec 3.3a §6).
             match run(Program::for_package(dir, Roots::Test), &job.overlay, false) {
                 Ok(a) => {
+                    if let Some(graph) = &a.graph {
+                        dirs = graph.dirs().iter().map(|d| PathKey::of(d)).collect();
+                    }
                     reached = a.modules.iter().map(|(_, p)| PathKey::of(p)).collect();
                     publish_own(job, &a, true, &mut out);
                 }
@@ -208,45 +239,48 @@ fn check(job: &Job) -> Option<Vec<Publish>> {
             }
         }
     }
-    Some(out)
+    Some((out, dirs))
 }
 
 /// One publish per file `analysis` owns (spec 3.3a §6): with `all`, each
-/// module of the root package, else its entry alone. A dependency's files
-/// are its own project's to publish.
+/// module of the root package and the root's `nova.toml`, else its entry
+/// alone. A dependency's files are its own project's to publish.
 fn publish_own(job: &Job, analysis: &Analysis, all: bool, out: &mut Vec<Publish>) {
-    let Some(&(entry, _)) = analysis.modules.first() else {
+    let manifest = analysis.manifest.filter(|_| all);
+    // A package with no module to read has only its manifest.
+    let Some(entry) = analysis.modules.first().map(|(file, _)| *file).or(manifest) else {
         return;
     };
-    let uri_of = |path: &Path| match job
-        .open
-        .iter()
-        .find(|d| PathKey::of(&d.path) == PathKey::of(path))
-    {
+    let open = |path: &Path| {
+        job.open
+            .iter()
+            .find(|d| PathKey::of(&d.path) == PathKey::of(path))
+    };
+    let uri_of = |path: &Path| match open(path) {
         Some(doc) => doc.uri.clone(),
         None => uri::from_path(path),
     };
-    let owned: Vec<&(FileId, PathBuf)> = if all {
+    let mut owned: Vec<(FileId, PathBuf)> = if all {
         analysis
             .modules
             .iter()
             .zip(&analysis.module_packages)
             .filter(|(_, package)| matches!(package, None | Some(PackageId(0))))
-            .map(|(module, _)| module)
+            .map(|(module, _)| module.clone())
             .collect()
     } else {
-        analysis.modules.iter().take(1).collect()
+        analysis.modules.iter().take(1).cloned().collect()
     };
-    for (file, path) in owned {
-        let version = job
-            .open
-            .iter()
-            .find(|d| PathKey::of(&d.path) == PathKey::of(path))
-            .map(|d| d.version);
+    if let Some(file) = manifest {
+        if let Some(name) = analysis.db.get_name(file) {
+            owned.push((file, PathBuf::from(name)));
+        }
+    }
+    for (file, path) in &owned {
         out.push(Publish {
             uri: uri_of(path),
-            version,
-            diagnostics: convert::diagnostics_for(analysis, *file, entry, &uri_of),
+            version: open(path).map(|d| d.version),
+            diagnostics: convert::diagnostics_for(analysis, *file, entry, manifest, &uri_of),
         });
     }
 }
