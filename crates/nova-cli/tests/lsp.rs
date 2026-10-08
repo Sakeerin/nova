@@ -431,3 +431,50 @@ fn completion_in_a_file_main_does_not_import_yet() {
     let names = labels(&complete(&mut client, &uri, after(extra, "    s.")));
     assert!(names.contains(&"len".to_string()), "{names:?}");
 }
+
+// === Task 13: formatting ===
+
+/// Format the open document `uri`, and return the response.
+fn format(client: &mut Client, uri: &str) -> Value {
+    client.request(
+        "textDocument/formatting",
+        json!({ "textDocument": { "uri": uri }, "options": { "tabSize": 4, "insertSpaces": true } }),
+    )
+}
+
+/// A loose file holding `text`, opened, in a directory whose `.editorconfig`
+/// says `root = true`, so none above it can change line endings.
+fn formattable(name: &str, text: &str) -> (Client, String) {
+    let dir = fresh_dir(name);
+    std::fs::write(dir.join(".editorconfig"), "root = true\n").unwrap();
+    let file = dir.join("main.nova");
+    std::fs::write(&file, text).unwrap();
+    let uri = file_uri(&file);
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    (client, uri)
+}
+
+#[test]
+fn the_document_is_formatted() {
+    let text = "fn main() {\nprintln(\"hi\")\n}\n";
+    let (mut client, uri) = formattable("format", text);
+    let response = format(&mut client, &uri);
+    let edits = response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{response}"));
+    assert_eq!(edits.len(), 1, "{response}");
+    assert_eq!(edits[0]["newText"], "fn main() { println(\"hi\") }\n");
+    assert_eq!(
+        edits[0]["range"],
+        json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 3, "character": 0 } })
+    );
+}
+
+#[test]
+fn a_formatted_or_broken_buffer_gets_no_edit() {
+    let (mut client, uri) = formattable("format-none", "fn main() { println(\"hi\") }\n");
+    assert_eq!(format(&mut client, &uri)["result"], json!([]));
+    let (mut client, uri) = formattable("format-broken", "fn main( {\n");
+    assert_eq!(format(&mut client, &uri)["result"], json!([]));
+}
