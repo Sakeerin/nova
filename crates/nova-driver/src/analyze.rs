@@ -75,6 +75,9 @@ pub struct Analysis {
     pub module_packages: Vec<Option<PackageId>>,
     /// The package graph, as far as it resolved.
     pub graph: Option<Graph>,
+    /// The root package's `nova.toml`, when the program has one
+    /// ([`Program::manifest`]).
+    pub manifest: Option<FileId>,
     pub definitions: Option<Definitions>,
     /// The typed module, partial when errors were found.
     pub module: Option<nova_hir::Module>,
@@ -98,6 +101,7 @@ pub fn analyze_program(
     sources: &dyn Sources,
     options: &Options,
 ) -> std::io::Result<Analysis> {
+    let manifest = program.manifest();
     let Program {
         mut db,
         graph,
@@ -120,6 +124,7 @@ pub fn analyze_program(
         modules: modules.iter().map(|m| (m.file, m.path.clone())).collect(),
         module_packages: modules.iter().map(|m| m.package).collect(),
         graph,
+        manifest,
         definitions: None,
         module: None,
         probe: ProbeResult::default(),

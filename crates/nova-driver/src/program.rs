@@ -140,6 +140,22 @@ impl Program {
             .iter()
             .any(|d| d.severity == Severity::Error)
     }
+
+    /// The root package's `nova.toml` in `db`, once read. The language
+    /// server publishes the graph's problems under it (spec §6).
+    pub fn manifest(&self) -> Option<FileId> {
+        match &self.graph {
+            Some(graph) => Some(graph.root().manifest_file),
+            // Without a graph only the root's manifest was read, and each of
+            // its diagnostics is labelled in it.
+            None => self
+                .diagnostics
+                .iter()
+                .flat_map(|d| &d.labels)
+                .map(|label| label.span.file)
+                .next(),
+        }
+    }
 }
 
 /// `relative`, a `/`-separated path, under `root`. Under an empty root it

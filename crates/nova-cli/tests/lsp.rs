@@ -753,3 +753,100 @@ fn a_library_without_a_program_is_checked_as_a_module() {
     let params = client.diagnostics(&uri, nonempty);
     assert_eq!(codes(&params), ["E0010"], "{params}");
 }
+
+#[test]
+fn a_dependency_error_shows_on_the_apps_manifest_entry() {
+    let (app, _geom) = app_and_library("dependency-error", GEOMETRY_BROKEN);
+    let mut client = Client::start(&app, false);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    let params = client.diagnostics(&file_uri(&app.join("nova.toml")), nonempty);
+    assert_eq!(codes(&params), ["E0010"], "{params}");
+    let d = &params["diagnostics"][0];
+    assert_eq!(d["range"]["start"]["line"], 6, "the `geom` entry: {params}");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.contains("(in geom: ") && message.contains("lib.nova:1:"),
+        "{message}"
+    );
+}
+
+#[test]
+fn editing_a_dependency_rechecks_its_dependent() {
+    let (app, geom) = app_and_library("dependency-edit", GEOMETRY_FIXED);
+    let toml = file_uri(&app.join("nova.toml"));
+    let lib = file_uri(&geom.join("src").join("lib.nova"));
+    let mut client = Client::start(&app, false);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    client.diagnostics(&toml, |p| !nonempty(p));
+    open(&mut client, &lib, GEOMETRY_FIXED);
+    client.diagnostics(&lib, |p| !nonempty(p));
+    // geom's buffer, never saved: the app reads it through the overlay.
+    change(&mut client, &lib, 2, GEOMETRY_BROKEN);
+    let params = client.diagnostics(&toml, nonempty);
+    assert_eq!(codes(&params), ["E0010"], "{params}");
+}
+
+#[test]
+fn a_manifest_error_is_published_under_its_nova_toml() {
+    let dir = project("manifest-error", &[("main.nova", "fn main() {}\n")]);
+    std::fs::write(dir.join("nova.toml"), MANIFEST.replace("2026", "2021")).unwrap();
+    let mut client = Client::start(&dir, false);
+    open(
+        &mut client,
+        &file_uri(&dir.join("src").join("main.nova")),
+        "fn main() {}\n",
+    );
+    let params = client.diagnostics(&file_uri(&dir.join("nova.toml")), nonempty);
+    assert_eq!(codes(&params), ["M0003"], "{params}");
+    assert_eq!(
+        params["diagnostics"][0]["range"]["start"]["line"], 3,
+        "{params}"
+    );
+}
+
+#[test]
+fn a_dependencys_manifest_is_published_by_its_own_project_only() {
+    let (app, geom) = app_and_library("dependency-manifest", GEOMETRY_FIXED);
+    let warned = format!(
+        "{}\n[features]\ndefault = []\n",
+        MANIFEST.replace("demo", "geom")
+    );
+    std::fs::write(geom.join("nova.toml"), warned).unwrap();
+    let geom_toml = file_uri(&geom.join("nova.toml"));
+    let mut client = Client::start(&app, false);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    // geom's manifest under any spelling (Task 10's ruling), or the
+    // sentinel's publish, which comes after everything the app's check sent.
+    let sentinel = sentinel(&mut client, "dependency-manifest");
+    let first = client.wait_for(|m| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"]
+                .as_str()
+                .is_some_and(|u| same_uri(u, &sentinel) || u.ends_with("/geom/nova.toml"))
+    });
+    let uri = first["params"]["uri"].as_str().unwrap();
+    assert!(
+        same_uri(uri, &sentinel),
+        "the app published geom's nova.toml: {first}"
+    );
+    client.clear_unread();
+    open(
+        &mut client,
+        &file_uri(&geom.join("src").join("lib.nova")),
+        GEOMETRY_FIXED,
+    );
+    let params = client.diagnostics(&geom_toml, nonempty);
+    assert_eq!(codes(&params), ["M0006"], "{params}");
+}
