@@ -7,6 +7,7 @@ use std::path::Path;
 use lsp_types as lsp;
 use nova_diagnostics::{Diagnostic, FileId, LineIndex, Severity, Span};
 use nova_driver::Analysis;
+use nova_pm::PackageId;
 
 /// LSP's range for bytes `start..end` of the indexed text.
 pub fn range(index: &LineIndex, start: u32, end: u32) -> lsp::Range {
@@ -27,18 +28,25 @@ pub fn range(index: &LineIndex, start: u32, end: u32) -> lsp::Range {
 /// The LSP diagnostics `analysis` has for `file`.
 ///
 /// A diagnostic goes to the file of its primary label, or of its first label
-/// in one of the program's own files. One with no label in the program's
-/// files goes to `entry`'s first line, naming the place it has: the spec
-/// §6.3 fallback, for E0601 and for labels in std. Its other labels in the
-/// program's files become related information, under the URIs `uri_of`
-/// gives their paths.
+/// in one of the root package's own modules. One with no label there goes
+/// to `entry`'s first line, naming the place it has: the spec §6.3
+/// fallback, for E0601 and for labels in std or a dependency. Its other
+/// labels in the own modules become related information, under the URIs
+/// `uri_of` gives their paths.
 pub fn diagnostics_for(
     analysis: &Analysis,
     file: FileId,
     entry: FileId,
     uri_of: &dyn Fn(&Path) -> String,
 ) -> Vec<lsp::Diagnostic> {
-    let own: Vec<FileId> = analysis.modules.iter().map(|(f, _)| *f).collect();
+    // A dependency's modules are its own project's (spec 3.3a §6).
+    let own: Vec<FileId> = analysis
+        .modules
+        .iter()
+        .zip(&analysis.module_packages)
+        .filter(|(_, package)| matches!(package, None | Some(PackageId(0))))
+        .map(|((file, _), _)| *file)
+        .collect();
     let mut indexes: HashMap<FileId, LineIndex> = HashMap::new();
     let mut out = Vec::new();
     for d in &analysis.diagnostics {
