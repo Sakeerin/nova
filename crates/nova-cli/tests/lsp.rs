@@ -850,3 +850,37 @@ fn a_dependencys_manifest_is_published_by_its_own_project_only() {
     let params = client.diagnostics(&geom_toml, nonempty);
     assert_eq!(codes(&params), ["M0006"], "{params}");
 }
+
+#[test]
+fn an_unreached_file_does_not_repeat_the_manifests_diagnostics() {
+    // Final review, Important 2: the project's own analysis publishes the
+    // graph's problems under nova.toml; a file nothing imports yet must not
+    // get them again on its first line.
+    let dir = project(
+        "unreached-manifest",
+        &[
+            ("main.nova", "fn main() {}\n"),
+            ("shapes.nova", "pub fn area() -> Int { 1 }\n"),
+        ],
+    );
+    std::fs::write(
+        dir.join("nova.toml"),
+        format!("{MANIFEST}\n[features]\ndefault = []\n"),
+    )
+    .unwrap();
+    let mut client = Client::start(&dir, false);
+    open(
+        &mut client,
+        &file_uri(&dir.join("src").join("main.nova")),
+        "fn main() {}\n",
+    );
+    let toml = client.diagnostics(&file_uri(&dir.join("nova.toml")), nonempty);
+    assert_eq!(codes(&toml), ["M0006"], "{toml}");
+    let shapes = file_uri(&dir.join("src").join("shapes.nova"));
+    open(&mut client, &shapes, "pub fn area() -> Int { 1 }\n");
+    let params = client.diagnostics(&shapes, |p| p["version"] == 1);
+    assert!(
+        !nonempty(&params),
+        "the manifest's warning repeated on an unreached file: {params}"
+    );
+}

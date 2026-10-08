@@ -231,7 +231,12 @@ fn check(job: &Job) -> Option<(Vec<Publish>, Vec<PathKey>)> {
                 if reached.contains(&PathKey::of(&doc.path)) {
                     continue;
                 }
-                match run(Program::for_file(&doc.path), &job.overlay, true) {
+                // The project's own analysis publishes the graph's problems
+                // under its nova.toml; this file need not repeat them on its
+                // first line.
+                let mut program = Program::for_file(&doc.path);
+                program.diagnostics.clear();
+                match run(program, &job.overlay, true) {
                     Ok(a) => publish_own(job, &a, false, &mut out),
                     Err(Failed::Panicked) => return None,
                     Err(Failed::Unreadable) => {}
