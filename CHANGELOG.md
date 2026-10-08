@@ -57,6 +57,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field, a variant or an extern function documents it. Anywhere else it is
   an error.
 - `nova_lexer::lex_with_comments` returns the tokens and every comment.
+- **`nova lsp`**, a language server over stdio.
+  - **Diagnostics.** Whole projects are re-checked on every edit and on
+    every watched change on disk, including unsaved buffers.
+  - **Completion.** After `.`, fields and methods (std's included).
+    Elsewhere, the locals, the names in scope, the primitive types and the
+    keywords. It works in a file that has syntax errors.
+  - **Formatting.** It formats through `nova-fmt`, with `.editorconfig`.
+
+  Edits and completions take at most 200 ms on `examples/05-json-api`
+  (ADR 0029).
+- **`tools/vscode-nova/`**, the VS Code extension: the language, a
+  grammar, and a client for the installed `nova lsp`. Each release attaches
+  its `.vsix`.
+- **`nova_driver::analyze`** runs the front end over editor buffers and
+  past errors, for the language server.
+- **`nova-fmt`'s `format_buffer`** formats an editor's text as
+  `format_file` would format the file.
 
 ### Changed
 
@@ -72,6 +89,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `where` clause takes a trailing comma.
 - `std/` and `examples/` are formatted with `nova fmt`, and CI checks that
   they stay so.
+- The parser keeps an unfinished `foo.` as a field access with an empty
+  name, after the same P0001. Parsing continues past it, so a few broken
+  programs report fewer follow-on errors.
 
 ## [0.2.0] - 2026-10-06
 

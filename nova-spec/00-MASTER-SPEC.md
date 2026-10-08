@@ -630,6 +630,8 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
 2. `crates/nova-pm` — package manager + `nova.toml` parsing + lock file
 3. Registry server (separate repo `novalang/registry`) — Rust + Postgres + S3
 4. `crates/nova-lsp` — LSP server (use `tower-lsp`)
+   **Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** built with
+   `lsp-server` 0.7.8 and `lsp-types` 0.97 instead (ADR 0029).
 5. `tools/vscode-nova` — VSCode extension (TypeScript)
 6. `crates/nova-doc` — doc gen (output static HTML)
 7. REPL: `nova repl` (use `rustyline`, evaluate via JIT… actually skip, use AOT-then-load via `dlopen`)
@@ -831,6 +833,11 @@ are not in `Cargo.lock`, and no crate depends on them.**
 - `wasm-encoder` and `walrus`: for Phase 4's WASM backend, position 1.
 - `tower-lsp` and `rustyline`: for Phase 3's language server and REPL,
   positions 4 and 7.
+
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** the language server
+uses `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`
+0.20, whose last release was 2023's (ADR 0029). The dependency list's
+`tower-lsp` line above is that plan.
 
 The workspace `Cargo.toml` also declares three dependencies no crate uses:
 `chumsky = "0.9"`, `rustyline = "14"` and `serde_json = "1"`.

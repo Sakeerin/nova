@@ -205,6 +205,17 @@ grammar above (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`
   spanned over their parentheses, as parenthesised expressions and types
   already were.
 
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** two recoveries for
+the language server (`docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`
+§3.2, §3.4):
+- A `.` followed by something other than a name still reports P0001, and
+  now keeps its receiver as a field access with an empty name.
+- `parse_recovering` also names the top-level items dropped after their
+  names were read.
+
+`parse` is unchanged, and only the server's analysis type-checks the empty
+name.
+
 ---
 
 ## 3. AST Node Definitions (Rust)

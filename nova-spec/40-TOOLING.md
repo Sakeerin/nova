@@ -171,17 +171,38 @@ ADR 0028):
 | Code Lens | 4 | Run/debug test buttons |
 | Call Hierarchy | 4 | |
 
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** 3.2 delivers
+diagnostics, completion and format on save
+(`docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`).
+Diagnostics come from re-checking the whole program, not from `salsa`
+(ADR 0029). Completion offers members after `.`; elsewhere the locals,
+the module's names, the primitive types and the keywords. The other Phase
+3 rows are 3.4's.
+
 ### 3.2 Architecture
 - `tower-lsp` for protocol
 - `salsa` for incremental query system (parse → resolve → typecheck queries cached per file)
 - File watcher to invalidate cache on disk changes
 - Workspace-aware: scans `nova.toml` to find roots
 
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** as built, the stack
+is `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`.
+Analyses run on one checker thread, re-checking the whole program, not
+through `salsa`. The file watcher is the client's, registered
+dynamically. A file's project is the nearest directory holding
+`nova.toml`, found on demand rather than by a scan. ADR 0029 has the
+reasons and the measured budget.
+
 ### 3.3 Editor Extensions
 - `tools/vscode-nova/` — TypeScript-based, registers language + connects to `nova lsp`
 - `tools/zed-nova/` — Zed extension config (TOML)
 - `tools/nvim-nova/` — Neovim Lua config + tree-sitter grammar
 - All use the same `nova lsp` backend
+
+**Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** `tools/vscode-nova/`
+exists. It is TypeScript with `vscode-languageclient` 10, a TextMate
+grammar, and a smoke test in CI, and it runs the installed `nova`. The
+Zed and Neovim extensions are outside Phase 3 (ADR 0026).
 
 ---
 

@@ -1028,3 +1028,20 @@ is priced here only as the `offsets_ns` baseline the subtraction removes.
 **Nothing here totals the measured mechanisms against the 100-microsecond
 budget or pronounces on the gate.** Two mechanisms of an undecomposed
 remainder do not make a decomposition.
+
+## The language server's latency (Phase 3.2)
+
+The budget is 200 ms for the median and the maximum of 20 edits, each sent
+while no check runs, to their diagnostics, and of 20 completions after
+`self.users.` (ADR 0029). It is measured on
+`examples/05-json-api/src/main.nova` with
+`cargo test --release -p nova-cli --test lsp -- --ignored --nocapture latency`.
+
+| Date | Run | Edit to diagnostics, median / max | Completion, median / max | Binary |
+|---|---|---|---|---|
+| 2026-10-08 | 1 | 17 / 18 ms | 13 / 14 ms | `target/release/nova.exe` on Windows 11, 14,534,144 bytes, built 2026-10-08 05:28 UTC |
+| 2026-10-08 | 2 | 17 / 18 ms | 13 / 21 ms | the same binary |
+| 2026-10-08 | 3 | 18 / 24 ms | 13 / 15 ms | the same binary |
+
+Each figure includes the round trip through the protocol on one machine.
+CI asserts 2 s for each, with the debug binary, on all three systems.
