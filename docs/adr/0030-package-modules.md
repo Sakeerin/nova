@@ -74,8 +74,10 @@ cannot hold them.
 
 - Every compile goes through the loader. A loose program resolves exactly
   as before, except that imports match case on Windows and macOS too.
-- `nova run src/main.nova` inside a project reads its manifest; any other
-  file argument is still loose (the 3.0 spec's §6.1, amended).
+- A file argument directly in a package's `src/` or `tests/`, such as
+  `nova run src/main.nova`, is a module of that package: it reads the
+  manifest, sees the dependencies, and stops on a broken manifest. Any
+  other file argument is still loose (the 3.0 spec's §6.1, amended).
 - `nova test` runs the root's `src/` tests that the roots reach, and every
   top-level `tests/*.nova`. A dependency's tests never run in its
   dependent's binary.
