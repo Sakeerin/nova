@@ -1,9 +1,10 @@
 name: Release
 
 # On a `v*` tag: build the four targets, pack and smoke-test each archive,
-# and publish a GitHub release with the archives and SHA256SUMS. On a pull
-# request that changes how `nova` is built or released, run every job but
-# the publish, so a broken release shows before any tag exists (spec
+# package the VS Code extension, and publish a GitHub release with the
+# archives, the `.vsix` and SHA256SUMS. On a pull request that changes how
+# `nova` is built or released, run every job but the publish, so a broken
+# release shows before any tag exists (spec
 # docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §7).
 on:
   push:
@@ -18,6 +19,7 @@ on:
       - crates/nova-cli/Cargo.toml
       - crates/nova-runtime/Cargo.toml
       - Cargo.lock
+      - tools/vscode-nova/**
 
 # Only `publish` may write to the repository.
 permissions:
@@ -88,9 +90,36 @@ jobs:
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
 
+  # The VS Code extension, packaged for the release (spec
+  # docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §8). Its
+  # artifact is named `archive-vsix` so that `prepare`'s `archive-*`
+  # download takes it. CI's `VS Code extension` job smoke-tests it.
+  vsix:
+    name: Package the VS Code extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Package
+        working-directory: tools/vscode-nova
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run compile
+          version=$(node -p "require('./package.json').version")
+          npx vsce package --out "nova-vscode-$version.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-vsix
+          path: tools/vscode-nova/*.vsix
+          if-no-files-found: error
+
   prepare:
     name: Prepare the release
-    needs: build
+    needs: [build, vsix]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,9 +133,12 @@ jobs:
         run: |
           set -euo pipefail
           version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
-          count=$(ls release/dist | wc -l)
-          if [ "$count" -ne 4 ]; then
-            echo "::error::expected 4 archives, found $count"
+          # An archive is nova-<version>-<target>; the extension is
+          # nova-vscode-<version>.vsix.
+          archives=$(ls release/dist | grep -c -E '^nova-[0-9]' || true)
+          vsix=$(ls release/dist | grep -c -E '^nova-vscode-.+\.vsix$' || true)
+          if [ "$archives" -ne 4 ] || [ "$vsix" -ne 1 ]; then
+            echo "::error::expected 4 archives and 1 .vsix, found $archives and $vsix"
             ls release/dist
             exit 1
           fi
