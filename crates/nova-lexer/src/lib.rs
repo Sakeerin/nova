@@ -28,6 +28,17 @@ mod token;
 pub use error::LexError;
 pub use token::Token;
 
+/// Every keyword, in the order the lexer declares its tokens: the words
+/// completion offers, and the extension's grammar colours (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §4.3,
+/// §7.4). `tests/keywords.rs` keeps it equal to the lexer's alphabetic
+/// tokens.
+pub const KEYWORDS: [&str; 32] = [
+    "let", "mut", "const", "fn", "return", "if", "else", "while", "for", "in", "break", "continue",
+    "match", "type", "record", "trait", "impl", "import", "module", "pub", "async", "await",
+    "extern", "unsafe", "true", "false", "as", "is", "where", "with", "self", "Self",
+];
+
 use nova_diagnostics::{FileId, Span, Spanned};
 
 /// Lex `source` and return all tokens and any errors encountered.
