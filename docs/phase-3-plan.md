@@ -334,6 +334,13 @@ a PR, and a merge on the user's word.
   With this sub-phase, every step of the Phase 3 gate can be run, installing
   from git rather than crates.io.
 
+  **Amended 2026-10-08:** 3.3 is two sub-phases, each with its own spec.
+  3.3a, "Local packages", has package modules, path dependencies,
+  `tests/`, `nova add --path`, `nova remove` and `nova new --lib`
+  (`docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`,
+  branch `phase-3-3a-local-packages`). 3.3b, "The index and publishing",
+  has the rest of this entry, and its two-part gate.
+
 ### 3.4 — LSP completeness
 - Hover, with types and `///` docs.
 - Go to definition, across files and into dependencies, and into std

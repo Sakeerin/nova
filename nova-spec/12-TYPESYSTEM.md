@@ -207,6 +207,7 @@ Future      — async result
 | E0001 | Cannot find name in scope |
 | E0002 | Duplicate definition |
 | E0003 | Private item access |
+| E0004 | An import names both a module of the package and a dependency (added 2026-10-08, Phase 3.3a, ADR 0030) |
 | E0010 | Type mismatch |
 | E0011 | Cannot infer type |
 | E0012 | Generic argument count mismatch |

@@ -348,6 +348,14 @@ M0005 in one place, and `nova-pm`'s parser stays the lasting API.
   read, even inside a project, and `build` writes `<file stem>` in the
   current directory.
 
+**Amended 2026-10-08 (branch `phase-3-3a-local-packages`):** a file
+argument directly in a package's `src/` or `tests/` is a module of that
+package, so `nova run src/main.nova` reads the manifest and sees the
+dependencies, and a broken manifest stops it
+(`docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+§4.1). Any other file argument reads no manifest, and where `nova build`
+writes is unchanged.
+
 ### 6.2 Outputs and paths
 
 - In project mode:
