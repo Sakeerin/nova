@@ -1,0 +1,6 @@
+record P { x: Int }
+
+fn f() {
+    let p = P { x: 1 }
+    p.
+}

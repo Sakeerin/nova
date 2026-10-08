@@ -5,3 +5,8 @@
 .env
 .env.local
 /examples/04-todo-cli/todos.json
+/tools/vscode-nova/node_modules
+/tools/vscode-nova/out
+/tools/vscode-nova/.vscode-test
+/tools/vscode-nova/*.vsix
+/tools/vscode-nova/test/fixture/.vscode

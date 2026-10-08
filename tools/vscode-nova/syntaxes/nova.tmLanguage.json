@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Nova",
+  "scopeName": "source.nova",
+  "fileTypes": ["nova"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#attributes" },
+    { "include": "#function-names" },
+    { "include": "#keywords" },
+    { "include": "#types" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.documentation.nova", "match": "///(?!/).*$" },
+        { "name": "comment.line.double-slash.nova", "match": "//.*$" },
+        { "name": "comment.block.nova", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        { "name": "string.quoted.raw.nova", "begin": "r(#*)\"", "end": "\"\\1" },
+        {
+          "name": "string.quoted.double.nova",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.nova", "match": "\\\\." },
+            {
+              "name": "meta.interpolation.nova",
+              "begin": "\\$\\{",
+              "end": "\\}",
+              "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.nova" } },
+              "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.nova" } },
+              "patterns": [{ "include": "$self" }]
+            }
+          ]
+        }
+      ]
+    },
+    "chars": { "name": "string.quoted.single.nova", "match": "'(\\\\.|[^'\\\\])'" },
+    "numbers": { "name": "constant.numeric.nova", "match": "\\b\\d[\\d_]*(\\.\\d[\\d_]*)?\\b" },
+    "attributes": { "name": "entity.name.function.decorator.nova", "match": "@[A-Za-z_][A-Za-z0-9_]*" },
+    "function-names": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.other.fn.nova" },
+        "2": { "name": "entity.name.function.nova" }
+      }
+    },
+    "keywords": {
+      "name": "keyword.other.nova",
+      "match": "\\b(let|mut|const|fn|return|if|else|while|for|in|break|continue|match|type|record|trait|impl|import|module|pub|async|await|extern|unsafe|true|false|as|is|where|with|self|Self)\\b"
+    },
+    "types": { "name": "entity.name.type.nova", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
+  }
+}
