@@ -21,6 +21,14 @@ the installed `nova` needs nothing beside it. It unpacks the library into
 that directory. From the next release on, each GitHub release also carries
 ready-built archives for Linux, macOS and Windows.
 
+### Editor support
+
+`nova lsp` is a language server: it gives an editor diagnostics,
+completion and formatting. For VS Code, `tools/vscode-nova/` is the
+extension. Each GitHub release attaches it as `nova-vscode-<version>.vsix`,
+which installs with **Extensions: Install from VSIX…**. It runs the `nova`
+on your PATH, or the one the `nova.server.path` setting names.
+
 ---
 
 ## How to use this bundle

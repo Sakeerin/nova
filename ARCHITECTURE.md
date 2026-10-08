@@ -49,7 +49,7 @@ nova-mir            → Mid-level IR
 | `nova-runtime` | GC, async runtime, panic handling |
 | `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler |
 | `nova-fmt` | The formatter: prints the AST in one fixed layout, keeps every comment, and refuses output that would change the program (ADR 0028) |
-| `nova-lsp` | Language Server Protocol implementation |
+| `nova-lsp` | The language server, `nova lsp`: diagnostics, completion and formatting over `nova_driver::analyze` (ADR 0029) |
 | `nova-test` | Test runner |
 | `nova-pm` | Package manager: `nova.toml` parsing and project discovery so far |
 | `nova-bundler` | Frontend bundler |

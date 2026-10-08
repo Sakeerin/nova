@@ -222,6 +222,11 @@ departs from the master spec or from `40-TOOLING.md`.
    `40-TOOLING.md` §3.1 and §3.2 specify, and that ADR 0025 mapped to
    Phase 3. 3.2's spec sets the latency budget, for example 200 ms from an
    edit to its diagnostics on the largest example.
+
+   **Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** `lsp-server`
+   0.10.0 declares no minimum Rust, but it is edition 2024, which needs
+   Rust 1.85, and so is every release from 0.7.9 on. 3.2 pins 0.7.8 to
+   keep the 1.78 minimum (ADR 0029). The budget is 200 ms.
 8. **The VSCode extension (3.2).** TypeScript with `vscode-languageclient`,
    and a TextMate grammar for colouring until 3.4's semantic tokens.
 9. **`nova doc` (3.5).** `///` comments as Markdown, rendered with
@@ -307,6 +312,8 @@ a PR, and a merge on the user's word.
   met on the development host and recorded; CI asserts a looser bound to
   catch regressions. If 3.2 or 3.4 misses the budget, adopting `salsa`
   becomes its own step, decided with the user.
+- **Spec:** `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`,
+  built on the branch `phase-3-2-lsp-core`.
 
 ### 3.3 — Packages and publishing
 - Package modules (decision 3), with path dependencies first.
