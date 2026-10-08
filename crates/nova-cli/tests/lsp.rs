@@ -300,3 +300,134 @@ fn a_diagnostic_with_no_place_goes_on_the_entrys_first_line() {
         json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } })
     );
 }
+
+// === Task 12: completion ===
+
+/// The labels of a completion response.
+fn labels(response: &Value) -> Vec<String> {
+    response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items: {response}"))
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The LSP position just after the first `marker` in `text`.
+fn after(text: &str, marker: &str) -> Value {
+    let at = text.find(marker).unwrap() + marker.len();
+    let line = text[..at].matches('\n').count();
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    json!({ "line": line, "character": text[line_start..at].encode_utf16().count() })
+}
+
+fn complete(client: &mut Client, uri: &str, position: Value) -> Value {
+    client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": uri }, "position": position }),
+    )
+}
+
+/// Start a server on a loose file holding `text`, opened.
+fn loose(name: &str, text: &str) -> (Client, String) {
+    let dir = fresh_dir(name);
+    let file = dir.join("main.nova");
+    std::fs::write(&file, text).unwrap();
+    let uri = file_uri(&file);
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    (client, uri)
+}
+
+const BROKEN_WITH_DOTS: &str = "record Point { x: Int, y: Int }\n\
+fn broken( {\n}\n\
+fn main() {\n    let p = Point { x: 1, y: 2 }\n    let v: Vec<Int> = Vec::new()\n    p.\n    let n = 1\n    v.\n}\n";
+
+#[test]
+fn completion_works_in_a_file_with_a_syntax_error() {
+    let (mut client, uri) = loose("complete", BROKEN_WITH_DOTS);
+    let diagnostics = client.diagnostics(&uri, nonempty);
+    assert!(
+        codes(&diagnostics).contains(&"P0001".to_string()),
+        "{diagnostics}"
+    );
+    // A record field, after `p.` (gate item 3)...
+    let fields = complete(&mut client, &uri, after(BROKEN_WITH_DOTS, "    p."));
+    let names = labels(&fields);
+    assert!(
+        names.contains(&"x".to_string()) && names.contains(&"y".to_string()),
+        "{names:?}"
+    );
+    let x = fields["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "x")
+        .unwrap();
+    assert_eq!(x["detail"], "Int");
+    // ...and a std method, after `v.`, with its declaration as its detail.
+    let methods = complete(&mut client, &uri, after(BROKEN_WITH_DOTS, "    v."));
+    let names = labels(&methods);
+    assert!(names.contains(&"push".to_string()), "{names:?}");
+    assert!(
+        !names.contains(&"data".to_string()),
+        "std's private field: {names:?}"
+    );
+    let push = methods["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["label"] == "push")
+        .unwrap();
+    assert_eq!(push["detail"], "fn push(mut self, x: T)");
+}
+
+#[test]
+fn completion_after_a_dot_followed_by_a_name_on_the_next_line() {
+    let text = "fn main() {\n    let s = \"a\"\n    s.\n    println(\"x\")\n}\n";
+    let (mut client, uri) = loose("next-line", text);
+    let names = labels(&complete(&mut client, &uri, after(text, "    s.")));
+    assert!(names.contains(&"len".to_string()), "{names:?}");
+}
+
+#[test]
+fn completion_offers_locals_names_types_and_keywords() {
+    let text = "fn helper() {}\nfn main() {\n    let count = 1\n    \n}\n";
+    let (mut client, uri) = loose("names", text);
+    let names = labels(&complete(
+        &mut client,
+        &uri,
+        after(text, "let count = 1\n    "),
+    ));
+    for want in [
+        "count", "helper", "main", "println", "Vec", "Int", "let", "match",
+    ] {
+        assert!(
+            names.contains(&want.to_string()),
+            "{want} missing from {names:?}"
+        );
+    }
+}
+
+#[test]
+fn no_completion_inside_a_string_or_a_comment() {
+    let text = "fn main() {\n    let s = \"in a string\" // in a comment\n}\n";
+    let (mut client, uri) = loose("literal", text);
+    assert!(labels(&complete(&mut client, &uri, after(text, "in a"))).is_empty());
+    assert!(labels(&complete(&mut client, &uri, after(text, "// in"))).is_empty());
+}
+
+#[test]
+fn completion_in_a_file_main_does_not_import_yet() {
+    // Review Focus 3: a new module, before `main.nova` imports it.
+    let extra = "fn helper() {\n    let s = \"a\"\n    s.\n}\n";
+    let dir = project(
+        "not-yet",
+        &[("main.nova", "fn main() {}\n"), ("extra.nova", extra)],
+    );
+    let uri = file_uri(&dir.join("src").join("extra.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, extra);
+    let names = labels(&complete(&mut client, &uri, after(extra, "    s.")));
+    assert!(names.contains(&"len".to_string()), "{names:?}");
+}

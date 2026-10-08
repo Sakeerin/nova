@@ -7,6 +7,7 @@
 //! messages; logs go through `tracing`, which `nova lsp` sends to stderr.
 
 mod checker;
+mod completion;
 mod convert;
 mod uri;
 mod workspace;
@@ -21,7 +22,8 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{RegisterCapability, Request as _};
+use lsp_types::request::{Completion, RegisterCapability, Request as _};
+use nova_diagnostics::LineIndex;
 
 use checker::{Checker, Job, Publish};
 use workspace::{ProjectKey, Workspace};
@@ -106,6 +108,10 @@ fn capabilities() -> lsp::ServerCapabilities {
                 ..Default::default()
             },
         )),
+        completion_provider: Some(lsp::CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
@@ -188,11 +194,40 @@ impl Server<'_> {
     }
 
     fn request(&mut self, request: Request) {
-        let response = Response::new_err(
-            request.id,
-            ErrorCode::MethodNotFound as i32,
-            format!("nova lsp does not handle {}", request.method),
-        );
+        let response = match request.method.as_str() {
+            Completion::METHOD => {
+                match serde_json::from_value::<lsp::CompletionParams>(request.params) {
+                    Ok(p) => {
+                        let at = p.text_document_position;
+                        let uri = uri::text(&at.text_document.uri);
+                        let items = match self.workspace.get(&uri) {
+                            Some(doc) => {
+                                let offset = LineIndex::new(&doc.text)
+                                    .offset(at.position.line, at.position.character);
+                                completion::complete(
+                                    &doc.path,
+                                    &doc.text,
+                                    offset,
+                                    &self.workspace.overlay(),
+                                )
+                            }
+                            None => Vec::new(),
+                        };
+                        Response::new_ok(request.id, lsp::CompletionResponse::Array(items))
+                    }
+                    Err(e) => Response::new_err(
+                        request.id,
+                        ErrorCode::InvalidParams as i32,
+                        e.to_string(),
+                    ),
+                }
+            }
+            _ => Response::new_err(
+                request.id,
+                ErrorCode::MethodNotFound as i32,
+                format!("nova lsp does not handle {}", request.method),
+            ),
+        };
         self.respond(response);
     }
 
