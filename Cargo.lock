@@ -1111,6 +1111,7 @@ name = "nova-pm"
 version = "0.2.0"
 dependencies = [
  "nova-diagnostics",
+ "nova-lexer",
  "semver",
  "toml_edit",
 ]
