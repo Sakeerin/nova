@@ -221,6 +221,11 @@ jobs:
       - name: The installed nova makes, runs, builds and tests a project
         shell: bash
         run: bash .github/scripts/gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/gate" --test
+      # The Phase 3.3a gate (spec
+      # docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §8).
+      - name: The installed nova builds a program against a path library
+        shell: bash
+        run: bash .github/scripts/packages-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/packages"
       - name: std survives packaging
         run: cargo package -p nova-std --locked
 
