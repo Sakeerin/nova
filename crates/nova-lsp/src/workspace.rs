@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use nova_driver::Sources;
+pub use nova_pm::real_path;
 
 use crate::uri;
 
@@ -235,17 +236,5 @@ impl Eq for ProjectKey {}
 impl std::hash::Hash for ProjectKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id().hash(state);
-    }
-}
-
-/// `path`, canonicalised when it exists, without Windows' `\\?\` prefix, so
-/// that it is spelled as the file system spells it. The URIs of unopened
-/// files are made from paths built on it, and VS Code keeps an opened
-/// file's real spelling.
-pub fn real_path(path: &Path) -> PathBuf {
-    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    match real.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-        Some(rest) => PathBuf::from(rest),
-        None => real,
     }
 }

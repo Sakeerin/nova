@@ -41,3 +41,10 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// A package's import name: its name with each `-` replaced by `_` (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+/// §3.4), so `json-api` is imported as `import json_api`.
+pub fn import_name(name: &str) -> String {
+    name.replace('-', "_")
+}

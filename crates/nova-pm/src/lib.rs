@@ -8,5 +8,5 @@ mod name;
 mod project;
 
 pub use manifest::{parse, Dependency, Manifest, Package};
-pub use name::check_name;
-pub use project::{find_root, MANIFEST};
+pub use name::{check_name, import_name};
+pub use project::{find_root, real_path, MANIFEST};
