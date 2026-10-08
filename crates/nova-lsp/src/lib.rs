@@ -9,6 +9,7 @@
 mod checker;
 mod completion;
 mod convert;
+mod formatting;
 mod uri;
 mod workspace;
 
@@ -22,7 +23,7 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, RegisterCapability, Request as _};
+use lsp_types::request::{Completion, Formatting, RegisterCapability, Request as _};
 use nova_diagnostics::LineIndex;
 
 use checker::{Checker, Job, Publish};
@@ -112,6 +113,7 @@ fn capabilities() -> lsp::ServerCapabilities {
             trigger_characters: Some(vec![".".to_string()]),
             ..Default::default()
         }),
+        document_formatting_provider: Some(lsp::OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -214,6 +216,23 @@ impl Server<'_> {
                             None => Vec::new(),
                         };
                         Response::new_ok(request.id, lsp::CompletionResponse::Array(items))
+                    }
+                    Err(e) => Response::new_err(
+                        request.id,
+                        ErrorCode::InvalidParams as i32,
+                        e.to_string(),
+                    ),
+                }
+            }
+            Formatting::METHOD => {
+                match serde_json::from_value::<lsp::DocumentFormattingParams>(request.params) {
+                    Ok(p) => {
+                        let uri = uri::text(&p.text_document.uri);
+                        let edits = match self.workspace.get(&uri) {
+                            Some(doc) => formatting::format_document(&doc.path, &doc.text),
+                            None => Vec::new(),
+                        };
+                        Response::new_ok(request.id, edits)
                     }
                     Err(e) => Response::new_err(
                         request.id,
