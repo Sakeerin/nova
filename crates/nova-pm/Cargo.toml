@@ -15,5 +15,6 @@ bench = false
 
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
+nova-lexer = { path = "../nova-lexer" }
 semver = { workspace = true }
 toml_edit = { workspace = true }
