@@ -400,3 +400,31 @@ fn the_entry_main_runs_when_a_dependency_also_has_one() {
         .expect("run the build");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "app 9\n");
 }
+
+#[test]
+fn a_bare_file_argument_matches_an_imports_case_exactly() {
+    // Final review, Important 1: `nova run main.nova` from the file's own
+    // directory has an empty directory, which the exact-case rule must list
+    // as `.` (spec §4.3).
+    let dir = fresh("bare-case");
+    write(
+        &dir,
+        &[
+            (
+                "main.nova",
+                "import Utils\n\nfn main() {\n    println(label())\n}\n",
+            ),
+            (
+                "utils.nova",
+                "pub fn label() -> String {\n    \"utils\"\n}\n",
+            ),
+        ],
+    );
+    let out = nova()
+        .current_dir(&dir)
+        .args(["run", "main.nova"])
+        .assert()
+        .failure();
+    let err = stderr(&out);
+    assert!(err.contains("cannot find module `Utils`"), "{err}");
+}
