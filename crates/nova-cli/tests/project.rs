@@ -500,3 +500,89 @@ fn init_suggests_the_name_flag_for_a_bad_directory_name() {
         .success();
     assert!(read(dir.join("nova.toml")).contains("name = \"good\""));
 }
+
+// === Phase 3.3a: library templates (spec
+// docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.5) ===
+
+const TEMPLATE_LIB: &str = "pub fn greeting() -> String {\n    \"Hello, Nova!\"\n}\n\n@test\nfn greeting_says_hello() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n";
+
+#[test]
+fn new_lib_writes_a_library_and_its_tests_pass() {
+    let dir = fresh_dir("new-lib");
+    let out = nova()
+        .current_dir(&dir)
+        .args(["new", "--lib", "json-api"])
+        .assert()
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "created `json-api`: nova.toml, .gitignore, README.md, src/lib.nova, \
+         tests/json_api_test.nova\n"
+    );
+    let project = dir.join("json-api");
+    assert_eq!(read(project.join("src").join("lib.nova")), TEMPLATE_LIB);
+    assert_eq!(
+        read(project.join("tests").join("json_api_test.nova")),
+        "import json_api\n\n@test\nfn greeting_is_public() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n"
+    );
+    assert!(read(project.join("README.md")).contains("`nova test` runs the tests in"));
+    assert!(!project.join("src").join("main.nova").exists());
+    let tested = nova().current_dir(&project).arg("test").assert().success();
+    let printed = stdout(&tested);
+    assert!(printed.contains("2 passed; 0 failed"), "{printed}");
+    assert!(
+        printed.contains("test json_api_test::greeting_is_public ... ok"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn new_lib_refuses_a_keyword_name_before_writing() {
+    let dir = fresh_dir("new-lib-keyword");
+    let out = nova()
+        .current_dir(&dir)
+        .args(["new", "--lib", "match"])
+        .assert()
+        .failure();
+    assert!(
+        stderr(&out).contains("would be imported as `match`, which is a keyword"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!dir.join("match").exists());
+    // A program may be called `match`: nothing imports it.
+    nova()
+        .current_dir(&dir)
+        .args(["new", "match"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn init_lib_beside_a_program_makes_a_package_with_both() {
+    let dir = fresh_dir("init-lib").join("both");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join("main.nova"), HELLO).unwrap();
+    let out = nova()
+        .current_dir(&dir)
+        .args(["init", "--lib"])
+        .assert()
+        .success();
+    assert_eq!(
+        stdout(&out),
+        "wrote: nova.toml, .gitignore, README.md, src/lib.nova, tests/both_test.nova\n"
+    );
+    assert_eq!(read(dir.join("src").join("main.nova")), HELLO);
+    nova()
+        .current_dir(&dir)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout("hello from the project\n");
+    let tested = nova().current_dir(&dir).arg("test").assert().success();
+    assert!(
+        stdout(&tested).contains("2 passed; 0 failed"),
+        "{}",
+        stdout(&tested)
+    );
+}

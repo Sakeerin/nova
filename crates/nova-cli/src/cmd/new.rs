@@ -1,6 +1,7 @@
-//! `nova new <name>` and `nova init [--name <name>]`: write a new project
-//! (spec `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`
-//! §6.3). Neither runs `git init`.
+//! `nova new <name>` and `nova init [--name <name>]`, each with `--lib` for a
+//! library: write a new project (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §6.3,
+//! and 3.3a's §5.5). Neither runs `git init`.
 
 use std::fs;
 use std::io::{self, Write};
@@ -9,10 +10,15 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 
+use crate::template::Kind;
+
 #[derive(Args)]
 pub struct NewCmd {
     /// The project's name, which is also the directory `nova new` creates.
     name: String,
+    /// Make a library: src/lib.nova and tests/, in place of src/main.nova.
+    #[arg(long)]
+    lib: bool,
 }
 
 #[derive(Args)]
@@ -20,11 +26,15 @@ pub struct InitCmd {
     /// The project's name (default: the current directory's name).
     #[arg(long)]
     name: Option<String>,
+    /// Make a library: src/lib.nova and tests/, in place of src/main.nova.
+    #[arg(long)]
+    lib: bool,
 }
 
 /// `nova new <name>`: the template, in a new directory called `<name>`.
 pub fn new(cmd: NewCmd) -> Result<()> {
     nova_pm::check_name(&cmd.name).map_err(|message| anyhow!(message))?;
+    let kind = kind(&cmd.name, cmd.lib)?;
     let dir = Path::new(&cmd.name);
     if dir.exists() && !is_empty_dir(dir)? {
         bail!(
@@ -32,10 +42,12 @@ pub fn new(cmd: NewCmd) -> Result<()> {
             cmd.name
         );
     }
-    fs::create_dir_all(dir.join("src")).with_context(|| format!("creating {}", dir.display()))?;
+    for sub in dirs(kind) {
+        fs::create_dir_all(dir.join(sub)).with_context(|| format!("creating {}", dir.display()))?;
+    }
     let mut wrote = Vec::new();
-    for (path, text) in crate::template::files(&cmd.name) {
-        if write_new(&dir.join(path), &text)? {
+    for (path, text) in crate::template::files(&cmd.name, kind) {
+        if write_new(&dir.join(&path), &text)? {
             wrote.push(path);
         }
     }
@@ -66,11 +78,14 @@ pub fn init(cmd: InitCmd) -> Result<()> {
             name
         }
     };
-    fs::create_dir_all(cwd.join("src")).context("creating src")?;
+    let kind = kind(&name, cmd.lib)?;
+    for sub in dirs(kind) {
+        fs::create_dir_all(cwd.join(sub)).with_context(|| format!("creating {sub}"))?;
+    }
     let mut wrote = Vec::new();
     let mut kept = Vec::new();
-    for (path, text) in crate::template::files(&name) {
-        if write_new(&cwd.join(path), &text)? {
+    for (path, text) in crate::template::files(&name, kind) {
+        if write_new(&cwd.join(&path), &text)? {
             wrote.push(path);
         } else {
             kept.push(path);
@@ -94,6 +109,30 @@ fn is_empty_dir(dir: &Path) -> Result<bool> {
     }
     let mut entries = fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     Ok(entries.next().is_none())
+}
+
+/// The template `lib` asks for. A library's import name must not be a
+/// keyword (spec 3.3a §3.4), so it is refused before anything is written.
+fn kind(name: &str, lib: bool) -> Result<Kind> {
+    if !lib {
+        return Ok(Kind::Program);
+    }
+    let import = nova_pm::import_name(name);
+    if nova_lexer::KEYWORDS.contains(&import.as_str()) {
+        bail!(
+            "a library called `{name}` would be imported as `{import}`, which is a keyword; \
+             choose another name"
+        );
+    }
+    Ok(Kind::Library)
+}
+
+/// The directories the template of `kind` writes into.
+fn dirs(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Program => &["src"],
+        Kind::Library => &["src", "tests"],
+    }
 }
 
 /// Create `path` holding `text`, unless it already exists. Returns whether
