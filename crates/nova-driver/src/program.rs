@@ -528,7 +528,7 @@ impl<'a> Loader<'a> {
                 })
                 .unwrap_or_default()
         });
-        if listing.iter().any(|n| *n == name) {
+        if listing.contains(&name) {
             return true;
         }
         if listing.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
