@@ -17,7 +17,7 @@ mod check;
 mod infer;
 mod usefulness;
 
-pub use check::check;
+pub use check::{check, check_with};
 
 use nova_hir::Ty;
 use nova_resolver::Definitions;
@@ -29,6 +29,51 @@ pub struct CheckResult {
     /// only meaningful for codegen when `diagnostics` has no errors.
     pub module: nova_hir::Module,
     pub diagnostics: Vec<nova_diagnostics::Diagnostic>,
+    /// What the probe found: empty unless [`check_with`] was given one.
+    pub probe: ProbeResult,
+}
+
+/// Where the language server's probe looks: a byte offset in one file (spec
+/// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbePoint {
+    pub file: nova_diagnostics::FileId,
+    pub offset: u32,
+}
+
+/// What [`check_with`] does beyond checking.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CheckOptions {
+    pub probe: Option<ProbePoint>,
+}
+
+/// What the probe found (spec §4.1, §4.2). Each part is empty when the
+/// probe's place holds nothing of its kind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProbeResult {
+    /// At a member access whose receiver ends at or before the offset and
+    /// whose name ends at or after it: the receiver's type.
+    pub receiver: Option<Ty>,
+    /// The receiver's fields and methods.
+    pub members: Vec<Member>,
+    /// The locals in scope at the offset, innermost first, each name once.
+    pub locals: Vec<(String, Ty)>,
+}
+
+/// A field or method completion can offer after `.`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub name: String,
+    pub kind: MemberKind,
+    /// Where it is declared: a field's type, or a method's name, from which
+    /// the server reads the signature. `None` for a built-in method.
+    pub decl: Option<nova_diagnostics::Span>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    Field,
+    Method,
 }
 
 /// Render a type for use in diagnostics, resolving sum-type names.
