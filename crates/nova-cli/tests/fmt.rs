@@ -289,3 +289,24 @@ fn a_stale_temporary_file_is_replaced_not_written_through() {
     let kind = std::fs::symlink_metadata(&file).unwrap().file_type();
     assert!(kind.is_file(), "main.nova is no longer a regular file");
 }
+
+#[test]
+fn no_path_formats_tests_too_and_skips_a_nested_package() {
+    // Phase 3.3a (spec
+    // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.4).
+    let dir = fresh_dir("tests-dir");
+    let manifest = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+    write(&dir, "nova.toml", manifest);
+    let main = write(&dir, "src/main.nova", UNFORMATTED);
+    let test = write(&dir, "tests/api.nova", UNFORMATTED);
+    write(
+        &dir,
+        "src/vendor/geom/nova.toml",
+        manifest.replace("demo", "geom"),
+    );
+    let nested = write(&dir, "src/vendor/geom/src/lib.nova", UNFORMATTED);
+    nova().arg("fmt").current_dir(&dir).assert().success();
+    assert_eq!(read(&main), FORMATTED);
+    assert_eq!(read(&test), FORMATTED);
+    assert_eq!(read(&nested), UNFORMATTED, "a nested package is its own");
+}
