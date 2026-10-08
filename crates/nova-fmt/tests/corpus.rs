@@ -13,11 +13,18 @@ use nova_ast::Item;
 use nova_diagnostics::FileDb;
 use nova_lexer::CommentKind;
 
-/// The only file expected not to parse: it uses a `::<User>` turbofish.
-const EXPECTED_SKIP: &str = "crates/nova-parser/tests/fixtures/async.nova";
+/// The files expected not to parse:
+/// - the parser's `async` fixture, which uses a `::<User>` turbofish;
+/// - the VS Code smoke test's `complete.nova`, which stops after `p.` so
+///   that completion is tested mid-edit (spec
+///   `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §7.6).
+const EXPECTED_SKIP: [&str; 2] = [
+    "crates/nova-parser/tests/fixtures/async.nova",
+    "tools/vscode-nova/test/fixture/src/complete.nova",
+];
 
-/// The gate's floor: the 168 tracked files, less the one that does not
-/// parse.
+/// The gate's floor, set in 3.1: the 168 tracked files then, less the one
+/// that did not parse.
 const AT_LEAST: usize = 167;
 
 /// The repository, two levels above this crate.
@@ -195,7 +202,7 @@ fn every_corpus_file_formats_to_the_same_program_and_comments() {
     );
     assert_eq!(
         skipped,
-        vec![EXPECTED_SKIP.to_owned()],
+        EXPECTED_SKIP.map(str::to_owned).to_vec(),
         "the files that do not parse"
     );
     assert!(checked >= AT_LEAST, "only {checked} files were checked");
