@@ -228,3 +228,64 @@ fn a_missing_path_or_a_file_that_is_not_utf8_is_an_error() {
     assert!(stderr(&out).contains("not UTF-8"), "{}", stderr(&out));
     assert_eq!(std::fs::read(&bytes).unwrap(), [0x66u8, 0x6e, 0xff]);
 }
+
+#[test]
+fn a_read_only_file_is_refused_and_left_untouched() {
+    let dir = fresh_dir("write-protected");
+    let file = write(&dir, "main.nova", UNFORMATTED);
+    let writable = std::fs::metadata(&file).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&file, read_only).unwrap();
+    let out = nova().arg("fmt").arg(&file).output().unwrap();
+    // Writable again before any assertion, so the next run can remove it.
+    std::fs::set_permissions(&file, writable).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(read(&file), UNFORMATTED);
+    assert!(
+        !dir.join(".main.nova.nova-fmt.tmp").exists(),
+        "a temporary file was left"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symbolic_link_is_written_through_to_its_file() {
+    let dir = fresh_dir("symlink");
+    let real = write(&dir, "real.nova", UNFORMATTED);
+    let link = dir.join("link.nova");
+    std::os::unix::fs::symlink("real.nova", &link).unwrap();
+    nova().arg("fmt").arg(&link).assert().success();
+    let kind = std::fs::symlink_metadata(&link).unwrap().file_type();
+    assert!(kind.is_symlink(), "the link was replaced by a file");
+    assert_eq!(read(&real), FORMATTED);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_files_permissions_survive_formatting() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fresh_dir("permissions");
+    let file = write(&dir, "main.nova", UNFORMATTED);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    nova().arg("fmt").arg(&file).assert().success();
+    assert_eq!(read(&file), FORMATTED);
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the mode is {mode:o}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stale_temporary_file_is_replaced_not_written_through() {
+    let dir = fresh_dir("stale-temp");
+    let file = write(&dir, "main.nova", UNFORMATTED);
+    let other = write(&dir, "other.txt", "keep me\n");
+    std::os::unix::fs::symlink("other.txt", dir.join(".main.nova.nova-fmt.tmp")).unwrap();
+    nova().arg("fmt").arg(&file).assert().success();
+    assert_eq!(read(&file), FORMATTED);
+    assert_eq!(read(&other), "keep me\n");
+    let kind = std::fs::symlink_metadata(&file).unwrap().file_type();
+    assert!(kind.is_file(), "main.nova is no longer a regular file");
+}
