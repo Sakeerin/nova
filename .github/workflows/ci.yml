@@ -223,3 +223,44 @@ jobs:
         run: bash .github/scripts/gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/gate" --test
       - name: std survives packaging
         run: cargo package -p nova-std --locked
+
+  # The VS Code extension (spec
+  # docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §8): it
+  # is platform-neutral, and the Rust gate test drives `nova lsp` on all
+  # three systems, so one Linux job suffices. The smoke test runs VS Code
+  # 1.91.0, the extension's floor, under a virtual display.
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build -p nova-cli
+        run: cargo build --locked -p nova-cli
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/vscode-nova/package-lock.json
+      - name: npm ci
+        working-directory: tools/vscode-nova
+        run: npm ci
+      - name: Compile
+        working-directory: tools/vscode-nova
+        run: npm run compile
+      - name: Smoke test
+        working-directory: tools/vscode-nova
+        run: xvfb-run -a npm test
+      - name: Package the .vsix
+        working-directory: tools/vscode-nova
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          npx vsce package --out "nova-vscode-$version.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: tools/vscode-nova/*.vsix
+          if-no-files-found: error
