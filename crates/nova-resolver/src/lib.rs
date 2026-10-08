@@ -1389,10 +1389,60 @@ impl Definitions {
     }
 }
 
-/// A source module: a parsed file plus its module name (file stem).
+/// What an `import` names, by its first segment (spec 3.3a §4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportTarget {
+    /// The module at this index of [`resolve_program`]'s `modules`.
+    Module(usize),
+    /// The driver has already reported this import (E0004, or a
+    /// dev-dependency imported from `src/`): bind nothing, and say nothing
+    /// more.
+    Reported,
+}
+
+/// A source module: a parsed file, its label, and what its imports name.
 pub struct ModuleSource<'a> {
+    /// A label for the module. Messages print an import as written, so the
+    /// label is never a lookup key.
     pub name: String,
     pub file: &'a File,
+    /// What each import names, by its first segment. An import missing here
+    /// is "cannot find module".
+    pub imports: std::collections::HashMap<String, ImportTarget>,
+}
+
+impl<'a> ModuleSource<'a> {
+    /// A module with an empty import table; [`name_imports`] fills it by
+    /// name.
+    pub fn new(name: impl Into<String>, file: &'a File) -> Self {
+        ModuleSource {
+            name: name.into(),
+            file,
+            imports: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Fill each module's import table by module name, as a program without
+/// packages has always resolved (ADR 0003): `import m` names the first
+/// module called `m`.
+pub fn name_imports(modules: &mut [ModuleSource]) {
+    let names: Vec<String> = modules.iter().map(|m| m.name.clone()).collect();
+    for module in modules.iter_mut() {
+        for item in &module.file.items {
+            let Item::Import(import) = &item.value else {
+                continue;
+            };
+            let Some(first) = import.path.value.segments.first() else {
+                continue;
+            };
+            if let Some(index) = names.iter().position(|n| *n == first.value) {
+                module
+                    .imports
+                    .insert(first.value.clone(), ImportTarget::Module(index));
+            }
+        }
+    }
 }
 
 /// The public exports of one module (its `pub` items), used to resolve imports.
@@ -1455,10 +1505,8 @@ pub struct ProgramResolution {
 /// and `module` declarations are accepted but ignored in Phase 1 (single-file
 /// compilation); traits/impls/records are collected in later Phase 1 steps.
 pub fn resolve(file: &File) -> ResolveResult {
-    let sources = [ModuleSource {
-        name: "main".to_string(),
-        file,
-    }];
+    let mut sources = [ModuleSource::new("main", file)];
+    name_imports(&mut sources);
     // No `FileDb` to register the embedded std modules into here, so every
     // one of them gets the same `FileId::DUMMY` sentinel used throughout the
     // test suite — one per `STD_MODULES` entry, in order.
@@ -1549,16 +1597,15 @@ pub fn resolve_program(
         .map(|m| ModuleSource {
             name: m.name.clone(),
             file: m.file,
+            imports: m.imports.clone(),
         })
         .chain(
             std_entries
                 .iter()
                 .zip(std_modules.iter())
                 .filter_map(|(&(name, _), file)| {
-                    file.as_ref().map(|file| ModuleSource {
-                        name: name.to_string(),
-                        file,
-                    })
+                    file.as_ref()
+                        .map(|file| ModuleSource::new(name.to_string(), file))
                 }),
         )
         .collect();
@@ -1615,19 +1662,15 @@ pub fn resolve_program(
         }
     }
 
-    // Pass 2: resolve `import`s, binding other modules' public names.
-    let by_name: FxHashMap<&str, usize> = all
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (m.name.as_str(), i))
-        .collect();
+    // Pass 2: resolve `import`s, binding other modules' public names. What
+    // each import names is its module's table (spec 3.3a §4.5).
     for (mid, m) in all.iter().enumerate() {
         for item in &m.file.items {
             if let Item::Import(imp) = &item.value {
                 resolve_import(
                     &mut definitions,
                     &exports,
-                    &by_name,
+                    &m.imports,
                     mid,
                     imp,
                     &mut diagnostics,
@@ -2274,7 +2317,7 @@ fn test_shape_violations(f: &Function) -> Vec<(&'static str, Option<Span>)> {
 fn resolve_import(
     definitions: &mut Definitions,
     exports: &[Exports],
-    by_name: &FxHashMap<&str, usize>,
+    imports: &std::collections::HashMap<String, ImportTarget>,
     mid: usize,
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2298,12 +2341,16 @@ fn resolve_import(
         .last()
         .map(|s| s.value.as_str())
         .unwrap_or("");
-    let Some(&target) = by_name.get(target_name) else {
-        diagnostics.push(
-            Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
-                .with_primary_label(span, "no such module"),
-        );
-        return;
+    let target = match imports.get(target_name) {
+        Some(ImportTarget::Module(target)) => *target,
+        Some(ImportTarget::Reported) => return,
+        None => {
+            diagnostics.push(
+                Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
+                    .with_primary_label(span, "no such module"),
+            );
+            return;
+        }
     };
     if target == mid {
         diagnostics.push(
@@ -2579,22 +2626,70 @@ mod tests {
     fn resolve_two(main_src: &str, lib_src: &str) -> ProgramResolution {
         let main = parse_file(main_src);
         let lib = parse_file(lib_src);
-        let sources = [
-            ModuleSource {
-                name: "main".to_string(),
-                file: &main,
-            },
-            ModuleSource {
-                name: "lib".to_string(),
-                file: &lib,
-            },
+        let mut sources = [
+            ModuleSource::new("main", &main),
+            ModuleSource::new("lib", &lib),
         ];
+        name_imports(&mut sources);
         let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
         resolve_program(&sources, &std_files, None)
     }
 
     fn error_codes(diags: &[Diagnostic]) -> Vec<&str> {
         diags.iter().map(|d| d.code.as_str()).collect()
+    }
+
+    // === Phase 3.3a: import tables (spec
+    // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §4.5) ===
+
+    #[test]
+    fn an_import_table_can_name_a_module_by_any_label() {
+        let main = parse_file("import geom::{area}\nfn main() { let a = area() }\n");
+        let lib = parse_file("pub fn area() -> Int { 1 }\n");
+        let mut sources = [
+            ModuleSource::new("main", &main),
+            ModuleSource::new("geom", &lib),
+        ];
+        sources[1].name = "a label no import names".to_string();
+        sources[0]
+            .imports
+            .insert("geom".to_string(), ImportTarget::Module(1));
+        let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+        let p = resolve_program(&sources, &std_files, None);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        assert!(matches!(
+            p.definitions.resolve_value(ModuleId(0), "area"),
+            Some(Res::Def(_))
+        ));
+    }
+
+    #[test]
+    fn a_reported_import_binds_nothing_and_says_nothing() {
+        let main = parse_file("import geom\nfn main() {}\n");
+        let mut sources = [ModuleSource::new("main", &main)];
+        sources[0]
+            .imports
+            .insert("geom".to_string(), ImportTarget::Reported);
+        let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+        let p = resolve_program(&sources, &std_files, None);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    }
+
+    #[test]
+    fn an_import_missing_from_the_table_cannot_find_its_module() {
+        let main = parse_file("import geom\nfn main() {}\n");
+        let lib = parse_file("pub fn area() -> Int { 1 }\n");
+        // No `name_imports`: the table is empty, whatever the modules' names.
+        let sources = [
+            ModuleSource::new("main", &main),
+            ModuleSource::new("geom", &lib),
+        ];
+        let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
+        let p = resolve_program(&sources, &std_files, None);
+        assert_eq!(error_codes(&p.diagnostics), ["E0001"]);
+        assert!(p.diagnostics[0]
+            .message
+            .contains("cannot find module `geom`"));
     }
 
     #[test]

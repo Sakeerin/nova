@@ -196,13 +196,11 @@ pub fn analyze(
         let file = analysis.db.add(format!("<std/{short}>"), src);
         (nova_resolver::STD_TEST_MODULE, file)
     });
-    let module_sources: Vec<ModuleSource> = files
+    let mut module_sources: Vec<ModuleSource> = files
         .iter()
-        .map(|(name, file)| ModuleSource {
-            name: name.clone(),
-            file,
-        })
+        .map(|(name, file)| ModuleSource::new(name.clone(), file))
         .collect();
+    nova_resolver::name_imports(&mut module_sources);
     let resolved = nova_resolver::resolve_program(&module_sources, &std_files, extra_std);
     diagnostics.extend(resolved.diagnostics);
     if stop(&diagnostics) {
