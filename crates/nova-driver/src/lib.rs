@@ -564,13 +564,11 @@ impl FrontendContext {
             let file_id = self.db.add(format!("<std/{short}>"), src);
             (nova_resolver::STD_TEST_MODULE, file_id)
         });
-        let sources: Vec<ModuleSource> = modules
+        let mut sources: Vec<ModuleSource> = modules
             .iter()
-            .map(|(name, file)| ModuleSource {
-                name: name.clone(),
-                file,
-            })
+            .map(|(name, file)| ModuleSource::new(name.clone(), file))
             .collect();
+        nova_resolver::name_imports(&mut sources);
         let resolved = nova_resolver::resolve_program(&sources, &std_files, extra_std);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {

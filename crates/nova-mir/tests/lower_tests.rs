@@ -1178,10 +1178,7 @@ fn http_parse_request_lowers_to_a_runtime_call() {
     assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
     let ast = ast.expect("no AST");
 
-    let sources = [ModuleSource {
-        name: "main".to_string(),
-        file: &ast,
-    }];
+    let sources = [ModuleSource::new("main", &ast)];
     let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
     let resolved = resolve_program(
         &sources,
@@ -1266,10 +1263,7 @@ fn crypto_builtins_reach_their_runtime_functions() {
         assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
         let ast = ast.expect("no AST");
 
-        let sources = [ModuleSource {
-            name: "main".to_string(),
-            file: &ast,
-        }];
+        let sources = [ModuleSource::new("main", &ast)];
         let std_files: Vec<FileId> = STD_MODULES.iter().map(|_| FileId::DUMMY).collect();
         let resolved = resolve_program(
             &sources,

@@ -16603,10 +16603,7 @@ mod tests {
             .collect();
         let (tokens, _) = lex(&src, file);
         let parsed = nova_parser::parse_recovering(&tokens, file);
-        let module = nova_resolver::ModuleSource {
-            name: "main".to_string(),
-            file: &parsed.file,
-        };
+        let module = nova_resolver::ModuleSource::new("main", &parsed.file);
         let resolved = nova_resolver::resolve_program(&[module], &std_files, None);
         let options = CheckOptions {
             probe: Some(ProbePoint { file, offset }),
