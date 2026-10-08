@@ -137,8 +137,8 @@ impl Client {
         self.wait_for(|m| is_publish_for(m, sentinel));
         self.unread
             .iter()
-            .filter(|m| is_publish_for(m, uri))
-            .last()
+            .rev()
+            .find(|m| is_publish_for(m, uri))
             .map(|m| m["params"].clone())
     }
 
