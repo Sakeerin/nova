@@ -74,6 +74,26 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   past errors, for the language server.
 - **`nova-fmt`'s `format_buffer`** formats an editor's text as
   `format_file` would format the file.
+- **Packages with path dependencies** (ADR 0030).
+  - `geom = { path = "../geom" }` in `[dependencies]` makes `import geom`
+    reach that library's `src/lib.nova`. A `-` in a name becomes `_` in
+    its import.
+  - Each package's files are its own: two packages may each have a
+    `utils.nova`, and so may one package's `src/` and `tests/`.
+  - M0007–M0013 report a bad path, a misnamed or non-library dependency,
+    a cycle, two packages with one name, an import-name clash, and a
+    package with no target. E0004 reports a file and a dependency with
+    one name.
+- **`nova add <name> --path <dir> [--dev]`** and **`nova remove <name>
+  [--dev]`** edit `nova.toml`, keeping its comments and layout.
+- **`nova new --lib`** and **`nova init --lib`** make a library, with a
+  test in `tests/`.
+- **`nova test` runs `tests/*.nova`.** A test there is named
+  `<file>::<function>`.
+- **`nova check`** checks the library as well as the program.
+- **The language server** follows packages. A dependency's problems show
+  on the manifest's entry for it, and a project's `nova.toml` gets its
+  own diagnostics.
 
 ### Changed
 
@@ -92,6 +112,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The parser keeps an unfinished `foo.` as a field access with an empty
   name, after the same P0001. Parsing continues past it, so a few broken
   programs report fewer follow-on errors.
+- An entry without `fn main` is E0601, even when a module it imports
+  declares one. That module's `main` used to run.
+- An import matches a file's name in its exact case on every system, so
+  `import Utils` no longer loads `utils.nova` on Windows or macOS.
+- `nova run src/main.nova` inside a project reads its manifest and sees
+  its dependencies. Other file arguments are unchanged.
+- A declared dependency is no longer M0005 "cannot be used yet": a path
+  dependency resolves, and a version-only one is M0005 "a registry
+  dependency".
+- `nova run` and `nova build` in a library without `src/main.nova` say
+  so, and a package with neither target is M0013.
 
 ## [0.2.0] - 2026-10-06
 

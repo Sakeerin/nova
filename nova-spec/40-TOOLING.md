@@ -258,6 +258,15 @@ Every other key warns (M0006) and is ignored. Nothing resolves dependencies
 before Phase 3.3, so a declared one is an error (M0005). Diagnostics
 M0001–M0006 point at the key or value at fault (spec §5).
 
+**Amended 2026-10-08 (branch `phase-3-3a-local-packages`):** path
+dependencies resolve
+(`docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
+§3). Each `path` is read relative to its own manifest, and a package is
+identified by its canonical directory. M0005 now covers only a
+version-only entry, and `nova_pm::graph` raises it, not the CLI.
+M0007–M0013 are the graph's errors. A dependency is imported by its name
+with each `-` replaced by `_` (ADR 0030).
+
 ### 4.2 Lock file (`nova.lock`)
 - TOML, similar to Cargo.lock
 - Records exact versions + hashes
@@ -287,6 +296,13 @@ nova publish             Pack + upload (requires login)
 nova login               Auth via token
 nova owner add/rm <user> <pkg>
 ```
+
+**Amended 2026-10-08 (branch `phase-3-3a-local-packages`):** 3.3a has
+`nova add <pkg> --path <dir> [--dev]` and `nova remove <pkg> [--dev]`.
+`nova add` writes the path relative to the manifest, keeps the
+manifest's comments and layout, and checks the graph before it writes.
+The version form, `nova update`, `nova publish` and `nova login` are
+3.3b's.
 
 ### 4.6 Publishing
 - `nova package` creates `.nova-pkg` (gzip tar)
@@ -327,6 +343,14 @@ nova owner add/rm <user> <pkg>
 - Output: TAP-compatible + pretty default
 - `--filter <name>` runs only matching
 - `--bench` runs benchmarks instead
+
+**Amended 2026-10-08 (branch `phase-3-3a-local-packages`):** as built,
+`nova test` runs the tests of the `src/` files that the program and the
+library reach, not all of `src/**`, and every top-level `tests/*.nova`,
+sorted by name. A test in `tests/api.nova` is named `api::<function>`,
+and the filter is a positional substring of that name. Subdirectories of
+`tests/` are not read (ADR 0003's deferral). A dependency's tests are
+never run.
 
 ---
 

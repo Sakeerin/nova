@@ -29,6 +29,15 @@ extension. Each GitHub release attaches it as `nova-vscode-<version>.vsix`,
 which installs with **Extensions: Install from VSIX…**. It runs the `nova`
 on your PATH, or the one the `nova.server.path` setting names.
 
+### Packages
+
+A package is a directory with `nova.toml` and a `src/lib.nova` library, a
+`src/main.nova` program, or both. `nova new --lib geom` makes a library.
+In another package, `nova add geom --path ../geom` adds it as a
+dependency, and `import geom` then reaches its `lib.nova`. `nova test` runs
+the tests in `src/` and in `tests/*.nova`, which import the package by its
+name. Registry dependencies and `nova publish` come in a later release.
+
 ---
 
 ## How to use this bundle

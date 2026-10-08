@@ -52,3 +52,9 @@ Constraints from the existing pipeline:
   encapsulation.
 - Deferred to later increments: `import as` aliases, qualified `m::name` paths,
   nested module directories, and re-exports.
+
+**Amended 2026-10-08 (branch `phase-3-3a-local-packages`):** with packages,
+a module is (package, directory, file stem), and the loader decides what
+each import names (ADR 0030). A file in no package is loose, and resolves
+by name as this ADR describes, except that a file's name must match its
+import's case exactly.
