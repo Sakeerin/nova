@@ -226,6 +226,12 @@ jobs:
       - name: The installed nova builds a program against a path library
         shell: bash
         run: bash .github/scripts/packages-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/packages"
+      # The Phase 3.3b gate (spec
+      # docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
+      # §11.1): a local index only; CI never writes the real one.
+      - name: The installed nova publishes to a local index and builds from it
+        shell: bash
+        run: bash .github/scripts/registry-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/registry"
       - name: std survives packaging
         run: cargo package -p nova-std --locked
 
