@@ -4,8 +4,9 @@ use std::path::PathBuf;
 
 use nova_pm::{Candidate, IndexView};
 
+use crate::http::{Http, MAX_INDEX_FILE};
 use crate::line::{parse_config, parse_lines, Config};
-use crate::location::index_path;
+use crate::location::{index_path, Index, Source};
 
 /// How an index's files are read: from a directory, over HTTP, or through
 /// the GitHub API.
@@ -38,6 +39,41 @@ impl Reader for LocalReader {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(format!("cannot read {}: {error}", full.display())),
         }
+    }
+}
+
+/// An index read over HTTP from `base`, its canonical URL.
+pub struct HttpReader {
+    pub base: String,
+    pub http: Http,
+}
+
+impl HttpReader {
+    pub fn new(base: &str) -> HttpReader {
+        HttpReader {
+            base: base.to_string(),
+            http: Http::new(),
+        }
+    }
+}
+
+impl Reader for HttpReader {
+    fn file(&mut self, path: &str) -> Result<Option<String>, String> {
+        let url = format!("{}{path}", self.base);
+        match self.http.get(&url, MAX_INDEX_FILE)? {
+            None => Ok(None),
+            Some(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| format!("{url} is not UTF-8")),
+        }
+    }
+}
+
+/// The reader for `index`'s own files: its directory, or HTTP.
+pub fn reader_for(index: &Index) -> Box<dyn Reader> {
+    match &index.source {
+        Source::Local(dir) => Box::new(LocalReader { dir: dir.clone() }),
+        Source::Http(base) => Box::new(HttpReader::new(base)),
     }
 }
 

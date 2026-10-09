@@ -28,3 +28,8 @@ serde_json = { workspace = true }
 tar = { version = "0.4", default-features = false }
 flate2 = { workspace = true }
 ring = "0.17"
+# HTTP for the index and downloads (spec §9). ureq 3.3.0 and later need
+# Rust 1.85; 3.2.1 needs 1.71.1. `rustls` is rustls on the `ring` already
+# locked, with Mozilla's roots from webpki-roots, so no system TLS library
+# is needed. Default features are off, so no transparent gzip decoding.
+ureq = { version = "=3.2.1", default-features = false, features = ["rustls"] }
