@@ -6,11 +6,15 @@
 //! §3). See ARCHITECTURE.md for the crate's place in the pipeline.
 
 mod graph;
+mod home;
+mod index_name;
 pub mod manifest;
 mod name;
 mod project;
 
 pub use graph::{graph, graph_from, Edge, Graph, GraphPackage, PackageId};
+pub use home::{nova_home, nova_home_from_env, registry_dir};
+pub use index_name::{canonical_index, index_dir_name, local_index_path};
 pub use manifest::{parse, Dependency, Manifest, Package};
 pub use name::{check_name, import_name};
 pub use project::{find_root, real_path, MANIFEST};

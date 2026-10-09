@@ -51,29 +51,23 @@ pub(crate) fn embedded_runtime() -> Option<&'static EmbeddedRuntime> {
 /// in the home directory, which is `USERPROFILE` on Windows and `HOME`
 /// elsewhere. It takes the variables' values rather than reading them, so
 /// tests need not change the process environment. An empty value counts as
-/// unset.
+/// unset. The rule is `nova_pm::nova_home`'s (spec 3.3b §5.1).
 pub(crate) fn cache_root(
     nova_home: Option<PathBuf>,
     userprofile: Option<PathBuf>,
     home: Option<PathBuf>,
     windows: bool,
 ) -> Result<PathBuf> {
-    let set = |value: Option<PathBuf>| value.filter(|path| !path.as_os_str().is_empty());
-    if let Some(nova_home) = set(nova_home) {
-        return Ok(nova_home.join("runtime"));
-    }
-    let (home, name) = if windows {
-        (set(userprofile), "USERPROFILE")
-    } else {
-        (set(home), "HOME")
-    };
-    match home {
-        Some(home) => Ok(home.join(".nova").join("runtime")),
-        None => bail!(
-            "cannot place the runtime library's cache: neither NOVA_HOME nor {name} is \
-             set; set NOVA_HOME to a writable directory, or NOVA_RUNTIME_LIB to a runtime \
-             library"
-        ),
+    match nova_pm::nova_home(nova_home, userprofile, home, windows) {
+        Some(home) => Ok(home.join("runtime")),
+        None => {
+            let name = if windows { "USERPROFILE" } else { "HOME" };
+            bail!(
+                "cannot place the runtime library's cache: neither NOVA_HOME nor {name} is \
+                 set; set NOVA_HOME to a writable directory, or NOVA_RUNTIME_LIB to a runtime \
+                 library"
+            )
+        }
     }
 }
 

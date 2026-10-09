@@ -16,5 +16,6 @@ bench = false
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
 nova-lexer = { path = "../nova-lexer" }
+crc32fast = { workspace = true }
 semver = { workspace = true }
 toml_edit = { workspace = true }
