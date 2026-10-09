@@ -33,3 +33,7 @@ ring = "0.17"
 # locked, with Mozilla's roots from webpki-roots, so no system TLS library
 # is needed. Default features are off, so no transparent gzip decoding.
 ureq = { version = "=3.2.1", default-features = false, features = ["rustls"] }
+# The Contents API's base64, and credentials.toml (spec §6.7, §7). Both
+# were already in the lockfile.
+base64 = { workspace = true }
+toml_edit = { workspace = true }

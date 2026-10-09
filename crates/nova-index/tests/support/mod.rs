@@ -9,6 +9,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
+pub mod fake_github;
+
 /// A request the server received.
 #[derive(Debug, Clone)]
 pub struct Request {

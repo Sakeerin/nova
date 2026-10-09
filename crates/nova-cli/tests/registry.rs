@@ -488,3 +488,105 @@ fn a_library_is_refused_by_run_before_anything_syncs() {
     assert!(err.contains("`geom` is a library"), "{err}");
     assert!(!err.contains("M0014"), "{err}");
 }
+#[path = "../../nova-index/tests/support/mod.rs"]
+mod support;
+
+use support::fake_github::FakeGitHub;
+
+/// A stand-in GitHub index: its config.json read raw from the stand-in,
+/// whose API it also is, with `dl` at its release downloads. The URL is
+/// known only once the stand-in runs, so config.json is written then.
+fn github_index() -> FakeGitHub {
+    let fake = FakeGitHub::start("{}");
+    let config = format!(
+        r#"{{"dl":"{}/dl/{{name}}-{{version}}.nova-pkg","api":"owner/index"}}"#,
+        fake.server.url
+    );
+    fake.state
+        .lock()
+        .unwrap()
+        .files
+        .insert("config.json".into(), (config, "sha-config".into()));
+    fake
+}
+
+/// `nova` as `f.nova` does, but reading `fake`'s index.
+fn nova_on(f: &Fixture, fake: &FakeGitHub, cwd: &Path) -> Command {
+    let mut command = f.nova(cwd);
+    command
+        .env("NOVA_INDEX", format!("{}/raw/", fake.server.url))
+        .env("NOVA_GITHUB_API", fake.api());
+    command
+}
+
+#[test]
+fn login_checks_the_token_and_stores_it_unprinted() {
+    let f = Fixture::new("login");
+    let fake = github_index();
+    let app = f.app("", "fn main() {}\n");
+    let out = nova_on(&f, &fake, &app)
+        .arg("login")
+        .write_stdin(format!("{}\n", FakeGitHub::TOKEN))
+        .assert()
+        .success();
+    assert!(!stdout(&out).contains(FakeGitHub::TOKEN));
+    assert!(!stderr(&out).contains(FakeGitHub::TOKEN));
+    let stored = read(&f.home.join("credentials.toml"));
+    assert!(stored.contains(FakeGitHub::TOKEN), "{stored}");
+    fake.state.lock().unwrap().push = false;
+    let out = nova_on(&f, &fake, &app)
+        .arg("login")
+        .write_stdin(format!("{}\n", FakeGitHub::TOKEN))
+        .assert()
+        .failure();
+    assert!(
+        stderr(&out).contains("cannot push to owner/index"),
+        "{}",
+        stderr(&out)
+    );
+    let out = nova_on(&f, &fake, &app)
+        .arg("login")
+        .write_stdin("ghp_wrong\n")
+        .assert()
+        .failure();
+    assert!(!stderr(&out).contains("ghp_wrong"), "{}", stderr(&out));
+}
+
+#[test]
+fn publish_to_a_github_index_goes_through_the_api() {
+    let f = Fixture::new("publish-github");
+    let fake = github_index();
+    let geom = f.library("geom", "0.1.0", "", AREA);
+    let out = nova_on(&f, &fake, &geom).arg("publish").assert().failure();
+    assert!(
+        stderr(&out).contains("not logged in: run `gh auth token | nova login` first"),
+        "{}",
+        stderr(&out)
+    );
+    nova_on(&f, &fake, &geom)
+        .arg("login")
+        .write_stdin(FakeGitHub::TOKEN)
+        .assert()
+        .success();
+    let out = nova_on(&f, &fake, &geom).arg("publish").assert().success();
+    let printed = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(printed.contains("up to five minutes"), "{printed}");
+    assert!(!printed.contains(FakeGitHub::TOKEN), "{printed}");
+    let text = fake.state.lock().unwrap().files["ge/om/geom"].0.clone();
+    assert!(text.contains("\"vers\":\"0.1.0\""), "{text}");
+    // The token went to the API only.
+    for request in fake.server.requests() {
+        if request.header("authorization").is_some() {
+            assert!(request.path.starts_with("/repos/"), "{request:?}");
+        }
+    }
+    // An app depends on it, reading the index raw and the tarball from
+    // the release, with no token.
+    let app = f.app("", MAIN_AREA);
+    nova_on(&f, &fake, &app)
+        .args(["add", "geom"])
+        .assert()
+        .success();
+    let out = nova_on(&f, &fake, &app).arg("run").assert().success();
+    assert_eq!(stdout(&out).trim(), "9");
+}

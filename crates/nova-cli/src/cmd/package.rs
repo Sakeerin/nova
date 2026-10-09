@@ -8,7 +8,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use nova_diagnostics::{render, Diagnostic, FileDb, Severity};
 use nova_driver::{Program, Roots};
 use nova_index::{
-    Index, Line, LineDep, Packed, Reader, Source, SyncError, SyncRequest, LINE_VERSION,
+    load_token, publish_github, ApiReader, GitHub, Index, Line, LineDep, Packed, Reader, Source,
+    SyncError, SyncRequest, LINE_VERSION,
 };
 use nova_pm::{Manifest, Offline, Unlock};
 
@@ -68,10 +69,37 @@ pub fn publish() -> Result<()> {
             );
             Ok(())
         }
-        Source::Http(_) => bail!(
-            "`nova publish` writes only to a local index so far; {} is read over HTTP",
-            index.canonical
-        ),
+        Source::Http(_) => {
+            let config = nova_index::reader_for(&index)
+                .config()
+                .map_err(|e| anyhow!("cannot read the index at {}: {e}", index.canonical))?;
+            let Some(repo) = config.api else {
+                bail!(
+                    "the index at {} has no `api` in its config.json, so nova cannot publish \
+                     to it",
+                    index.canonical
+                );
+            };
+            let home = nova_pm::nova_home_from_env()
+                .context("cannot read the credentials: set NOVA_HOME")?;
+            let token = load_token(&home)
+                .map_err(|e| anyhow!(e))?
+                .context("not logged in: run `gh auth token | nova login` first")?;
+            let github = GitHub::from_env(&repo, &token).map_err(|e| anyhow!(e))?;
+            // The verification reads the index through the API, which is
+            // never stale (spec §6.6).
+            let mut api = ApiReader { github: &github };
+            let prepared = prepare(&index, &mut api)?;
+            report(&prepared);
+            publish_github(&github, &prepared.line(), &prepared.packed.bytes)
+                .map_err(|e| anyhow!(e))?;
+            let package = &prepared.manifest.package;
+            println!(
+                "published {} {} to {repo}; other machines may take up to five minutes to see it",
+                package.name, package.version
+            );
+            Ok(())
+        }
     }
 }
 

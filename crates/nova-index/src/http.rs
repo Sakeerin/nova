@@ -39,6 +39,10 @@ impl Http {
         }
     }
 
+    pub(crate) fn agent(&self) -> &ureq::Agent {
+        &self.agent
+    }
+
     /// GET `url`, reading at most `limit` bytes of its body. `Ok(None)` for
     /// a 404. Up to five redirects are followed, each checked by
     /// [`check_url`].

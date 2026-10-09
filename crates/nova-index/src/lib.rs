@@ -6,7 +6,9 @@
 //! See ARCHITECTURE.md for its place in the pipeline.
 
 mod cache;
+mod credentials;
 mod download;
+mod github;
 mod http;
 mod line;
 mod location;
@@ -16,7 +18,9 @@ mod read;
 mod sync;
 
 pub use cache::{unpack, unpack_limited, Limits, LIMITS};
+pub use credentials::{credentials_path, load_token, store_token};
 pub use download::fetch_package;
+pub use github::{publish_github, ApiReader, GitHub, Release, Written};
 pub use http::{check_url, Http, MAX_INDEX_FILE};
 pub use line::{parse_config, parse_lines, Config, Line, LineDep, LINE_VERSION};
 pub use location::{fill_dl, index_path, Index, Location, Source, DEFAULT_INDEX};

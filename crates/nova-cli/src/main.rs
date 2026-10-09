@@ -1,7 +1,7 @@
 //! The `nova` command-line tool.
 //!
 //! Dispatches to subcommands: parse, run, build, check, test, fmt, lsp,
-//! new, init, fetch, update, package, publish and version. Phase 0
+//! new, init, fetch, update, package, publish, login and version. Phase 0
 //! implemented `nova
 //! parse`, Phase 1 `nova run` (Cranelift JIT) and `nova check`, Phase 3.0
 //! the project commands (spec
@@ -62,6 +62,9 @@ enum Command {
     Fetch,
     /// Move locked versions to the newest that fit: every package, or one.
     Update(cmd::fetch::UpdateCmd),
+    /// Store a GitHub token for `nova publish`, read from standard input:
+    /// `gh auth token | nova login`.
+    Login,
     /// Pack the library into target/package/, and verify the tarball.
     Package,
     /// Pack and verify the library, then publish it to the package
@@ -106,6 +109,7 @@ fn main() -> Result<()> {
         Command::Remove(cmd) => cmd::deps::remove(cmd),
         Command::Fetch => cmd::fetch::fetch(),
         Command::Update(cmd) => cmd::fetch::update(cmd),
+        Command::Login => cmd::login::login(),
         Command::Package => cmd::package::package(),
         Command::Publish => cmd::package::publish(),
         Command::Version => cmd::version::run(),

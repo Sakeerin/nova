@@ -43,6 +43,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Misc
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The GitHub Contents API carries files as base64 (spec
+# docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
+# §7). ureq already brings 0.22; it declares Rust 1.48.
+base64 = "0.22"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
