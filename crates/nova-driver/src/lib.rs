@@ -15,6 +15,7 @@ pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Prob
 pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
@@ -49,24 +50,43 @@ pub fn check_file(path: &Path) -> Result<Outcome<()>> {
     check_program(Program::for_file(path))
 }
 
+/// What [`check_program_counted`] rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checked {
+    pub errors: usize,
+    /// The warnings shown. A registry package's are not (spec 3.3b §5.4).
+    pub warnings: usize,
+}
+
 /// [`check_file`] on `program` (spec 3.3a §5.1). MIR runs only when the
 /// program runs: its entry is `src/main.nova`, or a loose file.
 pub fn check_program(program: Program) -> Result<Outcome<()>> {
-    let runs = program.runs;
-    let mut ctx = FrontendContext::new(program)?;
-    let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
-        return Ok(Outcome::Failed { errors: ctx.errors });
-    };
-    if runs {
-        if let Err(diags) = nova_mir::lower_module(&module) {
-            ctx.render(&diags);
-        }
-    }
-    if ctx.errors > 0 {
-        Ok(Outcome::Failed { errors: ctx.errors })
+    let checked = check_program_counted(program)?;
+    if checked.errors > 0 {
+        Ok(Outcome::Failed {
+            errors: checked.errors,
+        })
     } else {
         Ok(Outcome::Ok(()))
     }
+}
+
+/// [`check_program`], counting the errors and warnings it rendered.
+/// Publishing's verification fails on either (spec 3.3b §6.6).
+pub fn check_program_counted(program: Program) -> Result<Checked> {
+    let runs = program.runs;
+    let mut ctx = FrontendContext::new(program)?;
+    if let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? {
+        if runs {
+            if let Err(diags) = nova_mir::lower_module(&module) {
+                ctx.render(&diags);
+            }
+        }
+    }
+    Ok(Checked {
+        errors: ctx.errors,
+        warnings: ctx.warnings,
+    })
 }
 
 /// Compile a file to native code via the Cranelift JIT.
@@ -548,6 +568,10 @@ struct FrontendContext {
     graph: Option<nova_pm::Graph>,
     roots: Vec<Root>,
     errors: usize,
+    warnings: usize,
+    /// The registry packages' modules, once loaded: a warning only about
+    /// them is not shown.
+    registry_files: HashSet<FileId>,
 }
 
 impl FrontendContext {
@@ -566,6 +590,8 @@ impl FrontendContext {
             graph,
             roots,
             errors: 0,
+            warnings: 0,
+            registry_files: HashSet::new(),
         };
         ctx.render(&diagnostics);
         if ctx.errors == 0 {
@@ -584,12 +610,21 @@ impl FrontendContext {
     }
 
     fn render(&mut self, diagnostics: &[Diagnostic]) {
-        self.errors += diagnostics
+        let shown: Vec<Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| !program::a_dependencys_warning(d, &self.registry_files))
+            .cloned()
+            .collect();
+        self.errors += shown
             .iter()
             .filter(|d| d.severity == Severity::Error)
             .count();
-        if !diagnostics.is_empty() {
-            render::emit_all(&self.db, diagnostics);
+        self.warnings += shown
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count();
+        if !shown.is_empty() {
+            render::emit_all(&self.db, &shown);
         }
     }
 
@@ -608,6 +643,7 @@ impl FrontendContext {
         let load =
             program::load_program(self.graph.as_ref(), &self.roots, &DiskSources, &mut self.db)
                 .with_context(|| format!("failed to read {}", entry.display()))?;
+        self.registry_files = program::registry_files(self.graph.as_ref(), &load.modules);
         self.render(&load.diagnostics);
         Ok(load.modules)
     }
