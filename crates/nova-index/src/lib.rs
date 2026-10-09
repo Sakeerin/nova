@@ -11,6 +11,7 @@ mod http;
 mod line;
 mod location;
 mod pack;
+mod publish;
 mod read;
 mod sync;
 
@@ -20,5 +21,6 @@ pub use http::{check_url, Http, MAX_INDEX_FILE};
 pub use line::{parse_config, parse_lines, Config, Line, LineDep, LINE_VERSION};
 pub use location::{fill_dl, index_path, Index, Location, Source, DEFAULT_INDEX};
 pub use pack::{pack, sha256_hex, Packed, MAX_TARBALL};
+pub use publish::{check_new, publish_local};
 pub use read::{reader_for, HttpReader, LocalReader, Reader, View};
 pub use sync::{sync, write_lock, SyncError, SyncRequest, Synced};

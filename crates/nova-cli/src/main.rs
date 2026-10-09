@@ -1,13 +1,16 @@
 //! The `nova` command-line tool.
 //!
 //! Dispatches to subcommands: parse, run, build, check, test, fmt, lsp,
-//! new, init and version. Phase 0 implemented `nova parse`, Phase 1 `nova
-//! run` (Cranelift JIT) and `nova check`, Phase 3.0 the project commands
-//! (spec `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
+//! new, init, package, publish and version. Phase 0 implemented `nova
+//! parse`, Phase 1 `nova run` (Cranelift JIT) and `nova check`, Phase 3.0
+//! the project commands (spec
+//! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
 //! Phase 3.1 `nova fmt` (spec
-//! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`), and
+//! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`),
 //! Phase 3.2 `nova lsp` (spec
-//! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`).
+//! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`), and
+//! Phase 3.3b the package index (spec
+//! `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`).
 
 mod cmd;
 mod embedded;
@@ -53,6 +56,11 @@ enum Command {
     Add(cmd::deps::AddCmd),
     /// Remove a dependency from nova.toml.
     Remove(cmd::deps::RemoveCmd),
+    /// Pack the library into target/package/, and verify the tarball.
+    Package,
+    /// Pack and verify the library, then publish it to the package
+    /// index.
+    Publish,
     /// Show the version, the target, and whether the runtime library is
     /// embedded.
     Version,
@@ -90,6 +98,8 @@ fn main() -> Result<()> {
         Command::Init(cmd) => cmd::new::init(cmd),
         Command::Add(cmd) => cmd::deps::add(cmd),
         Command::Remove(cmd) => cmd::deps::remove(cmd),
+        Command::Package => cmd::package::package(),
+        Command::Publish => cmd::package::publish(),
         Command::Version => cmd::version::run(),
     }
 }
