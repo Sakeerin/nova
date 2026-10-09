@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use nova_diagnostics::{Diagnostic, FileDb, FileId, Severity, Span};
-use nova_pm::{Edge, Graph, GraphPackage, PackageId};
+use nova_pm::{Edge, Graph, GraphPackage, Offline, PackageId};
 use nova_resolver::ImportTarget;
 
 use crate::analyze::Sources;
@@ -97,8 +97,15 @@ impl Program {
     /// The package whose `nova.toml` is in `root` (empty for the current
     /// directory), with the roots `roots` names that exist.
     pub fn for_package(root: &Path, roots: Roots) -> Program {
+        Program::for_package_in(root, roots, &Offline::from_env())
+    }
+
+    /// [`Program::for_package`], with registry packages found as `offline`
+    /// says (spec 3.3b §5.4): tests pass the registry directory, and
+    /// publishing's verification reads no dev-dependencies.
+    pub fn for_package_in(root: &Path, roots: Roots, offline: &Offline) -> Program {
         let mut db = FileDb::new();
-        let (graph, diagnostics) = nova_pm::graph(root, &mut db);
+        let (graph, diagnostics) = nova_pm::graph_with(root, None, offline, &mut db);
         let mut list = Vec::new();
         let main = under(root, "src/main.nova");
         if main.is_file() {
@@ -200,6 +207,30 @@ fn test_files(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// The files of `modules` that belong to a registry package (spec 3.3b
+/// §5.4). A registry manifest's warnings never leave the graph.
+pub(crate) fn registry_files(graph: Option<&Graph>, modules: &[Loaded]) -> HashSet<FileId> {
+    let Some(graph) = graph else {
+        return HashSet::new();
+    };
+    modules
+        .iter()
+        .filter(|m| m.package.is_some_and(|p| graph.package(p).registry))
+        .map(|m| m.file)
+        .collect()
+}
+
+/// Whether `d` is a warning about a registry package alone, which is not
+/// shown, as Cargo caps a dependency's lints: it has a label, and every
+/// label is in `registry`.
+pub(crate) fn a_dependencys_warning(d: &Diagnostic, registry: &HashSet<FileId>) -> bool {
+    d.severity == Severity::Warning
+        && !d.labels.is_empty()
+        && d.labels
+            .iter()
+            .all(|label| registry.contains(&label.span.file))
 }
 
 /// One module [`load_program`] read.

@@ -10,6 +10,7 @@
 //! The CLI's entry points share [`crate::program::load_program`] with it,
 //! through [`DiskSources`], and keep their own staged behaviour.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use nova_diagnostics::{Diagnostic, FileDb, FileId, Severity};
@@ -17,7 +18,7 @@ use nova_pm::{Graph, PackageId};
 use nova_resolver::{Definitions, ModuleSource};
 use nova_typeck::{CheckOptions, ProbePoint, ProbeResult};
 
-use crate::program::{load_program, Load, Program};
+use crate::program::{a_dependencys_warning, load_program, registry_files, Load, Program};
 
 /// Where `analyze` reads a module's text.
 pub trait Sources {
@@ -117,6 +118,7 @@ pub fn analyze_program(
     };
     diagnostics.extend(load.diagnostics);
     let dropped = load.dropped;
+    let registry = registry_files(graph.as_ref(), &load.modules);
     let mut modules = load.modules;
     let mut analysis = Analysis {
         db,
@@ -130,7 +132,7 @@ pub fn analyze_program(
         probe: ProbeResult::default(),
     };
     if stop(&diagnostics) {
-        analysis.diagnostics = diagnostics;
+        analysis.diagnostics = shown(diagnostics, &registry);
         return Ok(analysis);
     }
 
@@ -159,7 +161,7 @@ pub fn analyze_program(
     let resolved = nova_resolver::resolve_program(&module_sources, &std_files, extra_std);
     diagnostics.extend(resolved.diagnostics);
     if stop(&diagnostics) {
-        analysis.diagnostics = diagnostics;
+        analysis.diagnostics = shown(diagnostics, &registry);
         analysis.definitions = Some(resolved.definitions);
         return Ok(analysis);
     }
@@ -193,7 +195,7 @@ pub fn analyze_program(
     if options.keep_going {
         diagnostics.retain(|d| !about_a_dropped_name(d, &dropped));
     }
-    analysis.diagnostics = diagnostics;
+    analysis.diagnostics = shown(diagnostics, &registry);
     analysis.definitions = Some(resolved.definitions);
     analysis.module = Some(module);
     analysis.probe = checked.probe;
@@ -202,6 +204,12 @@ pub fn analyze_program(
 
 fn has_error(diagnostics: &[Diagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
+}
+
+/// `diagnostics` without a registry package's warnings (spec 3.3b §5.4).
+fn shown(mut diagnostics: Vec<Diagnostic>, registry: &HashSet<FileId>) -> Vec<Diagnostic> {
+    diagnostics.retain(|d| !a_dependencys_warning(d, registry));
+    diagnostics
 }
 
 /// Whether `d` is an E0001 about an item the parser dropped mid-edit (spec
