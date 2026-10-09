@@ -95,7 +95,9 @@ pub fn check_url(url: &str) -> Result<(), String> {
             Some(end) => &authority[..=end],
             None => authority.split(':').next().unwrap_or(""),
         };
-        if host == "127.0.0.1" || host == "[::1]" {
+        // With a user name the host is what follows the `@`, so an
+        // authority holding one is never loopback.
+        if !authority.contains('@') && (host == "127.0.0.1" || host == "[::1]") {
             return Ok(());
         }
     }
