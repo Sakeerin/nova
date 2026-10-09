@@ -28,13 +28,22 @@ impl Client {
     /// Start `nova lsp` and initialize it. With `watch`, the client offers
     /// dynamic registration of watched files, as VS Code does.
     pub fn start(root: &Path, watch: bool) -> Client {
-        let mut child = Command::new(assert_cmd::cargo::cargo_bin("nova"))
+        Client::start_with_env(root, watch, &[])
+    }
+
+    /// [`Client::start`], with each of `env` set for the server, such as
+    /// `NOVA_HOME`.
+    pub fn start_with_env(root: &Path, watch: bool, env: &[(&str, &Path)]) -> Client {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin("nova"));
+        command
             .arg("lsp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("start nova lsp");
+            .stderr(Stdio::inherit());
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().expect("start nova lsp");
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, rx) = mpsc::channel();

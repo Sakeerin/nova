@@ -190,11 +190,18 @@ fn run(program: Program, overlay: &Overlay, module_only: bool) -> Result<Analysi
 /// - each open project file it does not reach is checked on its own, as a
 ///   module;
 /// - a loose file is its own entry, and a module unless it declares
-///   `fn main`.
+///   `fn main`;
+/// - a project in nova's cache of downloaded packages is not checked (spec
+///   3.3b §5.5).
 ///
 /// The publishes, and the project's package directories; `None` after a
 /// panic.
 fn check(job: &Job) -> Option<(Vec<Publish>, Vec<PathKey>)> {
+    // A downloaded package belongs to no project: nothing is checked or
+    // published for its files (spec 3.3b §5.5).
+    if in_the_cache(&job.project) {
+        return Some((Vec::new(), Vec::new()));
+    }
     let mut out = Vec::new();
     let mut dirs: Vec<PathKey> = Vec::new();
     match &job.project {
@@ -245,6 +252,18 @@ fn check(job: &Job) -> Option<(Vec<Publish>, Vec<PathKey>)> {
         }
     }
     Some((out, dirs))
+}
+
+/// Whether `project` is inside nova's cache of downloaded packages.
+fn in_the_cache(project: &ProjectKey) -> bool {
+    let Some(registry) = nova_pm::registry_dir() else {
+        return false;
+    };
+    let path = match project {
+        ProjectKey::Root(dir) => dir.as_path(),
+        ProjectKey::Loose(file) => file.as_path(),
+    };
+    PathKey::of(path).is_under(&PathKey::of(&registry))
 }
 
 /// One publish per file `analysis` owns (spec 3.3a §6): with `all`, each
