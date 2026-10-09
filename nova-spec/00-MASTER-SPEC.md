@@ -21,6 +21,11 @@
 | Bootstrap language | **Rust** (edition 2021, MSRV 1.78) |
 | Self-hosting target | Phase 5 (~month 42) |
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** Phase 3 has
+no registry domain. The package index is the GitHub repository
+`Sakeerin/nova-index`, read over HTTPS
+(`docs/adr/0026-phase-3-scope.md`, `docs/adr/0031-package-index-and-publishing.md`).
+
 If "Nova" is taken when you check the registry, fall back to: `Nyx`, `Lumen`, `Vela`, `Astra` — in that order.
 
 ---
@@ -628,7 +633,15 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
    `docs/adr/0028-the-formatter.md` reads "only `--check`" as "no style
    options".
 2. `crates/nova-pm` — package manager + `nova.toml` parsing + lock file
+   **Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** built in
+   Phases 3.0, 3.3a and 3.3b. `nova.lock`, the resolver and the offline
+   package graph are in `nova-pm`; reading the index, downloading and
+   publishing are in `crates/nova-index` (ADR 0030, ADR 0031).
 3. Registry server (separate repo `novalang/registry`) — Rust + Postgres + S3
+   **Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** no
+   server. The registry is a git-backed index in a GitHub repository, with
+   tarballs as release assets, written through GitHub's REST API (ADR 0026,
+   ADR 0031).
 4. `crates/nova-lsp` — LSP server (use `tower-lsp`)
    **Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** built with
    `lsp-server` 0.7.8 and `lsp-types` 0.97 instead (ADR 0029).
