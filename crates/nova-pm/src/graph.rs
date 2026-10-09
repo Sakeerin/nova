@@ -1,14 +1,21 @@
-//! The package graph (spec
+//! The package graph (specs
 //! `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
-//! §3): the root package, and every package its path dependencies reach.
+//! §3 and
+//! `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`
+//! §5.4): the root package, and every package its dependencies reach,
+//! found by path or through `nova.lock` and the registry directory. The
+//! graph never touches the network.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
-use nova_diagnostics::{Diagnostic, FileDb, FileId, Span};
+use nova_diagnostics::{Diagnostic, FileDb, FileId, Severity, Span};
+use semver::VersionReq;
 
+use crate::lock::{parse_lock, Lock, LOCKFILE};
 use crate::manifest::{Dependency, Manifest};
-use crate::{import_name, real_path, MANIFEST};
+use crate::resolve::Requirement;
+use crate::{import_name, index_dir_name, real_path, registry_dir, MANIFEST};
 
 /// A package's index in its [`Graph`]. The root is `PackageId(0)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -39,6 +46,9 @@ pub struct GraphPackage {
     pub manifest_file: FileId,
     pub has_lib: bool,
     pub has_main: bool,
+    /// Whether it was found in the registry directory (spec 3.3b §5.4).
+    /// Its warnings are not shown.
+    pub registry: bool,
     pub dependencies: Vec<Edge>,
     /// Read for the root package only (spec §3.3).
     pub dev_dependencies: Vec<Edge>,
@@ -91,15 +101,40 @@ impl Graph {
     }
 }
 
+/// Where the graph finds registry packages (spec 3.3b §5.4).
+#[derive(Debug, Clone)]
+pub struct Offline {
+    /// `$NOVA_HOME/registry`. `None` when `$NOVA_HOME` cannot be found.
+    pub registry: Option<PathBuf>,
+    /// The lock to use instead of the root's `nova.lock`: `nova add`
+    /// checks the lock it would write this way.
+    pub lock: Option<Lock>,
+    /// Whether the root's `[dev-dependencies]` are read. Publishing's
+    /// verification reads none (spec 3.3b §6.6).
+    pub dev: bool,
+}
+
+impl Offline {
+    /// The registry directory from this process's environment, the root's
+    /// own `nova.lock`, and its dev-dependencies.
+    pub fn from_env() -> Offline {
+        Offline {
+            registry: registry_dir(),
+            lock: None,
+            dev: true,
+        }
+    }
+}
+
 /// Read the package at `root`, the directory holding its `nova.toml` (empty
-/// for the current directory), and every package its path dependencies
-/// reach. Every manifest goes into `db`, so each diagnostic's label renders.
+/// for the current directory), and every package its dependencies reach.
+/// Every manifest goes into `db`, so each diagnostic's label renders.
 ///
 /// The graph is partial on error: what resolved is kept, with the
 /// diagnostics. It is `None` only when the root's own manifest cannot be
 /// read or parsed.
 pub fn graph(root: &Path, db: &mut FileDb) -> (Option<Graph>, Vec<Diagnostic>) {
-    graph_from(root, None, db)
+    graph_with(root, None, &Offline::from_env(), db)
 }
 
 /// [`graph`], with the root's `nova.toml` taken from `text` when it is
@@ -109,48 +144,71 @@ pub fn graph_from(
     text: Option<&str>,
     db: &mut FileDb,
 ) -> (Option<Graph>, Vec<Diagnostic>) {
-    let mut builder = Builder {
-        db,
-        diagnostics: Vec::new(),
-        packages: Vec::new(),
-    };
-    let Some(package) = builder.read(root, text) else {
+    graph_with(root, text, &Offline::from_env(), db)
+}
+
+/// [`graph_from`], with registry packages found as `offline` says.
+pub fn graph_with(
+    root: &Path,
+    text: Option<&str>,
+    offline: &Offline,
+    db: &mut FileDb,
+) -> (Option<Graph>, Vec<Diagnostic>) {
+    let mut builder = Builder::new(root, db, offline, Mode::Graph);
+    let Some(package) = builder.read(root, text, false) else {
         return (None, builder.diagnostics);
     };
-    if !package.has_lib && !package.has_main {
-        builder.error(
-            "M0013",
-            format!(
-                "package `{}` has neither src/lib.nova nor src/main.nova",
-                package.name
-            ),
-            package.manifest.package.span,
-            "a package needs a library, a program, or both",
-        );
-    }
-    if package.has_lib && is_keyword(&package.import_name) {
-        builder.error(
-            "M0012",
-            format!(
-                "library `{}` would be imported as `{}`, which is a keyword",
-                package.name, package.import_name
-            ),
-            package.manifest.package.span,
-            "choose another name",
-        );
-    }
+    builder.check_root(&package);
     builder.packages.push(package);
-    let mut queue = VecDeque::from([PackageId(0)]);
-    while let Some(id) = queue.pop_front() {
-        builder.expand(id, &mut queue);
-    }
-    builder.cycles();
+    builder.walk();
     let Builder {
         diagnostics,
         packages,
         ..
     } = builder;
     (Some(Graph { packages }), diagnostics)
+}
+
+/// Every version entry that the root and its path packages declare, for
+/// the resolver (spec 3.3b §4.1): who made each one, and the root's entry
+/// through which it is reached. The root's dev-dependencies count when
+/// `dev` is set. The root's `nova.toml` is `text` when it is given.
+///
+/// Registry packages are not read: their requirements come from the index.
+/// The diagnostics are the manifests' and the path graph's, without M0013,
+/// since `nova add` syncs a package before it has a source file.
+pub fn requirements(
+    root: &Path,
+    text: Option<&str>,
+    dev: bool,
+    db: &mut FileDb,
+) -> (Vec<Requirement>, Vec<Diagnostic>) {
+    let offline = Offline {
+        registry: None,
+        lock: None,
+        dev,
+    };
+    let mut builder = Builder::new(root, db, &offline, Mode::Collect);
+    let Some(package) = builder.read(root, text, false) else {
+        return (Vec::new(), builder.diagnostics);
+    };
+    builder.check_root(&package);
+    builder.packages.push(package);
+    builder.walk();
+    let graph = Graph {
+        packages: std::mem::take(&mut builder.packages),
+    };
+    let found = builder
+        .requirements
+        .into_iter()
+        .map(|(mut requirement, from)| {
+            if let Some(span) = graph.reached_through(from) {
+                requirement.span = span;
+            }
+            requirement
+        })
+        .collect();
+    (found, builder.diagnostics)
 }
 
 /// Whether `name` is one of Nova's keywords, which no import name may be.
@@ -165,10 +223,50 @@ enum Visit {
     Done,
 }
 
+/// What the builder does with a version entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Find its package through the lock and the registry directory.
+    Graph,
+    /// Record it as a [`Requirement`].
+    Collect,
+}
+
+/// The root's `nova.lock`, once read.
+enum LockState {
+    Missing,
+    Unreadable,
+    Read(Lock),
+}
+
 struct Builder<'a> {
     db: &'a mut FileDb,
+    offline: &'a Offline,
+    mode: Mode,
+    /// The root's directory, where its `nova.lock` is.
+    root: PathBuf,
     diagnostics: Vec<Diagnostic>,
     packages: Vec<GraphPackage>,
+    /// Read at the first registry entry.
+    lock: Option<LockState>,
+    /// In [`Mode::Collect`]: each version entry, and the package that made
+    /// it.
+    requirements: Vec<(Requirement, PackageId)>,
+}
+
+impl<'a> Builder<'a> {
+    fn new(root: &Path, db: &'a mut FileDb, offline: &'a Offline, mode: Mode) -> Builder<'a> {
+        Builder {
+            db,
+            offline,
+            mode,
+            root: root.to_path_buf(),
+            diagnostics: Vec::new(),
+            packages: Vec::new(),
+            lock: None,
+            requirements: Vec::new(),
+        }
+    }
 }
 
 impl Builder<'_> {
@@ -177,10 +275,48 @@ impl Builder<'_> {
             .push(Diagnostic::error(code, message).with_primary_label(at, label));
     }
 
+    /// M0013 and M0012 on the root package itself. M0013 is the graph's
+    /// alone (see [`requirements`]).
+    fn check_root(&mut self, package: &GraphPackage) {
+        if self.mode == Mode::Graph && !package.has_lib && !package.has_main {
+            self.error(
+                "M0013",
+                format!(
+                    "package `{}` has neither src/lib.nova nor src/main.nova",
+                    package.name
+                ),
+                package.manifest.package.span,
+                "a package needs a library, a program, or both",
+            );
+        }
+        if package.has_lib && is_keyword(&package.import_name) {
+            self.error(
+                "M0012",
+                format!(
+                    "library `{}` would be imported as `{}`, which is a keyword",
+                    package.name, package.import_name
+                ),
+                package.manifest.package.span,
+                "choose another name",
+            );
+        }
+    }
+
+    /// Expand every package, breadth first from the root, then find the
+    /// cycles.
+    fn walk(&mut self) {
+        let mut queue = VecDeque::from([PackageId(0)]);
+        while let Some(id) = queue.pop_front() {
+            self.expand(id, &mut queue);
+        }
+        self.cycles();
+    }
+
     /// The package whose manifest is `dir/nova.toml`, or `text` when it is
     /// given, with no edges yet. `None` when the manifest cannot be read or
-    /// has errors.
-    fn read(&mut self, dir: &Path, text: Option<&str>) -> Option<GraphPackage> {
+    /// has errors. A registry package's warnings are dropped (spec 3.3b
+    /// §5.4).
+    fn read(&mut self, dir: &Path, text: Option<&str>, registry: bool) -> Option<GraphPackage> {
         let path = dir.join(MANIFEST);
         let source = match text {
             Some(text) => text.to_string(),
@@ -197,7 +333,11 @@ impl Builder<'_> {
         };
         let file = self.db.add(path.display().to_string(), source.as_str());
         let (manifest, diagnostics) = crate::manifest::parse(&source, file);
-        self.diagnostics.extend(diagnostics);
+        self.diagnostics.extend(
+            diagnostics
+                .into_iter()
+                .filter(|d| !registry || d.severity == Severity::Error),
+        );
         let manifest = manifest?;
         let canonical = real_path(if dir.as_os_str().is_empty() {
             Path::new(".")
@@ -212,6 +352,7 @@ impl Builder<'_> {
             canonical,
             has_lib: src.join("lib.nova").is_file(),
             has_main: src.join("main.nova").is_file(),
+            registry,
             manifest,
             manifest_file: file,
             dependencies: Vec::new(),
@@ -220,7 +361,8 @@ impl Builder<'_> {
     }
 
     /// Resolve package `id`'s entries, and for the root its
-    /// dev-dependencies, queueing each package read for the first time.
+    /// dev-dependencies when they are read, queueing each package read for
+    /// the first time.
     fn expand(&mut self, id: PackageId, queue: &mut VecDeque<PackageId>) {
         let package = &self.packages[id.0 as usize];
         let mut entries: Vec<(Dependency, bool)> = package
@@ -230,7 +372,7 @@ impl Builder<'_> {
             .cloned()
             .map(|d| (d, false))
             .collect();
-        if id == PackageId(0) {
+        if id == PackageId(0) && self.offline.dev {
             entries.extend(
                 package
                     .manifest
@@ -312,20 +454,11 @@ impl Builder<'_> {
         dependency: &Dependency,
         queue: &mut VecDeque<PackageId>,
     ) -> Option<Edge> {
-        let Some(path) = &dependency.path else {
-            self.diagnostics.push(
-                Diagnostic::error(
-                    "M0005",
-                    format!(
-                        "dependency `{}` is a registry dependency; registry dependencies \
-                         arrive with the package index",
-                        dependency.name
-                    ),
-                )
-                .with_primary_label(dependency.span, "declared here")
-                .with_note("use `path = \"...\"` for a local package"),
-            );
-            return None;
+        let path = match (&dependency.path, &dependency.version) {
+            (Some(path), _) => path,
+            (None, Some(req)) => return self.registry_edge(from, dependency, &req.clone(), queue),
+            // The manifest parser gives every entry one or the other.
+            (None, None) => return None,
         };
         let at = dependency.path_span.unwrap_or(dependency.span);
         let declarer = &self.packages[from.0 as usize];
@@ -387,52 +520,8 @@ impl Builder<'_> {
                 PackageId(index as u32)
             }
             None => {
-                let new = self.read(&dir, None)?;
-                if new.name != dependency.name {
-                    let message = format!(
-                        "dependency `{}` is the package `{}`",
-                        dependency.name, new.name
-                    );
-                    self.error(
-                        "M0008",
-                        message,
-                        dependency.span,
-                        "an entry's key must be the package's name",
-                    );
-                    return None;
-                }
-                if !new.has_lib {
-                    self.error(
-                        "M0009",
-                        format!(
-                            "dependency `{}` is not a library: {} has no src/lib.nova",
-                            dependency.name,
-                            dir.display()
-                        ),
-                        at,
-                        "a dependency needs src/lib.nova",
-                    );
-                    return None;
-                }
-                if let Some(other) = self.packages.iter().find(|p| p.name == new.name) {
-                    let message = format!(
-                        "two packages named `{}` in one build: {} and {}",
-                        new.name,
-                        other.dir.display(),
-                        dir.display()
-                    );
-                    self.error(
-                        "M0011",
-                        message,
-                        dependency.span,
-                        "the second package of that name",
-                    );
-                    return None;
-                }
-                self.packages.push(new);
-                let id = PackageId(self.packages.len() as u32 - 1);
-                queue.push_back(id);
-                id
+                let new = self.read(&dir, None, false)?;
+                self.admit(new, dependency, at, queue)?
             }
         };
         Some(Edge {
@@ -440,6 +529,225 @@ impl Builder<'_> {
             package,
             span: dependency.span,
         })
+    }
+
+    /// A package read for the first time, checked against the entry that
+    /// named it (M0008, M0009, M0011), then added to the graph and queued.
+    fn admit(
+        &mut self,
+        new: GraphPackage,
+        dependency: &Dependency,
+        at: Span,
+        queue: &mut VecDeque<PackageId>,
+    ) -> Option<PackageId> {
+        if new.name != dependency.name {
+            let message = format!(
+                "dependency `{}` is the package `{}`",
+                dependency.name, new.name
+            );
+            self.error(
+                "M0008",
+                message,
+                dependency.span,
+                "an entry's key must be the package's name",
+            );
+            return None;
+        }
+        if !new.has_lib {
+            self.error(
+                "M0009",
+                format!(
+                    "dependency `{}` is not a library: {} has no src/lib.nova",
+                    dependency.name,
+                    new.dir.display()
+                ),
+                at,
+                "a dependency needs src/lib.nova",
+            );
+            return None;
+        }
+        if let Some(other) = self.packages.iter().find(|p| p.name == new.name) {
+            let message = format!(
+                "two packages named `{}` in one build: {} and {}",
+                new.name,
+                other.dir.display(),
+                new.dir.display()
+            );
+            self.error(
+                "M0011",
+                message,
+                dependency.span,
+                "the second package of that name",
+            );
+            return None;
+        }
+        self.packages.push(new);
+        let id = PackageId(self.packages.len() as u32 - 1);
+        queue.push_back(id);
+        Some(id)
+    }
+
+    /// Resolve a version entry of package `from` through the lock and the
+    /// registry directory (spec 3.3b §5.4), or in [`Mode::Collect`] record
+    /// it.
+    fn registry_edge(
+        &mut self,
+        from: PackageId,
+        dependency: &Dependency,
+        req: &VersionReq,
+        queue: &mut VecDeque<PackageId>,
+    ) -> Option<Edge> {
+        if self.mode == Mode::Collect {
+            let by = self.packages[from.0 as usize].name.clone();
+            let requirement = Requirement {
+                name: dependency.name.clone(),
+                req: req.clone(),
+                by,
+                span: dependency.span,
+            };
+            self.requirements.push((requirement, from));
+            return None;
+        }
+        let name = &dependency.name;
+        let found = self
+            .lock()
+            .map(|lock| (lock.index.clone(), lock.find(name).cloned()));
+        let Some((index, Some(locked))) = found else {
+            self.missing(
+                dependency,
+                format!("dependency `{name}` is not downloaded yet; run `nova fetch`"),
+            );
+            return None;
+        };
+        if !req.matches(&locked.version) {
+            self.missing(
+                dependency,
+                format!(
+                    "dependency `{name}` is locked at {}, which does not meet `{req}`; run \
+                     `nova fetch`",
+                    locked.version
+                ),
+            );
+            return None;
+        }
+        let Some(registry) = self.offline.registry.clone() else {
+            self.missing(
+                dependency,
+                format!(
+                    "dependency `{name}` cannot be found: cannot place the package cache: set \
+                     NOVA_HOME to a writable directory"
+                ),
+            );
+            return None;
+        };
+        let dir = registry
+            .join("src")
+            .join(index_dir_name(&index))
+            .join(format!("{name}-{}", locked.version));
+        if !dir.join(MANIFEST).is_file() {
+            self.missing(
+                dependency,
+                format!("dependency `{name}` is not downloaded yet; run `nova fetch`"),
+            );
+            return None;
+        }
+        let canonical = real_path(&dir);
+        let package = match self.packages.iter().position(|p| p.canonical == canonical) {
+            Some(index) => PackageId(index as u32),
+            None => {
+                let new = self.read(&dir, None, true)?;
+                // Unpacking checked both (spec §5.2); a copy edited since is
+                // refused here.
+                if let Some(entry) = new.manifest.dependencies.iter().find(|d| d.path.is_some()) {
+                    self.error(
+                        "M0017",
+                        format!(
+                            "downloaded package `{name}` {} has a path dependency `{}`",
+                            locked.version, entry.name
+                        ),
+                        dependency.span,
+                        "declared here",
+                    );
+                    return None;
+                }
+                let mut names: Vec<String> = new
+                    .manifest
+                    .dependencies
+                    .iter()
+                    .map(|d| d.name.clone())
+                    .collect();
+                names.sort();
+                if names != locked.dependencies {
+                    self.missing(
+                        dependency,
+                        format!(
+                            "the downloaded copy of `{name}` {} does not match nova.lock; delete \
+                             {} and run `nova fetch`",
+                            locked.version,
+                            dir.display()
+                        ),
+                    );
+                    return None;
+                }
+                self.admit(new, dependency, dependency.span, queue)?
+            }
+        };
+        Some(Edge {
+            import_name: import_name(name),
+            package,
+            span: dependency.span,
+        })
+    }
+
+    /// M0005 on `dependency`: a registry entry the cache cannot satisfy.
+    fn missing(&mut self, dependency: &Dependency, message: String) {
+        self.diagnostics.push(
+            Diagnostic::error("M0005", message)
+                .with_primary_label(dependency.span, "declared here"),
+        );
+    }
+
+    /// The lock registry entries are found through: [`Offline::lock`], else
+    /// the root's `nova.lock`, read once. M0016 when it cannot be read.
+    fn lock(&mut self) -> Option<&Lock> {
+        if self.lock.is_none() {
+            let state = match &self.offline.lock {
+                Some(lock) => LockState::Read(lock.clone()),
+                None => {
+                    let path = self.root.join(LOCKFILE);
+                    match std::fs::read_to_string(&path) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            LockState::Missing
+                        }
+                        Err(error) => {
+                            self.diagnostics.push(
+                                Diagnostic::error(
+                                    "M0016",
+                                    format!("nova.lock cannot be read: {error}"),
+                                )
+                                .with_note("delete nova.lock, or run `nova update`"),
+                            );
+                            LockState::Unreadable
+                        }
+                        Ok(text) => {
+                            let file = self.db.add(path.display().to_string(), text.as_str());
+                            match parse_lock(&text, file) {
+                                Ok(lock) => LockState::Read(lock),
+                                Err(diagnostic) => {
+                                    self.diagnostics.push(diagnostic);
+                                    LockState::Unreadable
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            self.lock = Some(state);
+        }
+        match &self.lock {
+            Some(LockState::Read(lock)) => Some(lock),
+            _ => None,
+        }
     }
 
     /// M0010 for each cycle of `[dependencies]` edges (spec §3.3), found
