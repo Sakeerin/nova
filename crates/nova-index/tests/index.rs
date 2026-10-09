@@ -201,3 +201,22 @@ fn a_view_compares_names_exactly() {
     assert_eq!(view.versions("geom").unwrap(), None);
     assert!(view.versions("Geom").unwrap().is_some());
 }
+
+#[test]
+fn an_index_path_is_made_for_any_name() {
+    // Final review I2: no name makes it panic.
+    assert_eq!(index_path("ไทย"), "3/ไ/ไทย");
+    assert_eq!(index_path("éa"), "2/éa");
+    assert_eq!(index_path(""), "1/");
+}
+
+#[test]
+fn a_line_whose_names_are_not_package_names_is_skipped() {
+    let mut bad_name = line("geom", "1.0.0", &[]);
+    bad_name.name = "ไทย".into();
+    let bad_dep = line("geom", "1.0.0", &[("é", "^1")]);
+    let text = format!("{}\n{}\n", bad_name.to_json(), bad_dep.to_json());
+    let (lines, notes) = parse_lines(&text, "ge/om/geom");
+    assert!(lines.is_empty(), "{lines:?}");
+    assert_eq!(notes.len(), 2, "{notes:?}");
+}

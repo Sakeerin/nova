@@ -412,3 +412,12 @@ fn notes_about_bad_index_lines_are_returned() {
         synced.notes
     );
 }
+
+#[test]
+fn a_dependency_name_that_is_not_a_package_name_is_m0003() {
+    // Final review I2: a hand-written key outside ASCII used to panic in
+    // `index_path`.
+    let f = Fixture::new("not-a-name");
+    let app = f.app("\n[dependencies]\n\"ไทย\" = \"1\"\n");
+    assert_eq!(codes(f.sync(&app, Unlock::Nothing).unwrap_err()), ["M0003"]);
+}

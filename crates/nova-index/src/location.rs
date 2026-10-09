@@ -89,13 +89,16 @@ pub fn fill_dl(dl: &str, name: &str, version: &str) -> String {
 }
 
 /// The path of `name`'s file in an index (spec §3.1): Cargo's sparse
-/// layout, in lower case. Package names are ASCII.
+/// layout, in lower case. Package names are ASCII; any other name still
+/// gets a path, counted in characters, rather than a panic.
 pub fn index_path(name: &str) -> String {
     let name = name.to_ascii_lowercase();
-    match name.len() {
+    let chars: Vec<char> = name.chars().collect();
+    let part = |range: std::ops::Range<usize>| chars[range].iter().collect::<String>();
+    match chars.len() {
         0 | 1 => format!("1/{name}"),
         2 => format!("2/{name}"),
-        3 => format!("3/{}/{name}", &name[..1]),
-        _ => format!("{}/{}/{name}", &name[..2], &name[2..4]),
+        3 => format!("3/{}/{name}", part(0..1)),
+        _ => format!("{}/{}/{name}", part(0..2), part(2..4)),
     }
 }
