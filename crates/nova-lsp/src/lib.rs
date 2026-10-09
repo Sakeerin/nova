@@ -181,7 +181,11 @@ impl Server<'_> {
                         .iter()
                         .filter_map(|c| uri::to_path(&uri::text(&c.uri)))
                         .collect();
-                    let manifest = paths.iter().any(|p| p.ends_with("nova.toml"));
+                    // A lock changes when `nova fetch` has unpacked
+                    // something (spec 3.3b §4.6, §5.5).
+                    let manifest = paths
+                        .iter()
+                        .any(|p| p.ends_with("nova.toml") || p.ends_with("nova.lock"));
                     let touched: Vec<ProjectKey> = self
                         .workspace
                         .projects()
@@ -299,9 +303,10 @@ impl Server<'_> {
         });
     }
 
-    /// Ask the client to watch `.nova` files and `nova.toml` (spec §6.1).
+    /// Ask the client to watch `.nova` files, `nova.toml` and `nova.lock` (spec
+    /// §6.1; 3.3b §5.5).
     fn register_watcher(&self) {
-        let watchers = ["**/*.nova", "**/nova.toml"]
+        let watchers = ["**/*.nova", "**/nova.toml", "**/nova.lock"]
             .iter()
             .map(|glob| lsp::FileSystemWatcher {
                 glob_pattern: lsp::GlobPattern::String(glob.to_string()),

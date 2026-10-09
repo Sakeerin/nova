@@ -884,3 +884,143 @@ fn an_unreached_file_does_not_repeat_the_manifests_diagnostics() {
         "the manifest's warning repeated on an unreached file: {params}"
     );
 }
+// === Phase 3.3b: registry packages (spec
+// docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
+// §5.5, §10.6) ===
+
+const INDEX: &str = "https://example.test/index/";
+
+/// `dir/app`, which depends on `geom = "<req>"` and runs `APP_MAIN`, and
+/// `dir/home`, the server's `NOVA_HOME`.
+fn registry_app(name: &str, req: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = fresh_dir(name);
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(
+        app.join("nova.toml"),
+        format!(
+            "{}\n[dependencies]\ngeom = \"{req}\"\n",
+            MANIFEST.replace("demo", "app")
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
+    (app, dir.join("home"))
+}
+
+/// `geom` 0.1.0, locked in `app`'s nova.lock and unpacked under `home`,
+/// with `lib` as its lib.nova. Its directory.
+fn lock_and_cache(app: &std::path::Path, home: &std::path::Path, lib: &str) -> std::path::PathBuf {
+    let geom = home
+        .join("registry")
+        .join("src")
+        .join(nova_pm::index_dir_name(INDEX))
+        .join("geom-0.1.0");
+    std::fs::create_dir_all(geom.join("src")).unwrap();
+    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
+    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
+    std::fs::write(
+        app.join("nova.lock"),
+        format!(
+            "version = 1\nindex = \"{INDEX}\"\n\n[[package]]\nname = \"geom\"\n\
+             version = \"0.1.0\"\nchecksum = \"00\"\ndependencies = []\n"
+        ),
+    )
+    .unwrap();
+    geom
+}
+
+#[test]
+fn an_entry_not_downloaded_is_m0005_on_its_manifest_entry() {
+    // A guard: Task 4's graph, through the server.
+    let (app, home) = registry_app("registry-unfetched", "0.1");
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    let params = client.diagnostics(&file_uri(&app.join("nova.toml")), nonempty);
+    assert_eq!(codes(&params), ["M0005"], "{params}");
+    let message = params["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(message.contains("run `nova fetch`"), "{message}");
+}
+
+#[test]
+fn a_locked_version_that_no_longer_fits_is_m0005() {
+    // A guard, as above.
+    let (app, home) = registry_app("registry-no-fit", "0.2");
+    lock_and_cache(&app, &home, GEOMETRY_FIXED);
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    let params = client.diagnostics(&file_uri(&app.join("nova.toml")), nonempty);
+    assert_eq!(codes(&params), ["M0005"], "{params}");
+    let message = params["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("is locked at 0.1.0, which does not meet `^0.2`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_changed_lock_rechecks_the_project() {
+    let (app, home) = registry_app("registry-relock", "0.1");
+    let toml = file_uri(&app.join("nova.toml"));
+    let mut client = Client::start_with_env(&app, true, &[("NOVA_HOME", &home)]);
+    open(
+        &mut client,
+        &file_uri(&app.join("src").join("main.nova")),
+        APP_MAIN,
+    );
+    client.diagnostics(&toml, nonempty);
+    let registration = client.wait_for(|m| m["method"] == "client/registerCapability");
+    let globs: Vec<String> = registration["params"]["registrations"][0]["registerOptions"]
+        ["watchers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["globPattern"].as_str().unwrap().to_string())
+        .collect();
+    assert!(globs.iter().any(|g| g == "**/nova.lock"), "{globs:?}");
+    // What `nova fetch` leaves: the package unpacked, then the lock.
+    lock_and_cache(&app, &home, GEOMETRY_FIXED);
+    client.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": file_uri(&app.join("nova.lock")), "type": 1 }] }),
+    );
+    client.diagnostics(&toml, |p| !nonempty(p));
+}
+
+#[test]
+fn a_file_in_the_cache_gets_nothing_published() {
+    let (app, home) = registry_app("registry-cached-file", "0.1");
+    let geom = lock_and_cache(&app, &home, GEOMETRY_BROKEN);
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    client.clear_unread();
+    let lib = file_uri(&geom.join("src").join("lib.nova"));
+    open(&mut client, &lib, GEOMETRY_BROKEN);
+    let sentinel = sentinel(&mut client, "registry-cached-file");
+    assert_eq!(client.last_diagnostics_before(&lib, &sentinel), None);
+}
+
+#[test]
+fn a_dependencys_warning_is_not_shown() {
+    // A guard: Task 5's dropping, through the server.
+    let (app, home) = registry_app("registry-warning", "0.1");
+    lock_and_cache(
+        &app,
+        &home,
+        "pub fn area() -> Int {\n    match 1 { _ => 1, 0 => 2 }\n}\n",
+    );
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    let main = file_uri(&app.join("src").join("main.nova"));
+    open(&mut client, &main, APP_MAIN);
+    let params = client.diagnostics(&main, |_| true);
+    assert!(!nonempty(&params), "{params}");
+    let params = client.diagnostics(&file_uri(&app.join("nova.toml")), |_| true);
+    assert!(!nonempty(&params), "{params}");
+}
