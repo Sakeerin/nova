@@ -190,6 +190,11 @@ incremental parsing and no `salsa`. What it needs instead is
 | Lock files | Reproducible builds |
 | Registry API | REST + S3 for package storage |
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** the index
+has no API of its own. It is read over HTTPS from a GitHub repository, and
+`nova publish` writes through GitHub's REST API, with tarballs as release
+assets (`docs/adr/0031-package-index-and-publishing.md`).
+
 ---
 
 ## 10. Frontend / WASM (Phase 4)
