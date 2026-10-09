@@ -189,19 +189,29 @@ fn add_refuses_without_writing() {
     let app = app(&dir, "geom");
     write(&app, &[("src/lib.nova", "")]);
     let manifest = app.join("nova.toml");
+    // An empty local index and a cache of the test's own (spec 3.3b
+    // §10): `nova add` reads the index.
+    let index = dir.join("index");
+    write(
+        &index,
+        &[("config.json", r#"{"dl":"dl/{name}-{version}.nova-pkg"}"#)],
+    );
     // The package's own directory is M0010 before its name is compared; a
     // key equal to the package's own name would be M0012 first.
     let cases: [(&[&str], &str); 4] = [
         (&["add", "me", "--path", "."], "M0010"),
         (&["add", "geom2", "--path", "../geom2"], "M0010"),
         (&["add", "geom", "--path", "../nowhere"], "M0007"),
-        (
-            &["add", "geom"],
-            "registry dependencies arrive with the package index",
-        ),
+        (&["add", "geom"], "M0014"),
     ];
     for (args, expected) in cases {
-        let out = nova().current_dir(&app).args(args).assert().failure();
+        let out = nova()
+            .current_dir(&app)
+            .env("NOVA_INDEX", &index)
+            .env("NOVA_HOME", dir.join("home"))
+            .args(args)
+            .assert()
+            .failure();
         assert!(
             stderr(&out).contains(expected),
             "{args:?}: {}",

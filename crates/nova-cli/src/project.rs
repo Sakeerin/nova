@@ -6,8 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use nova_diagnostics::{render, FileDb, Severity};
 use nova_driver::{Program, Roots};
+use nova_index::{Index, SyncError, SyncRequest, Synced};
+use nova_pm::Unlock;
 
 /// What a command works on.
 pub enum Mode {
@@ -100,4 +103,95 @@ pub fn refuse_cached(root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The package a command syncs (spec 3.3b §5.3): the project, or the
+/// package a file argument is directly in. `None` for a loose file.
+pub fn package_root(mode: &Mode) -> Option<PathBuf> {
+    match mode {
+        Mode::Project { root, .. } => Some(root.clone()),
+        Mode::File(file) => nova_driver::package_of(file).map(|(root, _)| root),
+    }
+}
+
+/// `nova run` and `nova build` refuse a project that is only a library
+/// before anything is synced (spec 3.3a §5.1, 3.3b §5.3). A manifest with
+/// errors is left for the graph to report.
+pub fn refuse_library(mode: &Mode) -> Result<()> {
+    let Mode::Project { root, .. } = mode else {
+        return Ok(());
+    };
+    let src = root.join("src");
+    if !src.join("lib.nova").is_file() || src.join("main.nova").is_file() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(root.join(nova_pm::MANIFEST)).unwrap_or_default();
+    let (Some(manifest), _) = nova_pm::parse(&text, nova_diagnostics::FileId::DUMMY) else {
+        return Ok(());
+    };
+    bail!(
+        "`{}` is a library: it has no src/main.nova; `nova check` and `nova test` work on it",
+        manifest.package.name
+    )
+}
+
+/// Sync the package `mode` works on before a command compiles it, as
+/// `nova fetch` does (spec 3.3b §5.3).
+pub fn sync(mode: &Mode) -> Result<()> {
+    sync_with(mode, Unlock::Nothing).map(|_| ())
+}
+
+/// The sync, with `unlock`. `Ok(None)` for a loose file, which has nothing
+/// to sync.
+pub fn sync_with(mode: &Mode, unlock: Unlock) -> Result<Option<Synced>> {
+    let Some(root) = package_root(mode) else {
+        return Ok(None);
+    };
+    refuse_cached(&root)?;
+    let index = Index::from_env().map_err(|e| anyhow!(e))?;
+    let mut reader = nova_index::reader_for(&index);
+    let registry = nova_pm::registry_dir();
+    let mut db = FileDb::new();
+    let result = nova_index::sync(
+        SyncRequest {
+            root: &root,
+            manifest: None,
+            dev: true,
+            unlock,
+            write: true,
+            index: &index,
+            reader: reader.as_mut(),
+            registry: registry.as_deref(),
+        },
+        &mut db,
+    );
+    finish(result, &db).map(Some)
+}
+
+/// A sync's outcome: its notes and downloads printed on standard error,
+/// its diagnostics rendered.
+pub fn finish(result: Result<Synced, SyncError>, db: &FileDb) -> Result<Synced> {
+    match result {
+        Ok(synced) => {
+            for note in &synced.notes {
+                eprintln!("note: {note}");
+            }
+            for package in &synced.unpacked {
+                eprintln!("downloaded {package}");
+            }
+            Ok(synced)
+        }
+        Err(SyncError::Diagnostics(diagnostics)) => {
+            render::emit_all(db, &diagnostics);
+            let errors = diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .count();
+            bail!(
+                "could not resolve the dependencies due to {errors} previous error{}",
+                if errors == 1 { "" } else { "s" }
+            )
+        }
+        Err(SyncError::Other(why)) => Err(anyhow!(why)),
+    }
 }

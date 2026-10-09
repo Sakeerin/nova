@@ -1,7 +1,8 @@
 //! The `nova` command-line tool.
 //!
 //! Dispatches to subcommands: parse, run, build, check, test, fmt, lsp,
-//! new, init, package, publish and version. Phase 0 implemented `nova
+//! new, init, fetch, update, package, publish and version. Phase 0
+//! implemented `nova
 //! parse`, Phase 1 `nova run` (Cranelift JIT) and `nova check`, Phase 3.0
 //! the project commands (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`),
@@ -52,10 +53,15 @@ enum Command {
     New(cmd::new::NewCmd),
     /// Make the current directory a project.
     Init(cmd::new::InitCmd),
-    /// Add a path dependency to nova.toml.
+    /// Add a dependency to nova.toml.
     Add(cmd::deps::AddCmd),
     /// Remove a dependency from nova.toml.
     Remove(cmd::deps::RemoveCmd),
+    /// Download what nova.lock names and the cache lacks, resolving first
+    /// if the lock does not answer nova.toml.
+    Fetch,
+    /// Move locked versions to the newest that fit: every package, or one.
+    Update(cmd::fetch::UpdateCmd),
     /// Pack the library into target/package/, and verify the tarball.
     Package,
     /// Pack and verify the library, then publish it to the package
@@ -98,6 +104,8 @@ fn main() -> Result<()> {
         Command::Init(cmd) => cmd::new::init(cmd),
         Command::Add(cmd) => cmd::deps::add(cmd),
         Command::Remove(cmd) => cmd::deps::remove(cmd),
+        Command::Fetch => cmd::fetch::fetch(),
+        Command::Update(cmd) => cmd::fetch::update(cmd),
         Command::Package => cmd::package::package(),
         Command::Publish => cmd::package::publish(),
         Command::Version => cmd::version::run(),

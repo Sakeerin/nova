@@ -61,6 +61,8 @@ fn entry(program: &Program) -> PathBuf {
 
 pub fn run(cmd: RunCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
+    project::refuse_library(&mode)?;
+    project::sync(&mode)?;
     let program = project::program_to_run(&mode)?;
     let mut args = vec![entry(&program).to_string_lossy().into_owned()];
     args.extend(cmd.args.iter().map(|a| a.to_string_lossy().into_owned()));
@@ -75,6 +77,8 @@ pub fn run(cmd: RunCmd) -> Result<()> {
 
 pub fn build(cmd: BuildCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
+    project::refuse_library(&mode)?;
+    project::sync(&mode)?;
     let program = project::program_to_run(&mode)?;
     let output = match (cmd.output, &mode) {
         (Some(output), _) => output,
@@ -117,6 +121,7 @@ pub fn build(cmd: BuildCmd) -> Result<()> {
 
 pub fn check(cmd: CheckCmd) -> Result<()> {
     let mode = project::mode(cmd.file)?;
+    project::sync(&mode)?;
     let program = mode.program(Roots::Check);
     let entry = entry(&program);
     match nova_driver::check_program(program)? {

@@ -3,7 +3,6 @@
 //! §6, §10.5). Every command runs with `NOVA_HOME` and `NOVA_INDEX` set to
 //! the test's own directories, so nothing reaches the internet.
 
-#[allow(unused_imports)]
 use std::env::consts::EXE_SUFFIX;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +44,6 @@ fn manifest(name: &str, version: &str, extra: &str) -> String {
 }
 
 const AREA: &str = "pub fn area() -> Int {\n    9\n}\n";
-#[allow(dead_code)]
 const MAIN_AREA: &str = "import geom\n\nfn main() {\n    println(\"${area()}\")\n}\n";
 /// A match whose second arm is unreachable: E0021, a warning.
 const UNREACHABLE: &str = "pub fn pick(n: Int) -> Int {\n    match n { _ => 1, 0 => 2 }\n}\n";
@@ -317,4 +315,176 @@ fn publishing_to_a_local_index_needs_a_relative_dl() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn add_from_the_index_writes_the_version_chosen_and_the_lock() {
+    let f = Fixture::new("add");
+    f.publish("geom", "0.1.0", "", AREA);
+    f.publish("geom", "0.2.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    let out = stdout(&f.nova(&app).args(["add", "geom"]).assert().success());
+    assert!(
+        out.contains("added geom = \"0.2.0\" to [dependencies]"),
+        "{out}"
+    );
+    assert!(read(&app.join("nova.toml")).contains("geom = \"0.2.0\""));
+    let lock = read(&app.join("nova.lock"));
+    assert!(
+        lock.contains("name = \"geom\"\nversion = \"0.2.0\""),
+        "{lock}"
+    );
+}
+
+#[test]
+fn add_with_a_requirement_writes_it_as_given() {
+    let f = Fixture::new("add-requirement");
+    f.publish("geom", "0.1.0", "", AREA);
+    f.publish("geom", "0.2.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom@0.1"]).assert().success();
+    assert!(read(&app.join("nova.toml")).contains("geom = \"0.1\""));
+    assert!(read(&app.join("nova.lock")).contains("version = \"0.1.0\""));
+}
+
+#[test]
+fn add_from_the_index_keeps_a_crlf_manifests_line_endings() {
+    // Review Focus 2.
+    let f = Fixture::new("add-crlf");
+    f.publish("geom", "0.1.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    let crlf = manifest("app", "0.1.0", "\n[dependencies]\n").replace('\n', "\r\n");
+    std::fs::write(app.join("nova.toml"), &crlf).unwrap();
+    f.nova(&app).args(["add", "geom"]).assert().success();
+    let text = read(&app.join("nova.toml"));
+    assert!(text.contains("geom = \"0.1.0\"\r\n"), "{text:?}");
+    assert!(!text.replace("\r\n", "").contains('\n'), "{text:?}");
+}
+
+#[test]
+fn a_refused_add_leaves_both_files_untouched() {
+    let f = Fixture::new("add-refused");
+    f.publish("geom", "0.1.0", "", AREA);
+    f.publish("json", "1.0.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom"]).assert().success();
+    let manifest_before = read(&app.join("nova.toml"));
+    let lock_before = read(&app.join("nova.lock"));
+    for (args, expected) in [
+        (&["add", "nope"][..], "M0014"),
+        (&["add", "json@9"][..], "M0015"),
+        (&["add", "x@1", "--path", "../x"][..], "never both"),
+    ] {
+        let out = f.nova(&app).args(args).assert().failure();
+        assert!(
+            stderr(&out).contains(expected),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+        assert_eq!(read(&app.join("nova.toml")), manifest_before, "{args:?}");
+        assert_eq!(read(&app.join("nova.lock")), lock_before, "{args:?}");
+    }
+}
+
+#[test]
+fn an_app_runs_builds_and_tests_with_a_published_library() {
+    let f = Fixture::new("end-to-end");
+    f.publish("geom", "0.1.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    write(
+        &app,
+        &[(
+            "tests/area.nova",
+            "import geom\n\n@test\nfn area_is_nine() {\n    assert_eq(area(), 9)\n}\n",
+        )],
+    );
+    f.nova(&app).args(["add", "geom"]).assert().success();
+    let out = f.nova(&app).arg("run").assert().success();
+    assert_eq!(stdout(&out).trim(), "9");
+    f.nova(&app).arg("build").assert().success();
+    let exe = app
+        .join("target")
+        .join("debug")
+        .join(format!("app{EXE_SUFFIX}"));
+    let ran = std::process::Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout).trim(), "9");
+    f.nova(&app).arg("test").assert().success();
+}
+
+#[test]
+fn update_moves_to_a_newer_version_and_says_so() {
+    let f = Fixture::new("update");
+    f.publish("geom", "0.1.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom@0.1"]).assert().success();
+    f.publish("geom", "0.1.1", "", AREA);
+    let out = stdout(&f.nova(&app).arg("update").assert().success());
+    assert!(out.contains("geom 0.1.0 -> 0.1.1"), "{out}");
+    let out = stdout(&f.nova(&app).arg("update").assert().success());
+    assert!(out.contains("nothing to update"), "{out}");
+}
+
+#[test]
+fn update_one_name_leaves_the_others() {
+    let f = Fixture::new("update-one");
+    f.publish("geom", "0.1.0", "", AREA);
+    f.publish("json", "1.0.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom@0.1"]).assert().success();
+    f.nova(&app).args(["add", "json@1"]).assert().success();
+    f.publish("geom", "0.1.1", "", AREA);
+    f.publish("json", "1.0.1", "", AREA);
+    let out = stdout(&f.nova(&app).args(["update", "geom"]).assert().success());
+    assert!(out.contains("geom 0.1.0 -> 0.1.1"), "{out}");
+    assert!(!out.contains("json"), "{out}");
+    assert!(read(&app.join("nova.lock")).contains("version = \"1.0.0\""));
+    let out = f.nova(&app).args(["update", "nope"]).assert().failure();
+    assert!(
+        stderr(&out).contains("`nope` is not in nova.lock"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn fetch_fills_the_cache_and_a_build_needs_no_index() {
+    let f = Fixture::new("fetch");
+    f.publish("geom", "0.1.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom"]).assert().success();
+    std::fs::remove_dir_all(&f.home).unwrap();
+    let out = stdout(&f.nova(&app).arg("fetch").assert().success());
+    assert!(out.contains("fetched 1 package"), "{out}");
+    let out = stdout(&f.nova(&app).arg("fetch").assert().success());
+    assert!(out.contains("nothing to fetch"), "{out}");
+    std::fs::rename(&f.index, f.dir.join("index-gone")).unwrap();
+    f.nova(&app).arg("build").assert().success();
+}
+
+#[test]
+fn a_command_inside_the_cache_is_refused() {
+    let f = Fixture::new("inside-cache");
+    f.publish("geom", "0.1.0", "", AREA);
+    let app = f.app("", MAIN_AREA);
+    f.nova(&app).args(["add", "geom"]).assert().success();
+    let out = f
+        .nova(&f.cached("geom", "0.1.0"))
+        .arg("check")
+        .assert()
+        .failure();
+    assert!(
+        stderr(&out).contains("is a downloaded package in nova's cache; it is read only"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_library_is_refused_by_run_before_anything_syncs() {
+    let f = Fixture::new("library-run");
+    let geom = f.library("geom", "0.1.0", "\n[dependencies]\nnope = \"1\"\n", AREA);
+    let out = f.nova(&geom).arg("run").assert().failure();
+    let err = stderr(&out);
+    assert!(err.contains("`geom` is a library"), "{err}");
+    assert!(!err.contains("M0014"), "{err}");
 }

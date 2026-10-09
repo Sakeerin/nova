@@ -184,8 +184,15 @@ fn each_graph_error_is_rendered_and_stops_the_command() {
             ("src/lib.nova", ""),
         ],
     );
+    // An empty local index and a cache of the test's own (spec 3.3b
+    // §10): `nova check` syncs first.
+    let index = dir.join("index");
+    write(
+        &index,
+        &[("config.json", r#"{"dl":"dl/{name}-{version}.nova-pkg"}"#)],
+    );
     let cases = [
-        ("M0005", "\n[dependencies]\nhttp = \"1.0\"\n"),
+        ("M0014", "\n[dependencies]\nhttp = \"1.0\"\n"),
         (
             "M0007",
             "\n[dependencies]\ngeom = { path = \"../nowhere\" }\n",
@@ -213,7 +220,13 @@ fn each_graph_error_is_rendered_and_stops_the_command() {
                 ("src/main.nova", "fn main() {}\n"),
             ],
         );
-        let out = nova().current_dir(&app).arg("check").assert().failure();
+        let out = nova()
+            .current_dir(&app)
+            .env("NOVA_INDEX", &index)
+            .env("NOVA_HOME", dir.join("home"))
+            .arg("check")
+            .assert()
+            .failure();
         let err = stderr(&out);
         assert!(err.contains(code), "{code}: {err}");
     }

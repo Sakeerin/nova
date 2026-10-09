@@ -163,6 +163,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // unlike `run`/`build`/`check`), so it always works on the project
     // around the current directory, or on `src/main.nova` outside any.
     let mode = crate::project::mode(None)?;
+    crate::project::sync(&mode)?;
     let program = mode.program(nova_driver::Roots::Test);
     let (exe, tests) = nova_driver::build_test_program(program)?;
 
