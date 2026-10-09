@@ -65,6 +65,11 @@ commitment the gate does not require.
   3.3 records the exact rules, yanking included.
 - **No server to run.** The costs move to GitHub's API limits and to the
   index repository's size, which 3.3 measures.
+
+  **Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** decision 1
+  is built as ADR 0031 records. Yanking is not in 3.3: a published version
+  stays, and its line never changes. The measurements wait for the by-hand
+  publish.
 - **A REPL and a debugger wait for a later phase.** The master spec's
   Phase 3 list is not amended; this ADR records the difference.
 - **Nothing removes old runtime caches** (ADR 0027), because `nova clean`

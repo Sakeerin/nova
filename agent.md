@@ -134,6 +134,11 @@ on `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`, and it
 analyses through `nova-driver`'s `analyze`
 (`docs/adr/0029-the-language-server.md`).
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** `nova-index`
+is the package index's client, built on `ureq` 3.2.1, pinned
+(`docs/adr/0031-package-index-and-publishing.md`). `nova-cli` depends on
+it; the driver and `nova-lsp` do not.
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)

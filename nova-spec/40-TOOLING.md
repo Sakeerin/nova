@@ -55,6 +55,13 @@ file that would change, or 2 on any error. ADR 0028 reads the master spec's
 "only `--check`" as "no style options"
 (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §7).
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** `nova
+add <pkg>[@<req>]`, `nova update [pkg]`, `nova publish` and `nova login`
+exist, with two commands this list lacks. `nova fetch` downloads what
+`nova.lock` names, and `nova package` packs and verifies a library
+(`docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`
+§6; ADR 0031).
+
 ### 1.2 Project Template (`nova new`)
 
 ```
@@ -267,21 +274,46 @@ version-only entry, and `nova_pm::graph` raises it, not the CLI.
 M0007–M0013 are the graph's errors. A dependency is imported by its name
 with each `-` replaced by `_` (ADR 0030).
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** a version
+entry resolves against the package index. M0005 now means an entry the
+cache cannot satisfy: not downloaded, locked at a version that no longer
+fits, or `NOVA_HOME` not found. M0014–M0017 are the index's errors: a
+package the index lacks, a conflict no version meets, an unreadable
+`nova.lock`, and a path dependency in a package to publish (ADR 0031).
+
 ### 4.2 Lock file (`nova.lock`)
 - TOML, similar to Cargo.lock
 - Records exact versions + hashes
 - Committed for binaries, optional for libraries
+
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** as built,
+`nova.lock` holds `version = 1`, the index's canonical form, and one
+`[[package]]` per registry package: its name, version, SHA-256 and
+dependencies' names. A path package is in the tree, so it is not
+locked. Every command that syncs writes it last, with `\n` endings
+(ADR 0031).
 
 ### 4.3 Resolver
 - Semver-based
 - Compatible with Cargo's resolver semantics
 - Edition compatibility rules
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** one
+version of each name per build, with Cargo's caret requirements. Locked
+versions that still fit are kept. Edition rules are out of Phase 3 (ADR
+0026; ADR 0031).
+
 ### 4.4 Registry
 - Central registry at `registry.novalang.dev` (run separately)
 - Backend: Rust (axum) + Postgres + S3
 - Mirror-friendly (full index downloadable)
 - `cargo`-like sparse index format
+
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** the index
+is a GitHub repository, `Sakeerin/nova-index`, read over HTTPS, with
+tarballs as release assets (ADR 0026). There is no server to run, and
+`registry.novalang.dev` does not exist. `NOVA_INDEX` names another
+index, a local directory included (ADR 0031).
 
 ### 4.5 Commands
 
@@ -304,11 +336,26 @@ manifest's comments and layout, and checks the graph before it writes.
 The version form, `nova update`, `nova publish` and `nova login` are
 3.3b's.
 
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** as built,
+`nova add <pkg>` writes the version it resolved, and `nova add
+<pkg>@<req>` the requirement given. `nova update <pkg>` lets only that
+package move. `nova login` reads a token from a pipe. `nova owner` is
+out of Phase 3 (ADR 0026; ADR 0031).
+
 ### 4.6 Publishing
 - `nova package` creates `.nova-pkg` (gzip tar)
 - Includes: source files, `nova.toml`, README, LICENSE
 - Excludes: `target/`, `nova.lock` (for libs), VCS dirs
 - Verification: must compile with no warnings
+
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** a
+`.nova-pkg` holds `nova.toml`, `src/`, `tests/` and the top-level
+`README*` and `LICENSE*`, under `<name>-<version>/`. It leaves out
+`target/`, `nova.lock` and every name starting with `.`, and is
+reproducible to the byte. Only a library is published, with no path in
+`[dependencies]`. The verification unpacks the tarball, resolves it
+afresh, and checks it as `nova check` does: any error, or any warning
+of its own, stops it (ADR 0031).
 
 ---
 
@@ -402,6 +449,10 @@ carries the first time it links a program; `NOVA_HOME` moves the whole
 directory. Until the install scripts exist (Phase 3.6),
 `cargo install --locked --git https://github.com/Sakeerin/nova nova-cli`
 installs a `nova` that needs nothing beside it (ADR 0027).
+
+**Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** `~/.nova`
+also holds `registry/`, the downloaded packages, and `credentials.toml`,
+the token `nova login` stores (ADR 0031).
 
 ### 10.2 Windows
 ```powershell
