@@ -22,3 +22,9 @@ semver = { workspace = true }
 # §3.1, §3.2). Both were already in the lockfile.
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Packing and unpacking (spec §6.5, §5.2). tar's default features add
+# xattr, which nova never reads; flate2 is the workspace's gzip; ring, as
+# nova-runtime has it, gives the SHA-256 the index records.
+tar = { version = "0.4", default-features = false }
+flate2 = { workspace = true }
+ring = "0.17"
