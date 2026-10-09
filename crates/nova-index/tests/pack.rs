@@ -50,12 +50,15 @@ fn entries(tarball: &[u8]) -> Vec<(String, tar::Header)> {
         .collect()
 }
 
+/// One entry of a crafted tarball: its path, its type and its data.
+type Entry<'a> = (&'a str, tar::EntryType, &'a str);
+
 /// A tarball holding each `(path, entry type, data)` exactly as given, with
 /// no checks on the path, as a hostile index could serve. The path is
 /// written straight into the header, since `tar`'s own setters refuse `..`
 /// and absolute paths. Paths and data are `&str`, so every case's tuple
 /// has one type.
-fn crafted(entries: &[(&str, tar::EntryType, &str)]) -> Vec<u8> {
+fn crafted(entries: &[Entry]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (path, kind, data) in entries {
         let mut header = tar::Header::new_gnu();
@@ -195,7 +198,7 @@ fn two_names_differing_only_in_case_are_refused() {
 #[test]
 fn unpacking_refuses_what_could_escape_or_merge() {
     use tar::EntryType::{Char, Directory, Regular, Symlink};
-    let cases: Vec<(&str, Vec<(&str, tar::EntryType, &str)>)> = vec![
+    let cases: Vec<(&str, Vec<Entry>)> = vec![
         (
             "a parent directory",
             vec![("geom-0.1.0/../evil", Regular, "x")],
