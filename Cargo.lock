@@ -1051,6 +1051,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova-index"
+version = "0.2.0"
+dependencies = [
+ "nova-diagnostics",
+ "nova-pm",
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nova-lexer"
 version = "0.2.0"
 dependencies = [
