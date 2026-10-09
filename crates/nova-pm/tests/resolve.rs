@@ -315,3 +315,31 @@ fn an_index_error_is_passed_on() {
         _ => panic!("expected the index's error"),
     }
 }
+
+#[test]
+fn a_conflict_moves_only_the_packages_it_names() {
+    // Final review I4: `d` is new and needs a newer `b` than the locked one.
+    // Only `b` moves; `a` and `c` keep their locked versions though newer
+    // ones fit (spec §4.3).
+    let mut index = index(vec![
+        ("a", vec![c("1.0.0", &[]), c("1.5.0", &[])]),
+        ("b", vec![c("1.0.0", &[]), c("1.1.0", &[])]),
+        ("c", vec![c("1.0.0", &[]), c("1.5.0", &[])]),
+        ("d", vec![c("1.0.0", &[("b", "^1.1")])]),
+    ]);
+    let lock = lock_of(&[("a", "1.0.0"), ("b", "1.0.0"), ("c", "1.0.0")]);
+    assert_eq!(
+        ok(
+            &[
+                req("a", "^1"),
+                req("b", "^1"),
+                req("c", "^1"),
+                req("d", "^1")
+            ],
+            Some(&lock),
+            Unlock::Nothing,
+            &mut index
+        ),
+        ["a 1.0.0", "b 1.1.0", "c 1.0.0", "d 1.0.0"]
+    );
+}

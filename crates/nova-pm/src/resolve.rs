@@ -85,6 +85,7 @@ pub fn resolve(
         pinned: HashMap::new(),
         strict: false,
         failure: None,
+        conflicted: Vec::new(),
     };
     match unlock {
         Unlock::All => search.run(requirements, HashMap::new(), false),
@@ -97,15 +98,25 @@ pub fn resolve(
                 other => other,
             }),
         Unlock::Nothing => {
-            let pinned = pins(None);
-            if pinned.is_empty() {
-                return search.run(requirements, pinned, false);
-            }
-            match search.run(requirements, pinned, false) {
-                Err(ResolveError::Diagnostic(_)) => {
-                    search.run(requirements, HashMap::new(), false)
+            // Keep every locked version that can stay (spec §4.3): when the
+            // pinned search meets a conflict, unpin only the packages it
+            // names and search again, until it succeeds or nothing is left
+            // pinned.
+            let mut pinned = pins(None);
+            loop {
+                match search.run(requirements, pinned.clone(), false) {
+                    Err(ResolveError::Diagnostic(d)) if d.code == "M0015" && !pinned.is_empty() => {
+                        let before = pinned.len();
+                        for name in &search.conflicted {
+                            pinned.remove(name);
+                        }
+                        // A conflict naming no pinned package: unpin them all.
+                        if pinned.len() == before {
+                            pinned.clear();
+                        }
+                    }
+                    result => return result,
                 }
-                result => result,
             }
         }
     }
@@ -135,6 +146,9 @@ struct Search<'a> {
     strict: bool,
     /// The first conflict met, for M0015.
     failure: Option<Failure>,
+    /// After a failed search: the package of its conflict, and every
+    /// package that made a requirement on it.
+    conflicted: Vec<String>,
 }
 
 impl Search<'_> {
@@ -174,6 +188,9 @@ impl Search<'_> {
                 .collect());
         }
         let failure = self.failure.take().expect("a failed search records why");
+        self.conflicted = std::iter::once(failure.name.clone())
+            .chain(failure.reqs.iter().map(|r| r.by.clone()))
+            .collect();
         Err(ResolveError::Diagnostic(conflict(&failure)))
     }
 
