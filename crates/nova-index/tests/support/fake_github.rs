@@ -11,13 +11,16 @@ use base64::Engine;
 
 use super::{Request, Response, Server};
 
+/// A release asset: its id, its name and its bytes.
+pub type Asset = (u64, String, Vec<u8>);
+
 /// What the stand-in holds.
 #[derive(Default)]
 pub struct State {
     /// Each file by path: its text and its blob sha.
     pub files: HashMap<String, (String, String)>,
-    /// Each release by tag: its id and its assets, `(id, name, bytes)`.
-    pub releases: HashMap<String, (u64, Vec<(u64, String, Vec<u8>)>)>,
+    /// Each release by tag: its id and its assets.
+    pub releases: HashMap<String, (u64, Vec<Asset>)>,
     /// The last id handed out.
     pub next_id: u64,
     /// Whether the token may push.
@@ -83,7 +86,7 @@ fn json(status: u16, value: serde_json::Value) -> Response {
     Response::with_status(status, value.to_string())
 }
 
-fn release_json(id: u64, assets: &[(u64, String, Vec<u8>)]) -> serde_json::Value {
+fn release_json(id: u64, assets: &[Asset]) -> serde_json::Value {
     let assets: Vec<serde_json::Value> = assets
         .iter()
         .map(|(id, name, _)| serde_json::json!({"id": id, "name": name}))
