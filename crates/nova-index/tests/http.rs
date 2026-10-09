@@ -270,3 +270,23 @@ fn a_local_indexs_tarball_is_read_from_its_directory() {
     .unwrap();
     assert!(dest.join("nova.toml").is_file());
 }
+
+#[test]
+fn a_userinfo_does_not_make_a_host_loopback() {
+    // Final review I1: the host is what follows the `@`, so these name
+    // evil.invalid, not a loopback address. `.invalid` never resolves, so
+    // even a wrong answer reaches no network.
+    for refused in [
+        "http://127.0.0.1:1@evil.invalid/x",
+        "http://[::1]@evil.invalid/",
+        "http://127.0.0.1@evil.invalid/",
+    ] {
+        assert!(nova_index::check_url(refused).is_err(), "{refused}");
+    }
+    assert!(nova_index::check_url("http://127.0.0.1:8080/x").is_ok());
+    let server = Server::start(|_| Response::redirect("http://127.0.0.1:1@evil.invalid/x"));
+    let error = Http::new()
+        .get(&format!("{}/away", server.url), 100)
+        .unwrap_err();
+    assert!(error.contains("refused"), "{error}");
+}
