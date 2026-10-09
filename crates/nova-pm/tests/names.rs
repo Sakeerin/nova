@@ -44,3 +44,41 @@ fn the_package_table_and_a_dependency_path_keep_their_positions() {
     assert_eq!(&source[path.as_range()], "\"../geom\"");
     assert_eq!(manifest.dependencies[1].path_span, None);
 }
+#[test]
+fn a_portable_name_is_one_every_system_can_hold() {
+    for good in [
+        "lib.nova",
+        "README.ไทย.md",
+        "a-b_c",
+        "LICENSE",
+        "con-x.nova",
+        "x.y.z",
+    ] {
+        assert!(nova_pm::is_portable(good), "{good}");
+    }
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a:b",
+        "a\\b",
+        "a/b",
+        "a<b",
+        "a>b",
+        "a\"b",
+        "a|b",
+        "a?b",
+        "a*b",
+        "tab\there",
+        "dot.",
+        "space ",
+        "con",
+        "CON.nova",
+        "aux.txt",
+        "nul",
+        "com1.x",
+        "LPT9",
+    ] {
+        assert!(!nova_pm::is_portable(bad), "{bad:?}");
+    }
+}

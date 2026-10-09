@@ -42,6 +42,31 @@ pub fn check_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `component`, one name in a path, is valid on Windows, macOS
+/// and Linux (spec
+/// `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`
+/// §6.5):
+/// - not empty, `.` or `..`;
+/// - none of `/ : \ < > " | ? *` or a control character;
+/// - no trailing `.` or space;
+/// - not a Windows device name, with or without an extension.
+pub fn is_portable(component: &str) -> bool {
+    if component.is_empty() || component == "." || component == ".." {
+        return false;
+    }
+    if component
+        .chars()
+        .any(|c| c.is_control() || "/:\\<>\"|?*".contains(c))
+    {
+        return false;
+    }
+    if component.ends_with('.') || component.ends_with(' ') {
+        return false;
+    }
+    let stem = component.split('.').next().unwrap_or(component);
+    !WINDOWS_DEVICES.contains(&stem.to_ascii_lowercase().as_str())
+}
+
 /// A package's import name: its name with each `-` replaced by `_` (spec
 /// `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
 /// §3.4), so `json-api` is imported as `import json_api`.

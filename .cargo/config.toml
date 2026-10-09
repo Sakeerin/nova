@@ -1,0 +1,7 @@
+# For each dependency, Cargo picks the newest version whose `rust-version`
+# this workspace's 1.78 can build (spec
+# docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
+# §9). Cargo 1.84 and later read this. Every CI job passes `--locked`, so
+# cargo 1.78 on the MSRV job never resolves and never needs it.
+[resolver]
+incompatible-rust-versions = "fallback"

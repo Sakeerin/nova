@@ -24,6 +24,6 @@ pub use home::{nova_home, nova_home_from_env, registry_dir};
 pub use index_name::{canonical_index, index_dir_name, local_index_path};
 pub use lock::{parse_lock, Lock, LockedPackage, LOCKFILE};
 pub use manifest::{parse, Dependency, Manifest, Package};
-pub use name::{check_name, import_name};
+pub use name::{check_name, import_name, is_portable};
 pub use project::{find_root, real_path, MANIFEST};
 pub use resolve::{resolve, Candidate, IndexView, Requirement, ResolveError, Unlock};
