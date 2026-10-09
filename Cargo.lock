@@ -1112,6 +1112,7 @@ dependencies = [
 name = "nova-pm"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
  "nova-diagnostics",
  "nova-lexer",
  "semver",
