@@ -121,11 +121,12 @@ fn a_version_only_entry_is_m0005_and_names_the_dependency() {
     package(&dir, "app", MAIN, "\n[dependencies]\nhttp = \"1.0\"\n");
     let (graph, codes, rendered) = build(&dir);
     assert_eq!(codes, ["M0005"]);
+    // Spec 3.3b §5.4: a registry entry is found through nova.lock and the
+    // cache, and with no lock it is not downloaded yet.
     assert!(
-        rendered.contains("`http` is a registry dependency"),
+        rendered.contains("dependency `http` is not downloaded yet; run `nova fetch`"),
         "{rendered}"
     );
-    assert!(rendered.contains("use `path"), "{rendered}");
     assert_eq!(names(&graph.unwrap()), ["app"]);
 }
 
