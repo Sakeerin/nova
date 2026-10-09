@@ -223,14 +223,28 @@ fn a_file_argument_inside_a_project_ignores_even_a_broken_manifest() {
 }
 
 #[test]
-fn a_declared_dependency_is_m0005() {
+fn a_declared_dependency_the_index_lacks_is_m0014() {
     let dir = fresh_dir("dependency");
     write_project(&dir, "demo", HELLO);
     let with_dependency = format!("{}\n[dependencies]\nhttp = \"1.0\"\n", manifest("demo"));
     std::fs::write(dir.join("nova.toml"), with_dependency).unwrap();
-    let out = nova().current_dir(&dir).arg("run").assert().failure();
+    // An empty local index and a cache of the test's own, so nothing
+    // reaches the internet (spec 3.3b §10).
+    let index = fresh_dir("dependency-index");
+    std::fs::write(
+        index.join("config.json"),
+        r#"{"dl":"dl/{name}-{version}.nova-pkg"}"#,
+    )
+    .unwrap();
+    let out = nova()
+        .current_dir(&dir)
+        .env("NOVA_INDEX", &index)
+        .env("NOVA_HOME", index.join("home"))
+        .arg("run")
+        .assert()
+        .failure();
     let err = stderr(&out);
-    assert!(err.contains("M0005") && err.contains("`http`"), "{err}");
+    assert!(err.contains("M0014") && err.contains("`http`"), "{err}");
 }
 
 #[test]
