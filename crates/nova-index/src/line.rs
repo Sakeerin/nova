@@ -88,7 +88,14 @@ pub fn parse_lines(text: &str, file: &str) -> (Vec<Line>, Vec<String>) {
         }
         let parsed = serde_json::from_value::<Line>(value)
             .map_err(|e| e.to_string())
-            .and_then(|line| line.candidate().map(|_| line));
+            .and_then(|line| line.candidate().map(|_| line))
+            .and_then(|line| {
+                // Only package names reach a path or a lookup.
+                std::iter::once(&line.name)
+                    .chain(line.deps.iter().map(|dep| &dep.name))
+                    .try_for_each(|name| nova_pm::check_name(name))
+                    .map(|()| line)
+            });
         match parsed {
             Ok(line) => lines.push(line),
             Err(reason) => notes.push(note(reason)),

@@ -15,7 +15,7 @@ use semver::VersionReq;
 use crate::lock::{parse_lock, Lock, LOCKFILE};
 use crate::manifest::{Dependency, Manifest};
 use crate::resolve::Requirement;
-use crate::{import_name, index_dir_name, real_path, registry_dir, MANIFEST};
+use crate::{check_name, import_name, index_dir_name, real_path, registry_dir, MANIFEST};
 
 /// A package's index in its [`Graph`]. The root is `PackageId(0)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -597,6 +597,12 @@ impl Builder<'_> {
         req: &VersionReq,
         queue: &mut VecDeque<PackageId>,
     ) -> Option<Edge> {
+        // An index knows only package names; any other key is the
+        // manifest's error, not the index's.
+        if let Err(why) = check_name(&dependency.name) {
+            self.error("M0003", why, dependency.span, "not a valid package name");
+            return None;
+        }
         if self.mode == Mode::Collect {
             let by = self.packages[from.0 as usize].name.clone();
             let requirement = Requirement {

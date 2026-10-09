@@ -375,3 +375,23 @@ fn requirements_name_who_made_each_and_the_roots_entry() {
     let names: Vec<&str> = found.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, ["json", "http"]);
 }
+
+#[test]
+fn a_registry_key_that_is_not_a_package_name_is_m0003() {
+    // Final review I2.
+    let dir = fresh("not-a-name");
+    let app = dir.join("app");
+    package(
+        &app,
+        "app",
+        "0.1.0",
+        &["main.nova"],
+        "\n[dependencies]\n\"ไทย\" = \"1\"\n",
+    );
+    let (_, codes, rendered) = build(&app, &offline(&dir.join("registry")));
+    assert_eq!(codes, ["M0003"], "{rendered}");
+    let mut db = FileDb::new();
+    let (found, diagnostics) = requirements(&app, None, true, &mut db);
+    assert!(found.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+}
