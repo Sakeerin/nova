@@ -103,6 +103,17 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Write `bytes` to `path` through a temporary file beside it, unique to
 /// this process, renamed into place. `path`'s directory is created.
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_new(path, bytes, false)
+}
+
+/// [`write_atomically`], the temporary file created readable by its owner
+/// only (mode 0600) on Unix before anything is written to it (spec §6.7).
+/// On Windows it takes its directory's permissions.
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_new(path, bytes, true)
+}
+
+fn write_new(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)?;
@@ -115,11 +126,18 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()>
     let (mut file, temp) = loop {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp = path.with_file_name(format!(".{name}.{}-{n}.tmp", std::process::id()));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            if private {
+                options.mode(0o600);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match options.open(&temp) {
             Ok(file) => break (file, temp),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
