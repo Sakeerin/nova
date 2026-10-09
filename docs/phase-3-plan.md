@@ -341,6 +341,12 @@ a PR, and a merge on the user's word.
   branch `phase-3-3a-local-packages`). 3.3b, "The index and publishing",
   has the rest of this entry, and its two-part gate.
 
+  **Amended 2026-10-09:** 3.3b, "The index and publishing", is built
+  (`docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`,
+  branch `phase-3-3b-index-publishing`; ADR 0031). Its CI gate runs in
+  the `install` job on three systems. The by-hand publish to the real
+  index waits for the user's word.
+
 ### 3.4 — LSP completeness
 - Hover, with types and `///` docs.
 - Go to definition, across files and into dependencies, and into std
@@ -394,6 +400,12 @@ a PR, and a merge on the user's word.
   never printed, and sent only to GitHub's API. A downloaded package is
   checked against the index's SHA-256 before it is used. The index is
   append-only: a published version is never overwritten.
+
+  **Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** on
+  Windows the token's file takes its directory's permissions, the user's
+  profile by default, so "readable only by its owner" holds there only as
+  far as the profile's do. `nova login` warns when `NOVA_HOME` is outside
+  the profile (ADR 0031).
 - **Publishing:** every publish to crates.io, an extension store or the real
   index is a stop for the user's word. CI publishes only to a local index.
 

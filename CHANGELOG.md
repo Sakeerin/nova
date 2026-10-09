@@ -94,6 +94,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The language server** follows packages. A dependency's problems show
   on the manifest's entry for it, and a project's `nova.toml` gets its
   own diagnostics.
+- **The package index** (ADR 0031).
+  - `json = "1.4"` in `[dependencies]` resolves against the index that
+    `NOVA_INDEX` names, by default `Sakeerin/nova-index` on GitHub. One
+    version of each name per build, recorded in `nova.lock`.
+  - `nova run`, `build`, `check` and `test` download what the lock names
+    into `~/.nova/registry/`, checked against its SHA-256. With the lock
+    and the cache complete, they need no network.
+  - M0014–M0017 report a package the index lacks, a conflict, an
+    unreadable lock, and a path dependency in a package to publish.
+- **`nova add <name>[@<req>]`** adds a dependency from the index, writing
+  the version it resolved. **`nova update [<name>]`** and **`nova fetch`**
+  move and download locked versions.
+- **`nova package`** packs a library reproducibly and verifies it.
+  **`nova publish`** publishes it, to a local index or to GitHub.
+  **`nova login`** stores the GitHub token it needs, read from a pipe.
+- **The language server** re-checks when `nova.lock` changes, and leaves
+  downloaded packages alone.
 
 ### Changed
 
@@ -126,6 +143,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dependency".
 - `nova run` and `nova build` in a library without `src/main.nova` say
   so, and a package with neither target is M0013.
+- A version-only dependency is no longer M0005 "a registry dependency":
+  it resolves against the index, and M0005 means an entry the cache
+  cannot satisfy, with `nova fetch` to fix it.
+- `nova run`, `build`, `check` and `test` sync a package's dependencies
+  first, and a sync's errors stop them before compiling.
+- A warning in a downloaded dependency is not shown.
 
 ## [0.2.0] - 2026-10-06
 

@@ -51,7 +51,8 @@ nova-mir            → Mid-level IR
 | `nova-fmt` | The formatter: prints the AST in one fixed layout, keeps every comment, and refuses output that would change the program (ADR 0028) |
 | `nova-lsp` | The language server, `nova lsp`: diagnostics, completion and formatting over `nova_driver::analyze` (ADR 0029) |
 | `nova-test` | Test runner |
-| `nova-pm` | Package manager: `nova.toml` parsing and project discovery so far |
+| `nova-pm` | Package manager: `nova.toml`, the package graph, `nova.lock` and the resolver; it never touches the network (ADR 0030, ADR 0031) |
+| `nova-index` | The package index: reading, downloading, packing, the sync step and publishing (ADR 0031) |
 | `nova-bundler` | Frontend bundler |
 | `nova-doc` | Documentation generator |
 | `nova-bench-http` | Keep-alive HTTP load generator for benchmarking `std/http` |

@@ -36,7 +36,10 @@ A package is a directory with `nova.toml` and a `src/lib.nova` library, a
 In another package, `nova add geom --path ../geom` adds it as a
 dependency, and `import geom` then reaches its `lib.nova`. `nova test` runs
 the tests in `src/` and in `tests/*.nova`, which import the package by its
-name. Registry dependencies and `nova publish` come in a later release.
+name. `nova add json` adds a package from the index instead, and
+`nova.lock` records the version. `nova update` moves it, and `nova fetch`
+downloads what the lock names. To publish a library, run
+`gh auth token | nova login` once, then `nova publish`.
 
 ---
 
