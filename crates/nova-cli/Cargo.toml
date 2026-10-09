@@ -24,6 +24,12 @@ nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
 nova-fmt = { path = "../nova-fmt" }
 nova-lsp = { path = "../nova-lsp" }
+# The package index: syncing, packing and publishing (spec
+# docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
+# §9).
+nova-index = { path = "../nova-index" }
+# `nova add json@1.4` checks its requirement.
+semver = { workspace = true }
 # `nova add` and `nova remove` edit nova.toml, keeping its comments and
 # layout (spec docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.3).
 toml_edit = { workspace = true }

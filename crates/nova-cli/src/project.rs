@@ -4,7 +4,7 @@
 //! `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
 //! §5.1).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use nova_driver::{Program, Roots};
@@ -80,4 +80,24 @@ pub fn package_name(program: &Program) -> String {
         .graph
         .as_ref()
         .map_or_else(|| "out".to_string(), |graph| graph.root().name.clone())
+}
+
+/// Refuse to work inside nova's cache of downloaded packages, which is
+/// never edited in place (spec 3.3b §5.1, §5.4).
+pub fn refuse_cached(root: &Path) -> Result<()> {
+    let Some(registry) = nova_pm::registry_dir() else {
+        return Ok(());
+    };
+    let dir = nova_pm::real_path(if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    });
+    if dir.starts_with(nova_pm::real_path(&registry)) {
+        bail!(
+            "`{}` is a downloaded package in nova's cache; it is read only",
+            dir.display()
+        );
+    }
+    Ok(())
 }
