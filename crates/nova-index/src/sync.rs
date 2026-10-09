@@ -113,6 +113,22 @@ pub fn sync(request: SyncRequest<'_>, db: &mut FileDb) -> Result<Synced, SyncErr
         index: index.canonical.clone(),
         packages,
     };
+    // A published version never changes (spec §3.1, §8): a version the
+    // lock already holds keeps its checksum, whatever the index now says.
+    if let Some(old) = usable {
+        for package in &lock.packages {
+            let kept = old
+                .find(&package.name)
+                .filter(|locked| locked.version == package.version);
+            if let Some(locked) = kept.filter(|locked| locked.checksum != package.checksum) {
+                return Err(SyncError::Other(format!(
+                    "the index now gives {} {} the SHA-256 {}, but nova.lock records {}; a \
+                     published version never changes, so nothing was changed",
+                    package.name, package.version, package.checksum, locked.checksum
+                )));
+            }
+        }
+    }
     let idx = nova_pm::index_dir_name(&index.canonical);
     let missing: Vec<&LockedPackage> = lock
         .packages
