@@ -421,3 +421,38 @@ fn a_dependency_name_that_is_not_a_package_name_is_m0003() {
     let app = f.app("\n[dependencies]\n\"ไทย\" = \"1\"\n");
     assert_eq!(codes(f.sync(&app, Unlock::Nothing).unwrap_err()), ["M0003"]);
 }
+
+#[test]
+fn a_locked_versions_checksum_never_changes() {
+    // Final review I3: an index line that now gives a locked version another
+    // checksum is refused, under a plain sync and under `nova update`, and
+    // nova.lock is left as it was.
+    let f = Fixture::new("checksum-changed");
+    f.publish("json", "1.0.0", &[]);
+    let app = f.app("\n[dependencies]\njson = \"1\"\n");
+    let synced = f.sync(&app, Unlock::Nothing).unwrap();
+    let old = synced.lock.unwrap().packages[0].checksum.clone();
+    let before = std::fs::read_to_string(app.join("nova.lock")).unwrap();
+    let file = f.index_dir.join(index_path("json"));
+    let new = "f".repeat(64);
+    let text = std::fs::read_to_string(&file).unwrap().replace(&old, &new);
+    std::fs::write(&file, text).unwrap();
+    // A new entry makes the sync resolve.
+    f.publish("http", "0.3.0", &[]);
+    f.app("\n[dependencies]\njson = \"1\"\nhttp = \"0.3\"\n");
+    for unlock in [Unlock::Nothing, Unlock::All] {
+        match f.sync(&app, unlock) {
+            Err(SyncError::Other(message)) => {
+                assert!(
+                    message.contains(&old) && message.contains(&new),
+                    "{message}"
+                );
+            }
+            other => panic!("expected the checksum refused: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(app.join("nova.lock")).unwrap(),
+            before
+        );
+    }
+}
