@@ -1500,6 +1500,10 @@ pub struct ProgramResolution {
     pub definitions: Definitions,
     pub diagnostics: Vec<Diagnostic>,
     pub tests: Vec<TestFn>,
+    /// The occurrences of import items, for the language server's index
+    /// (spec 3.4a §3.3). Always filled; the driver merges them only when
+    /// asked.
+    pub imports: Vec<Occurrence>,
 }
 
 /// Collect the item-level namespace of a single file.
@@ -1560,6 +1564,7 @@ pub fn resolve_program(
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
     let mut tests = Vec::new();
+    let mut imports: Vec<Occurrence> = Vec::new();
 
     // Every `STD_MODULES` entry plus, only when the caller passed one, the
     // extra std module — combined here so the rest of this function has one
@@ -1677,6 +1682,7 @@ pub fn resolve_program(
                     mid,
                     imp,
                     &mut diagnostics,
+                    &mut imports,
                 );
             }
         }
@@ -1699,6 +1705,7 @@ pub fn resolve_program(
         definitions,
         diagnostics,
         tests,
+        imports,
     }
 }
 
@@ -2324,6 +2331,7 @@ fn resolve_import(
     mid: usize,
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
+    occurrences: &mut Vec<Occurrence>,
 ) {
     let span = imp.path.span;
     // Only single-segment module imports are supported. A qualified or nested
@@ -2361,6 +2369,16 @@ fn resolve_import(
                 .with_primary_label(span, "self-import"),
         );
         return;
+    }
+    // Spec 3.4a §3.3: the module, at its own segment. Only one-segment
+    // paths reach here, and `path.span` would also cover a list's `::`.
+    if let Some(first) = imp.path.value.segments.first() {
+        occurrences.push(Occurrence {
+            span: first.span,
+            role: Role::Use,
+            target: Target::Module(ModuleId(target as u32)),
+            shorthand: false,
+        });
     }
     match &imp.kind {
         ImportKind::Simple => {
@@ -2402,6 +2420,17 @@ fn resolve_import(
                         n.span,
                         r,
                     );
+                    let named = match r {
+                        Res::Def(id) => Target::Def(id),
+                        Res::Variant(sum, i) => Target::Variant(sum, i as u32),
+                        Res::Builtin(b) => Target::Builtin(b),
+                    };
+                    occurrences.push(Occurrence {
+                        span: n.span,
+                        role: Role::Use,
+                        target: named,
+                        shorthand: false,
+                    });
                     found = true;
                 }
                 if let Some(id) = exports[target].types.get(name).copied() {
@@ -2412,6 +2441,12 @@ fn resolve_import(
                         n.span,
                         id,
                     );
+                    occurrences.push(Occurrence {
+                        span: n.span,
+                        role: Role::Use,
+                        target: Target::Def(id),
+                        shorthand: false,
+                    });
                     found = true;
                 }
                 if let Some(id) = exports[target].traits.get(name).copied() {
@@ -2422,6 +2457,12 @@ fn resolve_import(
                         n.span,
                         id,
                     );
+                    occurrences.push(Occurrence {
+                        span: n.span,
+                        role: Role::Use,
+                        target: Target::Def(id),
+                        shorthand: false,
+                    });
                     found = true;
                 }
                 if !found {
@@ -3184,5 +3225,83 @@ mod tests {
             panic!("not a record");
         };
         assert_eq!(r.definitions.module_of(item_index), ModuleId(0));
+    }
+
+    // === Phase 3.4a: import occurrences (spec
+    // docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md §3.3) ===
+
+    fn occurrence_at(prog: &ProgramResolution, src: &str, needle: &str) -> Vec<(Role, Target)> {
+        let start = src.find(needle).unwrap() as u32;
+        prog.imports
+            .iter()
+            .filter(|o| o.span.start == start && o.span.end == start + needle.len() as u32)
+            .map(|o| (o.role, o.target))
+            .collect()
+    }
+
+    #[test]
+    fn an_imports_module_is_a_use_of_it() {
+        let main = "import lib\nfn main() { let a = area() }\n";
+        let prog = resolve_two(main, "pub fn area() -> Int { 1 }\n");
+        assert_eq!(
+            occurrence_at(&prog, main, "lib"),
+            vec![(Role::Use, Target::Module(ModuleId(1)))]
+        );
+    }
+
+    #[test]
+    fn a_list_imports_module_is_its_first_segment() {
+        let main = "import lib::{area}\nfn main() { let a = area() }\n";
+        let prog = resolve_two(main, "pub fn area() -> Int { 1 }\n");
+        // `lib` alone, not `lib::`.
+        assert_eq!(
+            occurrence_at(&prog, main, "lib"),
+            vec![(Role::Use, Target::Module(ModuleId(1)))]
+        );
+    }
+
+    #[test]
+    fn a_listed_name_is_a_use_of_each_namespace_it_binds() {
+        // User modules' defs come before std's, so `position` finds these.
+        let main = "import lib::{area, Figure, Paint, Round}\nfn main() {}\n";
+        let lib = "pub fn area() -> Int { 1 }\n\
+                   pub type Figure = | Round(Int) | Square(Int)\n\
+                   pub trait Paint { fn paint(self) -> String }\n";
+        let prog = resolve_two(main, lib);
+        let id = |name: &str| {
+            DefId(
+                prog.definitions
+                    .defs()
+                    .iter()
+                    .position(|d| d.name == name)
+                    .unwrap() as u32,
+            )
+        };
+        assert_eq!(
+            occurrence_at(&prog, main, "area"),
+            vec![(Role::Use, Target::Def(id("area")))]
+        );
+        assert_eq!(
+            occurrence_at(&prog, main, "Figure"),
+            vec![(Role::Use, Target::Def(id("Figure")))]
+        );
+        assert_eq!(
+            occurrence_at(&prog, main, "Paint"),
+            vec![(Role::Use, Target::Def(id("Paint")))]
+        );
+        assert_eq!(
+            occurrence_at(&prog, main, "Round"),
+            vec![(Role::Use, Target::Variant(id("Figure"), 0))]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_import_records_nothing() {
+        let main = "import nowhere\nimport lib::{missing}\nfn main() {}\n";
+        let prog = resolve_two(main, "pub fn area() -> Int { 1 }\n");
+        assert!(occurrence_at(&prog, main, "nowhere").is_empty());
+        assert!(occurrence_at(&prog, main, "missing").is_empty());
+        // The module of a list import still resolves.
+        assert_eq!(occurrence_at(&prog, main, "lib").len(), 1);
     }
 }
