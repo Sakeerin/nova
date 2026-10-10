@@ -41,6 +41,11 @@ pub fn code_actions(
     if wanted(&lsp::CodeActionKind::QUICKFIX, only) {
         out.extend(quick_fixes(answer, start, end, uri_of));
     }
+    if wanted(&lsp::CodeActionKind::SOURCE_ORGANIZE_IMPORTS, only) {
+        if let Some(action) = crate::organize::action(answer, uri_of) {
+            out.push(lsp::CodeActionOrCommand::CodeAction(action));
+        }
+    }
     out
 }
 
