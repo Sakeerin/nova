@@ -118,8 +118,6 @@ fn nothing_at(a: &Analysis, path: &str, word: &str, n: usize) {
 }
 
 /// The name of the file `target` is declared in.
-// Task 4's tests are its first callers.
-#[allow(dead_code)]
 #[track_caller]
 fn declared_in(a: &Analysis, target: &Target) -> String {
     let decl = index(a)
@@ -281,4 +279,74 @@ fn the_index_is_none_unless_asked_for() {
     };
     let a = analyze(Path::new(MAIN), &buffers, &options).unwrap();
     assert!(a.index.is_none());
+}
+
+// === Task 4: types, bounds, projections, impl headers ===
+
+#[test]
+fn a_type_annotation_uses_its_type_and_arguments() {
+    let text = "record Point { x: Int }\n\
+fn origin(p: Point) -> Option<Point> { None }\n\
+fn main() {\n    let q: Point = Point { x: 1 }\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "Point", 1, MAIN, 0); // a parameter's type
+    uses(&a, MAIN, "Point", 2, MAIN, 0); // a generic argument
+    uses(&a, MAIN, "Point", 3, MAIN, 0); // a let's annotation
+    assert_eq!(at(&a, MAIN, "Int", 0).target, Target::Primitive("Int"));
+    let option = at(&a, MAIN, "Option", 0).target;
+    assert!(declared_in(&a, &option).starts_with("<std/"), "{option:?}");
+}
+
+#[test]
+fn a_type_parameters_uses_resolve_to_its_declaration() {
+    let text = "record Pair<A> { a: A }\n\
+impl<K> Pair<K> {\n    fn get<M>(self, m: M) -> K { self.a }\n}\n\
+fn wrap<T>(t: T) -> Pair<T> {\n    let p: Pair<T> = Pair { a: t }\n    p\n}\n\
+fn main() {}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "A", 1, MAIN, 0);
+    uses(&a, MAIN, "K", 1, MAIN, 0); // the impl's self type
+    uses(&a, MAIN, "K", 2, MAIN, 0); // a method's return type: the impl's
+    uses(&a, MAIN, "M", 1, MAIN, 0);
+    uses(&a, MAIN, "T", 1, MAIN, 0);
+    uses(&a, MAIN, "T", 2, MAIN, 0);
+    uses(&a, MAIN, "T", 3, MAIN, 0); // inside the body
+}
+
+#[test]
+fn a_projection_uses_its_parameter_and_associated_type() {
+    let text = "trait Source {\n    type Item\n    fn take(self) -> Self::Item\n}\n\
+record Box { v: Int }\n\
+impl Source for Box {\n    type Item = Int\n    fn take(self) -> Self::Item { self.v }\n}\n\
+fn pull<S: Source>(s: S) -> S::Item { s.take() }\n\
+fn main() {}\n";
+    let a = analyse(&[(MAIN, text)]);
+    let item = declares(&a, MAIN, "Item", 0);
+    assert!(matches!(item, Target::Def(_)), "{item:?}");
+    assert_eq!(at(&a, MAIN, "Item", 1).target, item); // the trait's Self::Item
+    assert_eq!(at(&a, MAIN, "Item", 2).target, item); // the impl's binding
+    assert_eq!(at(&a, MAIN, "Item", 3).target, item); // the impl's Self::Item
+    assert_eq!(at(&a, MAIN, "Item", 4).target, item); // S::Item
+    uses(&a, MAIN, "S", 2, MAIN, 0); // the projection's base
+                                     // `Self` is not recorded (spec decision 20).
+    nothing_at(&a, MAIN, "Self", 0);
+    nothing_at(&a, MAIN, "Self", 1);
+}
+
+#[test]
+fn bounds_where_clauses_supertraits_and_impl_headers_use_their_traits() {
+    let text = "trait Named { fn name(self) -> String }\n\
+trait Loud: Named { fn shout(self) -> String }\n\
+record Dog { n: Int }\n\
+impl Named for Dog { fn name(self) -> String { \"d\" } }\n\
+fn greet<T: Named>(t: T) -> String { t.name() }\n\
+fn call<U>(u: U) -> String where U: Named { u.name() }\n\
+fn main() {}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "Named", 1, MAIN, 0); // a supertrait
+    uses(&a, MAIN, "Named", 2, MAIN, 0); // an impl header
+    uses(&a, MAIN, "Named", 3, MAIN, 0); // an inline bound
+    uses(&a, MAIN, "Named", 4, MAIN, 0); // a where clause
+    uses(&a, MAIN, "Dog", 1, MAIN, 0); // an impl's self type
+    uses(&a, MAIN, "U", 2, MAIN, 0); // a where clause's parameter
 }

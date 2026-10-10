@@ -693,6 +693,9 @@ impl<'a> Checker<'a> {
                     .unwrap_or("");
                 match self.defs.resolve_trait(self.cur_module, name) {
                     Some(id) => {
+                        if let Some(seg) = path.value.segments.last() {
+                            self.note_use(seg.span, Target::Def(id));
+                        }
                         if !ids.contains(&id) {
                             ids.push(id);
                         }
@@ -1201,7 +1204,12 @@ impl<'a> Checker<'a> {
                         .map(|s| s.value.as_str())
                         .unwrap_or("");
                     match self.defs.resolve_trait(self.cur_module, name) {
-                        Some(id) => Some(id),
+                        Some(id) => {
+                            if let Some(seg) = tr.value.segments.last() {
+                                self.note_use(seg.span, Target::Def(id));
+                            }
+                            Some(id)
+                        }
                         None => {
                             self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
                             continue;
@@ -1288,6 +1296,7 @@ impl<'a> Checker<'a> {
                     }
                     continue;
                 };
+                self.note_use(b.name.span, Target::Def(assoc));
                 // Two bindings for one associated type would leave which one
                 // normalization picks up to list order. Keep the first and
                 // reject the rest, the way a duplicate generic parameter is
@@ -2278,6 +2287,9 @@ impl<'a> Checker<'a> {
                         // `T: Show`. A repeated trait must not later read as two
                         // distinct method providers (a false E0015 ambiguity).
                         Some(id) => {
+                            if let Some(seg) = b.value.segments.last() {
+                                self.note_use(seg.span, Target::Def(id));
+                            }
                             if !ids.contains(&id) {
                                 ids.push(id);
                             }
@@ -2332,6 +2344,9 @@ impl<'a> Checker<'a> {
                     // Deduplicate against inline and earlier `where` bounds, so a
                     // trait named twice is not read as two method providers.
                     Some(id) => {
+                        if let Some(seg) = b.value.segments.last() {
+                            self.note_use(seg.span, Target::Def(id));
+                        }
                         if !slot.contains(&id) {
                             slot.push(id);
                         }
@@ -2397,6 +2412,11 @@ impl<'a> Checker<'a> {
                                 ty.span,
                             );
                         }
+                        if by_index.is_some() {
+                            if let Some(t) = self.type_param_target(base) {
+                                self.note_use(path.segments[0].span, t);
+                            }
+                        }
                         let (on, candidates) = match by_index {
                             // Find the associated type among the traits
                             // bounding this parameter. Searching the bounds
@@ -2460,7 +2480,12 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         };
-                        return self.resolve_projection(on, base, assoc_name, &candidates, ty.span);
+                        let projected =
+                            self.resolve_projection(on, base, assoc_name, &candidates, ty.span);
+                        if let Ty::Assoc { assoc, .. } = &projected {
+                            self.note_use(path.segments[1].span, Target::Def(*assoc));
+                        }
+                        return projected;
                     }
                     self.unsupported(ty.span, "module-qualified type paths");
                     return Ty::Error;
@@ -2471,6 +2496,9 @@ impl<'a> Checker<'a> {
                 }
                 let name = path.segments[0].value.as_str();
                 if let Some(&idx) = generics.get(name) {
+                    if let Some(t) = self.type_param_target(name) {
+                        self.note_use(path.segments[0].span, t);
+                    }
                     if !args.is_empty() {
                         self.error(
                             "E0012",
@@ -2484,6 +2512,7 @@ impl<'a> Checker<'a> {
                 // Handled ahead of the nullary `prim` table below, whose
                 // `args.is_empty()` guard means the opposite here.
                 if name == "Future" {
+                    self.note_use(path.segments[0].span, Target::Primitive("Future"));
                     if args.len() != 1 {
                         self.error(
                             "E0012",
@@ -2514,6 +2543,9 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 if let Some(p) = prim {
+                    if let Some(name) = primitive(name) {
+                        self.note_use(path.segments[0].span, Target::Primitive(name));
+                    }
                     if !args.is_empty() {
                         self.error(
                             "E0012",
@@ -2524,6 +2556,7 @@ impl<'a> Checker<'a> {
                     return p;
                 }
                 if let Some(def_id) = self.defs.resolve_type(self.cur_module, name) {
+                    self.note_use(path.segments[0].span, Target::Def(def_id));
                     let is_record = matches!(self.defs.def(def_id).kind, DefKind::Record { .. });
                     // Arity is precomputed (see `collect_type_arities`) so it is
                     // independent of whether this type has been collected yet.
@@ -7076,8 +7109,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    // Task 4's type conversions are its first callers.
-    #[allow(dead_code)]
     fn type_param_target(&self, name: &str) -> Option<Target> {
         self.type_params
             .iter()
@@ -7546,6 +7577,14 @@ fn param_names(generics: &FxHashMap<String, u32>) -> Vec<String> {
         names[i as usize] = name.clone();
     }
     names
+}
+
+/// A built-in type's name, as the index's `Primitive` holds it.
+fn primitive(name: &str) -> Option<&'static str> {
+    nova_resolver::RESERVED_TYPE_NAMES
+        .iter()
+        .copied()
+        .find(|n| *n == name)
 }
 
 /// The generic scope inside a trait definition / default method: `Self`
