@@ -939,3 +939,24 @@ fn a_dependencys_errors_offer_no_fix() {
     let attribute = diagnostic(&a, "E0082", "unknown attribute `@tset`");
     assert!(attribute.fixes.is_empty(), "{:?}", attribute.fixes);
 }
+
+// === The final review's fix pass ===
+
+#[test]
+fn make_public_is_not_offered_when_a_glob_of_the_module_would_clash() {
+    // Spec §3.2: `other` glob-imports `lib` and has its own `helper`, so
+    // making `lib`'s `helper` public would bind it twice there (E0002).
+    let a = loose(&buffers(&[
+        (
+            MAIN,
+            "import lib::{helper}\nimport other\n\nfn main() {\n    println(\"${helper()} ${twice()}\")\n}\n",
+        ),
+        ("mem/lib.nova", "fn helper() -> Int {\n    1\n}\n"),
+        (
+            "mem/other.nova",
+            "import lib\n\nfn helper() -> Int {\n    2\n}\n\npub fn twice() -> Int {\n    helper() * 2\n}\n",
+        ),
+    ]));
+    let d = diagnostic(&a, "E0001", "`helper` is not a public item of module `lib`");
+    assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+}
