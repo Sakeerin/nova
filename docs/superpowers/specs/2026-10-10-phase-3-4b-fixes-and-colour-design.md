@@ -4,8 +4,9 @@
 > "LSP completeness" (`docs/phase-3-plan.md` §4, the 3.4 entry). 3.4a,
 > "Navigation", merged as PR #107 on 2026-10-10 (ADR 0032). The design was
 > approved in three sections on 2026-10-10. Three findings made while
-> checking it against the code changed it; §13's decisions 7, 8 and 9
-> record each, and the user chose decision 7.
+> writing changed it; §13's decisions 7, 8 and 9 record each, and the user
+> chose decision 7. A read-only fact-check against the code then found 21
+> more; decisions 27 to 36 record the ones that changed the design.
 
 Diagnostics learn to say how to fix themselves. Where the resolver or the
 type checker raises an error whose fix it can decide, it attaches the
@@ -42,7 +43,9 @@ built.
   (`crates/nova-diagnostics/src/render.rs:16`, `:72`), hand `notes` to
   codespan-reporting, which prints each as `= <note>`.
 - The server publishes diagnostics through `nova-lsp`'s `convert.rs`
-  (`diagnostics_for`).
+  (`diagnostics_for`). A published message is the diagnostic's message and
+  then each note, one per line (`convert.rs:211-221`).
+- The checker's `error()` labels its span "here" (`check.rs:7288-7291`).
 - Two codes are warnings: E0021, an unreachable match arm
   (`crates/nova-typeck/src/check.rs:6815`), and M0006, an unknown manifest
   key. Every other code is an error.
@@ -58,6 +61,9 @@ built.
 | E0001 | cannot find type `x` | `check.rs:2598` |
 | E0001 | cannot find record `x` | `check.rs:4994` |
 | E0001 | cannot find trait `x` | `check.rs:704`, `:1214`, `:2305`, `:2361` |
+| E0900 | module-qualified paths are not supported yet | `check.rs:3591`, in `check_path`, when a two-segment path's qualifier is not a type in scope: `Point::origin`, `Shape::Empty`, and a call such as `Point::new()`, which falls through to it (`:3933`) |
+| E0001 | `T::V` is not a variant of the matched type | `check.rs:6979` (a pattern) |
+| E0001 | cannot resolve this pattern to a sum type variant | `check.rs:7006` (a pattern such as `Shape::Circle(r)`) |
 | E0014 | record `R` has no field `f` | `check.rs:5019` (a record literal) |
 | E0014 | no field `f` on record `R` | `check.rs:5451` (a read), `:6663` (a write), both through `no_field_message` |
 | E0014 | no method `m` on type `T`, or on array type `T` | `check.rs:5819`, `:5779` |
@@ -68,7 +74,12 @@ built.
 
 E0060's two sites add a note: "declare it as `let mut x` to allow
 assignment" (or "mutation"), or for `self`, "declare the enclosing
-method's receiver as `mut self` to allow mutation".
+method's receiver as `mut self` to allow mutation" (`check.rs:6441`,
+`:6538`). Every binding not named `self` gets the `let mut` advice,
+including match bindings and `for` variables, where `mut` does not parse.
+
+"cannot find module `m`" (resolver `lib.rs:2360`, `program.rs:510`,
+`:534`) names a module the loader could not find.
 
 ### Locals and `mut`
 
@@ -83,9 +94,16 @@ method's receiver as `mut self` to allow mutation".
 - **Nor does a `for` loop:** `for mut i in 0..3` is P0001, "expected
   pattern (in statement), found 'mut'", as `for_loop_var`'s comment records
   (`check.rs:4503`).
-- The checker's locals record a name, a type, `is_mut` and a span
-  (`FnCtx::new_local`, `check.rs:353`). They do not record how they were
-  bound. User locals go through `bind_local` (`check.rs:7183`).
+- `let x` without an initializer is E0900 and binds nothing
+  (`check.rs:3228`).
+- The checker's locals are `hir::Local`s: a name, a type, `is_mut` and a
+  span (`FnCtx::new_local`, `check.rs:353`). They do not record how they
+  were bound. `hir::Local` is built at `check.rs:369` and `:4927`, the
+  driver's `lib.rs:510`, and `nova-mir/src/mono.rs:472` and `:733`.
+- User locals go through `bind_local` (`check.rs:7183`). `self` is bound
+  by the same parameter loop as the other parameters (`check.rs:3011-3018`).
+- `place_root`'s `PlaceRoot::ImmutableLocal` carries the root's name only
+  (`check.rs:6496`), not the local.
 
 ### Imports and modules
 
@@ -93,7 +111,13 @@ method's receiver as `mut self` to allow mutation".
   `import m::{a, b}`. `import m as n` is refused (3.4a).
 - **`import m` is a glob.** It binds every public name of `m`, in all three
   namespaces (`lib.rs:2384`). `import m::{a}` binds `a` in each namespace
-  `m` exports it in (`lib.rs:2411`).
+  `m` exports it in (`lib.rs:2411`). So `import m` beside `import m::{a}`
+  is E0002 today: the list's `a` is "already defined or imported in this
+  module" (`lib.rs:2549-2563`).
+- A module's scope binds the builtins first (`lib.rs:1639`), then its
+  items and imports, and std's glob last (`lib.rs:1689-1700`). An import
+  of a name std also has wins without a conflict; one the builtins have
+  is E0002.
 - What `m` names follows 3.3a §4.3: a file of the same package and
   directory, or a dependency's `src/lib.nova` by its import name, or, from
   `tests/`, the package itself. The driver decides it while loading and
@@ -102,6 +126,14 @@ method's receiver as `mut self` to allow mutation".
 - **The loader parses only what the roots reach,** breadth first through
   imports (`crates/nova-driver/src/program.rs:311`). A module nothing
   imports is never read.
+- Loose programs go through the same loader (`Place::Loose`,
+  `program.rs:475`). `name_imports` serves only `resolver::resolve`
+  (`lib.rs:1516`) and the resolver's tests. `ModuleSource` is built at the
+  driver's `analyze.rs:163` and `lib.rs:730`, and the resolver's
+  `lib.rs:1421` and `:1605`.
+- `Definitions::names_in_scope` (`lib.rs:1362`) lists a module's names in
+  all three namespaces, its imports, the builtins and std's names
+  included. Completion uses it (`completion.rs:153`).
 - Each loaded module knows its package (`Loaded.package`); the driver's
   `Analysis` carries them as `module_packages`.
 - The resolver computes each module's exports, its public names by
@@ -110,6 +142,30 @@ method's receiver as `mut self` to allow mutation".
   find", and std's sources contain no `import`.
 - The `.nova` corpus has three `import` lines, two of them in
   `tests/runtime/modules/main.nova`, and no blank line between imports.
+- **Method calls ignore imports.** `resolve_method_on` searches every impl
+  in the program (`check.rs:5531-5568`), filled from all merged items
+  (`:1090`). A trait's methods resolve whether or not the file imports the
+  trait.
+- **With `keep_going`, as the server runs,** `analyze.rs:208` drops every
+  E0001 whose first backticked name is an item the parser dropped, in any
+  loaded file (`program.rs:352`, `analyze.rs:231-250`). A parse error in
+  one module can so hide another file's resolution errors.
+
+### What the front end can see of the source
+
+- The resolver gets each module's AST (`ModuleSource.file`), and the
+  checker the merged AST (`check_with(file, defs, options)`,
+  `check.rs:125`). `File` is its items (`nova-ast/src/lib.rs:30-32`).
+  Neither sees source text.
+- The loader lexes with `nova_lexer::lex`, which drops comments
+  (`program.rs:344`); only `lex_with_comments` keeps them.
+- An item's span starts at its `///` docs and attributes
+  (`grammar.rs:415-416`, `:504`). `Attribute.span` covers only the `@`.
+  `Def.span` is the item's name.
+- A match arm has no span of its own (`nova-ast/src/expr.rs:144-148`), and
+  the parser does not record where an arm's comma was (`grammar.rs:2236`).
+  The checker has the arm's pattern span and its body's span
+  (`check.rs:6716`, `:6735`).
 
 ### The formatter's imports
 
@@ -121,6 +177,9 @@ method's receiver as `mut self` to allow mutation".
   stay above the run.
 - Its output check sorts the same runs (`fingerprint` and `import_runs`,
   `crates/nova-fmt/src/check.rs:56`, `:75`).
+- `crates/nova-fmt/tests/layout.rs:153-155` pins that behaviour:
+  `"import b\n\n\nimport a\n"` formats to `"import a\nimport b\n"` (the
+  3.1 plan's decision 3). It is the only such test in `crates/`.
 
 ### The server and the index
 
@@ -143,9 +202,10 @@ method's receiver as `mut self` to allow mutation".
 
 - `crates/nova-driver/tests/broken.rs` analyses 364 cut programs and checks
   every occurrence lies inside its file.
-- `crates/nova-cli/tests/lsp_navigation.rs` drives the server over stdio,
-  with a project helper and `app_and_library` for a project with a path
-  dependency.
+- `crates/nova-cli/tests/lsp_navigation.rs` drives the server over stdio.
+  Its `project` helper (`:20`) and `app_and_library` (`:231`), which
+  writes a fixed `APP_MAIN`, are private to that file; the shared module
+  is `lsp_client`.
 - `crates/nova-cli/tests/lsp.rs`'s `requests_stay_within_the_ci_bound`
   measures six requests.
 
@@ -175,7 +235,9 @@ pub struct Edit {
   diagnostic is in. Only "make it public" does.
 - A fix's edits never overlap, and each lies inside its file, on character
   boundaries.
-- A fix never edits std, a dependency, or a file inside nova's caches.
+- A fix never edits std, another package, or a file inside nova's caches.
+  The package's own library is the project's, so a fix raised in a
+  `tests/` file may edit `src/lib.nova`.
 
 ### 3.2 What a fix promises
 
@@ -196,7 +258,7 @@ pub struct Edit {
     ┌─ src/main.nova:3:5
     │
   3 │     x = 2
-    │     ^^^^^
+    │     ^^^^^ here
     │
     = help: make `x` mutable
   ```
@@ -204,10 +266,14 @@ pub struct Edit {
 - Where E0060 offers a fix, its note "declare it as `let mut x` …" is not
   added; the fix says it. Where no fix is offered (a pattern binding, a
   `for` variable, `self`), the note stays.
-- The published LSP diagnostic is unchanged. Fixes reach the editor as
-  code actions.
-- Fixes are computed only for errors that occur, so a clean program pays
-  nothing.
+- The note is part of the published LSP message today (§2), so where the
+  fix replaces it the published message loses that line. Two checker unit
+  tests assert the note on a `let`-bound receiver (`check.rs:10049`,
+  `:10275`); they assert the fix instead.
+- Otherwise the published diagnostic is unchanged. Fixes reach the editor
+  as code actions, not inside the diagnostic.
+- Fixes are computed only for errors that occur. The tables §4.6 adds are
+  built on every analysis, a few entries per module.
 
 ## 4. The fixes
 
@@ -222,29 +288,55 @@ pub struct Edit {
 - **Title:** "make `x` mutable".
 - **Not offered** for a pattern binding or a `for` variable, where `mut`
   does not parse (§2), or for `self`, since changing a receiver changes
-  every caller. Their notes stay.
-- **What the checker gains:** each local records how it was bound: by a
-  `let`, as a parameter, or otherwise. `bind_local` takes it.
+  every caller. Their notes stay. `self` is bound as a parameter (§2), so
+  it is excluded by name, as the existing note already tells it apart.
+- **What the checker gains:**
+  - beside its locals, a checker-only table of how each was bound, by a
+    `let`, as a parameter, or otherwise, keyed by the local's declaration
+    span. `bind_local` takes the kind. `hir::Local` does not change, so
+    its five construction sites (§2) do not either;
+  - `PlaceRoot::ImmutableLocal` also carries the local's declaration span,
+    so `require_mutable_place` can find the binding.
 
 ### 4.2 Import a name (E0001)
 
 - **Where:** the "cannot find" sites of §2, except an assignment's target
-  (`check.rs:6420`). Each knows its namespace: a value or function looks
-  in values, a type or record in types, a trait in traits.
+  (`check.rs:6420`); and an unknown qualifier, where a type was used
+  without being imported: the E0900 of a two-segment path whose qualifier
+  is not a type in scope (`Point::new()`, `Shape::Empty`), and the two
+  pattern errors of §2 (`Shape::Circle(r)`), when their qualifier is not a
+  type in scope.
+- **Each site needs one kind of item:**
+
+  | Site | Needs |
+  |---|---|
+  | an unknown value (`check.rs:3660`) | any value: a function, a constant or a variant |
+  | an unknown function in a call (`:3714`) | a function or extern function |
+  | an unknown type (`:2598`) | a record or sum type |
+  | an unknown record in a literal (`:4994`) | a record |
+  | an unknown trait (four sites) | a trait |
+  | an unknown qualifier in an expression | a record or sum type |
+  | an unknown qualifier in a pattern | a sum type |
+
+  A candidate of another kind would trade one error for another, such as
+  a sum type for a record literal (E0010, `check.rs:4996-4999`).
 - **Candidates:** every module the current module could import by a
-  single-segment name, by the rules of 3.3a §4.3, whose exports bind `x`
-  in that namespace (§4.6). Std is never a candidate.
-- **Offered when exactly one module is a candidate,** and the current
-  module has no `x` in any namespace the import would bind `x` in. A list
-  import binds `x` in every namespace its module exports `x` in (§2), so a
-  module that exports a value and a type both named `x` is not offered
-  to a module that already has a type `x`.
+  single-segment name, by the rules of 3.3a §4.3, whose exports hold an
+  item named `x` of the kind the site needs (§4.6). Std is never a
+  candidate.
+- **Offered when exactly one module is a candidate,** and importing it
+  would bind `x` in no namespace where the current module already has `x`
+  from its own items, its imports or the builtins. A list import binds `x`
+  in every namespace its module exports `x` in (§2). A std name does not
+  block the fix, since an import of a name std has wins without a
+  conflict (§2).
 - **Title:** "import `x` from `m`", where `m` is the name the import uses.
-- **The edit:**
+- **The edit,** placed by §4.7's line rules:
   - when the file has an `import m::{…}`, add `, x` after the list's last
     name;
-  - otherwise, when the file has imports, a new line `import m::{x}` after
-    the last one;
+  - otherwise, when the file has imports, a new line `import m::{x}` at
+    the end of the last import's line, so a comment ending that line stays
+    on it;
   - otherwise, a new line `import m::{x}` and a blank line, before the
     first item. That is before the item's `///` docs, its attributes, and
     any comment lines directly above it with no blank line between. A
@@ -256,27 +348,34 @@ pub struct Edit {
 ### 4.3 Did you mean
 
 - **The rule:** among the candidates, other than `x` itself, a candidate
-  equal to `x` ignoring ASCII case comes first. Then the smallest edit
-  distance, then byte order. Only one suggestion is made.
+  equal to `x` ignoring ASCII case comes first, and qualifies at any
+  distance, as in rustc. Then the smallest edit distance, then byte order.
+  Only one suggestion is made.
 - **The distance:** the optimal string alignment distance, over Unicode
   scalar values: Levenshtein's insertions, deletions and substitutions,
   and a swap of two adjacent characters, each one edit. So `cuont` is one
   edit from `count`, where Levenshtein counts two. A candidate qualifies
   within `max(len(x), 3) / 3`, rustc's bound, with `len` in characters: 1
   up to 5 characters, 2 up to 8, and so on.
-- **Title:** "change `x` to `y`". The edit replaces `x`'s span with `y`.
-- **The candidates, by site:**
+- **Title:** "change `x` to `y`". The edit replaces the name's own span,
+  the path segment, with `y`. That can be narrower than the diagnostic's
+  label: "cannot find type" labels the whole type with its arguments, and
+  "cannot find record" the whole literal.
+- **The candidates, by site,** each of the kind §4.2's table says the site
+  needs:
   - an unknown value or function: the locals visible there, and the
-    module's value namespace (its items, its imports, std's names and the
-    builtins);
-  - an unknown type or record: the module's type namespace, the type
-    parameters in scope, and the primitive types;
-  - an unknown trait: the module's trait namespace;
+    module's values from `Definitions::names_in_scope` (§2): its items,
+    its imports, std's names and the builtins;
+  - an unknown type, record or qualifier: the module's types from
+    `names_in_scope`, the type parameters in scope, and, for a type, the
+    primitive types;
+  - an unknown trait: the module's traits from `names_in_scope`;
   - an unknown field: the record's fields, less those a literal already
     gives;
-  - an unknown method: the receiver type's methods, including those of
-    traits in scope it implements, and the builtin methods of a builtin
-    type;
+  - an unknown method: every method that resolution would accept on the
+    receiver's type: its inherent methods, the methods of every trait
+    implemented for it anywhere in the program (resolution ignores
+    imports, §2), and the builtin methods of a builtin type;
   - E0082: the known attributes; E0085: the known `@test` arguments.
 - The checker's own names (`__it` and its kind) are never candidates.
 - Where an E0001 offers both an import and "did you mean", the import comes
@@ -287,22 +386,24 @@ pub struct Edit {
 - **Where:** the resolver's "`x` is not a public item of module `m`"
   (`lib.rs:2471`), when `m` declares a private item named `x` and `m` is
   in the same package as the importing module. A loose program's files
-  count as one package.
-- **The edit:** insert `pub ` before the item's first keyword (after its
-  `///` docs and attributes), in `m`'s file. When `m` has private items
-  named `x` in more than one namespace, the fix makes each public.
+  count as one package. A `tests/` file importing its own package's
+  library by name is in the same package (§3.1).
+- **The edit:** insert `pub ` before the item's keyword, in `m`'s file,
+  found by §4.7 from the item's name: `fn`, `async fn`, `record`, `enum`,
+  `trait` or `const`. When `m` has private items named `x` in more than one
+  namespace, the fix makes each public.
 - **Title:** "make `x` public in `m`".
 - **Not offered** for a dependency's module, which this project does not
   own.
 
 ### 4.5 Remove an unreachable arm (E0021)
 
-- **The edit:** delete the arm, from its pattern to the end of its body,
-  with its trailing comma. When nothing else shares the arm's lines, the
-  edit deletes those whole lines.
+- **The edit:** delete the arm, from its pattern's start to its body's
+  end, with a comma that follows it. When nothing else shares the arm's
+  lines, the edit deletes those whole lines. Both are found by §4.7.
 - **Title:** "remove the unreachable arm".
-- The diagnostic's label stays on the pattern; the checker passes the
-  whole arm's span to the fix.
+- The diagnostic's label stays on the pattern. The checker merges the
+  pattern's span with the body's (§2) to give the fix the arm.
 
 ### 4.6 What the front end gains
 
@@ -310,20 +411,53 @@ pub struct Edit {
   - `package: Option<u32>`, an opaque key that is equal for two modules of
     the same package, and `None` for a loose program;
   - `importable: Vec<(String, usize)>`, every loaded module this module
-    could import, by the name it would write. The driver fills it by
-    3.3a §4.3's rules, over the modules it loaded. `name_imports` fills it
-    by name for a loose program and the resolver's own tests.
+    could import, by the name it would write.
+
+  The driver fills both for every program it loads, with a package or
+  loose, by 3.3a §4.3's rules over the modules it loaded. `name_imports`
+  fills `importable` by name for `resolver::resolve` and the resolver's
+  own tests. The four `ModuleSource` construction sites of §2 change.
 - **`Definitions` keeps** each module's exports (today local to the
-  import pass), its importable table and its package key. It offers
-  lookups by name and namespace, and iteration over a module's names in a
-  namespace for §4.3.
+  import pass), its importable table and its package key, with lookups by
+  name and kind. §4.3's candidates come from the existing
+  `names_in_scope`.
+- **The front end reads the sources:** the resolver and the checker get
+  the program's `FileDb`, read-only, for §4.7. Without one, as in
+  `resolver::resolve` and the resolver's tests, the fixes that §4.7 places
+  are not offered.
 - **The checker's locals** record how they were bound (§4.1).
 - **The index gains a table of locals:** for each local's declaration
   span, whether it is a parameter and whether it is `mut` (§7). The
-  existing recording sites fill it.
-- These tables are built on every analysis, the command line's included.
-  They hold a few entries per module, and the command line's help lines
-  need them.
+  existing recording sites fill it, only when the index is on, as for the
+  rest of the index.
+- The other tables are built on every analysis, the command line's
+  included. They hold a few entries per module, and the command line's
+  help lines need them.
+
+### 4.7 Placing edits by lines
+
+Three fixes place their edits by the source's lines, which neither AST
+holds (§2). The rules read the file's text from the `FileDb`:
+- **A comment line** is a line whose first character after spaces and
+  tabs is `//`. A **blank line** holds only spaces and tabs.
+- **After the last import** (§4.2): the edit inserts at the end of that
+  import's last line, after its line ending, so a comment that ends the
+  line stays with it. When that line is the file's last and has no
+  ending, the edit adds one first.
+- **Before the first item** (§4.2): from the item's span, which starts at
+  its docs and attributes (§2), move up over comment lines with no blank
+  line between, and insert at the start of the topmost.
+- **An item's keyword** (§4.4): from the item's name, move left over
+  spaces and tabs to the keyword, and over `async` before `fn`. `pub `
+  goes before the first of them.
+- **An arm's comma and lines** (§4.5): after the body's end, spaces and
+  tabs, then a `,` if there is one, belong to the arm. The arm owns its
+  lines when the text before its start on its first line, and after its
+  end on its last line, is only spaces, tabs and the line ending; the edit
+  then deletes from its first line's start through its last line's
+  ending.
+- Line endings may be `\n` or `\r\n`; an inserted line takes the file's
+  own ending.
 
 ## 5. Code actions
 
@@ -344,7 +478,8 @@ pub struct Edit {
   - it is preferred when the diagnostic has exactly one fix.
 
   A range touching a label's end counts as overlapping, since VS Code
-  sends the cursor as an empty range.
+  sends the cursor as an empty range. A diagnostic that labels a wide
+  span, such as a whole record literal, offers its fixes anywhere in it.
 - **Identical fixes,** with the same title and the same edits, from several
   diagnostics, are offered once, naming every diagnostic.
 - **Order:** by the diagnostic's position, then the fix's order on it;
@@ -390,18 +525,26 @@ pub struct Edit {
 - `import m::{a}` and `import m::{b}` become `import m::{a, b}`, with the
   names sorted and duplicates removed.
 - Two `import m` become one.
-- `import m` and `import m::{a}` both stay.
+- `import m::{a}` beside `import m` is removed, since the glob binds every
+  name the list does, and the pair is E0002 today (§2). This is merging,
+  so it happens in a file with errors too; its comments go above the
+  glob.
 
 ### 6.4 Unused imports
 
-- **Removed only when the analysis reports no error in the file.** A
-  broken line may be a use the checker could not record. Warnings do not
+- **Removed only when the analysis reports no error in the file, and no
+  loaded file has a lex or parse error.** A broken line may be a use the
+  checker could not record. A parse error elsewhere can hide this file's
+  errors (§2: with `keep_going`, an E0001 naming an item the parser
+  dropped is filtered out), so it blocks removal too. Warnings do not
   block removal.
 - **A name in a list** is used when an occurrence in the file, other than
-  the import's own, targets something the name binds. A use of a trait's
-  method, and a use of an enum's variant, count as uses of the trait and
-  the enum. A list whose names are all unused is removed; otherwise only
-  its unused names go.
+  the import's own, targets something the name binds. A use of an enum's
+  variant counts as a use of the enum, and a call of a trait's method as a
+  use of the trait. Method resolution does not need the trait imported
+  (§2), but a reader of the file uses the trait through its methods, so
+  organize imports keeps it. A list whose names are all unused is
+  removed; otherwise only its unused names go.
 - **A glob `import m`** is used when an occurrence in the file targets
   anything declared in `m`: an item, a variant or field of its types, or
   a method of its traits. This counts more uses than the glob may
@@ -428,6 +571,9 @@ pub struct Edit {
 - No `.nova` file in the repository has a blank line between imports, so
   no formatted file in the repository changes. A user's file with such a
   blank line now keeps it, and its groups are sorted separately.
+- `layout.rs:153-155`, which pins the 3.1 plan's decision 3 (§2), changes:
+  `"import b\n\n\nimport a\n"` now formats to `"import b\n\nimport a\n"`,
+  two groups one blank line apart.
 - ADR 0028 and `40-TOOLING.md` §2.1 get dated notes.
 
 ## 7. Semantic tokens
@@ -509,7 +655,7 @@ where one stays.
 
 | # | Fix | Case |
 |---|---|---|
-| 1 | mutable | `let x` then `x = 1` |
+| 1 | mutable | `let x = 0` then `x = 1` |
 | 2 | mutable | `x += 1` |
 | 3 | mutable | `arr[i] = v` on an immutable `let` |
 | 4 | mutable | `rec.f = v` on an immutable `let` |
@@ -520,21 +666,28 @@ where one stays.
 | 9 | mutable, none | a `for` variable assigned |
 | 10 | mutable, none | a field of `self` set in a method without `mut self` |
 | 11 | import | extends an existing `import m::{…}` |
-| 12 | import | a new line after the last import |
-| 13 | import | a file with no imports: above the first item, below a header comment |
-| 14 | import | from a dependency's library |
-| 15 | import | a type, and a trait |
-| 16 | import, none | two modules export the name |
-| 17 | import, none | importing would bind a name the module already has |
-| 18 | did you mean | a local |
-| 19 | did you mean | a type |
-| 20 | did you mean | a field, in a read and in a literal |
-| 21 | did you mean | a method |
-| 22 | did you mean | an attribute, and a `@test` argument |
-| 23 | did you mean, none | nothing within the distance, and its edge: a five-character name at distance 1 is offered, at 2 is not |
-| 24 | public | a sibling module's private item; the edit is in the other file |
-| 25 | public, none | a dependency's private item |
-| 26 | remove arm | an arm on its own line, an arm over several lines, and an arm sharing its line |
+| 12 | import | a new line after the last import, which ends with a comment that stays on its line |
+| 13 | import | a file with no imports: above the first item and the comment lines on it, below a header comment |
+| 14 | import | from a dependency's library, which another module of the program imports, so it is loaded |
+| 15 | import | a type, a record literal, and a trait |
+| 16 | import | an unknown qualifier: `Point::new()`, `Shape::Empty`, and the pattern `Shape::Circle(r)` |
+| 17 | import, none | two modules export the name |
+| 18 | import, none | importing would bind a name the module already has; a std name of the same spelling does not block it |
+| 19 | import, none | a record literal whose only candidate is a sum type |
+| 20 | did you mean | a local |
+| 21 | did you mean | a type, and a qualifier |
+| 22 | did you mean | a field, in a read and in a literal |
+| 23 | did you mean | a method, one of them from a trait the file does not import |
+| 24 | did you mean | an attribute, and a `@test` argument |
+| 25 | did you mean | a name equal ignoring case, beyond the distance |
+| 26 | did you mean, none | nothing within the distance, and its edge: a five-character name at distance 1 is offered, at 2 is not |
+| 27 | public | a sibling module's private item; the edit is in the other file |
+| 28 | public | from a `tests/` file, an item of the package's own library |
+| 29 | public, none | a dependency's private item |
+| 30 | remove arm | an arm on its own line, an arm over several lines, an arm sharing its line, and an arm with a trailing comma |
+
+The cases run on `\n` and on `\r\n` sources where §4.7's rules place the
+edit (cases 12, 13, 27, 28, 30).
 
 ### 9.2 Every fix on broken programs
 
@@ -545,27 +698,37 @@ at a time and analysing again does not panic.
 ### 9.3 The command line
 
 `nova check` on a project with an E0060 prints `= help: make \`x\`
-mutable`, and not the note.
+mutable`, and not the note. The two checker unit tests of §3.3 assert the
+fix in place of the note.
 
 ### 9.4 Organize imports and the formatter's groups
 
-- **Organize imports,** in `nova-fmt`:
+- **The block, in `nova-fmt`,** given each import's group and unused names
+  as inputs:
   - scattered imports, with an item between them;
   - unsorted imports, and unsorted lists;
-  - lists merged, and duplicate globs;
+  - lists merged, duplicate globs, and a list beside a glob of the same
+    module;
   - unused list names, a wholly unused list, and an unused glob, removed;
-  - unused imports kept when the file has an error;
-  - a trait imported only for its methods, kept;
   - comments travelling, a header comment staying, comments of a removed
     import removed;
   - the two groups;
-  - nothing offered after a run;
+  - nothing to do after a run;
   - `nova fmt` changing nothing in the result.
+- **The classification, in `nova-lsp`,** from a real analysis:
+  - a list name used and unused, a glob used and unused;
+  - a trait used only through its methods, and an enum only through its
+    variants, counted as used;
+  - nothing unused when the file has an error, or when another loaded
+    file has a parse error;
+  - a dependency's import, the package's own library from `tests/`, and a
+    sibling module, each in its group.
 - **The formatter:**
   - two groups kept, each sorted;
   - a header comment above the second group;
   - the output check accepting a grouped file;
-  - formatting twice changing nothing.
+  - formatting twice changing nothing;
+  - `layout.rs`'s blank-line case, as §6.6 changes it.
 
 ### 9.5 Semantic tokens (`nova-lsp`)
 
@@ -574,13 +737,18 @@ span, and of the encoding, including a non-ASCII line.
 
 ### 9.6 The language server (`crates/nova-cli/tests/lsp_fixes.rs`)
 
-Over stdio, on a project with two modules and a path dependency:
+Over stdio, on a project with two modules and a path dependency. The main
+module imports the dependency, so its library is loaded, and the second
+module uses one of its names without importing it. `project` and
+`app_and_library` move into the shared `lsp_client` module, and
+`app_and_library` takes the main file's text.
 - the capabilities are advertised;
-- a quick fix imports a name from the dependency;
+- a quick fix in the second module imports the name from the dependency;
 - "make public" edits the sibling module's URI;
 - "make mutable" at a cursor's empty range;
 - `only` returns organize imports alone;
 - organize imports, with both groups and an unused import;
+- organize imports in a file with an error keeps the unused import;
 - no actions inside a downloaded package;
 - semantic tokens, decoded and checked name by name;
 - tokens for a file with an error.
@@ -592,10 +760,10 @@ Each must fail the named test:
 | # | Mutant | Caught by |
 |---|---|---|
 | 1 | `mut ` inserted before the `let` keyword | §9.1 case 1 |
-| 2 | the import fix offered with two candidates | case 16 |
-| 3 | the distance bound `/ 2` instead of `/ 3` | case 23 |
+| 2 | the import fix offered with two candidates | case 17 |
+| 3 | the distance bound `/ 2` instead of `/ 3` | case 26 |
 | 4 | the import groups swapped | §9.4's groups |
-| 5 | unused imports removed from a file with an error | §9.4 |
+| 5 | unused imports removed from a file with an error | §9.4's classification, and §9.6 |
 | 6 | token positions absolute, not relative | §9.6's decode |
 | 7 | `defaultLibrary` dropped | §9.5 |
 | 8 | code actions answered inside a downloaded package | §9.6 |
@@ -662,8 +830,9 @@ With this gate met, 3.4 is complete.
 2. **An import fix that does not resolve,** from a wrong importable table.
    §9.1's cases 11 to 15 analyse after applying, including a dependency.
 3. **Organize imports removing a used import.** Only in a file without
-   errors, counting uses generously (§6.4), and tested with a trait used
-   only through its methods.
+   errors, and only while no loaded file has a parse error, which could
+   hide this file's errors (§6.4). Uses are counted generously, and
+   §9.4's classification tests pin each rule.
 4. **The formatter's change.** A user's file with a blank line between
    imports now keeps it. No file in the repository has one, and the
    change is recorded in ADR 0028.
@@ -675,7 +844,12 @@ With this gate met, 3.4 is complete.
 7. **Overlapping edits,** which clients reject. §9.2 checks every fix, and
    identical fixes are offered once.
 8. **Scripts reading the command line's output.** The `help:` lines are
-   added after the notes; nothing else in the output moves.
+   added after the notes, and E0060's note gives way to its fix; nothing
+   else in the output moves.
+9. **Placing an edit by lines** (§4.7). The rules read text the ASTs do not
+   hold, so a layout the tests miss could misplace an edit. §9.1 runs the
+   placed cases on both line endings, and §9.2 checks every edit's bounds
+   on 364 broken programs.
 
 ## 13. Decisions
 
@@ -737,9 +911,43 @@ With this gate met, 3.4 is complete.
     needs.
 24. **Budgets:** 200 ms for code actions and semantic tokens; CI 2 s.
 25. **An import fix names the module as an import would,** by 3.3a §4.3.
-26. **A dependency is an import of another package's library,** or of the
-    package's own library from `tests/`. Every other import, an
-    unresolved one included, is the project's own.
+26. **For grouping, a dependency is an import of another package's
+    library,** or of the package's own library from `tests/`. Every other
+    import, an unresolved one included, is the project's own. For editing
+    (§3.1), the package's own library is the project's.
+27. **Three fixes place their edits by lines of the source** (§4.7), which
+    the resolver and checker read from the `FileDb`. The fact-check found
+    that neither sees text or comments, so the layout rules of §4.2, §4.4
+    and §4.5 had nothing to work from. Giving the front end read access
+    to the sources keeps decision 5's approach.
+28. **The import fix also covers an unknown qualifier** (`Point::new()`,
+    `Shape::Empty`, `Shape::Circle(r)`), the commonest way to use a type
+    without importing it. The fact-check found these are E0900 and two
+    pattern errors, not "cannot find".
+29. **A candidate must be the kind of item its site needs** (§4.2's
+    table). The fact-check found that matching by namespace alone could
+    trade one error for another.
+30. **Unused imports wait for a program without parse errors** (§6.4). The
+    fact-check found that `keep_going` filters out E0001s that name items
+    the parser dropped, in any loaded file.
+31. **A list import beside a glob of the same module is removed** (§6.3),
+    in any file. The fact-check found that the pair is E0002 today, so the
+    approved "both stay" would have kept an error.
+32. **Method candidates are every method resolution accepts** (§4.3),
+    since method resolution searches every impl in the program, not those
+    in scope (fact-check). For the same reason, a trait is not needed for
+    its methods; organize imports keeps it anyway (§6.4).
+33. **E0060's published message loses the note where a fix replaces it**,
+    and two checker unit tests change (§3.3). The approved design said the
+    published diagnostic was unchanged; the fact-check found that notes
+    are part of the published message.
+34. **A name equal ignoring case qualifies at any distance,** as in rustc
+    (§4.3).
+35. **"Did you mean" for a module name is not in.** The modules an import
+    could name are files the loader did not read, and the candidates would
+    need its directory listings (§14).
+36. **How a local was bound lives in a checker-only table,** so `hir::Local`
+    and its five construction sites do not change (§4.1).
 
 ## 14. Not in 3.4b
 
@@ -750,8 +958,9 @@ With this gate met, 3.4 is complete.
   for a non-exhaustive match (E0020), missing record fields (E0014).
 - Importing from a module the program does not load yet.
 - "Make mutable" for a `mut self` receiver.
-- E0060's note for a `for` variable, which advises `let mut`, though
-  `for mut` does not parse: noted here, not changed.
+- E0060's note for a match binding or a `for` variable, which advises
+  `let mut`, though `mut` does not parse there: noted here, not changed.
+- "Did you mean" for a module name in an import (decision 35).
 - Requests the phase plan does not list: `documentHighlight`,
   `typeDefinition`, `implementation`, `documentSymbol`, `workspace/symbol`.
 - `salsa`, unless the budget is missed (ADR 0029).
