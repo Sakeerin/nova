@@ -88,6 +88,11 @@ fixes and colour.
 - The checker has a write-only recording path at its name sites. A new
   construct that resolves a name needs a recording place, and the
   completeness checks fail until it has one.
+- Rename refuses what its re-analysis cannot see (the final review):
+  - a program's `main`, which is looked for after the front end;
+  - an extern function's name, which is its C symbol;
+  - from a project file no root reaches, any name declared elsewhere;
+  - from a loose module, any name a file importing it could use.
 - Forms the checker refuses today are not navigable:
   - type aliases;
   - `import … as`;

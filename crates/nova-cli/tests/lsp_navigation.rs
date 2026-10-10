@@ -1176,3 +1176,101 @@ fn each_request_works_in_a_broken_file_and_is_empty_for_an_unopened_one() {
     assert_eq!(ok(&prepare(&mut client, &other, use_.clone())), Value::Null);
     assert_eq!(ok(&rename(&mut client, &other, use_, "sum")), Value::Null);
 }
+
+// === The final review's fixes ===
+
+#[test]
+fn rename_refuses_the_entry_point_and_an_extern_symbol() {
+    // Final review I1: the front end alone cannot see either break. `main`
+    // is found after it (MIR), and an extern function's name is its C
+    // symbol.
+    let text =
+        "extern \"C\" {\n    fn abs(value: Int) -> Int\n}\n\nfn main() {\n    let n = abs(1)\n}\n";
+    let dir = project("rename-entry-extern", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    assert_eq!(
+        refused(&prepare(&mut client, &uri, at(text, "main", 0))),
+        "`main` is a program's entry point and cannot be renamed"
+    );
+    assert_eq!(
+        refused(&rename(
+            &mut client,
+            &uri,
+            at(text, "abs(1)", 0),
+            "absolute"
+        )),
+        "`abs` names a C symbol and cannot be renamed"
+    );
+}
+
+#[test]
+fn rename_from_a_file_the_program_does_not_reach_keeps_to_its_own_names() {
+    // Final review I2: scratch.nova is analysed alone, so a rename of
+    // geometry's `area` from it could not see main.nova's call.
+    let main = "import geometry\n\nfn main() {\n    let a = area()\n}\n";
+    let scratch = "import geometry\n\nfn helper() -> Int {\n    let b = area()\n    b\n}\n";
+    let dir = project(
+        "rename-unreached",
+        &[
+            ("main.nova", main),
+            ("geometry.nova", GEOMETRY),
+            ("scratch.nova", scratch),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("scratch.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, scratch);
+    assert_eq!(
+        refused(&prepare(&mut client, &uri, at(scratch, "area()", 0))),
+        "`area` is declared outside this file, which the project's program does not \
+         reach; rename it from a file the program reaches"
+    );
+    // The file's own names can still be renamed.
+    assert_eq!(
+        edits(&rename(&mut client, &uri, at(scratch, "b = area", 0), "c")).len(),
+        2
+    );
+}
+
+#[test]
+fn rename_in_a_loose_module_keeps_to_names_no_importer_can_see() {
+    // Final review I2: util.nova, which declares no `main`, is analysed
+    // alone, so it cannot see main.nova's call to `helper`.
+    let dir = fresh_dir("rename-loose-module");
+    let main = "import util\n\nfn main() {\n    let h = helper()\n}\n";
+    let util = "pub fn helper() -> Int { inner() }\n\nfn inner() -> Int { 1 }\n";
+    std::fs::write(dir.join("main.nova"), main).unwrap();
+    std::fs::write(dir.join("util.nova"), util).unwrap();
+    let util_uri = file_uri(&dir.join("util.nova"));
+    let main_uri = file_uri(&dir.join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &util_uri, util);
+    assert_eq!(
+        refused(&prepare(&mut client, &util_uri, at(util, "helper", 0))),
+        "`helper` can be used from files that import this module, which this analysis \
+         cannot see; rename it from one of them"
+    );
+    // A private function no importer can name may be renamed here.
+    assert_eq!(
+        edits(&rename(
+            &mut client,
+            &util_uri,
+            at(util, "inner", 0),
+            "core"
+        ))
+        .len(),
+        2
+    );
+    // From the entry that imports the module, both files are edited.
+    open(&mut client, &main_uri, main);
+    let found = edits(&rename(
+        &mut client,
+        &main_uri,
+        at(main, "helper", 0),
+        "assist",
+    ));
+    let files: Vec<&str> = found.iter().map(|e| e.0.as_str()).collect();
+    assert_eq!(files, ["main.nova", "util.nova"], "{found:?}");
+}

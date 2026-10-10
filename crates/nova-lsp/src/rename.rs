@@ -10,10 +10,10 @@ use nova_diagnostics::{FileId, LineIndex, Span};
 use nova_driver::Analysis;
 use nova_lexer::Token;
 use nova_pm::PackageId;
-use nova_resolver::{Occurrence, Role, Target};
+use nova_resolver::{DefKind, Definitions, Occurrence, Role, Target};
 
-use crate::analysis::Answer;
-use crate::workspace::{Overlay, PathKey};
+use crate::analysis::{Answer, Scope};
+use crate::workspace::{declares_main, Overlay, PathKey, ProjectKey};
 use crate::{convert, navigate, std_cache};
 
 /// Why a rename is refused: a `RequestFailed` error's message.
@@ -110,7 +110,85 @@ fn renameable<'a>(
             }
         }
     }
+    // Final review I1: two spellings the front end cannot check. `main`
+    // is looked for after it, and an extern function's name is its C
+    // symbol.
+    for target in &family {
+        if let Target::Def(id) = target {
+            match &defs.def(*id).kind {
+                DefKind::ExternFn { .. } => {
+                    return refuse(format!("`{old}` names a C symbol and cannot be renamed"));
+                }
+                DefKind::Fn { .. } if defs.def(*id).name == "main" => {
+                    return refuse(format!(
+                        "`{old}` is a program's entry point and cannot be renamed"
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    // Final review I2: an analysis of one file alone cannot see every file
+    // that uses its names. A project file no root reaches keeps to its own
+    // names; a loose module keeps to names no importer can see.
+    if let Scope::File(file) = &answer.scope {
+        let project = ProjectKey::of(file);
+        let unreached = matches!(project, ProjectKey::Root(_));
+        let module = matches!(project, ProjectKey::Loose(_))
+            && !declares_main(a.db.get_source(answer.file).unwrap_or(""));
+        for target in &family {
+            let Some(decl) = index.declaration(target) else {
+                continue;
+            };
+            let here = decl.span.file == answer.file;
+            if unreached && !here {
+                return refuse(format!(
+                    "`{old}` is declared outside this file, which the project's program does \
+                     not reach; rename it from a file the program reaches"
+                ));
+            }
+            if module && (!here || visible_to_importers(a, defs, target, decl.span)) {
+                return refuse(format!(
+                    "`{old}` can be used from files that import this module, which this \
+                     analysis cannot see; rename it from one of them"
+                ));
+            }
+        }
+    }
     Ok(Some(Found { at, old, family }))
+}
+
+/// Whether another module can name `target`: a `pub` item, or anything
+/// that belongs to an item (a field, a variant, a method). Locals and type
+/// parameters cannot be named from outside.
+fn visible_to_importers(a: &Analysis, defs: &Definitions, target: &Target, decl: Span) -> bool {
+    match target {
+        Target::Local(_) | Target::TypeParam(_) => false,
+        Target::Def(id)
+            if matches!(
+                defs.def(*id).kind,
+                DefKind::Fn { .. }
+                    | DefKind::Const { .. }
+                    | DefKind::Record { .. }
+                    | DefKind::Sum { .. }
+                    | DefKind::Trait { .. }
+            ) =>
+        {
+            let text = a.db.get_source(decl.file).unwrap_or("");
+            declared_pub(text, decl.start as usize)
+        }
+        _ => true,
+    }
+}
+
+/// Whether the item whose name starts at byte `at` is declared `pub`: its
+/// first token, after the last `{`, `;` or `}` on the name's line.
+fn declared_pub(text: &str, at: usize) -> bool {
+    let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let item_start = text[line_start..at]
+        .rfind(['{', ';', '}'])
+        .map_or(line_start, |i| line_start + i + 1);
+    text[item_start..at].split_whitespace().next() == Some("pub")
 }
 
 fn in_registry(path: &Path) -> bool {
