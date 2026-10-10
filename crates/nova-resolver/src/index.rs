@@ -174,7 +174,7 @@ impl Index {
 }
 
 /// Which of several occurrences on one span a request means: lower first.
-fn rank(defs: &Definitions, target: &Target) -> u8 {
+pub fn rank(defs: &Definitions, target: &Target) -> u8 {
     match target {
         Target::Field(..) => 3,
         Target::Def(id) => match defs.defs().get(id.0 as usize).map(|d| &d.kind) {
