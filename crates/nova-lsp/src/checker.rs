@@ -255,14 +255,18 @@ fn check(job: &Job) -> Option<(Vec<Publish>, Vec<PathKey>)> {
     Some((out, dirs))
 }
 
-/// Whether `project` is inside nova's cache of downloaded packages.
+/// Whether `project` is inside one of nova's caches: downloaded packages
+/// (spec 3.3b §5.5), or std's sources (3.4a §6).
 fn in_the_cache(project: &ProjectKey) -> bool {
-    let Some(registry) = nova_pm::registry_dir() else {
-        return false;
-    };
     let path = match project {
         ProjectKey::Root(dir) => dir.as_path(),
         ProjectKey::Loose(file) => file.as_path(),
+    };
+    if crate::std_cache::in_std_cache(path) {
+        return true;
+    }
+    let Some(registry) = nova_pm::registry_dir() else {
+        return false;
     };
     PathKey::of(path).is_under(&PathKey::of(&registry))
 }
@@ -307,5 +311,23 @@ fn publish_own(job: &Job, analysis: &Analysis, all: bool, out: &mut Vec<Publish>
             version: open(path).map(|d| d.version),
             diagnostics: convert::diagnostics_for(analysis, *file, entry, manifest, &uri_of),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_diagnostics_check_leaves_the_index_off() {
+        // A guard for spec 3.4a §3.6: diagnostics never pay for the index.
+        let path = std::env::temp_dir()
+            .join("nova-lsp-checker-index")
+            .join("main.nova");
+        let overlay = Overlay::default().with(&path, "fn main() {}\n".to_string());
+        let a = run(Program::loose(&path), &overlay, true)
+            .ok()
+            .expect("the buffer is analysed");
+        assert!(a.index.is_none());
     }
 }

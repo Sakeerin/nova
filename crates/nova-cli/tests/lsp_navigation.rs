@@ -4,7 +4,6 @@
 
 mod lsp_client;
 
-#[allow(unused_imports)]
 use lsp_client::{file_uri, fresh_dir, same_uri, Client};
 use serde_json::{json, Value};
 
@@ -244,4 +243,314 @@ fn app_and_library(name: &str, lib: &str) -> (std::path::PathBuf, std::path::Pat
     std::fs::write(app.join("nova.toml"), manifest).unwrap();
     std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
     (app, geom)
+}
+
+// === Task 8: std's cache, and go to definition ===
+
+fn definition(client: &mut Client, uri: &str, position: Value) -> Value {
+    client.request(
+        "textDocument/definition",
+        json!({ "textDocument": { "uri": uri }, "position": position }),
+    )
+}
+
+/// A location's path, from its `file:` URI.
+fn path_of(location: &Value) -> std::path::PathBuf {
+    let uri = location["uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no location: {location}"));
+    let decoded = lsp_client::decode(uri.strip_prefix("file://").unwrap());
+    let trimmed = if decoded.as_bytes().get(2) == Some(&b':') {
+        &decoded[1..]
+    } else {
+        &decoded[..]
+    };
+    std::path::PathBuf::from(trimmed)
+}
+
+/// The text a location's range covers, read from its file.
+fn text_at(location: &Value) -> String {
+    let text = std::fs::read_to_string(path_of(location)).unwrap();
+    let range = &location["range"];
+    let offset = |p: &Value| {
+        let line = p["line"].as_u64().unwrap() as usize;
+        let character = p["character"].as_u64().unwrap() as usize;
+        let start = text
+            .split_inclusive('\n')
+            .take(line)
+            .map(str::len)
+            .sum::<usize>();
+        let rest = &text[start..];
+        let mut units = 0;
+        for (i, c) in rest.char_indices() {
+            if units >= character {
+                return start + i;
+            }
+            units += c.len_utf16();
+        }
+        text.len()
+    };
+    text[offset(&range["start"])..offset(&range["end"])].to_string()
+}
+
+const MAIN_IMPORTS_GEOMETRY: &str =
+    "import geometry\n\nfn main() {\n    let total = area()\n    let again = total\n    print(\"x\")\n}\n";
+const GEOMETRY: &str = "/// One.\npub fn area() -> Int { 1 }\n";
+
+#[test]
+fn definition_in_the_same_file_and_into_another_module() {
+    let dir = project(
+        "definition-modules",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let main = dir.join("src").join("main.nova");
+    let uri = file_uri(&main);
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, MAIN_IMPORTS_GEOMETRY);
+    let local =
+        definition(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "total", 1))["result"].clone();
+    assert!(same_uri(local["uri"].as_str().unwrap(), &uri), "{local}");
+    assert_eq!(
+        local["range"],
+        range(MAIN_IMPORTS_GEOMETRY, "total", 0, "total")
+    );
+    let area =
+        definition(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "area()", 0))["result"].clone();
+    assert!(
+        same_uri(
+            area["uri"].as_str().unwrap(),
+            &file_uri(&dir.join("src").join("geometry.nova"))
+        ),
+        "{area}"
+    );
+    assert_eq!(text_at(&area), "area");
+    // `import geometry` goes to its file's start.
+    let module =
+        definition(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "geometry", 0))["result"].clone();
+    assert!(path_of(&module).ends_with("geometry.nova"), "{module}");
+    assert_eq!(
+        module["range"]["start"],
+        json!({ "line": 0, "character": 0 })
+    );
+    // A builtin has no definition.
+    assert_eq!(
+        ok(&definition(
+            &mut client,
+            &uri,
+            at(MAIN_IMPORTS_GEOMETRY, "print", 0)
+        )),
+        Value::Null
+    );
+}
+
+#[test]
+fn definition_of_a_trait_dispatched_call_is_the_traits_declaration() {
+    // Spec decision 6, and the test spec §8.5's second mutant breaks.
+    let text = "trait Show {\n    fn show(self) -> String\n}\nrecord A { n: Int }\n\
+impl Show for A {\n    fn show(self) -> String { \"a\" }\n}\n\
+fn main() {\n    let a = A { n: 1 }\n    let s = a.show()\n}\n";
+    let dir = project("definition-trait", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let found = ok(&definition(&mut client, &uri, at(text, "show()", 0)));
+    // The trait's `fn show`, not the impl's.
+    assert_eq!(found["range"], range(text, "show", 0, "show"));
+}
+
+#[test]
+fn definition_into_a_path_dependency_is_at_its_real_path() {
+    let (app, geom) = app_and_library("definition-dependency", GEOMETRY);
+    let main = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start(&app, false);
+    open(&mut client, &main, APP_MAIN);
+    let found = definition(&mut client, &main, at(APP_MAIN, "area()", 0))["result"].clone();
+    // Not `app/../geom/...`.
+    assert!(
+        same_uri(
+            found["uri"].as_str().unwrap(),
+            &file_uri(&geom.join("src").join("lib.nova"))
+        ),
+        "{found}"
+    );
+    assert_eq!(text_at(&found), "area");
+}
+
+/// A fresh `NOVA_HOME`.
+fn home(name: &str) -> std::path::PathBuf {
+    fresh_dir(&format!("{name}-home"))
+}
+
+const USES_STD: &str = "fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n}\n";
+
+#[test]
+fn definition_into_std_opens_its_cache() {
+    let home = home("definition-std");
+    let dir = project("definition-std", &[("main.nova", USES_STD)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &uri, USES_STD);
+    let found = definition(&mut client, &uri, at(USES_STD, "push", 0))["result"].clone();
+    let file = path_of(&found);
+    assert!(file.starts_with(home.join("std")), "{}", file.display());
+    assert_eq!(file.file_name().unwrap(), "collections.nova");
+    assert_eq!(text_at(&found), "push");
+    assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+    // Every module is there.
+    let dir_of = file.parent().unwrap();
+    for name in ["core", "json", "test"] {
+        assert!(dir_of.join(format!("{name}.nova")).is_file(), "{name}");
+    }
+}
+
+#[test]
+fn std_cache_is_reused_and_a_damaged_file_is_replaced() {
+    let home = home("std-cache-reuse");
+    let dir = project("std-cache-reuse", &[("main.nova", USES_STD)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &uri, USES_STD);
+    let file = path_of(&definition(&mut client, &uri, at(USES_STD, "push", 0))["result"]);
+    let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let text = std::fs::read_to_string(&file).unwrap();
+    definition(&mut client, &uri, at(USES_STD, "push", 0));
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        written
+    );
+    // Damage it: the next request replaces it.
+    let mut perms = std::fs::metadata(&file).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&file, perms).unwrap();
+    std::fs::write(&file, "damaged").unwrap();
+    definition(&mut client, &uri, at(USES_STD, "push", 0));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+}
+
+#[test]
+fn two_servers_write_std_cache_at_once() {
+    let home = home("std-cache-two");
+    let dir = project("std-cache-two", &[("main.nova", USES_STD)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut a = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    let mut b = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut a, &uri, USES_STD);
+    open(&mut b, &uri, USES_STD);
+    let (ra, rb) = std::thread::scope(|s| {
+        let ta = s.spawn(|| definition(&mut a, &uri, at(USES_STD, "push", 0)));
+        let tb = s.spawn(|| definition(&mut b, &uri, at(USES_STD, "push", 0)));
+        (ta.join().unwrap(), tb.join().unwrap())
+    });
+    for found in [&ra["result"], &rb["result"]] {
+        assert_eq!(text_at(found), "push", "{found}");
+    }
+}
+
+#[test]
+fn a_request_inside_std_cache_is_answered_and_nothing_is_published() {
+    let home = home("std-cache-inside");
+    let dir = project("std-cache-inside", &[("main.nova", USES_STD)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &uri, USES_STD);
+    let file = path_of(&definition(&mut client, &uri, at(USES_STD, "push", 0))["result"]);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let std_uri = file_uri(&file);
+    client.clear_unread();
+    open(&mut client, &std_uri, &text);
+    // Hover on `Vec`'s name, in its declaration inside std's own file.
+    let start = text.find("record Vec").unwrap() + "record ".len();
+    let response = hover(&mut client, &std_uri, position(&text, start));
+    assert!(code(&response).contains("record Vec"), "{response}");
+    // Nothing is published for it.
+    let sentinel_dir = fresh_dir("std-cache-inside-sentinel");
+    let sentinel = file_uri(&sentinel_dir.join("main.nova"));
+    std::fs::write(sentinel_dir.join("main.nova"), "fn main() {}\n").unwrap();
+    open(&mut client, &sentinel, "fn main() {}\n");
+    assert_eq!(client.last_diagnostics_before(&std_uri, &sentinel), None);
+}
+
+// Review Focus 2.
+const WIDE: &str =
+    "fn main() {\n    let s = \"ก😀\"; let total = 1\n    let b = \"ก😀\"; let c = total\n}\n";
+
+#[test]
+fn ranges_count_utf16_after_thai_and_an_emoji() {
+    let dir = project("definition-utf16", &[("main.nova", WIDE)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, WIDE);
+    let found = definition(&mut client, &uri, at(WIDE, "total", 1))["result"].clone();
+    assert_eq!(found["range"], range(WIDE, "total", 0, "total"));
+    let response = hover(&mut client, &uri, at(WIDE, "total", 1));
+    assert_eq!(
+        response["result"]["range"],
+        range(WIDE, "total", 1, "total")
+    );
+}
+
+// === Phase 3.3b's registry helpers, as in lsp.rs ===
+
+const INDEX: &str = "https://example.test/index/";
+
+/// `dir/app`, which depends on `geom = "<req>"` and runs `APP_MAIN`, and
+/// `dir/home`, the server's `NOVA_HOME`.
+fn registry_app(name: &str, req: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = fresh_dir(name);
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(
+        app.join("nova.toml"),
+        format!(
+            "{}\n[dependencies]\ngeom = \"{req}\"\n",
+            MANIFEST.replace("demo", "app")
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
+    (app, dir.join("home"))
+}
+
+/// `geom` 0.1.0, locked in `app`'s nova.lock and unpacked under `home`,
+/// with `lib` as its lib.nova. Its directory.
+fn lock_and_cache(app: &std::path::Path, home: &std::path::Path, lib: &str) -> std::path::PathBuf {
+    let geom = home
+        .join("registry")
+        .join("src")
+        .join(nova_pm::index_dir_name(INDEX))
+        .join("geom-0.1.0");
+    std::fs::create_dir_all(geom.join("src")).unwrap();
+    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
+    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
+    std::fs::write(
+        app.join("nova.lock"),
+        format!(
+            "version = 1\nindex = \"{INDEX}\"\n\n[[package]]\nname = \"geom\"\n\
+             version = \"0.1.0\"\nchecksum = \"00\"\ndependencies = []\n"
+        ),
+    )
+    .unwrap();
+    geom
+}
+
+#[test]
+fn definition_into_a_downloaded_package() {
+    let (app, home) = registry_app("definition-registry", "0.1");
+    let geom = lock_and_cache(&app, &home, GEOMETRY);
+    let main = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &main, APP_MAIN);
+    let found = definition(&mut client, &main, at(APP_MAIN, "area()", 0))["result"].clone();
+    assert!(
+        same_uri(
+            found["uri"].as_str().unwrap(),
+            &file_uri(&geom.join("src").join("lib.nova"))
+        ),
+        "{found}"
+    );
+    assert_eq!(text_at(&found), "area");
 }

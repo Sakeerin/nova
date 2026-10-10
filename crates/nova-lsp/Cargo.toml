@@ -29,3 +29,5 @@ lsp-types = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+# Std's cache's directory name (spec 3.4a §6). Already in the lockfile.
+crc32fast = { workspace = true }

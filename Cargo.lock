@@ -1119,6 +1119,7 @@ name = "nova-lsp"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "lsp-server",
  "lsp-types",
  "nova-ast",

@@ -16,6 +16,10 @@ pub enum Scope {
     Project(PathBuf),
     /// A file on its own: `Program::for_file` finds its package.
     File(PathBuf),
+    /// A file in std's cache (spec §4, rule 2), answered from an in-memory
+    /// program that includes std. Rename never re-analyses one (it refuses
+    /// inside the caches), so the module is not kept.
+    Std,
 }
 
 /// An analysis, the request's file in it, and where it came from.
@@ -41,16 +45,33 @@ pub fn options(probe: Option<Probe>, index: bool) -> Options {
 
 /// Analyse `scope` over `overlay`, guarded against a panic.
 pub fn analyse(scope: &Scope, overlay: &Overlay, options: &Options) -> Option<Analysis> {
-    let program = match scope {
-        Scope::Project(dir) => Program::for_package(dir, Roots::Test),
-        Scope::File(path) => Program::for_file(path),
+    let (program, overlay) = match scope {
+        Scope::Project(dir) => (Program::for_package(dir, Roots::Test), overlay.clone()),
+        Scope::File(path) => (Program::for_file(path), overlay.clone()),
+        Scope::Std => {
+            // Plan decision 14: `fn main() {}`, which exists only in the
+            // overlay.
+            let entry = std::env::temp_dir().join("nova-lsp-std").join("main.nova");
+            let overlay = overlay.with(&entry, "fn main() {}\n".to_string());
+            (Program::loose(&entry), overlay)
+        }
     };
-    guarded(|| analyze_program(program, overlay, options).ok())
+    guarded(|| analyze_program(program, &overlay, options).ok())
 }
 
 /// The analysis that answers a request in `path` (spec §4, rule 1): its
 /// project's, if that reaches the file, or else the file's own.
 pub fn answering(path: &Path, overlay: &Overlay, options: &Options) -> Option<Answer> {
+    if let Some(module) = crate::std_cache::module_of(path) {
+        let scope = Scope::Std;
+        let analysis = analyse(&scope, overlay, options)?;
+        let file = analysis.db.id_of(&format!("<std/{module}>"))?;
+        return Some(Answer {
+            analysis,
+            file,
+            scope,
+        });
+    }
     if let ProjectKey::Root(dir) = ProjectKey::of(path) {
         let scope = Scope::Project(dir);
         if let Some(analysis) = analyse(&scope, overlay, options) {
