@@ -234,6 +234,9 @@ fn plan_edits(a: &Analysis, found: &Found, new: &str) -> Vec<Edit> {
 }
 
 /// The edits as LSP's, each file under the URI `uri_of` gives it.
+// `WorkspaceEdit::changes` is a `HashMap` keyed by `lsp::Uri`, whose
+// parsed form caches into a `Cell`; the key is never changed here.
+#[allow(clippy::mutable_key_type)]
 fn workspace_edit(
     a: &Analysis,
     edits: &[Edit],

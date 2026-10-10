@@ -78,7 +78,7 @@ pub fn declaration(a: &Analysis, target: &Target) -> Option<String> {
 fn item_line(text: &str, at: usize, stops: &[char]) -> String {
     let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let item_start = text[line_start..at]
-        .rfind(|c: char| matches!(c, '{' | ';' | '}'))
+        .rfind(['{', ';', '}'])
         .map_or(line_start, |i| line_start + i + 1);
     let lead = text[item_start..at].len() - text[item_start..at].trim_start().len();
     let start = item_start + lead;
