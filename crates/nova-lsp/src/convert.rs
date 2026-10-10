@@ -197,7 +197,7 @@ fn span_range(
     range(index, span.start, span.end)
 }
 
-fn severity(s: Severity) -> lsp::DiagnosticSeverity {
+pub(crate) fn severity(s: Severity) -> lsp::DiagnosticSeverity {
     match s {
         Severity::Error => lsp::DiagnosticSeverity::ERROR,
         Severity::Warning => lsp::DiagnosticSeverity::WARNING,
@@ -208,7 +208,7 @@ fn severity(s: Severity) -> lsp::DiagnosticSeverity {
 
 /// The message, its notes one per line, and where it really is when it is
 /// shown somewhere else, such as `(at <std/core>:12:5)`.
-fn message(d: &Diagnostic, suffix: Option<&str>) -> String {
+pub(crate) fn message(d: &Diagnostic, suffix: Option<&str>) -> String {
     let mut m = d.message.clone();
     for note in &d.notes {
         m.push('\n');

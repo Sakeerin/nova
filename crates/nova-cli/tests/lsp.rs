@@ -3,7 +3,10 @@
 
 mod lsp_client;
 
-use lsp_client::{file_uri, fresh_dir, same_uri, Client};
+use lsp_client::{
+    app_and_library, file_uri, fresh_dir, lock_and_cache, project, registry_app, same_uri, Client,
+    APP_MAIN, MANIFEST,
+};
 use serde_json::{json, Value};
 
 /// Thai and an emoji before the planted error, so a byte column and a
@@ -110,19 +113,6 @@ fn an_unknown_request_gets_method_not_found() {
 }
 
 // === Task 11: projects, ownership, watched files, stale results ===
-
-const MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
-
-/// A project: `nova.toml`, and `src/` holding `files`.
-fn project(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-    let dir = fresh_dir(name);
-    std::fs::write(dir.join("nova.toml"), MANIFEST).unwrap();
-    std::fs::create_dir_all(dir.join("src")).unwrap();
-    for (file, text) in files {
-        std::fs::write(dir.join("src").join(file), text).unwrap();
-    }
-    dir
-}
 
 fn change(client: &mut Client, uri: &str, version: i32, text: &str) {
     client.notify(
@@ -755,27 +745,6 @@ fn a_loose_file_is_rechecked_when_a_sibling_it_imports_changes() {
 // === Phase 3.3a: packages (spec
 // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §6, §7.4) ===
 
-const APP_MAIN: &str = "import geom\n\nfn main() {\n    let a: Int = area()\n}\n";
-
-/// `app`, which depends on `geom` by path, in one fresh directory. `geom`'s
-/// `src/lib.nova` is `lib`.
-fn app_and_library(name: &str, lib: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = fresh_dir(name);
-    let geom = dir.join("geom");
-    std::fs::create_dir_all(geom.join("src")).unwrap();
-    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
-    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
-    let app = dir.join("app");
-    std::fs::create_dir_all(app.join("src")).unwrap();
-    let manifest = format!(
-        "{}\n[dependencies]\ngeom = {{ path = \"../geom\" }}\n",
-        MANIFEST.replace("demo", "app")
-    );
-    std::fs::write(app.join("nova.toml"), manifest).unwrap();
-    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
-    (app, geom)
-}
-
 #[test]
 fn the_apps_analysis_publishes_nothing_for_its_dependency() {
     let (app, _geom) = app_and_library("dependency-owner", GEOMETRY_BROKEN);
@@ -962,48 +931,6 @@ fn an_unreached_file_does_not_repeat_the_manifests_diagnostics() {
 // === Phase 3.3b: registry packages (spec
 // docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
 // §5.5, §10.6) ===
-
-const INDEX: &str = "https://example.test/index/";
-
-/// `dir/app`, which depends on `geom = "<req>"` and runs `APP_MAIN`, and
-/// `dir/home`, the server's `NOVA_HOME`.
-fn registry_app(name: &str, req: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = fresh_dir(name);
-    let app = dir.join("app");
-    std::fs::create_dir_all(app.join("src")).unwrap();
-    std::fs::write(
-        app.join("nova.toml"),
-        format!(
-            "{}\n[dependencies]\ngeom = \"{req}\"\n",
-            MANIFEST.replace("demo", "app")
-        ),
-    )
-    .unwrap();
-    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
-    (app, dir.join("home"))
-}
-
-/// `geom` 0.1.0, locked in `app`'s nova.lock and unpacked under `home`,
-/// with `lib` as its lib.nova. Its directory.
-fn lock_and_cache(app: &std::path::Path, home: &std::path::Path, lib: &str) -> std::path::PathBuf {
-    let geom = home
-        .join("registry")
-        .join("src")
-        .join(nova_pm::index_dir_name(INDEX))
-        .join("geom-0.1.0");
-    std::fs::create_dir_all(geom.join("src")).unwrap();
-    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
-    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
-    std::fs::write(
-        app.join("nova.lock"),
-        format!(
-            "version = 1\nindex = \"{INDEX}\"\n\n[[package]]\nname = \"geom\"\n\
-             version = \"0.1.0\"\nchecksum = \"00\"\ndependencies = []\n"
-        ),
-    )
-    .unwrap();
-    geom
-}
 
 #[test]
 fn an_entry_not_downloaded_is_m0005_on_its_manifest_entry() {

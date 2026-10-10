@@ -8,6 +8,7 @@
 
 mod analysis;
 mod checker;
+mod code_action;
 mod completion;
 mod convert;
 mod formatting;
@@ -29,8 +30,8 @@ use lsp_types::notification::{
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References,
-    RegisterCapability, Rename, Request as _,
+    CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest,
+    References, RegisterCapability, Rename, Request as _,
 };
 use nova_diagnostics::LineIndex;
 use serde_json::Value;
@@ -131,6 +132,16 @@ fn capabilities() -> lsp::ServerCapabilities {
             prepare_provider: Some(true),
             work_done_progress_options: Default::default(),
         })),
+        code_action_provider: Some(lsp::CodeActionProviderCapability::Options(
+            lsp::CodeActionOptions {
+                code_action_kinds: Some(vec![
+                    lsp::CodeActionKind::QUICKFIX,
+                    lsp::CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                ]),
+                resolve_provider: Some(false),
+                work_done_progress_options: Default::default(),
+            },
+        )),
         ..Default::default()
     }
 }
@@ -354,6 +365,31 @@ impl Server<'_> {
                 },
                 Err(e) => invalid(request.id, e),
             },
+            CodeActionRequest::METHOD => {
+                match serde_json::from_value::<lsp::CodeActionParams>(request.params) {
+                    Ok(p) => {
+                        let found = self
+                            .answer_of(&p.text_document.uri)
+                            .map(|(answer, path, text)| {
+                                let lines = LineIndex::new(&text);
+                                let start =
+                                    lines.offset(p.range.start.line, p.range.start.character);
+                                let end = lines.offset(p.range.end.line, p.range.end.character);
+                                code_action::code_actions(
+                                    &answer,
+                                    &path,
+                                    start,
+                                    end,
+                                    p.context.only.as_deref(),
+                                    &|path| self.uri_of(path),
+                                )
+                            })
+                            .unwrap_or_default();
+                        Response::new_ok(request.id, found)
+                    }
+                    Err(e) => invalid(request.id, e),
+                }
+            }
             _ => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -372,6 +408,16 @@ impl Server<'_> {
         let options = analysis::options(None, true);
         let answer = analysis::answering(&doc.path, &self.workspace.overlay(), &options)?;
         Some((answer, offset))
+    }
+
+    /// The analysis that answers a request about the open document `uri`,
+    /// with the index on, its path and its text (3.4a spec §4). `None` for
+    /// a document that is not open.
+    fn answer_of(&self, uri: &lsp::Uri) -> Option<(Answer, PathBuf, String)> {
+        let doc = self.workspace.get(&uri::text(uri))?;
+        let options = analysis::options(None, true);
+        let answer = analysis::answering(&doc.path, &self.workspace.overlay(), &options)?;
+        Some((answer, doc.path.clone(), doc.text.clone()))
     }
 
     /// The URI for `path`: the open document's, so a Windows client gets

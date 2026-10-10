@@ -191,11 +191,11 @@ fn declared_pub(text: &str, at: usize) -> bool {
     text[item_start..at].split_whitespace().next() == Some("pub")
 }
 
-fn in_registry(path: &Path) -> bool {
+pub(crate) fn in_registry(path: &Path) -> bool {
     nova_pm::registry_dir().is_some_and(|r| PathKey::of(path).is_under(&PathKey::of(&r)))
 }
 
-enum Owner {
+pub(crate) enum Owner {
     Own,
     Std,
     Dependency(String),
@@ -203,7 +203,7 @@ enum Owner {
 }
 
 /// Whose a declaration's file is (plan decision 15).
-fn owner(a: &Analysis, file: FileId) -> Owner {
+pub(crate) fn owner(a: &Analysis, file: FileId) -> Owner {
     if a.db.get_name(file).is_some_and(|n| n.starts_with("<std/")) {
         return Owner::Std;
     }
