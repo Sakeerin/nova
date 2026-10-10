@@ -17,6 +17,9 @@ use nova_ast::{File, Function, Item, Type};
 use nova_diagnostics::{Diagnostic, FileId, Span};
 use rustc_hash::FxHashMap;
 
+pub mod index;
+pub use index::{Index, Occurrence, Role, Target};
+
 /// A stable identifier for a top-level definition within a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DefId(pub u32);
