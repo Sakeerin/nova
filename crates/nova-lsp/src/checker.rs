@@ -168,6 +168,7 @@ fn run(program: Program, overlay: &Overlay, module_only: bool) -> Result<Analysi
         tests: true,
         module_only,
         probe: None,
+        index: false,
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         analyze_program(program, overlay, &options)

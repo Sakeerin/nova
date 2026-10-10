@@ -6,12 +6,17 @@ use nova_ast::item::{ExternItem, TraitItem, TypeDef};
 use nova_diagnostics::{Diagnostic, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
-use nova_resolver::{Builtin, DefId, DefKind, Definitions, MethodOwner, ModuleId, Res};
+use nova_resolver::{
+    Builtin, DefId, DefKind, Definitions, Index, MethodOwner, ModuleId, Res, Role, Target,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::infer::InferCtx;
 use crate::usefulness;
-use crate::{display_ty, CheckOptions, CheckResult, Member, MemberKind, ProbePoint, ProbeResult};
+use crate::{
+    display_ty, display_ty_named, CheckOptions, CheckResult, Member, MemberKind, ProbePoint,
+    ProbeResult,
+};
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -142,9 +147,12 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         probe_result: ProbeResult::default(),
         probe_pending: None,
         probe_locals_pending: None,
+        index: options.index.then(Index::default),
+        type_params: Vec::new(),
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
+    checker.note_item_declarations();
     checker.reject_self_type_params();
     checker.collect_type_arities();
     // Before `collect_records`: since Task 1 of the iterator-finishing plan,
@@ -210,6 +218,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         },
         diagnostics: checker.diagnostics,
         probe: checker.probe_result,
+        index: checker.index,
     }
 }
 
@@ -290,6 +299,13 @@ struct Checker<'a> {
     /// The locals in scope at the probe, with their types as inference had
     /// them then; read with the function's final substitution.
     probe_locals_pending: Option<Vec<(String, Ty)>>,
+    /// The language server's index (spec 3.4a §3), when asked for. Written
+    /// here and never read.
+    index: Option<Index>,
+    /// The type parameters of the item being checked, names and
+    /// declaration spans, the impl's first (plan decision 4). Set by
+    /// [`Checker::enter_type_params`] at each item entry point.
+    type_params: Vec<(String, Span)>,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -538,6 +554,10 @@ impl<'a> Checker<'a> {
             self.cur_module = self.defs.module_of(*item_index);
             self.check_duplicate_generics(&decl.generics, "type");
             let generics = generic_scope(&decl.generics);
+            self.enter_type_params(&[&decl.generics]);
+            for (fi, field) in decl.fields.iter().enumerate() {
+                self.note_decl(field.name.span, Target::Field(DefId(i as u32), fi as u32));
+            }
             // A bound on a record's type parameter is a RESOLUTION SCOPE, not a
             // constraint: it exists so a field type may name a projection on
             // that parameter (`f: fn(I::Item) -> U`), which is what makes a
@@ -609,6 +629,7 @@ impl<'a> Checker<'a> {
             self.check_duplicate_generics(&decl.generics, "type");
             self.reject_type_param_bounds(&decl.generics, "sum type parameters");
             let generics = generic_scope(&decl.generics);
+            self.enter_type_params(&[&decl.generics]);
             let variants = variants
                 .iter()
                 .map(|v| hir::Variant {
@@ -899,6 +920,7 @@ impl<'a> Checker<'a> {
                         name.span,
                     );
                 }
+                self.enter_type_params(&[generics.as_slice()]);
                 self.check_duplicate_generics(generics, "method");
                 // A generic trait method (`fn map<U>(self, …)`) binds `Self` at
                 // Param(0) and its own generic parameters at Param(1..).
@@ -927,6 +949,13 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                // Spec 3.4a §3.2: a required and a provided method alike are
+                // declared as the trait's method, at the index `methods`
+                // gives it, which is `MethodRes::Trait`'s.
+                self.note_decl(name.span, Target::TraitMethod(def_id, methods.len() as u32));
+                if !is_default {
+                    self.note_params(params);
+                }
                 methods.push(hir::TraitMethod {
                     name: name.value.clone(),
                     params: m_params,
@@ -993,6 +1022,7 @@ impl<'a> Checker<'a> {
                 if !f.where_clause.is_empty() {
                     continue;
                 }
+                self.enter_type_params(&[&f.generics]);
                 // `Self` at Param(0), the method's own generics at Param(1..).
                 let mut scope = self_scope.clone();
                 for (j, g) in f.generics.iter().enumerate() {
@@ -1068,6 +1098,7 @@ impl<'a> Checker<'a> {
             // The impl's generic parameters (`impl<T> …`) are in scope in the
             // self type and every method signature/body.
             let impl_generics = generic_scope(&block.generics);
+            self.enter_type_params(&[&block.generics]);
             let mut impl_bounds = self.resolve_bounds(&block.generics);
             self.apply_where(&mut impl_bounds, &block.where_clause, &impl_generics);
             self.expand_bounds(&mut impl_bounds);
@@ -1281,6 +1312,7 @@ impl<'a> Checker<'a> {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
                     continue;
                 };
+                self.enter_type_params(&[&block.generics, &f.generics]);
                 // The method's generic scope: the impl's parameters (`impl<T> …`)
                 // at indices [0, impl_count), then the method's own parameters
                 // (`fn map<U>`) at [impl_count, …). A single flat `type_args`
@@ -2048,6 +2080,7 @@ impl<'a> Checker<'a> {
             self.cur_module = self.defs.module_of(item_index);
             self.check_duplicate_generics(&f.generics, "function");
             let generics = generic_scope(&f.generics);
+            self.enter_type_params(&[&f.generics]);
             let mut bounds = self.resolve_bounds(&f.generics);
             self.apply_where(&mut bounds, &f.where_clause, &generics);
             self.expand_bounds(&mut bounds);
@@ -2151,6 +2184,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
+            self.enter_type_params(&[]);
+            self.note_params(&sig.params);
             let empty = FxHashMap::default();
             let params: Vec<Ty> = sig
                 .params
@@ -2792,6 +2827,7 @@ impl<'a> Checker<'a> {
         // `check_method` may have run first and left an impl in scope.
         self.impl_self = None;
         let generics = generic_scope(&f.generics);
+        self.enter_type_params(&[&f.generics]);
         self.check_fn_body(def_id, f, generics)
     }
 
@@ -2857,6 +2893,12 @@ impl<'a> Checker<'a> {
                 scope
             }
         };
+        match (loc.owner, &file.items[loc.item_index].value) {
+            (MethodOwner::Impl, ast::Item::Impl(block)) => {
+                self.enter_type_params(&[&block.generics, &f.generics])
+            }
+            _ => self.enter_type_params(&[&f.generics]),
+        }
         self.check_fn_body(def_id, f, generics)
     }
 
@@ -2927,7 +2969,13 @@ impl<'a> Checker<'a> {
             pending_closures: Vec::new(),
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
-            fcx.new_local(p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
+            self.bind_local(
+                &mut fcx,
+                p.name.value.clone(),
+                ty.clone(),
+                p.is_mut,
+                p.name.span,
+            );
         }
 
         let body = self.check_block(&mut fcx, &f.body.value, f.body.span);
@@ -2945,6 +2993,7 @@ impl<'a> Checker<'a> {
             );
         }
 
+        let names = param_names(&fcx.generics);
         let mut func = hir::Function {
             def_id,
             name,
@@ -2960,11 +3009,13 @@ impl<'a> Checker<'a> {
             span: f.name.span,
         };
         self.finalize_function(&mut func, &fcx.icx);
+        self.note_local_types(&func.locals, &names);
         // Finalize and emit any closures/wrappers lifted from this body,
         // using the same inference context so their types resolve.
         let mut closures = std::mem::take(&mut fcx.pending_closures);
         for c in &mut closures {
             self.finalize_function(c, &fcx.icx);
+            self.note_local_types(&c.locals, &names);
         }
         self.extra_functions.append(&mut closures);
         Some(func)
@@ -2989,6 +3040,7 @@ impl<'a> Checker<'a> {
         // items are never collected at all — `ast::ImplBlock::consts` has no
         // consumer), so nothing here can see an impl's `Self`.
         self.impl_self = None;
+        self.enter_type_params(&[]);
         let value_ast = &c.value;
         let sig = self.sigs.get(&def_id)?.clone();
         let name = self.defs.def(def_id).name.clone();
@@ -3032,9 +3084,11 @@ impl<'a> Checker<'a> {
             span: value_ast.span,
         };
         self.finalize_function(&mut func, &fcx.icx);
+        self.note_local_types(&func.locals, &[]);
         let mut closures = std::mem::take(&mut fcx.pending_closures);
         for cl in &mut closures {
             self.finalize_function(cl, &fcx.icx);
+            self.note_local_types(&cl.locals, &[]);
         }
         self.extra_functions.append(&mut closures);
         Some(func)
@@ -3174,7 +3228,7 @@ impl<'a> Checker<'a> {
                         }
                     };
                     let local =
-                        fcx.new_local(name, value.ty.clone(), *is_mut || pat_mut, name_span);
+                        self.bind_local(fcx, name, value.ty.clone(), *is_mut || pat_mut, name_span);
                     stmts.push(hir::Expr {
                         kind: hir::ExprKind::Let {
                             local,
@@ -3503,6 +3557,10 @@ impl<'a> Checker<'a> {
         // Spec 3.2 §4.1: a name at the probe sees these locals.
         self.probe_locals(fcx, span.file, span.start, span.end);
         if let Some(local) = fcx.lookup(name) {
+            self.note_use(
+                path.segments[0].span,
+                Target::Local(fcx.locals[local.0 as usize].span),
+            );
             let ty = fcx.locals[local.0 as usize].ty.clone();
             return hir::Expr {
                 kind: hir::ExprKind::Local(local),
@@ -4248,7 +4306,7 @@ impl<'a> Checker<'a> {
 
         fcx.scopes.push(FxHashMap::default());
         let (var_name, var_span) = self.for_loop_var(pattern);
-        let i = fcx.new_local(var_name, Ty::Int, false, var_span);
+        let i = self.bind_local(fcx, var_name, Ty::Int, false, var_span);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4523,7 +4581,7 @@ impl<'a> Checker<'a> {
 
         fcx.scopes.push(FxHashMap::default());
         let (var_name, var_span) = self.for_loop_var(pattern);
-        let elem = fcx.new_local(var_name, item_ty, false, var_span);
+        let elem = self.bind_local(fcx, var_name, item_ty, false, var_span);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4658,7 +4716,8 @@ impl<'a> Checker<'a> {
             } else {
                 self.convert_ty(&p.ty, &generics_scope, &fcx.param_bounds)
             };
-            let local = fcx.new_local(p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
+            let local =
+                self.bind_local(fcx, p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
             param_locals.push(local);
             param_types.push(ty);
         }
@@ -6284,6 +6343,10 @@ impl<'a> Checker<'a> {
             );
             return error_expr(span);
         };
+        self.note_use(
+            path.segments[0].span,
+            Target::Local(fcx.locals[local.0 as usize].span),
+        );
         let info = fcx.locals[local.0 as usize].clone();
         if !info.is_mut {
             self.error(
@@ -6783,7 +6846,13 @@ impl<'a> Checker<'a> {
                     );
                     return hir::Pattern::Wildcard;
                 }
-                let local = fcx.new_local(name.value.clone(), scrut_ty.clone(), *is_mut, name.span);
+                let local = self.bind_local(
+                    fcx,
+                    name.value.clone(),
+                    scrut_ty.clone(),
+                    *is_mut,
+                    name.span,
+                );
                 hir::Pattern::Bind(local)
             }
             ast::Pattern::Path(path) if path.segments.len() == 1 => {
@@ -6933,7 +7002,8 @@ impl<'a> Checker<'a> {
             match &field_pat.value {
                 ast::Pattern::Wildcard => binders.push(None),
                 ast::Pattern::Ident { is_mut, name } => {
-                    let local = fcx.new_local(name.value.clone(), bound_ty, *is_mut, name.span);
+                    let local =
+                        self.bind_local(fcx, name.value.clone(), bound_ty, *is_mut, name.span);
                     binders.push(Some(local));
                 }
                 _ => {
@@ -6950,6 +7020,116 @@ impl<'a> Checker<'a> {
     }
 
     // === Helpers ===
+
+    // === The language server's index (spec 3.4a §3) ===
+
+    fn note(&mut self, span: Span, role: Role, target: Target) {
+        if let Some(index) = self.index.as_mut() {
+            index.record(span, role, target);
+        }
+    }
+
+    fn note_use(&mut self, span: Span, target: Target) {
+        self.note(span, Role::Use, target);
+    }
+
+    fn note_decl(&mut self, span: Span, target: Target) {
+        self.note(span, Role::Declaration, target);
+    }
+
+    /// Declare every resolver definition (spec §3.2): each item by its
+    /// `Def`, and a sum's variants beside it. A trait's provided method is
+    /// declared as its `TraitMethod` by `collect_traits`, never by its
+    /// default body's `Def`.
+    fn note_item_declarations(&mut self) {
+        if self.index.is_none() {
+            return;
+        }
+        let defs: &'a Definitions = self.defs;
+        for (i, def) in defs.defs().iter().enumerate() {
+            let id = DefId(i as u32);
+            match &def.kind {
+                DefKind::Method {
+                    owner: MethodOwner::TraitDefault,
+                    ..
+                } => {}
+                DefKind::Sum { variants, .. } => {
+                    self.note_decl(def.span, Target::Def(id));
+                    for (vi, v) in variants.iter().enumerate() {
+                        self.note_decl(v.span, Target::Variant(id, vi as u32));
+                    }
+                }
+                _ => self.note_decl(def.span, Target::Def(id)),
+            }
+        }
+    }
+
+    /// Enter an item's type parameters, the impl's first: declare them, and
+    /// let the item's uses find them by name (plan decision 4).
+    fn enter_type_params(&mut self, lists: &[&[ast::TypeParam]]) {
+        self.type_params.clear();
+        for list in lists {
+            for g in list.iter() {
+                self.type_params.push((g.name.value.clone(), g.name.span));
+                self.note_decl(g.name.span, Target::TypeParam(g.name.span));
+            }
+        }
+    }
+
+    // Task 4's type conversions are its first callers.
+    #[allow(dead_code)]
+    fn type_param_target(&self, name: &str) -> Option<Target> {
+        self.type_params
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, span)| Target::TypeParam(*span))
+    }
+
+    /// `fcx.new_local` for a name the user wrote, declaring it (spec §3.2).
+    /// `_` declares nothing. The checker's own locals call `new_local`
+    /// directly and are never recorded.
+    fn bind_local(
+        &mut self,
+        fcx: &mut FnCtx,
+        name: String,
+        ty: Ty,
+        is_mut: bool,
+        span: Span,
+    ) -> LocalId {
+        if name != "_" {
+            self.note_decl(span, Target::Local(span));
+        }
+        fcx.new_local(name, ty, is_mut, span)
+    }
+
+    /// Declare parameters that no body binds: a trait's required method's
+    /// and an extern function's.
+    fn note_params(&mut self, params: &[ast::Param]) {
+        for p in params {
+            self.note_decl(p.name.span, Target::Local(p.name.span));
+        }
+    }
+
+    /// Each declared local's type as hover shows it (spec §3.4), read after
+    /// inference, with `names` for the type parameters. A wholly unknown
+    /// type is not stored.
+    fn note_local_types(&mut self, locals: &[hir::Local], names: &[String]) {
+        let defs = self.defs;
+        let Some(index) = self.index.as_mut() else {
+            return;
+        };
+        for local in locals {
+            if !index.has(local.span, Role::Declaration, Target::Local(local.span)) {
+                continue;
+            }
+            if matches!(local.ty, Ty::Var(_) | Ty::Error) {
+                continue;
+            }
+            let shown = display_ty_named(&local.ty, defs, names);
+            index.types.insert(local.span, shown);
+        }
+    }
 
     fn variant_index(&self, sum_id: DefId, name: &str) -> Option<usize> {
         self.sums
@@ -7352,6 +7532,20 @@ fn generic_scope(generics: &[ast::TypeParam]) -> FxHashMap<String, u32> {
         .enumerate()
         .map(|(i, g)| (g.name.value.clone(), i as u32))
         .collect()
+}
+
+/// Type parameter names by index, for [`display_ty_named`].
+fn param_names(generics: &FxHashMap<String, u32>) -> Vec<String> {
+    let n = generics
+        .values()
+        .map(|&i| i as usize + 1)
+        .max()
+        .unwrap_or(0);
+    let mut names = vec![String::new(); n];
+    for (name, &i) in generics {
+        names[i as usize] = name.clone();
+    }
+    names
 }
 
 /// The generic scope inside a trait definition / default method: `Self`
@@ -13084,6 +13278,8 @@ mod tests {
             probe_result: ProbeResult::default(),
             probe_pending: None,
             probe_locals_pending: None,
+            index: None,
+            type_params: Vec::new(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -13154,6 +13350,8 @@ mod tests {
             probe_result: ProbeResult::default(),
             probe_pending: None,
             probe_locals_pending: None,
+            index: None,
+            type_params: Vec::new(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -16607,6 +16805,7 @@ mod tests {
         let resolved = nova_resolver::resolve_program(&[module], &std_files, None);
         let options = CheckOptions {
             probe: Some(ProbePoint { file, offset }),
+            index: false,
         };
         let checked = check_with(&resolved.file, &resolved.definitions, &options);
         (checked, resolved.definitions)

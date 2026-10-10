@@ -31,6 +31,8 @@ pub struct CheckResult {
     pub diagnostics: Vec<nova_diagnostics::Diagnostic>,
     /// What the probe found: empty unless [`check_with`] was given one.
     pub probe: ProbeResult,
+    /// What the index recorded: `None` unless [`CheckOptions::index`].
+    pub index: Option<nova_resolver::Index>,
 }
 
 /// Where the language server's probe looks: a byte offset in one file (spec
@@ -45,6 +47,10 @@ pub struct ProbePoint {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CheckOptions {
     pub probe: Option<ProbePoint>,
+    /// Record the language server's index (spec
+    /// `docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`
+    /// §3). Recording is write-only: the checker never reads it.
+    pub index: bool,
 }
 
 /// What the probe found (spec §4.1, §4.2). Each part is empty when the
@@ -116,5 +122,33 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
         Ty::Var(v) => format!("?{v}"),
         Ty::Never => "!".to_string(),
         Ty::Error => "{error}".to_string(),
+    }
+}
+
+/// [`display_ty`] for hover (spec 3.4a §3.4): type parameter `i` prints as
+/// `names[i]`, and an unsolved variable or an error as `_`.
+pub fn display_ty_named(ty: &Ty, defs: &Definitions, names: &[String]) -> String {
+    let show = |t: &Ty| display_ty_named(t, defs, names);
+    let list = |ts: &[Ty]| ts.iter().map(show).collect::<Vec<_>>().join(", ");
+    match ty {
+        Ty::Fn { params, ret } => format!("fn({}) -> {}", list(params.as_slice()), show(ret)),
+        Ty::Sum { def_id, args } | Ty::Record { def_id, args } => {
+            let name = &defs.def(*def_id).name;
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}<{}>", list(args.as_slice()))
+            }
+        }
+        Ty::Array(elem) => format!("[{}]", show(elem)),
+        Ty::Future(out) => format!("Future<{}>", show(out)),
+        Ty::Param(i) => names
+            .get(*i as usize)
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("T{i}")),
+        Ty::Assoc { on, assoc } => format!("{}::{}", show(on), defs.def(*assoc).name),
+        Ty::Var(_) | Ty::Error => "_".to_string(),
+        other => display_ty(other, defs),
     }
 }
