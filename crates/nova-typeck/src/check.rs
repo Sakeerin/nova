@@ -1829,6 +1829,13 @@ impl<'a> Checker<'a> {
                     // signature here to compare it against.
                     continue;
                 };
+                // Spec 3.4a §3.2: the family links, where the checker matches
+                // an impl method to its trait's.
+                if let Some(idx) = tr.methods.iter().position(|m| &m.name == name) {
+                    if let Some(index) = self.index.as_mut() {
+                        index.implement(*def_id, (trait_id, idx as u32));
+                    }
+                }
                 let Some(impl_sig) = self.sigs.get(def_id).cloned() else {
                     continue;
                 };
@@ -3569,7 +3576,9 @@ impl<'a> Checker<'a> {
             let ty_name = path.segments[0].value.as_str();
             let v_name = path.segments[1].value.as_str();
             if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
+                self.note_use(path.segments[0].span, Target::Def(def_id));
                 if let Some(vi) = self.variant_index(def_id, v_name) {
+                    self.note_use(path.segments[1].span, Target::Variant(def_id, vi as u32));
                     return self.make_variant(fcx, def_id, vi, Vec::new(), span);
                 }
                 self.error(
@@ -3604,6 +3613,7 @@ impl<'a> Checker<'a> {
         match self.defs.resolve_value(self.cur_module, name) {
             Some(Res::Def(def_id)) => match &self.defs.def(def_id).kind {
                 DefKind::Fn { .. } => {
+                    self.note_use(path.segments[0].span, Target::Def(def_id));
                     let Some(sig) = self.sigs.get(&def_id).cloned() else {
                         return error_expr(span);
                     };
@@ -3616,6 +3626,7 @@ impl<'a> Checker<'a> {
                     self.make_fn_wrapper(fcx, def_id, type_args, param_types, ret, span)
                 }
                 DefKind::Const { .. } => {
+                    self.note_use(path.segments[0].span, Target::Def(def_id));
                     // A constant reference is a call to its zero-arg function.
                     let ret = self
                         .sigs
@@ -3637,7 +3648,10 @@ impl<'a> Checker<'a> {
                     error_expr(span)
                 }
             },
-            Some(Res::Variant(sum_id, vi)) => self.make_variant(fcx, sum_id, vi, Vec::new(), span),
+            Some(Res::Variant(sum_id, vi)) => {
+                self.note_use(path.segments[0].span, Target::Variant(sum_id, vi as u32));
+                self.make_variant(fcx, sum_id, vi, Vec::new(), span)
+            }
             Some(Res::Builtin(_)) => {
                 self.unsupported(span, "using builtins as values");
                 error_expr(span)
@@ -3677,15 +3691,21 @@ impl<'a> Checker<'a> {
                                 self.defs.def(def_id).kind,
                                 DefKind::Fn { .. } | DefKind::ExternFn { .. }
                             ) {
+                                self.note_use(path.segments[0].span, Target::Def(def_id));
                                 return self.check_direct_call(fcx, def_id, args, span);
                             }
                         }
                         Some(Res::Variant(sum_id, vi)) => {
+                            self.note_use(
+                                path.segments[0].span,
+                                Target::Variant(sum_id, vi as u32),
+                            );
                             let checked: Vec<hir::Expr> =
                                 args.iter().map(|a| self.check_expr(fcx, a)).collect();
                             return self.make_variant(fcx, sum_id, vi, checked, span);
                         }
                         Some(Res::Builtin(b)) => {
+                            self.note_use(path.segments[0].span, Target::Builtin(b));
                             return self.check_builtin_call(fcx, b, args, span);
                         }
                         None => {
@@ -3707,6 +3727,9 @@ impl<'a> Checker<'a> {
                 // Checked before the type namespace so a generic parameter
                 // shadows a same-named type, matching `convert_ty`.
                 if let Some(&k) = fcx.generics.get(ty_name) {
+                    if let Some(t) = self.type_param_target(ty_name) {
+                        self.note_use(path.segments[0].span, t);
+                    }
                     let matches: Vec<(DefId, u32)> = fcx
                         .param_bounds
                         .get(k as usize)
@@ -3717,14 +3740,17 @@ impl<'a> Checker<'a> {
                     let checked: Vec<hir::Expr> =
                         args.iter().map(|a| self.check_expr(fcx, a)).collect();
                     return match matches.as_slice() {
-                        [(tid, idx)] => self.emit_trait_call(
-                            fcx,
-                            *tid,
-                            *idx,
-                            TraitCallSelf::Qualifier(Ty::Param(k)),
-                            checked,
-                            span,
-                        ),
+                        [(tid, idx)] => {
+                            self.note_use(path.segments[1].span, Target::TraitMethod(*tid, *idx));
+                            self.emit_trait_call(
+                                fcx,
+                                *tid,
+                                *idx,
+                                TraitCallSelf::Qualifier(Ty::Param(k)),
+                                checked,
+                                span,
+                            )
+                        }
                         [] => {
                             // A bound may still declare `name` — just as a
                             // method with a `self` receiver rather than an
@@ -3777,6 +3803,8 @@ impl<'a> Checker<'a> {
                 // path and is tried before any associated function.
                 if let Some(def_id) = self.defs.resolve_type(self.cur_module, ty_name) {
                     if let Some(vi) = self.variant_index(def_id, name) {
+                        self.note_use(path.segments[0].span, Target::Def(def_id));
+                        self.note_use(path.segments[1].span, Target::Variant(def_id, vi as u32));
                         let checked: Vec<hir::Expr> =
                             args.iter().map(|a| self.check_expr(fcx, a)).collect();
                         return self.make_variant(fcx, def_id, vi, checked, span);
@@ -3795,6 +3823,8 @@ impl<'a> Checker<'a> {
                     match inherent.as_slice() {
                         [assoc_id] => {
                             let assoc_id = *assoc_id;
+                            self.note_qualifier(&path.segments[0]);
+                            self.note_use(path.segments[1].span, Target::Def(assoc_id));
                             let checked: Vec<hir::Expr> =
                                 args.iter().map(|a| self.check_expr(fcx, a)).collect();
                             return self.emit_assoc_call(fcx, assoc_id, checked, span);
@@ -3821,6 +3851,8 @@ impl<'a> Checker<'a> {
                     match matches.as_slice() {
                         [(tid, idx)] => {
                             let (tid, idx) = (*tid, *idx);
+                            self.note_qualifier(&path.segments[0]);
+                            self.note_use(path.segments[1].span, Target::TraitMethod(tid, idx));
                             let checked: Vec<hir::Expr> =
                                 args.iter().map(|a| self.check_expr(fcx, a)).collect();
                             return self.emit_trait_call(
@@ -4966,6 +4998,7 @@ impl<'a> Checker<'a> {
             self.error("E0010", format!("`{name}` is not a record type"), span);
             return error_expr(span);
         };
+        self.note_use(path.segments[0].span, Target::Def(def_id));
         let type_args: Vec<Ty> = (0..record.generics).map(|_| fcx.icx.fresh()).collect();
         let record_ty = Ty::Record {
             def_id,
@@ -4988,6 +5021,9 @@ impl<'a> Checker<'a> {
                 );
                 continue;
             };
+            if let Some(fi) = record.fields.iter().position(|f| f.name == fname) {
+                self.note_use(init.name.span, Target::Field(def_id, fi as u32));
+            }
             // Normalization seam: a record's field may declare a projection on
             // the record's own bounded type parameter (`f: fn(I::Item) -> U`),
             // and `type_args` carries this literal's fresh per-field inference
@@ -5024,6 +5060,10 @@ impl<'a> Checker<'a> {
                 // Shorthand `{ x }` binds the local named `x`.
                 None => self.check_path(fcx, &ast::Path::single(init.name.clone()), init.name.span),
             };
+            // `{ x }`: the field and the value share the span (spec §3.2).
+            if init.value.is_none() {
+                self.mark_shorthand(init.name.span);
+            }
             if !fcx.icx.unify(&value.ty, &expected) {
                 self.error(
                     "E0010",
@@ -5392,6 +5432,7 @@ impl<'a> Checker<'a> {
         if let Some((index, field_ty)) =
             self.record_field_index_and_ty(fcx, &recv_ty, &field.value, span)
         {
+            self.note_field(fcx, &recv_ty, index, field.span);
             return hir::Expr {
                 kind: hir::ExprKind::FieldGet {
                     target: Box::new(recv),
@@ -5723,6 +5764,7 @@ impl<'a> Checker<'a> {
         // Built-in array methods.
         if matches!(recv_ty, Ty::Array(_)) {
             if method.value == "len" && args.is_empty() {
+                self.note_use(method.span, Target::BuiltinMethod("len"));
                 return hir::Expr {
                     kind: hir::ExprKind::ArrayLen {
                         target: Box::new(receiver),
@@ -5744,17 +5786,21 @@ impl<'a> Checker<'a> {
         }
         match self.resolve_method_on(&recv_ty, fcx, &method.value) {
             MethodRes::Inherent(def_id) => {
+                self.note_use(method.span, Target::Def(def_id));
                 self.check_mutable_receiver(fcx, def_id, receiver_ast, span);
                 self.emit_inherent_call(fcx, def_id, receiver, args, span)
             }
-            MethodRes::Trait(trait_id, method_idx) => self.emit_trait_call(
-                fcx,
-                trait_id,
-                method_idx,
-                TraitCallSelf::Receiver(receiver, receiver_ast),
-                args,
-                span,
-            ),
+            MethodRes::Trait(trait_id, method_idx) => {
+                self.note_use(method.span, Target::TraitMethod(trait_id, method_idx));
+                self.emit_trait_call(
+                    fcx,
+                    trait_id,
+                    method_idx,
+                    TraitCallSelf::Receiver(receiver, receiver_ast),
+                    args,
+                    span,
+                )
+            }
             MethodRes::Ambiguous => {
                 self.error(
                     "E0015",
@@ -6621,6 +6667,7 @@ impl<'a> Checker<'a> {
             self.check_expr(fcx, rhs);
             return error_expr(span);
         };
+        self.note_field(fcx, &recv_ty, index, field.span);
         let value = self.check_expr(fcx, rhs);
         if !fcx.icx.unify(&value.ty, &field_ty) {
             self.error(
@@ -6866,6 +6913,7 @@ impl<'a> Checker<'a> {
                     self.defs.resolve_value(self.cur_module, &name.value)
                 {
                     if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                        self.note_use(name.span, Target::Variant(sum_id, vi as u32));
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
                     // The name is a known constructor, but of a different type:
@@ -6894,6 +6942,7 @@ impl<'a> Checker<'a> {
                     self.defs.resolve_value(self.cur_module, name)
                 {
                     if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                        self.note_use(path.segments[0].span, Target::Variant(sum_id, vi as u32));
                         return self.variant_pattern(fcx, sum_id, vi, &[], scrut_ty, pattern.span);
                     }
                 }
@@ -6910,6 +6959,11 @@ impl<'a> Checker<'a> {
                 if let Some(sum_id) = self.defs.resolve_type(self.cur_module, ty_name) {
                     if let Some(vi) = self.variant_index(sum_id, v_name) {
                         if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                            self.note_use(path.segments[0].span, Target::Def(sum_id));
+                            self.note_use(
+                                path.segments[1].span,
+                                Target::Variant(sum_id, vi as u32),
+                            );
                             return self.variant_pattern(
                                 fcx,
                                 sum_id,
@@ -6962,6 +7016,12 @@ impl<'a> Checker<'a> {
                         pattern.span,
                     );
                     return hir::Pattern::Wildcard;
+                }
+                if path.segments.len() == 2 {
+                    self.note_use(path.segments[0].span, Target::Def(sum_id));
+                }
+                if let Some(last) = path.segments.last() {
+                    self.note_use(last.span, Target::Variant(sum_id, vi as u32));
                 }
                 self.variant_pattern(fcx, sum_id, vi, fields, scrut_ty, pattern.span)
             }
@@ -7159,6 +7219,29 @@ impl<'a> Checker<'a> {
             }
             let shown = display_ty_named(&local.ty, defs, names);
             index.types.insert(local.span, shown);
+        }
+    }
+
+    /// A two-segment path's qualifier, `Point` in `Point::origin`, by
+    /// `qualifier_self_ty`'s order: a primitive, then a nominal type.
+    fn note_qualifier(&mut self, seg: &Spanned<String>) {
+        if let Some(name) = primitive(&seg.value) {
+            self.note_use(seg.span, Target::Primitive(name));
+        } else if let Some(def_id) = self.defs.resolve_type(self.cur_module, &seg.value) {
+            self.note_use(seg.span, Target::Def(def_id));
+        }
+    }
+
+    /// A field access's field (spec §3.2).
+    fn note_field(&mut self, fcx: &FnCtx, recv_ty: &Ty, field: u32, span: Span) {
+        if let Ty::Record { def_id, .. } = fcx.icx.apply(recv_ty) {
+            self.note_use(span, Target::Field(def_id, field));
+        }
+    }
+
+    fn mark_shorthand(&mut self, span: Span) {
+        if let Some(index) = self.index.as_mut() {
+            index.mark_shorthand(span);
         }
     }
 
