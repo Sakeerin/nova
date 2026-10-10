@@ -139,6 +139,11 @@ is the package index's client, built on `ureq` 3.2.1, pinned
 (`docs/adr/0031-package-index-and-publishing.md`). `nova-cli` depends on
 it; the driver and `nova-lsp` do not.
 
+**Amended 2026-10-10 (branch `phase-3-4a-navigation`):** `nova-lsp` also
+answers hover, go to definition, find references and rename, from an
+index `nova-typeck` records and `nova-resolver` holds the types of
+(`docs/adr/0032-navigation-in-the-language-server.md`).
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)

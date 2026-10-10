@@ -186,6 +186,14 @@ Diagnostics come from re-checking the whole program, not from `salsa`
 the module's names, the primitive types and the keywords. The other Phase
 3 rows are 3.4's.
 
+**Amended 2026-10-10 (branch `phase-3-4a-navigation`):** 3.4a delivers
+hover, go to definition, find references and rename
+(`docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`;
+ADR 0032). They read an index the type checker records while it
+resolves names, not salsa's queries. References and rename reach the
+owning project, and rename checks itself by analysing the renamed
+program again. Code actions and semantic highlighting are 3.4b's.
+
 ### 3.2 Architecture
 - `tower-lsp` for protocol
 - `salsa` for incremental query system (parse → resolve → typecheck queries cached per file)

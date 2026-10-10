@@ -361,6 +361,14 @@ a PR, and a merge on the user's word.
   project with a dependency. The extension's smoke test also checks hover
   and go to definition.
 
+  **Amended 2026-10-10:** 3.4 is two sub-phases, each with its own spec.
+  3.4a, "Navigation", has hover, go to definition, find references and
+  rename, and the gate's navigation half
+  (`docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`,
+  branch `phase-3-4a-navigation`; ADR 0032). 3.4b, "Fixes and colour",
+  has `Diagnostic`'s suggested edits, code actions, organize imports and
+  semantic tokens, and the rest of the gate.
+
 ### 3.5 — `nova doc`
 - `nova doc [--open]` builds a static site under `target/doc/`: a page per
   module, item signatures from the type checker, a search index, and a light

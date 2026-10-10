@@ -107,6 +107,12 @@ The front end was built for finished programs:
   semantic tokens on the same engine.** The probe is where hover's "what
   is here" starts.
 
+  **Amended 2026-10-10 (branch `phase-3-4a-navigation`):** 3.4 is two
+  sub-phases. 3.4a adds hover, definitions, references and rename on the
+  same engine. They read an index the checker records only when the
+  server asks, which revisits the "full position index" set aside above
+  (ADR 0032). Code actions and semantic tokens are 3.4b's.
+
 ## References
 
 - `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`

@@ -1,7 +1,7 @@
 {
   "name": "nova",
   "displayName": "Nova",
-  "description": "The Nova language: colouring, and diagnostics, completion and formatting from nova lsp.",
+  "description": "The Nova language: colouring, and diagnostics, completion, formatting, hover, go to definition, find references and rename from nova lsp.",
   "version": "0.2.0",
   "publisher": "sakeerin",
   "license": "MIT OR Apache-2.0",
