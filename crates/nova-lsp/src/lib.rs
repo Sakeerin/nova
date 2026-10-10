@@ -28,7 +28,8 @@ use lsp_types::notification::{
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, Formatting, GotoDefinition, HoverRequest, RegisterCapability, Request as _,
+    Completion, Formatting, GotoDefinition, HoverRequest, References, RegisterCapability,
+    Request as _,
 };
 use nova_diagnostics::LineIndex;
 
@@ -123,6 +124,7 @@ fn capabilities() -> lsp::ServerCapabilities {
         document_formatting_provider: Some(lsp::OneOf::Left(true)),
         hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
         definition_provider: Some(lsp::OneOf::Left(true)),
+        references_provider: Some(lsp::OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -281,6 +283,25 @@ impl Server<'_> {
                                 navigate::definition(&answer, offset, &|path| self.uri_of(path))
                             })
                             .map(lsp::GotoDefinitionResponse::Scalar);
+                        Response::new_ok(request.id, found)
+                    }
+                    Err(e) => invalid(request.id, e),
+                }
+            }
+            References::METHOD => {
+                match serde_json::from_value::<lsp::ReferenceParams>(request.params) {
+                    Ok(p) => {
+                        let found = self
+                            .answer_at(&p.text_document_position)
+                            .map(|(answer, offset)| {
+                                navigate::references(
+                                    &answer,
+                                    offset,
+                                    p.context.include_declaration,
+                                    &|path| self.uri_of(path),
+                                )
+                            })
+                            .unwrap_or_default();
                         Response::new_ok(request.id, found)
                     }
                     Err(e) => invalid(request.id, e),

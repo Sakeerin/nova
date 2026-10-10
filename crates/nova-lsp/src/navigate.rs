@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use lsp_types as lsp;
 use nova_diagnostics::{FileId, LineIndex, Span};
 use nova_driver::Analysis;
-use nova_resolver::Target;
+use nova_resolver::{Occurrence, Role, Target};
 
 use crate::analysis::Answer;
 use crate::{convert, std_cache, uri};
@@ -89,4 +89,45 @@ pub fn definition(
         }
         target => locator.location(index.declaration(&target)?.span),
     }
+}
+
+/// The references to the name at byte `offset` (spec §5.3): every
+/// occurrence of its target, or of its family, declarations only when
+/// asked, in the spec's one order.
+pub fn references(
+    answer: &Answer,
+    offset: u32,
+    declarations: bool,
+    uri_of: &dyn Fn(&Path) -> String,
+) -> Vec<lsp::Location> {
+    let a = &answer.analysis;
+    let (Some(index), Some(defs)) = (a.index.as_ref(), a.definitions.as_ref()) else {
+        return Vec::new();
+    };
+    let Some(o) = index.at(defs, answer.file, offset) else {
+        return Vec::new();
+    };
+    let family = index.family(&o.target);
+    let mut found: Vec<&Occurrence> = index
+        .occurrences
+        .iter()
+        .filter(|x| family.contains(&x.target))
+        .filter(|x| declarations || x.role == Role::Use)
+        .collect();
+    sort_by_place(a, &mut found);
+    found.dedup_by_key(|x| x.span);
+    let locator = Locator::new(a, uri_of);
+    found
+        .iter()
+        .filter_map(|x| locator.location(x.span))
+        .collect()
+}
+
+/// Sort by file name in the database, then offset: the spec's one order
+/// (plan decision 16).
+pub fn sort_by_place(a: &Analysis, found: &mut [&Occurrence]) {
+    found.sort_by(|x, y| {
+        let name = |o: &Occurrence| a.db.get_name(o.span.file).unwrap_or("").to_string();
+        (name(x), x.span.start).cmp(&(name(y), y.span.start))
+    });
 }
