@@ -26,8 +26,6 @@ pub enum Scope {
 pub struct Answer {
     pub analysis: Analysis,
     pub file: FileId,
-    // Task 11's rename check is its first reader.
-    #[allow(dead_code)]
     pub scope: Scope,
 }
 

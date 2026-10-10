@@ -989,3 +989,61 @@ fn rename_reaches_the_projects_tests_files() {
         ]
     );
 }
+
+// === Task 11: the rename check ===
+
+#[test]
+fn a_rename_that_captures_a_name_is_refused() {
+    let text = "fn main() {\n    let y = 1\n    let x = 2\n    let z = x + y\n}\n";
+    let dir = project("check-capture", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    // `let y = 2` would shadow the first `y`, so `x + y` would read it.
+    assert_eq!(
+        refused(&rename(&mut client, &uri, at(text, "x = 2", 0), "y")),
+        "renaming `x` to `y` would make 1 other name refer to it"
+    );
+}
+
+#[test]
+fn a_rename_that_changes_what_a_name_means_is_refused() {
+    let text = "fn main() {\n    let x = 1\n    let f = |y: Int| x + y\n}\n";
+    let dir = project("check-change", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    // Inside the closure, `y + y` would read its own parameter twice.
+    assert_eq!(
+        refused(&rename(&mut client, &uri, at(text, "x = 1", 0), "y")),
+        "renaming `x` to `y` would change what 1 name refers to"
+    );
+}
+
+#[test]
+fn a_rename_that_adds_an_error_is_refused() {
+    let text =
+        "fn helper() -> Int { 1 }\nfn other() -> Int { 2 }\nfn main() {\n    let a = helper()\n}\n";
+    let dir = project("check-error", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let message = refused(&rename(&mut client, &uri, at(text, "helper", 0), "other"));
+    assert!(
+        message.starts_with("renaming `helper` to `other` would add an error: E0002"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_program_with_errors_can_still_be_renamed() {
+    // A guard: the check counts error codes, so an error already there
+    // does not stop a rename.
+    let text = "fn main() {\n    let total: Int = \"s\"\n    let b = total\n}\n";
+    let dir = project("check-broken", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let response = rename(&mut client, &uri, at(text, "total", 0), "sum");
+    assert_eq!(edits(&response).len(), 2, "{response}");
+}

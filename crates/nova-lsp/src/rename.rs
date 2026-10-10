@@ -145,8 +145,6 @@ fn owner(a: &Analysis, file: FileId) -> Owner {
 
 /// One replacement: `start..end` of `file` becomes `text`, which holds the
 /// new name at `name_at`.
-// Task 11's check is the first reader of `name_at` and `role`.
-#[allow(dead_code)]
 pub struct Edit {
     pub file: FileId,
     pub start: u32,
@@ -175,7 +173,7 @@ pub fn rename(
         return Ok(Some(lsp::WorkspaceEdit::default()));
     }
     let edits = plan_edits(&answer.analysis, &found, new);
-    let _ = overlay; // Task 11's check reads it.
+    check(answer, &found, new, &edits, overlay)?;
     Ok(Some(workspace_edit(&answer.analysis, &edits, uri_of)))
 }
 
@@ -257,4 +255,142 @@ fn workspace_edit(
         changes: Some(changes),
         ..Default::default()
     }
+}
+
+/// A span as both analyses can compare it: by file name, not `FileId`,
+/// since the second analysis numbers files again (plan decision 10).
+type Place = (String, u32, u32);
+
+/// Spec §5.5: analyse the renamed program, and refuse unless every renamed
+/// name still means what it meant, nothing else came to mean it, and no
+/// error code became more common.
+fn check(
+    answer: &Answer,
+    found: &Found,
+    new: &str,
+    edits: &[Edit],
+    overlay: &Overlay,
+) -> Result<(), Refused> {
+    let a = &answer.analysis;
+    let name_of = |f: FileId| a.db.get_name(f).unwrap_or("").to_string();
+
+    // The renamed texts, over the overlay; and where each renamed name
+    // lands in them.
+    let mut renamed = overlay.clone();
+    let mut expected: Vec<Place> = Vec::new();
+    let mut declared: Vec<Place> = Vec::new();
+    let mut files: Vec<FileId> = edits.iter().map(|e| e.file).collect();
+    files.dedup();
+    for file in files {
+        let Some(source) = a.db.get_source(file) else {
+            continue;
+        };
+        let mut text = String::with_capacity(source.len());
+        let mut copied = 0usize;
+        for e in edits.iter().filter(|e| e.file == file) {
+            text.push_str(&source[copied..e.start as usize]);
+            let start = text.len() as u32 + e.name_at;
+            let place = (name_of(file), start, start + new.len() as u32);
+            if e.role == Role::Declaration {
+                declared.push(place.clone());
+            }
+            expected.push(place);
+            text.push_str(&e.text);
+            copied = e.end as usize;
+        }
+        text.push_str(&source[copied..]);
+        renamed = renamed.with(Path::new(&name_of(file)), text);
+    }
+
+    let options = crate::analysis::options(None, true);
+    let Some(b) = crate::analysis::analyse(&answer.scope, &renamed, &options) else {
+        return Err(Refused(
+            "the renamed program could not be analysed".to_string(),
+        ));
+    };
+    let Some(index) = b.index.as_ref() else {
+        return Err(Refused(
+            "the renamed program could not be analysed".to_string(),
+        ));
+    };
+    let place = |o: &Occurrence| -> Place {
+        (
+            b.db.get_name(o.span.file).unwrap_or("").to_string(),
+            o.span.start,
+            o.span.end,
+        )
+    };
+    let targets: Vec<Target> = index
+        .occurrences
+        .iter()
+        .filter(|o| o.role == Role::Declaration && declared.contains(&place(o)))
+        .map(|o| o.target)
+        .collect();
+    let now: Vec<Place> = index
+        .occurrences
+        .iter()
+        .filter(|o| targets.contains(&o.target))
+        .map(&place)
+        .collect();
+    let old = &found.old;
+    let captured = now.iter().filter(|p| !expected.contains(p)).count();
+    if captured > 0 {
+        return Err(Refused(format!(
+            "renaming `{old}` to `{new}` would make {} refer to it",
+            count(captured, "other name", "other names")
+        )));
+    }
+    let changed = expected.iter().filter(|p| !now.contains(p)).count();
+    if changed > 0 {
+        let verb = if changed == 1 { "refers" } else { "refer" };
+        return Err(Refused(format!(
+            "renaming `{old}` to `{new}` would change what {} {verb} to",
+            count(changed, "name", "names")
+        )));
+    }
+    if let Some((code, message)) = new_error(a, &b) {
+        return Err(Refused(format!(
+            "renaming `{old}` to `{new}` would add an error: {code} {message}"
+        )));
+    }
+    Ok(())
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The first error of `after`, in the spec's one order, whose code is
+/// more common than in `before`.
+fn new_error(before: &Analysis, after: &Analysis) -> Option<(String, String)> {
+    use nova_diagnostics::Severity;
+    let codes = |a: &Analysis| {
+        let mut n: HashMap<String, usize> = HashMap::new();
+        for d in a
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+        {
+            *n.entry(d.code.clone()).or_default() += 1;
+        }
+        n
+    };
+    let (was, now) = (codes(before), codes(after));
+    let mut errors: Vec<&nova_diagnostics::Diagnostic> = after
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .filter(|d| now.get(&d.code) > was.get(&d.code).or(Some(&0)))
+        .collect();
+    let key = |d: &nova_diagnostics::Diagnostic| {
+        let label = d.labels.iter().find(|l| l.primary).or(d.labels.first());
+        label.map_or((String::new(), 0), |l| {
+            (
+                after.db.get_name(l.span.file).unwrap_or("").to_string(),
+                l.span.start,
+            )
+        })
+    };
+    errors.sort_by_key(|d| key(d));
+    errors.first().map(|d| (d.code.clone(), d.message.clone()))
 }
