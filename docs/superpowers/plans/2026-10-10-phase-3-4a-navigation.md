@@ -103,9 +103,9 @@ code:
    - **`nova-driver`:** `Options::index`, `Analysis::index`.
    - **`nova-lsp`:**
      - `analysis::{Scope, Answer, options, analyse, answering}`;
-     - `std_cache::{dir, ensure, module_of, path_of, in_std_cache}`;
+     - `std_cache::{dir, ensure, module_of, in_std_cache}`;
      - `hover::hover`;
-     - `navigate::{definition, references}`;
+     - `navigate::{Locator, definition, references, sort_by_place}`;
      - `rename::{prepare, rename}`.
 2. **The resolver always records import occurrences.** An import
    records a few occurrences, so `ProgramResolution::imports` is always
@@ -161,6 +161,17 @@ code:
 16. **Results are sorted where they are produced.** `Index` keeps its
     occurrences in recording order. `references`, rename's edits and the
     rename check sort by (file name, offset), the spec's one order.
+17. **Mutant 2 records `Def(trait_id)` for a trait-dispatched call.** Spec
+    §8.5 describes it as "records an impl method's `Def`". Writing that
+    would need impl selection at the call site. `Def(trait_id)` breaks the
+    same promise, that a trait-dispatched call means the trait's method,
+    and the test that catches it is the one the spec names. That test is
+    `definition_of_a_trait_dispatched_call_is_the_traits_declaration`
+    (Task 8).
+18. **A `Locator` per request turns spans into locations.** It makes std's
+    cache ready at most once, and indexes each file's lines once. A
+    reference list into std (`Some`, `push`) would otherwise re-read and
+    compare all 17 std files for every location.
 
 ## File Structure
 
@@ -406,7 +417,8 @@ pub use index::{Index, Occurrence, Role, Target};
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-resolver --lib index:: 2>&1 | tail -20`
-Expected: compile errors, among them `cannot find type `Index` in this scope`.
+Expected: compile errors: `Index`, `Role`, `Target` and `Occurrence` are
+not defined (`failed to resolve: use of undeclared type` and the like).
 
 - [ ] **Step 3: Write the types and lookups**
 
@@ -688,7 +700,7 @@ At the end of the `mod tests` block of `crates/nova-resolver/src/lib.rs`
         // User modules' defs come before std's, so `position` finds these.
         let main = "import lib::{area, Figure, Paint, Round}\nfn main() {}\n";
         let lib = "pub fn area() -> Int { 1 }\n\
-                   pub type Figure = Round(Int) | Square(Int)\n\
+                   pub type Figure = | Round(Int) | Square(Int)\n\
                    pub trait Paint { fn paint(self) -> String }\n";
         let prog = resolve_two(main, lib);
         let id = |name: &str| {
@@ -735,7 +747,7 @@ its offsets alone.)
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-resolver --lib import 2>&1 | tail -15`
-Expected: a compile error, `no field `imports` on type `ProgramResolution``.
+Expected: a compile error, ``no field `imports` on type `&ProgramResolution` ``.
 
 - [ ] **Step 3: Record the occurrences**
 
@@ -773,10 +785,11 @@ and in the `ProgramResolution { … }` it returns, after `tests,`, add
 `imports,`.
 
 In `fn resolve_import(`, add the parameter after `diagnostics: &mut
-Vec<Diagnostic>,`:
+Vec<Diagnostic>,`. It cannot be called `imports`: that name is already
+the import table's parameter (`:2320`).
 
 ```rust
-    imports: &mut Vec<Occurrence>,
+    occurrences: &mut Vec<Occurrence>,
 ```
 
 After the self-import check (the `if target == mid { … return; }` block),
@@ -786,7 +799,7 @@ before `match &imp.kind {`, add:
     // Spec 3.4a §3.3: the module, at its own segment. Only one-segment
     // paths reach here, and `path.span` would also cover a list's `::`.
     if let Some(first) = imp.path.value.segments.first() {
-        imports.push(Occurrence {
+        occurrences.push(Occurrence {
             span: first.span,
             role: Role::Use,
             target: Target::Module(ModuleId(target as u32)),
@@ -812,7 +825,7 @@ In the `ImportKind::List(names)` arm, record each binding. Change the three
                         Res::Variant(sum, i) => Target::Variant(sum, i as u32),
                         Res::Builtin(b) => Target::Builtin(b),
                     };
-                    imports.push(Occurrence {
+                    occurrences.push(Occurrence {
                         span: n.span,
                         role: Role::Use,
                         target,
@@ -828,7 +841,7 @@ In the `ImportKind::List(names)` arm, record each binding. Change the three
                         n.span,
                         id,
                     );
-                    imports.push(Occurrence {
+                    occurrences.push(Occurrence {
                         span: n.span,
                         role: Role::Use,
                         target: Target::Def(id),
@@ -844,7 +857,7 @@ In the `ImportKind::List(names)` arm, record each binding. Change the three
                         n.span,
                         id,
                     );
-                    imports.push(Occurrence {
+                    occurrences.push(Occurrence {
                         span: n.span,
                         role: Role::Use,
                         target: Target::Def(id),
@@ -866,8 +879,10 @@ warnings.
 
 Then check that nothing else builds a `ProgramResolution` by hand:
 
-Run: `cd /d/Projects/nona/nova && git grep -n "ProgramResolution {" -- crates`
-Expected: one line, in `resolve_program`.
+Run: `cd /d/Projects/nona/nova && git grep -n -E "^\s+ProgramResolution \{" -- crates`
+Expected: one line, the literal at the end of `resolve_program`. (The
+struct, `resolve_program`'s return type and the test helper's return
+type also hold `ProgramResolution {`, but none is indented before it.)
 
 - [ ] **Step 5: Commit**
 
@@ -1119,7 +1134,7 @@ fn a_match_binding_and_a_variant_payload_are_locals() {
 fn items_fields_variants_and_trait_methods_are_declared() {
     let text = "pub const LIMIT: Int = 3\n\
 record Point { x: Int, y: Int }\n\
-type Shape = Round(Int) | Flat\n\
+type Shape = | Round(Int) | Flat\n\
 trait Show {\n    fn show(self) -> String\n    fn twice(self) -> String { self.show() }\n}\n\
 fn main() {}\n";
     let a = analyse(&[(MAIN, text)]);
@@ -1170,7 +1185,7 @@ fn type_parameters_are_declared() {
 #[test]
 fn a_locals_type_is_read_after_inference() {
     let text = "fn first<T>(xs: [T]) -> T {\n    let x = xs[0]\n    x\n}\n\
-fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    let f = |k| k + 1\n    let w = Vec::new()\n}\n";
+fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    let f = |k| k + 1\n    let w = Vec::new()\n    let g = |q| q\n}\n";
     let a = analyse(&[(MAIN, text)]);
     // A type parameter by its declared name, not `T0`.
     assert_eq!(local_type(&a, MAIN, "x", 0).as_deref(), Some("T"));
@@ -1179,13 +1194,23 @@ fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    let f = |k| k + 1\n 
     assert_eq!(local_type(&a, MAIN, "k", 0).as_deref(), Some("Int"));
     // An unsolved variable as `_`.
     assert_eq!(local_type(&a, MAIN, "w", 0).as_deref(), Some("Vec<_>"));
+    // A wholly unknown type is not stored (spec §3.4).
+    assert_eq!(local_type(&a, MAIN, "q", 0), None);
 }
 
 #[test]
-fn nothing_is_recorded_for_an_unresolved_name_or_a_wildcard() {
-    let a = analyse(&[(MAIN, "fn main() {\n    let _ = 1\n    let a = missing + 1\n}\n")]);
+fn nothing_is_recorded_for_an_unresolved_name_a_wildcard_or_a_placeholder() {
+    // `a.` is unfinished: the parser gives its member an empty name.
+    let text = "fn main() {\n    let _ = 1\n    let a = missing + 1\n    let b = a.\n}\n";
+    let a = analyse(&[(MAIN, text)]);
     nothing_at(&a, MAIN, "missing", 0);
     nothing_at(&a, MAIN, "_", 0);
+    let empty: Vec<&Occurrence> = index(&a)
+        .occurrences
+        .iter()
+        .filter(|o| o.span.start >= o.span.end)
+        .collect();
+    assert!(empty.is_empty(), "{empty:?}");
 }
 
 #[test]
@@ -1207,8 +1232,8 @@ remove the attribute in Task 4.
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index 2>&1 | tail -20`
-Expected: a compile error, `struct `Options` has no field named `index``
-(and `no field `index` on type `Analysis``).
+Expected: compile errors: ``struct `Options` has no field named `index` ``,
+and ``no field `index` on type `&Analysis` ``.
 
 - [ ] **Step 3: The options and the results**
 
@@ -1417,6 +1442,8 @@ Before `    fn variant_index(&self, sum_id: DefId, name: &str) -> Option<usize> 
         }
     }
 
+    // Task 4's type conversions are its first callers.
+    #[allow(dead_code)]
     fn type_param_target(&self, name: &str) -> Option<Target> {
         self.type_params
             .iter()
@@ -1580,7 +1607,8 @@ Leave `__f_{fname}`, `__base` and every `new_local_unscoped` call alone.
 Then check that only those two `new_local(` calls remain:
 
 Run: `cd /d/Projects/nona/nova && git grep -n "fcx.new_local(" -- crates/nova-typeck/src/check.rs`
-Expected: two lines, `__f_{fname}` and `__base`, both in `check_record_literal`.
+Expected: three lines: `bind_local`'s own body, and `__f_{fname}` and
+`__base` in `check_record_literal`.
 
 Record the uses:
 - `check_path`: after `if let Some(local) = fcx.lookup(name) {` add
@@ -1626,7 +1654,7 @@ Expected: `test result: ok. 11 passed; 0 failed`.
 Then the crates' own suites, to confirm recording changes nothing, and
 that the server still builds:
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck -p nova-resolver -p nova-driver 2>&1 > $P/t3.txt; python -X utf8 $P/count.py $P/t3.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck -p nova-resolver -p nova-driver > $P/t3.txt 2>&1; python -X utf8 $P/count.py $P/t3.txt`
 Expected: `0 failed`.
 
 Run: `cd /d/Projects/nona/nova && cargo check --workspace --all-targets 2>&1 | tail -3`
@@ -1764,6 +1792,9 @@ the like; Task 3's eleven pass.
 
 - [ ] **Step 3: Record the types**
 
+Remove the `#[allow(dead_code)]` (and its comment) above
+`type_param_target`: this step calls it.
+
 In `convert_ty`:
 
 1. In the two-segment branch, inside `if by_index.is_some() || (in_impl &&
@@ -1864,7 +1895,7 @@ fn primitive(name: &str) -> Option<&'static str> {
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index 2>&1 | tail -20`
 Expected: `test result: ok. 15 passed; 0 failed`.
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck 2>&1 > $P/t4.txt; python -X utf8 $P/count.py $P/t4.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck > $P/t4.txt 2>&1; python -X utf8 $P/count.py $P/t4.txt`
 Expected: `0 failed`.
 
 - [ ] **Step 6: Commit**
@@ -1934,7 +1965,7 @@ fn main() {\n    let a = double(LIMIT)\n    let f = double\n    println(\"x\")\n
 
 #[test]
 fn variants_use_their_sum_and_variant() {
-    let text = "type Shape = Round(Int) | Flat\n\
+    let text = "type Shape = | Round(Int) | Flat\n\
 fn main() {\n    let a = Round(1)\n    let b = Shape::Round(2)\n    let c = Flat\n    let d = Shape::Flat\n    let e: Option<Int> = None\n}\n";
     let a = analyse(&[(MAIN, text)]);
     uses(&a, MAIN, "Round", 1, MAIN, 0);
@@ -2013,7 +2044,7 @@ fn main() {\n    let c = Counter { n: 1 }\n    let a = c.get()\n    let b = c.sh
 
 #[test]
 fn patterns_use_their_variants() {
-    let text = "type Shape = Round(Int) | Flat\n\
+    let text = "type Shape = | Round(Int) | Flat\n\
 fn size(s: Shape) -> Int {\n    match s {\n        Round(r) => r,\n        Shape::Flat => 0,\n    }\n}\n\
 fn other(s: Shape) -> Int {\n    match s {\n        Shape::Round(r) => r,\n        Flat => 0,\n    }\n}\n\
 fn main() {}\n";
@@ -2041,13 +2072,36 @@ fn main() {}\n";
     assert!(matches!(trait_method, Target::TraitMethod(..)), "{trait_method:?}");
     assert_eq!(index(&a).family(&a_show), vec![trait_method, a_show, b_show]);
 }
+
+#[test]
+fn the_checkers_own_names_are_not_recorded() {
+    // Spec §3.5: a `for` loop's `next` and interpolation's `fmt` are calls
+    // the checker makes, not names the user wrote. Every occurrence in the
+    // file covers an identifier the source holds, and none is a trait
+    // method, since the source calls none.
+    let text = "record P { n: Int }\n\
+impl Display for P {\n    fn fmt(self) -> String { \"p\" }\n}\n\
+fn main() {\n    let p = P { n: 1 }\n    let s = \"${p}\"\n    let mut v = Vec::new()\n    v.push(1)\n    for x in v.iter() {\n        let y = x\n    }\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    let (file, _) = &a.modules[0];
+    let source = a.db.get_source(*file).unwrap();
+    for o in index(&a).occurrences.iter().filter(|o| o.span.file == *file) {
+        assert!(!matches!(o.target, Target::TraitMethod(..)), "{o:?}");
+        let word = &source[o.span.start as usize..o.span.end as usize];
+        assert!(
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{o:?} covers `{word}`"
+        );
+    }
+}
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index 2>&1 | tail -20`
-Expected: the seven new tests fail (`nothing at …`, or a wrong target);
-Tasks 3 and 4's fifteen pass.
+Expected: seven of the eight new tests fail (`nothing at …`, or a wrong
+target); `the_checkers_own_names_are_not_recorded` passes already, as the
+guard it is; Tasks 3 and 4's fifteen pass.
 
 - [ ] **Step 3: Values and calls**
 
@@ -2255,9 +2309,9 @@ statement add:
 - [ ] **Step 6: Run the tests to see them pass**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index 2>&1 | tail -20`
-Expected: `test result: ok. 22 passed; 0 failed`.
+Expected: `test result: ok. 23 passed; 0 failed`.
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck -p nova-driver 2>&1 > $P/t5.txt; python -X utf8 $P/count.py $P/t5.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-typeck -p nova-driver > $P/t5.txt 2>&1; python -X utf8 $P/count.py $P/t5.txt`
 Expected: `0 failed`.
 
 - [ ] **Step 7: Commit**
@@ -2547,7 +2601,7 @@ fn every_name_in_the_corpora_is_indexed() {
 
 - [ ] **Step 3: Run the checks, and read what they find**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index_complete 2>&1 > $P/t6.txt; tail -60 $P/t6.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test index_complete > $P/t6.txt 2>&1; tail -60 $P/t6.txt`
 Expected: either `test result: ok. 1 passed`, or a list of problems, each
 naming a file, a line and the name.
 
@@ -2571,13 +2625,23 @@ In `crates/nova-driver/tests/broken.rs`:
 1. Add `index: true,` to the `Options { … }` literal in the worker.
 2. Change `analyze(&path, &sources, &options).map(|a| a.diagnostics.len())`
    to `analyze(&path, &sources, &options).map(|a| spans_inside(&a))`.
-3. Change `done.send((path, text.len(), outcome.is_ok(), took))` to:
+3. The send is split over three lines (`broken.rs:109-111`). Replace
+
+   ```rust
+            if done
+                .send((path, text.len(), outcome.is_ok(), took))
+                .is_err()
+            {
+   ```
+
+   with:
 
    ```rust
             let spans_ok = !matches!(outcome, Ok(Ok(false)));
             if done
                 .send((path, text.len(), outcome.is_ok(), spans_ok, took))
                 .is_err()
+            {
    ```
 
 4. In the receiving loop, change `Ok((path, len, ok, took)) => {` to `Ok((path,
@@ -2616,7 +2680,7 @@ Expected: `test result: ok. 1 passed`.
 
 - [ ] **Step 5: Run the driver's and checker's suites**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics -p nova-resolver -p nova-typeck -p nova-driver 2>&1 > $P/t6b.txt; python -X utf8 $P/count.py $P/t6b.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics -p nova-resolver -p nova-typeck -p nova-driver > $P/t6b.txt 2>&1; python -X utf8 $P/count.py $P/t6b.txt`
 Expected: `0 failed`.
 
 - [ ] **Step 6: Commit**
@@ -2738,6 +2802,14 @@ fn hover(client: &mut Client, uri: &str, position: Value) -> Value {
     )
 }
 
+/// A response's result, after checking it is not an error. A missing
+/// `result` reads as `null`, so a null check alone would pass on an error.
+#[track_caller]
+fn ok(response: &Value) -> Value {
+    assert!(response["error"].is_null(), "an error: {response}");
+    response["result"].clone()
+}
+
 /// A hover response's Markdown.
 #[track_caller]
 fn markdown(response: &Value) -> String {
@@ -2788,7 +2860,7 @@ fn hover_shows_a_locals_inferred_type() {
 }
 
 const KINDS: &str = "/// A point.\nrecord Point { x: Int }\n\
-type Shape = Round(Int) | Flat\n\
+type Shape = | Round(Int) | Flat\n\
 trait Show {\n    type Out\n    fn show(self) -> String\n}\n\
 impl Show for Point {\n    type Out = Int\n    fn show(self) -> String { \"p\" }\n}\n\
 pub const LIMIT: Int = 3\n\
@@ -2867,10 +2939,10 @@ fn hover_on_no_name_or_an_unopened_document_is_null() {
     let uri = file_uri(&dir.join("src").join("main.nova"));
     let mut client = Client::start(&dir, false);
     // Not opened yet.
-    assert_eq!(hover(&mut client, &uri, at(AREA, "area(3)", 0))["result"], Value::Null);
+    assert_eq!(ok(&hover(&mut client, &uri, at(AREA, "area(3)", 0))), Value::Null);
     open(&mut client, &uri, AREA);
     // A blank line.
-    assert_eq!(hover(&mut client, &uri, json!({ "line": 4, "character": 0 }))["result"], Value::Null);
+    assert_eq!(ok(&hover(&mut client, &uri, json!({ "line": 4, "character": 0 }))), Value::Null);
 }
 
 // === Phase 3.3a's app and library, as in lsp.rs ===
@@ -2902,7 +2974,7 @@ above the `use lsp_client::…` line, and remove it in Task 8.
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t7.txt; tail -30 $P/t7.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t7.txt 2>&1; tail -30 $P/t7.txt`
 Expected: the six tests fail. Hover is not handled, so each response
 carries `MethodNotFound` and `markdown` panics with "no hover: …"; the
 null test fails on its error response.
@@ -3130,29 +3202,35 @@ pub fn declaration(a: &Analysis, target: &Target) -> Option<String> {
     Some(match target {
         Target::Local(span) => local_line(text, at, name, index.types.get(span)),
         Target::TypeParam(_) => collapse(&text[at..end_of(text, at, &[',', '>'], true)]),
-        Target::Field(..) => collapse(&text[at..end_of(text, at, &[',', '}', '\n'], false)]),
+        Target::Field(..) => collapse(&text[at..end_of(text, at, &[',', '}', '\n'], true)]),
         Target::Variant(..) => collapse(&text[at..end_of(text, at, &['|', '\n'], false)]),
-        Target::TraitMethod(..) => item_line(text, at, &['{', ';', '\n']),
+        Target::TraitMethod(..) => item_line(text, at, &['{', ';', '}', '\n']),
         Target::Def(id) => match &defs.def(*id).kind {
             DefKind::Fn { .. } | DefKind::Method { .. } => item_line(text, at, &['{', ';']),
             DefKind::ExternFn { .. }
             | DefKind::AssocType { .. }
             | DefKind::Record { .. }
-            | DefKind::Trait { .. } => item_line(text, at, &['{', ';', '\n']),
+            | DefKind::Trait { .. } => item_line(text, at, &['{', ';', '}', '\n']),
             DefKind::Sum { .. } | DefKind::Const { .. } => {
-                item_line(text, at, &['=', '{', ';', '\n'])
+                item_line(text, at, &['=', '{', ';', '}', '\n'])
             }
         },
         _ => name.to_string(),
     })
 }
 
-/// A declaration from the first token of its line to the first of `stops`
-/// outside brackets, on one line. This keeps `pub`, `async` and a `where`
-/// clause.
+/// A declaration from its item's first token to the first of `stops`
+/// outside brackets, on one line. The item starts after the last `{`, `;`
+/// or `}` on the name's line, so a method written on its trait's or
+/// impl's line is shown alone. `pub`, `async` and a `where` clause are
+/// kept.
 fn item_line(text: &str, at: usize, stops: &[char]) -> String {
     let line_start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-    let start = line_start + (text[line_start..at].len() - text[line_start..at].trim_start().len());
+    let item_start = text[line_start..at]
+        .rfind(|c: char| matches!(c, '{' | ';' | '}'))
+        .map_or(line_start, |i| line_start + i + 1);
+    let lead = text[item_start..at].len() - text[item_start..at].trim_start().len();
+    let start = item_start + lead;
     collapse(&text[start..end_of(text, start, stops, false)])
 }
 
@@ -3292,6 +3370,26 @@ mod tests {
     }
 
     #[test]
+    fn an_item_on_its_containers_line_starts_at_the_item() {
+        let text =
+            "trait Show { fn show(self) -> String }\nimpl Show for A { fn show(self) -> String { \"a\" } }\n";
+        let at = text.find("show(").unwrap();
+        assert_eq!(item_line(text, at, &['{', ';', '}', '\n']), "fn show(self) -> String");
+        let at = text.rfind("show(").unwrap();
+        assert_eq!(item_line(text, at, &['{', ';']), "fn show(self) -> String");
+    }
+
+    #[test]
+    fn a_fields_type_keeps_its_generic_arguments() {
+        let text = "record S { m: Map<String, Int>, n: Int }";
+        let at = text.find("m:").unwrap();
+        assert_eq!(
+            collapse(&text[at..end_of(text, at, &[',', '}', '\n'], true)]),
+            "m: Map<String, Int>"
+        );
+    }
+
+    #[test]
     fn a_type_parameters_bounds_stop_at_its_comma_or_angle() {
         let text = "fn f<T: Into<Vec<Int>>, U>() {}";
         let at = text.find("T:").unwrap();
@@ -3364,14 +3462,14 @@ fn invalid(id: lsp_server::RequestId, e: serde_json::Error) -> Response {
 - [ ] **Step 6: Run the tests to see them pass**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp 2>&1 | tail -8`
-Expected: hover.rs's four unit tests pass with the crate's others.
+Expected: hover.rs's six unit tests pass with the crate's others.
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t7.txt; tail -12 $P/t7.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t7.txt 2>&1; tail -12 $P/t7.txt`
 Expected: `test result: ok. 6 passed; 0 failed`.
 
 Completion's tests guard the moved `analysis_at`:
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp 2>&1 > $P/t7b.txt; python -X utf8 $P/count.py $P/t7b.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp > $P/t7b.txt 2>&1; python -X utf8 $P/count.py $P/t7b.txt`
 Expected: `0 failed`, and as many passed as before this task.
 
 - [ ] **Step 7: Commit**
@@ -3409,12 +3507,18 @@ Expected: `nova-lsp: hover`
 - Produces:
   - `std_cache::dir(home: &Path) -> PathBuf`;
   - `std_cache::ensure() -> Option<PathBuf>`;
-  - `std_cache::path_of(short: &str) -> Option<PathBuf>`;
   - `std_cache::module_of(path: &Path) -> Option<String>`;
   - `std_cache::in_std_cache(path: &Path) -> bool`;
-  - `analysis::Scope::Std { module: String }`;
-  - `navigate::path_of(a: &Analysis, file: FileId) -> Option<PathBuf>`;
-  - `navigate::location(a: &Analysis, span: Span, uri_of: &dyn Fn(&Path) -> String) -> Option<lsp::Location>`;
+  - `analysis::Scope::Std`;
+  - `navigate::Locator<'a>`, with:
+    - `new(a: &'a Analysis, uri_of: &'a dyn Fn(&Path) -> String)`;
+    - `path_of(&self, file: FileId) -> Option<PathBuf>`;
+    - `range(&self, span: Span) -> Option<lsp::Range>`;
+    - `uri(&self, file: FileId) -> Option<lsp::Uri>`;
+    - `location(&self, span: Span) -> Option<lsp::Location>`;
+
+    Std's cache is made ready at most once per `Locator`, so once per
+    request, and each file's lines are indexed once (plan decision 18);
   - `navigate::definition(answer: &Answer, offset: u32, uri_of: &dyn Fn(&Path) -> String) -> Option<lsp::Location>`;
   - `Server::uri_of(&self, path: &Path) -> String`.
 
@@ -3494,7 +3598,22 @@ fn definition_in_the_same_file_and_into_another_module() {
     assert!(path_of(&module).ends_with("geometry.nova"), "{module}");
     assert_eq!(module["range"]["start"], json!({ "line": 0, "character": 0 }));
     // A builtin has no definition.
-    assert_eq!(definition(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "print", 0))["result"], Value::Null);
+    assert_eq!(ok(&definition(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "print", 0))), Value::Null);
+}
+
+#[test]
+fn definition_of_a_trait_dispatched_call_is_the_traits_declaration() {
+    // Spec decision 6, and the test spec §8.5's second mutant breaks.
+    let text = "trait Show {\n    fn show(self) -> String\n}\nrecord A { n: Int }\n\
+impl Show for A {\n    fn show(self) -> String { \"a\" }\n}\n\
+fn main() {\n    let a = A { n: 1 }\n    let s = a.show()\n}\n";
+    let dir = project("definition-trait", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let found = ok(&definition(&mut client, &uri, at(text, "show()", 0)));
+    // The trait's `fn show`, not the impl's.
+    assert_eq!(found["range"], range(text, "show", 0, "show"));
 }
 
 #[test]
@@ -3689,9 +3808,9 @@ In `crates/nova-cli/tests/lsp_client/mod.rs`, make `fn decode(` public
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t8.txt; tail -30 $P/t8.txt`
-Expected: Task 7's six pass; the eight new tests fail, each on a
-`MethodNotFound` response ("no location").
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t8.txt 2>&1; tail -30 $P/t8.txt`
+Expected: Task 7's six pass; the nine new tests fail, each on a
+`MethodNotFound` response ("no location", or `ok`'s "an error").
 
 - [ ] **Step 3: Std's cache**
 
@@ -3760,11 +3879,6 @@ pub fn ensure() -> Option<PathBuf> {
             None
         }
     }
-}
-
-/// The cached file of std module `short`, written if need be.
-pub fn path_of(short: &str) -> Option<PathBuf> {
-    Some(ensure()?.join(format!("{short}.nova")))
 }
 
 /// The std module a path in the cache holds, by its file name.
@@ -3849,6 +3963,9 @@ On Unix, `set_readonly(false)` would make the file writable by everyone,
 so it is called only on Windows. Clippy's
 `permissions_set_readonly_false` lint fires only on a literal `false`.
 
+In `crates/nova-lsp/src/lib.rs`, add `mod std_cache;` to the `mod` list
+now: `checker.rs` uses it below.
+
 In `crates/nova-lsp/src/checker.rs`, change `in_the_cache` to:
 
 ```rust
@@ -3901,8 +4018,9 @@ In `crates/nova-lsp/src/analysis.rs`, add the variant:
 
 ```rust
     /// A file in std's cache (spec §4, rule 2), answered from an in-memory
-    /// program that includes std.
-    Std { module: String },
+    /// program that includes std. Rename never re-analyses one (it refuses
+    /// inside the caches), so the module is not kept.
+    Std,
 ```
 
 In `analyse`, change the `match scope` so the `Std` arm builds the
@@ -3913,7 +4031,7 @@ pub fn analyse(scope: &Scope, overlay: &Overlay, options: &Options) -> Option<An
     let (program, overlay) = match scope {
         Scope::Project(dir) => (Program::for_package(dir, Roots::Test), overlay.clone()),
         Scope::File(path) => (Program::for_file(path), overlay.clone()),
-        Scope::Std { .. } => {
+        Scope::Std => {
             // Plan decision 14: `fn main() {}`, which exists only in the
             // overlay.
             let entry = std::env::temp_dir().join("nova-lsp-std").join("main.nova");
@@ -3929,9 +4047,7 @@ and at the start of `answering`:
 
 ```rust
     if let Some(module) = crate::std_cache::module_of(path) {
-        let scope = Scope::Std {
-            module: module.clone(),
-        };
+        let scope = Scope::Std;
         let analysis = analyse(&scope, overlay, options)?;
         let file = analysis.db.id_of(&format!("<std/{module}>"))?;
         return Some(Answer {
@@ -3951,6 +4067,8 @@ Create `crates/nova-lsp/src/navigate.rs`:
 //! `docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`
 //! §5.2, §5.3).
 
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lsp_types as lsp;
@@ -3961,26 +4079,61 @@ use nova_resolver::Target;
 use crate::analysis::Answer;
 use crate::{convert, std_cache, uri};
 
-/// Where a file of `a` is on disk: a std module's place in std's cache, or
-/// the real path of anything else, so `app/../geom` reads as `geom` (plan
-/// decision 8).
-pub fn path_of(a: &Analysis, file: FileId) -> Option<PathBuf> {
-    let name = a.db.get_name(file)?;
-    match name.strip_prefix("<std/").and_then(|s| s.strip_suffix('>')) {
-        Some(short) => std_cache::path_of(short),
-        None => Some(nova_pm::real_path(Path::new(name))),
-    }
+/// Turns one analysis's spans into locations (plan decision 18). Std's
+/// cache is made ready at most once per `Locator`, which a request makes
+/// one of, and each file's lines are indexed once.
+pub struct Locator<'a> {
+    a: &'a Analysis,
+    uri_of: &'a dyn Fn(&Path) -> String,
+    std_dir: OnceCell<Option<PathBuf>>,
+    lines: RefCell<HashMap<FileId, LineIndex>>,
 }
 
-/// `span`'s location, under the URI `uri_of` gives its file.
-pub fn location(a: &Analysis, span: Span, uri_of: &dyn Fn(&Path) -> String) -> Option<lsp::Location> {
-    let path = path_of(a, span.file)?;
-    let source = a.db.get_source(span.file)?;
-    let range = convert::range(&LineIndex::new(source), span.start, span.end);
-    Some(lsp::Location {
-        uri: uri::parse(&uri_of(&path))?,
-        range,
-    })
+impl<'a> Locator<'a> {
+    pub fn new(a: &'a Analysis, uri_of: &'a dyn Fn(&Path) -> String) -> Locator<'a> {
+        Locator {
+            a,
+            uri_of,
+            std_dir: OnceCell::new(),
+            lines: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Where a file is on disk: a std module's place in std's cache, or the
+    /// real path of anything else, so `app/../geom` reads as `geom` (plan
+    /// decision 8).
+    pub fn path_of(&self, file: FileId) -> Option<PathBuf> {
+        let name = self.a.db.get_name(file)?;
+        match name.strip_prefix("<std/").and_then(|s| s.strip_suffix('>')) {
+            Some(short) => {
+                let dir = self.std_dir.get_or_init(std_cache::ensure).as_ref()?;
+                Some(dir.join(format!("{short}.nova")))
+            }
+            None => Some(nova_pm::real_path(Path::new(name))),
+        }
+    }
+
+    /// `span`'s range in its file.
+    pub fn range(&self, span: Span) -> Option<lsp::Range> {
+        let source = self.a.db.get_source(span.file)?;
+        let mut lines = self.lines.borrow_mut();
+        let index = lines
+            .entry(span.file)
+            .or_insert_with(|| LineIndex::new(source));
+        Some(convert::range(index, span.start, span.end))
+    }
+
+    /// The URI `uri_of` gives a file.
+    pub fn uri(&self, file: FileId) -> Option<lsp::Uri> {
+        uri::parse(&(self.uri_of)(&self.path_of(file)?))
+    }
+
+    pub fn location(&self, span: Span) -> Option<lsp::Location> {
+        Some(lsp::Location {
+            uri: self.uri(span.file)?,
+            range: self.range(span)?,
+        })
+    }
 }
 
 /// The definition of the name at byte `offset` (spec §5.2).
@@ -3992,19 +4145,20 @@ pub fn definition(
     let a = &answer.analysis;
     let index = a.index.as_ref()?;
     let o = index.at(a.definitions.as_ref()?, answer.file, offset)?;
+    let locator = Locator::new(a, uri_of);
     match o.target {
         Target::Builtin(_) | Target::BuiltinMethod(_) | Target::Primitive(_) => None,
         Target::Module(m) => {
             let (file, _) = a.modules.get(m.0 as usize)?;
-            location(a, Span::new(0, 0, *file), uri_of)
+            locator.location(Span::new(0, 0, *file))
         }
-        target => location(a, index.declaration(&target)?.span, uri_of),
+        target => locator.location(index.declaration(&target)?.span),
     }
 }
 ```
 
 In `crates/nova-lsp/src/lib.rs`:
-- Add `mod navigate;` and `mod std_cache;` to the `mod` list.
+- Add `mod navigate;` to the `mod` list (`mod std_cache;` came in Step 3).
 - Add `GotoDefinition` to the request imports.
 - In `capabilities()`, add `definition_provider: Some(lsp::OneOf::Left(true)),`.
 - Add to `impl Server<'_>`:
@@ -4045,10 +4199,10 @@ Run: `cd /d/Projects/nona/nova && cargo check -p nova-lsp 2>&1 | tail -3 && git 
 Expected: `Finished`; `Cargo.lock` gains one line, `crc32fast` under
 `nova-lsp`'s dependencies, and no new package.
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t8.txt; tail -12 $P/t8.txt`
-Expected: `test result: ok. 14 passed; 0 failed`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t8.txt 2>&1; tail -12 $P/t8.txt`
+Expected: `test result: ok. 15 passed; 0 failed`.
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp 2>&1 > $P/t8b.txt; python -X utf8 $P/count.py $P/t8b.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp > $P/t8b.txt 2>&1; python -X utf8 $P/count.py $P/t8b.txt`
 Expected: `0 failed`. `a_file_in_the_cache_gets_nothing_published` guards
 `in_the_cache`.
 
@@ -4082,7 +4236,7 @@ Expected: `nova-lsp: go to definition, and std's sources on disk`
 - Modify: `crates/nova-cli/tests/lsp_navigation.rs`
 
 **Interfaces:**
-- Consumes: Task 8's `location`, `Server::uri_of`; Task 1's `family`.
+- Consumes: Task 8's `Locator`, `Server::uri_of`; Task 1's `family`.
 - Produces:
   - `navigate::references(answer: &Answer, offset: u32, declarations: bool, uri_of: &dyn Fn(&Path) -> String) -> Vec<lsp::Location>`;
   - `navigate::sort_by_place(a: &Analysis, found: &mut [&Occurrence])`,
@@ -4137,7 +4291,7 @@ fn references_with_and_without_the_declaration() {
     let names: Vec<String> = places(&area).into_iter().map(|p| p.0).collect();
     assert_eq!(names.len(), 2, "{area:?}");
     let mut sorted = area.clone();
-    sorted.sort_by_key(|l| path_of(l));
+    sorted.sort_by_key(path_of);
     assert_eq!(places(&sorted), places(&area));
 }
 
@@ -4165,7 +4319,7 @@ impl Show for B { fn show(self) -> String { \"b\" } }\n\
 fn main() {\n    let a = A { n: 1 }\n    let b = B { n: 2 }\n    let s = a.show()\n    let t = b.show()\n}\n";
 
 #[test]
-fn a_trait_methods_family_is_found_from_each_member() {
+fn references_find_a_trait_methods_family_from_each_member() {
     let dir = project("references-family", &[("main.nova", FAMILY)]);
     let uri = file_uri(&dir.join("src").join("main.nova"));
     let mut client = Client::start(&dir, false);
@@ -4215,9 +4369,10 @@ pub fn references(
         .collect();
     sort_by_place(a, &mut found);
     found.dedup_by_key(|x| x.span);
+    let locator = Locator::new(a, uri_of);
     found
         .iter()
-        .filter_map(|x| location(a, x.span, uri_of))
+        .filter_map(|x| locator.location(x.span))
         .collect()
 }
 
@@ -4262,8 +4417,8 @@ and before the `_ =>` arm:
 
 - [ ] **Step 4: Run the tests to see them pass**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t9.txt; tail -8 $P/t9.txt`
-Expected: `test result: ok. 17 passed; 0 failed`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t9.txt 2>&1; tail -8 $P/t9.txt`
+Expected: `test result: ok. 18 passed; 0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -4294,12 +4449,13 @@ Expected: `nova-lsp: find references`
 - Modify: `crates/nova-cli/tests/lsp_navigation.rs`
 
 **Interfaces:**
-- Consumes: Tasks 8 and 9's `navigate::path_of`, `sort_by_place`;
+- Consumes: Tasks 8 and 9's `navigate::Locator`, `sort_by_place`;
   `std_cache::in_std_cache`; Task 1's `family`.
 - Produces:
   - `rename::Refused(pub String)`;
   - `rename::prepare(answer: &Answer, path: &Path, offset: u32) -> Result<Option<lsp::PrepareRenameResponse>, Refused>`;
-  - `rename::rename(answer: &Answer, path: &Path, offset: u32, new: &str, overlay: &Overlay, uri_of: &dyn Fn(&Path) -> String) -> Result<lsp::WorkspaceEdit, Refused>`;
+  - `rename::rename(answer: &Answer, path: &Path, offset: u32, new: &str, overlay: &Overlay, uri_of: &dyn Fn(&Path) -> String) -> Result<Option<lsp::WorkspaceEdit>, Refused>`,
+    `Ok(None)` for no name at the place (spec §5: never an error);
   - `Edit` and `plan_edits`, which Task 11's check reads.
 
 - [ ] **Step 1: Write the failing tests**
@@ -4362,14 +4518,16 @@ fn prepare_rename_gives_the_range_and_spelling() {
     let response = prepare(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "total", 1));
     assert_eq!(response["result"]["placeholder"], "total");
     assert_eq!(response["result"]["range"], range(MAIN_IMPORTS_GEOMETRY, "total", 1, "total"));
-    // No name: null.
-    assert_eq!(prepare(&mut client, &uri, json!({ "line": 1, "character": 0 }))["result"], Value::Null);
+    // No name: null, from prepare and from rename, never an error.
+    let blank = json!({ "line": 1, "character": 0 });
+    assert_eq!(ok(&prepare(&mut client, &uri, blank.clone())), Value::Null);
+    assert_eq!(ok(&rename(&mut client, &uri, blank, "x")), Value::Null);
 }
 
 const REFUSALS: &str = "import geometry\n\
 record P { n: Int }\n\
 impl Display for P {\n    fn fmt(self) -> String { \"p\" }\n}\n\
-fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    print(\"x\")\n    let n: Int = area()\n}\n";
+fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    print(\"x\")\n    let n: Int = area()\n    let xs = [1]\n    let k = xs.len()\n}\n";
 
 #[test]
 fn prepare_rename_refuses_what_is_not_the_projects() {
@@ -4382,6 +4540,7 @@ fn prepare_rename_refuses_what_is_not_the_projects() {
         ("push", 0, "`push` is declared in std and cannot be renamed"),
         ("fmt", 0, "`fmt` is declared in std and cannot be renamed"),
         ("print", 0, "`print` is built in and cannot be renamed"),
+        ("len()", 0, "`len` is built in and cannot be renamed"),
         ("Int =", 0, "`Int` is built in and cannot be renamed"),
         ("self", 0, "`self` is a keyword and cannot be renamed"),
         ("geometry", 0, "a module or package is renamed by renaming its file or its `nova.toml`"),
@@ -4559,7 +4718,7 @@ fn rename_reaches_the_projects_tests_files() {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation rename 2>&1 > $P/t10.txt; tail -20 $P/t10.txt`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation rename > $P/t10.txt 2>&1; tail -20 $P/t10.txt`
 Expected: the ten new tests fail. A request the server does not handle
 gets `MethodNotFound` (-32601), so `refused` fails on `-32601` and `edits`
 on "no edit".
@@ -4577,7 +4736,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use lsp_types as lsp;
-use nova_diagnostics::{FileId, LineIndex};
+use nova_diagnostics::{FileId, LineIndex, Span};
 use nova_driver::Analysis;
 use nova_lexer::Token;
 use nova_pm::PackageId;
@@ -4585,7 +4744,7 @@ use nova_resolver::{Occurrence, Role, Target};
 
 use crate::analysis::Answer;
 use crate::workspace::{Overlay, PathKey};
-use crate::{convert, navigate, std_cache, uri};
+use crate::{convert, navigate, std_cache};
 
 /// Why a rename is refused: a `RequestFailed` error's message.
 #[derive(Debug)]
@@ -4720,6 +4879,8 @@ pub struct Edit {
 }
 
 /// Rename the name at byte `offset` of `path` to `new` (spec §5.4).
+/// `Ok(None)` when there is no name there: an empty result, never an
+/// error (spec §5).
 pub fn rename(
     answer: &Answer,
     path: &Path,
@@ -4727,17 +4888,17 @@ pub fn rename(
     new: &str,
     overlay: &Overlay,
     uri_of: &dyn Fn(&Path) -> String,
-) -> Result<lsp::WorkspaceEdit, Refused> {
+) -> Result<Option<lsp::WorkspaceEdit>, Refused> {
     let Some(found) = renameable(answer, path, offset)? else {
-        return Err(Refused("there is no name here to rename".to_string()));
+        return Ok(None);
     };
     check_new_name(new)?;
     if new == found.old {
-        return Ok(lsp::WorkspaceEdit::default());
+        return Ok(Some(lsp::WorkspaceEdit::default()));
     }
     let edits = plan_edits(&answer.analysis, &found, new);
     let _ = overlay; // Task 11's check reads it.
-    Ok(workspace_edit(&answer.analysis, &edits, uri_of))
+    Ok(Some(workspace_edit(&answer.analysis, &edits, uri_of)))
 }
 
 /// Spec §5.4: one identifier, not `_`, and not a built-in type's name.
@@ -4799,18 +4960,15 @@ fn plan_edits(a: &Analysis, found: &Found, new: &str) -> Vec<Edit> {
 
 /// The edits as LSP's, each file under the URI `uri_of` gives it.
 fn workspace_edit(a: &Analysis, edits: &[Edit], uri_of: &dyn Fn(&Path) -> String) -> lsp::WorkspaceEdit {
-    let mut indexes: HashMap<FileId, LineIndex> = HashMap::new();
+    let locator = navigate::Locator::new(a, uri_of);
     let mut changes: HashMap<lsp::Uri, Vec<lsp::TextEdit>> = HashMap::new();
     for e in edits {
-        let (Some(path), Some(source)) = (navigate::path_of(a, e.file), a.db.get_source(e.file)) else {
+        let span = Span::new(e.start, e.end, e.file);
+        let (Some(uri), Some(range)) = (locator.uri(e.file), locator.range(span)) else {
             continue;
         };
-        let Some(uri) = uri::parse(&uri_of(&path)) else {
-            continue;
-        };
-        let lines = indexes.entry(e.file).or_insert_with(|| LineIndex::new(source));
         changes.entry(uri).or_default().push(lsp::TextEdit {
-            range: convert::range(lines, e.start, e.end),
+            range,
             new_text: e.text.clone(),
         });
     }
@@ -4897,8 +5055,8 @@ fn refused(id: lsp_server::RequestId, why: String) -> Response {
 
 - [ ] **Step 5: Run the tests to see them pass**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t10.txt; tail -8 $P/t10.txt`
-Expected: `test result: ok. 27 passed; 0 failed`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t10.txt 2>&1; tail -8 $P/t10.txt`
+Expected: `test result: ok. 28 passed; 0 failed`.
 
 - [ ] **Step 6: Commit**
 
@@ -5088,7 +5246,7 @@ fn check(
         .occurrences
         .iter()
         .filter(|o| targets.contains(&o.target))
-        .map(|o| place(o))
+        .map(&place)
         .collect();
     let old = &found.old;
     let captured = now.iter().filter(|p| !expected.contains(p)).count();
@@ -5152,8 +5310,8 @@ fn new_error(before: &Analysis, after: &Analysis) -> Option<(String, String)> {
 
 - [ ] **Step 4: Run the tests to see them pass**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t11.txt; tail -8 $P/t11.txt`
-Expected: `test result: ok. 31 passed; 0 failed`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t11.txt 2>&1; tail -8 $P/t11.txt`
+Expected: `test result: ok. 32 passed; 0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -5279,17 +5437,17 @@ fn each_request_works_in_a_broken_file_and_is_empty_for_an_unopened_one() {
     assert_eq!(prepare(&mut client, &uri, use_.clone())["result"]["placeholder"], "total");
     assert_eq!(edits(&rename(&mut client, &uri, use_.clone(), "sum")).len(), 2);
     // A document that is not open: empty results, never an error.
-    assert_eq!(definition(&mut client, &other, use_.clone())["result"], Value::Null);
+    assert_eq!(ok(&definition(&mut client, &other, use_.clone())), Value::Null);
     assert!(references(&mut client, &other, use_.clone(), true).is_empty());
-    assert_eq!(prepare(&mut client, &other, use_.clone())["result"], Value::Null);
-    assert_eq!(rename(&mut client, &other, use_, "sum")["result"], Value::Null);
+    assert_eq!(ok(&prepare(&mut client, &other, use_.clone())), Value::Null);
+    assert_eq!(ok(&rename(&mut client, &other, use_, "sum")), Value::Null);
 }
 ```
 
 - [ ] **Step 2: Run the gate and robustness tests**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation 2>&1 > $P/t12.txt; tail -8 $P/t12.txt`
-Expected: `test result: ok. 33 passed; 0 failed`. Both new tests are guards
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_navigation > $P/t12.txt 2>&1; tail -8 $P/t12.txt`
+Expected: `test result: ok. 34 passed; 0 failed`. Both new tests are guards
 over Tasks 7-11, so they pass on their first run. If one fails, the
 failing line names a behaviour an earlier task missed: fix it there, with
 a test in that task's style, and ledger a ruling.
@@ -5452,7 +5610,7 @@ Expected: `1 passed`.
 
 Then the development host's figures, in a release build:
 
-Run: `cd /d/Projects/nona/nova && cargo test --release -p nova-cli --test lsp -- --ignored --nocapture latency 2>&1 > $P/latency-1.txt; grep -E "median|binary|test result" $P/latency-1.txt`
+Run: `cd /d/Projects/nona/nova && cargo test --release -p nova-cli --test lsp -- --ignored --nocapture latency > $P/latency-1.txt 2>&1; grep -E "median|binary|test result" $P/latency-1.txt`
 Expected: six `median … max …` lines, each median and maximum within its
 budget, the binary's size and time, and `1 passed`.
 
@@ -5866,8 +6024,10 @@ Expected: `Records for Phase 3.4a: ADR 0032, notes, CHANGELOG`
 
 - [ ] **Step 6: Scan the records**
 
-Run: `cd /d/Projects/nona/nova && grep -n "…" docs/adr/0032-navigation-in-the-language-server.md; grep -n -E "TBD|TODO|<the sweep" docs/adr/0032-navigation-in-the-language-server.md CHANGELOG.md; git log -1 --format=%B | grep -c "<the sweep"`
-Expected: no output from the greps, and `0`.
+Run: `cd /d/Projects/nona/nova && grep -n -F "| … |" docs/adr/0032-navigation-in-the-language-server.md; grep -n -E "TBD|TODO|<the sweep" docs/adr/0032-navigation-in-the-language-server.md CHANGELOG.md; git log -1 --format=%B | grep -c "<the sweep"`
+Expected: no output from the greps, and `0`. (The ADR's "`import … as`"
+holds a `…` too, so the first grep looks for an unfilled table cell
+only.)
 
 ---
 
@@ -5888,22 +6048,22 @@ Run: `netstat -ano | grep -E "[:.]3000 .*LISTENING"`
 Expected: no output. If a process holds it, stop and ask the user. Never
 stop it.
 
-Run: `cd /d/Projects/nona/nova && cargo test --workspace --no-fail-fast 2>&1 > $P/full-windows.txt; python -X utf8 $P/count.py $P/full-windows.txt`
+Run: `cd /d/Projects/nona/nova && cargo test --workspace --no-fail-fast > $P/full-windows.txt 2>&1; python -X utf8 $P/count.py $P/full-windows.txt`
 Expected: `0 failed`. `main` at `cf0cebf` had 1701 passed and 9 ignored.
 The branch adds:
 - 7 + 4 resolver unit tests (Tasks 1-2);
-- 22 index tests (Tasks 3-5) and 1 completeness test (Task 6);
-- `FileDb::id_of`'s test, hover.rs's 4 unit tests and checker.rs's guard;
-- 33 navigation tests (Tasks 7-12).
+- 23 index tests (Tasks 3-5) and 1 completeness test (Task 6);
+- `FileDb::id_of`'s test, hover.rs's 6 unit tests and checker.rs's guard;
+- 34 navigation tests (Tasks 7-12).
 
 The CI-bound test was renamed, not added. Ledger the exact count; a
-difference from 1701 + 73 = 1774 is explained by name, or it is a finding.
+difference from 1701 + 77 = 1778 is explained by name, or it is a finding.
 
 - [ ] **Step 2: The full suite on Linux**
 
 If Docker is running:
 
-Run: `cd /d/Projects/nona/nova && bash /c/Users/SAKEER~1/AppData/Local/Temp/gcm/linux/run.sh test --workspace --no-fail-fast 2>&1 > $P/full-linux.txt; python -X utf8 $P/count.py $P/full-linux.txt`
+Run: `cd /d/Projects/nona/nova && bash /c/Users/SAKEER~1/AppData/Local/Temp/gcm/linux/run.sh test --workspace --no-fail-fast > $P/full-linux.txt 2>&1; python -X utf8 $P/count.py $P/full-linux.txt`
 Expected: `0 failed`.
 
 If it is not, the Linux run is CI's: ledger a ruling. Do not start Docker.
@@ -5930,7 +6090,7 @@ then undo with `git checkout -- <file>` and ledger the outcome:
 | # | Mutant | File | Run | Expected |
 |---|---|---|---|---|
 | 1 | delete the three `note_use` calls in `check_method_call` | `crates/nova-typeck/src/check.rs` | `cargo test -p nova-driver --test index_complete` | FAIL, listing method names with "no occurrence" |
-| 2 | in `check_method_call`'s `MethodRes::Trait` arm, record `Target::Def(trait_id)` instead | same | `cargo test -p nova-driver --test index method_calls_use_their_method` | FAIL |
+| 2 | in `check_method_call`'s `MethodRes::Trait` arm, record `Target::Def(trait_id)` instead (plan decision 17) | same | `cargo test -p nova-cli --test lsp_navigation definition_of_a_trait_dispatched_call` | FAIL |
 | 3 | delete the `index.implement(…)` call in `check_impl_method_signatures` | same | `cargo test -p nova-cli --test lsp_navigation rename_a_trait_methods_family` | FAIL |
 | 4 | in `Index::at`, change the end-of-name filter to `.filter(\|_\| false)` | `crates/nova-resolver/src/index.rs` | `cargo test -p nova-resolver --lib a_cursor_inside` | FAIL |
 | 5 | delete `check(answer, &found, new, &edits, overlay)?;` | `crates/nova-lsp/src/rename.rs` | `cargo test -p nova-cli --test lsp_navigation a_rename_that_captures` | FAIL |
