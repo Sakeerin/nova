@@ -11197,3 +11197,63 @@ fn todo_cli_done_with_an_unknown_id_changes_nothing() {
         );
     }
 }
+
+/// Spec 3.4b §3.3: `nova check` prints a fix's title as a help line, in
+/// place of the note it replaces.
+#[test]
+fn check_prints_a_fix_as_a_help_line() {
+    let dir = std::env::temp_dir().join("nova-check-help-mutable");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let main = dir.join("main.nova");
+    std::fs::write(
+        &main,
+        "fn main() {\n    let x = 1\n    x = 2\n    println(\"${x}\")\n}\n",
+    )
+    .expect("write");
+    // Uncoloured, so `= help:` is one run of text (termcolor's Auto colours
+    // a pipe too).
+    let assert = nova()
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg(&main)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("= help: make `x` mutable"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("declare it as"),
+        "the fix replaces the note: {stderr}"
+    );
+}
+
+/// Spec 3.4b §4.4: the resolver's fix, placed in another file.
+#[test]
+fn check_prints_make_public_as_a_help_line() {
+    let dir = std::env::temp_dir().join("nova-check-help-public");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("lib.nova"), "fn hidden() -> Int {\n    1\n}\n").expect("write lib");
+    let main = dir.join("app.nova");
+    std::fs::write(
+        &main,
+        "import lib::{hidden}\n\nfn main() {\n    println(\"${hidden()}\")\n}\n",
+    )
+    .expect("write main");
+    // Uncoloured, so `= help:` is one run of text (termcolor's Auto colours
+    // a pipe too).
+    let assert = nova()
+        .env("NO_COLOR", "1")
+        .arg("check")
+        .arg(&main)
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("= help: make `hidden` public in `lib`"),
+        "stderr: {stderr}"
+    );
+}
