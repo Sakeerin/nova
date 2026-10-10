@@ -680,3 +680,312 @@ fn references_find_a_trait_methods_family_from_each_member() {
     assert_eq!(from_impl, from_trait);
     assert_eq!(from_call, from_trait);
 }
+
+// === Task 10: prepare rename and rename ===
+
+fn prepare(client: &mut Client, uri: &str, position: Value) -> Value {
+    client.request(
+        "textDocument/prepareRename",
+        json!({ "textDocument": { "uri": uri }, "position": position }),
+    )
+}
+
+fn rename(client: &mut Client, uri: &str, position: Value, new: &str) -> Value {
+    client.request(
+        "textDocument/rename",
+        json!({ "textDocument": { "uri": uri }, "position": position, "newName": new }),
+    )
+}
+
+/// A refusal's message, after checking it is `RequestFailed`.
+#[track_caller]
+fn refused(response: &Value) -> String {
+    assert_eq!(response["error"]["code"], -32803, "{response}");
+    response["error"]["message"].as_str().unwrap().to_string()
+}
+
+/// A rename's edits as `(file name, line, character, new text)`, sorted.
+#[track_caller]
+fn edits(response: &Value) -> Vec<(String, u64, u64, String)> {
+    let changes = response["result"]["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("no edit: {response}"));
+    let mut out = Vec::new();
+    for (uri, list) in changes {
+        let name = path_of(&json!({ "uri": uri }))
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for e in list.as_array().unwrap() {
+            let start = &e["range"]["start"];
+            out.push((
+                name.clone(),
+                start["line"].as_u64().unwrap(),
+                start["character"].as_u64().unwrap(),
+                e["newText"].as_str().unwrap().to_string(),
+            ));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn prepare_rename_gives_the_range_and_spelling() {
+    let dir = project(
+        "prepare-range",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, MAIN_IMPORTS_GEOMETRY);
+    let response = prepare(&mut client, &uri, at(MAIN_IMPORTS_GEOMETRY, "total", 1));
+    assert_eq!(response["result"]["placeholder"], "total");
+    assert_eq!(
+        response["result"]["range"],
+        range(MAIN_IMPORTS_GEOMETRY, "total", 1, "total")
+    );
+    // No name: null, from prepare and from rename, never an error.
+    let blank = json!({ "line": 1, "character": 0 });
+    assert_eq!(ok(&prepare(&mut client, &uri, blank.clone())), Value::Null);
+    assert_eq!(ok(&rename(&mut client, &uri, blank, "x")), Value::Null);
+}
+
+const REFUSALS: &str = "import geometry\n\
+record P { n: Int }\n\
+impl Display for P {\n    fn fmt(self) -> String { \"p\" }\n}\n\
+fn main() {\n    let mut v = Vec::new()\n    v.push(1)\n    print(\"x\")\n    let n: Int = area()\n    let xs = [1]\n    let k = xs.len()\n}\n";
+
+#[test]
+fn prepare_rename_refuses_what_is_not_the_projects() {
+    let dir = project(
+        "prepare-refusals",
+        &[("main.nova", REFUSALS), ("geometry.nova", GEOMETRY)],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let home = home("prepare-refusals");
+    let mut client = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &uri, REFUSALS);
+    let cases: &[(&str, usize, &str)] = &[
+        ("push", 0, "`push` is declared in std and cannot be renamed"),
+        ("fmt", 0, "`fmt` is declared in std and cannot be renamed"),
+        ("print", 0, "`print` is built in and cannot be renamed"),
+        ("len()", 0, "`len` is built in and cannot be renamed"),
+        ("Int =", 0, "`Int` is built in and cannot be renamed"),
+        ("self", 0, "`self` is a keyword and cannot be renamed"),
+        (
+            "geometry",
+            0,
+            "a module or package is renamed by renaming its file or its `nova.toml`",
+        ),
+    ];
+    for (marker, n, message) in cases {
+        let response = prepare(&mut client, &uri, at(REFUSALS, marker, *n));
+        assert_eq!(refused(&response), *message, "at `{marker}`");
+    }
+    // A dependency's name.
+    let (app, _geom) = app_and_library("prepare-dependency", GEOMETRY);
+    let main = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start(&app, false);
+    open(&mut client, &main, APP_MAIN);
+    assert_eq!(
+        refused(&prepare(&mut client, &main, at(APP_MAIN, "area()", 0))),
+        "`area` is declared in the dependency `geom` and cannot be renamed"
+    );
+}
+
+#[test]
+fn prepare_rename_refuses_inside_nova_s_caches() {
+    let home = home("prepare-cache");
+    let dir = project("prepare-cache", &[("main.nova", USES_STD)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&dir, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &uri, USES_STD);
+    let file = path_of(&definition(&mut client, &uri, at(USES_STD, "push", 0))["result"]);
+    let text = std::fs::read_to_string(&file).unwrap();
+    let std_uri = file_uri(&file);
+    open(&mut client, &std_uri, &text);
+    let start = text.find("fn push").unwrap() + "fn ".len();
+    assert_eq!(
+        refused(&prepare(&mut client, &std_uri, position(&text, start))),
+        "`push` is in nova's cache and cannot be renamed"
+    );
+}
+
+#[test]
+fn rename_across_files() {
+    let dir = project(
+        "rename-files",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, MAIN_IMPORTS_GEOMETRY);
+    let response = rename(
+        &mut client,
+        &uri,
+        at(MAIN_IMPORTS_GEOMETRY, "area()", 0),
+        "size",
+    );
+    assert_eq!(
+        edits(&response),
+        [
+            ("geometry.nova".to_string(), 1, 7, "size".to_string()),
+            ("main.nova".to_string(), 3, 16, "size".to_string()),
+        ]
+    );
+}
+
+const SHORTHAND: &str = "record Point { x: Int }\n\
+fn main() {\n    let x = 1\n    let p = Point { x }\n    let y = p.x\n}\n";
+
+#[test]
+fn rename_writes_out_a_shorthand() {
+    let dir = project("rename-shorthand", &[("main.nova", SHORTHAND)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, SHORTHAND);
+    // The field: its declaration, `p.x`, and `{ x }` written out.
+    let field = rename(&mut client, &uri, at(SHORTHAND, "x: Int", 0), "w");
+    assert_eq!(
+        edits(&field),
+        [
+            ("main.nova".to_string(), 0, 15, "w".to_string()),
+            ("main.nova".to_string(), 3, 20, "w: x".to_string()),
+            ("main.nova".to_string(), 4, 14, "w".to_string()),
+        ]
+    );
+    // The local: its `let`, and `{ x }` written out the other way.
+    let local = rename(&mut client, &uri, at(SHORTHAND, "x = 1", 0), "z");
+    assert_eq!(
+        edits(&local),
+        [
+            ("main.nova".to_string(), 2, 8, "z".to_string()),
+            ("main.nova".to_string(), 3, 20, "x: z".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn rename_a_trait_methods_family() {
+    let dir = project("rename-family", &[("main.nova", FAMILY)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, FAMILY);
+    let response = rename(&mut client, &uri, at(FAMILY, "show()", 0), "render");
+    let found = edits(&response);
+    assert_eq!(found.len(), 5, "{found:?}");
+    assert!(found.iter().all(|e| e.3 == "render"), "{found:?}");
+}
+
+#[test]
+fn rename_refuses_a_new_name_that_is_not_a_name() {
+    let dir = project(
+        "rename-invalid",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, MAIN_IMPORTS_GEOMETRY);
+    let place = at(MAIN_IMPORTS_GEOMETRY, "total", 0);
+    for new in ["1x", "let", "two words", "a-b"] {
+        let message = refused(&rename(&mut client, &uri, place.clone(), new));
+        assert!(message.contains("is not a name"), "{new}: {message}");
+    }
+    assert_eq!(
+        refused(&rename(&mut client, &uri, place.clone(), "_")),
+        "`_` cannot be a name"
+    );
+    assert_eq!(
+        refused(&rename(&mut client, &uri, place.clone(), "Int")),
+        "`Int` is a built-in type's name"
+    );
+    // The same name: an empty edit, with no `changes`.
+    let same = rename(&mut client, &uri, place, "total");
+    assert!(same["error"].is_null(), "{same}");
+    assert!(same["result"]["changes"].is_null(), "{same}");
+}
+
+// Review Focus 1.
+#[test]
+fn rename_edits_an_unsaved_buffer_at_its_own_offsets() {
+    let dir = project(
+        "rename-unsaved",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    // The buffer has two lines the disk does not.
+    let buffer = format!("// one\n// two\n{MAIN_IMPORTS_GEOMETRY}");
+    open(&mut client, &uri, &buffer);
+    let response = rename(&mut client, &uri, at(&buffer, "total", 0), "sum");
+    assert_eq!(
+        edits(&response),
+        [
+            ("main.nova".to_string(), 5, 8, "sum".to_string()),
+            ("main.nova".to_string(), 6, 16, "sum".to_string()),
+        ]
+    );
+}
+
+// Review Focus 3.
+#[test]
+fn rename_in_a_crlf_document_edits_the_right_characters() {
+    let crlf = MAIN_IMPORTS_GEOMETRY.replace('\n', "\r\n");
+    let dir = project(
+        "rename-crlf",
+        &[("main.nova", crlf.as_str()), ("geometry.nova", GEOMETRY)],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, &crlf);
+    let response = rename(&mut client, &uri, at(&crlf, "total", 1), "sum");
+    assert_eq!(
+        edits(&response),
+        [
+            ("main.nova".to_string(), 3, 8, "sum".to_string()),
+            ("main.nova".to_string(), 4, 16, "sum".to_string()),
+        ]
+    );
+}
+
+// Review Focus 4.
+#[test]
+fn rename_reaches_the_projects_tests_files() {
+    let dir = project(
+        "rename-tests",
+        &[("lib.nova", "pub fn area() -> Int { 1 }\n")],
+    );
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let test = "import demo\n\n@test\nfn area_is_one() {\n    let a: Int = area()\n}\n";
+    std::fs::write(dir.join("tests").join("area.nova"), test).unwrap();
+    let lib = file_uri(&dir.join("src").join("lib.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &lib, "pub fn area() -> Int { 1 }\n");
+    let response = rename(
+        &mut client,
+        &lib,
+        json!({ "line": 0, "character": 7 }),
+        "size",
+    );
+    assert_eq!(
+        edits(&response),
+        [
+            ("area.nova".to_string(), 4, 17, "size".to_string()),
+            ("lib.nova".to_string(), 0, 7, "size".to_string()),
+        ]
+    );
+}
