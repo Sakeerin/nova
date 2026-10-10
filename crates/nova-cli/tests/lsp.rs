@@ -100,12 +100,11 @@ fn shutdown_then_exit_is_code_0_and_exit_alone_is_code_1() {
 fn an_unknown_request_gets_method_not_found() {
     let dir = fresh_dir("unknown");
     let mut client = Client::start(&dir, false);
+    // Hover was this test's unknown request until 3.4a answered it; neither
+    // 3.4a nor 3.4b answers document symbols.
     let response = client.request(
-        "textDocument/hover",
-        json!({
-            "textDocument": { "uri": file_uri(&dir.join("x.nova")) },
-            "position": { "line": 0, "character": 0 },
-        }),
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": file_uri(&dir.join("x.nova")) } }),
     );
     assert_eq!(response["error"]["code"], -32601);
 }

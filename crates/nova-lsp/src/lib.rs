@@ -6,10 +6,12 @@
 //! analyses run on the checker thread. Stdout carries only protocol
 //! messages; logs go through `tracing`, which `nova lsp` sends to stderr.
 
+mod analysis;
 mod checker;
 mod completion;
 mod convert;
 mod formatting;
+mod hover;
 mod uri;
 mod workspace;
 
@@ -23,9 +25,10 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Formatting, RegisterCapability, Request as _};
+use lsp_types::request::{Completion, Formatting, HoverRequest, RegisterCapability, Request as _};
 use nova_diagnostics::LineIndex;
 
+use analysis::Answer;
 use checker::{Checker, Job, Publish};
 use workspace::{ProjectKey, Workspace};
 
@@ -114,8 +117,14 @@ fn capabilities() -> lsp::ServerCapabilities {
             ..Default::default()
         }),
         document_formatting_provider: Some(lsp::OneOf::Left(true)),
+        hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
         ..Default::default()
     }
+}
+
+/// The response to a request whose parameters do not parse.
+fn invalid(id: lsp_server::RequestId, e: serde_json::Error) -> Response {
+    Response::new_err(id, ErrorCode::InvalidParams as i32, e.to_string())
 }
 
 struct Server<'c> {
@@ -247,6 +256,17 @@ impl Server<'_> {
                     ),
                 }
             }
+            HoverRequest::METHOD => {
+                match serde_json::from_value::<lsp::HoverParams>(request.params) {
+                    Ok(p) => {
+                        let found = self
+                            .answer_at(&p.text_document_position_params)
+                            .and_then(|(answer, offset)| hover::hover(&answer, offset));
+                        Response::new_ok(request.id, found)
+                    }
+                    Err(e) => invalid(request.id, e),
+                }
+            }
             _ => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -254,6 +274,17 @@ impl Server<'_> {
             ),
         };
         self.respond(response);
+    }
+
+    /// The analysis that answers a request at `at`, with the index on, and
+    /// the request's byte offset (spec 3.4a §4). `None` for a document
+    /// that is not open.
+    fn answer_at(&self, at: &lsp::TextDocumentPositionParams) -> Option<(Answer, u32)> {
+        let doc = self.workspace.get(&uri::text(&at.text_document.uri))?;
+        let offset = LineIndex::new(&doc.text).offset(at.position.line, at.position.character);
+        let options = analysis::options(None, true);
+        let answer = analysis::answering(&doc.path, &self.workspace.overlay(), &options)?;
+        Some((answer, offset))
     }
 
     fn respond(&self, response: Response) {
