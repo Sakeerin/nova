@@ -6,7 +6,9 @@
 > approved in three sections on 2026-10-10. Three findings made while
 > writing changed it; §13's decisions 7, 8 and 9 record each, and the user
 > chose decision 7. A read-only fact-check against the code then found 21
-> more; decisions 27 to 36 record the ones that changed the design.
+> more; decisions 27 to 36 record the ones that changed the design. The
+> user approved the written spec on 2026-10-10; writing the plan then
+> found four more, decisions 37 to 40.
 
 Diagnostics learn to say how to fix themselves. Where the resolver or the
 type checker raises an error whose fix it can decide, it attaches the
@@ -245,6 +247,9 @@ pub struct Edit {
   common.
 - **"Did you mean" is the exception.** The intended name may have another
   type, so it can expose an error at the same place.
+- **So is the import fix's argument types** (decision 37). It matches the
+  kind of item and, for a call, its arity, but not its parameter types, so
+  an imported function can expose a type error in the call's arguments.
 - The promise is held by the tests of §9.1 and §9.2. A fix is not
   re-checked when it is offered (decision 13).
 
@@ -376,7 +381,9 @@ pub struct Edit {
     receiver's type: its inherent methods, the methods of every trait
     implemented for it anywhere in the program (resolution ignores
     imports, §2), and the builtin methods of a builtin type;
-  - E0082: the known attributes; E0085: the known `@test` arguments.
+  - E0082: the known attributes, on a function only, since `test` is the
+    one known attribute and `@test` on anything else is E0083 (decision
+    38); E0085: the known `@test` arguments.
 - The checker's own names (`__it` and its kind) are never candidates.
 - Where an E0001 offers both an import and "did you mean", the import comes
   first.
@@ -389,8 +396,8 @@ pub struct Edit {
   count as one package. A `tests/` file importing its own package's
   library by name is in the same package (§3.1).
 - **The edit:** insert `pub ` before the item's keyword, in `m`'s file,
-  found by §4.7 from the item's name: `fn`, `async fn`, `record`, `enum`,
-  `trait` or `const`. When `m` has private items named `x` in more than one
+  found by §4.7 from the item's name: `fn`, `async fn`, `record`, `type`
+  (a sum type), `trait` or `const`. When `m` has private items named `x` in more than one
   namespace, the fix makes each public.
 - **Title:** "make `x` public in `m`".
 - **Not offered** for a dependency's module, which this project does not
@@ -564,8 +571,10 @@ holds (§2). The rules read the file's text from the `FileDb`:
 
 ### 6.6 The formatter keeps groups
 
-- `nova fmt`, in the printer and in its output check, splits a run of
-  consecutive imports into groups at a blank line, as gofmt does.
+- `nova fmt`'s printer splits a run of consecutive imports into groups at
+  a blank line, as gofmt does. Its output check does not change: it sorts
+  each run of consecutive imports, and a group's sort is a sort within
+  the run it belongs to (decision 39).
 - Each group is sorted on its own, groups print one blank line apart, and
   the header rule applies to each group's first import.
 - No `.nova` file in the repository has a blank line between imports, so
@@ -692,8 +701,10 @@ edit (cases 12, 13, 27, 28, 30).
 ### 9.2 Every fix on broken programs
 
 `broken.rs`'s 364 cut programs: every fix's edits lie inside their file, on
-character boundaries, and do not overlap. Applying each program's fixes one
-at a time and analysing again does not panic.
+character boundaries, and do not overlap. Applying each of a program's
+first three fixes, one at a time, and analysing again does not panic. The
+test waits 30 s for each program, so three keeps a program with many
+fixes inside it (decision 40).
 
 ### 9.3 The command line
 
@@ -948,6 +959,18 @@ With this gate met, 3.4 is complete.
     need its directory listings (§14).
 36. **How a local was bound lives in a checker-only table,** so `hir::Local`
     and its five construction sites do not change (§4.1).
+37. **The import fix matches kind and arity, not types** (§3.2). Found
+    while planning: checking an imported function's parameter types
+    against a call's arguments would mean type-checking the call again.
+38. **"Did you mean" for an attribute is offered on a function only**
+    (§4.3). Found while planning: `test` is the one known attribute, and
+    `@test` on a record or a type is E0083.
+39. **The formatter's output check is unchanged** (§6.6). Found while
+    planning: a group is part of its run, so the check's per-run sort
+    already accepts grouped output.
+40. **The sweep re-analyses three fixes per program** (§9.2). Found while
+    planning: `broken.rs` waits 30 s for each program, and a cut program
+    can carry dozens of fixes.
 
 ## 14. Not in 3.4b
 
