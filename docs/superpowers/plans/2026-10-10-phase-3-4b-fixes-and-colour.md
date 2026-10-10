@@ -94,7 +94,7 @@ code:
      `suggest::{distance, closest, change_to}`.
    - **`nova-resolver`:** `ModuleSource::{text, package, importable}`;
      `Exported { value, ty, trait_def }`; `Definitions::{importable,
-     exported, same_package, bound_outside_std, is_std_module}`;
+     exported, same_package, bound_outside_std, is_std_module, owned}`;
      `LocalFlags { parameter, mutable }`, `Index::locals`; `index::rank`,
      now public.
    - **`nova-typeck`:** `CheckOptions::sources`.
@@ -148,9 +148,12 @@ code:
     share one.
 12. **The cut-program sweep re-analyses the first three fixes of each
     program** (spec decision 40), and checks every fix's edits.
-13. **Remove-arm offers no fix when a comment sits between an arm's body
-    and its comma.** `lines::arm_removal` returns `None` for anything but a
-    comma, a line end, the text's end or `}` after the body.
+13. **Remove-arm offers no fix when a block comment sits between an arm's
+    body and its comma.** `lines::arm_removal` returns `None` for anything
+    after the body but a comma, a `//` comment, a line end, the text's end
+    or `}`. A `//` comment ending the arm's line goes with the arm's lines.
+    Spec §4.5 says only "delete the arm"; this narrows it where deleting
+    could leave a stray comma.
 14. **A code action's `diagnostics` entry** carries the published range,
     severity, code, source and message, without related information.
 15. **The shared stdio helpers move into `lsp_client`:** `MANIFEST`,
@@ -164,15 +167,28 @@ code:
     the resolver and the checker.
 17. **The test file for fixes is `crates/nova-driver/tests/fixes.rs`,** one
     `#[test]` per spec §9.1 case, named after it.
+18. **Where the plan refines the spec, the plan records it.** Decisions 4,
+    6, 10, 13, 14 and 15 make the spec exact where it is silent or loose,
+    and the spec does not repeat them.
+19. **A fix stays in the owning project at its source** (spec §3.1). A
+    module is owned when it is the root package's, or a loose program's,
+    and not std's (`Definitions::owned`). The checker offers no fix in a
+    module it does not own, so E0060's note stays there; the resolver's
+    make-public and attribute fixes check the same. The server's
+    `Owner::Own` guard stays as a second check.
+20. **Organize imports judges uses outside every import.** `ImportView`
+    carries the byte spans of all the file's imports, and the server
+    ignores occurrences inside any of them, so one name of a list is
+    never a use of another, and a second run offers nothing.
 
 ## File Structure
 
 | File | Task | Responsibility |
 |---|---|---|
 | `crates/nova-diagnostics/src/{lib,render}.rs` | 1 | `Fix`, `Edit`, `help:` lines |
-| `crates/nova-diagnostics/src/{lines,suggest}.rs` (new) | 2 | Line rules; "did you mean" |
+| `crates/nova-diagnostics/src/{lines,suggest}.rs` (new), `src/lib.rs` | 2 | Line rules; "did you mean" |
 | `crates/nova-resolver/src/lib.rs`, `crates/nova-driver/src/{program,analyze,lib}.rs`, `crates/nova-driver/tests/fixes.rs` (new) | 3 | The tables a fix needs |
-| `crates/nova-typeck/src/{lib,check}.rs`, `src/check/fixes.rs` (new), `crates/nova-resolver/src/index.rs`, `crates/nova-driver/src/{analyze,lib}.rs`, `crates/nova-driver/tests/{fixes,index}.rs` | 4 | Sources in the checker; make mutable; the index's locals |
+| `crates/nova-typeck/src/{lib,check}.rs`, `src/check/fixes.rs` (new), `crates/nova-resolver/src/{index,lib}.rs`, `crates/nova-driver/src/{analyze,lib}.rs`, `crates/nova-driver/tests/{fixes,index}.rs` | 4 | Sources in the checker; make mutable; the index's locals |
 | `crates/nova-typeck/src/check{,/fixes}.rs`, `crates/nova-driver/tests/fixes.rs` | 5 | Import a name; did you mean |
 | `crates/nova-resolver/src/lib.rs`, `crates/nova-typeck/src/check{,/fixes}.rs`, `crates/nova-driver/tests/fixes.rs` | 6 | Make public; attributes; remove an arm |
 | `crates/nova-driver/tests/broken.rs`, `crates/nova-cli/tests/run_tests.rs` | 7 | The sweep; the command line's help lines |
@@ -344,9 +360,9 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | tail -5`
-Expected: compile errors, `cannot find type 'Fix' in this scope` and
-`cannot find type 'Edit'`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors naming `Fix` and `Edit`, such as E0433 "failed
+to resolve: use of undeclared type `Fix`".
 
 - [ ] **Step 3: The types**
 
@@ -477,7 +493,8 @@ fn notes(diag: &Diagnostic) -> Vec<String> {
 - [ ] **Step 6: Run the tests**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | tail -5`
-Expected: `test result: ok. 4 passed; 0 failed`.
+Expected: `test result: ok. 5 passed; 0 failed`: these 4, and `files.rs`'s
+existing `a_file_is_found_by_its_name`.
 
 Run: `cd /d/Projects/nona/nova && cargo build --workspace 2>&1 | tail -3`
 Expected: `Finished`. Nothing outside this crate builds `Diagnostic` with
@@ -589,6 +606,10 @@ mod tests {
             arm_removal(text, start, end).map(|(s, e)| &text[s..e]),
             Some("    _ => {\n        b\n    }\n")
         );
+        // A comment ending the arm's line goes with it.
+        let text = "match x {\n    1 => a, // one\n    _ => b\n}\n";
+        let start = text.find("1 =>").unwrap();
+        assert_eq!(arm_removal(text, start, start + "1 => a".len()), Some((10, 29)));
     }
 
     #[test]
@@ -686,9 +707,9 @@ In `crates/nova-diagnostics/src/lib.rs`, replace `pub mod line_index;` with
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | tail -5`
-Expected: compile errors, `cannot find function 'line_after'` and
-`cannot find function 'closest'`, among others.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors naming `line_after` and `closest`, among others
+(E0425, "cannot find function").
 
 - [ ] **Step 3: The line rules**
 
@@ -798,8 +819,9 @@ pub fn keyword_start(text: &str, name_start: usize) -> Option<usize> {
 
 /// What removing a match arm, bytes `start..end`, takes (spec §4.7): a
 /// comma after it and the spaces after that, and when nothing else shares
-/// its lines, those whole lines. `None` when anything but a comma, a line
-/// ending, the text's end or `}` follows the arm.
+/// its lines but a `//` comment ending them, those whole lines. `None`
+/// when anything but a comma, a `//` comment, a line ending, the text's end
+/// or `}` follows the arm (plan decision 13).
 pub fn arm_removal(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
     let bytes = text.as_bytes();
     let skip = |mut i: usize| {
@@ -812,11 +834,13 @@ pub fn arm_removal(text: &str, start: usize, end: usize) -> Option<(usize, usize
     match bytes.get(after) {
         Some(b',') => after = skip(after + 1),
         None | Some(b'\r' | b'\n' | b'}') => {}
+        Some(b'/') if bytes.get(after + 1) == Some(&b'/') => {}
         Some(_) => return None,
     }
     let first = line_start(text, start);
     let alone_before = text[first..start].bytes().all(|b| matches!(b, b' ' | b'\t'));
-    let alone_after = matches!(bytes.get(after), None | Some(b'\r' | b'\n'));
+    let alone_after = text[after..].starts_with("//")
+        || matches!(bytes.get(after), None | Some(b'\r' | b'\n'));
     if alone_before && alone_after {
         Some((first, next_line_start(text, after)))
     } else {
@@ -908,8 +932,8 @@ pub fn change_to<'c>(
 - [ ] **Step 5: Run the tests**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-diagnostics --lib 2>&1 | tail -5`
-Expected: `test result: ok. 17 passed; 0 failed` (Task 1's 4, `lines`' 7,
-`suggest`'s 6).
+Expected: `test result: ok. 18 passed; 0 failed` (the existing
+`files.rs` test, Task 1's 4, `lines`' 7, `suggest`'s 6).
 
 Run: `cd /d/Projects/nona/nova && cargo clippy -p nova-diagnostics --all-targets -- -D warnings 2>&1 | tail -3`
 Expected: `Finished`, no warning.
@@ -958,6 +982,7 @@ Expected: `nova-diagnostics: placing an edit by lines; did you mean`
   - `Definitions::same_package(&self, a: ModuleId, b: ModuleId) -> bool`;
   - `Definitions::bound_outside_std(&self, module: ModuleId, name: &str) -> Exported`;
   - `Definitions::is_std_module(&self, module: ModuleId) -> bool`;
+  - `Definitions::owned(&self, module: ModuleId) -> bool` (plan decision 19);
   - in `tests/fixes.rs`: `Buffers`, `options`, `MAIN`, `buffers`, `loose`,
     `fresh`, `write`, `manifest`, `project`, `app_and_geom`, `whole`,
     `messages`, `diagnostic`, `fix`, `apply`, `text`, `counts`,
@@ -979,6 +1004,8 @@ Append to the resolver's `mod tests`, with `append_in_mod.py`, this block
         assert_eq!(d.importable(ModuleId(0)), [("lib".to_string(), ModuleId(1))]);
         assert_eq!(d.importable(ModuleId(1)), [("main".to_string(), ModuleId(0))]);
         assert!(d.same_package(ModuleId(0), ModuleId(1)));
+        // A loose program's modules are owned; std's are not.
+        assert!(d.owned(ModuleId(0)) && d.owned(ModuleId(1)) && !d.owned(ModuleId(2)));
     }
 
     #[test]
@@ -1254,9 +1281,9 @@ fn every_loaded_module_knows_what_it_could_import() {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-resolver --lib importable 2>&1 | tail -5`
-Expected: compile errors, `no method named 'importable' found for struct
-'Definitions'`, and `cannot find type 'Exported'`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-resolver --lib importable 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors, such as "no method named `importable` found for
+reference `&Definitions`" and E0433 for `Exported`.
 
 - [ ] **Step 3: `ModuleSource`'s fields**
 
@@ -1407,6 +1434,14 @@ impl Definitions {
     pub fn is_std_module(&self, module: ModuleId) -> bool {
         let m = module.0 as usize;
         m >= self.std_start && m < self.modules.len()
+    }
+
+    /// Whether a fix may edit `module` (spec 3.4b §3.1; plan decision 19):
+    /// it is the root package's, whose key is 0, or a loose program's, and
+    /// not std's.
+    pub fn owned(&self, module: ModuleId) -> bool {
+        !self.is_std_module(module)
+            && matches!(self.packages.get(module.0 as usize), Some(None | Some(0)))
     }
 }
 ```
@@ -1572,10 +1607,11 @@ Expected: `Resolver and driver: the tables a fix is made from`
 **Files:**
 - Create: `crates/nova-typeck/src/check/fixes.rs`
 - Modify: `crates/nova-typeck/src/lib.rs` (`CheckOptions`)
-- Modify: `crates/nova-typeck/src/check.rs` (imports; `Checker`; `bind_local`
-  and its seven callers; `note_params`; `place_root`, `PlaceRoot`,
-  `require_mutable_place`; `check_assign`; two unit tests; the probe
-  test's `CheckOptions` literal)
+- Modify: `crates/nova-typeck/src/check.rs` (imports; `Checker` and its
+  three literals, two of them in unit tests; `bind_local` and its seven
+  callers; `note_params`; `place_root`, `PlaceRoot`,
+  `require_mutable_place`; `check_assign`; two unit tests' assertions; the
+  probe test's `CheckOptions` literal)
 - Modify: `crates/nova-resolver/src/index.rs`, `src/lib.rs` (`LocalFlags`,
   `Index::locals`)
 - Modify: `crates/nova-driver/src/analyze.rs:191-194`, `crates/nova-driver/src/lib.rs:745`
@@ -1746,7 +1782,7 @@ fn the_index_records_how_each_local_was_declared() {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test fixes case_0 2>&1 | grep -E "^test |test result"`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test fixes case_ 2>&1 | grep -E "^test |test result"`
 Expected: cases 1-7 FAIL with "the fix replaces the note" (the note is
 still added and there is no fix), and cases 8-10 pass.
 
@@ -1836,13 +1872,24 @@ use fixes::Binding;
     bindings: FxHashMap<Span, Binding>,
 ```
 
-4. In `check_with`'s `Checker { … }`, after `        type_params: Vec::new(),`
-   insert:
+4. Three `Checker { … }` literals list every field. In `check_with`'s,
+   replace `\n        type_params: Vec::new(),\n    };` (eight spaces, then
+   `    };`: it occurs once) with
 
 ```rust
+
+        type_params: Vec::new(),
         sources: options.sources,
         bindings: FxHashMap::default(),
+    };
 ```
+
+   and in the two unit tests that build one,
+   `future_qualifier_short_circuits_before_resolve_type` (`check.rs:13379`)
+   and `every_reserved_nullary_names_qualifier_resolves_to_its_own_primitive`
+   (`check.rs:13451`), replace each `\n            type_params: Vec::new(),\n        };`
+   (twelve spaces: it occurs twice, so replace both and check the count is
+   2) with `\n            type_params: Vec::new(),\n            sources: None,\n            bindings: FxHashMap::default(),\n        };`.
 
 `sources` is read from Task 5 on. Until then the compiler warns that it
 is never read; Task 5 removes the warning, and no clippy run happens
@@ -1876,9 +1923,10 @@ pub(super) enum Binding {
 impl<'a> Checker<'a> {
     /// "make `x` mutable" (spec §4.1): `mut ` before the name of a local
     /// bound by a `let` or as a parameter. `decl` is that name's span.
-    /// Never for `self`, since changing a receiver changes every caller.
+    /// Never for `self`, since changing a receiver changes every caller,
+    /// nor in a module this project does not own (plan decision 19).
     pub(super) fn mutable_fix(&self, name: &str, decl: Span) -> Option<Fix> {
-        if name == "self" {
+        if name == "self" || !self.defs.owned(self.cur_module) {
             return None;
         }
         match self.bindings.get(&decl) {
@@ -2039,8 +2087,13 @@ with (marker `T4-ASSIGN-NEW`)
 
 ```rust
 
-    /// Add `fix`, if there is one, to the diagnostic just pushed.
+    /// Add `fix`, if there is one, to the diagnostic just pushed, unless
+    /// this project does not own the module being checked (spec §3.1; plan
+    /// decision 19).
     pub(super) fn push_fix(&mut self, fix: Option<Fix>) {
+        if !self.defs.owned(self.cur_module) {
+            return;
+        }
         if let (Some(fix), Some(d)) = (fix, self.diagnostics.last_mut()) {
             d.fixes.push(fix);
         }
@@ -2071,9 +2124,10 @@ with (marker `T4-UNIT-P`)
         );
 ```
 
-and in `immutable_self_root_is_advised_to_use_mut_self_not_let_mut_self`
-the same block with `c` for `p` (old: `n.contains("let mut c")`; new
-title: ``"make `c` mutable"``).
+and in `mut_self_trait_method_diagnostic_names_the_callee_and_advises_let_mut`
+(`check.rs:10251`) the same block with `c` for `p` (old:
+`n.contains("let mut c")`, at `check.rs:10274-10278`; new title:
+``"make `c` mutable"``).
 
 - [ ] **Step 10: The driver passes the sources**
 
@@ -2133,8 +2187,8 @@ Expected: `nova-typeck: sources in the checker, and make it mutable`
 
 **Files:**
 - Modify: `crates/nova-typeck/src/check/fixes.rs`
-- Modify: `crates/nova-typeck/src/check.rs` (imports, `Checker`, and the
-  sites the table in Step 4 lists)
+- Modify: `crates/nova-typeck/src/check.rs` (imports, `Checker` and its
+  three literals, and the sites the table in Step 4 lists)
 - Test: `crates/nova-driver/tests/fixes.rs`
 
 **Interfaces:**
@@ -2923,8 +2977,12 @@ In `crates/nova-typeck/src/check.rs`:
     qualified_callee: Option<usize>,
 ```
 
-   and in `check_with`, after `        bindings: FxHashMap::default(),`
-   insert `        qualified_callee: None,`.
+   and in the three `Checker { … }` literals (Task 4 Step 5): replace
+   `\n        bindings: FxHashMap::default(),\n    };` (once, in
+   `check_with`) with `\n        bindings: FxHashMap::default(),\n        qualified_callee: None,\n    };`,
+   and each `\n            bindings: FxHashMap::default(),\n        };`
+   (twice, in the two unit tests; check the count is 2) with
+   `\n            bindings: FxHashMap::default(),\n            qualified_callee: None,\n        };`.
 3. At each site, insert the new lines right after the old text, each old
    text occurring once. Indent the new lines as the old text's first line:
 
@@ -2942,10 +3000,37 @@ In `crates/nova-typeck/src/check.rs`:
 | field, literal | `                    format!("record \`{name}\` has no field \`{fname}\`"),` / `                    init.name.span,` / `                );` | `let given: Vec<&str> = fields.iter().map(\|f\| f.name.value.as_str()).collect();` / `let fix = suggest::change_to(&init.name, record.fields.iter().map(\|f\| f.name.as_str()).filter(\|n\| !given.contains(n)));` / `self.push_fix(fix);` |
 | field, read | `            self.no_field_message(fcx, &recv_ty, &field.value),` / `            field.span,` / `        );` / `        error_expr(span)` | before `error_expr(span)`: `let fix = self.field_fix(&recv_ty, field);` / `self.push_fix(fix);` |
 | field, write | `                self.no_field_message(fcx, &recv_ty, &field.value),` / `                field.span,` / `            );` / `            self.check_expr(fcx, rhs);` | before `self.check_expr(fcx, rhs);`: `let fix = self.field_fix(&recv_ty, field);` / `self.push_fix(fix);` |
-| method, array | `                    "no method \`{}\` on array type \`{}\`",` … `                method.span,` / `            );` | `self.push_fix(suggest::change_to(method, ["len"]));` |
-| method | `                        "no method \`{}\` on type \`{}\`",` … `                    method.span,` / `                );` | `let fix = self.method_fix(&recv_ty, fcx, method);` / `self.push_fix(fix);` |
+| method, array | the whole `self.error(` call at `check.rs:5776-5784`, block `T5-ARRAY-OLD` below | `self.push_fix(suggest::change_to(method, ["len"]));` |
+| method | the whole `self.error(` call at `check.rs:5816-5824`, block `T5-METHOD-OLD` below | `let fix = self.method_fix(&recv_ty, fcx, method);` / `self.push_fix(fix);` |
 | pattern, a path | `format!("\`{ty_name}::{v_name}\` is not a variant of the matched type"),` / `                    pattern.span,` / `                );` | the block below, marker `T5-PATTERN-PATH` |
 | pattern, a tuple struct | `"cannot resolve this pattern to a sum type variant",` / `                        pattern.span,` / `                    );` | the block below, marker `T5-PATTERN-TUPLE` |
+
+The two method sites' old texts, each unique (markers `T5-ARRAY-OLD` and
+`T5-METHOD-OLD`):
+
+```rust
+            self.error(
+                "E0014",
+                format!(
+                    "no method `{}` on array type `{}`",
+                    method.value,
+                    self.show(&recv_ty, fcx)
+                ),
+                method.span,
+            );
+```
+
+```rust
+                self.error(
+                    "E0014",
+                    format!(
+                        "no method `{}` on type `{}`",
+                        method.value,
+                        self.show(&recv_ty, fcx)
+                    ),
+                    method.span,
+                );
+```
 
 The two pattern blocks:
 
@@ -3202,12 +3287,39 @@ fn case_30_remove_an_unreachable_arm() {
         "match x { _ => \"any\", }",
     );
 }
+
+#[test]
+fn a_dependencys_errors_offer_no_fix() {
+    // Spec §3.1 (plan decision 19): a fix never edits another package, and
+    // E0060's note stays where its fix is not offered.
+    let app = app_and_geom(
+        "dependency-errors",
+        &[(
+            "src/main.nova",
+            "import geom\n\nfn main() {\n    println(\"${area()}\")\n}\n",
+        )],
+        "@tset\nfn helper() {}\n\npub fn area() -> Int {\n    let x = 1\n    x = 2\n    x\n}\n",
+    );
+    let a = whole(&app, &Buffers(Vec::new()));
+    let mutable = diagnostic(&a, "E0060", "cannot assign to immutable variable `x`");
+    assert!(mutable.fixes.is_empty(), "{:?}", mutable.fixes);
+    assert!(
+        mutable.notes.iter().any(|n| n.contains("let mut x")),
+        "{:?}",
+        mutable.notes
+    );
+    let attribute = diagnostic(&a, "E0082", "unknown attribute `@tset`");
+    assert!(attribute.fixes.is_empty(), "{:?}", attribute.fixes);
+}
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test fixes 2>&1 | grep -E "^test case_(24|2[7-9]|30)" `
-Expected: cases 24, 27, 28 and 30 FAILED ("no fix …"); case 29 ok.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test fixes 2>&1 | grep -E "^test (case_(24|2[7-9]|30)|a_dependencys)" `
+Expected: cases 24, 27, 28 and 30 FAILED ("no fix …"); case 29 and
+`a_dependencys_errors_offer_no_fix` ok. The latter is a *guard*: Task 4's
+gate keeps its E0060 note, and no attribute fix exists yet; Step 5 shows
+it can fail.
 
 - [ ] **Step 3: The resolver's fixes**
 
@@ -3219,9 +3331,107 @@ In `crates/nova-resolver/src/lib.rs`:
    `    modules: &[ModuleSource],`, and in its body replace
    `    let target = match imports.get(target_name) {` with
    `    let target = match modules[mid].imports.get(target_name) {`.
-   In `resolve_program`'s pass 2, replace `                    &m.imports,`
-   with `                    &all,`.
-3. Replace (marker `T6-NOT-PUB-OLD`)
+3. In `resolve_program`, replace passes 1 and 2 whole (marker
+   `T6-PASSES-OLD`)
+
+```rust
+    // Pass 1: collect each module's own definitions into its scope + exports.
+    for (mid, m) in all.iter().enumerate() {
+        let mut first_value: IndexMap<String, Span> = IndexMap::new();
+        let mut first_type: IndexMap<String, Span> = IndexMap::new();
+        for item in &m.file.items {
+            let item_index = merged.len();
+            definitions.item_module.push(mid as u32);
+            collect_item(
+                &mut definitions.defs,
+                &mut definitions.modules[mid],
+                &mut exports[mid],
+                &mut first_value,
+                &mut first_type,
+                &mut diagnostics,
+                &mut tests,
+                item_index,
+                &item.value,
+            );
+            merged.push(item.clone());
+        }
+    }
+
+    // Pass 2: resolve `import`s, binding other modules' public names. What
+    // each import names is its module's table (spec 3.3a §4.5).
+    for (mid, m) in all.iter().enumerate() {
+        for item in &m.file.items {
+            if let Item::Import(imp) = &item.value {
+                resolve_import(
+                    &mut definitions,
+                    &exports,
+                    &m.imports,
+                    mid,
+                    imp,
+                    &mut diagnostics,
+                    &mut imports,
+                );
+            }
+        }
+    }
+```
+
+   with (marker `T6-PASSES-NEW`)
+
+```rust
+    // Spec 3.4b §3.1 (plan decision 19): a fix may edit only the root
+    // package's modules or a loose program's.
+    let owned = |mid: usize| mid < std_start && matches!(all[mid].package, None | Some(0));
+
+    // Pass 1: collect each module's own definitions into its scope + exports.
+    for (mid, m) in all.iter().enumerate() {
+        let mut first_value: IndexMap<String, Span> = IndexMap::new();
+        let mut first_type: IndexMap<String, Span> = IndexMap::new();
+        let before = diagnostics.len();
+        for item in &m.file.items {
+            let item_index = merged.len();
+            definitions.item_module.push(mid as u32);
+            collect_item(
+                &mut definitions.defs,
+                &mut definitions.modules[mid],
+                &mut exports[mid],
+                &mut first_value,
+                &mut first_type,
+                &mut diagnostics,
+                &mut tests,
+                item_index,
+                &item.value,
+            );
+            merged.push(item.clone());
+        }
+        if !owned(mid) {
+            diagnostics[before..].iter_mut().for_each(|d| d.fixes.clear());
+        }
+    }
+
+    // Pass 2: resolve `import`s, binding other modules' public names. What
+    // each import names is its module's table (spec 3.3a §4.5).
+    for (mid, m) in all.iter().enumerate() {
+        let before = diagnostics.len();
+        for item in &m.file.items {
+            if let Item::Import(imp) = &item.value {
+                resolve_import(
+                    &mut definitions,
+                    &exports,
+                    &all,
+                    mid,
+                    imp,
+                    &mut diagnostics,
+                    &mut imports,
+                );
+            }
+        }
+        if !owned(mid) {
+            diagnostics[before..].iter_mut().for_each(|d| d.fixes.clear());
+        }
+    }
+```
+4. Replace (marker `T6-NOT-PUB-OLD`)
 
 ```rust
                 if !found {
@@ -3252,7 +3462,7 @@ with (marker `T6-NOT-PUB-NEW`)
                 }
 ```
 
-4. After `fn is_pub`'s closing brace, insert (marker `T6-MAKE-PUBLIC`):
+5. After `fn is_pub`'s closing brace, insert (marker `T6-MAKE-PUBLIC`):
 
 ```rust
 
@@ -3284,7 +3494,7 @@ fn make_public(module: &ModuleSource, name: &str, import: &str, same_package: bo
 }
 ```
 
-5. In `validate_test_function`, replace
+6. In `validate_test_function`, replace
    `        if attr.name.value != "test" {\n            diagnostics.push(unknown_attribute(attr));\n            continue;\n        }`
    with (marker `T6-ATTRIBUTE`):
 
@@ -3301,7 +3511,7 @@ fn make_public(module: &ModuleSource, name: &str, import: &str, same_package: bo
         }
 ```
 
-6. In the same function, replace (marker `T6-ARGUMENT-OLD`)
+7. In the same function, replace (marker `T6-ARGUMENT-OLD`)
 
 ```rust
                 diagnostics.push(
@@ -3382,8 +3592,12 @@ with (marker `T6-E0021-NEW`)
 ```rust
 
     /// "remove the unreachable arm" (spec §4.5), `arm` being its pattern
-    /// through its body, placed by §4.7's rules.
+    /// through its body, placed by §4.7's rules; only in a module this
+    /// project owns (plan decision 19).
     pub(super) fn remove_arm_fix(&self, arm: Span) -> Option<Fix> {
+        if !self.defs.owned(self.cur_module) {
+            return None;
+        }
         let text = self.sources?.get_source(arm.file)?;
         let (start, end) = lines::arm_removal(text, arm.start as usize, arm.end as usize)?;
         Some(Fix::new(
@@ -3396,7 +3610,15 @@ with (marker `T6-E0021-NEW`)
 - [ ] **Step 5: Run the tests**
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-driver --test fixes 2>&1 | tail -3`
-Expected: `test result: ok. 31 passed; 0 failed`.
+Expected: `test result: ok. 32 passed; 0 failed`.
+
+Confirm the guard can fail: delete pass 1's
+`        if !owned(mid) {\n            diagnostics[before..].iter_mut().for_each(|d| d.fixes.clear());\n        }`
+in `crates/nova-resolver/src/lib.rs`, rerun
+`cargo test -p nova-driver --test fixes a_dependencys`, see it FAIL at the
+E0082 assertion, and restore the lines with `git diff` as your guide (the
+task is not committed yet, so `git checkout` would lose the task's work:
+undo the one deletion by hand).
 
 Run: `cd /d/Projects/nona/nova && for c in nova-resolver nova-typeck nova-driver; do cargo test -p $c 2>&1 | grep -E "^test result" | grep -v " 0 failed"; done; echo done`
 Expected: `done` alone.
@@ -3426,8 +3648,7 @@ Expected: `Make public, the attributes, and an unreachable arm`
 
 **Files:**
 - Modify: `crates/nova-driver/tests/broken.rs`
-- Modify: `crates/nova-cli/tests/run_tests.rs` (after
-  `import_of_private_item_is_rejected`)
+- Modify: `crates/nova-cli/tests/run_tests.rs` (at its end)
 
 **Interfaces:**
 - Consumes: `Fix::apply` (Task 1); every fix of Tasks 4-6.
@@ -3435,8 +3656,9 @@ Expected: `Make public, the attributes, and an unreachable arm`
 
 - [ ] **Step 1: Write the command line's tests**
 
-Insert into `crates/nova-cli/tests/run_tests.rs` after
-`import_of_private_item_is_rejected`'s closing brace (marker `T7-CLI`):
+Append to `crates/nova-cli/tests/run_tests.rs`, with `append.py` (its
+tests are top-level functions, so its last line closes one; marker
+`T7-CLI`):
 
 ```rust
 
@@ -3496,7 +3718,9 @@ In `crates/nova-driver/tests/broken.rs`:
    `//! index on, must return within 10 s without panicking, and every\n//! occurrence it records must lie inside its file.`
    with
    `//! index on, must return within 10 s without panicking, and every\n//! occurrence it records must lie inside its file. Every fix it makes must\n//! apply, and its first three fixes, applied one at a time, must analyse\n//! again without panicking (spec 3.4b §9.2; plan decision 12).`.
-2. After `fn spans_inside`'s closing brace, insert (marker `T7-FIXES-HOLD`):
+2. Before `#[test]\nfn cut_programs_never_panic_or_hang() {` (unique;
+   with `replace_once.py`, the old text that line pair, the new text the
+   block below followed by it), insert (marker `T7-FIXES-HOLD`):
 
 ```rust
 
@@ -3575,7 +3799,9 @@ fn fixes_hold(
    `    let mut checked = 0usize;`; replace
    `            Ok((path, len, ok, spans_ok, took)) => {` with
    `            Ok((path, len, ok, spans_ok, fixes, took)) => {`; and after the
-   `} else if !spans_ok { … }` branch insert (marker `T7-REPORT`):
+   `!spans_ok` branch, whose unique text is
+   `                        "an occurrence outside its file: {} cut at byte {len}",\n                        path.display()\n                    ));`,
+   insert (marker `T7-REPORT`):
 
 ```rust
                 } else if let Err(why) = &fixes {
@@ -3684,10 +3910,10 @@ fn a_header_comment_stays_above_the_second_group() {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-fmt --test layout import 2>&1 | grep -E "^test "`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-fmt --test layout 2>&1 | grep -E "^test .*FAILED"`
 Expected: `imports_are_sorted_within_a_run`,
 `a_blank_line_keeps_two_groups_of_imports_each_sorted` and
-`a_header_comment_stays_above_the_second_group` FAILED; the rest ok.
+`a_header_comment_stays_above_the_second_group` FAILED, and no other.
 
 - [ ] **Step 3: Groups in the printer**
 
@@ -3768,7 +3994,7 @@ Expected: `nova-fmt: a blank line between imports keeps two groups`
 **Interfaces:**
 - Consumes: `Source` (this crate); `lines` (Task 2); Task 8's groups.
 - Produces (re-exported from `nova_fmt`):
-  - `pub struct ImportView<'a> { pub path: String, pub path_start: u32, pub first: &'a str, pub glob: bool, pub names: Vec<(&'a str, u32)> }`;
+  - `pub struct ImportView<'a> { pub path: String, pub path_start: u32, pub first: &'a str, pub glob: bool, pub names: Vec<(&'a str, u32)>, pub imports: &'a [(u32, u32)] }`;
   - `pub enum Group { Dependency, Module }`, ordered, dependencies first;
   - `pub struct Verdict { pub group: Group, pub unused_glob: bool, pub unused_names: Vec<String> }`;
   - `pub struct TextEdit { pub start: u32, pub end: u32, pub text: String }`;
@@ -3948,8 +4174,9 @@ fn nothing_to_do_or_nothing_parsed_offers_nothing() {
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-fmt --test organize 2>&1 | tail -3`
-Expected: a compile error, `unresolved imports 'nova_fmt::organize'`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-fmt --test organize 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors, E0432 "unresolved imports" naming
+`nova_fmt::organize` and its types.
 
 - [ ] **Step 3: The block**
 
@@ -3980,6 +4207,9 @@ pub struct ImportView<'a> {
     pub glob: bool,
     /// A `{…}` list's names, each with where it starts.
     pub names: Vec<(&'a str, u32)>,
+    /// Where every top-level import of the file starts and ends: an
+    /// occurrence inside one is never a use (plan decision 20).
+    pub imports: &'a [(u32, u32)],
 }
 
 /// Which group an import goes in (spec §6.2): dependencies first.
@@ -4032,6 +4262,10 @@ pub fn organize(text: &str, judge: &dyn Fn(&ImportView) -> Verdict) -> Option<Ve
     if imports.is_empty() {
         return None;
     }
+    let spans: Vec<(u32, u32)> = imports
+        .iter()
+        .map(|&i| (items[i].span.start, items[i].span.end))
+        .collect();
     // The bytes each import owns: its lead lines through its line's end.
     let mut regions: Vec<(usize, usize)> = Vec::new();
     let mut entries: Vec<Entry> = Vec::new();
@@ -4095,6 +4329,7 @@ pub fn organize(text: &str, judge: &dyn Fn(&ImportView) -> Verdict) -> Option<Ve
                     .collect(),
                 _ => Vec::new(),
             },
+            imports: &spans,
         };
         let verdict = judge(&view);
         let (names, removed) = match &imp.kind {
@@ -4404,12 +4639,15 @@ pub fn lock_and_cache(app: &Path, home: &Path, lib: &str) -> PathBuf {
 }
 ```
 
-3. In `crates/nova-cli/tests/lsp.rs`, delete its `MANIFEST`, `project`,
-   `APP_MAIN` and `app_and_library` (lines 114-125 and 758-776 at
-   `1c7bae5`). In `crates/nova-cli/tests/lsp_navigation.rs`, delete its
+3. In `crates/nova-cli/tests/lsp.rs`, delete its `MANIFEST` and `project`
+   (lines 114-125 at `1c7bae5`), `APP_MAIN` and `app_and_library` (lines
+   758-777, through `app_and_library`'s closing brace), and `INDEX`,
+   `registry_app` and `lock_and_cache` (lines 966-1003, with their doc
+   comments). In `crates/nova-cli/tests/lsp_navigation.rs`, delete its
    `MANIFEST`, `project`, `APP_MAIN`, `app_and_library`, `INDEX`,
-   `registry_app` and `lock_and_cache`. Add the names each file uses to
-   its `use lsp_client::{…};`; the compiler names any missing one.
+   `registry_app` and `lock_and_cache`. Each copy is identical to the
+   shared one. Add the names each file uses to its `use lsp_client::{…};`;
+   the compiler names any missing one.
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp --test lsp_navigation --no-run 2>&1 | grep -E "^(warning|error)" | sort | uniq -c; echo done`
 Expected: `done` alone.
@@ -4527,6 +4765,9 @@ fn make_mutable_at_a_cursor() {
         edits_in(action, &uri),
         [json!({ "range": { "start": point, "end": point }, "newText": "mut " })]
     );
+    // A cursor touching the label's end counts too (spec §5).
+    let end = position(MUTABLE, MUTABLE.find("x = 2").unwrap() + "x = 2".len());
+    titled(&actions(&mut client, &uri, end, None), "Make `x` mutable");
 }
 
 #[test]
@@ -4806,8 +5047,10 @@ fn capitalised(title: &str) -> String {
    - replace `mod checker;` with `mod checker;\nmod code_action;`;
    - replace `    Completion, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References,`
      with `    CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest,\n    PrepareRenameRequest, References,`;
-   - in `capabilities`, after the `rename_provider: …` field's closing
-     `})),` insert:
+   - in `capabilities`, before its last field line, the unique
+     `        ..Default::default()\n    }\n}\n\n/// The response to a request whose parameters do not parse.`
+     (with `replace_once.py`: the new text is the block below followed by
+     that old text), insert:
 
 ```rust
         code_action_provider: Some(lsp::CodeActionProviderCapability::Options(
@@ -4852,7 +5095,8 @@ fn capitalised(title: &str) -> String {
             }
 ```
 
-   - after `answer_at`'s closing brace, insert (marker `T10-ANSWER-OF`):
+   - after `answer_at`'s last lines, the unique
+     `        Some((answer, offset))\n    }`, insert (marker `T10-ANSWER-OF`):
 
 ```rust
 
@@ -5008,6 +5252,23 @@ mod tests {
     }
 
     #[test]
+    fn names_of_one_import_are_not_uses_of_each_other() {
+        // Plan decision 20: `Empty`'s own occurrence, in the import, is a
+        // variant of `Shape`, and must not keep it.
+        assert_eq!(
+            organized(
+                "one-import",
+                &[
+                    ("main.nova", "import kinds::{Empty, Shape}\n\nfn main() {}\n"),
+                    ("kinds.nova", "pub type Shape =\n  | Circle(Int)\n  | Empty\n"),
+                ]
+            )
+            .as_deref(),
+            Some("fn main() {}\n")
+        );
+    }
+
+    #[test]
     fn an_error_in_the_file_keeps_unused_imports() {
         assert_eq!(
             organized(
@@ -5142,12 +5403,36 @@ fn only_source_returns_organize_imports_alone() {
         "{fixes:?}"
     );
 }
+
+#[test]
+fn organize_imports_puts_the_packages_own_library_with_the_dependencies() {
+    // Spec §6.2 and spec decision 26: from `tests/`, the package's own library
+    // is a dependency, and a sibling test module is the project's own.
+    let dir = project(
+        "organize-tests",
+        &[("lib.nova", "pub fn name() -> String {\n    \"demo\"\n}\n")],
+    );
+    let tests = dir.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("util.nova"), "pub fn one() -> Int {\n    1\n}\n").unwrap();
+    let test = "import util\nimport demo\n\n@test\nfn t() {\n    assert_eq(name(), \"demo\")\n    assert_eq(one(), 1)\n}\n";
+    std::fs::write(tests.join("t.nova"), test).unwrap();
+    let uri = file_uri(&tests.join("t.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, test);
+    let found = actions(&mut client, &uri, at(test, "@test", 0), Some(&["source.organizeImports"]));
+    let action = titled(&found, "Organize imports");
+    assert_eq!(
+        applied(test, &edits_in(action, &uri)),
+        "import demo\n\nimport util\n\n@test\nfn t() {\n    assert_eq(name(), \"demo\")\n    assert_eq(one(), 1)\n}\n"
+    );
+}
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp organize 2>&1 | tail -3`
-Expected: a compile error, `cannot find function 'edits' in this scope`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp --lib organize 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors, E0425 "cannot find function `edits`".
 
 - [ ] **Step 3: The judge, and the action**
 
@@ -5162,7 +5447,7 @@ use lsp_types as lsp;
 use nova_diagnostics::{FileId, LineIndex, Severity, Span};
 use nova_driver::Analysis;
 use nova_fmt::{Group, ImportView, TextEdit, Verdict};
-use nova_resolver::{Definitions, Index, ModuleId, Target};
+use nova_resolver::{Definitions, Index, ModuleId, Occurrence, Target};
 
 use crate::analysis::Answer;
 use crate::convert;
@@ -5235,7 +5520,9 @@ fn verdict(a: &Analysis, file: FileId, view: &ImportView, removal: bool) -> Verd
     };
     if view.glob {
         let used = index.occurrences.iter().any(|o| {
-            o.span.file == file && o.span != first && declared_in(a, defs, &o.target, m)
+            o.span.file == file
+                && !inside_an_import(o, view.imports)
+                && declared_in(a, defs, &o.target, m)
         });
         Verdict {
             unused_glob: !used,
@@ -5246,7 +5533,8 @@ fn verdict(a: &Analysis, file: FileId, view: &ImportView, removal: bool) -> Verd
             .names
             .iter()
             .filter(|(name, start)| {
-                !list_name_used(index, Span::new(*start, *start + name.len() as u32, file))
+                let at = Span::new(*start, *start + name.len() as u32, file);
+                !list_name_used(index, at, view.imports)
             })
             .map(|(name, _)| name.to_string())
             .collect();
@@ -5279,10 +5567,18 @@ fn beside(a: &Analysis, file: FileId, m: ModuleId) -> bool {
     dir(*target).is_some() && dir(*target) == dir(file)
 }
 
+/// Whether `o` lies inside one of the file's imports, `imports` (plan
+/// decision 20): an import's own occurrences are never uses.
+fn inside_an_import(o: &Occurrence, imports: &[(u32, u32)]) -> bool {
+    imports
+        .iter()
+        .any(|&(start, end)| o.span.start >= start && o.span.end <= end)
+}
+
 /// Whether the list name at `at` is used (spec §6.4): an occurrence in its
-/// file, other than the import's own, targets what it binds. A call of a
-/// trait's method uses the trait, and a variant its sum type.
-fn list_name_used(index: &Index, at: Span) -> bool {
+/// file, outside every import, targets what it binds. A call of a trait's
+/// method uses the trait, and a variant its sum type.
+fn list_name_used(index: &Index, at: Span, imports: &[(u32, u32)]) -> bool {
     let bound: Vec<Target> = index
         .occurrences
         .iter()
@@ -5292,7 +5588,7 @@ fn list_name_used(index: &Index, at: Span) -> bool {
     index
         .occurrences
         .iter()
-        .filter(|o| o.span.file == at.file && o.span != at)
+        .filter(|o| o.span.file == at.file && !inside_an_import(o, imports))
         .any(|o| {
             bound.iter().any(|b| match (*b, o.target) {
                 (b, t) if b == t => true,
@@ -5335,11 +5631,11 @@ with (marker `T11-ACTIONS`):
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp organize 2>&1 | tail -3`
-Expected: `test result: ok. 6 passed; 0 failed`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp --lib organize 2>&1 | tail -3`
+Expected: `test result: ok. 7 passed; 0 failed`.
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_fixes 2>&1 | tail -3`
-Expected: `test result: ok. 11 passed; 0 failed`.
+Expected: `test result: ok. 12 passed; 0 failed`.
 
 - [ ] **Step 5: Commit**
 
@@ -5448,7 +5744,7 @@ mod tests {
         (ty.to_string(), mods.iter().map(|m| m.to_string()).collect())
     }
 
-    const EVERY_ROW: &str = "import geometry::{origin}\n\nconst LIMIT: Int = 3\n\nrecord Point { x: Int }\n\ntype Shape =\n  | Empty\n\ntrait Show {\n    fn show(self) -> String\n}\n\nimpl Show for Point {\n    fn show(self) -> String {\n        \"p\"\n    }\n}\n\nfn first<T>(x: T) -> T {\n    x\n}\n\nfn main() {\n    let mut n = LIMIT\n    n = n + origin()\n    let p = Point { x: n }\n    let s = Shape::Empty\n    let o = Some(1)\n    println(p.show())\n    let k = [1].len()\n}\n";
+    const EVERY_ROW: &str = "import geometry::{origin}\n\nconst LIMIT: Int = 3\n\nrecord Point { x: Int }\n\ntype Shape =\n  | Empty\n\ntrait Show {\n    fn show(self) -> String\n}\n\nimpl Show for Point {\n    fn show(self) -> String {\n        \"p\"\n    }\n}\n\nfn first<T>(mut x: T) -> T {\n    x\n}\n\nfn main() {\n    let mut n = LIMIT\n    n = n + origin()\n    let p = Point { x: n }\n    let s = Shape::Empty\n    let o = Some(1)\n    println(p.show())\n    let k = [1].len()\n}\n";
 
     #[test]
     fn every_row_of_the_table() {
@@ -5475,7 +5771,7 @@ mod tests {
         assert_eq!(token(&found, text, "show", 1), of("method", &[decl]));
         assert_eq!(token(&found, text, "first", 0), of("function", &[decl]));
         assert_eq!(token(&found, text, "T", 0), of("typeParameter", &[decl]));
-        assert_eq!(token(&found, text, "x", 1), of("parameter", &[decl]));
+        assert_eq!(token(&found, text, "x", 1), of("parameter", &[decl, "mutable"]));
         assert_eq!(token(&found, text, "n", 0), of("variable", &[decl, "mutable"]));
         assert_eq!(token(&found, text, "n", 1), of("variable", &["mutable"]));
         assert_eq!(token(&found, text, "LIMIT", 1), of("variable", &["readonly"]));
@@ -5553,11 +5849,11 @@ fn tokens(client: &mut Client, uri: &str) -> Vec<(u64, u64, u64, u64, u64)> {
 }
 
 /// The legend's indices (spec §7.1).
-const FUNCTION: u64 = 10;
-const VARIABLE: u64 = 7;
-const DECLARATION: u64 = 1;
-const DEFAULT_LIBRARY: u64 = 4;
-const MUTABLE: u64 = 8;
+const T_FUNCTION: u64 = 10;
+const T_VARIABLE: u64 = 7;
+const M_DECLARATION: u64 = 1;
+const M_DEFAULT_LIBRARY: u64 = 4;
+const M_MUTABLE: u64 = 8;
 
 #[test]
 fn the_server_advertises_semantic_tokens() {
@@ -5577,10 +5873,10 @@ fn semantic_tokens_name_by_name() {
     let mut client = Client::start(&dir, false);
     open(&mut client, &uri, main);
     let found = tokens(&mut client, &uri);
-    assert!(found.contains(&(0, 3, 4, FUNCTION, DECLARATION)), "{found:?}");
-    assert!(found.contains(&(1, 12, 1, VARIABLE, DECLARATION | MUTABLE)), "{found:?}");
-    assert!(found.contains(&(2, 4, 1, VARIABLE, MUTABLE)), "{found:?}");
-    assert!(found.contains(&(3, 4, 7, FUNCTION, DEFAULT_LIBRARY)), "{found:?}");
+    assert!(found.contains(&(0, 3, 4, T_FUNCTION, M_DECLARATION)), "{found:?}");
+    assert!(found.contains(&(1, 12, 1, T_VARIABLE, M_DECLARATION | M_MUTABLE)), "{found:?}");
+    assert!(found.contains(&(2, 4, 1, T_VARIABLE, M_MUTABLE)), "{found:?}");
+    assert!(found.contains(&(3, 4, 7, T_FUNCTION, M_DEFAULT_LIBRARY)), "{found:?}");
 }
 
 #[test]
@@ -5591,15 +5887,16 @@ fn semantic_tokens_in_a_file_with_an_error() {
     let mut client = Client::start(&dir, false);
     open(&mut client, &uri, main);
     let found = tokens(&mut client, &uri);
-    assert!(found.contains(&(2, 19, 1, VARIABLE, 0)), "{found:?}");
+    assert!(found.contains(&(2, 19, 1, T_VARIABLE, 0)), "{found:?}");
     assert!(!found.iter().any(|t| t.0 == 2 && t.1 == 12), "an unresolved name: {found:?}");
 }
 ```
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp tokens 2>&1 | tail -3`
-Expected: a compile error, `cannot find function 'tokens' in this scope`.
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp --lib tokens 2>&1 | grep -E "^error" | sort | uniq -c`
+Expected: compile errors, E0425 "cannot find function `tokens`" and
+`legend`.
 
 - [ ] **Step 3: The tokens**
 
@@ -5770,9 +6067,13 @@ fn encode(text: &str, spans: &[(u32, u32, u32, u32)]) -> Vec<lsp::SemanticToken>
 ```
 
 In `crates/nova-lsp/src/lib.rs`:
-- replace `    CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest,\n    PrepareRenameRequest, References,`
-  with `    CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest,\n    PrepareRenameRequest, References, SemanticTokensFullRequest,`;
-- in `capabilities`, after `code_action_provider`'s closing `)),` insert:
+- replace `Request as _,` (unique in the file; Task 10's `cargo fmt` may have
+  rewrapped the lines around it) with `Request as _, SemanticTokensFullRequest,`;
+  the commit step's `cargo fmt --all` puts it in order;
+- in `capabilities`, before the unique
+  `        ..Default::default()\n    }\n}\n\n/// The response to a request whose parameters do not parse.`
+  (with `replace_once.py`: the new text is the block below followed by
+  that old text), insert:
 
 ```rust
         semantic_tokens_provider: Some(
@@ -5813,11 +6114,11 @@ In `crates/nova-lsp/src/lib.rs`:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp tokens 2>&1 | tail -3`
+Run: `cd /d/Projects/nona/nova && cargo test -p nova-lsp --lib tokens 2>&1 | tail -3`
 Expected: `test result: ok. 4 passed; 0 failed`.
 
 Run: `cd /d/Projects/nona/nova && cargo test -p nova-cli --test lsp_fixes 2>&1 | tail -3`
-Expected: `test result: ok. 14 passed; 0 failed`.
+Expected: `test result: ok. 15 passed; 0 failed`.
 
 A row of `every_row_of_the_table` that fails names the occurrence the
 index recorded for it. If the index records the name with another target
@@ -5913,8 +6214,8 @@ fn the_gate_on_a_project_with_a_dependency() {
 
     let found = tokens(&mut client, &tidy_uri);
     assert!(found.contains(&(1, 7, 4, 0, 0)), "`geom`, a namespace: {found:?}");
-    assert!(found.contains(&(4, 7, 5, FUNCTION, DECLARATION)), "`total`: {found:?}");
-    assert!(found.contains(&(5, 4, 4, FUNCTION, 0)), "`area`: {found:?}");
+    assert!(found.contains(&(4, 7, 5, T_FUNCTION, M_DECLARATION)), "`total`: {found:?}");
+    assert!(found.contains(&(5, 4, 4, T_FUNCTION, 0)), "`area`: {found:?}");
 }
 ```
 
@@ -6034,37 +6335,37 @@ In `smoke.test.ts`, replace the first comment's lines
 `// The extension's smoke test (spec §7.6; 3.4a §7): the language, a\n// diagnostic, a completion, a formatted document, a hover and a definition,\n// through the real \`nova lsp\`.`
 with
 `// The extension's smoke test (spec §7.6; 3.4a §7; 3.4b §8): the language, a\n// diagnostic, a completion, a formatted document, a hover, a definition,\n// semantic tokens and a quick fix, through the real \`nova lsp\`.`,
-and before the final `});` insert (marker `T14-SMOKE`):
+and replace the file's unique last two lines, `  });\n});`, with
+`  });\n`, then the block below, then `});` (marker `T14-SMOKE`):
 
 ```ts
 
   it("colours a call as a function with a semantic token", async () => {
     const uri = vscode.Uri.file(path.join(fixture, "src", "navigate.nova"));
     await vscode.workspace.openTextDocument(uri);
-    const legend = await eventually("a token legend", async () =>
-      vscode.commands.executeCommand<vscode.SemanticTokensLegend>(
+    // One `eventually`, which asks for the legend and the tokens in each
+    // attempt: two would wait up to 120 s, past mocha's 90 s timeout.
+    const types = await eventually("a function token", async () => {
+      const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend>(
         "vscode.provideDocumentSemanticTokensLegend",
         uri,
-      ),
-    );
-    const fn = legend.tokenTypes.indexOf("function");
-    assert.ok(fn >= 0, legend.tokenTypes.join(", "));
-    const data = await eventually("a function token", async () => {
+      );
       const found = await vscode.commands.executeCommand<vscode.SemanticTokens>(
         "vscode.provideDocumentSemanticTokens",
         uri,
       );
-      if (found === undefined) {
+      if (legend === undefined || found === undefined) {
         return undefined;
       }
+      const fn = legend.tokenTypes.indexOf("function");
       for (let i = 3; i < found.data.length; i += 5) {
         if (found.data[i] === fn) {
-          return found.data;
+          return legend.tokenTypes;
         }
       }
       return undefined;
     });
-    assert.ok(data.length >= 5);
+    assert.ok(types.includes("function"), types.join(", "));
   });
 
   it("offers a quick fix for a planted error", async () => {
@@ -6091,7 +6392,7 @@ In `tools/vscode-nova/package.json`:
   `completion, formatting, hover, go to definition, find references and rename from nova lsp.`
   with
   `completion, formatting, hover, go to definition, find references, rename, quick fixes, organize imports and semantic highlighting from nova lsp.`;
-- after the `"grammars": [ … ],` entry insert:
+- before the unique `    "configuration": {` line insert:
 
 ```json
     "semanticTokenModifiers": [
@@ -6290,10 +6591,10 @@ cell left as `…` is a records failure; Step 6 checks for it.
    ```text
      **Amended 2026-10-10:** 3.4b, "Fixes and colour", is built
      (`docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`,
-     branch `phase-3-4b-fixes-colour`; ADR 0033). With it the 3.4 gate is
-     met: the scripted LSP tests cover each capability on a multi-file
-     project with a dependency, and the extension's smoke test also checks
-     semantic tokens and a quick fix.
+     branch `phase-3-4b-fixes-colour`; ADR 0033). With it 3.4 is complete
+     and its gate is met: the scripted LSP tests cover each capability on
+     a multi-file project with a dependency, and the extension's smoke
+     test also checks semantic tokens and a quick fix.
    ```
 
 4. `docs/adr/0028-the-formatter.md`, at the end of `## Consequences`:
@@ -6343,6 +6644,11 @@ cell left as `…` is a records failure; Step 6 checks for it.
    ```text
    - **`nova fmt` keeps a blank line between imports,** as gofmt does, and
      sorts each group of imports on its own (ADR 0028).
+   - **E0060's note gives way to its fix.** Where a `let` or a parameter
+     can be made mutable, `nova check` prints ``= help: make `x` mutable``
+     in place of the note advising `let mut`, and the language server's
+     published message loses that note too. A match binding, a `for`
+     variable and `self` keep the note.
    ```
 
 2. `README.md`, "Editor support": replace "completion, formatting, hover,
@@ -6353,6 +6659,9 @@ cell left as `…` is a records failure; Step 6 checks for it.
 3. `ARCHITECTURE.md`'s crate rows:
    - `nova-diagnostics`: "Shared error reporting infrastructure, and the
      fixes a diagnostic suggests";
+   - `nova-resolver`: "Name resolution, module graph; the types of the
+     language server's index of names; the make-public and attribute
+     fixes";
    - `nova-typeck`: "Type inference and checking (HM + extensions);
      records the language server's index of names when asked, and attaches
      fixes to its errors";
@@ -6375,7 +6684,7 @@ opens a code span it does not close. Rewrap it so the span does not split.
 Claims this branch makes stale can sit in files it never touches. List
 them by set difference:
 
-Run: `cd /d/Projects/nona/nova && git grep -l -i -E "code action|semantic (token|highlight)|3\.4b|import run|within (each|a) run|blank lines? between imports" -- . ':!docs/superpowers' ':!Cargo.lock' ':!target' | sort > $P/sweep-all.txt; git diff --name-only main...HEAD | sort > $P/sweep-touched.txt; comm -23 $P/sweep-all.txt $P/sweep-touched.txt`
+Run: `cd /d/Projects/nona/nova && git grep -l -i -E "code action|semantic (token|highlight)|3\.4b|import run|within (each|a) run|blank lines? between imports" -- . ':!docs/superpowers' ':!Cargo.lock' ':!target' | sort > $P/sweep-all.txt; git diff --name-only main | sort > $P/sweep-touched.txt; comm -23 $P/sweep-all.txt $P/sweep-touched.txt`
 Expected: a list of files the branch has not touched.
 
 Read each match in those files with `git grep -n -i -E "<the same
@@ -6443,15 +6752,16 @@ stop it.
 Run: `cd /d/Projects/nona/nova && cargo test --workspace --no-fail-fast > $P/full-windows.txt 2>&1; python -X utf8 $P/count.py $P/full-windows.txt`
 Expected: `0 failed`. `main` at `1039f1e` had 1781 passed and 9 ignored.
 The branch adds:
-- 17 `nova-diagnostics` unit tests (Tasks 1-2);
+- 17 `nova-diagnostics` unit tests (Tasks 1-2: 4 and 13);
 - 3 resolver unit tests (Task 3);
-- 31 fix tests in `fixes.rs` and 1 index test (Tasks 3-6);
+- 32 tests in `fixes.rs` (Tasks 3-6: the tables test, the 30 fix cases,
+  and `a_dependencys_errors_offer_no_fix`) and 1 index test (Task 4);
 - 2 command-line tests (Task 7);
 - 2 formatter layout tests (Task 8) and 10 organize tests (Task 9);
-- 6 organize and 4 token unit tests in `nova-lsp` (Tasks 11-12);
-- 15 stdio tests in `lsp_fixes.rs` (Tasks 10-13).
+- 7 organize and 4 token unit tests in `nova-lsp` (Tasks 11-12);
+- 16 stdio tests in `lsp_fixes.rs` (Tasks 10-13: 8, 4, 3 and 1).
 
-That is 91, so 1872 passed. A difference is explained by name, or it is a
+That is 94, so 1875 passed. A difference is explained by name, or it is a
 finding. Ledger the exact count.
 
 - [ ] **Step 2: The full suite on Linux**
@@ -6484,11 +6794,11 @@ then undo with `git checkout -- <file>` and ledger the outcome:
 
 | # | Mutant | File | Run | Expected |
 |---|---|---|---|---|
-| 1 | in `mutable_fix`, `Edit::insert(decl.start, …)` → `Edit::insert(decl.start.saturating_sub(4), …)`, which puts `mut ` before `let` | `crates/nova-typeck/src/check/fixes.rs` | `cargo test -p nova-driver --test fixes case_01` | FAIL: P0001 became more common |
+| 1 | in `mutable_fix`, `Edit::insert(decl.start, …)` → `Edit::insert(decl.start.saturating_sub(4), …)`, which puts `mut ` before `let` | `crates/nova-typeck/src/check/fixes.rs` | `cargo test -p nova-driver --test fixes case_01` | FAIL at `makes_mutable`'s `after.contains(decl)`: the text reads `mut let x = 0`, not `let mut x = 0` |
 | 2 | in `import_fix`, `let [(import, module)] = found.as_slice() else` → `let Some((import, module)) = found.first() else` | same | `cargo test -p nova-driver --test fixes case_17` | FAIL |
 | 3 | in `closest`, `.max(3) / 3` → `.max(3) / 2` | `crates/nova-diagnostics/src/suggest.rs` | `cargo test -p nova-driver --test fixes case_26` | FAIL |
 | 4 | in `merge`, sort by `(b.group, &a.path).cmp(&(a.group, &b.path))` | `crates/nova-fmt/src/organize.rs` | `cargo test -p nova-fmt --test organize two_groups` | FAIL |
-| 5 | in `may_remove`, return `true` (keep the parameters used: `let _ = (a, file); true`) | `crates/nova-lsp/src/organize.rs` | `cargo test -p nova-lsp an_error_in_the_file_keeps` | FAIL |
+| 5 | in `may_remove`, return `true` (keep the parameters used: `let _ = (a, file); true`) | `crates/nova-lsp/src/organize.rs` | `cargo test -p nova-lsp an_error_in_the_file_keeps`, then `cargo test -p nova-cli --test lsp_fixes organize_imports_in_a_file_with_an_error` | both FAIL |
 | 6 | in `encode`, delete `prev_line = line;` and `prev_col = col;`, so positions are absolute | `crates/nova-lsp/src/tokens.rs` | `cargo test -p nova-cli --test lsp_fixes semantic_tokens_name_by_name` | FAIL |
 | 7 | in `classify`, `Target::Builtin(_) => (FUNCTION, DEFAULT_LIBRARY),` → `(FUNCTION, 0)` | same | `cargo test -p nova-lsp every_row_of_the_table` | FAIL |
 | 8 | in `code_actions`, `if std_cache::in_std_cache(path) \|\| in_registry(path) {` → `if std_cache::in_std_cache(path) {` | `crates/nova-lsp/src/code_action.rs` | `cargo test -p nova-cli --test lsp_fixes no_actions_inside` | FAIL |
@@ -6522,12 +6832,12 @@ and the user's name out of it. Sections, in order:
    - `requests_stay_within_the_ci_bound` measures eight requests.
 4. `### Tests`: a table of Windows (local) and Linux results, `main` at
    `1039f1e` against this branch. Linux comes from Step 2, or "from this
-   PR's CI". Then the 31 fix cases, the sweep's fix count from Task 7,
+   PR's CI". Then the 30 fix cases and the tables test, the sweep's fix count from Task 7,
    and "each of the spec's nine mutants fails its named test".
 5. `### Latency`: the three runs' figures, as in ADR 0033.
 6. `### Final review`: filled in after the review (the executing-plans
    skill's fix pass).
-7. `### Decisions to review`: this plan's Decisions 1-17 by title, the
+7. `### Decisions to review`: this plan's Decisions 1-20 by title, the
    spec's planning decisions 37-40, and every ledger `Ruling:` line, each
    with its cost if wrong.
 8. `### Deferred minors`: from the final review.
