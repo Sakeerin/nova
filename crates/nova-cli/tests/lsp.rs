@@ -495,6 +495,8 @@ struct Figures {
     definitions: Vec<u128>,
     references: Vec<u128>,
     renames: Vec<u128>,
+    code_actions: Vec<u128>,
+    tokens: Vec<u128>,
 }
 
 /// `n` requests of `method`, each timed to its response, sorted.
@@ -559,6 +561,20 @@ fn measure(n: usize) -> Figures {
     let mut renaming = at;
     renaming["newName"] = json!("user_to_json");
     let renames = timed(&mut client, n, "textDocument/rename", renaming);
+    // 3.4b spec §9.8: code actions at a place without a diagnostic, and
+    // the whole document's tokens.
+    let acting = json!({
+        "textDocument": { "uri": uri },
+        "range": { "start": call, "end": call },
+        "context": { "diagnostics": [] },
+    });
+    let code_actions = timed(&mut client, n, "textDocument/codeAction", acting);
+    let tokens = timed(
+        &mut client,
+        n,
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    );
     Figures {
         edits,
         completions,
@@ -566,6 +582,8 @@ fn measure(n: usize) -> Figures {
         definitions,
         references,
         renames,
+        code_actions,
+        tokens,
     }
 }
 
@@ -580,8 +598,8 @@ fn summary(name: &str, ms: &[u128]) -> String {
 
 #[test]
 fn requests_stay_within_the_ci_bound() {
-    // Gate item 8, and 3.4a's: 2 s each with the debug binary, 4 s for a
-    // rename, which analyses twice.
+    // Gate item 8, 3.4a's and 3.4b's: 2 s each with the debug binary, 4 s
+    // for a rename, which analyses twice.
     let f = measure(3);
     let within = |ms: &[u128], bound: u128| ms.iter().all(|&m| m <= bound);
     assert!(
@@ -590,14 +608,18 @@ fn requests_stay_within_the_ci_bound() {
             && within(&f.hovers, 2000)
             && within(&f.definitions, 2000)
             && within(&f.references, 2000)
-            && within(&f.renames, 4000),
-        "{}; {}; {}; {}; {}; {}",
+            && within(&f.renames, 4000)
+            && within(&f.code_actions, 2000)
+            && within(&f.tokens, 2000),
+        "{}; {}; {}; {}; {}; {}; {}; {}",
         summary("edits", &f.edits),
         summary("completions", &f.completions),
         summary("hovers", &f.hovers),
         summary("definitions", &f.definitions),
         summary("references", &f.references),
-        summary("renames", &f.renames)
+        summary("renames", &f.renames),
+        summary("code actions", &f.code_actions),
+        summary("tokens", &f.tokens)
     );
 }
 
@@ -621,6 +643,8 @@ fn latency_on_05_json_api() {
     println!("{}", summary("definition", &f.definitions));
     println!("{}", summary("references", &f.references));
     println!("{}", summary("rename", &f.renames));
+    println!("{}", summary("code actions", &f.code_actions));
+    println!("{}", summary("semantic tokens", &f.tokens));
     println!(
         "binary {} ({} bytes, modified {:?})",
         binary.display(),
@@ -634,7 +658,9 @@ fn latency_on_05_json_api() {
             &f.completions,
             &f.hovers,
             &f.definitions,
-            &f.references
+            &f.references,
+            &f.code_actions,
+            &f.tokens
         ]
         .iter()
         .all(|ms| within(ms, bound))
