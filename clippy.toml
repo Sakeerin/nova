@@ -1,0 +1,6 @@
+# `nova_diagnostics::Diagnostic` is 128 bytes since it carries its fixes
+# (docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md
+# §3.1), which is clippy's default threshold for `result_large_err`. A
+# `Result<_, Diagnostic>` is how the front end and the package manager
+# report an error, so the threshold sits above it.
+large-error-threshold = 192
