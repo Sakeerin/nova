@@ -150,9 +150,9 @@ fn imports_are_sorted_within_a_run() {
         "import zeta\nimport alpha::{c, a, b}\n\nfn main() {}\n",
         "import alpha::{a, b, c}\nimport zeta\n\nfn main() {}\n",
     );
-    // Blank lines between imports do not end their run, and do not survive
-    // inside it (the 3.1 plan's decision 3).
-    assert_formats("import b\n\n\nimport a\n", "import a\nimport b\n");
+    // A blank line between imports ends a group, and one survives between
+    // groups (spec 3.4b §6.6, which replaces the 3.1 plan's decision 3).
+    assert_formats("import b\n\n\nimport a\n", "import b\n\nimport a\n");
 }
 
 #[test]
@@ -240,5 +240,23 @@ fn doc_comments_print_before_attributes_and_on_fields_and_variants() {
     );
     assert_stable(
         "record P {\n    /// The x.\n    x: Int,\n}\n\ntype T =\n    /// First.\n    | A\n    | B\n",
+    );
+}
+
+#[test]
+fn a_blank_line_keeps_two_groups_of_imports_each_sorted() {
+    // Spec 3.4b §6.6: as gofmt does.
+    assert_formats(
+        "import geom\nimport app\n\nimport utils\nimport shapes\n\nfn main() {}\n",
+        "import app\nimport geom\n\nimport shapes\nimport utils\n\nfn main() {}\n",
+    );
+    assert_stable("import app\nimport geom\n\nimport shapes\nimport utils\n\nfn main() {}\n");
+}
+
+#[test]
+fn a_header_comment_stays_above_the_second_group() {
+    assert_formats(
+        "import a\n\n// The project's own.\n\nimport c\nimport b\n",
+        "import a\n\n// The project's own.\n\nimport b\nimport c\n",
     );
 }
