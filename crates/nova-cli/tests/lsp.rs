@@ -497,13 +497,41 @@ fn json_api() -> std::path::PathBuf {
         .join("main.nova")
 }
 
-/// Time `n` edits, each sent when no check is running, and `n` completions,
-/// on `05-json-api`. Returns each list in milliseconds, sorted.
-fn measure(n: usize) -> (Vec<u128>, Vec<u128>) {
+/// Each request's times in milliseconds, sorted.
+struct Figures {
+    edits: Vec<u128>,
+    completions: Vec<u128>,
+    hovers: Vec<u128>,
+    definitions: Vec<u128>,
+    references: Vec<u128>,
+    renames: Vec<u128>,
+}
+
+/// `n` requests of `method`, each timed to its response, sorted.
+fn timed(client: &mut Client, n: usize, method: &str, params: Value) -> Vec<u128> {
+    let mut ms: Vec<u128> = (0..n)
+        .map(|_| {
+            let started = Instant::now();
+            let response = client.request(method, params.clone());
+            assert!(
+                response["error"].is_null() && !response["result"].is_null(),
+                "{method}: {response}"
+            );
+            started.elapsed().as_millis()
+        })
+        .collect();
+    ms.sort_unstable();
+    ms
+}
+
+/// Time `n` edits, each sent when no check is running, and `n` of each
+/// request, on `05-json-api` (ADR 0029; 3.4a spec §8.6).
+fn measure(n: usize) -> Figures {
     let path = json_api();
     let text = std::fs::read_to_string(&path).unwrap();
     let uri = file_uri(&path);
-    let mut client = Client::start(path.parent().unwrap(), false);
+    let home = fresh_dir("latency-home");
+    let mut client = Client::start_with_env(path.parent().unwrap(), false, &[("NOVA_HOME", &home)]);
     open(&mut client, &uri, &text);
     client.diagnostics(&uri, |p| p["version"] == 1);
     let mut edits = Vec::new();
@@ -529,7 +557,26 @@ fn measure(n: usize) -> (Vec<u128>, Vec<u128>) {
     }
     edits.sort_unstable();
     completions.sort_unstable();
-    (edits, completions)
+    // `user_json(u)` in `users_json`: a function main.nova declares. The
+    // edits above only appended, so its position is unchanged.
+    let call = after(&text, "parts[n] = ");
+    let at = json!({ "textDocument": { "uri": uri }, "position": call });
+    let hovers = timed(&mut client, n, "textDocument/hover", at.clone());
+    let definitions = timed(&mut client, n, "textDocument/definition", at.clone());
+    let mut with_context = at.clone();
+    with_context["context"] = json!({ "includeDeclaration": true });
+    let references = timed(&mut client, n, "textDocument/references", with_context);
+    let mut renaming = at;
+    renaming["newName"] = json!("user_to_json");
+    let renames = timed(&mut client, n, "textDocument/rename", renaming);
+    Figures {
+        edits,
+        completions,
+        hovers,
+        definitions,
+        references,
+        renames,
+    }
 }
 
 fn summary(name: &str, ms: &[u128]) -> String {
@@ -542,38 +589,67 @@ fn summary(name: &str, ms: &[u128]) -> String {
 }
 
 #[test]
-fn edits_and_completions_stay_within_the_ci_bound() {
-    // Gate item 8: 2 s each, with the debug binary.
-    let (edits, completions) = measure(3);
-    let bound = 2000;
+fn requests_stay_within_the_ci_bound() {
+    // Gate item 8, and 3.4a's: 2 s each with the debug binary, 4 s for a
+    // rename, which analyses twice.
+    let f = measure(3);
+    let within = |ms: &[u128], bound: u128| ms.iter().all(|&m| m <= bound);
     assert!(
-        edits.iter().chain(&completions).all(|&ms| ms <= bound),
-        "{}; {}; the CI bound is {bound} ms",
-        summary("edits", &edits),
-        summary("completions", &completions)
+        within(&f.edits, 2000)
+            && within(&f.completions, 2000)
+            && within(&f.hovers, 2000)
+            && within(&f.definitions, 2000)
+            && within(&f.references, 2000)
+            && within(&f.renames, 4000),
+        "{}; {}; {}; {}; {}; {}",
+        summary("edits", &f.edits),
+        summary("completions", &f.completions),
+        summary("hovers", &f.hovers),
+        summary("definitions", &f.definitions),
+        summary("references", &f.references),
+        summary("renames", &f.renames)
     );
 }
 
 #[test]
 #[ignore = "the development host's figure (spec §9.5): cargo test --release -p nova-cli --test lsp -- --ignored --nocapture latency"]
 fn latency_on_05_json_api() {
-    let (edits, completions) = measure(20);
-    // In a release build, the 200 ms budget. CI's advisory `--ignored` step
-    // runs this in a debug build, where only the 2 s CI bound applies.
-    let bound = if cfg!(debug_assertions) { 2000 } else { 200 };
+    let f = measure(20);
+    // In a release build, the budgets: 200 ms, and 400 ms for a rename.
+    // CI's advisory `--ignored` step runs this in a debug build, where only
+    // the CI bounds apply.
+    let (bound, rename_bound) = if cfg!(debug_assertions) {
+        (2000, 4000)
+    } else {
+        (200, 400)
+    };
     let binary = assert_cmd::cargo::cargo_bin("nova");
     let meta = std::fs::metadata(&binary).unwrap();
-    println!("{}", summary("edit to diagnostics", &edits));
-    println!("{}", summary("completion", &completions));
+    println!("{}", summary("edit to diagnostics", &f.edits));
+    println!("{}", summary("completion", &f.completions));
+    println!("{}", summary("hover", &f.hovers));
+    println!("{}", summary("definition", &f.definitions));
+    println!("{}", summary("references", &f.references));
+    println!("{}", summary("rename", &f.renames));
     println!(
         "binary {} ({} bytes, modified {:?})",
         binary.display(),
         meta.len(),
         meta.modified().ok()
     );
+    let within = |ms: &[u128], b: u128| ms.iter().all(|&m| m <= b);
     assert!(
-        edits.iter().chain(&completions).all(|&ms| ms <= bound),
-        "the budget is {bound} ms for the median and the maximum"
+        [
+            &f.edits,
+            &f.completions,
+            &f.hovers,
+            &f.definitions,
+            &f.references
+        ]
+        .iter()
+        .all(|ms| within(ms, bound))
+            && within(&f.renames, rename_bound),
+        "the budget is {bound} ms, {rename_bound} ms for a rename, for the median and the maximum"
     );
 }
 
