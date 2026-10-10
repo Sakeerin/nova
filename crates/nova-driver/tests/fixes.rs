@@ -792,3 +792,150 @@ fn case_26_no_did_you_mean_beyond_the_distance_and_its_edge() {
     let far = diagnostic(&a, "E0001", "cannot find `axxde`");
     assert!(far.fixes.is_empty(), "{:?}", far.fixes);
 }
+
+// === Task 6: make public, the attributes, an unreachable arm (spec §4.3,
+// §4.4, §4.5; §9.1 cases 24 and 27-30) ===
+
+#[test]
+fn case_24_did_you_mean_an_attribute_and_a_test_argument() {
+    offers(
+        &[(MAIN, "@tset\nfn t() {}\n\nfn main() {}\n")],
+        "E0082",
+        "unknown attribute `@tset`",
+        "change `tset` to `test`",
+        "main.nova",
+        "@test\nfn t()",
+    );
+    offers(
+        &[(
+            MAIN,
+            "@test(should_panik)\nfn t() {\n    panic(\"x\")\n}\n\nfn main() {}\n",
+        )],
+        "E0085",
+        "unknown `@test` argument `should_panik`",
+        "change `should_panik` to `should_panic`",
+        "main.nova",
+        "@test(should_panic)",
+    );
+}
+
+#[test]
+fn case_27_make_public_edits_the_sibling_module() {
+    for nl in ["\n", "\r\n"] {
+        let main = "import lib::{hidden}\n\nfn main() {\n    println(\"${hidden()}\")\n}\n"
+            .replace('\n', nl);
+        let lib = "/// The secret.\nfn hidden() -> Int {\n    1\n}\n".replace('\n', nl);
+        offers(
+            &[(MAIN, main.as_str()), ("mem/lib.nova", lib.as_str())],
+            "E0001",
+            "`hidden` is not a public item of module `lib`",
+            "make `hidden` public in `lib`",
+            "lib.nova",
+            &format!("/// The secret.{nl}pub fn hidden()"),
+        );
+    }
+}
+
+#[test]
+fn case_28_make_public_from_tests_edits_the_packages_library() {
+    for (k, nl) in ["\n", "\r\n"].into_iter().enumerate() {
+        let lib = "fn name() -> String {\n    \"app\"\n}\n".replace('\n', nl);
+        let test = "import demo::{name}\n\n@test\nfn t() {\n    assert_eq(name(), \"app\")\n}\n"
+            .replace('\n', nl);
+        let dir = project(
+            &format!("public-from-tests-{k}"),
+            &[
+                ("src/lib.nova", lib.as_str()),
+                ("tests/t.nova", test.as_str()),
+            ],
+        );
+        let none = Buffers(Vec::new());
+        let a = whole(&dir, &none);
+        let d = diagnostic(&a, "E0001", "`name` is not a public item of module `demo`");
+        let edited = apply(&a, fix(d, "make `name` public in `demo`"), &none);
+        let after = text(&edited, "lib.nova");
+        assert!(after.starts_with("pub fn name()"), "{after}");
+        assert_fixes(&a, &whole(&dir, &edited), "E0001", &[]);
+    }
+}
+
+#[test]
+fn case_29_no_make_public_for_a_dependencys_item() {
+    let app = app_and_geom(
+        "public-dependency",
+        &[("src/main.nova", "import geom::{secret}\n\nfn main() {}\n")],
+        "fn secret() -> Int {\n    1\n}\n\npub fn area() -> Int {\n    1\n}\n",
+    );
+    let a = whole(&app, &Buffers(Vec::new()));
+    let d = diagnostic(
+        &a,
+        "E0001",
+        "`secret` is not a public item of module `geom`",
+    );
+    assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+}
+
+#[test]
+fn case_30_remove_an_unreachable_arm() {
+    for nl in ["\n", "\r\n"] {
+        let after_any = format!("        _ => \"any\"{nl}    }}");
+        // On its own line.
+        let src = "fn main() {\n    let x = 1\n    let s = match x {\n        _ => \"any\"\n        1 => \"one\"\n    }\n    println(s)\n}\n"
+            .replace('\n', nl);
+        offers(
+            &[(MAIN, src.as_str())],
+            "E0021",
+            "unreachable match arm",
+            "remove the unreachable arm",
+            "main.nova",
+            &after_any,
+        );
+        // Over several lines.
+        let src = "fn main() {\n    let x = 1\n    let s = match x {\n        _ => \"any\"\n        1 => {\n            \"one\"\n        }\n    }\n    println(s)\n}\n"
+            .replace('\n', nl);
+        offers(
+            &[(MAIN, src.as_str())],
+            "E0021",
+            "unreachable match arm",
+            "remove the unreachable arm",
+            "main.nova",
+            &after_any,
+        );
+    }
+    // Sharing its line, with a trailing comma.
+    offers(
+        &[(
+            MAIN,
+            "fn main() {\n    let x = 1\n    let s = match x { _ => \"any\", 1 => \"one\", }\n    println(s)\n}\n",
+        )],
+        "E0021",
+        "unreachable match arm",
+        "remove the unreachable arm",
+        "main.nova",
+        "match x { _ => \"any\", }",
+    );
+}
+
+#[test]
+fn a_dependencys_errors_offer_no_fix() {
+    // Spec §3.1 (plan decision 19): a fix never edits another package, and
+    // E0060's note stays where its fix is not offered.
+    let app = app_and_geom(
+        "dependency-errors",
+        &[(
+            "src/main.nova",
+            "import geom\n\nfn main() {\n    println(\"${area()}\")\n}\n",
+        )],
+        "@tset\nfn helper() {}\n\npub fn area() -> Int {\n    let x = 1\n    x = 2\n    x\n}\n",
+    );
+    let a = whole(&app, &Buffers(Vec::new()));
+    let mutable = diagnostic(&a, "E0060", "cannot assign to immutable variable `x`");
+    assert!(mutable.fixes.is_empty(), "{:?}", mutable.fixes);
+    assert!(
+        mutable.notes.iter().any(|n| n.contains("let mut x")),
+        "{:?}",
+        mutable.notes
+    );
+    let attribute = diagnostic(&a, "E0082", "unknown attribute `@tset`");
+    assert!(attribute.fixes.is_empty(), "{:?}", attribute.fixes);
+}
