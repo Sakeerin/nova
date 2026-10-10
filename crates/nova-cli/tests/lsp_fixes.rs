@@ -380,3 +380,92 @@ fn organize_imports_puts_the_packages_own_library_with_the_dependencies() {
         "import demo\n\nimport util\n\n@test\nfn t() {\n    assert_eq(name(), \"demo\")\n    assert_eq(one(), 1)\n}\n"
     );
 }
+
+// === Task 12: semantic tokens (spec §7) ===
+
+/// The tokens of `uri`, decoded: line, UTF-16 column, length, type index,
+/// modifier bits.
+fn tokens(client: &mut Client, uri: &str) -> Vec<(u64, u64, u64, u64, u64)> {
+    let response = client.request(
+        "textDocument/semanticTokens/full",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let data: Vec<u64> = response["result"]["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{response}"))
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    let (mut line, mut col) = (0, 0);
+    data.chunks(5)
+        .map(|t| {
+            line += t[0];
+            col = if t[0] == 0 { col + t[1] } else { t[1] };
+            (line, col, t[2], t[3], t[4])
+        })
+        .collect()
+}
+
+/// The legend's indices (spec §7.1).
+const T_FUNCTION: u64 = 10;
+const T_VARIABLE: u64 = 7;
+const M_DECLARATION: u64 = 1;
+const M_DEFAULT_LIBRARY: u64 = 4;
+const M_MUTABLE: u64 = 8;
+
+#[test]
+fn the_server_advertises_semantic_tokens() {
+    let dir = project("tokens-capability", &[("main.nova", "fn main() {}\n")]);
+    let client = Client::start(&dir, false);
+    let provider = &client.initialized["capabilities"]["semanticTokensProvider"];
+    assert_eq!(provider["full"], true, "{provider}");
+    assert_eq!(
+        provider["legend"]["tokenTypes"][0], "namespace",
+        "{provider}"
+    );
+    assert_eq!(
+        provider["legend"]["tokenModifiers"][3], "mutable",
+        "{provider}"
+    );
+}
+
+#[test]
+fn semantic_tokens_name_by_name() {
+    let main = "fn main() {\n    let mut x = 1\n    x = x + 1\n    println(\"${x}\")\n}\n";
+    let dir = project("tokens", &[("main.nova", main)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, main);
+    let found = tokens(&mut client, &uri);
+    assert!(
+        found.contains(&(0, 3, 4, T_FUNCTION, M_DECLARATION)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&(1, 12, 1, T_VARIABLE, M_DECLARATION | M_MUTABLE)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&(2, 4, 1, T_VARIABLE, M_MUTABLE)),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&(3, 4, 7, T_FUNCTION, M_DEFAULT_LIBRARY)),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn semantic_tokens_in_a_file_with_an_error() {
+    let main = "fn main() {\n    let x = 1\n    let y = nope + x\n}\n";
+    let dir = project("tokens-error", &[("main.nova", main)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, main);
+    let found = tokens(&mut client, &uri);
+    assert!(found.contains(&(2, 19, 1, T_VARIABLE, 0)), "{found:?}");
+    assert!(
+        !found.iter().any(|t| t.0 == 2 && t.1 == 12),
+        "an unresolved name: {found:?}"
+    );
+}

@@ -17,6 +17,7 @@ mod navigate;
 mod organize;
 mod rename;
 mod std_cache;
+mod tokens;
 mod uri;
 mod workspace;
 
@@ -32,7 +33,7 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest,
-    References, RegisterCapability, Rename, Request as _,
+    References, RegisterCapability, Rename, Request as _, SemanticTokensFullRequest,
 };
 use nova_diagnostics::LineIndex;
 use serde_json::Value;
@@ -143,6 +144,16 @@ fn capabilities() -> lsp::ServerCapabilities {
                 work_done_progress_options: Default::default(),
             },
         )),
+        semantic_tokens_provider: Some(
+            lsp::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                lsp::SemanticTokensOptions {
+                    legend: tokens::legend(),
+                    range: Some(false),
+                    full: Some(lsp::SemanticTokensFullOptions::Bool(true)),
+                    work_done_progress_options: Default::default(),
+                },
+            ),
+        ),
         ..Default::default()
     }
 }
@@ -387,6 +398,24 @@ impl Server<'_> {
                             })
                             .unwrap_or_default();
                         Response::new_ok(request.id, found)
+                    }
+                    Err(e) => invalid(request.id, e),
+                }
+            }
+            SemanticTokensFullRequest::METHOD => {
+                match serde_json::from_value::<lsp::SemanticTokensParams>(request.params) {
+                    Ok(p) => {
+                        let data = self
+                            .answer_of(&p.text_document.uri)
+                            .map(|(answer, _, _)| tokens::tokens(&answer))
+                            .unwrap_or_default();
+                        Response::new_ok(
+                            request.id,
+                            lsp::SemanticTokensResult::Tokens(lsp::SemanticTokens {
+                                result_id: None,
+                                data,
+                            }),
+                        )
                     }
                     Err(e) => invalid(request.id, e),
                 }
