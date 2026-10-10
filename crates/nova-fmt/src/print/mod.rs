@@ -182,8 +182,16 @@ impl<'s, 't> Printer<'s, 't> {
         let mut i = 0;
         while i < items.len() {
             if matches!(items[i].value, Item::Import(_)) {
+                // Spec 3.4b §6.6: a blank line between two imports ends a
+                // group, as in gofmt, and each group is sorted on its own.
                 let start = i;
-                while i < items.len() && matches!(items[i].value, Item::Import(_)) {
+                i += 1;
+                while i < items.len()
+                    && matches!(items[i].value, Item::Import(_))
+                    && !self
+                        .src
+                        .blank_line_in(items[i - 1].span.end, items[i].span.start)
+                {
                     i += 1;
                 }
                 self.import_run(&mut v, &items[start..i]);
@@ -198,8 +206,8 @@ impl<'s, 't> Printer<'s, 't> {
         self.vertical_finish(v, src.text.len() as u32)
     }
 
-    /// A run of imports, sorted by path and printed one per line, with no
-    /// blank line inside the run. Each import takes its comments with it,
+    /// A group of imports, a run with no blank line inside it (spec 3.4b
+    /// §6.6), sorted by path and printed one per line. Each import takes its comments with it,
     /// except comments that a blank line separates from the run's first
     /// import: those belong to the file, and stay above the run (spec §6;
     /// the 3.1 plan's decision 3).
