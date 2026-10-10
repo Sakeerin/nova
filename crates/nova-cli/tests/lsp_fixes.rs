@@ -469,3 +469,76 @@ fn semantic_tokens_in_a_file_with_an_error() {
         "an unresolved name: {found:?}"
     );
 }
+
+// === Task 13: the gate (spec §10) ===
+
+#[test]
+fn the_gate_on_a_project_with_a_dependency() {
+    // A quick fix importing from the dependency, "make public" editing a
+    // second file, organize imports with both groups, and semantic tokens.
+    let main = "import shapes::{helper}\nimport tidy\n\nfn main() {\n    println(\"${total()} ${helper()}\")\n}\n";
+    let shapes =
+        "fn helper() -> Int {\n    2\n}\n\npub fn twice() -> Int {\n    side() * helper()\n}\n";
+    let tidy = "import shapes\nimport geom\nimport extra\n\npub fn total() -> Int {\n    area() + twice()\n}\n";
+    let (app, _geom) = lsp_client::app_with_main(
+        "gate",
+        "pub fn area() -> Int {\n    1\n}\n\npub fn side() -> Int {\n    2\n}\n",
+        main,
+    );
+    let src = app.join("src");
+    std::fs::write(src.join("shapes.nova"), shapes).unwrap();
+    std::fs::write(src.join("tidy.nova"), tidy).unwrap();
+    std::fs::write(src.join("extra.nova"), EXTRA).unwrap();
+    let (main_uri, shapes_uri, tidy_uri) = (
+        file_uri(&src.join("main.nova")),
+        file_uri(&src.join("shapes.nova")),
+        file_uri(&src.join("tidy.nova")),
+    );
+    let mut client = Client::start(&app, false);
+    open(&mut client, &main_uri, main);
+    open(&mut client, &shapes_uri, shapes);
+    open(&mut client, &tidy_uri, tidy);
+    let start = json!({ "line": 0, "character": 0 });
+
+    let found = actions(&mut client, &shapes_uri, at(shapes, "side()", 0), None);
+    let import = titled(&found, "Import `side` from `geom`");
+    assert_eq!(
+        edits_in(import, &shapes_uri),
+        [
+            json!({ "range": { "start": start, "end": start }, "newText": "import geom::{side}\n\n" })
+        ]
+    );
+
+    let found = actions(&mut client, &main_uri, at(main, "helper}", 0), None);
+    let public = titled(&found, "Make `helper` public in `shapes`");
+    assert_eq!(
+        edits_in(public, &shapes_uri),
+        [json!({ "range": { "start": start, "end": start }, "newText": "pub " })]
+    );
+
+    let found = actions(
+        &mut client,
+        &tidy_uri,
+        at(tidy, "pub fn", 0),
+        Some(&["source.organizeImports"]),
+    );
+    let organize = titled(&found, "Organize imports");
+    assert_eq!(
+        applied(tidy, &edits_in(organize, &tidy_uri)),
+        "import geom\n\nimport shapes\n\npub fn total() -> Int {\n    area() + twice()\n}\n"
+    );
+
+    let found = tokens(&mut client, &tidy_uri);
+    assert!(
+        found.contains(&(1, 7, 4, 0, 0)),
+        "`geom`, a namespace: {found:?}"
+    );
+    assert!(
+        found.contains(&(4, 7, 5, T_FUNCTION, M_DECLARATION)),
+        "`total`: {found:?}"
+    );
+    assert!(
+        found.contains(&(5, 4, 4, T_FUNCTION, 0)),
+        "`area`: {found:?}"
+    );
+}
