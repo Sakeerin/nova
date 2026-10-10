@@ -62,6 +62,11 @@ impl FileDb {
         self.files.get(id.0 as usize).map(|f| f.name.as_str())
     }
 
+    /// The file added under `name`, the latest if several were.
+    pub fn id_of(&self, name: &str) -> Option<FileId> {
+        self.by_name.get(name).copied()
+    }
+
     /// Returns (1-based line, 1-based column) for a byte offset.
     pub fn location(&self, id: FileId, offset: u32) -> Option<(usize, usize)> {
         let file = self.files.get(id.0 as usize)?;
@@ -72,5 +77,20 @@ impl FileDb {
         let line_start = file.line_starts[line_idx] as usize;
         let col = offset as usize - line_start + 1;
         Some((line_idx + 1, col))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_is_found_by_its_name() {
+        let mut db = FileDb::new();
+        let a = db.add("<std/core>", "a");
+        let b = db.add("b.nova", "b");
+        assert_eq!(db.id_of("<std/core>"), Some(a));
+        assert_eq!(db.id_of("b.nova"), Some(b));
+        assert_eq!(db.id_of("c.nova"), None);
     }
 }

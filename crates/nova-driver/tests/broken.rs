@@ -3,8 +3,9 @@
 //!
 //! Each example, cut at 16 evenly spaced character boundaries, and each
 //! `tests/runtime/*.nova`, cut at 2, is analysed with `keep_going`, as the
-//! language server analyses a file being typed. Each analysis must return
-//! within 10 s without panicking.
+//! language server analyses a file being typed. Each analysis, with the
+//! index on, must return within 10 s without panicking, and every
+//! occurrence it records must lie inside its file.
 
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
@@ -45,6 +46,17 @@ fn cuts(text: &str, n: usize) -> Vec<String> {
     (1..=n)
         .map(|k| text[..bounds[(bounds.len() * k / (n + 1)).min(bounds.len() - 1)]].to_string())
         .collect()
+}
+
+/// Whether every occurrence the index recorded lies inside its file's text
+/// (spec 3.4a §8.3).
+fn spans_inside(a: &nova_driver::Analysis) -> bool {
+    a.index.as_ref().map_or(true, |index| {
+        index.occurrences.iter().all(|o| {
+            a.db.get_source(o.span.file)
+                .is_some_and(|s| o.span.start <= o.span.end && o.span.end as usize <= s.len())
+        })
+    })
 }
 
 #[test]
@@ -94,6 +106,7 @@ fn cut_programs_never_panic_or_hang() {
             let options = Options {
                 keep_going: true,
                 tests: true,
+                index: true,
                 ..Options::default()
             };
             let sources = Cut {
@@ -102,12 +115,13 @@ fn cut_programs_never_panic_or_hang() {
             };
             let started = Instant::now();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                analyze(&path, &sources, &options).map(|a| a.diagnostics.len())
+                analyze(&path, &sources, &options).map(|a| spans_inside(&a))
             }));
             let took = started.elapsed();
             current.lock().unwrap()[t] = None;
+            let spans_ok = !matches!(outcome, Ok(Ok(false)));
             if done
-                .send((path, text.len(), outcome.is_ok(), took))
+                .send((path, text.len(), outcome.is_ok(), spans_ok, took))
                 .is_err()
             {
                 break;
@@ -119,9 +133,14 @@ fn cut_programs_never_panic_or_hang() {
     let mut failures: Vec<String> = Vec::new();
     for _ in 0..total {
         match results.recv_timeout(Duration::from_secs(30)) {
-            Ok((path, len, ok, took)) => {
+            Ok((path, len, ok, spans_ok, took)) => {
                 if !ok {
                     failures.push(format!("panicked: {} cut at byte {len}", path.display()));
+                } else if !spans_ok {
+                    failures.push(format!(
+                        "an occurrence outside its file: {} cut at byte {len}",
+                        path.display()
+                    ));
                 } else if took > Duration::from_secs(10) {
                     failures.push(format!(
                         "took {took:?}: {} cut at byte {len}",
