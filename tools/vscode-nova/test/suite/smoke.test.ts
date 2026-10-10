@@ -1,6 +1,6 @@
-// The extension's smoke test (spec §7.6; 3.4a §7): the language, a
-// diagnostic, a completion, a formatted document, a hover and a definition,
-// through the real `nova lsp`.
+// The extension's smoke test (spec §7.6; 3.4a §7; 3.4b §8): the language, a
+// diagnostic, a completion, a formatted document, a hover, a definition,
+// semantic tokens and a quick fix, through the real `nova lsp`.
 
 import * as assert from "assert";
 import * as path from "path";
@@ -127,5 +127,49 @@ describe("the Nova extension", () => {
     assert.ok(target.fsPath.endsWith("shapes.nova"), target.fsPath);
     assert.strictEqual(range.start.line, 1);
     assert.strictEqual(range.start.character, 7);
+  });
+
+  it("colours a call as a function with a semantic token", async () => {
+    const uri = vscode.Uri.file(path.join(fixture, "src", "navigate.nova"));
+    await vscode.workspace.openTextDocument(uri);
+    // One `eventually`, which asks for the legend and the tokens in each
+    // attempt: two would wait up to 120 s, past mocha's 90 s timeout.
+    const types = await eventually("a function token", async () => {
+      const legend = await vscode.commands.executeCommand<vscode.SemanticTokensLegend>(
+        "vscode.provideDocumentSemanticTokensLegend",
+        uri,
+      );
+      const found = await vscode.commands.executeCommand<vscode.SemanticTokens>(
+        "vscode.provideDocumentSemanticTokens",
+        uri,
+      );
+      if (legend === undefined || found === undefined) {
+        return undefined;
+      }
+      const fn = legend.tokenTypes.indexOf("function");
+      for (let i = 3; i < found.data.length; i += 5) {
+        if (found.data[i] === fn) {
+          return legend.tokenTypes;
+        }
+      }
+      return undefined;
+    });
+    assert.ok(types.includes("function"), types.join(", "));
+  });
+
+  it("offers a quick fix for a planted error", async () => {
+    const uri = vscode.Uri.file(path.join(fixture, "src", "fix.nova"));
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const at = doc.positionAt(doc.getText().indexOf("x = 2"));
+    const titles = await eventually("a quick fix", async () => {
+      const found = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+        "vscode.executeCodeActionProvider",
+        uri,
+        new vscode.Range(at, at),
+      );
+      const names = (found ?? []).map((a) => a.title);
+      return names.includes("Make `x` mutable") ? names : undefined;
+    });
+    assert.ok(titles.includes("Make `x` mutable"), titles.join(", "));
   });
 });
