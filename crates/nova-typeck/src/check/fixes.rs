@@ -374,4 +374,22 @@ impl<'a> Checker<'a> {
         });
         suggest::change_to(method, names.iter().map(String::as_str))
     }
+
+    /// "remove the unreachable arm" (spec §4.5), `arm` being its pattern
+    /// through its body, placed by §4.7's rules; only in a module this
+    /// project owns (plan decision 19).
+    pub(super) fn remove_arm_fix(&self, arm: Span) -> Option<Fix> {
+        if !self.defs.owned(self.cur_module) {
+            return None;
+        }
+        let text = self.sources?.get_source(arm.file)?;
+        let (start, end) = lines::arm_removal(text, arm.start as usize, arm.end as usize)?;
+        Some(Fix::new(
+            "remove the unreachable arm",
+            vec![Edit::replace(
+                Span::new(start as u32, end as u32, arm.file),
+                "",
+            )],
+        ))
+    }
 }

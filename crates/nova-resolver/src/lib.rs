@@ -14,7 +14,7 @@
 use indexmap::IndexMap;
 use nova_ast::item::{Attribute, ExternItem, Import, ImportKind, TypeDef};
 use nova_ast::{File, Function, Item, Type};
-use nova_diagnostics::{Diagnostic, FileId, Span};
+use nova_diagnostics::{suggest, Diagnostic, Edit, FileId, Fix, Span};
 use rustc_hash::FxHashMap;
 
 pub mod index;
@@ -1757,10 +1757,15 @@ pub fn resolve_program(
         exports.push(Exports::default());
     }
 
+    // Spec 3.4b §3.1 (plan decision 19): a fix may edit only the root
+    // package's modules or a loose program's.
+    let owned = |mid: usize| mid < std_start && matches!(all[mid].package, None | Some(0));
+
     // Pass 1: collect each module's own definitions into its scope + exports.
     for (mid, m) in all.iter().enumerate() {
         let mut first_value: IndexMap<String, Span> = IndexMap::new();
         let mut first_type: IndexMap<String, Span> = IndexMap::new();
+        let before = diagnostics.len();
         for item in &m.file.items {
             let item_index = merged.len();
             definitions.item_module.push(mid as u32);
@@ -1777,23 +1782,34 @@ pub fn resolve_program(
             );
             merged.push(item.clone());
         }
+        if !owned(mid) {
+            diagnostics[before..]
+                .iter_mut()
+                .for_each(|d| d.fixes.clear());
+        }
     }
 
     // Pass 2: resolve `import`s, binding other modules' public names. What
     // each import names is its module's table (spec 3.3a §4.5).
     for (mid, m) in all.iter().enumerate() {
+        let before = diagnostics.len();
         for item in &m.file.items {
             if let Item::Import(imp) = &item.value {
                 resolve_import(
                     &mut definitions,
                     &exports,
-                    &m.imports,
+                    &all,
                     mid,
                     imp,
                     &mut diagnostics,
                     &mut imports,
                 );
             }
+        }
+        if !owned(mid) {
+            diagnostics[before..]
+                .iter_mut()
+                .for_each(|d| d.fixes.clear());
         }
     }
 
@@ -2353,7 +2369,13 @@ fn validate_test_function(
     let mut collected = false;
     for attr in &f.attrs {
         if attr.name.value != "test" {
-            diagnostics.push(unknown_attribute(attr));
+            // Spec 3.4b §4.3: on a function only, since `@test` on anything
+            // else is E0083 (decision 38).
+            let mut d = unknown_attribute(attr);
+            if let Some(fix) = suggest::change_to(&attr.name, KNOWN_ATTRIBUTES.iter().copied()) {
+                d = d.with_fix(fix);
+            }
+            diagnostics.push(d);
             continue;
         }
         let mut well_formed = true;
@@ -2362,17 +2384,19 @@ fn validate_test_function(
             if arg.value == "should_panic" {
                 should_panic = true;
             } else {
-                diagnostics.push(
-                    Diagnostic::error(
-                        "E0085",
-                        format!(
-                            "unknown `@test` argument `{}`; the accepted arguments are: {}",
-                            arg.value,
-                            KNOWN_TEST_ARGS.join(", "),
-                        ),
-                    )
-                    .with_primary_label(arg.span, "unknown argument"),
-                );
+                let mut d = Diagnostic::error(
+                    "E0085",
+                    format!(
+                        "unknown `@test` argument `{}`; the accepted arguments are: {}",
+                        arg.value,
+                        KNOWN_TEST_ARGS.join(", "),
+                    ),
+                )
+                .with_primary_label(arg.span, "unknown argument");
+                if let Some(fix) = suggest::change_to(arg, KNOWN_TEST_ARGS.iter().copied()) {
+                    d = d.with_fix(fix);
+                }
+                diagnostics.push(d);
                 well_formed = false;
             }
         }
@@ -2450,7 +2474,7 @@ fn test_shape_violations(f: &Function) -> Vec<(&'static str, Option<Span>)> {
 fn resolve_import(
     definitions: &mut Definitions,
     exports: &[Exports],
-    imports: &std::collections::HashMap<String, ImportTarget>,
+    modules: &[ModuleSource],
     mid: usize,
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2475,7 +2499,7 @@ fn resolve_import(
         .last()
         .map(|s| s.value.as_str())
         .unwrap_or("");
-    let target = match imports.get(target_name) {
+    let target = match modules[mid].imports.get(target_name) {
         Some(ImportTarget::Module(target)) => *target,
         Some(ImportTarget::Reported) => return,
         None => {
@@ -2589,13 +2613,18 @@ fn resolve_import(
                     found = true;
                 }
                 if !found {
-                    diagnostics.push(
-                        Diagnostic::error(
-                            "E0001",
-                            format!("`{name}` is not a public item of module `{target_name}`"),
-                        )
-                        .with_primary_label(n.span, "not found or not `pub`"),
-                    );
+                    let mut diag = Diagnostic::error(
+                        "E0001",
+                        format!("`{name}` is not a public item of module `{target_name}`"),
+                    )
+                    .with_primary_label(n.span, "not found or not `pub`");
+                    let same_package = modules[mid].package == modules[target].package;
+                    if let Some(fix) =
+                        make_public(&modules[target], name, target_name, same_package)
+                    {
+                        diag = diag.with_fix(fix);
+                    }
+                    diagnostics.push(diag);
                 }
             }
         }
@@ -2610,6 +2639,33 @@ fn resolve_import(
 
 fn is_pub(vis: nova_ast::item::Visibility) -> bool {
     matches!(vis, nova_ast::item::Visibility::Pub)
+}
+
+/// "make `x` public in `m`" (spec 3.4b §4.4): `pub ` before the keyword of
+/// each private item `module` declares named `name`, when `module` is the
+/// importer's own package's. The keyword is found in the module's text.
+fn make_public(module: &ModuleSource, name: &str, import: &str, same_package: bool) -> Option<Fix> {
+    if !same_package {
+        return None;
+    }
+    let text = module.text?;
+    let mut edits = Vec::new();
+    for item in &module.file.items {
+        let (vis, item_name) = match &item.value {
+            Item::Function(f) => (f.vis, &f.name),
+            Item::Record(r) => (r.vis, &r.name),
+            Item::Type(t) => (t.vis, &t.name),
+            Item::Trait(t) => (t.vis, &t.name),
+            Item::Const(c) => (c.vis, &c.name),
+            _ => continue,
+        };
+        if item_name.value != name || is_pub(vis) {
+            continue;
+        }
+        let at = nova_diagnostics::lines::keyword_start(text, item_name.span.start as usize)?;
+        edits.push(Edit::insert(at as u32, item_name.span.file, "pub "));
+    }
+    (!edits.is_empty()).then(|| Fix::new(format!("make `{name}` public in `{import}`"), edits))
 }
 
 #[allow(clippy::too_many_arguments)]

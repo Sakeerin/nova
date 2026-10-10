@@ -6817,9 +6817,10 @@ impl<'a> Checker<'a> {
         let scrut = self.check_expr(fcx, scrutinee);
         let result_ty = fcx.icx.fresh();
         let mut hir_arms = Vec::new();
-        // Normalized (pattern, has-guard, span) per arm, for the exhaustiveness
-        // and reachability analysis after all arms are checked.
-        let mut arm_pats: Vec<(usefulness::Pat, bool, Span)> = Vec::new();
+        // Normalized (pattern, has-guard, its pattern's span, the whole arm's
+        // span) per arm, for the exhaustiveness and reachability analysis
+        // after all arms are checked.
+        let mut arm_pats: Vec<(usefulness::Pat, bool, Span, Span)> = Vec::new();
 
         for arm in arms {
             let guarded = arm.guard.is_some();
@@ -6847,7 +6848,12 @@ impl<'a> Checker<'a> {
                     body.span,
                 );
             }
-            arm_pats.push((upat, guarded, arm.pattern.span));
+            arm_pats.push((
+                upat,
+                guarded,
+                arm.pattern.span,
+                arm.pattern.span.merge(arm.body.span),
+            ));
             hir_arms.push(hir::Arm {
                 pattern,
                 body,
@@ -6883,7 +6889,7 @@ impl<'a> Checker<'a> {
         &mut self,
         fcx: &mut FnCtx,
         scrut: &hir::Expr,
-        arm_pats: &[(usefulness::Pat, bool, Span)],
+        arm_pats: &[(usefulness::Pat, bool, Span, Span)],
         span: Span,
     ) {
         let scrut_ty = fcx.icx.apply(&scrut.ty);
@@ -6918,7 +6924,7 @@ impl<'a> Checker<'a> {
         // (unguarded) arm does. A guarded arm's match is conditional, so it
         // neither is reported nor counts toward coverage.
         let mut prior: Vec<Vec<usefulness::Pat>> = Vec::new();
-        for (pat, guarded, arm_span) in arm_pats {
+        for (pat, guarded, arm_span, arm) in arm_pats {
             if *guarded {
                 continue;
             }
@@ -6926,13 +6932,16 @@ impl<'a> Checker<'a> {
                 .usefulness(&prior, std::slice::from_ref(pat), &col)
                 .is_empty()
             {
-                self.diagnostics.push(
-                    Diagnostic::warning("E0021", "unreachable match arm")
-                        .with_primary_label(*arm_span, "this arm is never reached")
-                        .with_note(
-                            "an earlier arm already matches every value this one would".to_string(),
-                        ),
-                );
+                let mut d = Diagnostic::warning("E0021", "unreachable match arm")
+                    .with_primary_label(*arm_span, "this arm is never reached")
+                    .with_note(
+                        "an earlier arm already matches every value this one would".to_string(),
+                    );
+                // Spec 3.4b §4.5.
+                if let Some(fix) = self.remove_arm_fix(*arm) {
+                    d = d.with_fix(fix);
+                }
+                self.diagnostics.push(d);
             }
             prior.push(vec![pat.clone()]);
         }
