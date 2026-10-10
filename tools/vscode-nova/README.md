@@ -1,7 +1,10 @@
 # Nova for VS Code
 
 Colouring for `.nova` files, and from `nova lsp`: diagnostics, completion,
-formatting, hover, go to definition, find references and rename.
+formatting, hover, go to definition, find references, rename, quick
+fixes, organize imports and semantic highlighting. A local or parameter
+declared `mut` carries the `mutable` token modifier, which a theme can
+style.
 
 The extension runs the `nova` you have installed: the `nova.server.path`
 setting, or else `nova` from your PATH. Install it with

@@ -1,7 +1,7 @@
 {
   "name": "nova",
   "displayName": "Nova",
-  "description": "The Nova language: colouring, and diagnostics, completion, formatting, hover, go to definition, find references and rename from nova lsp.",
+  "description": "The Nova language: colouring, and diagnostics, completion, formatting, hover, go to definition, find references, rename, quick fixes, organize imports and semantic highlighting from nova lsp.",
   "version": "0.2.0",
   "publisher": "sakeerin",
   "license": "MIT OR Apache-2.0",
@@ -34,6 +34,12 @@
         "language": "nova",
         "scopeName": "source.nova",
         "path": "./syntaxes/nova.tmLanguage.json"
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "mutable",
+        "description": "A local or parameter declared mut"
       }
     ],
     "configuration": {
