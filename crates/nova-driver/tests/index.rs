@@ -512,3 +512,20 @@ fn main() {\n    let p = P { n: 1 }\n    let s = \"${p}\"\n    let mut v = Vec::
         );
     }
 }
+
+#[test]
+fn the_index_records_how_each_local_was_declared() {
+    // Spec 3.4b §4.6, §7.2: parameters and `mut`, for semantic tokens.
+    let src = "fn f(mut a: Int, b: Int) -> Int {\n    let mut c = a\n    let d = b\n    c = d\n    c\n}\n\nfn main() {}\n";
+    let a = analyse(&[(MAIN, src)]);
+    let flags = |word: &str| {
+        let (file, start) = place(&a, MAIN, word, 0);
+        let span = nova_diagnostics::Span::new(start, start + word.len() as u32, file);
+        index(&a).locals.get(&span).copied()
+    };
+    let declared = |parameter, mutable| Some(nova_resolver::LocalFlags { parameter, mutable });
+    assert_eq!(flags("a"), declared(true, true));
+    assert_eq!(flags("b"), declared(true, false));
+    assert_eq!(flags("c"), declared(false, true));
+    assert_eq!(flags("d"), declared(false, false));
+}

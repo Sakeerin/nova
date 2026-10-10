@@ -3,11 +3,12 @@
 
 use nova_ast as ast;
 use nova_ast::item::{ExternItem, TraitItem, TypeDef};
-use nova_diagnostics::{Diagnostic, Span, Spanned};
+use nova_diagnostics::{Diagnostic, FileDb, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
 use nova_resolver::{
-    Builtin, DefId, DefKind, Definitions, Index, MethodOwner, ModuleId, Res, Role, Target,
+    Builtin, DefId, DefKind, Definitions, Index, LocalFlags, MethodOwner, ModuleId, Res, Role,
+    Target,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -17,6 +18,10 @@ use crate::{
     display_ty, display_ty_named, CheckOptions, CheckResult, Member, MemberKind, ProbePoint,
     ProbeResult,
 };
+
+mod fixes;
+
+use fixes::Binding;
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -149,6 +154,8 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         probe_locals_pending: None,
         index: options.index.then(Index::default),
         type_params: Vec::new(),
+        sources: options.sources,
+        bindings: FxHashMap::default(),
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -306,6 +313,11 @@ struct Checker<'a> {
     /// declaration spans, the impl's first (plan decision 4). Set by
     /// [`Checker::enter_type_params`] at each item entry point.
     type_params: Vec<(String, Span)>,
+    /// The program's sources (spec 3.4b §4.7), when the caller gave them.
+    sources: Option<&'a FileDb>,
+    /// How each local the user wrote was bound, by its declaration span
+    /// (spec 3.4b §4.1; plan decision 5).
+    bindings: FxHashMap<Span, Binding>,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -3015,6 +3027,7 @@ impl<'a> Checker<'a> {
                 ty.clone(),
                 p.is_mut,
                 p.name.span,
+                Binding::Param,
             );
         }
 
@@ -3267,8 +3280,14 @@ impl<'a> Checker<'a> {
                             ("_".to_string(), false, pattern.span)
                         }
                     };
-                    let local =
-                        self.bind_local(fcx, name, value.ty.clone(), *is_mut || pat_mut, name_span);
+                    let local = self.bind_local(
+                        fcx,
+                        name,
+                        value.ty.clone(),
+                        *is_mut || pat_mut,
+                        name_span,
+                        Binding::Let,
+                    );
                     stmts.push(hir::Expr {
                         kind: hir::ExprKind::Let {
                             local,
@@ -4371,7 +4390,7 @@ impl<'a> Checker<'a> {
 
         fcx.scopes.push(FxHashMap::default());
         let (var_name, var_span) = self.for_loop_var(pattern);
-        let i = self.bind_local(fcx, var_name, Ty::Int, false, var_span);
+        let i = self.bind_local(fcx, var_name, Ty::Int, false, var_span, Binding::Other);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4646,7 +4665,7 @@ impl<'a> Checker<'a> {
 
         fcx.scopes.push(FxHashMap::default());
         let (var_name, var_span) = self.for_loop_var(pattern);
-        let elem = self.bind_local(fcx, var_name, item_ty, false, var_span);
+        let elem = self.bind_local(fcx, var_name, item_ty, false, var_span, Binding::Other);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4781,8 +4800,14 @@ impl<'a> Checker<'a> {
             } else {
                 self.convert_ty(&p.ty, &generics_scope, &fcx.param_bounds)
             };
-            let local =
-                self.bind_local(fcx, p.name.value.clone(), ty.clone(), p.is_mut, p.name.span);
+            let local = self.bind_local(
+                fcx,
+                p.name.value.clone(),
+                ty.clone(),
+                p.is_mut,
+                p.name.span,
+                Binding::Param,
+            );
             param_locals.push(local);
             param_types.push(ty);
         }
@@ -6433,13 +6458,19 @@ impl<'a> Checker<'a> {
                 format!("cannot assign to immutable variable `{name}`"),
                 span,
             );
-            self.diagnostics
-                .last_mut()
-                .expect("just pushed")
-                .notes
-                .push(format!(
-                    "declare it as `let mut {name}` to allow assignment"
-                ));
+            // Spec 3.4b §3.3: where a fix is offered, it says what the note
+            // would.
+            match self.mutable_fix(name, info.span) {
+                Some(fix) => self.push_fix(Some(fix)),
+                None => self
+                    .diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(format!(
+                        "declare it as `let mut {name}` to allow assignment"
+                    )),
+            }
         }
         let value = self.check_expr(fcx, rhs);
 
@@ -6493,7 +6524,10 @@ impl<'a> Checker<'a> {
             ast::Expr::Path(p) if p.segments.len() == 1 => {
                 match fcx.lookup(&p.segments[0].value) {
                     Some(l) if fcx.locals[l.0 as usize].is_mut => PlaceRoot::Mutable,
-                    Some(_) => PlaceRoot::ImmutableLocal(p.segments[0].value.clone()),
+                    Some(l) => PlaceRoot::ImmutableLocal(
+                        p.segments[0].value.clone(),
+                        fcx.locals[l.0 as usize].span,
+                    ),
                     // A constant, a multi-segment path, or an unknown name is
                     // not a mutable place.
                     None => PlaceRoot::NotAPlace,
@@ -6524,8 +6558,14 @@ impl<'a> Checker<'a> {
     ) {
         match self.place_root(fcx, target) {
             PlaceRoot::Mutable => {}
-            PlaceRoot::ImmutableLocal(name) => {
+            PlaceRoot::ImmutableLocal(name, decl) => {
                 self.error("E0060", what.immutable_message(&name), span);
+                // Spec 3.4b §3.3: where a fix is offered, it says what the
+                // note would.
+                if let Some(fix) = self.mutable_fix(&name, decl) {
+                    self.push_fix(Some(fix));
+                    return;
+                }
                 // `let mut self` is not Nova syntax — a receiver's mutability is
                 // declared in the signature, so a `self` root needs the other
                 // advice entirely. `place_root` hands back the root's *name*,
@@ -6933,6 +6973,7 @@ impl<'a> Checker<'a> {
                     scrut_ty.clone(),
                     *is_mut,
                     name.span,
+                    Binding::Other,
                 );
                 hir::Pattern::Bind(local)
             }
@@ -7095,8 +7136,14 @@ impl<'a> Checker<'a> {
             match &field_pat.value {
                 ast::Pattern::Wildcard => binders.push(None),
                 ast::Pattern::Ident { is_mut, name } => {
-                    let local =
-                        self.bind_local(fcx, name.value.clone(), bound_ty, *is_mut, name.span);
+                    let local = self.bind_local(
+                        fcx,
+                        name.value.clone(),
+                        bound_ty,
+                        *is_mut,
+                        name.span,
+                        Binding::Other,
+                    );
                     binders.push(Some(local));
                 }
                 _ => {
@@ -7179,7 +7226,8 @@ impl<'a> Checker<'a> {
 
     /// `fcx.new_local` for a name the user wrote, declaring it (spec §3.2).
     /// `_` declares nothing. The checker's own locals call `new_local`
-    /// directly and are never recorded.
+    /// directly and are never recorded. `binding` says how it was bound
+    /// (spec 3.4b §4.1), which the index also keeps (3.4b §4.6).
     fn bind_local(
         &mut self,
         fcx: &mut FnCtx,
@@ -7187,10 +7235,21 @@ impl<'a> Checker<'a> {
         ty: Ty,
         is_mut: bool,
         span: Span,
+        binding: Binding,
     ) -> LocalId {
         if name != "_" {
             self.note_decl(span, Target::Local(span));
+            if let Some(index) = self.index.as_mut() {
+                index.locals.insert(
+                    span,
+                    LocalFlags {
+                        parameter: binding == Binding::Param,
+                        mutable: is_mut,
+                    },
+                );
+            }
         }
+        self.bindings.insert(span, binding);
         fcx.new_local(name, ty, is_mut, span)
     }
 
@@ -7199,6 +7258,15 @@ impl<'a> Checker<'a> {
     fn note_params(&mut self, params: &[ast::Param]) {
         for p in params {
             self.note_decl(p.name.span, Target::Local(p.name.span));
+            if let Some(index) = self.index.as_mut() {
+                index.locals.insert(
+                    p.name.span,
+                    LocalFlags {
+                        parameter: true,
+                        mutable: p.is_mut,
+                    },
+                );
+            }
         }
     }
 
@@ -7943,8 +8011,9 @@ impl MutTarget {
 enum PlaceRoot {
     /// Rooted at a mutable local — mutation through it is allowed.
     Mutable,
-    /// Rooted at an immutable local of the given name.
-    ImmutableLocal(String),
+    /// Rooted at an immutable local: its name, and its declaration's span
+    /// (spec 3.4b §4.1).
+    ImmutableLocal(String, Span),
     /// No assignable root: a temporary (call result, literal), a constant, or
     /// an unresolved/multi-segment path.
     NotAPlace,
@@ -10045,10 +10114,11 @@ mod tests {
             d.message,
             "`P.bump` mutates its receiver, but `p` is immutable"
         );
-        assert!(
-            d.notes.iter().any(|n| n.contains("let mut p")),
-            "{:?}",
-            d.notes
+        // Spec 3.4b §3.3: the fix says what the note did.
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        assert_eq!(
+            d.fixes.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+            ["make `p` mutable"]
         );
     }
 
@@ -10271,10 +10341,11 @@ mod tests {
             d.message,
             "`bump` mutates its receiver, but `c` is immutable"
         );
-        assert!(
-            d.notes.iter().any(|n| n.contains("let mut c")),
-            "{:?}",
-            d.notes
+        // Spec 3.4b §3.3: the fix says what the note did.
+        assert!(d.notes.is_empty(), "{:?}", d.notes);
+        assert_eq!(
+            d.fixes.iter().map(|f| f.title.as_str()).collect::<Vec<_>>(),
+            ["make `c` mutable"]
         );
     }
 
@@ -13402,6 +13473,8 @@ mod tests {
             probe_locals_pending: None,
             index: None,
             type_params: Vec::new(),
+            sources: None,
+            bindings: FxHashMap::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -13474,6 +13547,8 @@ mod tests {
             probe_locals_pending: None,
             index: None,
             type_params: Vec::new(),
+            sources: None,
+            bindings: FxHashMap::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -16928,6 +17003,7 @@ mod tests {
         let options = CheckOptions {
             probe: Some(ProbePoint { file, offset }),
             index: false,
+            sources: None,
         };
         let checked = check_with(&resolved.file, &resolved.definitions, &options);
         (checked, resolved.definitions)

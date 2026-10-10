@@ -745,7 +745,14 @@ impl FrontendContext {
         let mut tests = resolved.tests;
         name_tests(&mut tests, &resolved.definitions, &modules);
 
-        let checked = nova_typeck::check(&resolved.file, &resolved.definitions);
+        let checked = nova_typeck::check_with(
+            &resolved.file,
+            &resolved.definitions,
+            &nova_typeck::CheckOptions {
+                sources: Some(&self.db),
+                ..Default::default()
+            },
+        );
         self.render(&checked.diagnostics);
         if self.errors > 0 {
             return Ok(None);

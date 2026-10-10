@@ -45,12 +45,16 @@ pub struct ProbePoint {
 
 /// What [`check_with`] does beyond checking.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct CheckOptions {
+pub struct CheckOptions<'a> {
     pub probe: Option<ProbePoint>,
     /// Record the language server's index (spec
     /// `docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`
     /// §3). Recording is write-only: the checker never reads it.
     pub index: bool,
+    /// The program's sources, for the fixes placed by lines (spec
+    /// `docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`
+    /// §4.7). Without them, those fixes are not offered.
+    pub sources: Option<&'a nova_diagnostics::FileDb>,
 }
 
 /// What the probe found (spec §4.1, §4.2). Each part is empty when the

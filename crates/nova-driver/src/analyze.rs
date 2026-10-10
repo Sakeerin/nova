@@ -194,6 +194,7 @@ pub fn analyze_program(
         &CheckOptions {
             probe,
             index: options.index,
+            sources: Some(&analysis.db),
         },
     );
     diagnostics.extend(checked.diagnostics);

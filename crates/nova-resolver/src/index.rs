@@ -40,6 +40,13 @@ pub enum Target {
     Primitive(&'static str),
 }
 
+/// How a local was declared, for semantic tokens (spec 3.4b §7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalFlags {
+    pub parameter: bool,
+    pub mutable: bool,
+}
+
 /// One name in the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Occurrence {
@@ -59,6 +66,9 @@ pub struct Index {
     pub implements: Vec<(DefId, (DefId, u32))>,
     /// Each local's type as hover shows it, by declaration span.
     pub types: HashMap<Span, String>,
+    /// Each local's declaration span: whether it is a parameter and whether
+    /// it is `mut` (spec 3.4b §4.6, §7.2). Recorded with the index only.
+    pub locals: HashMap<Span, LocalFlags>,
     /// What `occurrences` holds, so a record is kept once (decision 28).
     seen: HashSet<(Span, Role, Target)>,
 }
