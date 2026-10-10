@@ -113,6 +113,10 @@ The front end was built for finished programs:
   server asks, which revisits the "full position index" set aside above
   (ADR 0032). Code actions and semantic tokens are 3.4b's.
 
+  **Amended 2026-10-10 (branch `phase-3-4b-fixes-colour`):** 3.4b adds
+  code actions and semantic tokens on the same engine, each request
+  analysing afresh with the index on (ADR 0033).
+
 ## References
 
 - `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`

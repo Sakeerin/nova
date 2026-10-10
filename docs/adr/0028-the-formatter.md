@@ -81,6 +81,10 @@ was a one-line stub, and the front end could not support it:
   come later; no corpus file needs it.
 - `nova-fmt`'s `format_file` and `format_text` are the library entry points
   3.2's LSP will call.
+- **Amended 2026-10-10 (branch `phase-3-4b-fixes-colour`):** a blank
+  line between imports now ends a group, as in gofmt, and each group is
+  sorted on its own. The self-check is unchanged: a group's sort is a
+  sort within its run (ADR 0033).
 
 ## References
 
