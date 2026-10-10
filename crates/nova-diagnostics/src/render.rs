@@ -61,7 +61,7 @@ pub fn emit_all(db: &FileDb, diagnostics: &[Diagnostic]) {
             .with_code(&diag.code)
             .with_message(&diag.message)
             .with_labels(labels)
-            .with_notes(diag.notes.clone());
+            .with_notes(notes(diag));
 
         term::emit(&mut writer.lock(), &config, &files, &cs_diag)
             .expect("failed to write diagnostic");
@@ -119,11 +119,20 @@ pub fn render_to_string(db: &FileDb, diagnostics: &[Diagnostic]) -> String {
             .with_code(&diag.code)
             .with_message(&diag.message)
             .with_labels(labels)
-            .with_notes(diag.notes.clone());
+            .with_notes(notes(diag));
 
         term::emit(&mut writer, &config, &files, &cs_diag).expect("failed to render diagnostic");
     }
 
     let _ = writer.flush();
     String::from_utf8(buf).expect("diagnostic output is not valid UTF-8")
+}
+
+/// The notes, then each fix's title as `help: …` (spec 3.4b §3.3).
+fn notes(diag: &Diagnostic) -> Vec<String> {
+    diag.notes
+        .iter()
+        .cloned()
+        .chain(diag.fixes.iter().map(|f| format!("help: {}", f.title)))
+        .collect()
 }
