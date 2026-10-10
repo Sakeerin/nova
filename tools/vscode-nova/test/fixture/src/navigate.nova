@@ -1,0 +1,3 @@
+import shapes
+
+fn main() { let a = area(2) }

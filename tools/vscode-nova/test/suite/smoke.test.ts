@@ -1,5 +1,6 @@
-// The extension's smoke test (spec §7.6): the language, a diagnostic, a
-// completion and a formatted document, through the real `nova lsp`.
+// The extension's smoke test (spec §7.6; 3.4a §7): the language, a
+// diagnostic, a completion, a formatted document, a hover and a definition,
+// through the real `nova lsp`.
 
 import * as assert from "assert";
 import * as path from "path";
@@ -88,5 +89,43 @@ describe("the Nova extension", () => {
         text.slice(doc.offsetAt(edit.range.end));
     }
     assert.strictEqual(text, 'fn main() { println("hi") }\n');
+  });
+
+  it("hovers over a call with its signature and doc", async () => {
+    const uri = vscode.Uri.file(path.join(fixture, "src", "navigate.nova"));
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const at = doc.positionAt(doc.getText().indexOf("area(") + 1);
+    const text = await eventually("a hover", async () => {
+      const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        uri,
+        at,
+      );
+      const joined = (hovers ?? [])
+        .flatMap((h) => h.contents.map((c) => (typeof c === "string" ? c : c.value)))
+        .join("\n");
+      return joined.includes("fn area") ? joined : undefined;
+    });
+    assert.ok(text.includes("pub fn area(side: Int) -> Int"), text);
+    assert.ok(text.includes("The area of a square."), text);
+  });
+
+  it("goes to a definition in another module", async () => {
+    const uri = vscode.Uri.file(path.join(fixture, "src", "navigate.nova"));
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const at = doc.positionAt(doc.getText().indexOf("area(") + 1);
+    const found = await eventually("a definition", async () => {
+      const locations = await vscode.commands.executeCommand<
+        (vscode.Location | vscode.LocationLink)[]
+      >("vscode.executeDefinitionProvider", uri, at);
+      return locations !== undefined && locations.length > 0 ? locations : undefined;
+    });
+    const first = found[0];
+    const target = "targetUri" in first ? first.targetUri : first.uri;
+    const range =
+      "targetUri" in first ? (first.targetSelectionRange ?? first.targetRange) : first.range;
+    assert.ok(target.fsPath.endsWith("shapes.nova"), target.fsPath);
+    assert.strictEqual(range.start.line, 1);
+    assert.strictEqual(range.start.character, 7);
   });
 });

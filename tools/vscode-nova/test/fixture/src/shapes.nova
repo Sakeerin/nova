@@ -1,0 +1,2 @@
+/// The area of a square.
+pub fn area(side: Int) -> Int { side * side }
