@@ -554,3 +554,129 @@ fn definition_into_a_downloaded_package() {
     );
     assert_eq!(text_at(&found), "area");
 }
+
+// === Task 9: references ===
+
+fn references(client: &mut Client, uri: &str, position: Value, declarations: bool) -> Vec<Value> {
+    let response = client.request(
+        "textDocument/references",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": position,
+            "context": { "includeDeclaration": declarations },
+        }),
+    );
+    response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no references: {response}"))
+        .clone()
+}
+
+/// Each location as `(file name, line, character)`.
+fn places(locations: &[Value]) -> Vec<(String, u64, u64)> {
+    locations
+        .iter()
+        .map(|l| {
+            let name = path_of(l)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            let start = &l["range"]["start"];
+            (
+                name,
+                start["line"].as_u64().unwrap(),
+                start["character"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn references_with_and_without_the_declaration() {
+    let dir = project(
+        "references-local",
+        &[
+            ("main.nova", MAIN_IMPORTS_GEOMETRY),
+            ("geometry.nova", GEOMETRY),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, MAIN_IMPORTS_GEOMETRY);
+    let with = references(
+        &mut client,
+        &uri,
+        at(MAIN_IMPORTS_GEOMETRY, "total", 1),
+        true,
+    );
+    assert_eq!(
+        places(&with),
+        [
+            ("main.nova".to_string(), 3, 8),
+            ("main.nova".to_string(), 4, 16)
+        ]
+    );
+    let without = references(
+        &mut client,
+        &uri,
+        at(MAIN_IMPORTS_GEOMETRY, "total", 0),
+        false,
+    );
+    assert_eq!(places(&without), [("main.nova".to_string(), 4, 16)]);
+    // Across files, in file then offset order.
+    let area = references(
+        &mut client,
+        &uri,
+        at(MAIN_IMPORTS_GEOMETRY, "area()", 0),
+        true,
+    );
+    let names: Vec<String> = places(&area).into_iter().map(|p| p.0).collect();
+    assert_eq!(names.len(), 2, "{area:?}");
+    let mut sorted = area.clone();
+    sorted.sort_by_key(path_of);
+    assert_eq!(places(&sorted), places(&area));
+}
+
+#[test]
+fn references_from_the_app_reach_into_its_dependency() {
+    let lib = "pub fn area() -> Int { 1 }\npub fn twice() -> Int { area() + area() }\n";
+    let (app, _geom) = app_and_library("references-dependency", lib);
+    let main = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start(&app, false);
+    open(&mut client, &main, APP_MAIN);
+    let found = references(&mut client, &main, at(APP_MAIN, "area()", 0), true);
+    let mut counts = std::collections::BTreeMap::new();
+    for (name, _, _) in places(&found) {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+    // The declaration and two uses in lib.nova, the call in main.nova.
+    assert_eq!(counts.get("lib.nova"), Some(&3), "{found:?}");
+    assert_eq!(counts.get("main.nova"), Some(&1), "{found:?}");
+}
+
+const FAMILY: &str = "trait Show { fn show(self) -> String }\n\
+record A { n: Int }\nrecord B { n: Int }\n\
+impl Show for A { fn show(self) -> String { \"a\" } }\n\
+impl Show for B { fn show(self) -> String { \"b\" } }\n\
+fn main() {\n    let a = A { n: 1 }\n    let b = B { n: 2 }\n    let s = a.show()\n    let t = b.show()\n}\n";
+
+#[test]
+fn references_find_a_trait_methods_family_from_each_member() {
+    let dir = project("references-family", &[("main.nova", FAMILY)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, FAMILY);
+    // The trait's declaration, two impls' and two calls.
+    let from_trait = places(&references(&mut client, &uri, at(FAMILY, "show", 0), true));
+    assert_eq!(from_trait.len(), 5, "{from_trait:?}");
+    let from_impl = places(&references(&mut client, &uri, at(FAMILY, "show", 1), true));
+    let from_call = places(&references(
+        &mut client,
+        &uri,
+        at(FAMILY, "show()", 1),
+        true,
+    ));
+    assert_eq!(from_impl, from_trait);
+    assert_eq!(from_call, from_trait);
+}
