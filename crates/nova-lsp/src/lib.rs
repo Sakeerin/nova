@@ -13,6 +13,7 @@ mod convert;
 mod formatting;
 mod hover;
 mod navigate;
+mod rename;
 mod std_cache;
 mod uri;
 mod workspace;
@@ -28,10 +29,11 @@ use lsp_types::notification::{
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, Formatting, GotoDefinition, HoverRequest, References, RegisterCapability,
-    Request as _,
+    Completion, Formatting, GotoDefinition, HoverRequest, PrepareRenameRequest, References,
+    RegisterCapability, Rename, Request as _,
 };
 use nova_diagnostics::LineIndex;
+use serde_json::Value;
 
 use analysis::Answer;
 use checker::{Checker, Job, Publish};
@@ -125,6 +127,10 @@ fn capabilities() -> lsp::ServerCapabilities {
         hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
         definition_provider: Some(lsp::OneOf::Left(true)),
         references_provider: Some(lsp::OneOf::Left(true)),
+        rename_provider: Some(lsp::OneOf::Right(lsp::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         ..Default::default()
     }
 }
@@ -132,6 +138,11 @@ fn capabilities() -> lsp::ServerCapabilities {
 /// The response to a request whose parameters do not parse.
 fn invalid(id: lsp_server::RequestId, e: serde_json::Error) -> Response {
     Response::new_err(id, ErrorCode::InvalidParams as i32, e.to_string())
+}
+
+/// A refusal: `RequestFailed`, with the reason (spec 3.4a §5.4).
+fn refused(id: lsp_server::RequestId, why: String) -> Response {
+    Response::new_err(id, ErrorCode::RequestFailed as i32, why)
 }
 
 struct Server<'c> {
@@ -307,6 +318,42 @@ impl Server<'_> {
                     Err(e) => invalid(request.id, e),
                 }
             }
+            PrepareRenameRequest::METHOD => {
+                match serde_json::from_value::<lsp::TextDocumentPositionParams>(request.params) {
+                    Ok(p) => match self.answer_at(&p) {
+                        Some((answer, offset)) => {
+                            let path = self.path_of(&p.text_document.uri);
+                            match rename::prepare(&answer, &path, offset) {
+                                Ok(found) => Response::new_ok(request.id, found),
+                                Err(rename::Refused(why)) => refused(request.id, why),
+                            }
+                        }
+                        None => Response::new_ok(request.id, Value::Null),
+                    },
+                    Err(e) => invalid(request.id, e),
+                }
+            }
+            Rename::METHOD => match serde_json::from_value::<lsp::RenameParams>(request.params) {
+                Ok(p) => match self.answer_at(&p.text_document_position) {
+                    Some((answer, offset)) => {
+                        let path = self.path_of(&p.text_document_position.text_document.uri);
+                        let overlay = self.workspace.overlay();
+                        match rename::rename(
+                            &answer,
+                            &path,
+                            offset,
+                            &p.new_name,
+                            &overlay,
+                            &|path| self.uri_of(path),
+                        ) {
+                            Ok(edit) => Response::new_ok(request.id, edit),
+                            Err(rename::Refused(why)) => refused(request.id, why),
+                        }
+                    }
+                    None => Response::new_ok(request.id, Value::Null),
+                },
+                Err(e) => invalid(request.id, e),
+            },
             _ => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -333,6 +380,15 @@ impl Server<'_> {
         match self.workspace.by_path(path) {
             Some(doc) => doc.uri.clone(),
             None => uri::from_path(path),
+        }
+    }
+
+    /// The path a request's document is checked under.
+    fn path_of(&self, uri: &lsp::Uri) -> PathBuf {
+        let text = uri::text(uri);
+        match self.workspace.get(&text) {
+            Some(doc) => doc.path.clone(),
+            None => uri::document_path(&text).unwrap_or_default(),
         }
     }
 
