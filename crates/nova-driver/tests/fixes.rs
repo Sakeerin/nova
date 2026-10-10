@@ -242,3 +242,131 @@ fn every_loaded_module_knows_what_it_could_import() {
     );
     assert!(d.same_package(main, check) && !d.same_package(main, geom));
 }
+
+// === Task 4: make it mutable (spec §4.1; §9.1 cases 1-10) ===
+
+/// The E0060 holding `part`, in the loose program `src`, has one fix,
+/// "make `name` mutable", which leaves `decl` in the text; applied, the
+/// error goes and nothing comes. The fix replaces the note (spec §3.3).
+#[track_caller]
+fn makes_mutable(src: &str, part: &str, name: &str, decl: &str) {
+    let b = buffers(&[(MAIN, src)]);
+    let a = loose(&b);
+    let d = diagnostic(&a, "E0060", part);
+    assert!(
+        d.notes.is_empty(),
+        "the fix replaces the note: {:?}",
+        d.notes
+    );
+    assert_eq!(d.fixes.len(), 1, "{:?}", d.fixes);
+    let edited = apply(&a, fix(d, &format!("make `{name}` mutable")), &b);
+    let after = text(&edited, "main.nova");
+    assert!(after.contains(decl), "{after}");
+    assert_fixes(&a, &loose(&edited), "E0060", &[]);
+}
+
+/// The E0060 holding `part` has no fix, and keeps a note holding `note`.
+#[track_caller]
+fn no_mutable_fix(src: &str, part: &str, note: &str) {
+    let a = loose(&buffers(&[(MAIN, src)]));
+    let d = diagnostic(&a, "E0060", part);
+    assert!(d.fixes.is_empty(), "{:?}", d.fixes);
+    assert!(d.notes.iter().any(|n| n.contains(note)), "{:?}", d.notes);
+}
+
+#[test]
+fn case_01_make_mutable_for_a_let() {
+    makes_mutable(
+        "fn main() {\n    let x = 0\n    x = 1\n    println(\"${x}\")\n}\n",
+        "cannot assign to immutable variable `x`",
+        "x",
+        "let mut x = 0",
+    );
+}
+
+#[test]
+fn case_02_make_mutable_for_a_compound_assignment() {
+    makes_mutable(
+        "fn main() {\n    let x = 0\n    x += 1\n    println(\"${x}\")\n}\n",
+        "cannot assign to immutable variable `x`",
+        "x",
+        "let mut x = 0",
+    );
+}
+
+#[test]
+fn case_03_make_mutable_for_an_element() {
+    makes_mutable(
+        "fn main() {\n    let a = [1, 2]\n    a[0] = 3\n    println(\"${a[0]}\")\n}\n",
+        "an element of immutable `a`",
+        "a",
+        "let mut a = [1, 2]",
+    );
+}
+
+#[test]
+fn case_04_make_mutable_for_a_field() {
+    makes_mutable(
+        "record P { v: Int }\n\nfn main() {\n    let p = P { v: 1 }\n    p.v = 2\n    println(\"${p.v}\")\n}\n",
+        "a field of immutable `p`",
+        "p",
+        "let mut p = P { v: 1 }",
+    );
+}
+
+#[test]
+fn case_05_make_mutable_for_a_mut_self_call() {
+    makes_mutable(
+        "record P { v: Int }\n\nimpl P {\n    fn bump(mut self) {\n        self.v = self.v + 1\n    }\n}\n\nfn main() {\n    let p = P { v: 1 }\n    p.bump()\n}\n",
+        "mutates its receiver, but `p` is immutable",
+        "p",
+        "let mut p = P { v: 1 }",
+    );
+}
+
+#[test]
+fn case_06_make_mutable_for_a_parameter() {
+    makes_mutable(
+        "fn twice(n: Int) -> Int {\n    n = n * 2\n    n\n}\n\nfn main() {\n    println(\"${twice(2)}\")\n}\n",
+        "cannot assign to immutable variable `n`",
+        "n",
+        "fn twice(mut n: Int)",
+    );
+}
+
+#[test]
+fn case_07_make_mutable_for_a_closure_parameter() {
+    makes_mutable(
+        "fn main() {\n    let f = |n: Int| {\n        n = n + 1\n        n\n    }\n    println(\"${f(1)}\")\n}\n",
+        "cannot assign to immutable variable `n`",
+        "n",
+        "|mut n: Int|",
+    );
+}
+
+#[test]
+fn case_08_no_make_mutable_for_a_match_binding() {
+    no_mutable_fix(
+        "fn main() {\n    let o = Some(1)\n    match o {\n        Some(v) => {\n            v = 2\n        }\n        None => {}\n    }\n}\n",
+        "cannot assign to immutable variable `v`",
+        "let mut v",
+    );
+}
+
+#[test]
+fn case_09_no_make_mutable_for_a_for_variable() {
+    no_mutable_fix(
+        "fn main() {\n    for i in 0..3 {\n        i = i + 1\n    }\n}\n",
+        "cannot assign to immutable variable `i`",
+        "let mut i",
+    );
+}
+
+#[test]
+fn case_10_no_make_mutable_for_self() {
+    no_mutable_fix(
+        "record C { n: Int }\n\nimpl C {\n    fn reset(self) {\n        self.n = 0\n    }\n}\n\nfn main() {}\n",
+        "a field of immutable `self`",
+        "mut self",
+    );
+}

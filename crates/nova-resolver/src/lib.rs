@@ -18,7 +18,7 @@ use nova_diagnostics::{Diagnostic, FileId, Span};
 use rustc_hash::FxHashMap;
 
 pub mod index;
-pub use index::{Index, Occurrence, Role, Target};
+pub use index::{Index, LocalFlags, Occurrence, Role, Target};
 
 /// A stable identifier for a top-level definition within a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
