@@ -14,6 +14,7 @@ mod convert;
 mod formatting;
 mod hover;
 mod navigate;
+mod organize;
 mod rename;
 mod std_cache;
 mod uri;

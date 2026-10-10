@@ -236,3 +236,147 @@ fn two_errors_with_one_fix_offer_it_once() {
         "{found:?}"
     );
 }
+
+// === Task 11: organize imports (spec §6) ===
+
+/// `text` with the LSP `edits` applied.
+fn applied(text: &str, edits: &[Value]) -> String {
+    let offset = |p: &Value| {
+        let line = p["line"].as_u64().unwrap() as usize;
+        let character = p["character"].as_u64().unwrap() as usize;
+        let start: usize = text.split_inclusive('\n').take(line).map(str::len).sum();
+        let (mut units, mut at) = (0, start);
+        for c in text[start..].chars() {
+            if units >= character {
+                break;
+            }
+            units += c.len_utf16();
+            at += c.len_utf8();
+        }
+        at
+    };
+    let mut spans: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|e| {
+            (
+                offset(&e["range"]["start"]),
+                offset(&e["range"]["end"]),
+                e["newText"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    spans.sort_by_key(|s| s.0);
+    let mut out = text.to_string();
+    for (start, end, new) in spans.iter().rev() {
+        out.replace_range(*start..*end, new);
+    }
+    out
+}
+
+const SHAPES: &str = "pub fn twice() -> Int {\n    2\n}\n";
+const EXTRA: &str = "pub fn unused() -> Int {\n    0\n}\n";
+
+#[test]
+fn organize_imports_groups_and_drops_an_unused_import() {
+    let main = "import shapes\nimport geom\nimport extra\n\nfn main() {\n    println(\"${area()} ${twice()}\")\n}\n";
+    let (app, _geom) =
+        lsp_client::app_with_main("organize", "pub fn area() -> Int {\n    1\n}\n", main);
+    std::fs::write(app.join("src").join("shapes.nova"), SHAPES).unwrap();
+    std::fs::write(app.join("src").join("extra.nova"), EXTRA).unwrap();
+    let uri = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start(&app, false);
+    open(&mut client, &uri, main);
+    let found = actions(
+        &mut client,
+        &uri,
+        at(main, "fn main", 0),
+        Some(&["source.organizeImports"]),
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    let action = titled(&found, "Organize imports");
+    assert_eq!(action["kind"], "source.organizeImports");
+    assert_eq!(
+        applied(main, &edits_in(action, &uri)),
+        "import geom\n\nimport shapes\n\nfn main() {\n    println(\"${area()} ${twice()}\")\n}\n"
+    );
+}
+
+#[test]
+fn organize_imports_in_a_file_with_an_error_keeps_unused_imports() {
+    let main = "import shapes\nimport extra\n\nfn main() {\n    let n: Int = \"no\"\n    println(\"${twice()}\")\n}\n";
+    let dir = project(
+        "organize-error",
+        &[
+            ("main.nova", main),
+            ("shapes.nova", SHAPES),
+            ("extra.nova", EXTRA),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, main);
+    let found = actions(
+        &mut client,
+        &uri,
+        at(main, "fn main", 0),
+        Some(&["source.organizeImports"]),
+    );
+    let action = titled(&found, "Organize imports");
+    assert_eq!(
+        applied(main, &edits_in(action, &uri)),
+        "import extra\nimport shapes\n\nfn main() {\n    let n: Int = \"no\"\n    println(\"${twice()}\")\n}\n"
+    );
+}
+
+#[test]
+fn only_source_returns_organize_imports_alone() {
+    let main = "import shapes\nimport extra\n\nfn main() {\n    let x = 1\n    x = 2\n    println(\"${x} ${twice()} ${unused()}\")\n}\n";
+    let dir = project(
+        "organize-only",
+        &[
+            ("main.nova", main),
+            ("shapes.nova", SHAPES),
+            ("extra.nova", EXTRA),
+        ],
+    );
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, main);
+    let source = actions(&mut client, &uri, at(main, "x = 2", 0), Some(&["source"]));
+    let kinds: Vec<&str> = source.iter().map(|a| a["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["source.organizeImports"]);
+    let fixes = actions(&mut client, &uri, at(main, "x = 2", 0), Some(&["quickfix"]));
+    assert!(
+        !fixes.is_empty() && fixes.iter().all(|a| a["kind"] == "quickfix"),
+        "{fixes:?}"
+    );
+}
+
+#[test]
+fn organize_imports_puts_the_packages_own_library_with_the_dependencies() {
+    // Spec §6.2 and spec decision 26: from `tests/`, the package's own library
+    // is a dependency, and a sibling test module is the project's own.
+    let dir = project(
+        "organize-tests",
+        &[("lib.nova", "pub fn name() -> String {\n    \"demo\"\n}\n")],
+    );
+    let tests = dir.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("util.nova"), "pub fn one() -> Int {\n    1\n}\n").unwrap();
+    let test = "import util\nimport demo\n\n@test\nfn t() {\n    assert_eq(name(), \"demo\")\n    assert_eq(one(), 1)\n}\n";
+    std::fs::write(tests.join("t.nova"), test).unwrap();
+    let uri = file_uri(&tests.join("t.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, test);
+    let found = actions(
+        &mut client,
+        &uri,
+        at(test, "@test", 0),
+        Some(&["source.organizeImports"]),
+    );
+    let action = titled(&found, "Organize imports");
+    assert_eq!(
+        applied(test, &edits_in(action, &uri)),
+        "import demo\n\nimport util\n\n@test\nfn t() {\n    assert_eq(name(), \"demo\")\n    assert_eq(one(), 1)\n}\n"
+    );
+}
