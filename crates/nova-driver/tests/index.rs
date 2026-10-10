@@ -350,3 +350,165 @@ fn main() {}\n";
     uses(&a, MAIN, "Dog", 1, MAIN, 0); // an impl's self type
     uses(&a, MAIN, "U", 2, MAIN, 0); // a where clause's parameter
 }
+
+// === Task 5: values, calls, records, fields, methods, patterns, families ===
+
+#[test]
+fn calls_and_values_use_their_definitions() {
+    let text = "const LIMIT: Int = 3\n\
+fn double(n: Int) -> Int { n * 2 }\n\
+fn main() {\n    let a = double(LIMIT)\n    let f = double\n    println(\"x\")\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "double", 1, MAIN, 0); // a direct call
+    uses(&a, MAIN, "double", 2, MAIN, 0); // a function as a value
+    uses(&a, MAIN, "LIMIT", 1, MAIN, 0);
+    assert!(matches!(
+        at(&a, MAIN, "println", 0).target,
+        Target::Builtin(_)
+    ));
+}
+
+#[test]
+fn variants_use_their_sum_and_variant() {
+    let text = "type Shape = | Round(Int) | Flat\n\
+fn main() {\n    let a = Round(1)\n    let b = Shape::Round(2)\n    let c = Flat\n    let d = Shape::Flat\n    let e: Option<Int> = None\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "Round", 1, MAIN, 0);
+    uses(&a, MAIN, "Round", 2, MAIN, 0);
+    uses(&a, MAIN, "Shape", 1, MAIN, 0);
+    uses(&a, MAIN, "Flat", 1, MAIN, 0);
+    uses(&a, MAIN, "Flat", 2, MAIN, 0);
+    uses(&a, MAIN, "Shape", 2, MAIN, 0);
+    let none = at(&a, MAIN, "None", 0).target;
+    assert!(declared_in(&a, &none).starts_with("<std/"), "{none:?}");
+}
+
+#[test]
+fn associated_functions_use_their_qualifier_and_function() {
+    let text = "record Point { x: Int }\n\
+impl Point {\n    fn origin() -> Point { Point { x: 0 } }\n}\n\
+trait Zero { fn zero() -> Self }\n\
+impl Zero for Int { fn zero() -> Int { 0 } }\n\
+fn pick<Z: Zero>() -> Z { Z::zero() }\n\
+fn main() {\n    let p = Point::origin()\n    let n = Int::zero()\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "origin", 1, MAIN, 0);
+    uses(&a, MAIN, "Point", 4, MAIN, 0); // the qualifier of Point::origin
+    let Target::Def(zero) = declares(&a, MAIN, "Zero", 0) else {
+        panic!("a trait is a Def");
+    };
+    // Through a bound and through an impl: the trait's method.
+    assert_eq!(at(&a, MAIN, "zero", 2).target, Target::TraitMethod(zero, 0));
+    assert_eq!(at(&a, MAIN, "zero", 3).target, Target::TraitMethod(zero, 0));
+    uses(&a, MAIN, "Z", 2, MAIN, 0);
+    // `Int` number 3 is the qualifier of `Int::zero()`.
+    assert_eq!(at(&a, MAIN, "Int", 3).target, Target::Primitive("Int"));
+}
+
+#[test]
+fn record_literals_and_field_accesses_use_their_fields() {
+    let text = "record Point { x: Int, y: Int }\n\
+fn main() {\n    let x = 1\n    let mut p = Point { x, y: 2 }\n    p.y = p.x + p.y\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    let Target::Def(point) = declares(&a, MAIN, "Point", 0) else {
+        panic!("a record is a Def");
+    };
+    uses(&a, MAIN, "Point", 1, MAIN, 0);
+    // `{ x }`: a field use and a value use, both marked; `at` takes the value.
+    let (file, start) = place(&a, MAIN, "x", 2);
+    let here: Vec<&Occurrence> = index(&a)
+        .occurrences
+        .iter()
+        .filter(|o| o.span.file == file && o.span.start == start)
+        .collect();
+    assert_eq!(here.len(), 2, "{here:?}");
+    assert!(here.iter().all(|o| o.shorthand), "{here:?}");
+    assert!(
+        here.iter().any(|o| o.target == Target::Field(point, 0)),
+        "{here:?}"
+    );
+    uses(&a, MAIN, "x", 2, MAIN, 1);
+    assert_eq!(at(&a, MAIN, "y", 1).target, Target::Field(point, 1)); // `y: 2`
+    assert_eq!(at(&a, MAIN, "y", 2).target, Target::Field(point, 1)); // the write
+    assert_eq!(at(&a, MAIN, "x", 3).target, Target::Field(point, 0)); // `p.x`
+    assert_eq!(at(&a, MAIN, "y", 3).target, Target::Field(point, 1)); // `p.y`
+}
+
+#[test]
+fn method_calls_use_their_method() {
+    let text = "record Counter { n: Int }\n\
+impl Counter {\n    fn get(self) -> Int { self.n }\n}\n\
+trait Show { fn show(self) -> String }\n\
+impl Show for Counter { fn show(self) -> String { \"c\" } }\n\
+fn main() {\n    let c = Counter { n: 1 }\n    let a = c.get()\n    let b = c.show()\n    let xs = [1, 2]\n    let n = xs.len()\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "get", 1, MAIN, 0);
+    let Target::Def(show) = declares(&a, MAIN, "Show", 0) else {
+        panic!("a trait is a Def");
+    };
+    assert_eq!(at(&a, MAIN, "show", 2).target, Target::TraitMethod(show, 0));
+    assert_eq!(at(&a, MAIN, "len", 0).target, Target::BuiltinMethod("len"));
+}
+
+#[test]
+fn patterns_use_their_variants() {
+    let text = "type Shape = | Round(Int) | Flat\n\
+fn size(s: Shape) -> Int {\n    match s {\n        Round(r) => r,\n        Shape::Flat => 0,\n    }\n}\n\
+fn other(s: Shape) -> Int {\n    match s {\n        Shape::Round(r) => r,\n        Flat => 0,\n    }\n}\n\
+fn main() {}\n";
+    let a = analyse(&[(MAIN, text)]);
+    uses(&a, MAIN, "Round", 1, MAIN, 0);
+    uses(&a, MAIN, "Flat", 1, MAIN, 0);
+    uses(&a, MAIN, "Round", 2, MAIN, 0);
+    uses(&a, MAIN, "Flat", 2, MAIN, 0);
+    uses(&a, MAIN, "Shape", 2, MAIN, 0);
+    uses(&a, MAIN, "Shape", 4, MAIN, 0);
+    uses(&a, MAIN, "r", 1, MAIN, 0);
+}
+
+#[test]
+fn an_impl_method_is_in_its_trait_methods_family() {
+    let text = "trait Show { fn show(self) -> String }\n\
+record A { n: Int }\nrecord B { n: Int }\n\
+impl Show for A { fn show(self) -> String { \"a\" } }\n\
+impl Show for B { fn show(self) -> String { \"b\" } }\n\
+fn main() {}\n";
+    let a = analyse(&[(MAIN, text)]);
+    let trait_method = declares(&a, MAIN, "show", 0);
+    let a_show = declares(&a, MAIN, "show", 1);
+    let b_show = declares(&a, MAIN, "show", 2);
+    assert!(
+        matches!(trait_method, Target::TraitMethod(..)),
+        "{trait_method:?}"
+    );
+    assert_eq!(
+        index(&a).family(&a_show),
+        vec![trait_method, a_show, b_show]
+    );
+}
+
+#[test]
+fn the_checkers_own_names_are_not_recorded() {
+    // Spec §3.5: a `for` loop's `next` and interpolation's `fmt` are calls
+    // the checker makes, not names the user wrote. Every occurrence in the
+    // file covers an identifier the source holds, and none is a trait
+    // method, since the source calls none.
+    let text = "record P { n: Int }\n\
+impl Display for P {\n    fn fmt(self) -> String { \"p\" }\n}\n\
+fn main() {\n    let p = P { n: 1 }\n    let s = \"${p}\"\n    let mut v = Vec::new()\n    v.push(1)\n    for x in v.iter() {\n        let y = x\n    }\n}\n";
+    let a = analyse(&[(MAIN, text)]);
+    let (file, _) = &a.modules[0];
+    let source = a.db.get_source(*file).unwrap();
+    for o in index(&a)
+        .occurrences
+        .iter()
+        .filter(|o| o.span.file == *file)
+    {
+        assert!(!matches!(o.target, Target::TraitMethod(..)), "{o:?}");
+        let word = &source[o.span.start as usize..o.span.end as usize];
+        assert!(
+            !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{o:?} covers `{word}`"
+        );
+    }
+}
