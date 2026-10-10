@@ -47,6 +47,7 @@ fn analysis_at(path: &Path, offset: u32, overlay: &Overlay) -> Option<Analysis> 
             path: path.to_path_buf(),
             offset,
         }),
+        index: false,
     };
     let project = ProjectKey::of(path);
     if let ProjectKey::Root(dir) = &project {

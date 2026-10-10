@@ -54,6 +54,10 @@ pub struct Options {
     pub module_only: bool,
     /// Record what is at this place (spec §4.1).
     pub probe: Option<Probe>,
+    /// Record the language server's index (spec
+    /// `docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md`
+    /// §3, §3.6). Off for every CLI command.
+    pub index: bool,
 }
 
 /// A place in one of the program's files.
@@ -83,6 +87,9 @@ pub struct Analysis {
     /// The typed module, partial when errors were found.
     pub module: Option<nova_hir::Module>,
     pub probe: ProbeResult,
+    /// Every name the front end resolved, the resolver's imports merged
+    /// in: `None` unless [`Options::index`].
+    pub index: Option<nova_resolver::Index>,
 }
 
 /// Run the front end on `entry` for the language server (spec §3): the
@@ -130,6 +137,7 @@ pub fn analyze_program(
         definitions: None,
         module: None,
         probe: ProbeResult::default(),
+        index: None,
     };
     if stop(&diagnostics) {
         analysis.diagnostics = shown(diagnostics, &registry);
@@ -160,6 +168,7 @@ pub fn analyze_program(
         .collect();
     let resolved = nova_resolver::resolve_program(&module_sources, &std_files, extra_std);
     diagnostics.extend(resolved.diagnostics);
+    let imports = resolved.imports;
     if stop(&diagnostics) {
         analysis.diagnostics = shown(diagnostics, &registry);
         analysis.definitions = Some(resolved.definitions);
@@ -179,7 +188,10 @@ pub fn analyze_program(
     let checked = nova_typeck::check_with(
         &resolved.file,
         &resolved.definitions,
-        &CheckOptions { probe },
+        &CheckOptions {
+            probe,
+            index: options.index,
+        },
     );
     diagnostics.extend(checked.diagnostics);
     // MIR lowering assumes a well-formed program (spec §3.3), and a
@@ -199,6 +211,10 @@ pub fn analyze_program(
     analysis.definitions = Some(resolved.definitions);
     analysis.module = Some(module);
     analysis.probe = checked.probe;
+    if let Some(mut index) = checked.index {
+        index.extend(imports);
+        analysis.index = Some(index);
+    }
     Ok(analysis)
 }
 
