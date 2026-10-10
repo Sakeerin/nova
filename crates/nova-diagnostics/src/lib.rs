@@ -6,7 +6,9 @@
 
 pub mod files;
 pub mod line_index;
+pub mod lines;
 pub mod render;
+pub mod suggest;
 
 pub use files::{FileDb, FileId};
 pub use line_index::LineIndex;
