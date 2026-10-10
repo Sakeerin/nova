@@ -6,10 +6,12 @@ mod comments;
 mod doc;
 mod editorconfig;
 mod file;
+mod organize;
 mod print;
 mod source;
 
 pub use file::{format_buffer, format_file, format_text, FileError, Formatted, LineEnding};
+pub use organize::{organize, Group, ImportView, TextEdit, Verdict};
 
 use nova_diagnostics::Diagnostic;
 
