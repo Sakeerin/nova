@@ -39,8 +39,8 @@ nova-mir            → Mid-level IR
 | `nova-lexer` | Source → tokens (uses `logos`) |
 | `nova-ast` | AST node type definitions |
 | `nova-parser` | Tokens → AST (hand-written recursive descent) |
-| `nova-resolver` | Name resolution, module graph |
-| `nova-typeck` | Type inference and checking (HM + extensions) |
+| `nova-resolver` | Name resolution, module graph; the types of the language server's index of names |
+| `nova-typeck` | Type inference and checking (HM + extensions); records the language server's index of names when asked |
 | `nova-hir` | High-level IR, desugared AST |
 | `nova-mir` | Mid-level IR, 3-address style |
 | `nova-codegen-cranelift` | Fast debug backend |
@@ -49,7 +49,7 @@ nova-mir            → Mid-level IR
 | `nova-runtime` | GC, async runtime, panic handling |
 | `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler |
 | `nova-fmt` | The formatter: prints the AST in one fixed layout, keeps every comment, and refuses output that would change the program (ADR 0028) |
-| `nova-lsp` | The language server, `nova lsp`: diagnostics, completion and formatting over `nova_driver::analyze` (ADR 0029) |
+| `nova-lsp` | The language server, `nova lsp`: diagnostics, completion, formatting, hover, definition, references and rename over `nova_driver::analyze` (ADR 0029, ADR 0032) |
 | `nova-test` | Test runner |
 | `nova-pm` | Package manager: `nova.toml`, the package graph, `nova.lock` and the resolver; it never touches the network (ADR 0030, ADR 0031) |
 | `nova-index` | The package index: reading, downloading, packing, the sync step and publishing (ADR 0031) |

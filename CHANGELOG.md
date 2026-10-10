@@ -111,6 +111,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   **`nova login`** stores the GitHub token it needs, read from a pipe.
 - **The language server** re-checks when `nova.lock` changes, and leaves
   downloaded packages alone.
+- **Navigation in the editor.** `nova lsp` answers:
+  - hover: a name's declaration, a local's inferred type, and `///` docs;
+  - go to definition: into other modules, dependencies, and std, whose
+    sources are written to `$NOVA_HOME/std/`;
+  - find references;
+  - rename.
+
+  Rename covers the owning project, a trait method with its impls, and
+  shorthand fields. It refuses, saying why, a rename that would change
+  what a name means. ADR 0032.
 
 ### Changed
 
