@@ -7731,7 +7731,7 @@ fn error_expr(span: Span) -> hir::Expr {
 /// type along with every other, so `nova-mir` sees the concrete one. A
 /// `std/task` function that declared a second type parameter *before* `T`
 /// would fail here with `E0010` rather than miscompiling.
-fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
+pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
     // `Future<T>` where `T` is the caller's first type parameter — see above.
     let future_of_param0 = || Ty::Future(Box::new(Ty::Param(0)));
     match builtin {

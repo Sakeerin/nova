@@ -152,3 +152,20 @@ pub fn display_ty_named(ty: &Ty, defs: &Definitions, names: &[String]) -> String
         other => display_ty(other, defs),
     }
 }
+
+/// A builtin's signature for hover (spec 3.4a §5.1), its type parameters
+/// as `T`, `U`, …: `fn print(String) -> ()`.
+pub fn builtin_text(builtin: nova_resolver::Builtin, defs: &Definitions) -> String {
+    let (params, ret) = check::builtin_signature(builtin);
+    let names: Vec<String> = ["T", "U", "V", "W"].iter().map(|s| s.to_string()).collect();
+    let params = params
+        .iter()
+        .map(|p| display_ty_named(p, defs, &names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "fn {}({params}) -> {}",
+        builtin.name(),
+        display_ty_named(&ret, defs, &names)
+    )
+}

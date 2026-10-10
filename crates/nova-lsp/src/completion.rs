@@ -7,12 +7,13 @@ use std::path::Path;
 use lsp_types as lsp;
 use lsp_types::CompletionItemKind as Kind;
 use nova_diagnostics::FileId;
-use nova_driver::{analyze, analyze_program, Analysis, Options, Probe, Program, Roots};
+use nova_driver::{Analysis, Probe};
 use nova_lexer::Token;
 use nova_resolver::{DefKind, ModuleId, Res, ScopeEntry};
 use nova_typeck::{Member, MemberKind};
 
-use crate::workspace::{Overlay, PathKey, ProjectKey};
+use crate::analysis;
+use crate::workspace::{Overlay, PathKey};
 
 /// The completion items at byte `offset` of `text`, the buffer for `path`.
 pub fn complete(
@@ -34,46 +35,15 @@ pub fn complete(
     }
 }
 
-/// The analysis that owns `path`, with the probe at `offset` (decision 9):
-/// its project's analysis, if that reaches it, or else its own, which
-/// `Program::for_file` finds the package of (spec 3.3a §6). Completion needs
-/// no MIR, so `module_only` is always on.
+/// The analysis that owns `path`, with the probe at `offset` (decision 9;
+/// 3.4a §4). Completion needs no MIR and no index.
 fn analysis_at(path: &Path, offset: u32, overlay: &Overlay) -> Option<Analysis> {
-    let options = Options {
-        keep_going: true,
-        tests: true,
-        module_only: true,
-        probe: Some(Probe {
-            path: path.to_path_buf(),
-            offset,
-        }),
-        index: false,
+    let probe = Probe {
+        path: path.to_path_buf(),
+        offset,
     };
-    let project = ProjectKey::of(path);
-    if let ProjectKey::Root(dir) = &project {
-        let program = Program::for_package(dir, Roots::Test);
-        if let Some(a) = guarded(|| analyze_program(program, overlay, &options).ok()) {
-            if a.modules
-                .iter()
-                .any(|(_, p)| PathKey::of(p) == PathKey::of(path))
-            {
-                return Some(a);
-            }
-        }
-    }
-    // A loose file, or a project file its entry does not reach: either way
-    // it is analysed as its own entry.
-    guarded(|| analyze(path, overlay, &options).ok())
-}
-
-fn guarded<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(v) => v,
-        Err(_) => {
-            tracing::warn!("nova lsp: the front end panicked during completion");
-            None
-        }
-    }
+    analysis::answering(path, overlay, &analysis::options(Some(probe), false))
+        .map(|answer| answer.analysis)
 }
 
 /// Whether `offset` is inside a string, a character literal or a comment
