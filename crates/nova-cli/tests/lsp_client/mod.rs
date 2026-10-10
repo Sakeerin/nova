@@ -22,6 +22,8 @@ pub struct Client {
     next_id: i64,
     /// Messages read while waiting for another, oldest first.
     unread: Vec<Value>,
+    /// The initialize response's result: the server's capabilities.
+    pub initialized: Value,
 }
 
 impl Client {
@@ -61,16 +63,18 @@ impl Client {
             messages: rx,
             next_id: 1,
             unread: Vec::new(),
+            initialized: Value::Null,
         };
         let capabilities = if watch {
             json!({ "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } } })
         } else {
             json!({})
         };
-        client.request(
+        client.initialized = client.request(
             "initialize",
             json!({ "processId": null, "rootUri": file_uri(root), "capabilities": capabilities }),
-        );
+        )["result"]
+            .clone();
         client.notify("initialized", json!({}));
         client
     }
@@ -287,4 +291,90 @@ pub fn fresh_dir(name: &str) -> PathBuf {
         Some(rest) => PathBuf::from(rest),
         None => real,
     }
+}
+
+// === The project helpers the stdio tests share (3.4b plan decision 15) ===
+
+/// A project's `nova.toml`, naming it `demo`.
+pub const MANIFEST: &str = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+
+/// 3.3a's app's main file, which calls `geom`'s `area`.
+pub const APP_MAIN: &str = "import geom\n\nfn main() {\n    let a: Int = area()\n}\n";
+
+/// The registry index the tests' locks name.
+pub const INDEX: &str = "https://example.test/index/";
+
+/// A project: `nova.toml`, and `src/` holding `files`.
+pub fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = fresh_dir(name);
+    std::fs::write(dir.join("nova.toml"), MANIFEST).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    for (file, text) in files {
+        std::fs::write(dir.join("src").join(file), text).unwrap();
+    }
+    dir
+}
+
+/// `app`, which depends on `geom` by path and runs `APP_MAIN`, in one
+/// fresh directory. `geom`'s `src/lib.nova` is `lib`.
+pub fn app_and_library(name: &str, lib: &str) -> (PathBuf, PathBuf) {
+    app_with_main(name, lib, APP_MAIN)
+}
+
+/// [`app_and_library`], with `main` as the app's `src/main.nova`.
+pub fn app_with_main(name: &str, lib: &str, main: &str) -> (PathBuf, PathBuf) {
+    let dir = fresh_dir(name);
+    let geom = dir.join("geom");
+    std::fs::create_dir_all(geom.join("src")).unwrap();
+    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
+    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    let manifest = format!(
+        "{}\n[dependencies]\ngeom = {{ path = \"../geom\" }}\n",
+        MANIFEST.replace("demo", "app")
+    );
+    std::fs::write(app.join("nova.toml"), manifest).unwrap();
+    std::fs::write(app.join("src").join("main.nova"), main).unwrap();
+    (app, geom)
+}
+
+/// `dir/app`, which depends on `geom = "<req>"` and runs `APP_MAIN`, and
+/// `dir/home`, the server's `NOVA_HOME`.
+pub fn registry_app(name: &str, req: &str) -> (PathBuf, PathBuf) {
+    let dir = fresh_dir(name);
+    let app = dir.join("app");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::write(
+        app.join("nova.toml"),
+        format!(
+            "{}\n[dependencies]\ngeom = \"{req}\"\n",
+            MANIFEST.replace("demo", "app")
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("src").join("main.nova"), APP_MAIN).unwrap();
+    (app, dir.join("home"))
+}
+
+/// `geom` 0.1.0, locked in `app`'s nova.lock and unpacked under `home`,
+/// with `lib` as its lib.nova. Its directory.
+pub fn lock_and_cache(app: &Path, home: &Path, lib: &str) -> PathBuf {
+    let geom = home
+        .join("registry")
+        .join("src")
+        .join(nova_pm::index_dir_name(INDEX))
+        .join("geom-0.1.0");
+    std::fs::create_dir_all(geom.join("src")).unwrap();
+    std::fs::write(geom.join("nova.toml"), MANIFEST.replace("demo", "geom")).unwrap();
+    std::fs::write(geom.join("src").join("lib.nova"), lib).unwrap();
+    std::fs::write(
+        app.join("nova.lock"),
+        format!(
+            "version = 1\nindex = \"{INDEX}\"\n\n[[package]]\nname = \"geom\"\n\
+             version = \"0.1.0\"\nchecksum = \"00\"\ndependencies = []\n"
+        ),
+    )
+    .unwrap();
+    geom
 }
