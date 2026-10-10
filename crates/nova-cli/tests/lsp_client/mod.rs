@@ -249,7 +249,7 @@ pub fn same_uri(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-fn decode(s: &str) -> String {
+pub fn decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;

@@ -107,8 +107,6 @@ impl Workspace {
     }
 
     /// The open document for `path`, if any.
-    // Task 8's definitions are its first callers.
-    #[allow(dead_code)]
     pub fn by_path(&self, path: &Path) -> Option<&Document> {
         self.docs.get(&PathKey::of(path))
     }
@@ -170,8 +168,6 @@ impl Sources for Overlay {
 
 impl Overlay {
     /// This overlay, with `text` read for `path`.
-    // Task 8's std scope is its first caller.
-    #[allow(dead_code)]
     pub fn with(&self, path: &Path, text: String) -> Overlay {
         let mut out = self.clone();
         out.buffers.insert(PathKey::of(path), text);

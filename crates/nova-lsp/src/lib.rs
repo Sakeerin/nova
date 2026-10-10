@@ -12,6 +12,8 @@ mod completion;
 mod convert;
 mod formatting;
 mod hover;
+mod navigate;
+mod std_cache;
 mod uri;
 mod workspace;
 
@@ -25,7 +27,9 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Exit, Notification as _, PublishDiagnostics,
 };
-use lsp_types::request::{Completion, Formatting, HoverRequest, RegisterCapability, Request as _};
+use lsp_types::request::{
+    Completion, Formatting, GotoDefinition, HoverRequest, RegisterCapability, Request as _,
+};
 use nova_diagnostics::LineIndex;
 
 use analysis::Answer;
@@ -118,6 +122,7 @@ fn capabilities() -> lsp::ServerCapabilities {
         }),
         document_formatting_provider: Some(lsp::OneOf::Left(true)),
         hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
+        definition_provider: Some(lsp::OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -267,6 +272,20 @@ impl Server<'_> {
                     Err(e) => invalid(request.id, e),
                 }
             }
+            GotoDefinition::METHOD => {
+                match serde_json::from_value::<lsp::GotoDefinitionParams>(request.params) {
+                    Ok(p) => {
+                        let found = self
+                            .answer_at(&p.text_document_position_params)
+                            .and_then(|(answer, offset)| {
+                                navigate::definition(&answer, offset, &|path| self.uri_of(path))
+                            })
+                            .map(lsp::GotoDefinitionResponse::Scalar);
+                        Response::new_ok(request.id, found)
+                    }
+                    Err(e) => invalid(request.id, e),
+                }
+            }
             _ => Response::new_err(
                 request.id,
                 ErrorCode::MethodNotFound as i32,
@@ -285,6 +304,15 @@ impl Server<'_> {
         let options = analysis::options(None, true);
         let answer = analysis::answering(&doc.path, &self.workspace.overlay(), &options)?;
         Some((answer, offset))
+    }
+
+    /// The URI for `path`: the open document's, so a Windows client gets
+    /// its own spelling back, else one made from the path (3.2's rule).
+    fn uri_of(&self, path: &Path) -> String {
+        match self.workspace.by_path(path) {
+            Some(doc) => doc.uri.clone(),
+            None => uri::from_path(path),
+        }
     }
 
     fn respond(&self, response: Response) {
