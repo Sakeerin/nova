@@ -1791,6 +1791,7 @@ pub fn resolve_program(
 
     // Pass 2: resolve `import`s, binding other modules' public names. What
     // each import names is its module's table (spec 3.3a §4.5).
+    let mut public_fixes: Vec<(usize, usize, String)> = Vec::new();
     for (mid, m) in all.iter().enumerate() {
         let before = diagnostics.len();
         for item in &m.file.items {
@@ -1803,6 +1804,7 @@ pub fn resolve_program(
                     imp,
                     &mut diagnostics,
                     &mut imports,
+                    &mut public_fixes,
                 );
             }
         }
@@ -1810,6 +1812,19 @@ pub fn resolve_program(
             diagnostics[before..]
                 .iter_mut()
                 .for_each(|d| d.fixes.clear());
+        }
+    }
+
+    // Spec 3.4b §3.2: making an item public must not bind its name into a
+    // module that already has it, which would be E0002 there. Every module's
+    // own items and imports are bound by now, and std's glob, which never
+    // conflicts, has not run.
+    for (at, target, name) in public_fixes {
+        let clash = all.iter().enumerate().any(|(g, m)| {
+            g != target && would_receive(m, target, &name) && binds(&definitions.modules[g], &name)
+        });
+        if clash {
+            diagnostics[at].fixes.clear();
         }
     }
 
@@ -2471,6 +2486,9 @@ fn test_shape_violations(f: &Function) -> Vec<(&'static str, Option<Span>)> {
 }
 
 /// Bind another module's public names into the importing module's scope.
+/// Each "make public" fix it offers is recorded in `public_fixes`: the
+/// diagnostic's index, the target module and the name (spec 3.4b §4.4).
+#[allow(clippy::too_many_arguments)]
 fn resolve_import(
     definitions: &mut Definitions,
     exports: &[Exports],
@@ -2479,6 +2497,7 @@ fn resolve_import(
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
     occurrences: &mut Vec<Occurrence>,
+    public_fixes: &mut Vec<(usize, usize, String)>,
 ) {
     let span = imp.path.span;
     // Only single-segment module imports are supported. A qualified or nested
@@ -2623,6 +2642,7 @@ fn resolve_import(
                         make_public(&modules[target], name, target_name, same_package)
                     {
                         diag = diag.with_fix(fix);
+                        public_fixes.push((diagnostics.len(), target, name.clone()));
                     }
                     diagnostics.push(diag);
                 }
@@ -2666,6 +2686,34 @@ fn make_public(module: &ModuleSource, name: &str, import: &str, same_package: bo
         edits.push(Edit::insert(at as u32, item_name.span.file, "pub "));
     }
     (!edits.is_empty()).then(|| Fix::new(format!("make `{name}` public in `{import}`"), edits))
+}
+
+/// Whether `module` would receive `name` once module `target` exports it:
+/// it imports `target` whole, or by a list naming `name`.
+fn would_receive(module: &ModuleSource, target: usize, name: &str) -> bool {
+    module.file.items.iter().any(|item| {
+        let Item::Import(imp) = &item.value else {
+            return false;
+        };
+        let [first] = imp.path.value.segments.as_slice() else {
+            return false;
+        };
+        if module.imports.get(&first.value) != Some(&ImportTarget::Module(target)) {
+            return false;
+        }
+        match &imp.kind {
+            ImportKind::Simple => true,
+            ImportKind::List(names) => names.iter().any(|n| n.value == name),
+            _ => false,
+        }
+    })
+}
+
+/// Whether `scope` binds `name` in any namespace.
+fn binds(scope: &ModuleScope, name: &str) -> bool {
+    scope.values.contains_key(name)
+        || scope.types.contains_key(name)
+        || scope.traits.contains_key(name)
 }
 
 #[allow(clippy::too_many_arguments)]
