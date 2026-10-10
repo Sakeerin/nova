@@ -370,3 +370,425 @@ fn case_10_no_make_mutable_for_self() {
         "mut self",
     );
 }
+
+// === Task 5: import a name, and did you mean (spec §4.2, §4.3; §9.1
+// cases 11-23, 25 and 26) ===
+
+const GEOMETRY: &str = "pub record Point { x: Int, y: Int }\n\npub fn origin() -> Point {\n    Point { x: 0, y: 0 }\n}\n\npub fn manhattan(p: Point) -> Int {\n    p.x + p.y\n}\n\npub trait Shape {\n    fn area(self) -> Int\n}\n\npub fn one() -> Int {\n    1\n}\n";
+
+const KINDS: &str = "pub type Shape =\n  | Circle(Int)\n  | Empty\n\npub record P { v: Int }\n\nimpl P {\n    fn new() -> P {\n        P { v: 7 }\n    }\n}\n\npub fn make() -> Shape {\n    Empty\n}\n\npub fn one() -> Int {\n    1\n}\n";
+
+/// In the loose program `files`, the diagnostic `code` holding `part`
+/// offers `title`, which leaves `expect` in the file ending `file`;
+/// applied, the diagnostic goes and nothing comes.
+#[track_caller]
+fn offers(files: &[(&str, &str)], code: &str, part: &str, title: &str, file: &str, expect: &str) {
+    let b = buffers(files);
+    let a = loose(&b);
+    let d = diagnostic(&a, code, part);
+    let edited = apply(&a, fix(d, title), &b);
+    let after = text(&edited, file);
+    assert!(after.contains(expect), "{after}");
+    assert_fixes(&a, &loose(&edited), code, &[]);
+}
+
+/// The diagnostic `code` holding `part` offers no import.
+#[track_caller]
+fn no_import(files: &[(&str, &str)], code: &str, part: &str) {
+    let a = loose(&buffers(files));
+    let d = diagnostic(&a, code, part);
+    assert!(
+        d.fixes.iter().all(|f| !f.title.starts_with("import")),
+        "{:?}",
+        d.fixes
+    );
+}
+
+#[test]
+fn case_11_import_extends_an_existing_list() {
+    offers(
+        &[
+            (
+                MAIN,
+                "import geometry::{origin}\n\nfn main() {\n    let d = manhattan(origin())\n    println(\"${d}\")\n}\n",
+            ),
+            ("mem/geometry.nova", GEOMETRY),
+        ],
+        "E0001",
+        "cannot find function `manhattan`",
+        "import `manhattan` from `geometry`",
+        "main.nova",
+        "import geometry::{origin, manhattan}\n",
+    );
+}
+
+#[test]
+fn case_12_import_adds_a_line_after_the_last_import() {
+    for nl in ["\n", "\r\n"] {
+        let main =
+            "import shapes // the shapes\n\nfn main() {\n    println(\"${twice()} ${one()}\")\n}\n"
+                .replace('\n', nl);
+        let shapes =
+            "import geometry\n\npub fn twice() -> Int {\n    one() * 2\n}\n".replace('\n', nl);
+        offers(
+            &[
+                (MAIN, main.as_str()),
+                ("mem/shapes.nova", shapes.as_str()),
+                ("mem/geometry.nova", GEOMETRY),
+            ],
+            "E0001",
+            "cannot find function `one`",
+            "import `one` from `geometry`",
+            "main.nova",
+            &format!("import shapes // the shapes{nl}import geometry::{{one}}{nl}{nl}fn main()"),
+        );
+    }
+}
+
+#[test]
+fn case_13_import_goes_above_the_first_item_below_a_header() {
+    for (k, nl) in ["\n", "\r\n"].into_iter().enumerate() {
+        let main = "// A header.\n\n// What main does.\nfn main() {\n    println(\"${twice()} ${one()}\")\n}\n"
+            .replace('\n', nl);
+        let lib = "import geometry\nimport shapes\n\npub fn name() -> String {\n    \"demo\"\n}\n"
+            .replace('\n', nl);
+        let geometry = GEOMETRY.replace('\n', nl);
+        let shapes = "pub fn twice() -> Int {\n    2\n}\n".replace('\n', nl);
+        let dir = project(
+            &format!("above-the-first-item-{k}"),
+            &[
+                ("src/main.nova", main.as_str()),
+                ("src/lib.nova", lib.as_str()),
+                ("src/geometry.nova", geometry.as_str()),
+                ("src/shapes.nova", shapes.as_str()),
+            ],
+        );
+        let none = Buffers(Vec::new());
+        let a = whole(&dir, &none);
+        let d = diagnostic(&a, "E0001", "cannot find function `one`");
+        let edited = apply(&a, fix(d, "import `one` from `geometry`"), &none);
+        let after = text(&edited, "main.nova");
+        let want = format!(
+            "// A header.{nl}{nl}import geometry::{{one}}{nl}{nl}// What main does.{nl}fn main()"
+        );
+        assert!(after.starts_with(&want), "{after}");
+        assert_fixes(&a, &whole(&dir, &edited), "E0001", &[]);
+    }
+}
+
+#[test]
+fn case_14_import_from_a_dependencys_library() {
+    let app = app_and_geom(
+        "from-a-dependency",
+        &[
+            (
+                "src/main.nova",
+                "import geom\nimport shapes\n\nfn main() {\n    println(\"${area()} ${twice()}\")\n}\n",
+            ),
+            ("src/shapes.nova", "pub fn twice() -> Int {\n    side() * 2\n}\n"),
+        ],
+        "pub fn area() -> Int {\n    1\n}\n\npub fn side() -> Int {\n    2\n}\n",
+    );
+    let none = Buffers(Vec::new());
+    let a = whole(&app, &none);
+    let d = diagnostic(&a, "E0001", "cannot find function `side`");
+    let edited = apply(&a, fix(d, "import `side` from `geom`"), &none);
+    let after = text(&edited, "shapes.nova");
+    assert!(
+        after.starts_with("import geom::{side}\n\npub fn twice()"),
+        "{after}"
+    );
+    assert_fixes(&a, &whole(&app, &edited), "E0001", &[]);
+}
+
+#[test]
+fn case_15_import_a_type_a_record_and_a_trait() {
+    let geometry = ("mem/geometry.nova", GEOMETRY);
+    offers(
+        &[
+            (
+                MAIN,
+                "import geometry::{origin}\n\nfn show(p: Point) -> Int {\n    p.x\n}\n\nfn main() {\n    println(\"${show(origin())}\")\n}\n",
+            ),
+            geometry,
+        ],
+        "E0001",
+        "cannot find type `Point`",
+        "import `Point` from `geometry`",
+        "main.nova",
+        "import geometry::{origin, Point}\n",
+    );
+    offers(
+        &[
+            (
+                MAIN,
+                "import geometry::{origin}\n\nfn main() {\n    let p = Point { x: 1, y: 2 }\n    println(\"${p.x}\")\n}\n",
+            ),
+            geometry,
+        ],
+        "E0001",
+        "cannot find record `Point`",
+        "import `Point` from `geometry`",
+        "main.nova",
+        "import geometry::{origin, Point}\n",
+    );
+    offers(
+        &[
+            (
+                MAIN,
+                "import geometry::{origin}\n\nrecord Sq { s: Int }\n\nimpl Shape for Sq {\n    fn area(self) -> Int {\n        self.s * self.s\n    }\n}\n\nfn main() {}\n",
+            ),
+            geometry,
+        ],
+        "E0001",
+        "cannot find trait `Shape`",
+        "import `Shape` from `geometry`",
+        "main.nova",
+        "import geometry::{origin, Shape}\n",
+    );
+}
+
+#[test]
+fn case_16_import_an_unknown_qualifier() {
+    let kinds = ("mem/kinds.nova", KINDS);
+    offers(
+        &[
+            (
+                MAIN,
+                "import kinds::{one}\n\nfn main() {\n    let p = P::new()\n    println(\"${p.v} ${one()}\")\n}\n",
+            ),
+            kinds,
+        ],
+        "E0900",
+        "module-qualified paths",
+        "import `P` from `kinds`",
+        "main.nova",
+        "import kinds::{one, P}\n",
+    );
+    offers(
+        &[
+            (
+                MAIN,
+                "import kinds::{one}\n\nfn main() {\n    let e = Shape::Empty\n}\n",
+            ),
+            kinds,
+        ],
+        "E0900",
+        "module-qualified paths",
+        "import `Shape` from `kinds`",
+        "main.nova",
+        "import kinds::{one, Shape}\n",
+    );
+    offers(
+        &[
+            (
+                MAIN,
+                "import kinds::{make}\n\nfn main() {\n    match make() {\n        Shape::Circle(r) => println(\"${r}\")\n        Shape::Empty => println(\"empty\")\n    }\n}\n",
+            ),
+            kinds,
+        ],
+        "E0001",
+        "cannot resolve this pattern",
+        "import `Shape` from `kinds`",
+        "main.nova",
+        "import kinds::{make, Shape}\n",
+    );
+}
+
+#[test]
+fn case_17_no_import_when_two_modules_export_the_name() {
+    no_import(
+        &[
+            (
+                MAIN,
+                "import a::{x}\nimport b::{y}\n\nfn main() {\n    let s = x() + y() + g()\n}\n",
+            ),
+            (
+                "mem/a.nova",
+                "pub fn x() -> Int {\n    1\n}\n\npub fn g() -> Int {\n    2\n}\n",
+            ),
+            (
+                "mem/b.nova",
+                "pub fn y() -> Int {\n    1\n}\n\npub fn g() -> Int {\n    3\n}\n",
+            ),
+        ],
+        "E0001",
+        "cannot find function `g`",
+    );
+}
+
+#[test]
+fn case_18_no_import_that_binds_a_name_the_module_has_but_std_does_not_block() {
+    let geo = (
+        "mem/geo.nova",
+        "pub record Area { v: Int }\n\npub fn Area() -> Int {\n    2\n}\n\npub record Map { v: Int }\n\npub fn Map() -> Int {\n    3\n}\n\npub fn one() -> Int {\n    1\n}\n",
+    );
+    no_import(
+        &[
+            (
+                MAIN,
+                "import geo::{one}\n\nrecord Area { w: Int }\n\nfn main() {\n    let n = Area() + one()\n}\n",
+            ),
+            geo,
+        ],
+        "E0001",
+        "cannot find function `Area`",
+    );
+    // `Map` is also std's type, which an import wins over (spec §4.2).
+    offers(
+        &[
+            (
+                MAIN,
+                "import geo::{one}\n\nfn main() {\n    let n = Map() + one()\n}\n",
+            ),
+            geo,
+        ],
+        "E0001",
+        "cannot find function `Map`",
+        "import `Map` from `geo`",
+        "main.nova",
+        "import geo::{one, Map}\n",
+    );
+}
+
+#[test]
+fn case_19_no_import_of_a_sum_type_for_a_record_literal() {
+    no_import(
+        &[
+            (
+                MAIN,
+                "import geo::{one}\n\nfn main() {\n    let p = Point { x: 1 }\n}\n",
+            ),
+            (
+                "mem/geo.nova",
+                "pub type Point =\n  | Origin\n\npub fn one() -> Int {\n    1\n}\n",
+            ),
+        ],
+        "E0001",
+        "cannot find record `Point`",
+    );
+}
+
+#[test]
+fn case_20_did_you_mean_a_local() {
+    offers(
+        &[(
+            MAIN,
+            "fn main() {\n    let count = 1\n    let total = cuont + 1\n    println(\"${total}\")\n}\n",
+        )],
+        "E0001",
+        "cannot find `cuont`",
+        "change `cuont` to `count`",
+        "main.nova",
+        "let total = count + 1",
+    );
+}
+
+#[test]
+fn case_21_did_you_mean_a_type_and_a_qualifier() {
+    offers(
+        &[(
+            MAIN,
+            "record Point { x: Int }\n\nfn show(p: Piont) -> Int {\n    p.x\n}\n\nfn main() {}\n",
+        )],
+        "E0001",
+        "cannot find type `Piont`",
+        "change `Piont` to `Point`",
+        "main.nova",
+        "fn show(p: Point)",
+    );
+    offers(
+        &[(
+            MAIN,
+            "type Shape =\n  | Empty\n\nfn main() {\n    let s = Shpae::Empty\n}\n",
+        )],
+        "E0900",
+        "module-qualified paths",
+        "change `Shpae` to `Shape`",
+        "main.nova",
+        "let s = Shape::Empty",
+    );
+}
+
+#[test]
+fn case_22_did_you_mean_a_field_in_a_read_and_a_literal() {
+    offers(
+        &[(
+            MAIN,
+            "record P { width: Int }\n\nfn main() {\n    let p = P { widht: 1 }\n}\n",
+        )],
+        "E0014",
+        "has no field `widht`",
+        "change `widht` to `width`",
+        "main.nova",
+        "P { width: 1 }",
+    );
+    offers(
+        &[(
+            MAIN,
+            "record P { width: Int }\n\nfn main() {\n    let p = P { width: 1 }\n    let w = p.widht + 1\n}\n",
+        )],
+        "E0014",
+        "no field `widht` on record `P`",
+        "change `widht` to `width`",
+        "main.nova",
+        "let w = p.width + 1",
+    );
+}
+
+#[test]
+fn case_23_did_you_mean_a_method_one_from_a_trait_not_imported() {
+    offers(
+        &[(
+            MAIN,
+            "record P { v: Int }\n\nimpl P {\n    fn double(self) -> Int {\n        self.v * 2\n    }\n}\n\nfn main() {\n    let p = P { v: 1 }\n    let d = p.doubel()\n}\n",
+        )],
+        "E0014",
+        "no method `doubel`",
+        "change `doubel` to `double`",
+        "main.nova",
+        "let d = p.double()",
+    );
+    // Method calls resolve through every impl, imported or not (spec §4.3).
+    offers(
+        &[
+            (MAIN, "import loud::{make}\n\nfn main() {\n    let s = make().shuot()\n}\n"),
+            (
+                "mem/loud.nova",
+                "pub trait Loud {\n    fn shout(self) -> String\n}\n\npub record T { s: String }\n\nimpl Loud for T {\n    fn shout(self) -> String {\n        self.s\n    }\n}\n\npub fn make() -> T {\n    T { s: \"hi\" }\n}\n",
+            ),
+        ],
+        "E0014",
+        "no method `shuot`",
+        "change `shuot` to `shout`",
+        "main.nova",
+        "let s = make().shout()",
+    );
+}
+
+#[test]
+fn case_25_did_you_mean_a_name_equal_ignoring_case_beyond_the_distance() {
+    offers(
+        &[(
+            MAIN,
+            "fn main() {\n    let httpclient = 1\n    let x = HTTPCLIENT + 1\n}\n",
+        )],
+        "E0001",
+        "cannot find `HTTPCLIENT`",
+        "change `HTTPCLIENT` to `httpclient`",
+        "main.nova",
+        "let x = httpclient + 1",
+    );
+}
+
+#[test]
+fn case_26_no_did_you_mean_beyond_the_distance_and_its_edge() {
+    let a = loose(&buffers(&[(
+        MAIN,
+        "fn main() {\n    let abcde = 1\n    let x = abxde + axxde\n}\n",
+    )]));
+    let near = diagnostic(&a, "E0001", "cannot find `abxde`");
+    fix(near, "change `abxde` to `abcde`");
+    let far = diagnostic(&a, "E0001", "cannot find `axxde`");
+    assert!(far.fixes.is_empty(), "{:?}", far.fixes);
+}
