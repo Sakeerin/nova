@@ -1047,3 +1047,132 @@ fn a_program_with_errors_can_still_be_renamed() {
     let response = rename(&mut client, &uri, at(text, "total", 0), "sum");
     assert_eq!(edits(&response).len(), 2, "{response}");
 }
+
+// === Task 12: the gate (spec §9) ===
+
+const GATE_LIB: &str = "/// A rectangle's area.\npub fn area(w: Int, h: Int) -> Int { w * h }\n";
+const GATE_UTIL: &str =
+    "pub record Size { w: Int, h: Int }\npub fn square(n: Int) -> Size { Size { w: n, h: n } }\n";
+const GATE_MAIN: &str = "import geom\nimport util\n\n\
+fn main() {\n    let side = 3\n    let s = square(side)\n    let w = s.w\n    let t = Size { w, h: s.h }\n    let a = area(t.w, t.h)\n    let mut v = Vec::new()\n    v.push(a)\n    let h = 1\n    let total = side + h\n}\n";
+
+#[test]
+fn the_navigation_gate() {
+    let (app, geom) = app_and_library("gate", GATE_LIB);
+    std::fs::write(app.join("src").join("main.nova"), GATE_MAIN).unwrap();
+    std::fs::write(app.join("src").join("util.nova"), GATE_UTIL).unwrap();
+    let home = home("gate");
+    let main = file_uri(&app.join("src").join("main.nova"));
+    let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
+    open(&mut client, &main, GATE_MAIN);
+
+    // Hover: a local, a function with docs, a field, a std method.
+    assert_eq!(
+        code(&hover(&mut client, &main, at(GATE_MAIN, "side", 0))),
+        "let side: Int"
+    );
+    assert_eq!(
+        markdown(&hover(&mut client, &main, at(GATE_MAIN, "area(", 0))),
+        "```nova\npub fn area(w: Int, h: Int) -> Int\n```\n\nA rectangle's area."
+    );
+    assert_eq!(
+        code(&hover(&mut client, &main, at(GATE_MAIN, "w\n", 0))),
+        "w: Int"
+    );
+    assert!(code(&hover(&mut client, &main, at(GATE_MAIN, "push", 0))).contains("fn push("));
+
+    // Definition: the same file, another module, the dependency, std.
+    let local = definition(&mut client, &main, at(GATE_MAIN, "side)", 0))["result"].clone();
+    assert_eq!(local["range"], range(GATE_MAIN, "side", 0, "side"));
+    let square = definition(&mut client, &main, at(GATE_MAIN, "square", 0))["result"].clone();
+    assert!(path_of(&square).ends_with("util.nova"), "{square}");
+    let area = definition(&mut client, &main, at(GATE_MAIN, "area(", 0))["result"].clone();
+    assert!(
+        same_uri(
+            area["uri"].as_str().unwrap(),
+            &file_uri(&geom.join("src").join("lib.nova"))
+        ),
+        "{area}"
+    );
+    let push = definition(&mut client, &main, at(GATE_MAIN, "push", 0))["result"].clone();
+    assert!(path_of(&push).starts_with(home.join("std")), "{push}");
+
+    // References, with and without the declaration.
+    assert_eq!(
+        references(&mut client, &main, at(GATE_MAIN, "side", 0), true).len(),
+        3
+    );
+    assert_eq!(
+        references(&mut client, &main, at(GATE_MAIN, "side", 0), false).len(),
+        2
+    );
+
+    // Rename across files, a shorthand field among them.
+    let renamed = edits(&rename(
+        &mut client,
+        &main,
+        at(GATE_MAIN, "w\n", 0),
+        "width",
+    ));
+    assert_eq!(renamed.len(), 5, "{renamed:?}");
+    assert!(
+        renamed
+            .iter()
+            .any(|e| e.0 == "main.nova" && e.3 == "width: w"),
+        "{renamed:?}"
+    );
+    assert_eq!(
+        renamed.iter().filter(|e| e.0 == "util.nova").count(),
+        2,
+        "{renamed:?}"
+    );
+
+    // Prepare rename refuses std's and the dependency's names.
+    assert!(refused(&prepare(&mut client, &main, at(GATE_MAIN, "push", 0))).contains("in std"));
+    assert!(
+        refused(&prepare(&mut client, &main, at(GATE_MAIN, "area(", 0)))
+            .contains("dependency `geom`")
+    );
+
+    // The check refuses a rename that shadows another name.
+    assert_eq!(
+        refused(&rename(
+            &mut client,
+            &main,
+            at(GATE_MAIN, "h = 1", 0),
+            "side"
+        )),
+        "renaming `h` to `side` would make 1 other name refer to it"
+    );
+}
+
+#[test]
+fn each_request_works_in_a_broken_file_and_is_empty_for_an_unopened_one() {
+    // A guard over Tasks 8-11, as Task 7's hover test is for hover.
+    let text = "fn broken( {\n}\nfn main() {\n    let total = 1\n    let b = total\n}\n";
+    let dir = project("requests-broken", &[("main.nova", text)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let other = file_uri(&dir.join("src").join("other.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, text);
+    let use_ = at(text, "total", 1);
+    let found = definition(&mut client, &uri, use_.clone())["result"].clone();
+    assert_eq!(found["range"], range(text, "total", 0, "total"));
+    assert_eq!(references(&mut client, &uri, use_.clone(), true).len(), 2);
+    assert_eq!(
+        prepare(&mut client, &uri, use_.clone())["result"]["placeholder"],
+        "total"
+    );
+    assert_eq!(
+        edits(&rename(&mut client, &uri, use_.clone(), "sum")).len(),
+        2
+    );
+    // A document that is not open: empty results, never an error.
+    assert_eq!(
+        ok(&definition(&mut client, &other, use_.clone())),
+        Value::Null
+    );
+    assert!(references(&mut client, &other, use_.clone(), true).is_empty());
+    assert_eq!(ok(&prepare(&mut client, &other, use_.clone())), Value::Null);
+    assert_eq!(ok(&rename(&mut client, &other, use_, "sum")), Value::Null);
+}
