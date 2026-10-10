@@ -3,7 +3,7 @@
 
 use nova_ast as ast;
 use nova_ast::item::{ExternItem, TraitItem, TypeDef};
-use nova_diagnostics::{Diagnostic, FileDb, Span, Spanned};
+use nova_diagnostics::{suggest, Diagnostic, FileDb, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
 use nova_resolver::{
@@ -21,7 +21,7 @@ use crate::{
 
 mod fixes;
 
-use fixes::Binding;
+use fixes::{Binding, Need};
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -156,6 +156,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         type_params: Vec::new(),
         sources: options.sources,
         bindings: FxHashMap::default(),
+        qualified_callee: None,
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -318,6 +319,9 @@ struct Checker<'a> {
     /// How each local the user wrote was bound, by its declaration span
     /// (spec 3.4b §4.1; plan decision 5).
     bindings: FxHashMap<Span, Binding>,
+    /// Set by `check_call` to its argument count just before it checks a
+    /// two-segment callee path; taken by `check_path` (plan decision 7).
+    qualified_callee: Option<usize>,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -714,6 +718,9 @@ impl<'a> Checker<'a> {
                     }
                     None => {
                         self.error("E0001", format!("cannot find trait `{name}`"), path.span);
+                        if let Some(seg) = path.value.segments.last() {
+                            self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                        }
                     }
                 }
             }
@@ -1224,6 +1231,9 @@ impl<'a> Checker<'a> {
                         }
                         None => {
                             self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
+                            if let Some(seg) = tr.value.segments.last() {
+                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            }
                             continue;
                         }
                     }
@@ -2315,6 +2325,9 @@ impl<'a> Checker<'a> {
                         }
                         None => {
                             self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                            if let Some(seg) = b.value.segments.last() {
+                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            }
                         }
                     }
                 }
@@ -2370,7 +2383,12 @@ impl<'a> Checker<'a> {
                             slot.push(id);
                         }
                     }
-                    None => self.error("E0001", format!("cannot find trait `{name}`"), b.span),
+                    None => {
+                        self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                        if let Some(seg) = b.value.segments.last() {
+                            self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                        }
+                    }
                 }
             }
         }
@@ -2608,6 +2626,11 @@ impl<'a> Checker<'a> {
                     };
                 }
                 self.error("E0001", format!("cannot find type `{name}`"), ty.span);
+                self.name_fixes(
+                    path.segments[0].clone(),
+                    Need::Type,
+                    generics.keys().cloned().collect(),
+                );
                 Ty::Error
             }
             ast::Type::Tuple(items) if items.is_empty() => Ty::Unit,
@@ -3590,6 +3613,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_path(&mut self, fcx: &mut FnCtx, path: &ast::Path, span: Span) -> hir::Expr {
+        let callee_args = self.qualified_callee.take();
         if path.segments.len() == 2 {
             // `Type::Variant` — qualified variant reference.
             let ty_name = path.segments[0].value.as_str();
@@ -3608,6 +3632,16 @@ impl<'a> Checker<'a> {
                 return error_expr(span);
             }
             self.unsupported(span, "module-qualified paths");
+            // Spec 3.4b §4.2, §4.3: a qualifier this module never imported,
+            // or misspelled.
+            self.name_fixes(
+                path.segments[0].clone(),
+                Need::Qualifier {
+                    member: v_name.to_string(),
+                    call: callee_args,
+                },
+                fcx.generics.keys().cloned().collect(),
+            );
             return error_expr(span);
         }
         if path.segments.len() != 1 {
@@ -3677,6 +3711,8 @@ impl<'a> Checker<'a> {
             }
             None => {
                 self.error("E0001", format!("cannot find `{name}` in this scope"), span);
+                let nearby = fixes::visible_locals(fcx);
+                self.name_fixes(path.segments[0].clone(), Need::Value, nearby);
                 error_expr(span)
             }
         }
@@ -3732,6 +3768,12 @@ impl<'a> Checker<'a> {
                                 "E0001",
                                 format!("cannot find function `{name}` in this scope"),
                                 callee.span,
+                            );
+                            let nearby = fixes::visible_locals(fcx);
+                            self.name_fixes(
+                                path.segments[0].clone(),
+                                Need::Call(args.len()),
+                                nearby,
                             );
                             return error_expr(span);
                         }
@@ -3949,7 +3991,17 @@ impl<'a> Checker<'a> {
 
         // Indirect call through any fn-typed value expression (a local, a
         // constant of function type, a field, another call's result, …).
+        // Plan decision 7: a two-segment callee's E0900 knows it is a
+        // call's, and its argument count.
+        if let ast::Expr::Path(path) = &callee.value {
+            if path.segments.len() == 2 {
+                self.qualified_callee = Some(args.len());
+            }
+        }
         let callee_expr = self.check_expr(fcx, callee);
+        // Taken by `check_path`; cleared here too, so it reaches no other
+        // path.
+        self.qualified_callee = None;
         let checked: Vec<hir::Expr> = args.iter().map(|a| self.check_expr(fcx, a)).collect();
         let ret = fcx.icx.fresh();
         let expected = Ty::Fn {
@@ -5017,6 +5069,7 @@ impl<'a> Checker<'a> {
         let name = path.segments[0].value.as_str();
         let Some(def_id) = self.defs.resolve_type(self.cur_module, name) else {
             self.error("E0001", format!("cannot find record `{name}`"), span);
+            self.name_fixes(path.segments[0].clone(), Need::Record, Vec::new());
             return error_expr(span);
         };
         let Some(record) = self.records.iter().find(|r| r.def_id == def_id).cloned() else {
@@ -5044,6 +5097,16 @@ impl<'a> Checker<'a> {
                     format!("record `{name}` has no field `{fname}`"),
                     init.name.span,
                 );
+                let given: Vec<&str> = fields.iter().map(|f| f.name.value.as_str()).collect();
+                let fix = suggest::change_to(
+                    &init.name,
+                    record
+                        .fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .filter(|n| !given.contains(n)),
+                );
+                self.push_fix(fix);
                 continue;
             };
             if let Some(fi) = record.fields.iter().position(|f| f.name == fname) {
@@ -5477,6 +5540,8 @@ impl<'a> Checker<'a> {
             self.no_field_message(fcx, &recv_ty, &field.value),
             field.span,
         );
+        let fix = self.field_fix(&recv_ty, field);
+        self.push_fix(fix);
         error_expr(span)
     }
 
@@ -5807,6 +5872,7 @@ impl<'a> Checker<'a> {
                 ),
                 method.span,
             );
+            self.push_fix(suggest::change_to(method, ["len"]));
             return error_expr(span);
         }
         match self.resolve_method_on(&recv_ty, fcx, &method.value) {
@@ -5847,6 +5913,8 @@ impl<'a> Checker<'a> {
                     ),
                     method.span,
                 );
+                let fix = self.method_fix(&recv_ty, fcx, method);
+                self.push_fix(fix);
                 error_expr(span)
             }
         }
@@ -6445,6 +6513,11 @@ impl<'a> Checker<'a> {
                 format!("cannot find `{name}` in this scope"),
                 lhs.span,
             );
+            let nearby = fixes::visible_locals(fcx);
+            self.push_fix(suggest::change_to(
+                &path.segments[0],
+                nearby.iter().map(String::as_str),
+            ));
             return error_expr(span);
         };
         self.note_use(
@@ -6704,6 +6777,8 @@ impl<'a> Checker<'a> {
                 self.no_field_message(fcx, &recv_ty, &field.value),
                 field.span,
             );
+            let fix = self.field_fix(&recv_ty, field);
+            self.push_fix(fix);
             self.check_expr(fcx, rhs);
             return error_expr(span);
         };
@@ -7021,6 +7096,19 @@ impl<'a> Checker<'a> {
                     format!("`{ty_name}::{v_name}` is not a variant of the matched type"),
                     pattern.span,
                 );
+                // Spec 3.4b §4.2: a qualifier this module never imported.
+                if self.defs.resolve_type(self.cur_module, ty_name).is_none() {
+                    let scrutinee = fixes::scrutinee_sum(fcx, scrut_ty);
+                    self.name_fixes(
+                        path.segments[0].clone(),
+                        Need::Pattern {
+                            variant: v_name.to_string(),
+                            arity: 0,
+                            scrutinee,
+                        },
+                        Vec::new(),
+                    );
+                }
                 hir::Pattern::Wildcard
             }
             ast::Pattern::TupleStruct { path, fields } => {
@@ -7048,6 +7136,24 @@ impl<'a> Checker<'a> {
                         "cannot resolve this pattern to a sum type variant",
                         pattern.span,
                     );
+                    // Spec 3.4b §4.2: a qualifier this module never imported.
+                    if path.segments.len() == 2
+                        && self
+                            .defs
+                            .resolve_type(self.cur_module, &path.segments[0].value)
+                            .is_none()
+                    {
+                        let scrutinee = fixes::scrutinee_sum(fcx, scrut_ty);
+                        self.name_fixes(
+                            path.segments[0].clone(),
+                            Need::Pattern {
+                                variant: path.segments[1].value.clone(),
+                                arity: fields.len(),
+                                scrutinee,
+                            },
+                            Vec::new(),
+                        );
+                    }
                     return hir::Pattern::Wildcard;
                 };
                 if !self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
@@ -13475,6 +13581,7 @@ mod tests {
             type_params: Vec::new(),
             sources: None,
             bindings: FxHashMap::default(),
+            qualified_callee: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -13549,6 +13656,7 @@ mod tests {
             type_params: Vec::new(),
             sources: None,
             bindings: FxHashMap::default(),
+            qualified_callee: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
