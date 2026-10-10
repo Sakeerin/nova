@@ -164,6 +164,9 @@ pub fn analyze_program(
             name: m.name.clone(),
             file: &m.ast,
             imports: m.imports.clone(),
+            text: analysis.db.get_source(m.file),
+            package: m.package.map(|p| p.0),
+            importable: m.importable.clone(),
         })
         .collect();
     let resolved = nova_resolver::resolve_program(&module_sources, &std_files, extra_std);

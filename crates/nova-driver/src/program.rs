@@ -247,6 +247,9 @@ pub(crate) struct Loaded {
     pub test_file: bool,
     /// What each of its imports names, by first segment (spec §4.3).
     pub imports: HashMap<String, ImportTarget>,
+    /// Every loaded module it could import, by the name an import of it
+    /// writes (spec 3.4b §4.6).
+    pub importable: Vec<(String, usize)>,
 }
 
 /// What [`load_program`] found.
@@ -384,6 +387,7 @@ pub(crate) fn load_program(
             package: place.package(),
             test_file: place.is_test(),
             imports: HashMap::new(),
+            importable: Vec::new(),
         });
         pending.push(imports);
     }
@@ -400,6 +404,46 @@ pub(crate) fn load_program(
             };
             module.imports.insert(name, target);
         }
+    }
+    // Spec 3.4b §4.6 (plan decision 9): what each loaded module could
+    // import, by the name an import of it writes, through `find` itself.
+    let mut place_of: Vec<Option<Place>> = vec![None; load.modules.len()];
+    for (place, &i) in &places {
+        place_of[i] = Some(place.clone());
+    }
+    let nowhere = Span::point(0, FileId::DUMMY);
+    let mut importables: Vec<Vec<(String, usize)>> = Vec::new();
+    for (i, from) in place_of.iter().enumerate() {
+        let mut importable = Vec::new();
+        if let Some(from) = from {
+            let mut names: Vec<String> = place_of
+                .iter()
+                .flatten()
+                .filter_map(|p| sibling_stem(from, p))
+                .collect();
+            if let (Place::Package { package, tests, .. }, Some(graph)) = (from, graph) {
+                names.extend(
+                    visible_edges(graph, *package, *tests)
+                        .into_iter()
+                        .map(|e| e.import_name),
+                );
+            }
+            names.sort();
+            names.dedup();
+            for name in names {
+                if let Found::Module(target, _) = loader.find(from, &name, nowhere, db) {
+                    if let Some(&j) = places.get(&target) {
+                        if j != i {
+                            importable.push((name, j));
+                        }
+                    }
+                }
+            }
+        }
+        importables.push(importable);
+    }
+    for (module, importable) in load.modules.iter_mut().zip(importables) {
+        module.importable = importable;
     }
     Ok(load)
 }
@@ -581,6 +625,30 @@ impl<'a> Loader<'a> {
 /// A package's `src/`, or `tests/` when `tests`.
 fn module_dir(package: &GraphPackage, tests: bool) -> PathBuf {
     package.dir.join(if tests { "tests" } else { "src" })
+}
+
+/// `p`'s stem when it is a module beside `from`: a loose file in the same
+/// directory, or a module of the same package and directory (spec 3.4b
+/// §4.6).
+fn sibling_stem(from: &Place, p: &Place) -> Option<String> {
+    match (from, p) {
+        (Place::Loose { dir: a, .. }, Place::Loose { dir: b, stem }) if a == b => {
+            Some(stem.clone())
+        }
+        (
+            Place::Package {
+                package: a,
+                tests: s,
+                ..
+            },
+            Place::Package {
+                package: b,
+                tests: t,
+                stem,
+            },
+        ) if a == b && s == t => Some(stem.clone()),
+        _ => None,
+    }
 }
 
 /// The dependencies a module of `package` sees (spec §4.3). A test module

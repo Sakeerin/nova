@@ -731,6 +731,9 @@ impl FrontendContext {
                 name: m.name.clone(),
                 file: &m.ast,
                 imports: m.imports.clone(),
+                text: self.db.get_source(m.file),
+                package: m.package.map(|p| p.0),
+                importable: m.importable.clone(),
             })
             .collect();
         let resolved = nova_resolver::resolve_program(&sources, &std_files, extra_std);

@@ -1241,6 +1241,14 @@ pub struct Definitions {
     modules: Vec<ModuleScope>,
     /// Merged-item-index → owning module.
     item_module: Vec<u32>,
+    /// Each module's exports, std's included (spec 3.4b §4.6).
+    exports: Vec<Exports>,
+    /// What each module could import, by the name an import writes.
+    importable: Vec<Vec<(String, ModuleId)>>,
+    /// Each module's package key ([`ModuleSource::package`]).
+    packages: Vec<Option<u32>>,
+    /// The first std module's index: the user modules come before it.
+    std_start: usize,
 }
 
 impl Definitions {
@@ -1392,6 +1400,84 @@ impl Definitions {
     }
 }
 
+/// What a module exports under one name, in each namespace (spec 3.4b
+/// §4.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Exported {
+    pub value: Option<Res>,
+    pub ty: Option<DefId>,
+    pub trait_def: Option<DefId>,
+}
+
+impl Definitions {
+    /// The modules `module` could import, by the name an import writes
+    /// (spec 3.4b §4.6).
+    pub fn importable(&self, module: ModuleId) -> &[(String, ModuleId)] {
+        self.importable
+            .get(module.0 as usize)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// What `module` exports under `name`.
+    pub fn exported(&self, module: ModuleId, name: &str) -> Exported {
+        let Some(e) = self.exports.get(module.0 as usize) else {
+            return Exported::default();
+        };
+        Exported {
+            value: e.values.get(name).copied(),
+            ty: e.types.get(name).copied(),
+            trait_def: e.traits.get(name).copied(),
+        }
+    }
+
+    /// Whether `a` and `b` are modules of one package. A loose program's
+    /// modules are.
+    pub fn same_package(&self, a: ModuleId, b: ModuleId) -> bool {
+        self.packages.get(a.0 as usize) == self.packages.get(b.0 as usize)
+    }
+
+    /// What `module` binds `name` to, in each namespace, other than through
+    /// std's glob (plan decision 8): a binding equal to some std module's
+    /// export of that name came through it. Builtins are bound outside std.
+    pub fn bound_outside_std(&self, module: ModuleId, name: &str) -> Exported {
+        let Some(scope) = self.modules.get(module.0 as usize) else {
+            return Exported::default();
+        };
+        let std = &self.exports[self.std_start.min(self.exports.len())..];
+        Exported {
+            value: scope
+                .values
+                .get(name)
+                .copied()
+                .filter(|r| !std.iter().any(|e| e.values.get(name) == Some(r))),
+            ty: scope
+                .types
+                .get(name)
+                .copied()
+                .filter(|d| !std.iter().any(|e| e.types.get(name) == Some(d))),
+            trait_def: scope
+                .traits
+                .get(name)
+                .copied()
+                .filter(|d| !std.iter().any(|e| e.traits.get(name) == Some(d))),
+        }
+    }
+
+    /// Whether `module` is one of the implicit std modules.
+    pub fn is_std_module(&self, module: ModuleId) -> bool {
+        let m = module.0 as usize;
+        m >= self.std_start && m < self.modules.len()
+    }
+
+    /// Whether a fix may edit `module` (spec 3.4b §3.1; plan decision 19):
+    /// it is the root package's, whose key is 0, or a loose program's, and
+    /// not std's.
+    pub fn owned(&self, module: ModuleId) -> bool {
+        !self.is_std_module(module)
+            && matches!(self.packages.get(module.0 as usize), Some(None | Some(0)))
+    }
+}
+
 /// What an `import` names, by its first segment (spec 3.3a §4.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportTarget {
@@ -1412,6 +1498,16 @@ pub struct ModuleSource<'a> {
     /// What each import names, by its first segment. An import missing here
     /// is "cannot find module".
     pub imports: std::collections::HashMap<String, ImportTarget>,
+    /// The module's source text, for fixes placed by lines (spec
+    /// `docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`
+    /// §4.7). `None` in the resolver's own tests.
+    pub text: Option<&'a str>,
+    /// A key equal for two modules of one package; `None` for a loose
+    /// program, whose files count as one package (spec 3.4b §4.6).
+    pub package: Option<u32>,
+    /// Every loaded module this one could import: the name an import of it
+    /// writes, and its index in `modules` (spec 3.4b §4.6).
+    pub importable: Vec<(String, usize)>,
 }
 
 impl<'a> ModuleSource<'a> {
@@ -1422,16 +1518,20 @@ impl<'a> ModuleSource<'a> {
             name: name.into(),
             file,
             imports: std::collections::HashMap::new(),
+            text: None,
+            package: None,
+            importable: Vec::new(),
         }
     }
 }
 
 /// Fill each module's import table by module name, as a program without
 /// packages has always resolved (ADR 0003): `import m` names the first
-/// module called `m`.
+/// module called `m`. Every other module becomes importable by its name
+/// (spec 3.4b §4.6).
 pub fn name_imports(modules: &mut [ModuleSource]) {
     let names: Vec<String> = modules.iter().map(|m| m.name.clone()).collect();
-    for module in modules.iter_mut() {
+    for (i, module) in modules.iter_mut().enumerate() {
         for item in &module.file.items {
             let Item::Import(import) = &item.value else {
                 continue;
@@ -1445,11 +1545,17 @@ pub fn name_imports(modules: &mut [ModuleSource]) {
                     .insert(first.value.clone(), ImportTarget::Module(index));
             }
         }
+        module.importable = names
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(j, n)| (n.clone(), j))
+            .collect();
     }
 }
 
 /// The public exports of one module (its `pub` items), used to resolve imports.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Exports {
     values: FxHashMap<String, Res>,
     types: FxHashMap<String, DefId>,
@@ -1606,6 +1712,9 @@ pub fn resolve_program(
             name: m.name.clone(),
             file: m.file,
             imports: m.imports.clone(),
+            text: m.text,
+            package: m.package,
+            importable: m.importable.clone(),
         })
         .chain(
             std_entries
@@ -1699,6 +1808,20 @@ pub fn resolve_program(
     for (mid, std_exports) in exports.iter().enumerate().skip(std_start) {
         import_std_module(&mut definitions, std_exports, mid);
     }
+
+    // Spec 3.4b §4.6: what a fix needs to know.
+    definitions.importable = all
+        .iter()
+        .map(|m| {
+            m.importable
+                .iter()
+                .map(|(n, i)| (n.clone(), ModuleId(*i as u32)))
+                .collect()
+        })
+        .collect();
+    definitions.packages = all.iter().map(|m| m.package).collect();
+    definitions.std_start = std_start;
+    definitions.exports = exports;
 
     ProgramResolution {
         file: File { items: merged },
@@ -3303,5 +3426,58 @@ mod tests {
         assert!(occurrence_at(&prog, main, "missing").is_empty());
         // The module of a list import still resolves.
         assert_eq!(occurrence_at(&prog, main, "lib").len(), 1);
+    }
+
+    // === Phase 3.4b: what a fix needs to know (spec
+    // docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md §4.6) ===
+
+    #[test]
+    fn name_imports_makes_every_other_module_importable() {
+        let p = resolve_two("fn main() {}\n", "pub fn area() -> Int { 1 }\n");
+        let d = &p.definitions;
+        assert_eq!(
+            d.importable(ModuleId(0)),
+            [("lib".to_string(), ModuleId(1))]
+        );
+        assert_eq!(
+            d.importable(ModuleId(1)),
+            [("main".to_string(), ModuleId(0))]
+        );
+        assert!(d.same_package(ModuleId(0), ModuleId(1)));
+        // A loose program's modules are owned; std's are not.
+        assert!(d.owned(ModuleId(0)) && d.owned(ModuleId(1)) && !d.owned(ModuleId(2)));
+    }
+
+    #[test]
+    fn exported_names_each_namespace_a_public_name_has() {
+        let p = resolve_two(
+            "fn main() {}\n",
+            "pub record Area { x: Int }\npub fn area() -> Int { 1 }\nfn hidden() -> Int { 0 }\n",
+        );
+        let d = &p.definitions;
+        let area = d.exported(ModuleId(1), "area");
+        assert!(matches!(area.value, Some(Res::Def(_))), "{area:?}");
+        assert!(area.ty.is_none() && area.trait_def.is_none(), "{area:?}");
+        assert!(d.exported(ModuleId(1), "Area").ty.is_some());
+        assert_eq!(d.exported(ModuleId(1), "hidden"), Exported::default());
+    }
+
+    #[test]
+    fn a_name_bound_through_std_is_not_bound_outside_it() {
+        let p = resolve_two(
+            "record Option { x: Int }\nfn main() {}\n",
+            "pub fn area() -> Int { 1 }\n",
+        );
+        let d = &p.definitions;
+        assert_eq!(
+            d.bound_outside_std(ModuleId(0), "Some"),
+            Exported::default()
+        );
+        assert!(d.bound_outside_std(ModuleId(0), "Option").ty.is_some());
+        assert!(matches!(
+            d.bound_outside_std(ModuleId(0), "println").value,
+            Some(Res::Builtin(_))
+        ));
+        assert!(d.is_std_module(ModuleId(2)) && !d.is_std_module(ModuleId(1)));
     }
 }
