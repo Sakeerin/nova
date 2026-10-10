@@ -24,8 +24,9 @@ ready-built archives for Linux, macOS and Windows.
 ### Editor support
 
 `nova lsp` is a language server: it gives an editor diagnostics,
-completion, formatting, hover, go to definition, find references and
-rename. For VS Code, `tools/vscode-nova/` is the
+completion, formatting, hover, go to definition, find references,
+rename, quick fixes, organize imports and semantic highlighting. For
+VS Code, `tools/vscode-nova/` is the
 extension. Each GitHub release attaches it as `nova-vscode-<version>.vsix`,
 which installs with **Extensions: Install from VSIX…**. It runs the `nova`
 on your PATH, or the one the `nova.server.path` setting names.

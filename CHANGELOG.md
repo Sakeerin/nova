@@ -122,8 +122,22 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shorthand fields. It refuses, saying why, a rename that would change
   what a name means. ADR 0032.
 
+- **Fixes and colour in the editor.** Diagnostics suggest fixes: make a
+  local mutable, import a name, "did you mean", make an item public,
+  and remove an unreachable arm. `nova check` prints each as a `help:`
+  line, and `nova lsp` offers each as a quick fix. `nova lsp` also
+  organizes imports, the dependencies first and then the project's own
+  modules, and colours every name by what it means. ADR 0033.
+
 ### Changed
 
+- **`nova fmt` keeps a blank line between imports,** as gofmt does, and
+  sorts each group of imports on its own (ADR 0028).
+- **E0060's note gives way to its fix.** Where a `let` or a parameter
+  can be made mutable, `nova check` prints ``= help: make `x` mutable``
+  in place of the note advising `let mut`, and the language server's
+  published message loses that note too. A match binding, a `for`
+  variable and `self` keep the note.
 - In a project, `nova build` without `-o` writes `target/debug/<name>`,
   or `target/release/<name>` with `--release`, instead of `<file stem>` in
   the current directory. Outside a project, and with a file argument,

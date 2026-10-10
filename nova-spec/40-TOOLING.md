@@ -157,6 +157,12 @@ ADR 0028):
   with `root = true`, and EditorConfig's globs are matched, except numeric
   ranges.
 
+**Amended 2026-10-10 (branch `phase-3-4b-fixes-colour`):** a blank line
+between imports ends a group, as in gofmt, and each group is sorted on
+its own (ADR 0028). Organize imports writes two groups, the
+dependencies and then the project's own modules: "std first then
+third-party", in a Nova whose std needs no import (ADR 0033).
+
 ---
 
 ## 3. LSP Server (`nova lsp`)
@@ -193,6 +199,14 @@ ADR 0032). They read an index the type checker records while it
 resolves names, not salsa's queries. References and rename reach the
 owning project, and rename checks itself by analysing the renamed
 program again. Code actions and semantic highlighting are 3.4b's.
+
+**Amended 2026-10-10 (branch `phase-3-4b-fixes-colour`):** 3.4b delivers
+code actions and semantic highlighting
+(`docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`;
+ADR 0033). Diagnostics carry fixes, made where each error is found,
+which `nova check` prints as `help:` lines and code actions offer;
+organize imports is a source action. Semantic tokens cover names only.
+With 3.4a, every Phase 3 row of this table is delivered.
 
 ### 3.2 Architecture
 - `tower-lsp` for protocol

@@ -369,6 +369,13 @@ a PR, and a merge on the user's word.
   has `Diagnostic`'s suggested edits, code actions, organize imports and
   semantic tokens, and the rest of the gate.
 
+  **Amended 2026-10-10:** 3.4b, "Fixes and colour", is built
+  (`docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`,
+  branch `phase-3-4b-fixes-colour`; ADR 0033). With it 3.4 is complete
+  and its gate is met: the scripted LSP tests cover each capability on
+  a multi-file project with a dependency, and the extension's smoke
+  test also checks semantic tokens and a quick fix.
+
 ### 3.5 — `nova doc`
 - `nova doc [--open]` builds a static site under `target/doc/`: a page per
   module, item signatures from the type checker, a search index, and a light

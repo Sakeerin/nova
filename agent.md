@@ -144,6 +144,12 @@ answers hover, go to definition, find references and rename, from an
 index `nova-typeck` records and `nova-resolver` holds the types of
 (`docs/adr/0032-navigation-in-the-language-server.md`).
 
+**Amended 2026-10-10 (branch `phase-3-4b-fixes-colour`):** a
+`nova-diagnostics` `Diagnostic` carries fixes, which `nova-resolver`
+and `nova-typeck` attach and `nova-lsp` offers as code actions;
+`nova-fmt` builds organize imports' block; `nova-lsp` also answers
+semantic tokens (`docs/adr/0033-fixes-and-colour-in-the-language-server.md`).
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)
