@@ -15,21 +15,31 @@ use std::time::{Duration, Instant};
 
 use nova_driver::{analyze, Options, Sources};
 
-/// One file's text in place of its contents; every other file from disk.
+/// One file's text in place of its contents, and files no disk holds;
+/// every other file from disk.
 struct Cut {
     path: PathBuf,
     text: String,
+    /// A planted program's other files, served whole (spec 3.5a §3,
+    /// follow-up 4).
+    extra: Vec<(PathBuf, String)>,
 }
 
 impl Sources for Cut {
     fn read(&self, path: &Path) -> std::io::Result<String> {
         if path == self.path {
             Ok(self.text.clone())
+        } else if let Some((_, text)) = self.extra.iter().find(|(p, _)| p == path) {
+            Ok(text.clone())
         } else {
             std::fs::read_to_string(path)
         }
     }
 }
+
+/// A cut to analyse: its file, its text, and the other files `Cut` serves
+/// (follow-up 4).
+type Job = (PathBuf, String, Vec<(PathBuf, String)>);
 
 /// Per thread, the cut it is analysing, if any: its file, and its length in
 /// bytes.
@@ -114,6 +124,14 @@ fn fixes_hold(
 /// an item of its own, and is swept whole and cut (plan Task 7's ruling).
 const FIX_BEARING: &str = "record P { width: Int }\n\ntype Shape =\n  | Empty\n  | Circle(Int)\n\n@tset\nfn helper() {}\n\nfn bump() -> Int {\n    let x = 0\n    x = 1\n    x\n}\n\nfn total() -> Int {\n    let count = 1\n    cuont + 1\n}\n\nfn width(p: P) -> Int {\n    p.widht\n}\n\nfn pick(s: Shape) -> Int {\n    match s {\n        _ => 0\n        Shape::Empty => 1\n    }\n}\n\nfn main() {\n    println(\"${bump()} ${total()}\")\n}\n";
 
+/// Follow-up 4 (spec 3.5a §3): the two fixes that need a second file,
+/// planted in a loose program of two files no disk holds. `main` lists
+/// `one` from `util` and uses `two` without importing it (an import fix),
+/// and lists `secret`, which is private (a make-public fix in `util`).
+const TWO_MAIN: &str = "import util::{one, secret}\n\nfn main() {\n    println(\"${one()} ${two()} ${secret()}\")\n}\n";
+const TWO_UTIL: &str =
+    "pub fn one() -> Int { 1 }\n\npub fn two() -> Int { 2 }\n\nfn secret() -> Int { 3 }\n";
+
 #[test]
 fn cut_programs_never_panic_or_hang() {
     let root = root();
@@ -131,20 +149,27 @@ fn cut_programs_never_panic_or_hang() {
         }
     }
     programs.sort();
-    let mut jobs: Vec<(PathBuf, String)> = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     for (path, n) in &programs {
         let text = std::fs::read_to_string(path).unwrap();
         for cut in cuts(&text, *n) {
-            jobs.push((path.clone(), cut));
+            jobs.push((path.clone(), cut, Vec::new()));
         }
     }
     // 6 examples x 16 + 134 runtime programs x 2 = 364, on 2026-10-08.
     assert!(jobs.len() >= 360, "only {} cut programs", jobs.len());
     // The planted fixes, whole and at 16 cuts (spec 3.4b §9.2).
     let planted = root.join("tests/broken-fixes.nova");
-    jobs.push((planted.clone(), FIX_BEARING.to_string()));
+    jobs.push((planted.clone(), FIX_BEARING.to_string(), Vec::new()));
     for cut in cuts(FIX_BEARING, 16) {
-        jobs.push((planted.clone(), cut));
+        jobs.push((planted.clone(), cut, Vec::new()));
+    }
+    // The two-file fixes, whole and at 16 cuts of `main` (follow-up 4).
+    let two = root.join("tests").join("broken-two");
+    let extra = vec![(two.join("util.nova"), TWO_UTIL.to_string())];
+    jobs.push((two.join("main.nova"), TWO_MAIN.to_string(), extra.clone()));
+    for cut in cuts(TWO_MAIN, 16) {
+        jobs.push((two.join("main.nova"), cut, extra.clone()));
     }
     let total = jobs.len();
 
@@ -160,7 +185,7 @@ fn cut_programs_never_panic_or_hang() {
         let current = Arc::clone(&current);
         let done = done.clone();
         std::thread::spawn(move || loop {
-            let Some((path, text)) = queue.lock().unwrap().pop() else {
+            let Some((path, text, extra)) = queue.lock().unwrap().pop() else {
                 break;
             };
             current.lock().unwrap()[t] = Some((path.clone(), text.len()));
@@ -173,6 +198,7 @@ fn cut_programs_never_panic_or_hang() {
             let sources = Cut {
                 path: path.clone(),
                 text: text.clone(),
+                extra,
             };
             let started = Instant::now();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -196,6 +222,8 @@ fn cut_programs_never_panic_or_hang() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    // The two-file program's fixes: both, from the whole program at least.
+    let mut two_checked = 0usize;
     for _ in 0..total {
         match results.recv_timeout(Duration::from_secs(30)) {
             Ok((path, len, ok, spans_ok, fixes, took)) => {
@@ -214,7 +242,11 @@ fn cut_programs_never_panic_or_hang() {
                         path.display()
                     ));
                 }
-                checked += fixes.unwrap_or(0);
+                let n = fixes.unwrap_or(0);
+                checked += n;
+                if path.starts_with(&two) {
+                    two_checked += n;
+                }
             }
             Err(_) => {
                 let stuck: Vec<String> = current
@@ -238,4 +270,8 @@ fn cut_programs_never_panic_or_hang() {
     // The sweep is not vacuous: the cut programs carry fixes. Checked
     // after the failures, which name a fix that does not apply.
     assert!(checked > 0, "no cut program had a fix");
+    assert!(
+        two_checked >= 2,
+        "the two-file program carried {two_checked} fixes, not its import and make-public fixes"
+    );
 }
