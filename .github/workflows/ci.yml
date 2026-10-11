@@ -226,6 +226,12 @@ jobs:
       - name: The installed nova builds a program against a path library
         shell: bash
         run: bash .github/scripts/packages-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/packages"
+      # The Phase 3.5a gate (spec
+      # docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
+      # §17): its installed half; the anchors and links are the Test job's.
+      - name: The installed nova documents an example that uses a dependency
+        shell: bash
+        run: bash .github/scripts/doc-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/doc"
       # The Phase 3.3b gate (spec
       # docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
       # §11.1): a local index only; CI never writes the real one.
