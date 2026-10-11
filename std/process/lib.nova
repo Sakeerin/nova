@@ -5,6 +5,22 @@
 //! `exit(code)` ends it at once with the status `code`. Every module sees
 //! these names without an import, and a module's own `args` or `exit`
 //! shadows the one here.
+//!
+//! Reading the program's arguments. `exit` ends the program at once, so the
+//! example does not call it:
+//!
+//! ```
+//! let argv = args()
+//! // Index 0 names the program; the arguments it was given start at index 1.
+//! assert(argv.len() >= 1, "index 0 is always there")
+//! let name = argv.get(1).unwrap_or("world") // `get` gives None past the end
+//! println("hello, ${name}")
+//!
+//! // Each call returns a new Vec, so changing one changes no other.
+//! let mut mine = args()
+//! mine.push("--verbose")
+//! assert_eq(args().len(), argv.len())
+//! ```
 
 // Nova standard library -- the running process: its arguments, and a way to
 // end it with a status.
