@@ -76,7 +76,7 @@ the gate; 3.5b, `nova test --doc`.
   workspace without `--all-targets`.
 - `Analysis` keeps the merged AST, which `nova doc` reads.
 - std's public items all have `///` docs, and every module `//!` docs:
-  316 items and members in 17 modules. `std_docs.rs` keeps them so.
+  318 items and members in 17 modules. `std_docs.rs` keeps them so.
 - std's docs say what the code does, and were probed where they could be.
   Where a maintainer comment leaves a behaviour unspecified, such as how
   `NaN` orders, the doc says so and promises nothing.

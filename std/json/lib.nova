@@ -44,12 +44,14 @@ pub type JsonValue =
 // cursor and no source position to report, so every error `from_json`
 // returns carries a FIXED PLACEHOLDER, `at: 0`, never a real index.
 /// The error `parse` and `FromJson::from_json` return.
-///
-/// Its field `msg` says what was wrong, such as `expected a value` or
-/// `trailing content`, and its field `at` says where `parse` stopped in its
-/// input, counted in characters, not bytes, from 0. An error from
-/// `from_json` has no input to point into, and its `at` is always 0.
-pub record JsonError { msg: String, at: Int }
+pub record JsonError {
+    /// What was wrong, such as `expected a value` or `trailing content`.
+    pub msg: String,
+    /// Where `parse` stopped in its input, counted in characters, not
+    /// bytes, from 0. An error from `from_json` has no input to point into,
+    /// and its `at` is always 0.
+    pub at: Int,
+}
 
 // The deepest nesting `parse` accepts. RFC 8259 section 9 permits a limit --
 // "An implementation may set limits on the maximum depth of nesting" -- so a
