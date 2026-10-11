@@ -19,8 +19,6 @@
 //! has the server `dispatch` a request parsed from bytes, with no socket:
 //!
 //! ```
-//! // `listen` serves until the process is stopped, so this example asks the
-//! // server to `dispatch` a request it parsed from bytes, with no socket.
 //! let app = Server::new().get("/hello", |_| Response::text(200, "hi"))
 //!
 //! let raw = bytes_from_string("GET /hello HTTP/1.1\r\nHost: example\r\nX-Trace: abc\r\n\r\n")
