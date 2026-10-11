@@ -534,8 +534,8 @@ So std cannot gain an undocumented public item.
 - **The app prints a fixed output,** and a test in `run_tests.rs` runs
   it.
 - **Its name.** `60-EXAMPLES.md` reserves `06-` to `15-`. `05-geometry`
-  sorts after `05-json-api` and before them, as `03-producer-consumer`
-  shares `03` (decision 23).
+  shares `05` with `05-json-api`, sorting just before it and before them,
+  as `03-producer-consumer` shares `03` (decision 23).
 - **It joins** `nova fmt --check examples` in CI, and the
   index-completeness check (§2).
 
