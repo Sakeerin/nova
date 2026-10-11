@@ -110,3 +110,29 @@ pub fn guarded<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
         }
     }
 }
+
+/// `f`'s answer, or `default` when it panics, logged: what a request does
+/// after its analysis, guarded as the analysis is (spec 3.5a §3,
+/// follow-up 3).
+pub fn answered<T>(what: &str, f: impl FnOnce() -> T, default: T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!("nova lsp: answering {what} panicked");
+            default
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_while_answering_gives_the_default() {
+        // Follow-up 3 (spec 3.5a §3; plan decision 4).
+        let got: Vec<u32> = answered("a test", || panic!("planted"), Vec::new());
+        assert!(got.is_empty());
+        assert_eq!(answered("a test", || vec![1u32], Vec::new()), vec![1]);
+    }
+}
