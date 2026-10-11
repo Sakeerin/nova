@@ -1,6 +1,6 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, run, build, check, test, fmt, lsp,
+//! Dispatches to subcommands: parse, run, build, check, test, fmt, doc, lsp,
 //! new, init, fetch, update, package, publish, login and version. Phase 0
 //! implemented `nova
 //! parse`, Phase 1 `nova run` (Cranelift JIT) and `nova check`, Phase 3.0
@@ -9,9 +9,11 @@
 //! Phase 3.1 `nova fmt` (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md`),
 //! Phase 3.2 `nova lsp` (spec
-//! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`), and
+//! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`),
 //! Phase 3.3b the package index (spec
-//! `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`).
+//! `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`),
+//! and Phase 3.5a `nova doc` (spec
+//! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`).
 
 mod cmd;
 mod embedded;
@@ -47,6 +49,9 @@ enum Command {
     /// Format Nova source files: the project's `src/`, or the files and
     /// directories given.
     Fmt(cmd::fmt::FmtCmd),
+    /// Write the project's documentation site to target/doc/, with its
+    /// dependencies' and std's.
+    Doc(cmd::doc::DocCmd),
     /// Run the language server over stdin and stdout (editors start it).
     Lsp,
     /// Create a new project in a new directory.
@@ -101,6 +106,7 @@ fn main() -> Result<()> {
         Command::Test(cmd) => cmd::test::run(cmd),
         // Its exit code says more than success or failure (spec §7.2).
         Command::Fmt(cmd) => std::process::exit(cmd::fmt::run(cmd)),
+        Command::Doc(cmd) => cmd::doc::run(cmd),
         // Its exit code is the protocol's: 0 after `shutdown` then `exit`.
         Command::Lsp => std::process::exit(cmd::lsp::run()),
         Command::New(cmd) => cmd::new::new(cmd),
