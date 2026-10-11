@@ -8,6 +8,7 @@
 
 mod highlight;
 mod markdown;
+mod signature;
 
 /// `text` with `&`, `<`, `>`, `"` and `'` written as HTML entities.
 pub(crate) fn escape(text: &str) -> String {
