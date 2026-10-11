@@ -334,7 +334,8 @@ fn std_analysis() -> Result<Analysis, Failure> {
     Ok(a)
 }
 
-/// Spec §4.2: two packages that would share a directory.
+/// Spec §4.2: two packages, or two modules of one package, that would
+/// share a directory, names that differ in ASCII case alone included.
 fn clash(packages: &[Package]) -> Result<(), Failure> {
     for (k, p) in packages.iter().enumerate() {
         if !p.std && p.name.eq_ignore_ascii_case("std") {
@@ -353,6 +354,20 @@ fn clash(packages: &[Package]) -> Result<(), Failure> {
                  doc cannot document them",
                 q.name, p.name
             )));
+        }
+        // The root module's page is the package's own.
+        let modules: Vec<&Module> = p.modules.iter().filter(|m| !m.root).collect();
+        for (j, m) in modules.iter().enumerate() {
+            if let Some(n) = modules[..j]
+                .iter()
+                .find(|n| n.name.eq_ignore_ascii_case(&m.name))
+            {
+                return Err(Failure::Other(format!(
+                    "the modules `{}` and `{}` would share one directory in target/doc/{}/, so \
+                     nova doc cannot document them",
+                    n.qual, m.qual, p.name
+                )));
+            }
         }
     }
     Ok(())
@@ -1500,6 +1515,27 @@ mod tests {
         match document_package(&dir) {
             Err(Failure::Other(why)) => assert!(why.contains("`std`"), "{why}"),
             _ => panic!("a package named std was documented"),
+        }
+    }
+
+    #[test]
+    fn two_modules_whose_names_differ_in_case_alone_stop_it() {
+        // Their pages would share a directory on macOS's and Windows's
+        // file systems, which ignore case.
+        let mut site = sample_site();
+        assert!(clash(&site.packages).is_ok());
+        let mut util = sample_site().packages.remove(0).modules.remove(1);
+        util.name = "Util".to_string();
+        util.qual = "app::Util".to_string();
+        util.page = "app/Util/index.html".to_string();
+        site.packages[0].modules.insert(1, util);
+        match clash(&site.packages) {
+            Err(Failure::Other(why)) => assert_eq!(
+                why,
+                "the modules `app::Util` and `app::util` would share one directory in \
+                 target/doc/app/, so nova doc cannot document them"
+            ),
+            _ => panic!("two modules that differ in case alone were documented"),
         }
     }
 
