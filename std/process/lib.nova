@@ -1,3 +1,11 @@
+//! The running program: its command-line arguments, and ending it with an
+//! exit status.
+//!
+//! `args()` returns the arguments the program was started with, and
+//! `exit(code)` ends it at once with the status `code`. Every module sees
+//! these names without an import, and a module's own `args` or `exit`
+//! shadows the one here.
+
 // Nova standard library -- the running process: its arguments, and a way to
 // end it with a status.
 //
@@ -14,6 +22,14 @@
 // defaulted), and in a built executable it is whatever the OS reports. The
 // arguments after `--`, or a built executable's own, follow from index 1. One
 // that is not valid Unicode has U+FFFD in place of its bad bytes.
+/// Returns the program's command-line arguments.
+///
+/// Index 0 names the program: under `nova run FILE -- ARGS` it is FILE as
+/// written, or without FILE the path of the `src/main.nova` it runs; in a
+/// built executable it is whatever the operating system reports. The
+/// arguments follow from index 1: under `nova run`, those after `--`. An
+/// argument that is not valid Unicode has U+FFFD in place of its bad bytes.
+/// Each call returns a new `Vec`, so changing one changes no other.
 pub fn args() -> Vec<String> {
     let mut v: Vec<String> = Vec::new()
     let n = process_arg_count()
@@ -32,4 +48,11 @@ pub fn args() -> Vec<String> {
 //
 // Typed `-> ()` because Nova has no never type: code after `exit(..)`
 // type-checks, and never runs.
+/// Ends the program at once with the exit status `code`, after flushing
+/// standard output.
+///
+/// Tasks still running are not waited for. The operating system keeps only
+/// part of `code`: Unix its low 8 bits, so `exit(256)` gives 0 and `exit(-1)`
+/// 255, and Windows 32 bits. Under `nova run` it ends the `nova` process
+/// itself. Code after a call to `exit` never runs.
 pub fn exit(code: Int) { process_exit(code) }

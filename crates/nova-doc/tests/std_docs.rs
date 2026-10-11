@@ -6,7 +6,17 @@ mod common;
 
 /// The modules whose docs are written. Each std task adds its own; the
 /// last checks every module.
-const DONE: &[&str] = &["core", "collections", "strings", "bytes", "fmt"];
+const DONE: &[&str] = &[
+    "core",
+    "collections",
+    "strings",
+    "bytes",
+    "fmt",
+    "io",
+    "fs",
+    "net",
+    "process",
+];
 
 #[test]
 fn std_is_documented() {

@@ -1,3 +1,17 @@
+//! I/O errors, the `Read` and `Write` traits, and the standard streams.
+//!
+//! The operations here and in `std/fs` and `std/net` that can fail report a
+//! failure as an `IoError`: an `IoErrorKind` saying what went wrong, and a
+//! message for a person to read. `Read` and `Write` move bytes a piece at a
+//! time. `stdin()`, `stdout()` and `stderr()` return the process's standard
+//! streams, which implement them, as `std/fs`'s `File` and `std/net`'s
+//! `TcpStream` do. Every module sees these names without an import, and a
+//! module's own definition of one of them shadows the one here.
+//!
+//! The methods of `Read` and `Write` return a `Future` for the caller to
+//! await. On the standard streams they never suspend: each call blocks every
+//! task until the operating system has answered.
+
 // Nova standard library — I/O error types, and the `Read`/`Write` traits over
 // the three standard streams.
 //
@@ -38,14 +52,31 @@
 //
 // `AlreadyExists` and `InvalidData` are additions to the list in
 // `nova-spec/20-STDLIB.md` §4; see docs/adr/0011-io-error-kinds.md.
+/// What went wrong in a failed I/O operation, as an `IoError` reports it.
+///
+/// Match on it to handle a failure by its cause. Failures with no variant of
+/// their own are `Other`, and only the error's `message` tells them apart.
 pub type IoErrorKind =
+    /// A file or directory the operation needs does not exist.
     | NotFound
+    /// The operating system did not permit the operation.
     | PermissionDenied
+    /// Something the operation was to create already exists.
     | AlreadyExists
+    /// The data is not valid for the operation, as when `read_to_string`
+    /// reads a file that is not UTF-8.
     | InvalidData
+    /// The operation was interrupted before it finished.
     | Interrupted
+    /// A time limit passed before the operation finished, such as
+    /// `TcpStream::read_timeout`'s.
     | TimedOut
+    /// The other end refused the connection: usually nothing is listening at
+    /// the address `connect` was given.
     | ConnectionRefused
+    /// Any other failure, among them an address already in use, an address
+    /// that is not valid, a broken connection, and a `File` or `TcpStream`
+    /// that is closed.
     | Other
 
 // A failed I/O operation: a kind to branch on, and the operating system's own
@@ -54,7 +85,19 @@ pub type IoErrorKind =
 // `message` is platform-specific text, so a test asserting output should match
 // on `kind` and normalise `message` -- the same treatment
 // `tests/runtime/nova_test.stdout` already applies to a Windows NTSTATUS.
-pub record IoError { pub kind: IoErrorKind, pub message: String }
+/// A failed I/O operation: what kind of failure it was, and a description of
+/// it.
+///
+/// The functions of `std/io`, `std/fs` and `std/net` that can fail return
+/// one in their `Err`.
+pub record IoError {
+    /// What kind of failure this is.
+    pub kind: IoErrorKind,
+    /// A description of the failure for a person to read, usually the
+    /// operating system's own, so its wording differs from one system to
+    /// another. Match on `kind` rather than on `message`.
+    pub message: String,
+}
 
 // Map a runtime status code to its kind.
 //
@@ -77,6 +120,12 @@ pub record IoError { pub kind: IoErrorKind, pub message: String }
 // An unrecognised code is `Other` rather than a panic: a status this function
 // does not know is a runtime bug, and mapping it to `Other` keeps a diagnosable
 // error flowing instead of ending the process.
+/// Returns the `IoErrorKind` that the status code `code` stands for: 1
+/// `NotFound`, 2 `PermissionDenied`, 3 `AlreadyExists`, 4 `InvalidData`, 5
+/// `Interrupted`, 6 `TimedOut`, 7 `ConnectionRefused`, and `Other` for any
+/// other code.
+///
+/// std's I/O functions use it to build their `IoError`s.
 pub fn io_error_kind_of(code: Int) -> IoErrorKind {
     if code == 1 { return NotFound }
     if code == 2 { return PermissionDenied }
@@ -88,21 +137,48 @@ pub fn io_error_kind_of(code: Int) -> IoErrorKind {
     Other
 }
 
+/// A source of bytes, read a piece at a time.
+///
+/// `Stdin`, `std/fs`'s `File` and `std/net`'s `TcpStream` implement it. Its
+/// methods return a `Future`: await it for the result.
 pub trait Read {
     // Up to `max` bytes. An **empty** result means end of stream. **A short
     // read is not EOF** -- a pipe or a terminal may hand back far fewer bytes
     // than `max` and still have more to give later, so a caller (including
     // `read_to_end`'s default below) must keep reading on anything
     // non-empty and stop only on a genuinely empty result.
+    /// Reads up to `max` bytes and returns them; empty bytes mean the end of
+    /// the stream.
+    ///
+    /// A read can return fewer than `max` bytes even when more are coming, so
+    /// only an empty result marks the end. A `max` of 0 returns empty bytes
+    /// too. Room for `max` bytes is allocated before the read, however few
+    /// arrive.
+    ///
+    /// Returns an `IoError` if the read fails: of kind `Other` for a `File` or
+    /// `TcpStream` that is closed. A `TcpStream` read suspends the calling
+    /// task until there is something to read; a `Stdin` or `File` read blocks
+    /// every task until it returns. std's implementations panic if `max` is
+    /// negative.
     fn read(self, max: Int) -> Future<Result<Bytes, IoError>>
 
     // Reads until end of stream and returns everything concatenated in
     // order. Defaults to the private `read_all`, over this trait's own
     // `read` -- see that function for the loop, and `CHUNK` for the size it
     // reads at a time.
+    /// Reads to the end of the stream and returns every byte read, in order.
+    ///
+    /// It reads until a read returns empty bytes, so on `Stdin` or a
+    /// `TcpStream` it waits for the other end to close. At the end already, it
+    /// returns empty bytes. If a read fails, it returns that read's `IoError`,
+    /// and the bytes read before it are lost.
     fn read_to_end(self) -> Future<Result<Bytes, IoError>> { read_all(self) }
 }
 
+/// A destination for bytes, written a piece at a time.
+///
+/// `Stdout`, `Stderr`, `std/fs`'s `File` and `std/net`'s `TcpStream`
+/// implement it. Its methods return a `Future`: await it for the result.
 pub trait Write {
     // Writes as much of `buf` as one underlying write accepts, and reports
     // exactly how many bytes that was -- **not necessarily all of `buf`**.
@@ -110,8 +186,23 @@ pub trait Write {
     // unlike `std/fs`'s count-less, write-all `write`. A caller that needs a
     // guaranteed full write must loop on the returned count itself; this
     // method does not do it for you.
+    /// Writes as much of `buf` as one write accepts, and returns how many
+    /// bytes that was.
+    ///
+    /// The count can be less than `buf.len()`: to write all of `buf`, call
+    /// `write` again with the bytes not yet written. An empty `buf` writes
+    /// nothing and returns 0. Returns an `IoError` if the write fails: of kind
+    /// `Other` for a `File` or `TcpStream` that is closed, and for a broken
+    /// connection. A `TcpStream` write suspends the calling task until there
+    /// is room to write; the others block every task until they return.
     fn write(self, buf: Bytes) -> Future<Result<Int, IoError>>
 
+    /// Writes out any bytes the writer is holding in a buffer.
+    ///
+    /// Of std's writers only `Stdout` holds any: on the others it does
+    /// nothing, and on a `File` it does not wait for the data to reach the
+    /// disk. Returns an `IoError` if the held bytes cannot be written, or for
+    /// a `File` that is closed.
     fn flush(self) -> Future<Result<(), IoError>>
 }
 
@@ -130,8 +221,14 @@ pub trait Write {
 // `std/net` is the poller's only caller. See
 // `docs/adr/0009-async-execution-model.md` §1's 2026-08-16 amendment, which
 // records both halves.
+/// The process's standard input, which `stdin()` returns.
+///
+/// It is always open, and every `Stdin` reads the same stream: a read
+/// continues where the last one stopped. A read blocks every task until
+/// input arrives or the stream ends.
 pub record Stdin {}
 
+/// Returns the process's standard input, to read with `Read`.
 pub fn stdin() -> Stdin { Stdin {} }
 
 async fn read_stdin(s: Stdin, max: Int) -> Result<Bytes, IoError> {
@@ -145,8 +242,17 @@ impl Read for Stdin {
 }
 
 // The process's standard output. Process-global, always open, never closed.
+/// The process's standard output, which `stdout()` returns.
+///
+/// It is always open, and its writes share one buffer with `print` and
+/// `println`, so their output stays in order. A newline sends out everything
+/// up to it; bytes after the last newline can wait in the buffer until a
+/// later newline or `flush`. They can be lost if the program panics or
+/// returns from `main` before then, so flush before it ends; `exit` flushes
+/// them.
 pub record Stdout {}
 
+/// Returns the process's standard output, to write with `Write`.
 pub fn stdout() -> Stdout { Stdout {} }
 
 // The write's byte count crosses the boundary as 8 little-endian bytes in the
@@ -172,8 +278,12 @@ impl Write for Stdout {
 }
 
 // The process's standard error. Process-global, always open, never closed.
+/// The process's standard error, which `stderr()` returns.
+///
+/// It is always open, and not buffered: each write goes out at once.
 pub record Stderr {}
 
+/// Returns the process's standard error, to write with `Write`.
 pub fn stderr() -> Stderr { Stderr {} }
 
 // Mirrors `write_stdout` exactly, against the other stream.
@@ -279,6 +389,13 @@ async fn read_all<T: Read>(reader: T) -> Result<Bytes, IoError> {
 // Nova side; there is no shared encoder to point at, and citing any single
 // producer here would be wrong for every module but one. `net.rs`'s and
 // `file.rs`'s doc comments each record that their copy is a copy.
+/// Returns the integer that `b` holds in little-endian order: its first byte
+/// is the least significant.
+///
+/// Eight bytes can hold any `Int`, a negative one in two's complement. Fewer
+/// give a number that is not negative, empty bytes give 0, and bytes after
+/// the eighth do not change the result. std uses it to decode the integers,
+/// such as byte counts, that its I/O operations report.
 pub fn decode_count(b: Bytes) -> Int {
     let ints = b.to_ints()
     let mut n = 0

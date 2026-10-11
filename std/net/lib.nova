@@ -1,3 +1,18 @@
+//! TCP connections, and listeners that accept them.
+//!
+//! `connect` opens a `TcpStream` to a `"host:port"` address, and `bind` opens
+//! a `TcpListener` whose `accept` waits for connections from other programs.
+//! A `TcpStream` reads and writes through `std/io`'s `Read` and `Write`, and
+//! failures are `std/io`'s `IoError`s. Every module sees these names without
+//! an import, and a module's own definition of one of them shadows the one
+//! here.
+//!
+//! The operations that wait suspend only the calling task: `connect`,
+//! `accept`, and a stream's `read`, `write` and `read_timeout` park the task
+//! until the socket is ready, and other tasks run meanwhile. A host name,
+//! where a numeric address could be given, is looked up first, and the lookup
+//! blocks every task until it finishes.
+
 // Nova standard library — networking.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
@@ -50,11 +65,27 @@
 // `local_port` each read their payload out of the slot with nothing awaited in
 // between.
 
+/// An open TCP connection, from `connect` or `TcpListener::accept`.
+///
+/// It implements `std/io`'s `Read` and `Write`. A read returns empty bytes
+/// once the peer has closed the connection, a write can write fewer bytes
+/// than it is given, and `flush` does nothing. Copying a `TcpStream` copies
+/// the handle: every copy refers to the same connection. Nothing closes it
+/// for you: call `close` when done, or it stays open until the program exits.
 pub record TcpStream { fd: Int }
 
 // Connect to `addr` ("host:port"), suspending the calling task until the
 // connection settles (or fails) rather than blocking every other task on
 // this thread for the round trip.
+/// Opens a TCP connection to `addr`, a `"host:port"` string such as
+/// `"127.0.0.1:8080"`.
+///
+/// An `async fn`: it suspends the calling task until the connection is made
+/// or fails, and other tasks run meanwhile. A host name is looked up first,
+/// blocking every task, and only the first address found is tried. Returns an
+/// `IoError` of kind `ConnectionRefused` if nothing is listening at `addr`,
+/// and `Other` if `addr` is not a valid address. Abandoning a `connect` under
+/// `std/time`'s `timeout` leaves its socket open until the program exits.
 pub async fn connect(addr: String) -> Result<TcpStream, IoError> {
     let status = net_connect(addr).await
     if status == 0 { return Ok(TcpStream { fd: decode_count(fs_take_bytes()) }) }
@@ -67,6 +98,13 @@ impl TcpStream {
     // value cannot stop a second call — the identical reasoning `std/fs`'s
     // `File::close` documents. Closing a stale or forged `TcpStream` is the
     // same no-op: the runtime's socket table lookup simply removes nothing.
+    /// Closes the connection, so the peer's reads reach the end of the stream.
+    ///
+    /// It returns `Ok(())`, also when the stream is already closed: closing
+    /// reports no error. Afterwards, `read`, `write` and `read_timeout` on the
+    /// stream, through any copy, return an `IoError` of kind `Other`.
+    ///
+    /// An `async fn` that never suspends.
     pub async fn close(self) -> Result<(), IoError> {
         let status = net_close(self.fd)
         if status == 0 { return Ok(()) }
@@ -82,6 +120,15 @@ impl TcpStream {
     // modelled as a second inherent method on `TcpStream`, parallel to
     // `close` above, rather than folded into the `Read` trait, which has no
     // room for a third argument.
+    /// Reads up to `max` bytes, as `Read::read` does, but gives up if `ms`
+    /// milliseconds pass with nothing to read.
+    ///
+    /// An `async fn`: it suspends the calling task while it waits, and other
+    /// tasks run meanwhile. Empty bytes mean the peer has closed the
+    /// connection. Returns an `IoError` of kind `TimedOut` if the time runs
+    /// out; with `ms` 0 or negative that happens at once, unless bytes or the
+    /// end of the stream are already there. On a closed stream it returns one
+    /// of kind `Other`. Panics if `max` is negative.
     pub async fn read_timeout(self, max: Int, ms: Int) -> Result<Bytes, IoError> {
         let status = net_read_timeout(self.fd, max, ms).await
         if status == 0 { return Ok(fs_take_bytes()) }
@@ -144,6 +191,11 @@ impl Write for TcpStream {
 
 // A listening socket. Server side of `std/net`, added because Phase 2
 // position 10 (`std/http`) has no transport without it.
+/// A TCP socket that listens for connections, from `bind`.
+///
+/// `accept` waits for the next connection and returns a `TcpStream` for it.
+/// Nothing closes a listener for you: call `close` when done, or it holds its
+/// port until the program exits.
 pub record TcpListener { fd: Int }
 
 // Bind and listen on `addr` ("host:port"). Pass port 0 to let the kernel
@@ -172,6 +224,14 @@ pub record TcpListener { fd: Int }
 // only by `message`, whose text is the operating system's own. Adding a
 // variant is a wire-contract change across the runtime's `fail` and
 // `std/io`'s `io_error_kind_of` together, and is deliberately not done here.
+/// Opens a listener on `addr`, a `"host:port"` string such as
+/// `"127.0.0.1:8080"`.
+///
+/// Port 0 lets the system choose a free port, which `local_port` then
+/// reports. It is not `async`: binding never waits for a peer, though a host
+/// name is looked up first, blocking every task. Returns an `IoError` of kind
+/// `Other` if the address is already in use, which only the error's
+/// `message` tells apart, and also if `addr` is not a valid address.
 pub fn bind(addr: String) -> Result<TcpListener, IoError> {
     let status = net_listen(addr)
     if status == 0 { return Ok(TcpListener { fd: decode_count(fs_take_bytes()) }) }
@@ -190,6 +250,14 @@ impl TcpListener {
     // declared `async` to match the shipped `TcpStream::close`: a server
     // closes both handles in sequence, and a reader should not have to
     // remember which of two identically named socket methods needs `.await`.
+    /// Closes the listener and frees its port.
+    ///
+    /// It returns `Ok(())`, also when the listener is already closed: closing
+    /// reports no error. An `accept` already waiting on the listener goes on
+    /// waiting, and keeps the program from ending, so close a listener only
+    /// when no `accept` is waiting on it.
+    ///
+    /// An `async fn`, like `TcpStream::close`, that never suspends.
     pub async fn close(self) -> Result<(), IoError> {
         let status = net_close(self.fd)
         if status == 0 { return Ok(()) }
@@ -225,6 +293,11 @@ impl TcpListener {
     // instead -- the same reason `bind` above gives for `AddrInUse` arriving as
     // `Other` -- so a stream fd here yields `Other` with the runtime's own
     // "socket is not open" message, and no Nova code can tell the two apart.
+    /// Returns the port the listener is bound to: after binding port 0, the
+    /// one the system chose.
+    ///
+    /// It is not `async`, and never waits. Returns an `IoError` of kind
+    /// `Other` if the listener is closed.
     pub fn local_port(self) -> Result<Int, IoError> {
         let status = net_local_port(self.fd)
         if status == 0 { return Ok(decode_count(fs_take_bytes())) }
@@ -274,6 +347,16 @@ impl TcpListener {
     // that promise are measured, in `net.rs`'s
     // `accepting_on_a_closed_or_wrong_kind_fd_is_an_error_not_a_park`; until
     // that test was added this comment asserted a boundary nothing checked.
+    /// Waits for the next incoming connection, and returns a `TcpStream` for
+    /// it.
+    ///
+    /// An `async fn`: it suspends the calling task until a connection
+    /// arrives, and other tasks run meanwhile. It has no time limit, and the
+    /// program does not end while it waits; closing the listener does not end
+    /// the wait either. To stop waiting, run it under `std/time`'s `timeout`.
+    /// A task waiting here can do nothing else, so a server accepts in one
+    /// task and serves each connection in another, started with `spawn`.
+    /// Returns an `IoError` of kind `Other` if the listener is closed.
     pub async fn accept(self) -> Result<TcpStream, IoError> {
         let status = net_accept(self.fd).await
         if status == 0 { return Ok(TcpStream { fd: decode_count(fs_take_bytes()) }) }
