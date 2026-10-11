@@ -12,16 +12,32 @@
 //! there is no process left to inspect. Running one process per test and
 //! classifying it from the outside, by exit status and stderr, is what makes
 //! both possible (design doc `2026-08-05-nova-test-design.md` §5).
+//!
+//! Phase 3.5b adds the doc tests, the code blocks of a library's docs (spec
+//! `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md` §6):
+//! each is a module of a second binary, built after the unit tests' from
+//! memory, whose tests run the same way and report by the doc tests' names.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
+use nova_diagnostics::{render, Diagnostic, FileDb, Severity, Span};
+use nova_doc::{DocTest, Failure};
+use nova_driver::{DiskSources, Program, Sources};
+
+use crate::project::{self, Mode};
 
 #[derive(Args)]
 pub struct TestCmd {
     /// Only run tests whose name contains this substring.
     filter: Option<String>,
+
+    /// Run only the doc tests: the code examples in the library's docs.
+    #[arg(long)]
+    doc: bool,
 }
 
 /// The three ways a test's process can end, kept distinct end to end rather
@@ -162,11 +178,254 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`,
     // unlike `run`/`build`/`check`), so it always works on the project
     // around the current directory, or on `src/main.nova` outside any.
-    let mode = crate::project::mode(None)?;
-    crate::project::sync(&mode)?;
+    let mode = project::mode(None)?;
+    let filter = cmd.filter.as_deref();
+    if cmd.doc {
+        return run_doc_tests(&mode, filter);
+    }
+    project::sync(&mode)?;
     let program = mode.program(nova_driver::Roots::Test);
     let (exe, tests) = nova_driver::build_test_program(program)?;
+    let compiled: Vec<String> = tests.iter().map(|t| t.name.clone()).collect();
+    let names = inventory(&exe, &compiled)?;
+    let should_panic: Vec<bool> = tests.iter().map(|t| t.should_panic).collect();
 
+    // Spec 3.5b §6.1: the doc tests follow when the root package has a
+    // library whose docs hold at least one. Otherwise nothing changes.
+    let library = match &mode {
+        Mode::Project { root, .. } if has_library(root) => Some(root.as_path()),
+        _ => None,
+    };
+    let docs = match library {
+        Some(root) => library_doc_tests(root)?,
+        None => Vec::new(),
+    };
+    let doc_names: Vec<String> = docs.iter().map(|d| d.name.clone()).collect();
+
+    // A filter matches across both kinds (spec 3.5b §6.1).
+    let selected = select(&names, filter);
+    let doc_selected = select(&doc_names, filter);
+    let mut available = vec![(names.len(), "test")];
+    if !docs.is_empty() {
+        available.push((docs.len(), "doc test"));
+    }
+    ensure_matched(filter, selected.len() + doc_selected.len(), &available)?;
+
+    let tally = run_tests(&exe, "test", &names, &should_panic, &selected)?;
+    let mut sections = vec![("test", tally)];
+    // Both sections run when the unit tests compile, even if some failed
+    // (spec 3.5b §6.3), so one run reports everything.
+    if let (Some(root), false) = (library, docs.is_empty()) {
+        let tally = run_doc_section(root, &docs, &doc_selected, true)?;
+        sections.push(("doc test", tally));
+    }
+    finish(&sections)
+}
+
+/// `nova test --doc [filter]` (spec 3.5b §6.1): the doc tests alone, of
+/// the library of the package around the current directory.
+fn run_doc_tests(mode: &Mode, filter: Option<&str>) -> Result<()> {
+    let Mode::Project { root, .. } = mode else {
+        bail!(
+            "nova test --doc tests a package's library; run it inside one, or use \
+             `nova test --doc --std`"
+        );
+    };
+    if !has_library(root) {
+        bail!("nova test --doc tests a library's docs, and this package has no src/lib.nova");
+    }
+    project::sync(mode)?;
+    let docs = library_doc_tests(root)?;
+    let names: Vec<String> = docs.iter().map(|d| d.name.clone()).collect();
+    let selected = select(&names, filter);
+    ensure_matched(filter, selected.len(), &[(docs.len(), "doc test")])?;
+    let tally = run_doc_section(root, &docs, &selected, false)?;
+    finish(&[("doc test", tally)])
+}
+
+/// Whether the package at `root` has a library (spec 3.5b §4.1).
+fn has_library(root: &Path) -> bool {
+    root.join("src").join("lib.nova").is_file()
+}
+
+/// The doc tests of the library of the package at `root`, in the site's
+/// order. `root` is spelled as the doc tests' program spells it, so a
+/// doc test's file is named alike in both (`nova_doc::DocTest::file`).
+fn library_doc_tests(root: &Path) -> Result<Vec<DocTest>> {
+    Ok(nova_doc::package_doc_tests(root)
+        .map_err(failure)?
+        .unwrap_or_default())
+}
+
+/// A failure to read the doc tests, as the command's error, its
+/// diagnostics printed first.
+fn failure(f: Failure) -> anyhow::Error {
+    match f {
+        Failure::Diagnostics { db, diagnostics } => {
+            render::emit_all(&db, &diagnostics);
+            let errors = diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .count();
+            anyhow!(
+                "could not compile due to {errors} previous error{}",
+                if errors == 1 { "" } else { "s" }
+            )
+        }
+        Failure::Other(why) => anyhow!(why),
+    }
+}
+
+/// The directory, under a package's root, that its doc tests' modules are
+/// named in: no file is there (spec 3.5b §11.2), and `<` and `>` keep one
+/// from being made on Windows. Each module is `doc<N>.nova`, and the
+/// first names the binary.
+const DOC_TESTS: &str = "<doc tests>";
+
+/// The doc section (spec 3.5b §6.2, §6.3): the `selected` of `docs`, the
+/// doc tests of the package at `root`, compiled into a binary of their own
+/// and each run in its own process. `after_units` says the unit section
+/// ran: a blank line comes first, and the build shows only what is in doc
+/// tests' code, since the unit build showed the rest.
+fn run_doc_section(
+    root: &Path,
+    docs: &[DocTest],
+    selected: &[usize],
+    after_units: bool,
+) -> Result<Tally> {
+    for &i in selected {
+        warn_unknown_words(&docs[i]);
+    }
+    // With none selected there is nothing to build: the driver is never
+    // given no doc test (spec 3.5b §6.1).
+    let (exe, should_panic) = if selected.is_empty() {
+        (PathBuf::new(), Vec::new())
+    } else {
+        build_doc_tests(root, docs, after_units)?
+    };
+    if after_units {
+        println!();
+    }
+    let names: Vec<String> = docs.iter().map(|d| d.name.clone()).collect();
+    run_tests(&exe, "doc test", &names, &should_panic, selected)
+}
+
+/// The binary of `docs`, the doc tests of the package at `root`, and
+/// whether each of its tests should panic. Its modules are served from
+/// memory, and its diagnostics point at the docs (spec 3.5b §7).
+fn build_doc_tests(
+    root: &Path,
+    docs: &[DocTest],
+    after_units: bool,
+) -> Result<(PathBuf, Vec<bool>)> {
+    let dir = root.join(DOC_TESTS);
+    let modules: Vec<(PathBuf, String)> = docs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (dir.join(format!("doc{i}.nova")), d.text.clone()))
+        .collect();
+    let program = Program::doc_tests(Some(root), modules.iter().map(|(p, _)| p.clone()).collect());
+    // A module's name in the program's `FileDb`, and its doc test.
+    let by_name: HashMap<String, usize> = modules
+        .iter()
+        .enumerate()
+        .map(|(i, (path, _))| (path.display().to_string(), i))
+        .collect();
+    // No warning twice (spec 3.5b §6.3): after the unit section, only what
+    // is in doc tests' code.
+    let map =
+        |db: &mut FileDb, d: &mut Diagnostic| to_the_docs(db, d, &by_name, docs) || !after_units;
+    let (exe, tests) =
+        nova_driver::build_test_program_with(program, &Overlay(&modules), Some(&map))?;
+    // Each doc test module declares one test, and the driver collects only
+    // that one, in the modules' order: test `i` is doc test `i`.
+    anyhow::ensure!(
+        tests.len() == docs.len(),
+        "the doc tests' binary holds {} tests for {} doc tests; this is a compiler bug",
+        tests.len(),
+        docs.len()
+    );
+    let compiled: Vec<String> = tests.iter().map(|t| t.name.clone()).collect();
+    inventory(&exe, &compiled)?;
+    Ok((exe, tests.iter().map(|t| t.should_panic).collect()))
+}
+
+/// The doc tests' modules from memory, and every other file from the disk.
+struct Overlay<'a>(&'a [(PathBuf, String)]);
+
+impl Sources for Overlay<'_> {
+    fn read(&self, path: &Path) -> std::io::Result<String> {
+        match self.0.iter().find(|(p, _)| p == path) {
+            Some((_, text)) => Ok(text.clone()),
+            None => DiskSources.read(path),
+        }
+    }
+}
+
+/// Moves each label of `d` that is in a doc test's module, which `by_name`
+/// finds by the module's name, to the doc comment its code comes from
+/// (spec 3.5b §7), and says whether there was one. A moved diagnostic's
+/// fixes are dropped: their edits name the module.
+fn to_the_docs(
+    db: &mut FileDb,
+    d: &mut Diagnostic,
+    by_name: &HashMap<String, usize>,
+    docs: &[DocTest],
+) -> bool {
+    let mut in_docs = false;
+    for label in &mut d.labels {
+        let Some(i) = db
+            .get_name(label.span.file)
+            .and_then(|name| by_name.get(name))
+            .copied()
+        else {
+            continue;
+        };
+        in_docs = true;
+        let test = &docs[i];
+        let Some(file) = db.id_of(&test.file) else {
+            continue;
+        };
+        let text = db.get_source(file).unwrap_or_default();
+        let start = on_a_char(text, test.map(label.span.start));
+        let end = on_a_char(text, test.map(label.span.end)).max(start);
+        label.span = Span::new(start, end, file);
+    }
+    if in_docs {
+        d.fixes.clear();
+    }
+    in_docs
+}
+
+/// `offset`, at most `text`'s length, and moved back to a character
+/// boundary.
+fn on_a_char(text: &str, offset: u32) -> u32 {
+    let mut at = (offset as usize).min(text.len());
+    while !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at as u32
+}
+
+/// Spec 3.5b §4.2: an unknown word after `nova` warns, naming the block's
+/// line, and the block runs as a plain test.
+fn warn_unknown_words(test: &DocTest) {
+    if test.unknown.is_empty() {
+        return;
+    }
+    let words: Vec<String> = test.unknown.iter().map(|w| format!("`{w}`")).collect();
+    eprintln!(
+        "warning: {}: unknown word{} {} in a code block's info string; the block runs as a \
+         plain test",
+        test.place,
+        if words.len() == 1 { "" } else { "s" },
+        words.join(", ")
+    );
+}
+
+/// The test names `exe` prints when `NOVA_TEST_INDEX` is unset, checked
+/// against `compiled`, the compiler's own list, by count and by position.
+fn inventory(exe: &Path, compiled: &[String]) -> Result<Vec<String>> {
     // Enumerate by asking the compiled binary itself — exactly what a plain,
     // `NOVA_TEST_INDEX`-unset run of it prints to a human — rather than
     // trusting `tests` for the name/order pairing directly
@@ -174,7 +433,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // the binary so a future drift between what the compiler *built* and
     // what the binary *dispatches* would surface here instead of being
     // silently trusted away). One extra process, no second compilation.
-    let inventory = Command::new(&exe)
+    let inventory = Command::new(exe)
         .env_remove("NOVA_TEST_INDEX")
         .output()
         .with_context(|| format!("failed to run {}", exe.display()))?;
@@ -209,57 +468,85 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         if names.len() == 1 { "" } else { "s" }
     );
     anyhow::ensure!(
-        names.len() == tests.len(),
+        names.len() == compiled.len(),
         "the compiled binary's inventory ({} tests) disagrees with the compiler's own count \
          ({}); this is a compiler bug (inventory process {status})",
         names.len(),
-        tests.len()
+        compiled.len()
     );
     // Whole-branch review, finding 5 (minor): the two `ensure!`s above only
     // ever compared *lengths* — `names.len() == count` and
     // `names.len() == tests.len()` — never that the two lists actually agree
-    // *position by position*. The `should_panic`-by-index comment just below
-    // used to claim this was already covered ("see the `ensure!` above,
-    // which would have already failed"), which was not true: two
-    // same-length lists in different orders would satisfy both length checks
-    // and then silently misassociate `should_panic` with the wrong test.
-    // This is the check that makes that comment's claim actually hold.
+    // *position by position*. The `should_panic`-by-index comment in
+    // [`run_tests`] used to claim this was already covered ("see the
+    // `ensure!` above, which would have already failed"), which was not
+    // true: two same-length lists in different orders would satisfy both
+    // length checks and then silently misassociate `should_panic` with the
+    // wrong test. This is the check that makes that comment's claim
+    // actually hold.
     anyhow::ensure!(
-        (0..count).all(|i| names[i] == tests[i].name),
+        (0..count).all(|i| names[i] == compiled[i]),
         "the compiled binary's inventory names disagree with the compiler's own test names at \
          the same positions; this is a compiler bug (inventory process {status})"
     );
+    Ok(names)
+}
 
-    // should_panic, by position: `names` (read from the binary, above) and
-    // `tests` (returned by `build_test_binary`) are both derived from the
-    // identical source-ordered list at compile time, so index `i` names the
-    // same test in both — see the `ensure!`s above, which would have already
-    // failed if that invariant did not hold.
-    let selected: Vec<usize> = (0..count)
-        .filter(|&i| match &cmd.filter {
-            Some(f) => names[i].contains(f.as_str()),
+/// The indexes of `names` that contain `filter`: all of them without one.
+fn select(names: &[String], filter: Option<&str>) -> Vec<usize> {
+    (0..names.len())
+        .filter(|&i| match filter {
+            Some(f) => names[i].contains(f),
             None => true,
         })
-        .collect();
+        .collect()
+}
 
-    // Whole-branch review, finding 4: an *explicit* filter that matches
-    // nothing is a failure, not a quiet no-op. Before this, `nova test
-    // <typo>` printed `running 0 tests` / `test result: ok` and exited 0 —
-    // indistinguishable from an unfiltered run of a project with no tests at
-    // all, so a typo'd CI filter reported green having run nothing (ADR 0008
-    // §2's own residual-gaps list named this). An *unfiltered* run of a file
-    // with no tests is deliberately left alone: `count == 0` with
-    // `cmd.filter` absent still exits 0, since nothing was mistyped there.
-    if let Some(f) = &cmd.filter {
-        anyhow::ensure!(
-            !selected.is_empty(),
-            "no test name contains the filter `{f}` ({count} test{} available)",
-            if count == 1 { "" } else { "s" }
-        );
+/// Whole-branch review, finding 4: an *explicit* filter that matches
+/// nothing is a failure, not a quiet no-op. Before this, `nova test
+/// <typo>` printed `running 0 tests` / `test result: ok` and exited 0 —
+/// indistinguishable from an unfiltered run of a project with no tests at
+/// all, so a typo'd CI filter reported green having run nothing (ADR 0008
+/// §2's own residual-gaps list named this). An *unfiltered* run of a file
+/// with no tests is deliberately left alone: `count == 0` with no filter
+/// still exits 0, since nothing was mistyped there. `matched` counts what
+/// the filter selected across every section, and `available` how many
+/// tests of each kind there are (spec 3.5b §6.1).
+fn ensure_matched(filter: Option<&str>, matched: usize, available: &[(usize, &str)]) -> Result<()> {
+    let Some(f) = filter else {
+        return Ok(());
+    };
+    if matched > 0 {
+        return Ok(());
     }
+    let available: Vec<String> = available
+        .iter()
+        .map(|&(n, kind)| format!("{n} {kind}{}", if n == 1 { "" } else { "s" }))
+        .collect();
+    bail!(
+        "no test name contains the filter `{f}` ({} available)",
+        available.join(" and ")
+    )
+}
 
+/// A section's failures and traps, which the closing error counts.
+struct Tally {
+    failed: usize,
+    trapped: usize,
+}
+
+/// Run the `selected` tests of `exe`, each in its own process, and print
+/// their section: `running N {kind}s`, a line per test by its entry in
+/// `names`, a blank line, and the result line (spec 3.5b §6.3).
+fn run_tests(
+    exe: &Path,
+    kind: &str,
+    names: &[String],
+    should_panic: &[bool],
+    selected: &[usize],
+) -> Result<Tally> {
     println!(
-        "running {} test{}",
+        "running {} {kind}{}",
         selected.len(),
         if selected.len() == 1 { "" } else { "s" }
     );
@@ -268,14 +555,18 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     let mut failed = 0usize;
     let mut trapped = 0usize;
 
-    for &i in &selected {
+    for &i in selected {
         let name = &names[i];
-        let result = Command::new(&exe)
+        let result = Command::new(exe)
             .env("NOVA_TEST_INDEX", i.to_string())
             .output()
             .with_context(|| format!("failed to run {} for test `{name}`", exe.display()))?;
-        let should_panic = tests[i].should_panic;
-        match (classify(&result), should_panic) {
+        // should_panic, by position: the binary's inventory and the
+        // compiler's list are both derived from the identical
+        // source-ordered list at compile time, so index `i` names the same
+        // test in both — see [`inventory`]'s `ensure!`s, which would have
+        // already failed if that invariant did not hold.
+        match (classify(&result), should_panic[i]) {
             (Outcome::Passed { .. }, false) => {
                 passed += 1;
                 println!("test {name} ... ok");
@@ -330,7 +621,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         }
     }
 
-    // Deliberately the length of `selected`, not `count` or `tests.len()`:
+    // Deliberately the length of `selected`, not the inventory's count:
     // this line must enumerate what actually ran, not repeat a number that
     // was never measured when a filter narrowed the run.
     let total = selected.len();
@@ -340,15 +631,30 @@ pub fn run(cmd: TestCmd) -> Result<()> {
         "test result: {}. {passed} passed; {failed} failed; {trapped} trapped; {total} total",
         if all_ok { "ok" } else { "FAILED" }
     );
+    Ok(Tally { failed, trapped })
+}
 
-    if all_ok {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "{failed} test{} failed, {trapped} trapped",
-            if failed == 1 { "" } else { "s" }
-        );
+/// The run's end (spec 3.5b §6.3): it fails when a test of any section
+/// failed or trapped, and the error counts each section's.
+fn finish(sections: &[(&str, Tally)]) -> Result<()> {
+    if sections
+        .iter()
+        .all(|(_, t)| t.failed == 0 && t.trapped == 0)
+    {
+        return Ok(());
     }
+    let counts: Vec<String> = sections
+        .iter()
+        .map(|(kind, t)| {
+            format!(
+                "{} {kind}{} failed, {} trapped",
+                t.failed,
+                if t.failed == 1 { "" } else { "s" },
+                t.trapped
+            )
+        })
+        .collect();
+    bail!("{}", counts.join("; "))
 }
 
 #[cfg(test)]
