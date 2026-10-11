@@ -300,14 +300,32 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
     build_test_program(Program::for_file(path))
 }
 
+/// Rewrites a diagnostic before it is counted and rendered, with the
+/// program's files at hand (spec
+/// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md` §7):
+/// it may move the diagnostic's labels into other files of the database,
+/// adding them. `false` hides a warning; an error is always shown.
+pub type MapDiagnostic<'a> = dyn Fn(&mut FileDb, &mut Diagnostic) -> bool + 'a;
+
 /// [`build_test_binary`] on `program`: the test binary of its roots.
 pub fn build_test_program(program: Program) -> Result<(PathBuf, Vec<TestFn>)> {
+    build_test_program_with(program, &DiskSources, None)
+}
+
+/// [`build_test_program`], reading every module through `sources`, and
+/// passing each diagnostic through `map` before it is counted and rendered
+/// (spec 3.5b §7, §11.2). Doc tests are modules no file holds.
+pub fn build_test_program_with(
+    program: Program,
+    sources: &dyn Sources,
+    map: Option<&MapDiagnostic>,
+) -> Result<(PathBuf, Vec<TestFn>)> {
     let entry = program
         .roots
         .first()
         .map(|root| root.path.clone())
         .unwrap_or_default();
-    let mut ctx = FrontendContext::new(program)?;
+    let mut ctx = FrontendContext::with(program, sources, map)?;
     let Some((mut module, tests, fresh_def_id)) = ctx.check(true)? else {
         anyhow::bail!(
             "could not compile due to {} previous error{}",
@@ -367,14 +385,18 @@ pub fn build_test_program(program: Program) -> Result<(PathBuf, Vec<TestFn>)> {
 }
 
 /// A short, deterministic fingerprint of `path`'s canonicalized form, for
-/// `build_test_binary`'s output directory. Canonicalizing first (falling
-/// back to the path as given if that fails — it cannot fail here in
-/// practice, since `build_test_binary` has already opened and read this
-/// file by the time this runs) means two different relative spellings of
-/// the same file collide on purpose, while two files that merely share a
-/// name in different directories do not.
+/// `build_test_binary`'s output directory. Canonicalizing first means two
+/// different relative spellings of the same file collide on purpose, while
+/// two files that merely share a name in different directories do not. A
+/// path no file holds, such as a doc test's (spec 3.5b §11.2), is joined
+/// onto the current directory instead, so two packages' relative
+/// `<doc tests>/doc0.nova` do not share a binary.
 fn path_fingerprint(path: &Path) -> String {
-    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canon = path.canonicalize().unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|dir| dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    });
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
@@ -563,7 +585,7 @@ pub fn run_program(program: Program, args: Vec<String>) -> Result<Outcome<()>> {
 
 /// Shared front-end state: what to load, the file database, and error
 /// accounting.
-struct FrontendContext {
+struct FrontendContext<'a> {
     db: FileDb,
     graph: Option<nova_pm::Graph>,
     roots: Vec<Root>,
@@ -572,12 +594,27 @@ struct FrontendContext {
     /// The registry packages' modules, once loaded: a warning only about
     /// them is not shown.
     registry_files: HashSet<FileId>,
+    /// Where every module is read (spec 3.5b §11.2).
+    sources: &'a dyn Sources,
+    /// Called on each diagnostic before it is counted and rendered (spec
+    /// 3.5b §7).
+    map: Option<&'a MapDiagnostic<'a>>,
 }
 
-impl FrontendContext {
+impl<'a> FrontendContext<'a> {
     /// Take `program`, rendering its graph's diagnostics. When they hold
     /// no error, the entry must exist: imported modules are read lazily.
     fn new(program: Program) -> Result<Self> {
+        FrontendContext::with(program, &DiskSources, None)
+    }
+
+    /// [`FrontendContext::new`], reading every module through `sources`
+    /// and passing each diagnostic through `map`.
+    fn with(
+        program: Program,
+        sources: &'a dyn Sources,
+        map: Option<&'a MapDiagnostic<'a>>,
+    ) -> Result<Self> {
         let Program {
             db,
             graph,
@@ -592,13 +629,16 @@ impl FrontendContext {
             errors: 0,
             warnings: 0,
             registry_files: HashSet::new(),
+            sources,
+            map,
         };
         ctx.render(&diagnostics);
         if ctx.errors == 0 {
             let entry = ctx
                 .entry()
                 .context("nothing to compile: the package has no source file for this")?;
-            std::fs::File::open(entry)
+            ctx.sources
+                .read(entry)
                 .with_context(|| format!("failed to open {}", entry.display()))?;
         }
         Ok(ctx)
@@ -610,11 +650,15 @@ impl FrontendContext {
     }
 
     fn render(&mut self, diagnostics: &[Diagnostic]) {
-        let shown: Vec<Diagnostic> = diagnostics
+        let mut shown: Vec<Diagnostic> = diagnostics
             .iter()
             .filter(|d| !program::a_dependencys_warning(d, &self.registry_files))
             .cloned()
             .collect();
+        if let Some(map) = self.map {
+            let db = &mut self.db;
+            shown.retain_mut(|d| map(db, d) || d.severity == Severity::Error);
+        }
         self.errors += shown
             .iter()
             .filter(|d| d.severity == Severity::Error)
@@ -635,13 +679,14 @@ impl FrontendContext {
             .unwrap_or_else(|| "main".to_string())
     }
 
-    /// Load, lex and parse every module the roots reach, from disk,
-    /// rendering the lex, parse and import diagnostics. The loading itself
-    /// is [`program::load_program`], which the language server shares.
+    /// Load, lex and parse every module the roots reach, through
+    /// `sources`, rendering the lex, parse and import diagnostics. The
+    /// loading itself is [`program::load_program`], which the language
+    /// server shares.
     fn load_modules(&mut self) -> Result<Vec<Loaded>> {
         let entry = self.entry().map(Path::to_path_buf).unwrap_or_default();
         let load =
-            program::load_program(self.graph.as_ref(), &self.roots, &DiskSources, &mut self.db)
+            program::load_program(self.graph.as_ref(), &self.roots, self.sources, &mut self.db)
                 .with_context(|| format!("failed to read {}", entry.display()))?;
         self.registry_files = program::registry_files(self.graph.as_ref(), &load.modules);
         self.render(&load.diagnostics);
@@ -851,6 +896,46 @@ fn strip_test_functions(modules: &mut [Loaded], keep_root_tests: bool) {
                 nova_ast::Item::Function(f) if f.attrs.iter().any(|a| a.name.value == "test")
             )
         });
+    }
+}
+
+/// What doc tests need of a build (spec
+/// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+/// §7, §11.2), where only this crate can see it.
+#[cfg(test)]
+mod doc_test_builds {
+    use super::*;
+
+    /// Every path holds an empty program.
+    struct Memory;
+
+    impl Sources for Memory {
+        fn read(&self, _: &Path) -> std::io::Result<String> {
+            Ok("fn main() {}\n".to_string())
+        }
+    }
+
+    #[test]
+    fn a_map_hides_the_warnings_it_rejects_and_never_an_error() {
+        let map = |_: &mut FileDb, _: &mut Diagnostic| false;
+        let program = Program::loose(Path::new("<nova driver: memory>/main.nova"));
+        let mut ctx = FrontendContext::with(program, &Memory, Some(&map)).expect("the entry reads");
+        ctx.render(&[
+            Diagnostic::warning("W0000", "a warning"),
+            Diagnostic::error("E0000", "an error"),
+        ]);
+        assert_eq!((ctx.errors, ctx.warnings), (1, 0));
+    }
+
+    #[test]
+    fn a_path_no_file_holds_is_fingerprinted_from_the_current_directory() {
+        // Two packages' relative `<doc tests>/doc0.nova` must not share a
+        // test binary.
+        let relative = Path::new("<nova driver: no such dir>").join("doc0.nova");
+        let absolute = std::env::current_dir()
+            .expect("a current directory")
+            .join(&relative);
+        assert_eq!(path_fingerprint(&relative), path_fingerprint(&absolute));
     }
 }
 
