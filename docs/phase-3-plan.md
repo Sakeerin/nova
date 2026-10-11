@@ -233,6 +233,10 @@ departs from the master spec or from `40-TOOLING.md`.
    `pulldown-cmark` into a static site under `target/doc/` (`40-TOOLING.md`
    §5). 3.5's spec decides whether `nova test --doc` is in. std has no `///`
    docs yet, so its site shows signatures only unless 3.5 writes them.
+
+   **Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** 3.5
+   is two sub-phases, by the user on 2026-10-11. `nova test --doc` is
+   3.5b's, and 3.5a writes docs for every public std item.
 10. **The recorded scope (3.0).** ADR 0026 records the registry decision,
     which replaces the registry server of the master spec's Phase 3
     position 3 with the git-backed index, and what Phase 3 leaves out:
@@ -388,6 +392,17 @@ a PR, and a merge on the user's word.
 - **Gate:** for `std/`, and for an example that uses a dependency, every
   public item has an anchor and a link check finds no broken link. std's
   site is attached to the GitHub release.
+
+  **Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** 3.5
+  is two sub-phases, each with its own spec. 3.5a, "The documentation
+  site", is built
+  (`docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`;
+  ADR 0034): the site, docs for every public std item, and
+  `examples/05-geometry`. Its gate's tests run in CI's Test job on three
+  systems, and `.github/scripts/doc-gate.sh` in the install job; on this
+  branch they pass on Linux, and the pull request's CI runs them on all
+  three. std's site is attached by the next tag's release. 3.5b, `nova
+  test --doc`, has its own spec next.
 
 ### 3.6 — The `v0.3.0` release
 - The crates.io blockers of §2 item 8 are fixed, and the names are checked

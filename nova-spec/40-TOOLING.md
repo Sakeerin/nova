@@ -62,6 +62,12 @@ exist, with two commands this list lacks. `nova fetch` downloads what
 (`docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`
 §6; ADR 0031).
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** `nova
+doc [--open] [--std]` exists. It needs a project, or `--std`, which
+writes std's site alone, and it prints the start page's path
+(`docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`
+§4; ADR 0034).
+
 ### 1.2 Project Template (`nova new`)
 
 ```
@@ -389,6 +395,16 @@ of its own, stops it (ADR 0031).
 - Search via pre-built index (like rustdoc)
 - Code examples in docs are testable: `nova test --doc`
 - Theme: clean, light/dark mode toggle, similar to rustdoc visually
+
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** 3.5a
+delivers the site
+(`docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`;
+ADR 0034): `///` docs as Markdown through `pulldown-cmark`, with raw HTML
+escaped; `//!` lines before the first token as module docs; a page per
+module under `target/doc/<package>/`, with std's in every site;
+signatures as written, each name linked through the checker's index; a
+search index read as a script; light and dark themes. `nova test --doc`
+is 3.5b's.
 
 ---
 

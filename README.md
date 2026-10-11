@@ -43,6 +43,13 @@ name. `nova add json` adds a package from the index instead, and
 downloads what the lock names. To publish a library, run
 `gh auth token | nova login` once, then `nova publish`.
 
+### Documentation
+
+`nova doc` writes a project's documentation to `target/doc/`, with its
+dependencies' and std's, from the `///` comments above each item;
+`nova doc --open` opens it. Each GitHub release also attaches std's
+site.
+
 ---
 
 ## How to use this bundle

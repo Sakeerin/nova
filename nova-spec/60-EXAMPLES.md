@@ -781,6 +781,11 @@ follows this template.** `examples/03-http-server/README.md` does, beside
 this template,** `examples/04-todo-cli/README.md`. The durable check is
 unchanged.
 
+**Recorded 2026-10-11 (branch `claude/loving-archimedes-frtf5q`): a fourth
+example follows this template,** `examples/05-geometry/README.md`. It takes
+`05-` because §6 to §8 reserve `06-` to `15-`. The durable check is
+unchanged.
+
 ---
 
 ## 10. Test Coverage per Example

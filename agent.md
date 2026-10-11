@@ -150,6 +150,11 @@ and `nova-typeck` attach and `nova-lsp` offers as code actions;
 `nova-fmt` builds organize imports' block; `nova-lsp` also answers
 semantic tokens (`docs/adr/0033-fixes-and-colour-in-the-language-server.md`).
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):**
+`nova-doc` is built on `nova-driver`'s `analyze_program` and
+`pulldown-cmark`, not on `nova-ast` alone
+(`docs/adr/0034-the-documentation-generator.md`).
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)
