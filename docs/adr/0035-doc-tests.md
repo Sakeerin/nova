@@ -114,6 +114,11 @@ held a closure, or a function passed as a value, did not build.
 - `examples/05-geometry`'s library has two: `shapes (src/lib.nova:8)` and
   `shapes::units::Length::plus (src/units.nova:17)`. CI's install job
   runs them with the installed `nova` (`.github/scripts/doc-gate.sh`).
+- An example in a library submodule's docs can name only what
+  `import <package>` brings in, the library's `lib.nova` exports, since
+  module-qualified paths and nested import paths are E0900 today. So
+  `Length::plus`'s example in `shapes` reaches a `Length` through
+  `rectangle(...).perimeter()`.
 - A plain body's trailing value is E0010 at the example's own line, and
   it names the generated function: "`nova_doctest` should return `()` but
   its body has type `Int`".

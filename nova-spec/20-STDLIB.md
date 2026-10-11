@@ -2460,6 +2460,11 @@ core → fmt/io → collections → strings → fs → time/log → task → syn
 - Examples in doc comments are tested by `nova test --doc`
 - `nova doc` generates a static HTML site like rustdoc
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** std's
+examples run under `nova test --doc --std`, inside a project or not;
+`nova test --doc` runs those of the library of the package around the
+current directory (ADR 0035).
+
 ---
 
 ## 16. `std/net`
