@@ -387,13 +387,19 @@ impl Server<'_> {
                                 let start =
                                     lines.offset(p.range.start.line, p.range.start.character);
                                 let end = lines.offset(p.range.end.line, p.range.end.character);
-                                code_action::code_actions(
-                                    &answer,
-                                    &path,
-                                    start,
-                                    end,
-                                    p.context.only.as_deref(),
-                                    &|path| self.uri_of(path),
+                                analysis::answered(
+                                    "code actions",
+                                    || {
+                                        code_action::code_actions(
+                                            &answer,
+                                            &path,
+                                            start,
+                                            end,
+                                            p.context.only.as_deref(),
+                                            &|path| self.uri_of(path),
+                                        )
+                                    },
+                                    Vec::new(),
                                 )
                             })
                             .unwrap_or_default();
@@ -407,7 +413,13 @@ impl Server<'_> {
                     Ok(p) => {
                         let data = self
                             .answer_of(&p.text_document.uri)
-                            .map(|(answer, _, _)| tokens::tokens(&answer))
+                            .map(|(answer, _, _)| {
+                                analysis::answered(
+                                    "semantic tokens",
+                                    || tokens::tokens(&answer),
+                                    Vec::new(),
+                                )
+                            })
                             .unwrap_or_default();
                         Response::new_ok(
                             request.id,
