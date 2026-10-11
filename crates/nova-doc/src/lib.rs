@@ -9,9 +9,17 @@
 mod highlight;
 mod markdown;
 mod model;
+mod render;
+mod search;
 mod signature;
 
 pub use model::{document_package, document_std, Documented, Failure, Site};
+
+/// The site's stylesheet: its light and dark themes (spec §10.2).
+pub(crate) const CSS: &str = include_str!("../assets/nova.css");
+
+/// The site's script: search and the theme toggle (spec §10).
+pub(crate) const JS: &str = include_str!("../assets/nova.js");
 
 /// `text` with `&`, `<`, `>`, `"` and `'` written as HTML entities.
 pub(crate) fn escape(text: &str) -> String {
