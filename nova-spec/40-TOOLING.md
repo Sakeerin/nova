@@ -406,6 +406,16 @@ signatures as written, each name linked through the checker's index; a
 search index read as a script; light and dark themes. `nova test --doc`
 is 3.5b's.
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** 3.5b
+delivers `nova test --doc`
+(`docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`;
+ADR 0035). The Nova code blocks in a library's docs, those its site
+shows, are tests, each named by the item it documents and the block's
+line. A block whose info string starts with `ignore`, or has it after
+`nova`, is shown as Nova and not run. A `# ` line runs but is shown
+neither on the site nor in hover. A compile error in an example points
+at its line in the doc comment.
+
 ---
 
 ## 6. REPL (`nova repl`)
@@ -436,6 +446,15 @@ sorted by name. A test in `tests/api.nova` is named `api::<function>`,
 and the filter is a positional substring of that name. Subdirectories of
 `tests/` are not read (ADR 0003's deferral). A dependency's tests are
 never run.
+
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):**
+`nova test` also runs a library's doc tests (§5), after its unit and
+integration tests, in a binary of their own and a section of their own,
+`running N doc tests`; a program's code blocks and a dependency's are not
+run. `nova test --doc [filter]` runs the doc tests alone, and `nova test
+--doc --std [filter]` runs std's, inside a project or not
+(`docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md` §6;
+ADR 0035).
 
 ---
 

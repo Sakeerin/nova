@@ -164,6 +164,14 @@ code:
     "beside an existing `src/main.nova`" is a directory with sources and no
     manifest yet. A library is added to an existing project by writing its
     `src/lib.nova`.
+
+    **Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):**
+    settled by the user on 2026-10-11: `nova init` keeps refusing a
+    directory that has a `nova.toml`. With `--lib`, in a package with no
+    `src/lib.nova`, it now says how to add one: "this directory already
+    has a nova.toml; to add a library to its package, write src/lib.nova"
+    (`docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+    §3).
 15. **`ProjectKey::entry` goes.** Spec §6 says it "becomes the program,
     else the library". Once a project's analysis is
     `Program::for_package(dir, Roots::Test)`, nothing needs an entry, and an

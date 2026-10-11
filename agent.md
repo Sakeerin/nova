@@ -155,6 +155,12 @@ semantic tokens (`docs/adr/0033-fixes-and-colour-in-the-language-server.md`).
 `pulldown-cmark`, not on `nova-ast` alone
 (`docs/adr/0034-the-documentation-generator.md`).
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):**
+`nova-doc` also turns a library's code examples into doc test modules,
+which `nova-cli` builds through `nova-driver`'s `build_test_program_with`;
+`nova-lsp` depends on `nova-doc`, whose rule hides an example's hidden
+lines in hover (`docs/adr/0035-doc-tests.md`).
+
 ---
 
 ## 6. Compilation Pipeline (Data Flow)
