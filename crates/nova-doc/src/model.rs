@@ -247,6 +247,46 @@ const STD_ENTRY: &str = "<nova doc>/main.nova";
 /// Document the package whose `nova.toml` is in `root` (empty for the
 /// current directory), its dependencies and std (spec §5.1).
 pub fn document_package(root: &Path) -> Result<Documented, Failure> {
+    let (analysis, library) = package_analysis(root)?;
+    let std = std_analysis()?;
+    let mut packages = Ctx::new(&analysis, false, !library)?.packages();
+    packages.push(Ctx::new(&std, true, false)?.std_package());
+    clash(&packages)?;
+    let start = format!("{}/index.html", packages[0].name);
+    let warnings = analysis.diagnostics.clone();
+    Ok(Documented {
+        site: Site { packages, start },
+        db: analysis.db,
+        warnings,
+    })
+}
+
+/// A library's own package, as its site documents it, and the analysis it
+/// came from; `None` for a package with no library (3.5b spec §4.1).
+pub(crate) fn library_package(root: &Path) -> Result<Option<(Package, Analysis)>, Failure> {
+    let (analysis, library) = package_analysis(root)?;
+    if !library {
+        return Ok(None);
+    }
+    let packages = Ctx::new(&analysis, false, false)?.packages();
+    let name = analysis.graph.as_ref().map(|g| g.root().name.clone());
+    let package = packages
+        .into_iter()
+        .find(|p| Some(&p.name) == name.as_ref());
+    Ok(package.map(|p| (p, analysis)))
+}
+
+/// std's package, as its site documents it, and std's analysis.
+pub(crate) fn std_package() -> Result<(Package, Analysis), Failure> {
+    let std = std_analysis()?;
+    let package = Ctx::new(&std, true, false)?.std_package();
+    Ok((package, std))
+}
+
+/// The analysis a package's site reads, of its library when it has one,
+/// else of its program (spec §5.1), and whether it is a library. Errors
+/// are a failure.
+fn package_analysis(root: &Path) -> Result<(Analysis, bool), Failure> {
     let mut program = Program::for_package(root, Roots::Check);
     let stem = |p: &Path| p.file_stem().and_then(|s| s.to_str()).map(str::to_string);
     let library = program
@@ -275,23 +315,12 @@ pub fn document_package(root: &Path) -> Result<Documented, Failure> {
             diagnostics: analysis.diagnostics,
         });
     }
-    let std = std_analysis()?;
-    let mut packages = Ctx::new(&analysis, false, !library)?.packages();
-    packages.push(Ctx::new(&std, true, false)?.std_package());
-    clash(&packages)?;
-    let start = format!("{}/index.html", packages[0].name);
-    let warnings = analysis.diagnostics.clone();
-    Ok(Documented {
-        site: Site { packages, start },
-        db: analysis.db,
-        warnings,
-    })
+    Ok((analysis, library))
 }
 
 /// Document std alone (spec §4.1, `--std`).
 pub fn document_std() -> Result<Documented, Failure> {
-    let std = std_analysis()?;
-    let package = Ctx::new(&std, true, false)?.std_package();
+    let (package, _) = std_package()?;
     Ok(Documented {
         site: Site {
             packages: vec![package],
