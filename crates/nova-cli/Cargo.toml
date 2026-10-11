@@ -24,6 +24,10 @@ nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
 nova-fmt = { path = "../nova-fmt" }
 nova-lsp = { path = "../nova-lsp" }
+# `nova doc` (spec
+# docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
+# §4).
+nova-doc = { path = "../nova-doc" }
 # The package index: syncing, packing and publishing (spec
 # docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
 # §9).

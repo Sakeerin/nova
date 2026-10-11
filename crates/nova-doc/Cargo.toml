@@ -16,5 +16,21 @@ bench = false
 [dependencies]
 nova-diagnostics = { path = "../nova-diagnostics" }
 nova-ast = { path = "../nova-ast" }
+nova-lexer = { path = "../nova-lexer" }
+nova-resolver = { path = "../nova-resolver" }
+nova-typeck = { path = "../nova-typeck" }
+nova-driver = { path = "../nova-driver" }
+nova-pm = { path = "../nova-pm" }
+# `///` docs as Markdown (spec
+# docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
+# §9.1).
+pulldown-cmark = { workspace = true }
+# The search index's strings, written as JSON (spec §10.1).
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The gate tests and std's completeness check read the sources by the
+# parser alone (spec §16.4; plan decision 17).
 nova-parser = { path = "../nova-parser" }
-anyhow = { workspace = true }
+nova-std = { path = "../../std" }
