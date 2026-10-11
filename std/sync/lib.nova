@@ -21,6 +21,30 @@
 //! busy while it waits, and a wait that can never end, such as for a lock
 //! that is never released, goes on forever rather than being reported as a
 //! deadlock.
+//!
+//! A producer task sends values through a channel and closes it; the
+//! receiver takes them until `recv` gives `None`:
+//!
+//! ```
+//! async fn produce(mut tx: Sender<Int>) {
+//!     for i in 1..4 { tx.send(i * 10).await }
+//!     tx.close() // once the channel is empty, `recv` gives `None`
+//! }
+//!
+//! async fn main() {
+//!     let ch: Channel<Int> = channel(2)
+//!     spawn(produce(ch.sender()))
+//!     let mut rx = ch.receiver()
+//!     let mut total = 0
+//!     while true {
+//!         match rx.recv().await {
+//!             Some(v) => total = total + v
+//!             None => break
+//!         }
+//!     }
+//!     assert_eq(total, 60)
+//! }
+//! ```
 
 // Nova standard library -- synchronisation.
 //
@@ -153,6 +177,28 @@ impl<T> Mutex<T> {
     /// until the mutex is released. The wait keeps the processor busy, and
     /// goes on forever, with no deadlock reported, if the mutex is never
     /// released, as when the calling task already holds it.
+    ///
+    /// Two tasks adding to one total, each holding the lock across a
+    /// suspension:
+    ///
+    /// ```
+    /// async fn add(mut total: Mutex<Int>, n: Int) {
+    ///     let mut guard = total.lock().await
+    ///     let before = guard.get()
+    ///     yield_now().await // other tasks run here, but none can lock `total`
+    ///     guard.set(before + n)
+    ///     guard.release() // nothing releases a guard for you
+    /// }
+    ///
+    /// async fn main() {
+    ///     let mut total = Mutex::new(0)
+    ///     let a = spawn(add(total, 1))
+    ///     let b = spawn(add(total, 2))
+    ///     a.join().await
+    ///     b.join().await
+    ///     assert_eq(total.try_lock().unwrap().get(), 3)
+    /// }
+    /// ```
     pub async fn lock(mut self) -> MutexGuard<T> {
         while !self.take() { yield_now().await }
         MutexGuard { owner: self, released: false }

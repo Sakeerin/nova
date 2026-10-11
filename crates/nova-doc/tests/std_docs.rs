@@ -38,6 +38,10 @@ const EXAMPLED: &[&str] = &[
     "fs",
     "net",
     "process",
+    "task",
+    "sync",
+    "time",
+    "log",
 ];
 
 /// Each std module's `//!` docs hold an example that runs (spec 3.5b §9.2).
