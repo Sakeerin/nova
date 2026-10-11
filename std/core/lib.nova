@@ -1,14 +1,36 @@
+//! The types and traits every module sees without an import.
+//!
+//! `Option` holds a value that may be absent, `Result` the outcome of an
+//! operation that can fail, and `Ordering` the result of a comparison. The
+//! traits `Display`, `Debug`, `Eq`, `Ord`, `Clone`, `Default` and `Hash`
+//! come with impls for `Int`, `Float`, `Bool`, `Char` and `String`, except
+//! `Hash` for `Float`. `Iterator` yields values one at a time, and its `map`
+//! and `filter` return a `MapIter` and a `FilterIter`. A module's own
+//! definition of one of these names shadows the one here.
+
 // Nova standard library — core.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
 // these names need no `import`. A user definition of the same name shadows the
 // one here (see docs/adr/0004-stdlib-compile-model.md).
 
-pub type Option<T> = | Some(T) | None
+/// A value that may be absent: `Some` value, or `None`.
+pub type Option<T> =
+    /// Holds a value.
+    | Some(T)
+    /// Holds no value.
+    | None
 
-pub type Result<T, E> = | Ok(T) | Err(E)
+/// The outcome of an operation that can fail: `Ok` with a value, or `Err`
+/// with an error.
+pub type Result<T, E> =
+    /// Holds the value of a success.
+    | Ok(T)
+    /// Holds the error of a failure.
+    | Err(E)
 
 impl<T> Option<T> {
+    /// Returns `true` if the option is `Some`.
     pub fn is_some(self) -> Bool {
         match self {
             Some(_) => true
@@ -16,8 +38,12 @@ impl<T> Option<T> {
         }
     }
 
+    /// Returns `true` if the option is `None`.
     pub fn is_none(self) -> Bool { !self.is_some() }
 
+    /// Applies `f` to the value, if there is one.
+    ///
+    /// Returns `Some(f(v))` for `Some(v)`, and `None` for `None`.
     pub fn map<U>(self, f: fn(T) -> U) -> Option<U> {
         match self {
             Some(v) => Some(f(v))
@@ -25,6 +51,9 @@ impl<T> Option<T> {
         }
     }
 
+    /// Calls `f` with the value, if there is one, and returns its result.
+    ///
+    /// Returns `None` for `None`, without calling `f`.
     pub fn and_then<U>(self, f: fn(T) -> Option<U>) -> Option<U> {
         match self {
             Some(v) => f(v)
@@ -32,6 +61,9 @@ impl<T> Option<T> {
         }
     }
 
+    /// Returns the value.
+    ///
+    /// Panics if the option is `None`.
     pub fn unwrap(self) -> T {
         match self {
             Some(v) => v
@@ -39,6 +71,7 @@ impl<T> Option<T> {
         }
     }
 
+    /// Returns the value, or `default` if the option is `None`.
     pub fn unwrap_or(self, default: T) -> T {
         match self {
             Some(v) => v
@@ -46,6 +79,8 @@ impl<T> Option<T> {
         }
     }
 
+    /// Converts the option to a `Result`: `Ok(v)` for `Some(v)`, and
+    /// `Err(err)` for `None`.
     pub fn ok_or<E>(self, err: E) -> Result<T, E> {
         match self {
             Some(v) => Ok(v)
@@ -55,6 +90,7 @@ impl<T> Option<T> {
 }
 
 impl<T, E> Result<T, E> {
+    /// Returns `true` if the result is `Ok`.
     pub fn is_ok(self) -> Bool {
         match self {
             Ok(_) => true
@@ -62,8 +98,10 @@ impl<T, E> Result<T, E> {
         }
     }
 
+    /// Returns `true` if the result is `Err`.
     pub fn is_err(self) -> Bool { !self.is_ok() }
 
+    /// Applies `f` to the value of an `Ok`, leaving an `Err` as it is.
     pub fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {
         match self {
             Ok(v) => Ok(f(v))
@@ -71,6 +109,7 @@ impl<T, E> Result<T, E> {
         }
     }
 
+    /// Applies `f` to the error of an `Err`, leaving an `Ok` as it is.
     pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
         match self {
             Ok(v) => Ok(v)
@@ -78,6 +117,9 @@ impl<T, E> Result<T, E> {
         }
     }
 
+    /// Calls `f` with the value of an `Ok` and returns its result.
+    ///
+    /// Returns an `Err` as it is, without calling `f`.
     pub fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E> {
         match self {
             Ok(v) => f(v)
@@ -85,6 +127,9 @@ impl<T, E> Result<T, E> {
         }
     }
 
+    /// Returns the value of an `Ok`.
+    ///
+    /// Panics if the result is an `Err`.
     pub fn unwrap(self) -> T {
         match self {
             Ok(v) => v
@@ -92,6 +137,7 @@ impl<T, E> Result<T, E> {
         }
     }
 
+    /// Returns the value of an `Ok`, or `default` for an `Err`.
     pub fn unwrap_or(self, default: T) -> T {
         match self {
             Ok(v) => v
@@ -136,30 +182,68 @@ impl<T, E> Result<T, E> {
 // `Hash` is one-shot (`fn hash(self) -> Int`) rather than streaming, and why
 // there is deliberately no `Hash for Float`.
 
-pub type Ordering = | Less | Equal | Greater
+/// The result of comparing two values, as `Ord::cmp` returns it.
+pub type Ordering =
+    /// The first value is less than the second.
+    | Less
+    /// The two values are equal.
+    | Equal
+    /// The first value is greater than the second.
+    | Greater
 
+/// A type whose values can be shown as text for people to read.
+///
+/// String interpolation, `"${value}"`, uses it for a value of a type that
+/// implements it.
 pub trait Display {
+    /// Returns the value as text.
     fn fmt(self) -> String
 }
 
+/// A type whose values can be shown as text for debugging.
 pub trait Debug {
+    /// Returns the value as text for debugging.
+    ///
+    /// For `Int`, `Float` and `Bool` it is the text `Display` gives. A `Char`
+    /// or `String` comes out as a quoted Nova literal, escaped so that it
+    /// reads back as the same value.
     fn dbg(self) -> String
 }
 
+/// A type whose values can be compared for equality.
 pub trait Eq {
+    /// Returns `true` if `self` equals `other`.
+    ///
+    /// For `Float`, `NaN` equals no value, not even itself.
     fn eq(self, other: Self) -> Bool
+    /// Returns `true` if `self` does not equal `other`.
+    ///
+    /// By default it is the opposite of `eq`.
     fn ne(self, other: Self) -> Bool { !self.eq(other) }
 }
 
+/// A type whose values are ordered.
 pub trait Ord: Eq {
+    /// Returns whether `self` is less than, equal to or greater than `other`.
+    ///
+    /// std orders `false` before `true`, a `Char` by its code point, and a
+    /// `String` by its UTF-8 bytes. For `Float`, any comparison involving
+    /// `NaN` gives `Greater`, even `NaN` with itself.
     fn cmp(self, other: Self) -> Ordering
 }
 
+/// A type whose values can be copied.
 pub trait Clone {
+    /// Returns a copy of `self`.
     fn clone(self) -> Self
 }
 
+/// A type with a default value.
 pub trait Default {
+    /// Returns the type's default value.
+    ///
+    /// For `Int`, `Float`, `Bool`, `Char` and `String` it is `0`, `0.0`,
+    /// `false`, `'\0'` and `""`.
     fn default() -> Self
 }
 
@@ -185,7 +269,20 @@ pub trait Default {
 //     loses half its range on exactly the keys that need distinguishing.
 //   - `mix64`'s guarantees are stated over its whole 64-bit result; nothing
 //     promises that any particular slice of it is uniform on its own.
+/// A type whose values can be hashed to an `Int`.
+///
+/// A `Map`'s keys and a `Set`'s values must implement it, and `Eq`.
+/// Two values equal by `eq` must have the same hash. `Float` has no impl:
+/// `NaN` equals no value, and `0.0` and `-0.0` are equal though their bits
+/// differ.
 pub trait Hash {
+    /// Returns the value's hash.
+    ///
+    /// A hash can be negative. To pick one of `n` buckets, where `n` is a
+    /// power of two, mask it, `hash & (n - 1)`, rather than taking a
+    /// remainder, which can be negative, or using its high bits. std seeds
+    /// the hashes of `Int`, `Bool`, `Char` and `String` once per run, so they
+    /// can differ from one run of a program to the next.
     fn hash(self) -> Int
 }
 
@@ -232,14 +329,34 @@ pub trait Hash {
 // construction; grep `^pub trait` above this line for the current set, and the
 // `impl <Trait> for <primitive>` block near the bottom of this file for which
 // of their methods each primitive really has.
+/// A source of values, yielded one at a time by `next`.
+///
+/// A `for` loop runs over any iterator: `for x in v.iter()`. `map` and
+/// `filter` are lazy, and `fold`, `count`, `any` and `collect` consume the
+/// iterator. A record iterator is shared, not copied: the one these methods
+/// were called on is the one that advances, even when it is held in a
+/// binding that is not `mut`.
 pub trait Iterator {
+    /// The type of the values the iterator yields.
     type Item
+    /// Advances the iterator and returns its next value, or `None` when it
+    /// has no more.
+    ///
+    /// Calling it needs a mutable iterator, such as one held in a `mut`
+    /// binding.
     fn next(mut self) -> Option<Self::Item>
 
     // --- adapters (lazy: nothing is consumed until a consumer runs) ---
 
+    /// Returns an iterator that yields `f(x)` for each value `x` of this one.
+    ///
+    /// It is lazy: it calls `f` only as it is advanced.
     fn map<U>(self, f: fn(Self::Item) -> U) -> MapIter<Self, U> { MapIter { it: self, f: f } }
 
+    /// Returns an iterator that yields the values of this one for which
+    /// `keep` returns `true`.
+    ///
+    /// It is lazy: it calls `keep` only as it is advanced.
     fn filter(self, keep: fn(Self::Item) -> Bool) -> FilterIter<Self> {
         FilterIter { it: self, keep: keep }
     }
@@ -298,6 +415,10 @@ pub trait Iterator {
 
     // The fold primitive. `count` and `collect` could be written over it;
     // `any` cannot, because `fold` visits every element and `any` must stop.
+    /// Folds the values into one, calling `f(acc, x)` for each value `x`.
+    ///
+    /// `acc` starts as `init` and becomes each call's result, and the last
+    /// result is returned. Returns `init` if there are no values.
     fn fold<A>(self, init: A, f: fn(A, Self::Item) -> A) -> A {
         let mut it = self
         let mut acc = init
@@ -312,6 +433,7 @@ pub trait Iterator {
 
     // `count`, not `len`: this consumes the iterator, where `Vec::len` is cheap
     // and non-destructive. Naming it `len` would invite the wrong assumption.
+    /// Counts the values, consuming the iterator.
     fn count(self) -> Int {
         let mut it = self
         let mut n = 0
@@ -324,6 +446,10 @@ pub trait Iterator {
     }
 
     // Short-circuits, which is why it is not written over `fold`.
+    /// Returns `true` if `p` returns `true` for any value, and `false`
+    /// otherwise.
+    ///
+    /// It stops at the first value `p` accepts.
     fn any(self, p: fn(Self::Item) -> Bool) -> Bool {
         let mut it = self
         while true {
@@ -341,6 +467,7 @@ pub trait Iterator {
     // a convention. The alternative was `Vec::from_iter(it)` in
     // `std/collections`, which keeps `std/core` free of collections and reads
     // worse at the call site.
+    /// Collects the values into a `Vec`, in order.
     fn collect(self) -> Vec<Self::Item> {
         let mut it = self
         let mut out = Vec::new()
@@ -395,6 +522,10 @@ pub trait Iterator {
 // rather than copying it — advancing this adapter advances the source, and
 // mutating the source mid-iteration is observable. Same alias visibility
 // `VecIter` documents; preventing it needs borrow tracking Nova lacks.
+/// An iterator that yields a function's result for each value of another.
+///
+/// `Iterator::map` returns one. It shares the iterator it wraps rather than
+/// copying it.
 pub record MapIter<I: Iterator, U> { it: I, f: fn(I::Item) -> U }
 
 impl<I: Iterator, U> Iterator for MapIter<I, U> {
@@ -428,6 +559,10 @@ impl<I: Iterator, U> Iterator for MapIter<I, U> {
 // `fn(Int::Item) -> Bool` — but **not** when the construction site is
 // unreachable from `main`, since the mechanism is monomorphization. This
 // comment previously said "unconstructible" without that qualifier.
+/// An iterator that yields the values of another that a predicate accepts.
+///
+/// `Iterator::filter` returns one. It shares the iterator it wraps rather
+/// than copying it.
 pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
 
 impl<I: Iterator> Iterator for FilterIter<I> {
