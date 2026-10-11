@@ -67,7 +67,15 @@ says how).
   plan, 0.48 s with a library analysed for doc tests and none found, 0.88 s
   with Task 15's two examples. `nova test --doc --std` runs std's 32 in
   about 1.2 s.
-- FACTCHECK-PLACEHOLDER
+- **A fresh read-only fact-check** read the plan against the spec, the
+  code at `9d953d5` and the prototype, and checked that the tasks work in
+  this plan's order. It found nothing blocking. Its fixes are in: Task
+  14's check of std's examples now asks for an example of each of the 17
+  modules and at least 32 in all (it accepted none before); Task 14's
+  full-run count is the one this order gives (1988; Task 15 adds the
+  1989th); Task 17 spells out all nine mutants; `$P` and the ledger are
+  defined; a stale note in Task 9 is gone; Task 16 takes real names and
+  figures.
 
 ## Global Constraints
 
@@ -98,6 +106,15 @@ says how).
   runs all three systems.
 
 ## Conventions
+
+- **Scratch directory:** `P=/tmp/claude-0/-home-user-nova/1504a555-d3ea-5356-b003-28f2066a0d92/scratchpad`,
+  outside the repository. Set it in every shell before a command that
+  names `$P`.
+- **The ledger:** `$P/ledger-35b.md`. Every ruling made while executing
+  goes there, with its cost if wrong; so do each task's figures.
+- **Commit messages** are written to `$P/msg-35b-<task>.txt` and committed
+  with `git commit -F`.
+- **The baseline's full output** is `$P/base-35b.txt` (Task 0).
 
 As the 3.5a plan's: each task is test-first (the failing test, its run and
 the expected failure, the code, its run and the expected pass), copies the
@@ -246,8 +263,11 @@ Recorded on 2026-10-11 at `40db350`, the branch's base, in the ledger:
 `cargo test --workspace --locked --no-fail-fast` gave 1942 passed, 1
 failed, 10 ignored; the one failure is
 `nova-runtime net::tests::an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`,
-which needs IPv6 `::1` and is environmental here. Nothing to run; every
-later full run compares against this.
+which needs IPv6 `::1` and is environmental here. Its full output is
+`$P/base-35b.txt`; if that file is missing, run
+`git stash -u; git checkout 40db350; cargo test --workspace --locked --no-fail-fast > $P/base-35b.txt 2>&1; git checkout -; git stash pop`
+only when the tree is clean, or else compare totals alone. Every later
+full run compares against this.
 
 ---
 
@@ -1697,6 +1717,12 @@ with:
         Ok(ctx)
     }
 ````
+
+This reads the entry where `File::open` only opened it, so an entry that
+is not UTF-8 (or a directory, on Unix) now reports `failed to open X:
+stream did not contain valid UTF-8` where it said `failed to read X`, for
+every command. No test pins either wording; ledger it as a ruling (found
+by the plan's fact-check).
 
 Then, at the start of `FrontendContext::render`, replace:
 
@@ -4903,10 +4929,9 @@ fn finish(sections: &[(&str, Tally)]) -> Result<()> {
 Run: `cd /home/user/nova && cargo test -p nova-cli --test doc_test 2>&1 | grep -E "^test result|FAILED"`
 Expected: `test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
 
-Run: `cd /home/user/nova && env -u RUST_BACKTRACE cargo test -p nova-cli --test run_tests --test doc --test project 2>&1 | grep -E "^test result|FAILED"`
+Run: `cd /home/user/nova && cargo test -p nova-cli --test run_tests --test doc --test project 2>&1 | grep -E "^test result|FAILED"`
 Expected: `test result: ok. 13 passed` (doc), `test result: ok. 24 passed`
 (project) and `test result: ok. 307 passed; 0 failed; 1 ignored` (run_tests).
-`env -u` is for Task 2's tests only (see Found while prototyping above).
 
 The spec's mutants 6 and 8 (§12.5) run in the final task, on committed
 work. On the prototype each failed exactly its test, and nothing else in
@@ -6443,11 +6468,67 @@ The examples move these files' lines. As 3.5a's Tasks 15 to 19 did, re-point eve
 
 Expected: one, `docs/benchmarks/README.md:458`: `std/http/lib.nova:618` to `:658`, the line reading "denial-of-service, not a hygiene gap.** Both park with no deadline" in `read_request`'s maintainer comment (it moves by the 40 lines of examples above it, std/http's and `parse_request_head`'s). The README is the living procedure, not a record (3.5a's Task 19 re-pointed the same citation). The other hits into these files are dated records: `docs/superpowers/plans/2026-09-29-request-cost-differential.md:705,714,715`, `docs/superpowers/specs/2026-10-04-examples-03-04-inventory.md:364,393`, `docs/superpowers/specs/2026-10-05-gc-unix-stack-bounds-design.md:404,532` and `docs/superpowers/specs/2026-10-10-phase-3-4a-navigation-design.md:111`. The commit body names the re-pointed README citation.
 
-- [ ] **Step 5: Every module checked.** Delete `EXAMPLED`, its doc comment, and the `if !EXAMPLED.contains(&name) { continue; }` lines. In `crates/nova-cli/tests/doc_test.rs`, the comment saying std has no example until Tasks 11 to 14 add them now says that std's examples run here.
+- [ ] **Step 5: Every module checked.** Delete `EXAMPLED`, its doc comment, and the `if !EXAMPLED.contains(&name) { continue; }` lines.
+
+Then std's examples must also be seen to run (the fact-check's finding 1: Task 10's test accepted a run of none). In `crates/nova-cli/tests/doc_test.rs`, replace the whole of `doc_std_runs_stds_doc_tests_inside_a_project_or_not` with:
+
+```rust
+#[test]
+fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
+    // Spec §6.1, §9.2, §13: std's examples run, at least one per module,
+    // inside a project or not, and every one passes.
+    const MODULES: [&str; 17] = [
+        "bytes",
+        "collections",
+        "core",
+        "crypto",
+        "fmt",
+        "fs",
+        "http",
+        "io",
+        "json",
+        "log",
+        "net",
+        "process",
+        "strings",
+        "sync",
+        "task",
+        "test",
+        "time",
+    ];
+    for dir in [fresh("std-outside"), calc("std-inside", LIB)] {
+        let a = nova_test(&dir, &["--doc", "--std"]).success();
+        let out = stdout(&a);
+        let count: usize = out
+            .strip_prefix("running ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(count >= 32, "only {count} of std's doc tests ran:\n{out}");
+        assert!(
+            out.ends_with(&format!(
+                "\ntest result: ok. {count} passed; 0 failed; 0 trapped; {count} total\n"
+            )),
+            "{out}"
+        );
+        for m in MODULES {
+            assert!(
+                out.contains(&format!("\ntest std::{m} (std/{m}/lib.nova:")),
+                "no example of std::{m} ran:\n{out}"
+            );
+        }
+        assert!(!out.contains("calc"), "{out}");
+        assert_eq!(stderr(&a), "");
+    }
+}
+```
+
+Its mutant: delete std/time's `//!` example; this test and `every_std_module_has_an_example` must both fail, and pass again once it is restored.
 
 - [ ] **Step 6: Run**
 
 - `cd /home/user/nova && cargo test -p nova-doc --test std_docs 2>&1 | grep "test result"`. Expected: `ok. 2 passed`.
+- `cargo test -p nova-cli --test doc_test doc_std 2>&1 | grep "test result"`. Expected: `ok. 1 passed`.
 - `cargo run -q -p nova-cli -- fmt --check std`. Expected: no output.
 - `cargo build -q -p nova-cli && NOVA_HOME=$P/home-std target/debug/nova test --doc --std 2>&1 | tail -4`, with `$P/home-std` a fresh directory. Expected: `test result: ok. 32 passed; 0 failed; 0 trapped; 32 total` (17 module examples and 15 on single items in all). Without `tail`, the run lists each doc test by name, which shows each example landed on its item; this task's, among the earlier tasks' (the modules alphabetically, `String::split` last):
 
@@ -6461,7 +6542,7 @@ Expected: one, `docs/benchmarks/README.md:458`: `std/http/lib.nova:618` to `:658
   test std::json::ToJson (std/json/lib.nova:1365) ... ok
   test std::test (std/test/lib.nova:17) ... ok
   ```
-- The full suite, `cargo test --workspace --locked --no-fail-fast 2>&1 | tee $P/full-14.txt | grep -E "FAILED|panicked" | head`. Expected: only the environmental IPv6 test, nova-runtime's `net::tests::an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`; the dry run of 2026-10-11 had 1989 passed, 1 failed and 10 ignored over 98 test binaries, `every_std_module_has_an_example` and `doc_std_runs_stds_doc_tests_inside_a_project_or_not` among the passed. No hover or completion test compares the text of an item that gains an example; if one fails, check that the example is the only difference, update its expected text, and ledger it.
+- The full suite, `cargo test --workspace --locked --no-fail-fast 2>&1 | tee $P/full-14.txt | grep -E "FAILED|panicked" | head`. Expected: only the environmental IPv6 test, nova-runtime's `net::tests::an_ipv6_connect_parks_on_its_first_poll_and_then_establishes`; in this plan's order, 1988 passed, 1 failed and 10 ignored (the prototype, which already held Task 15's test, had 1989), `every_std_module_has_an_example` and `doc_std_runs_stds_doc_tests_inside_a_project_or_not` among the passed. No hover or completion test compares the text of an item that gains an example; if one fails, check that the example is the only difference, update its expected text, and ledger it.
 
 - [ ] **Step 7: Commit:** `docs: std's examples: json, http, crypto, test; every module checked`, body: spec 3.5b §9.
 
@@ -6719,8 +6800,14 @@ expectations alone:
 - the closure fix (Task 1), as found while verifying std's examples;
 - `nova-lsp`'s dependency on `nova-doc`.
 
-Its Consequences record, with real figures from the ledger: the cost of
-the second build, std's 17 module examples and 15 more, and what 3.5b
+Its Consequences record real figures and names, never the spec's
+illustrative ones (§1's `shapes::circle (src/lib.nova:41)` is no doc
+test): the cost of the second build, from the ledger if an executor
+measured it, else the header's prototype figures (0.40 s, 0.48 s, 0.88 s)
+named as such; std's 17 module examples and 15 more; the example's two,
+`shapes (src/lib.nova:8)` and `shapes::units::Length::plus
+(src/units.nova:17)`; that a plain body's trailing value is E0010 naming
+the generated `nova_doctest`, at the example's own line; and what 3.5b
 leaves out (spec §17).
 
 - [ ] **Step 2: Dated notes**
@@ -6751,7 +6838,9 @@ earlier notes do (3.5a's Task 23 ruling):
   - Fixed: a test program may hold a closure or a function passed as a
     value (Task 1).
   - Changed: `nova init --lib`'s message in a package; `ignore` blocks are
-    highlighted as Nova; hover leaves out hidden lines.
+    highlighted as Nova; an info string's empty words are dropped, so
+    `,text` is a `text` block, no longer Nova; hover leaves out hidden
+    lines.
 - `README.md`'s Documentation section: one or two sentences on doc tests.
 - `ARCHITECTURE.md`'s `nova-doc` row: doc tests.
 
@@ -6795,15 +6884,37 @@ outcome.
 - [ ] **Step 2: The spec's mutants (§12.5)**
 
 Each on committed work, undone with `git checkout -- <file>` and a clean
-`git status --short` before the next, each failing its named test.
-Mutants 1 to 5 and 7 ran in the tasks that own them (Tasks 3, 6, 8); run
-6, 8 and 9 here, and any whose earlier run the ledger does not record:
-6. The line map off by one line (`DocTest::map` returns the next line's
-   offset) → the CLI's compile-error test (Task 9).
-8. A failing doc test reported as passing (the doc section's
-   `Outcome::Panicked` arm counts a pass) → the CLI's failing-example test
-   (Task 9).
-9. One std module's example deleted → `every_std_module_has_an_example`.
+`git status --short` before the next, each failing its named test. Task 6
+Step 7 ran mutant 7 already; run all nine here, on the finished branch,
+and ledger each with the test that failed:
+1. Hidden lines shown on the page: in `crates/nova-doc/src/markdown.rs`,
+   `shown` returns its `code` whole → `hidden_lines_are_left_out_of_nova_code_on_the_page`
+   (Task 3).
+2. Hidden lines run with their `# `: in `crates/nova-doc/src/doctest.rs`,
+   `run_lines`' hidden arm keeps `l.text` as it is →
+   `the_line_map_points_into_the_doc_comment` (Task 8).
+3. The package import always added: in `module`, the `if !imports(&tokens,
+   p)` test is dropped, so the import is pushed every time →
+   `a_block_becomes_a_module` (Task 8).
+4. `ignore` blocks tested: in `classify`, `Some("ignore")` gives
+   `Block::Test { unknown: Vec::new() }` →
+   `blocks_are_classified_by_their_first_word` (Task 3).
+5. A program's blocks tested: in `crates/nova-doc/src/model.rs`,
+   `library_package`'s early `return Ok(None)` for a package with no library
+   is deleted → `only_a_librarys_documented_items_give_doc_tests` (Task 8).
+6. The line map off by one line: `DocTest::map` reads `self.lines.get(line
+   + 1)` → `a_compile_error_in_an_example_points_at_its_doc_line` (Task 9).
+7. The library's tests collected in the doc binary: in
+   `strip_test_functions`, `doc && f.name.value == DOC_TEST_FUNCTION`
+   becomes `root` →
+   `doc_tests_import_their_package_and_only_their_own_test_is_collected`
+   (Task 6).
+8. A failing doc test reported as passing: in `crates/nova-cli/src/cmd/test.rs`,
+   the doc section's `(Outcome::Panicked { .. }, false)` arm counts a pass
+   → `a_failing_example_fails_the_run_by_its_name` (Task 9).
+9. One std module's example deleted (std/time's `//!` example) →
+   `every_std_module_has_an_example` and
+   `doc_std_runs_stds_doc_tests_inside_a_project_or_not` (Task 14).
 
 Ledger each with the test that failed.
 
