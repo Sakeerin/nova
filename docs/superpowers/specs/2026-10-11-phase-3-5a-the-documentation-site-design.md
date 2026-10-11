@@ -416,6 +416,10 @@ each name in it means, from the index (decision 5).
   heading of what it documents, and stop at `<h6>` (decision 11).
 - **Links are kept as written.** The link check reports a relative link
   the site lacks (§11). `[Name]` links to items are not resolved (§21).
+  [Amended 2026-10-11, final review: a link or an image whose URL has a
+  scheme other than `http`, `https` or `mailto`, as `javascript:`, is
+  dropped and its text kept as plain text, so decision 10 holds for
+  links too.]
 - **The summary** of an item or a module is its first paragraph, as
   plain text. Lists and search results show it.
 

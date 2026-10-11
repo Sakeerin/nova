@@ -24,8 +24,9 @@ pub(crate) fn join(lines: &[Spanned<String>]) -> String {
         .join("\n")
 }
 
-/// `text` rendered (spec §9.1): raw HTML as text, headings moved down
-/// `level` levels, and Nova code blocks coloured (§9.3).
+/// `text` rendered (spec §9.1): raw HTML as text, a link or an image to
+/// a script as its text alone, headings moved down `level` levels, and
+/// Nova code blocks coloured (§9.3).
 pub(crate) fn render(text: &str, level: u8) -> Docs {
     if text.trim().is_empty() {
         return Docs::default();
@@ -36,6 +37,8 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
     let mut events: Vec<Event> = Vec::new();
     // A code block being read: whether it is Nova, and its text so far.
     let mut code: Option<(bool, String)> = None;
+    // For each link or image open, whether it is kept (decision 10).
+    let mut kept: Vec<bool> = Vec::new();
     for event in Parser::new_ext(text, options) {
         if code.is_some() {
             match event {
@@ -71,6 +74,20 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
                 code = Some((nova, String::new()));
             }
             Event::Html(h) | Event::InlineHtml(h) => events.push(Event::Text(h)),
+            // A link or an image to a script is dropped, and its text
+            // stays as plain text.
+            Event::Start(Tag::Link { ref dest_url, .. } | Tag::Image { ref dest_url, .. }) => {
+                let keep = linkable(dest_url);
+                kept.push(keep);
+                if keep {
+                    events.push(event);
+                }
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                if kept.pop().unwrap_or(true) {
+                    events.push(event);
+                }
+            }
             Event::Start(Tag::Heading {
                 level: l,
                 id,
@@ -92,6 +109,26 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
     let mut html = String::new();
     html::push_html(&mut html, events.into_iter());
     Docs { html, summary }
+}
+
+/// Whether `dest` may be a link's or an image's URL: a relative URL, a
+/// `#fragment`, or one whose scheme is `http`, `https` or `mailto`. Any
+/// other scheme, as `javascript:`, could put a script into the site
+/// (spec §9.1, decision 10).
+fn linkable(dest: &str) -> bool {
+    let dest = dest.trim_start_matches(|c: char| c.is_whitespace() || c.is_ascii_control());
+    let Some(end) = dest.find([':', '/', '?', '#']) else {
+        return true;
+    };
+    let scheme = &dest[..end];
+    let mut chars = scheme.chars();
+    let is_scheme = dest[end..].starts_with(':')
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    !is_scheme
+        || ["http", "https", "mailto"]
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s))
 }
 
 /// `level` moved down `by` levels, stopping at `<h6>` (plan decision 12).
@@ -167,6 +204,50 @@ mod tests {
             "{}",
             d.html
         );
+    }
+
+    #[test]
+    fn a_link_to_a_script_is_its_text_alone() {
+        // Decision 10: a dependency's docs cannot put a script into the site.
+        for (doc, text) in [
+            ("[one](javascript:alert(1))", "one"),
+            ("[two](JavaScript:alert(2))", "two"),
+            ("<javascript:alert(3)>", "javascript:alert(3)"),
+            ("[four](< \tjavascript:alert(4)>)", "four"),
+            ("[five](vbscript:msgbox(5))", "five"),
+            ("[six](data:text/html,six)", "six"),
+            ("[seven][s]\n\n[s]: javascript:alert(7)", "seven"),
+        ] {
+            let d = render(doc, 3);
+            assert!(!d.html.contains("<a"), "{doc}: {}", d.html);
+            assert!(d.html.contains(text), "{doc}: {}", d.html);
+        }
+        let d = render("![picture](javascript:alert(8))", 3);
+        assert!(!d.html.contains("<img"), "{}", d.html);
+        assert_eq!(d.html, "<p>picture</p>\n");
+        let d = render("[![badge](javascript:alert(9))](ok.html)", 3);
+        assert_eq!(d.html, "<p><a href=\"ok.html\">badge</a></p>\n");
+    }
+
+    #[test]
+    fn web_mail_relative_and_fragment_links_stay_links() {
+        let d = render(
+            "[a](https://example.com/) [b](HTTP://example.com/) \
+             [c](mailto:me@example.com) [d](../geom/index.html#fn.area) \
+             [e](#fn.main) [f](dir/a:b.html) ![g](pic.png)",
+            3,
+        );
+        for href in [
+            "<a href=\"https://example.com/\">a</a>",
+            "<a href=\"HTTP://example.com/\">b</a>",
+            "<a href=\"mailto:me@example.com\">c</a>",
+            "<a href=\"../geom/index.html#fn.area\">d</a>",
+            "<a href=\"#fn.main\">e</a>",
+            "<a href=\"dir/a:b.html\">f</a>",
+            "<img src=\"pic.png\" alt=\"g\" />",
+        ] {
+            assert!(d.html.contains(href), "{href}: {}", d.html);
+        }
     }
 
     #[test]
