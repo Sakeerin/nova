@@ -1,3 +1,17 @@
+//! Growable vectors, hash maps and hash sets.
+//!
+//! `Vec` is a list of values that grows as they are pushed, and `VecIter`
+//! walks one in order. `Map` maps keys to values, and `Set` holds values
+//! without repeats; both need a key or value type that implements `Hash` and
+//! `Eq`. Every module sees these types without an import, and a module's own
+//! definition of one of these names shadows the one here.
+//!
+//! The three collections are shared, not copied: assigning one to another
+//! binding, or passing it to a function, gives a second name for the same
+//! collection, and a change made through either is seen through both. A
+//! method that changes a collection takes `mut self`, and needs a mutable
+//! receiver, such as one held in a `mut` binding.
+
 // Nova standard library — collections.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
@@ -8,14 +22,23 @@
 // object's address never changes and the array's only referent is that field, so
 // the conservative non-moving collector needs no special handling.
 
+/// A list of values of type `T`, indexed from 0, that grows as values are
+/// pushed.
+///
+/// `get` returns `None` for an index out of range, where `set` panics.
+/// Assigning a `Vec`, or passing it to a function, shares it rather than
+/// copying it.
 pub record Vec<T> { len: Int, data: [T] }
 
 impl<T> Vec<T> {
     // An empty vector. No storage is allocated until the first `push`.
+    /// Returns an empty vector.
     pub fn new() -> Vec<T> { Vec { len: 0, data: [] } }
 
+    /// Returns the number of values in the vector.
     pub fn len(self) -> Int { self.len }
 
+    /// Returns `true` if the vector holds no values.
     pub fn is_empty(self) -> Bool { self.len == 0 }
 
     // Append `x`, growing if full.
@@ -24,6 +47,8 @@ impl<T> Vec<T> {
     // so no slot is ever uninitialized and no `Default` bound is needed — then
     // copies the existing elements back. Slot `self.len` is then already `x`,
     // so the append needs no further store on the growth path.
+    /// Appends `x` to the end of the vector, growing its storage when it is
+    /// full.
     pub fn push(mut self, x: T) {
         if self.len == self.data.len() {
             let newcap = if self.len == 0 { 4 } else { self.len * 2 }
@@ -36,6 +61,8 @@ impl<T> Vec<T> {
         self.len = self.len + 1
     }
 
+    /// Removes the last value and returns it, or returns `None` if the vector
+    /// is empty.
     pub fn pop(mut self) -> Option<T> {
         if self.len == 0 {
             None
@@ -46,16 +73,24 @@ impl<T> Vec<T> {
         }
     }
 
+    /// Returns the value at index `i`, or `None` if `i` is negative or not
+    /// less than `len()`.
     pub fn get(self, i: Int) -> Option<T> {
         if i < 0 { None } else { if i >= self.len { None } else { Some(self.data[i]) } }
     }
 
+    /// Replaces the value at index `i` with `v`.
+    ///
+    /// Panics if `i` is negative or not less than `len()`: `set` never adds a
+    /// value, as `push` does.
     pub fn set(mut self, i: Int, v: T) {
         if i < 0 { panic("Vec::set index out of range") }
         if i >= self.len { panic("Vec::set index out of range") }
         self.data[i] = v
     }
 
+    /// Removes every value, leaving the vector empty. It keeps its storage for
+    /// the values pushed next.
     pub fn clear(mut self) { self.len = 0 }
 
     // A cursor over this vector's elements, starting at index 0. See `VecIter`
@@ -65,6 +100,11 @@ impl<T> Vec<T> {
     // inherent impl on `Vec<T>`: two inherent impls on one type is a
     // configuration nothing in std or the test suite exercises, and `std/strings`
     // avoided it for the same reason.
+    /// Returns an iterator over the vector's values, from index 0 up.
+    ///
+    /// The iterator shares the vector rather than copying it, so it sees
+    /// changes made while it runs: a value pushed onto the vector is yielded
+    /// too, even one pushed after the iterator has returned `None`.
     pub fn iter(self) -> VecIter<T> { VecIter { v: self, i: 0 } }
 }
 
@@ -88,6 +128,11 @@ impl<T> Vec<T> {
 // bound to be convertible, and a bound in that position is not enforced at
 // construction. `std/core`'s `MapIter`/`FilterIter` are the records that do
 // need one.
+/// An iterator over a `Vec`'s values, in order.
+///
+/// `Vec::iter` returns one. It shares the vector rather than copying it, so a
+/// value pushed onto the vector is yielded too, even after the iterator has
+/// returned `None`.
 pub record VecIter<T> { v: Vec<T>, i: Int }
 
 impl<T> Iterator for VecIter<T> {
@@ -189,15 +234,23 @@ impl<T> Iterator for VecIter<T> {
 // method with a key that is not `Hash + Eq` is E0013 at monomorphization,
 // which is pinned by `map_key_without_hash_reports_e0013` in nova-mir's
 // lowering tests.
+/// A hash map from keys of type `K` to values of type `V`.
+///
+/// Its methods need a key type that implements `Hash` and `Eq`, and keys
+/// equal by `eq` must have the same hash. Assigning a `Map`, or passing it to
+/// a function, shares it rather than copying it.
 pub record Map<K, V> { len: Int, used: Int, keys: [K], vals: [V], state: [Int] }
 
 impl<K: Hash + Eq, V> Map<K, V> {
     // An empty map. No storage is allocated until the first `insert`.
+    /// Returns an empty map.
     pub fn new() -> Map<K, V> { Map { len: 0, used: 0, keys: [], vals: [], state: [] } }
 
     // Number of live entries; unaffected by tombstones.
+    /// Returns the number of entries in the map.
     pub fn len(self) -> Int { self.len }
 
+    /// Returns `true` if the map holds no entries.
     pub fn is_empty(self) -> Bool { self.len == 0 }
 
     // Bucket for `k` in a table of capacity `cap` (a power of two). `cap` must
@@ -212,6 +265,10 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // into the *first* tombstone it passed. Stopping early would let a second
     // copy of `k` appear behind the tombstone; not reusing the tombstone at all
     // would let a churn workload grow without bound.
+    /// Maps `k` to `v`, and returns the value `k` mapped to before, or `None`
+    /// if `k` was not in the map.
+    ///
+    /// If `k` was in the map, its entry keeps the key it had and takes `v`.
     pub fn insert(mut self, k: K, v: V) -> Option<V> {
         if self.state.len() == 0 {
             self.keys = [k; 8]
@@ -303,11 +360,13 @@ impl<K: Hash + Eq, V> Map<K, V> {
         return -1
     }
 
+    /// Returns the value `k` maps to, or `None` if `k` is not in the map.
     pub fn get(self, k: K) -> Option<V> {
         let i = self.find(k)
         if i < 0 { None } else { Some(self.vals[i]) }
     }
 
+    /// Returns `true` if `k` is in the map.
     pub fn contains_key(self, k: K) -> Bool {
         match self.get(k) {
             Some(_) => true
@@ -318,6 +377,8 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // Remove `k`, leaving a tombstone so later probes still reach entries that
     // were inserted past this slot. `len` drops; `used` does not, because the
     // slot is still unusable to a probe walking through it.
+    /// Removes the entry for `k` and returns its value, or returns `None` if
+    /// `k` was not in the map.
     pub fn remove(mut self, k: K) -> Option<V> {
         let i = self.find(k)
         if i < 0 {
@@ -378,6 +439,10 @@ impl<K: Hash + Eq, V> Map<K, V> {
     // never-growing map does not preserve insertion order -- but that exact
     // sequence is not reproducible now. Read it as an instance of the property,
     // not as an order to expect from those three keys.
+    /// Returns the map's keys, as an array with one element per entry.
+    ///
+    /// Their order is unspecified: it need not be the order the keys were
+    /// inserted in, and it can change from one run of a program to the next.
     pub fn keys(self) -> [K] {
         if self.len == 0 { return [] }
         let cap = self.state.len()
@@ -457,20 +522,32 @@ impl<K: Hash + Eq, V> Map<K, V> {
 // of Phase 2.2d but is a resolution scope rather than a constraint (ADR 0007
 // §1), and `map: Map<T, Bool>` names no projection, so it would resolve nothing
 // and enforce nothing.
+/// A hash set of values of type `T`, each held once.
+///
+/// Its methods need a value type that implements `Hash` and `Eq`, and values
+/// equal by `eq` must have the same hash. Assigning a `Set`, or passing it to
+/// a function, shares it rather than copying it.
 pub record Set<T> { map: Map<T, Bool> }
 
 impl<T: Hash + Eq> Set<T> {
     // An empty set. No storage is allocated until the first `insert`.
+    /// Returns an empty set.
     pub fn new() -> Set<T> { Set { map: Map::new() } }
 
     // Number of elements; unaffected by tombstones (see `Map::len`).
+    /// Returns the number of values in the set.
     pub fn len(self) -> Int { self.map.len() }
 
+    /// Returns `true` if the set holds no values.
     pub fn is_empty(self) -> Bool { self.map.is_empty() }
 
     // Add `v`, returning whether it was newly added. `Map::insert` returns
     // `Some(old)` when `v` was already a key, so "newly added" is exactly the
     // `None` case — the inverse of what `Map::insert` reports.
+    /// Adds `v` to the set, and returns `true` if it was not there before.
+    ///
+    /// If an equal value was there, the set keeps that one and returns
+    /// `false`.
     pub fn insert(mut self, v: T) -> Bool {
         match self.map.insert(v, true) {
             Some(_) => false
@@ -478,11 +555,13 @@ impl<T: Hash + Eq> Set<T> {
         }
     }
 
+    /// Returns `true` if `v` is in the set.
     pub fn contains(self, v: T) -> Bool { self.map.contains_key(v) }
 
     // Remove `v`, returning whether it was present. `Map::remove` returns
     // `Some(old)` when `v` was there, so "was present" is exactly the
     // `Some` case — the inverse of what `Map::remove` reports.
+    /// Removes `v` from the set, and returns `true` if it was there.
     pub fn remove(mut self, v: T) -> Bool {
         match self.map.remove(v) {
             Some(_) => true
