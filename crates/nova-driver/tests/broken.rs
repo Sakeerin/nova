@@ -222,8 +222,10 @@ fn cut_programs_never_panic_or_hang() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    // The two-file program's fixes: both, from the whole program at least.
-    let mut two_checked = 0usize;
+    // The whole two-file program's fixes: its import fix and its
+    // make-public fix. Only the whole program carries the import fix, since
+    // every cut drops `main`, so counting the cuts too would hide its loss.
+    let mut two_whole = 0usize;
     for _ in 0..total {
         match results.recv_timeout(Duration::from_secs(30)) {
             Ok((path, len, ok, spans_ok, fixes, took)) => {
@@ -244,8 +246,8 @@ fn cut_programs_never_panic_or_hang() {
                 }
                 let n = fixes.unwrap_or(0);
                 checked += n;
-                if path.starts_with(&two) {
-                    two_checked += n;
+                if path.starts_with(&two) && len == TWO_MAIN.len() {
+                    two_whole = n;
                 }
             }
             Err(_) => {
@@ -271,7 +273,7 @@ fn cut_programs_never_panic_or_hang() {
     // after the failures, which name a fix that does not apply.
     assert!(checked > 0, "no cut program had a fix");
     assert!(
-        two_checked >= 2,
-        "the two-file program carried {two_checked} fixes, not its import and make-public fixes"
+        two_whole >= 2,
+        "the whole two-file program carried {two_whole} fixes, not its import and make-public fixes"
     );
 }
