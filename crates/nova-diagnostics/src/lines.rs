@@ -33,21 +33,26 @@ pub fn is_comment_line(line: &str) -> bool {
     line.trim_start_matches([' ', '\t']).starts_with("//")
 }
 
-/// The line before the one starting at `start`: where it starts, and its
-/// text with its ending.
-fn line_before(text: &str, start: usize) -> Option<(usize, &str)> {
-    if start == 0 {
-        return None;
-    }
-    let begin = line_start(text, start - 1);
-    Some((begin, &text[begin..start]))
-}
-
 /// The edit adding `line` on a line of its own after the line holding byte
 /// `at`: where it goes, and what it inserts, in the text's own ending.
 pub fn line_after(text: &str, at: usize, line: &str) -> (usize, String) {
     let nl = ending(text);
-    let next = next_line_start(text, at);
+    // Past spaces and whole block comments, so a block comment that starts
+    // on this line and goes on stays whole (spec 3.5a §3, follow-up 9).
+    let bytes = text.as_bytes();
+    let mut i = at;
+    loop {
+        while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+            i += 1;
+        }
+        if !text[i..].starts_with("/*") {
+            break;
+        }
+        i = text[i + 2..]
+            .find("*/")
+            .map_or(text.len(), |n| i + 2 + n + 2);
+    }
+    let next = next_line_start(text, i);
     if next == text.len() && !text.ends_with('\n') {
         (next, format!("{nl}{line}"))
     } else {
@@ -61,14 +66,48 @@ pub fn line_after(text: &str, at: usize, line: &str) -> (usize, String) {
 pub fn line_before_item(text: &str, item_start: usize, line: &str) -> (usize, String) {
     let nl = ending(text);
     let mut at = line_start(text, item_start);
-    while let Some((begin, prev)) = line_before(text, at) {
-        if is_comment_line(prev) {
-            at = begin;
-        } else {
+    // The comments directly above, each with no blank line after it (spec
+    // 3.5a §3, follow-up 9). One that ends on the line `at` starts, beside
+    // a comment already taken or the item, comes with that line.
+    for &(start, end) in comments_before(text, at).iter().rev() {
+        if end > at {
+            at = at.min(line_start(text, start));
+            continue;
+        }
+        if text[end..at].matches('\n').count() > 1 {
             break;
         }
+        at = line_start(text, start);
     }
     (at, format!("{line}{nl}{nl}"))
+}
+
+/// The comments before byte `end` of `text`, which holds only comments
+/// and blank space there, by a scan from its start (plan decision 5).
+/// Block comments do not nest.
+fn comments_before(text: &str, end: usize) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < end {
+        match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                let e = text[i..].find('\n').map_or(text.len(), |n| i + n);
+                out.push((i, e));
+                i = e;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let e = text[i + 2..]
+                    .find("*/")
+                    .map_or(text.len(), |n| i + 2 + n + 2);
+                out.push((i, e));
+                i = e;
+            }
+            _ => break,
+        }
+    }
+    out
 }
 
 /// Where the keyword before the item name at byte `name_start` starts:
@@ -238,5 +277,62 @@ mod tests {
         assert_eq!(ending("a\nb"), "\n");
         assert!(is_blank("  \t\r\n") && !is_blank(" x\n"));
         assert!(is_comment_line("    // c\n") && !is_comment_line("x // c\n"));
+    }
+
+    #[test]
+    fn a_line_after_an_import_goes_past_a_block_comment_that_goes_on() {
+        // Follow-up 9 (spec 3.5a §3; plan decision 5).
+        let text = "import a /* one\n   two */\nfn main() {}\n";
+        let after = text.find("two */\n").unwrap() + "two */\n".len();
+        assert_eq!(
+            line_after(text, "import a".len(), "import b::{x}"),
+            (after, "import b::{x}\n".to_string())
+        );
+        let crlf = text.replace('\n', "\r\n");
+        let after = crlf.find("two */\r\n").unwrap() + "two */\r\n".len();
+        assert_eq!(
+            line_after(&crlf, "import a".len(), "import b::{x}"),
+            (after, "import b::{x}\r\n".to_string())
+        );
+    }
+
+    #[test]
+    fn a_line_before_an_item_goes_above_a_block_comment_over_it() {
+        // Follow-up 9: the comment's blank line is inside it, and the
+        // header a blank line separates stays above.
+        let text = "// header\n\n/* about f\n\n   more */\nfn f() {}\n";
+        let item = text.find("fn f").unwrap();
+        assert_eq!(
+            line_before_item(text, item, "import m::{x}"),
+            (
+                text.find("/* about").unwrap(),
+                "import m::{x}\n\n".to_string()
+            )
+        );
+        let crlf = text.replace('\n', "\r\n");
+        let item = crlf.find("fn f").unwrap();
+        assert_eq!(
+            line_before_item(&crlf, item, "import m::{x}"),
+            (
+                crlf.find("/* about").unwrap(),
+                "import m::{x}\r\n\r\n".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn comments_sharing_a_line_above_an_item_go_with_it() {
+        // Follow-up 9: two comments on one line, and a block comment ending
+        // on the item's own line, are walked over whole, not sliced.
+        let two = "/* a */ // b\nfn f() {}\n";
+        assert_eq!(
+            line_before_item(two, two.find("fn f").unwrap(), "import m::{x}"),
+            (0, "import m::{x}\n\n".to_string())
+        );
+        let shared = "/* a\n */ fn f() {}\n";
+        assert_eq!(
+            line_before_item(shared, shared.find("fn f").unwrap(), "import m::{x}"),
+            (0, "import m::{x}\n\n".to_string())
+        );
     }
 }
