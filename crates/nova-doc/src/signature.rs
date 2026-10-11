@@ -6,6 +6,7 @@ use nova_diagnostics::{lines, FileId, Span, Spanned};
 use nova_lexer::{Comment, Token};
 
 use crate::highlight::class;
+use crate::markdown::DocText;
 use crate::{escape, span};
 
 /// One file's text, with its tokens and its comments, lexed once.
@@ -50,21 +51,35 @@ impl<'a> FileText<'a> {
     }
 
     /// The module's docs (spec §9.2): its `//!` lines before its first
-    /// token, each without `//!` and one space.
-    pub fn module_docs(&self) -> String {
+    /// token, each without `//!` and one space, and where each starts in
+    /// the file (3.5b spec §7). A comment's span ends before its line
+    /// break, and before a CRLF's `\r`.
+    pub fn module_docs(&self) -> DocText {
         let first = self
             .tokens
             .iter()
             .find(|t| t.value != Token::Eof)
             .map_or(self.text.len(), |t| t.span.start as usize);
-        self.comments
+        let mut d = DocText::default();
+        for c in self
+            .comments
             .iter()
             .filter(|c| c.span.end as usize <= first)
-            .filter_map(|c| self.text.get(c.span.start as usize..c.span.end as usize))
-            .filter_map(|c| c.strip_prefix("//!"))
-            .map(|l| l.strip_prefix(' ').unwrap_or(l))
-            .collect::<Vec<_>>()
-            .join("\n")
+        {
+            let Some(line) = self.text.get(c.span.start as usize..c.span.end as usize) else {
+                continue;
+            };
+            let Some(rest) = line.strip_prefix("//!") else {
+                continue;
+            };
+            let body = rest.strip_prefix(' ').unwrap_or(rest);
+            d.push(
+                c.span.file,
+                c.span.start + (line.len() - body.len()) as u32,
+                body,
+            );
+        }
+        d
     }
 }
 
@@ -367,14 +382,48 @@ mod tests {
             "// A note.\n//! The core.\n//!\n//! More.\nfn f() {}\n//! Not docs.\n",
             FileId::DUMMY,
         );
-        assert_eq!(ft.module_docs(), "The core.\n\nMore.");
+        assert_eq!(ft.module_docs().text, "The core.\n\nMore.");
         assert_eq!(
-            FileText::new("fn f() {}\n", FileId::DUMMY).module_docs(),
+            FileText::new("fn f() {}\n", FileId::DUMMY)
+                .module_docs()
+                .text,
             ""
         );
         assert_eq!(
-            FileText::new("//! Only docs.\n", FileId::DUMMY).module_docs(),
+            FileText::new("//! Only docs.\n", FileId::DUMMY)
+                .module_docs()
+                .text,
             "Only docs."
+        );
+    }
+
+    #[test]
+    fn module_docs_map_back_to_their_source() {
+        // 3.5b spec §7: `//!` lines need not be adjacent, so each keeps its
+        // own place; and the same with CRLF.
+        for src in [
+            "//! One.\n// A note.\n//!Two.\n/* block */\n//!   three\n//!\nfn f() {}\n",
+            "//! One.\r\n// A note.\r\n//!Two.\r\n/* block */\r\n//!   three\r\n//!\r\nfn f() {}\r\n",
+        ] {
+            let d = FileText::new(src, FileId::DUMMY).module_docs();
+            assert_eq!(d.text, "One.\nTwo.\n  three\n", "{src:?}");
+            assert_eq!(d.file, Some(FileId::DUMMY));
+            for word in ["One.", "Two.", "three", "hree"] {
+                assert_eq!(
+                    d.source(d.text.find(word).unwrap()),
+                    Some(src.find(word).unwrap() as u32),
+                    "{word:?} in {src:?}"
+                );
+            }
+            // The bare `//!` is the end of its `//!`.
+            let bare = src.rfind("//!").unwrap() as u32;
+            assert_eq!(d.source(d.text.len()), Some(bare + 3));
+        }
+        assert_eq!(
+            FileText::new("fn f() {}\n", FileId::DUMMY)
+                .module_docs()
+                .file,
+            None
         );
     }
 }
