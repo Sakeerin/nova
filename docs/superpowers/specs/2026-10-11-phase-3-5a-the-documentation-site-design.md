@@ -195,6 +195,10 @@ of its own, before `nova doc`:
   or std's with `--std`.
   - It runs `$BROWSER` with the page's path when that is set, and
     otherwise the system's opener: `xdg-open`, `open` or `cmd /C start`.
+    [Amended 2026-10-11, final review: on Windows the opener is
+    `explorer`, given the path as its one argument. Rust does not apply
+    cmd.exe's quoting to `cmd /C start`, so a path with `&`, `^`, `|` or
+    `%` was mangled.]
   - Failing to open is a warning that names the page. The exit status
     stays 0.
 - On success it prints the start page's path. It exits 0, or 1 on an
