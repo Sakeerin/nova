@@ -229,7 +229,10 @@ jobs:
       # The Phase 3.5a gate (spec
       # docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
       # §17): its installed half; the anchors and links are the Test job's.
-      - name: The installed nova documents an example that uses a dependency
+      # And the 3.5b gate's (spec
+      # docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md
+      # §13): the example library's doc tests pass.
+      - name: The installed nova documents an example that uses a dependency, and runs its doc tests
         shell: bash
         run: bash .github/scripts/doc-gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/doc"
       # The Phase 3.3b gate (spec

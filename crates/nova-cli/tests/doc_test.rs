@@ -370,3 +370,43 @@ fn std_needs_doc() {
         stderr(&a)
     );
 }
+
+/// `from` copied to `to`, without any `target/`.
+fn copy(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "target" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy(&path, &to.join(&name));
+        } else {
+            std::fs::copy(&path, to.join(&name)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn the_example_library_runs_its_doc_tests() {
+    // Spec §10, §12.4: `nova test` inside a copy of the example's library.
+    let shapes = fresh("example").join("shapes");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    copy(&repo.join("examples/05-geometry/shapes"), &shapes);
+    let a = nova_test(&shapes, &[]).success();
+    assert_eq!(
+        stdout(&a),
+        "running 0 tests\n\
+         \n\
+         test result: ok. 0 passed; 0 failed; 0 trapped; 0 total\n\
+         \n\
+         running 2 doc tests\n\
+         test shapes (src/lib.nova:8) ... ok\n\
+         test shapes::units::Length::plus (src/units.nova:17) ... ok\n\
+         \n\
+         test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
+    );
+    assert_eq!(stderr(&a), "");
+}

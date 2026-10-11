@@ -2,6 +2,14 @@
 //!
 //! Every size is a `Length` from this package's `units` module, so a
 //! radius cannot be mixed up with a bare number.
+//!
+//! A circle and a rectangle, measured alone and together:
+//!
+//! ```
+//! let shapes = [circle(1.0), rectangle(2.0, 3.0)]
+//! assert_eq(shapes[1].area(), 6.0)
+//! assert_eq(total_area(shapes), PI + 6.0)
+//! ```
 
 import units
 
