@@ -129,8 +129,26 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   organizes imports, the dependencies first and then the project's own
   modules, and colours every name by what it means. ADR 0033.
 
+- **`nova doc`** writes a project's documentation site to
+  `target/doc/`: a page per module, each item's signature as written
+  with every name linked, its `///` docs as Markdown, a search box and
+  light and dark themes. The site carries the dependencies the program
+  uses and std. `--std` writes std's site alone, and `--open` opens
+  it. Every run checks the site's links. ADR 0034.
+- **std is documented:** every public item has `///` docs, which
+  hover shows too, and every module `//!` docs.
+- **`examples/05-geometry`,** a program and the path library beside
+  it.
+- **Each release attaches std's documentation site.**
+
 ### Changed
 
+- **Organize imports keeps the comments that start a file** above the
+  imports, even when the first import is removed or moved.
+- **The import fix steps over block comments:** after an import whose
+  line opens one, and above a first item one sits on.
+- **A panic answering code actions or semantic tokens** no longer ends
+  the language server.
 - **`nova fmt` keeps a blank line between imports,** as gofmt does, and
   sorts each group of imports on its own (ADR 0028).
 - **E0060's note gives way to its fix.** Where a `let` or a parameter

@@ -855,6 +855,13 @@ uses `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`
 The workspace `Cargo.toml` also declares three dependencies no crate uses:
 `chumsky = "0.9"`, `rustyline = "14"` and `serde_json = "1"`.
 
+**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):**
+`nova-doc` renders Markdown with `pulldown-cmark` 0.13.4, pinned, which
+brings `pulldown-cmark-escape` and `unicase` (ADR 0034). `nova-doc` also
+uses `serde_json`, which `nova-cli`, `nova-index` and `nova-lsp` already
+used, so of the three dependencies the paragraph above names, only
+`chumsky` and `rustyline` are unused.
+
 ---
 
 ## 7. Definition of Done (per phase)
