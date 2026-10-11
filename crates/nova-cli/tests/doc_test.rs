@@ -289,6 +289,43 @@ fn a_library_with_no_doc_tests_prints_what_it_printed_before() {
 }
 
 #[test]
+fn a_helper_that_asserts_breaks_neither_section() {
+    // Spec §6.1: the doc tests read the library as `nova test` does, with
+    // `std/test` in scope, so a plain helper that calls `assert_eq` still
+    // compiles, with or without an example in the docs.
+    const HELPER: &str = "pub fn double(x: Int) -> Int { x + x }\n\n\
+                          fn check_double(x: Int) { assert_eq(double(x), x + x) }\n\n\
+                          @test\nfn doubles() { check_double(2) }\n";
+    const UNITS: &str = "running 1 test\n\
+                         test doubles ... ok\n\
+                         \n\
+                         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n";
+    let dir = package("helper", &[("src/lib.nova", HELPER)]);
+    let a = nova_test(&dir, &[]).success();
+    assert_eq!(stdout(&a), UNITS);
+    assert_eq!(stderr(&a), "");
+    let a = nova_test(&dir, &["--doc"]).success();
+    assert_eq!(
+        stdout(&a),
+        "running 0 doc tests\n\ntest result: ok. 0 passed; 0 failed; 0 trapped; 0 total\n"
+    );
+    assert_eq!(stderr(&a), "");
+    let documented =
+        format!("/// Twice `x`.\n///\n/// ```\n/// assert_eq(double(3), 6)\n/// ```\n{HELPER}");
+    write(&dir, &[("src/lib.nova", &documented)]);
+    let docs = "running 1 doc test\n\
+                test calc::double (src/lib.nova:3) ... ok\n\
+                \n\
+                test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n";
+    let a = nova_test(&dir, &[]).success();
+    assert_eq!(stdout(&a), format!("{UNITS}\n{docs}"));
+    assert_eq!(stderr(&a), "");
+    let a = nova_test(&dir, &["--doc"]).success();
+    assert_eq!(stdout(&a), docs);
+    assert_eq!(stderr(&a), "");
+}
+
+#[test]
 fn a_warning_is_shown_once() {
     // Spec §6.3: after the unit section, the doc build shows only what is
     // in doc tests' code; under `--doc` alone it shows the rest too.

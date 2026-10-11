@@ -247,7 +247,7 @@ const STD_ENTRY: &str = "<nova doc>/main.nova";
 /// Document the package whose `nova.toml` is in `root` (empty for the
 /// current directory), its dependencies and std (spec §5.1).
 pub fn document_package(root: &Path) -> Result<Documented, Failure> {
-    let (analysis, library) = package_analysis(root)?;
+    let (analysis, library) = package_analysis(root, false)?;
     let std = std_analysis()?;
     let mut packages = Ctx::new(&analysis, false, !library)?.packages();
     packages.push(Ctx::new(&std, true, false)?.std_package());
@@ -262,9 +262,11 @@ pub fn document_package(root: &Path) -> Result<Documented, Failure> {
 }
 
 /// A library's own package, as its site documents it, and the analysis it
-/// came from; `None` for a package with no library (3.5b spec §4.1).
+/// came from; `None` for a package with no library (3.5b spec §4.1). The
+/// analysis is a test build's, as `nova test` reads the library (3.5b
+/// spec §6.1).
 pub(crate) fn library_package(root: &Path) -> Result<Option<(Package, Analysis)>, Failure> {
-    let (analysis, library) = package_analysis(root)?;
+    let (analysis, library) = package_analysis(root, true)?;
     if !library {
         return Ok(None);
     }
@@ -285,8 +287,9 @@ pub(crate) fn std_package() -> Result<(Package, Analysis), Failure> {
 
 /// The analysis a package's site reads, of its library when it has one,
 /// else of its program (spec §5.1), and whether it is a library. Errors
-/// are a failure.
-fn package_analysis(root: &Path) -> Result<(Analysis, bool), Failure> {
+/// are a failure. Under `tests`, `std/test` is in scope, as in a test
+/// build.
+fn package_analysis(root: &Path, tests: bool) -> Result<(Analysis, bool), Failure> {
     let mut program = Program::for_package(root, Roots::Check);
     let stem = |p: &Path| p.file_stem().and_then(|s| s.to_str()).map(str::to_string);
     let library = program
@@ -299,6 +302,7 @@ fn package_analysis(root: &Path) -> Result<(Analysis, bool), Failure> {
         .retain(|r| stem(&r.path).as_deref() == Some(keep));
     program.runs = false;
     let options = Options {
+        tests,
         index: true,
         module_only: true,
         ..Options::default()
