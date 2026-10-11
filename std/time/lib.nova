@@ -10,6 +10,25 @@
 //! `from_millis` and `from_micros` build one, and saturate rather than
 //! overflow. A duration can be negative, and `sleep` and `timeout` treat a
 //! negative one as zero.
+//!
+//! A `Duration` built and read back, a `sleep` timed with `Instant`, and a
+//! wall-clock timestamp:
+//!
+//! ```
+//! let d = Duration::from_millis(1500)
+//! assert_eq(d.as_secs(), 1) // rounded toward zero
+//! assert_eq(d.as_millis(), 1500)
+//!
+//! // Instant measures how long something takes.
+//! let start = Instant::now()
+//! block_on(sleep(Duration::from_millis(10)))
+//! assert(start.elapsed().as_millis() >= 10, "sleep waits at least as long as asked")
+//!
+//! // SystemTime reads the wall clock, for timestamps.
+//! let stamp = SystemTime::now().to_iso8601()
+//! assert_eq(stamp.len(), 24)
+//! assert(stamp.ends_with("Z"), "always in UTC")
+//! ```
 
 // A point on this process's monotonic clock.
 //
@@ -253,6 +272,26 @@ pub record TimeoutError {}
 /// yielding and trying again, as `std/sync`'s `lock`, `send` and `recv` and
 /// `yield_now` do, is tried again only once `d` has passed, so under
 /// `timeout` it takes all of `d` even when it could have finished sooner.
+///
+/// One future in time, one too slow:
+///
+/// ```
+/// async fn answer_after(ms: Int) -> Int {
+///     sleep(Duration::from_millis(ms)).await
+///     42
+/// }
+///
+/// async fn main() {
+///     // In time: `Ok` with the future's value.
+///     let fast = timeout(Duration::from_secs(5), answer_after(1)).await
+///     assert_eq(fast.unwrap_or(0), 42)
+///
+///     // Too slow: `Err(TimeoutError {})`. The future is abandoned, not
+///     // cancelled, and nothing waits for it to finish.
+///     let late = timeout(Duration::from_millis(10), answer_after(5000)).await
+///     assert(late.is_err(), "10 ms passed before the answer came")
+/// }
+/// ```
 pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError> {
     if task_timeout_future(d.nanos, fut).await == TIMEOUT_COMPLETED {
         Ok(task_output(fut))

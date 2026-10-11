@@ -12,6 +12,27 @@
 //! ready. No task runs except while `block_on` is running, and `block_on`
 //! returns only once every task has finished. An `async fn main` runs under
 //! `block_on`. A task that panics ends the whole program.
+//!
+//! Two tasks started with `spawn` and joined, run from code that is not
+//! `async` by `block_on`:
+//!
+//! ```
+//! async fn square(n: Int) -> Int {
+//!     yield_now().await // let the other tasks take a turn
+//!     n * n
+//! }
+//!
+//! async fn sum_of_squares() -> Int {
+//!     let a = spawn(square(3))
+//!     let b = spawn(square(4))
+//!     a.join().await + b.join().await
+//! }
+//!
+//! fn main() {
+//!     // `block_on` runs async work from code that is not async.
+//!     assert_eq(block_on(sum_of_squares()), 25)
+//! }
+//! ```
 
 // Nova standard library — tasks.
 //
@@ -193,6 +214,24 @@ pub async fn yield_now() { task_yield_future().await }
 /// Panics if called while `block_on` is already running, as from an
 /// `async fn` or a function one calls: there, `.await` the future instead.
 /// Panics too if `fut` is already a task that has not finished.
+///
+/// `block_on` runs every task, not only the one it is given:
+///
+/// ```
+/// async fn visit(mut log: Vec<String>, name: String) { log.push(name) }
+///
+/// fn main() {
+///     let mut log: Vec<String> = Vec::new()
+///     spawn(visit(log, "task"))
+///     log.push("main") // the task has not run: no `block_on` is running yet
+///
+///     // `block_on` runs every task, not only the one it is given.
+///     block_on(yield_now())
+///     assert_eq(log.len(), 2)
+///     assert_eq(log.get(0).unwrap(), "main")
+///     assert_eq(log.get(1).unwrap(), "task")
+/// }
+/// ```
 pub fn block_on<T>(fut: Future<T>) -> T {
     task_drive(fut)
     task_output(fut)

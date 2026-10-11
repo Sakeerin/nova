@@ -13,6 +13,24 @@
 //! Logging is not `async`: each call writes its line before it returns, so
 //! any function can log. The configuration holds for the whole program, and
 //! the last call to `Log::init` or `Log::init_with` sets it.
+//!
+//! Logging at the default level, then raising the level so `info` lines are
+//! dropped:
+//!
+//! ```
+//! // Writes a line such as `2026-08-19T02:40:13.123Z INFO cache warmed` to
+//! // standard error.
+//! Log::info("cache warmed")
+//!
+//! // From here on, only `Warn` and `Error` are written.
+//! Log::init_with(LogConfig { level: Warn, format: Human, output: Stderr })
+//! Log::info("dropped: below the configured level")
+//! Log::warn("disk almost full")
+//!
+//! // Levels compare by rank.
+//! assert(Warn.to_int() > Info.to_int(), "Warn is more severe than Info")
+//! assert_eq(Warn.label(), "WARN")
+//! ```
 
 // Levels, ordered by `to_int` below. The order is load-bearing: filtering
 // compares those integers, because Nova has no `==` on sum types
