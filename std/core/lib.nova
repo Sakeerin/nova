@@ -227,8 +227,9 @@ pub trait Ord: Eq {
     /// Returns whether `self` is less than, equal to or greater than `other`.
     ///
     /// std orders `false` before `true`, a `Char` by its code point, and a
-    /// `String` by its UTF-8 bytes. For `Float`, any comparison involving
-    /// `NaN` gives `Greater`, even `NaN` with itself.
+    /// `String` by its UTF-8 bytes. For `Float`, how `NaN` orders is
+    /// unspecified: today any comparison involving it gives `Greater`, even
+    /// `NaN` with itself.
     fn cmp(self, other: Self) -> Ordering
 }
 
