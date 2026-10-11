@@ -12,6 +12,7 @@ mod signature;
 mod write;
 
 pub use links::{check_links, BrokenLink};
+pub use markdown::{classify, code_blocks, hidden, hide_lines, Block, CodeBlock, CodeLine};
 pub use model::{document_package, document_std, Documented, Failure, Site};
 pub use write::{write_site, WriteError, MARKER};
 
