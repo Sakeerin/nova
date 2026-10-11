@@ -1,3 +1,11 @@
+//! Padding and fixed-point formatting, as methods on `Int`, `String` and
+//! `Float`.
+//!
+//! `pad` writes an integer padded with zeros, `pad_left` and `pad_right`
+//! align a string with spaces, and `fixed` writes a float with a set number
+//! of decimal places. The padding methods never truncate: a value already as
+//! wide as asked comes back as it is.
+
 // Nova standard library -- formatting.
 //
 // Methods rather than top-level `pub fn`s, and that is not a style choice.
@@ -24,6 +32,13 @@ impl Int {
     // by the array-length check at `crates/nova-mir/src/lower.rs:1080-1101`
     // rather than by anything in this function. A documented outcome, not
     // a silent one.
+    /// Returns the integer as text, padded on the left with zeros to `width`
+    /// characters.
+    ///
+    /// A negative number's minus sign counts toward `width` and stays in
+    /// front: `(-5).pad(3)` is `"-05"`. A number already `width` characters or
+    /// longer comes back without padding, never truncated, as does any number
+    /// when `width` is zero or negative.
     pub fn pad(self, width: Int) -> String {
         let s = "${self}"
         let len = s.len()
@@ -47,6 +62,12 @@ impl String {
     // in display columns: a wide or combining character will not align by
     // column. Measured: `"日本".pad_right(4)` is `"日本  "` (two spaces),
     // four codepoints wide but six columns in a monospace terminal.
+    /// Returns the string right-aligned in `width` characters, with spaces
+    /// added on the left.
+    ///
+    /// `width` counts characters, as `len` does, not columns on a screen, so a
+    /// wide character such as `日` counts as one. A string already `width`
+    /// characters or longer comes back as it is.
     pub fn pad_left(self, width: Int) -> String {
         let len = self.len()
         if len >= width { return self }
@@ -56,6 +77,11 @@ impl String {
 
     // Left-align within `width` by padding with spaces on the right. Same
     // codepoint-counted `width` as `pad_left` above.
+    /// Returns the string left-aligned in `width` characters, with spaces
+    /// added on the right.
+    ///
+    /// `width` counts characters, as for `pad_left`. A string already `width`
+    /// characters or longer comes back as it is.
     pub fn pad_right(self, width: Int) -> String {
         let len = self.len()
         if len >= width { return self }
@@ -75,5 +101,15 @@ impl Float {
     // side is the correct implementation rather than the convenient one.
     //
     // `places` is clamped to 0..=17 by the intrinsic.
+    /// Returns the number as text with `places` digits after the decimal
+    /// point: `(100.0 / 3.0).fixed(2)` is `"33.33"`.
+    ///
+    /// It rounds the float's exact binary value to the nearest such text, a
+    /// tie going to the even digit, so `(2.5).fixed(0)` is `"2"` and
+    /// `(1.005).fixed(2)` is `"1.00"`, 1.005 being stored as a little less.
+    /// A negative number that rounds to zero keeps its sign, as `-0.00`.
+    /// `places` is clamped to `0..=17`, and 0 gives no decimal point. It never
+    /// uses an exponent, and `NaN` and the infinities give `NaN`, `inf` and
+    /// `-inf`.
     pub fn fixed(self, places: Int) -> String { float_fixed(self, places) }
 }

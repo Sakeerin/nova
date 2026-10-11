@@ -132,7 +132,7 @@ impl<T> MutexGuard<T> {
     pub fn get(self) -> T { self.owner.value }
 
     // Replace the guarded value -- the other half of the pair `Vec<T>` already
-    // ships, `get` at `std/collections/lib.nova:49` with `set` at `:53`, and
+    // ships, `get` at `std/collections/lib.nova:78` with `set` at `:86`, and
     // for the same reason: without it a `Mutex<Int>` is a read-only view.
     //
     // A no-op on a released guard, exactly as `release` is. A stale `set` is
@@ -171,7 +171,7 @@ impl<T> MutexGuard<T> {
 // TRUNCATING remainder -- `-7 % 3` is `-1`, not `2`. Any operation added
 // later that seeks backwards must re-establish this, or the wrap arithmetic
 // lands outside the array. `std/core/lib.nova:263` and
-// `std/collections/lib.nova:119` carry the same warning for hash bucketing.
+// `std/collections/lib.nova:164` carry the same warning for hash bucketing.
 record Ring<T> { data: [T], head: Int, len: Int }
 
 pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }

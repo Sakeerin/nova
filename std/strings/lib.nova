@@ -1,3 +1,13 @@
+//! Methods on `String`: length, slicing, searching, splitting, joining,
+//! trimming and case.
+//!
+//! Every index and length here counts characters, the Unicode scalar values a
+//! `Char` holds, never bytes; `bytes_from_string` gives a string's UTF-8
+//! bytes. Most of these methods walk the whole string, so `len` and `char_at`
+//! take time in proportion to its length: to visit every character, call
+//! `chars` once and index the array it returns. Nothing here knows about
+//! grapheme clusters, so a combining accent counts as a character of its own.
+
 // Nova standard library — strings.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
@@ -111,17 +121,29 @@ fn trim_end_index(cs: [Char], floor: Int) -> Int {
 impl String {
     // Not `self.len() == 0`: `len()` decodes the whole string, while `==` on
     // `String` compares byte lengths first in the runtime.
+    /// Returns `true` if the string is empty, `""`.
     pub fn is_empty(self) -> Bool { self == "" }
 
     // Codepoints, not bytes. O(n): the runtime walks the UTF-8.
+    /// Returns the number of characters in the string, not its bytes.
+    ///
+    /// It walks the whole string to count them.
     pub fn len(self) -> Int { str_len_chars(self) }
 
     // The string's codepoints. Prefer this over repeated `char_at` — see the
     // performance contract in the module header.
+    /// Returns the string's characters, in order, as an array.
     pub fn chars(self) -> [Char] { str_chars(self) }
 
     // The codepoint at `i`, or `None` when `i` is outside `0..len()`. A
     // negative index is `None` rather than a panic, matching `Vec::get`.
+    /// Returns the character at index `i`, or `None` if `i` is negative or not
+    /// less than `len()`.
+    ///
+    /// It decodes the whole string to find the character, so a loop calling
+    /// it for every index takes time in proportion to the square of the
+    /// length. To visit every character, call `chars` once and index its
+    /// array.
     pub fn char_at(self, i: Int) -> Option<Char> {
         if i < 0 { return None }
         let cs = str_chars(self)
@@ -132,6 +154,11 @@ impl String {
     // other index range in the language). `start == end` yields "".
     // Panics rather than returning an Option, matching `Vec::set` — an index
     // that must be valid is a caller bug, whereas `char_at`'s query is not.
+    /// Returns the characters from index `start` up to, but not including,
+    /// `end`.
+    ///
+    /// `start == end` gives `""`. Panics if `start` is negative, if `end` is
+    /// greater than `len()`, or if `start` is greater than `end`.
     pub fn slice(self, start: Int, end: Int) -> String {
         let cs = str_chars(self)
         if start < 0 { panic("String::slice start is negative") }
@@ -149,6 +176,10 @@ impl String {
     // legal repeat literal, the `0..n` loop is then vacuous, and
     // `str_from_chars` of an empty array is already "") — it exists purely
     // as a fast path that skips the allocation for the empty string.
+    /// Returns the string with its characters in reverse order.
+    ///
+    /// It reverses characters, not grapheme clusters, so a combining accent
+    /// comes apart from the character it modifies.
     pub fn reverse(self) -> String {
         let cs = str_chars(self)
         let n = cs.len()
@@ -161,6 +192,8 @@ impl String {
     // Whether `self` begins with `prefix`, codepoint-for-codepoint. An empty
     // `prefix` always matches: `chars_match_at` accepts `at == 0` trivially
     // when `n` is empty.
+    /// Returns `true` if the string begins with `prefix`. An empty `prefix`
+    /// always matches.
     pub fn starts_with(self, prefix: String) -> Bool {
         chars_match_at(str_chars(self), str_chars(prefix), 0)
     }
@@ -169,6 +202,8 @@ impl String {
     // `n.len() > h.len()` before subtracting so `h.len() - n.len()` never
     // goes negative; an empty `suffix` still matches, since the subtraction
     // then lands on `h.len()` itself, which `chars_match_at` accepts.
+    /// Returns `true` if the string ends with `suffix`. An empty `suffix`
+    /// always matches.
     pub fn ends_with(self, suffix: String) -> Bool {
         let h = str_chars(self)
         let n = str_chars(suffix)
@@ -179,6 +214,10 @@ impl String {
     // Codepoint index of the FIRST occurrence, or `None`. An empty needle
     // occurs at every position, so it reports `Some(0)`. A runtime builtin
     // searches the bytes; it used to build a `[Char]` for each string first.
+    /// Returns the character index at which `needle` first occurs, or `None`
+    /// if it does not occur.
+    ///
+    /// An empty `needle` occurs at index 0.
     pub fn index_of(self, needle: String) -> Option<Int> {
         let at = str_index_of(self, needle)
         if at < 0 { return None }
@@ -188,6 +227,8 @@ impl String {
     // Whether `needle` occurs anywhere in `self`. An empty `needle` always
     // matches, since it occurs at `0`. Calls the builtin directly, so a
     // search allocates no `Option`.
+    /// Returns `true` if `needle` occurs in the string. An empty `needle`
+    /// always does.
     pub fn contains(self, needle: String) -> Bool { str_index_of(self, needle) >= 0 }
 
     // Split on every non-overlapping occurrence of `sep`, left to right.
@@ -198,6 +239,14 @@ impl String {
     // separator splits into single codepoints (the JavaScript behaviour;
     // Rust adds boundary empties and Python raises, so there is no consensus
     // to inherit), and `"".split("")` is `[]`.
+    /// Splits the string at each occurrence of `sep`, and returns the pieces
+    /// in order.
+    ///
+    /// Occurrences are found from left to right and do not overlap. Nothing
+    /// is collapsed or trimmed: two adjacent separators, or one at either end,
+    /// give an empty piece. A string without `sep` gives one piece, the whole
+    /// string, so `"".split(",")` is `[""]`. An empty `sep` splits the string
+    /// into its characters, and `"".split("")` is `[]`.
     pub fn split(self, sep: String) -> [String] {
         let h = str_chars(self)
         let s = str_chars(sep)
@@ -244,10 +293,20 @@ impl String {
     //
     // A runtime builtin copies the parts' bytes straight into one result. It
     // used to walk every part character by character into a `[Char]`.
+    /// Returns the strings of `parts` joined into one, with this string
+    /// between each pair: `",".join(parts)`.
+    ///
+    /// An empty `parts` gives `""`.
     pub fn join(self, parts: [String]) -> String { str_join(self, parts) }
 
     // Trims whitespace (see `char_is_whitespace`) from both ends. An
     // all-whitespace string, including "", yields "".
+    /// Returns the string without the whitespace at its start and end.
+    ///
+    /// A string of whitespace alone gives `""`. Whitespace here is, for now,
+    /// a space, a tab, `\n`, `\r`, and the no-break, en, em and ideographic
+    /// spaces (U+00A0, U+2002, U+2003 and U+3000), not the rest of Unicode's
+    /// whitespace: a form feed, say, stays.
     pub fn trim(self) -> String {
         let cs = str_chars(self)
         let a = trim_start_index(cs)
@@ -255,12 +314,16 @@ impl String {
     }
 
     // Trims whitespace from the start only.
+    /// Returns the string without the whitespace at its start, as `trim`
+    /// defines whitespace.
     pub fn trim_start(self) -> String {
         let cs = str_chars(self)
         chars_to_string(cs, trim_start_index(cs), cs.len())
     }
 
     // Trims whitespace from the end only.
+    /// Returns the string without the whitespace at its end, as `trim`
+    /// defines whitespace.
     pub fn trim_end(self) -> String {
         let cs = str_chars(self)
         chars_to_string(cs, 0, trim_end_index(cs, 0))
@@ -269,6 +332,9 @@ impl String {
     // `n` copies of `self`. Builds one array rather than concatenating, both
     // because `String` has no `+` (E0013) and because repeated interpolation
     // would be quadratic.
+    /// Returns `n` copies of the string, joined end to end.
+    ///
+    /// `n == 0` gives `""`. Panics if `n` is negative.
     pub fn repeat(self, n: Int) -> String {
         if n < 0 { panic("String::repeat count must not be negative") }
         let cs = str_chars(self)
@@ -287,11 +353,19 @@ impl String {
 
     // Full Unicode case mapping, so the result may be LONGER than the input
     // in codepoints: `"ß".to_upper()` is `"SS"`.
+    /// Returns the string in upper case, by Unicode's full case mapping.
+    ///
+    /// The result can have more characters than the string: `"ß".to_upper()`
+    /// is `"SS"`.
     pub fn to_upper(self) -> String { str_to_upper(self) }
 
     // Full Unicode case mapping, for the same reason as `to_upper`: the
     // result may differ in codepoint count from the input, just in the other
     // direction — `"İ".to_lower()` is `"i"` followed by a combining dot
     // above (U+0307), 2 codepoints from 1.
+    /// Returns the string in lower case, by Unicode's full case mapping.
+    ///
+    /// The result can have more characters than the string: `"İ".to_lower()`
+    /// is `i` followed by a combining dot above, U+0307.
     pub fn to_lower(self) -> String { str_to_lower(self) }
 }
