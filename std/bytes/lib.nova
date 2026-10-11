@@ -7,6 +7,24 @@
 //! changes it. `to_string` turns bytes that are valid UTF-8 back into a
 //! `String`. `Bytes` implements `Eq`: `a.eq(b)` compares two buffers byte for
 //! byte.
+//!
+//! Making `Bytes` from a string and from integers, measuring, slicing,
+//! joining and searching them, and turning them back into a `String`:
+//!
+//! ```
+//! let greeting = bytes_from_string("hi!")
+//! assert_eq(greeting.len(), 3)
+//! assert_eq(greeting.byte_at(0).unwrap(), 104) // 'h'
+//! assert_eq(greeting.slice(1, 99).to_string().unwrap(), "i!") // bounds are clamped
+//!
+//! let line = greeting.concat(bytes_from_ints([10])) // a line feed
+//! assert(line.eq(bytes_from_string("hi!\n")), "equal byte for byte")
+//! assert_eq(line.index_of(bytes_from_string("!")).unwrap(), 2)
+//!
+//! // Bytes carry no encoding: these two are not valid UTF-8.
+//! let raw = bytes_from_ints([0xff, 0xfe])
+//! assert(raw.to_string().is_none(), "not UTF-8, so no String")
+//! ```
 
 // Nova standard library — byte buffers.
 //

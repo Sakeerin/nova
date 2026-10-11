@@ -5,6 +5,23 @@
 //! align a string with spaces, and `fixed` writes a float with a set number
 //! of decimal places. The padding methods never truncate: a value already as
 //! wide as asked comes back as it is.
+//!
+//! Padding integers and strings to a width, and writing a float to a fixed
+//! number of places:
+//!
+//! ```
+//! assert_eq(7.pad(3), "007")
+//! assert_eq((-5).pad(3), "-05")
+//! assert_eq(1234.pad(2), "1234") // never truncated
+//! assert_eq("ab".pad_left(4), "  ab")
+//! assert_eq("ab".pad_right(4), "ab  ")
+//! assert_eq((100.0 / 3.0).fixed(2), "33.33")
+//! assert_eq((2.5).fixed(0), "2") // a tie goes to the even digit
+//!
+//! // A row of a table, in columns of fixed width.
+//! let row = "${"apples".pad_right(8)}|${3.pad(4)}|${(0.5).fixed(2).pad_left(6)}"
+//! assert_eq(row, "apples  |0003|  0.50")
+//! ```
 
 // Nova standard library -- formatting.
 //

@@ -25,3 +25,30 @@ fn std_is_documented() {
         missing.join("\n")
     );
 }
+
+/// The modules whose examples are written (plan Tasks 11 to 13); Task 14
+/// deletes this, and the test then checks every module.
+const EXAMPLED: &[&str] = &["core", "collections", "strings", "bytes", "fmt"];
+
+/// Each std module's `//!` docs hold an example that runs (spec 3.5b §9.2).
+#[test]
+fn every_std_module_has_an_example() {
+    let mut missing = Vec::new();
+    for (name, text) in nova_std::ALL {
+        if !EXAMPLED.contains(&name) {
+            continue;
+        }
+        let tested = nova_doc::code_blocks(&common::module_docs(text))
+            .iter()
+            .any(|b| matches!(b.block, nova_doc::Block::Test { .. }));
+        if !tested {
+            missing.push(format!("std/{name}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} module(s) without an example in their `//!` docs: {}",
+        missing.len(),
+        missing.join(", ")
+    );
+}

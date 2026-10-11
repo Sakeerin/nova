@@ -197,7 +197,7 @@ would allocate an array to do the identical work, via a compiler change,
 with nothing visible to any user — a pessimization, not a feature.
 `Formatter`'s body is elided above and described only as a "Format builder
 for Display impls" — there is no specified behaviour there to implement.
-`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:198`) and returns
+`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:220`) and returns
 a whole string in one call regardless, so any builder reachable from it is
 a longer, slower spelling of interpolation: a `mut self` accumulator (ADR
 0005 §1 — ten uses in shipped `std/collections`) is buildable inside `fmt`
@@ -1795,7 +1795,7 @@ or imports untouched." A top-level `pub fn error` would therefore make
 `std/log`'s own `error` unreachable in any module that defined its own,
 with no diagnostic anywhere — a logging call resolving to the wrong
 function is a worse failure than one that fails to compile.
-`std/strings/lib.nova:289-300` already declined this same trade for
+`std/strings/lib.nova:324-335` already declined this same trade for
 `join`, for the identical reason, stated in the source: "a top-level `pub
 fn` is glob-imported into every module and would take the name `join`
 from all user code." `Log` itself is an ordinary, empty, glob-imported
@@ -2155,7 +2155,7 @@ rather than merely stated: `release` was an unconditional
 a second `release` on a guard whose mutex had since been reacquired freed
 a lock another task was holding. `MutexGuard::set(mut self, v: T)` is the
 write half of the pair `std/collections`' `Vec` already ships (`get` at
-`std/collections/lib.nova:78`, `set` at `:86`): `get` returns the value,
+`std/collections/lib.nova:117`, `set` at `:125`): `get` returns the value,
 so for a `T` with no assignable interior — `Int`, `Bool`, `Float`, `Char`,
 `String` — the guard was a read-only view, which is why
 `sync_mutex_two_tasks_serialise.nova` wraps its counter in a
@@ -2379,7 +2379,7 @@ producer may close the instant it stops producing. `buffer < 1` **clamps
 to 1** rather than panicking: a zero-capacity rendezvous channel needs a
 handoff protocol yield-and-retry cannot express without a second wait
 state, and clamping follows `Int::pad`'s precedent
-(`std/fmt/lib.nova:45`, `if len >= width { return s }`; `:42` is that
+(`std/fmt/lib.nova:62`, `if len >= width { return s }`; `:59` is that
 function's signature) of an early return over a panic.
 
 **Every call site must annotate, and this is forced rather than chosen.**

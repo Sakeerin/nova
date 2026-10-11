@@ -11,6 +11,26 @@
 //! collection, and a change made through either is seen through both. A
 //! method that changes a collection takes `mut self`, and needs a mutable
 //! receiver, such as one held in a `mut` binding.
+//!
+//! A `Vec`, a `Map` and a `Set` in use:
+//!
+//! ```
+//! let mut scores: Vec<Int> = Vec::new()
+//! scores.push(90)
+//! scores.push(75)
+//! assert_eq(scores.len(), 2)
+//! assert(scores.get(5).is_none(), "an index past the end gives None")
+//!
+//! let mut ages: Map<String, Int> = Map::new()
+//! ages.insert("ada", 36)
+//! assert_eq(ages.get("ada").unwrap(), 36)
+//! assert(!ages.contains_key("alan"), "alan was never inserted")
+//!
+//! let mut seen: Set<String> = Set::new()
+//! assert(seen.insert("nova"), "the first insert adds the value")
+//! assert(!seen.insert("nova"), "a repeat is not added again")
+//! assert_eq(seen.len(), 1)
+//! ```
 
 // Nova standard library — collections.
 //
@@ -28,6 +48,25 @@
 /// `get` returns `None` for an index out of range, where `set` panics.
 /// Assigning a `Vec`, or passing it to a function, shares it rather than
 /// copying it.
+///
+/// A `Vec` is shared, not copied, when it is assigned:
+///
+/// ```
+/// let mut a: Vec<Int> = Vec::new()
+/// a.push(1)
+///
+/// // Assigning a Vec shares it: `b` is a second name for the same vector.
+/// let mut b = a
+/// b.push(2)
+/// assert_eq(a.len(), 2)
+///
+/// // For an independent copy, build a new Vec from the values.
+/// let mut copy: Vec<Int> = Vec::new()
+/// for x in a.iter() { copy.push(x) }
+/// copy.push(3)
+/// assert_eq(a.len(), 2)
+/// assert_eq(copy.len(), 3)
+/// ```
 pub record Vec<T> { len: Int, data: [T] }
 
 impl<T> Vec<T> {
@@ -361,6 +400,26 @@ impl<K: Hash + Eq, V> Map<K, V> {
     }
 
     /// Returns the value `k` maps to, or `None` if `k` is not in the map.
+    ///
+    /// Telling a missing key from a present one:
+    ///
+    /// ```
+    /// let mut stock: Map<String, Int> = Map::new()
+    /// stock.insert("apples", 3)
+    ///
+    /// // `get` returns an `Option`: `None` for a key that is not in the map.
+    /// let pears = match stock.get("pears") {
+    ///     Some(n) => n
+    ///     None => 0
+    /// }
+    /// assert_eq(pears, 0)
+    /// assert_eq(stock.get("apples").unwrap_or(0), 3)
+    ///
+    /// // `insert` returns the value the key had before, if any.
+    /// assert_eq(stock.insert("apples", 5).unwrap(), 3)
+    /// assert(stock.insert("pears", 1).is_none(), "pears is new")
+    /// assert_eq(stock.len(), 2)
+    /// ```
     pub fn get(self, k: K) -> Option<V> {
         let i = self.find(k)
         if i < 0 { None } else { Some(self.vals[i]) }
