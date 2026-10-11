@@ -28,7 +28,17 @@ fn std_is_documented() {
 
 /// The modules whose examples are written (plan Tasks 11 to 13); Task 14
 /// deletes this, and the test then checks every module.
-const EXAMPLED: &[&str] = &["core", "collections", "strings", "bytes", "fmt"];
+const EXAMPLED: &[&str] = &[
+    "core",
+    "collections",
+    "strings",
+    "bytes",
+    "fmt",
+    "io",
+    "fs",
+    "net",
+    "process",
+];
 
 /// Each std module's `//!` docs hold an example that runs (spec 3.5b §9.2).
 #[test]

@@ -11,6 +11,30 @@
 //! The methods of `Read` and `Write` return a `Future` for the caller to
 //! await. On the standard streams they never suspend: each call blocks every
 //! task until the operating system has answered.
+//!
+//! Writing to standard output through `Write`, and telling an `IoError` by
+//! its kind:
+//!
+//! ```
+//! async fn main() {
+//!     // `write` returns how many bytes it took, which can be fewer than given.
+//!     let out = stdout()
+//!     let n = out.write(bytes_from_string("hello\n")).await.unwrap()
+//!     assert(n >= 1 && n <= 6, "some of the six bytes were written")
+//!     out.flush().await.unwrap()
+//!
+//!     // A failure is an `IoError`: match on its `kind`, not its `message`.
+//!     let err = match read_to_string("${temp_dir()}/nova-std-io/absent.txt").await {
+//!         Ok(_) => panic("nothing should be there")
+//!         Err(e) => e
+//!     }
+//!     let not_found = match err.kind {
+//!         NotFound => true
+//!         _ => false
+//!     }
+//!     assert(not_found, "expected NotFound, got: ${err.message}")
+//! }
+//! ```
 
 // Nova standard library — I/O error types, and the `Read`/`Write` traits over
 // the three standard streams.
@@ -195,6 +219,30 @@ pub trait Write {
     /// `Other` for a `File` or `TcpStream` that is closed, and for a broken
     /// connection. A `TcpStream` write suspends the calling task until there
     /// is room to write; the others block every task until they return.
+    ///
+    /// Writing all of some bytes, a partial write at a time:
+    ///
+    /// ```
+    /// // `write` can take fewer bytes than it is given, so writing all of them
+    /// // means calling it again with the rest.
+    /// async fn write_all(f: File, data: Bytes) {
+    ///     let mut rest = data
+    ///     while rest.len() > 0 {
+    ///         let n = f.write(rest).await.unwrap()
+    ///         rest = rest.slice(n, rest.len())
+    ///     }
+    /// }
+    ///
+    /// async fn main() {
+    ///     let dir = "${temp_dir()}/nova-std-io"
+    ///     create_dir_all(dir).await.unwrap()
+    ///     let f = open("${dir}/out.txt", OpenOptions::writing()).await.unwrap()
+    ///     write_all(f, bytes_from_string("line\n".repeat(1000))).await
+    ///     f.close().await.unwrap()
+    ///     assert_eq(read("${dir}/out.txt").await.unwrap().len(), 5000)
+    ///     # remove_dir_all(dir).await.unwrap()
+    /// }
+    /// ```
     fn write(self, buf: Bytes) -> Future<Result<Int, IoError>>
 
     /// Writes out any bytes the writer is holding in a buffer.

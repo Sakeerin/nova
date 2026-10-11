@@ -11,6 +11,27 @@
 //!
 //! Every function here that touches the filesystem is an `async fn`, but none
 //! of them suspends: each blocks every task until the operation finishes.
+//!
+//! Writing a file in a directory of its own under `temp_dir()`, reading it
+//! back, listing the directory, and removing both:
+//!
+//! ```
+//! async fn main() {
+//!     let dir = "${temp_dir()}/nova-std-fs"
+//!     create_dir_all(dir).await.unwrap()
+//!     let path = "${dir}/notes.txt"
+//!     write_string(path, "first line\n").await.unwrap()
+//!     assert_eq(read_to_string(path).await.unwrap(), "first line\n")
+//!
+//!     let entries = read_dir(dir).await.unwrap()
+//!     assert_eq(entries.len(), 1)
+//!     assert_eq(entries[0].name, "notes.txt")
+//!     assert(entries[0].is_file, "notes.txt is a file")
+//!
+//!     remove_dir_all(dir).await.unwrap()
+//!     assert(!exists(dir).await, "the directory and its file are gone")
+//! }
+//! ```
 
 // Nova standard library — filesystem.
 //
@@ -424,6 +445,28 @@ pub record File { fd: Int }
 ///
 /// An `async fn` that never suspends: it blocks every task until it
 /// finishes.
+///
+/// Appending to a file, then reading it back:
+///
+/// ```
+/// async fn main() {
+///     let dir = "${temp_dir()}/nova-std-fs-open"
+///     create_dir_all(dir).await.unwrap()
+///     let path = "${dir}/log.txt"
+///     write_string(path, "one\n").await.unwrap()
+///
+///     // `appending()` keeps what the file holds and adds each write at its end.
+///     let log = open(path, OpenOptions::appending()).await.unwrap()
+///     log.write(bytes_from_string("two\n")).await.unwrap()
+///     log.close().await.unwrap() // nothing closes a File for you
+///
+///     let reader = open(path, OpenOptions::reading()).await.unwrap()
+///     let text = reader.read_to_end().await.unwrap().to_string().unwrap()
+///     reader.close().await.unwrap()
+///     assert_eq(text, "one\ntwo\n")
+///     # remove_dir_all(dir).await.unwrap()
+/// }
+/// ```
 pub async fn open(path: String, options: OpenOptions) -> Result<File, IoError> {
     let status = file_open(
         path,

@@ -12,6 +12,26 @@
 //! until the socket is ready, and other tasks run meanwhile. A host name,
 //! where a numeric address could be given, is looked up first, and the lookup
 //! blocks every task until it finishes.
+//!
+//! A connection over the loopback address: a listener on a port the system
+//! picks, a client that connects to it, and a message read to its end:
+//!
+//! ```
+//! async fn main() {
+//!     let listener = bind("127.0.0.1:0").unwrap() // port 0: the system picks one
+//!     let addr = "127.0.0.1:${listener.local_port().unwrap()}"
+//!     let client = connect(addr).await.unwrap()
+//!     let server = listener.accept().await.unwrap()
+//!
+//!     client.write(bytes_from_string("ping")).await.unwrap()
+//!     client.close().await.unwrap() // the server's reads now reach the end
+//!     let got = server.read_to_end().await.unwrap()
+//!     assert_eq(got.to_string().unwrap(), "ping")
+//!
+//!     server.close().await.unwrap()
+//!     listener.close().await.unwrap()
+//! }
+//! ```
 
 // Nova standard library — networking.
 //
@@ -357,6 +377,31 @@ impl TcpListener {
     /// A task waiting here can do nothing else, so a server accepts in one
     /// task and serves each connection in another, started with `spawn`.
     /// Returns an `IoError` of kind `Other` if the listener is closed.
+    ///
+    /// Accepting in a task of its own, so the client can connect from the
+    /// first:
+    ///
+    /// ```
+    /// async fn serve_one(listener: TcpListener) {
+    ///     let conn = listener.accept().await.unwrap()
+    ///     let asked = conn.read(64).await.unwrap()
+    ///     assert_eq(asked.to_string().unwrap(), "ping")
+    ///     conn.write(bytes_from_string("pong")).await.unwrap()
+    ///     conn.close().await.unwrap()
+    /// }
+    ///
+    /// async fn main() {
+    ///     let listener = bind("127.0.0.1:0").unwrap()
+    ///     let port = listener.local_port().unwrap()
+    ///     let server = spawn(serve_one(listener)) // accept in a task of its own
+    ///     let client = connect("127.0.0.1:${port}").await.unwrap()
+    ///     client.write(bytes_from_string("ping")).await.unwrap()
+    ///     let reply = client.read_to_end().await.unwrap() // until the server closes
+    ///     assert_eq(reply.to_string().unwrap(), "pong")
+    ///     server.join().await
+    ///     listener.close().await.unwrap()
+    /// }
+    /// ```
     pub async fn accept(self) -> Result<TcpStream, IoError> {
         let status = net_accept(self.fd).await
         if status == 0 { return Ok(TcpStream { fd: decode_count(fs_take_bytes()) }) }
