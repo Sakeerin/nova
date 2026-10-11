@@ -1,3 +1,17 @@
+//! JSON: text parsed into a `JsonValue`, and a `JsonValue` written as text.
+//!
+//! `parse` reads JSON text strictly, as RFC 8259 defines it, and `stringify`
+//! writes a `JsonValue` as compact JSON text. `ToJson` and `FromJson` convert
+//! between a `JsonValue` and another type; std implements both for `Bool`,
+//! `String`, `Float` and `Int`. Every module sees these names without an
+//! import, and a module's own definition of one of them shadows the one here.
+//!
+//! Every JSON number is a `Float`, so an integer larger in magnitude than
+//! 2^53 (9,007,199,254,740,992) may not keep its exact value. An object is a
+//! `Map`, which holds one value per key and keeps no order: `stringify`
+//! writes an object's members in an order that can change from one run of a
+//! program to the next.
+
 // Nova standard library -- JSON.
 //
 // `nova-spec/20-STDLIB.md` section 7's type declaration compiles verbatim,
@@ -5,12 +19,22 @@
 // assumed: `Bool(Bool)` and `String(String)` are accepted and `match` binds
 // them unqualified.
 
+/// A JSON value: null, a boolean, a number, a string, an array or an object.
 pub type JsonValue =
+    /// JSON's `null`.
     | Null
+    /// `true` or `false`.
     | Bool(Bool)
+    /// A number. JSON does not tell integers apart, so every number is a
+    /// `Float`. `NaN` and the infinities have no JSON form: `stringify`
+    /// writes them as `null`.
     | Number(Float)
+    /// A string.
     | String(String)
+    /// An array of values, in order.
     | Array([JsonValue])
+    /// An object: its members' values by key. It holds one value per key,
+    /// and keeps no order.
     | Object(Map<String, JsonValue>)
 
 // `at` is a character index into the input, not a byte offset -- the parser
@@ -19,6 +43,12 @@ pub type JsonValue =
 // already-parsed `JsonValue` tree rather than input text: there is no
 // cursor and no source position to report, so every error `from_json`
 // returns carries a FIXED PLACEHOLDER, `at: 0`, never a real index.
+/// The error `parse` and `FromJson::from_json` return.
+///
+/// Its field `msg` says what was wrong, such as `expected a value` or
+/// `trailing content`, and its field `at` says where `parse` stopped in its
+/// input, counted in characters, not bytes, from 0. An error from
+/// `from_json` has no input to point into, and its `at` is always 0.
 pub record JsonError { msg: String, at: Int }
 
 // The deepest nesting `parse` accepts. RFC 8259 section 9 permits a limit --
@@ -235,6 +265,22 @@ const MAX_RENDER_DEPTH: Int = 100_000
 // checks the fast path just below. Only the `String` arm's saving was
 // measured; `Null`, `Bool` and `Number` got the same match arm with no
 // separate measurement.
+/// Returns `v` as compact JSON text, with no spaces or line breaks.
+///
+/// In a string, `"` and `\` take a backslash; backspace, form feed, line
+/// feed, carriage return and tab are written `\b`, `\f`, `\n`, `\r` and
+/// `\t`; every other character below U+0020 is written `\u00` and two
+/// lowercase hex digits; and every other character is written as it is. A
+/// number is written in plain decimal, never with an exponent, as the
+/// shortest text that reads back as the same `Float`: `1.0` gives `1`, and
+/// `1e21` gives a 1 and 21 zeros. `NaN` and the infinities are written as
+/// `null`. An object's members come in an order that can change from one run
+/// of a program to the next.
+///
+/// Panics if arrays and objects nest more than 100,000 deep around a value,
+/// or more than 100,001 deep when the innermost one is empty. A value that
+/// contains itself, such as an array placed inside itself, panics by the
+/// same rule.
 pub fn stringify(v: JsonValue) -> String {
     // A TOP-LEVEL SCALAR IS ALREADY FINISHED, so return it rather than
     // copying it twice. The general path below hands `buf_push_str` exactly
@@ -533,6 +579,22 @@ fn quote(s: String) -> String { json_quote(s) }
 // `fail`'s first-failure-wins guard observable, and so the thing that keeps
 // that guard tested rather than merely written. `err` is then inspected ONCE,
 // here, which is the whole point of carrying the failure in a field.
+/// Parses `s` as JSON text: one value, with nothing after it but whitespace.
+///
+/// Parsing is strict, as RFC 8259 asks. There are no comments, no trailing
+/// commas, no single quotes, no unquoted keys, no `NaN` or `Infinity`, and no
+/// leading `+` or leading zeros in numbers. Whitespace is only space, tab,
+/// line feed and carriage return, so a leading byte order mark is an error.
+/// A string must escape its control characters below U+0020; a `\u` escape
+/// may name any character, one beyond U+FFFF as a surrogate pair, and an
+/// unpaired surrogate is an error. A number too large in magnitude for a
+/// `Float` becomes an infinity, and one too close to zero becomes 0. Of two
+/// members of an object with the same key, the last is kept. Arrays and
+/// objects may nest 128 deep around a value, or 129 deep when the innermost
+/// one is empty.
+///
+/// Returns a `JsonError` if `s` is not such a value, saying what is wrong and
+/// where.
 pub fn parse(s: String) -> Result<JsonValue, JsonError> {
     let mut p = P { cs: s.chars(), pos: 0, err: None }
     p.skip_ws()
@@ -1248,11 +1310,33 @@ fn simple_escape(c: Char) -> Option<String> {
 // position -- `impl Default for Int { fn default() -> Int { 0 } }` at
 // `std/core/lib.nova` is what proves that compiles; every impl below follows
 // that form, not `Self`.
+/// A type that can be converted to a `JsonValue`.
+///
+/// std implements it for `Bool`, `String`, `Float` and `Int`. A type of your
+/// own can implement it too, for instance by building an `Object` from its
+/// fields.
 pub trait ToJson {
+    /// Returns `self` as a `JsonValue`.
+    ///
+    /// std's impls give a `Bool`, a `String` or a `Number`. An `Int` larger
+    /// in magnitude than 2^53 (9,007,199,254,740,992) is rounded to the
+    /// nearest `Float`, so it can lose its exact value.
     fn to_json(self) -> JsonValue
 }
 
+/// A type that can be built from a `JsonValue`.
+///
+/// std implements it for `Bool`, `String`, `Float` and `Int`.
 pub trait FromJson {
+    /// Returns the value of this type that `v` holds, or a `JsonError` if `v`
+    /// does not hold one.
+    ///
+    /// std's impls convert nothing: each accepts only its own variant, so
+    /// `Null` is not `false` and a `Number` is not a `String`. A wrong variant
+    /// gives the error `expected a bool`, `expected a string` or
+    /// `expected a number`. `Int` accepts only a whole number within its
+    /// range: a fraction or `NaN` gives `expected an integer`, and a number
+    /// out of range, an infinity included, `integer out of range`.
     fn from_json(v: JsonValue) -> Result<Self, JsonError>
 }
 

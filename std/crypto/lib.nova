@@ -1,3 +1,16 @@
+//! Hashes, message authentication codes and secure random values.
+//!
+//! `sha256` and `sha512` hash `Bytes`, `hmac_sha256` computes an HMAC-SHA-256
+//! tag, and `hmac_sha256_verify` checks one. `random_bytes` and `random_int`
+//! draw from the operating system's cryptographically secure random source.
+//! Hashes and tags are raw `Bytes`: nothing here encodes them as hex or
+//! base64. Every module sees these names without an import, and a module's
+//! own definition of one of them shadows the one here.
+//!
+//! There is no encryption, no hash other than SHA-256 and SHA-512, and no way
+//! to hash input that arrives in pieces: each function takes all of its
+//! input in one `Bytes`.
+
 // `std/crypto`: hashes, HMAC and random, over three runtime intrinsics.
 //
 // **Digest lengths are documented, not typed.** `nova-spec/20-STDLIB.md`
@@ -11,9 +24,25 @@
 // hasher, so a caller with more data than fits in one `Bytes` has no route
 // here.
 
-pub type CryptoErrorKind = | EntropyUnavailable | InvalidLength | RequestTooLarge | InvalidRange
+/// Why `random_bytes` or `random_int` failed.
+pub type CryptoErrorKind =
+    /// The operating system's random source failed.
+    | EntropyUnavailable
+    /// `random_bytes` was asked for a negative number of bytes.
+    | InvalidLength
+    /// `random_bytes` was asked for more than 65,536 bytes.
+    | RequestTooLarge
+    /// `random_int` was given a `min` greater than its `max`.
+    | InvalidRange
 
-pub record CryptoError { pub kind: CryptoErrorKind, pub message: String }
+/// The error `random_bytes` and `random_int` return.
+pub record CryptoError {
+    /// Why the call failed.
+    pub kind: CryptoErrorKind,
+    /// A short message naming the function that failed, such as
+    /// `random_bytes failed`; `kind` says why.
+    pub message: String,
+}
 
 // These four values are duplicated in `crates/nova-runtime/src/crypto.rs`.
 // Nothing ties the two sides together, so the fixtures assert a known vector
@@ -51,18 +80,29 @@ fn no_bytes() -> Bytes { bytes_from_ints([]) }
 //
 // Infallible: the intrinsic's status is always 0 for this operation, because
 // no input this surface can produce makes a digest fail.
+/// Returns the SHA-256 hash of `data`, as 32 raw bytes.
+///
+/// Any `Bytes` is accepted, empty included, and it cannot fail.
 pub fn sha256(data: Bytes) -> Bytes {
     let _ = crypto_hash(OP_SHA256, no_bytes(), data, no_bytes())
     fs_take_bytes()
 }
 
 // SHA-512 of `data`, 64 bytes. Infallible, for the reason `sha256` gives.
+/// Returns the SHA-512 hash of `data`, as 64 raw bytes.
+///
+/// Any `Bytes` is accepted, empty included, and it cannot fail.
 pub fn sha512(data: Bytes) -> Bytes {
     let _ = crypto_hash(OP_SHA512, no_bytes(), data, no_bytes())
     fs_take_bytes()
 }
 
 // HMAC-SHA-256 of `data` under `key`, 32 bytes. Infallible.
+/// Returns the HMAC-SHA-256 tag of `data` under `key`, as 32 raw bytes.
+///
+/// `key` may be any length, empty included, and it cannot fail. To check a
+/// tag a message arrived with, use `hmac_sha256_verify` rather than comparing
+/// it with this function's result yourself.
 pub fn hmac_sha256(key: Bytes, data: Bytes) -> Bytes {
     let _ = crypto_hash(OP_HMAC_SHA256, key, data, no_bytes())
     fs_take_bytes()
@@ -75,6 +115,12 @@ pub fn hmac_sha256(key: Bytes, data: Bytes) -> Bytes {
 // Prefer this over comparing tags yourself: `Bytes::eq` is available and
 // exact, but it is not constant-time -- it returns early on a length
 // mismatch and then calls `memcmp` -- so a hand-written check leaks.
+/// Returns `true` if `tag` is the HMAC-SHA-256 tag of `data` under `key`.
+///
+/// A `tag` of the wrong length gives `false`, not an error. The comparison
+/// is made in constant time, so how long it takes does not reveal how much of
+/// a wrong `tag` matched; comparing tags with `Bytes`'s `eq` gives no such
+/// guarantee.
 pub fn hmac_sha256_verify(key: Bytes, data: Bytes, tag: Bytes) -> Bool {
     crypto_hash(OP_HMAC_SHA256_VERIFY, key, data, tag) == 0
 }
@@ -85,6 +131,13 @@ pub fn hmac_sha256_verify(key: Bytes, data: Bytes, tag: Bytes) -> Bool {
 // fail, `n` can be negative or above the runtime's cap, and no panic may
 // cross a generated poll boundary, so the alternative to a `Result` is
 // ending the process.
+/// Returns `n` cryptographically secure random bytes from the operating
+/// system.
+///
+/// An `n` of 0 gives empty `Bytes`. Returns a `CryptoError` of kind
+/// `InvalidLength` if `n` is negative, `RequestTooLarge` if `n` is more than
+/// 65,536, and `EntropyUnavailable` if the operating system's random source
+/// fails.
 pub fn random_bytes(n: Int) -> Result<Bytes, CryptoError> {
     let status = crypto_random_bytes(n)
     if status == 0 { return Ok(fs_take_bytes()) }
@@ -95,6 +148,13 @@ pub fn random_bytes(n: Int) -> Result<Bytes, CryptoError> {
 //
 // `min == max` is a valid degenerate range and returns `min`; a range with
 // `min` above `max` is `InvalidRange`.
+/// Returns a random `Int` from `min` to `max`, both included, each value as
+/// likely as any other.
+///
+/// It draws from the operating system's cryptographically secure random
+/// source. A `min` equal to `max` gives `min`, and the range may span every
+/// `Int`. Returns a `CryptoError` of kind `InvalidRange` if `min` is greater
+/// than `max`, and `EntropyUnavailable` if the random source fails.
 pub fn random_int(min: Int, max: Int) -> Result<Int, CryptoError> {
     let status = crypto_random_int(min, max)
     if status == 0 { return Ok(decode_count(fs_take_bytes())) }
