@@ -13,6 +13,8 @@ Measures a few shapes with a library beside it, and documents both with
   constant.**
 - **Docs:** `///` on every item and member and `//!` on every module,
   which `nova doc` renders.
+- **Doc tests:** the code examples in the library's docs are tests, and
+  `nova test` inside `shapes` runs them.
 
 ## Run it
 

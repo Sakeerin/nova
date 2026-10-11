@@ -11,6 +11,13 @@ impl Length {
     pub fn of(value: Float) -> Length { Length { value: value } }
 
     /// This length and `other` laid end to end.
+    ///
+    /// A unit square's perimeter, 4, laid end to end with itself:
+    ///
+    /// ```
+    /// let outline = rectangle(1.0, 1.0).perimeter()
+    /// assert_eq(outline.plus(outline).value, 8.0)
+    /// ```
     pub fn plus(self, other: Length) -> Length { Length::of(self.value + other.value) }
 
     /// This length scaled by `factor`.
