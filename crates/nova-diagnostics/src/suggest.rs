@@ -40,7 +40,8 @@ pub fn distance(a: &str, b: &str) -> usize {
 /// distance; else the nearest within `max(len, 3) / 3` edits, `len` in
 /// characters; ties in byte order.
 pub fn closest<'c>(name: &str, candidates: impl IntoIterator<Item = &'c str>) -> Option<&'c str> {
-    let bound = name.chars().count().max(3) / 3;
+    let len = name.chars().count();
+    let bound = len.max(3) / 3;
     let mut best: Option<(bool, usize, &'c str)> = None;
     for c in candidates {
         if c == name {
@@ -49,6 +50,11 @@ pub fn closest<'c>(name: &str, candidates: impl IntoIterator<Item = &'c str>) ->
         let key = if c.eq_ignore_ascii_case(name) {
             (false, 0, c)
         } else {
+            // Its distance is at least the difference in length (spec
+            // 3.5a §3, follow-up 8).
+            if c.chars().count().abs_diff(len) > bound {
+                continue;
+            }
             let d = distance(name, c);
             if d > bound {
                 continue;
@@ -124,5 +130,14 @@ mod tests {
         let fix = change_to(&name, ["count"]).unwrap();
         assert_eq!(fix.title, "change `cuont` to `count`");
         assert_eq!(fix.edits, vec![Edit::replace(name.span, "count")]);
+    }
+
+    #[test]
+    fn a_candidate_too_long_or_short_to_qualify_is_skipped() {
+        // Guard (follow-up 8, spec 3.5a §3): the behaviour must not change
+        // when such candidates are skipped before their distance is taken.
+        assert_eq!(closest("count", ["countdown", "cnt", "coun"]), Some("coun"));
+        assert_eq!(closest("count", ["countdowns", "c"]), None);
+        assert_eq!(closest("count", ["COUNT"]), Some("COUNT"));
     }
 }
