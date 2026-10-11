@@ -107,11 +107,12 @@ fn opener() -> Command {
     Command::new("open")
 }
 
+// `explorer` opens a file with its associated program. `cmd /C start`
+// would read the path with cmd.exe's quoting, which Rust does not apply
+// when the program is `cmd`, so a path with `&`, `^`, `|` or `%` broke.
 #[cfg(windows)]
 fn opener() -> Command {
-    let mut c = Command::new("cmd");
-    c.args(["/C", "start", ""]);
-    c
+    Command::new("explorer")
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
