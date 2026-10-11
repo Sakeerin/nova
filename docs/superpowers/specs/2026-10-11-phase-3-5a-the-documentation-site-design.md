@@ -211,7 +211,10 @@ of its own, before `nova doc`:
   do not stop it.
 - **Two packages that would share a directory.** A documented package
   named `std`, or two whose names are equal ignoring ASCII case: it stops
-  and says why.
+  and says why. [Amended 2026-10-11, final review: so do two modules of
+  one package whose names are equal ignoring ASCII case, as
+  `src/Foo.nova` and `src/foo.nova`, whose pages would share a directory
+  on macOS and Windows.]
 
 ### 4.3 Replacing `target/doc/`
 

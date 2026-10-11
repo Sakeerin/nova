@@ -86,8 +86,8 @@ the gate; 3.5b, `nova test --doc`.
   `docs/benchmarks/README.md`. Dated records keep the lines of their time.
 - Code blocks are rendered but not run until 3.5b.
 - A package whose name is `std` in any letter case cannot be documented,
-  since its pages would share std's directory; nor can two packages whose
-  names differ only in case.
+  since its pages would share std's directory; nor can two packages, or
+  two modules of one package, whose names differ only in case.
 
 ## References
 
