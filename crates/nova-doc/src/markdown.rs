@@ -2,7 +2,7 @@
 //! for code blocks and hidden lines that the site, doc tests and hover
 //! share (3.5b spec §4.2, §4.3).
 
-use nova_diagnostics::Spanned;
+use nova_diagnostics::{FileId, Spanned};
 use pulldown_cmark::{html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::escape;
@@ -218,16 +218,69 @@ fn shown(code: &str) -> String {
 pub(crate) struct Docs {
     pub html: String,
     pub summary: String,
+    /// The Markdown they were rendered from, and where its lines are in
+    /// their file; empty for docs no file holds (3.5b spec §11.1).
+    pub source: DocText,
+}
+
+/// Docs as one Markdown text, and where each of its lines starts in its
+/// file (3.5b spec §7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DocText {
+    pub text: String,
+    /// The file its lines are in; `None` for docs no file holds, as a
+    /// primitive's or a builtin's.
+    pub file: Option<FileId>,
+    /// For each line of `text`: where it starts in `text`, and where that
+    /// byte is in `file`.
+    pub lines: Vec<(usize, u32)>,
+}
+
+impl DocText {
+    /// Adds a line, `body`, whose first byte is byte `at` of `file`.
+    pub(crate) fn push(&mut self, file: FileId, at: u32, body: &str) {
+        if !self.lines.is_empty() {
+            self.text.push('\n');
+        }
+        self.lines.push((self.text.len(), at));
+        self.text.push_str(body);
+        self.file = Some(file);
+    }
+
+    /// Where byte `offset` of `text` is in `file`: each line is a run of
+    /// its file's bytes.
+    // Read by doc tests from Task 8, which removes this line.
+    #[allow(dead_code)]
+    pub(crate) fn source(&self, offset: usize) -> Option<u32> {
+        let i = self
+            .lines
+            .partition_point(|&(start, _)| start <= offset)
+            .checked_sub(1)?;
+        let (start, at) = self.lines[i];
+        Some(at + (offset - start) as u32)
+    }
 }
 
 /// Doc lines as the AST keeps them, each the text after its `///`, as one
-/// Markdown text: each line loses one leading space.
-pub(crate) fn join(lines: &[Spanned<String>]) -> String {
-    lines
-        .iter()
-        .map(|l| l.value.strip_prefix(' ').unwrap_or(&l.value))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Markdown text: each line loses one leading space. A line's text starts
+/// three bytes into its span, after `///`; the lexer drops only trailing
+/// whitespace, a `\r` included (3.5b spec §7).
+pub(crate) fn join(lines: &[Spanned<String>]) -> DocText {
+    let mut d = DocText::default();
+    for l in lines {
+        let body = l.value.strip_prefix(' ').unwrap_or(&l.value);
+        let skipped = (l.value.len() - body.len()) as u32;
+        d.push(l.span.file, l.span.start + 3 + skipped, body);
+    }
+    d
+}
+
+/// Docs rendered as [`render`] renders them, keeping their Markdown and
+/// its place in the source, which doc tests read (3.5b spec §11.1).
+pub(crate) fn render_source(source: DocText, level: u8) -> Docs {
+    let mut d = render(&source.text, level);
+    d.source = source;
+    d
 }
 
 /// `text` rendered (spec §9.1): raw HTML as text, a link or an image to
@@ -310,7 +363,11 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
     let summary = summary(&events);
     let mut html = String::new();
     html::push_html(&mut html, events.into_iter());
-    Docs { html, summary }
+    Docs {
+        html,
+        summary,
+        source: DocText::default(),
+    }
 }
 
 /// Whether `dest` may be a link's or an image's URL: a relative URL, a
@@ -626,8 +683,56 @@ mod tests {
     fn lines_join_without_one_leading_space() {
         let line = |s: &str| Spanned::new(s.to_string(), Span::point(0, FileId::DUMMY));
         assert_eq!(
-            join(&[line(" One."), line(""), line("  Two.")]),
+            join(&[line(" One."), line(""), line("  Two.")]).text,
             "One.\n\n Two."
         );
+    }
+
+    /// The `///` lines of `src`, as the parser keeps them.
+    fn doc_lines(src: &str) -> Vec<Spanned<String>> {
+        nova_lexer::lex(src, FileId::DUMMY)
+            .0
+            .into_iter()
+            .filter_map(|t| match t.value {
+                nova_lexer::Token::DocComment(s) => Some(Spanned::new(s, t.span)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn joined_lines_map_back_to_their_source() {
+        // 3.5b spec §7: a line with and without its leading space, a bare
+        // `///`, an indented one, and the same with CRLF.
+        for src in [
+            "/// One.\n///\n///Two.\n    ///   three\nfn f() {}\n",
+            "/// One.\r\n///\r\n///Two.\r\n    ///   three\r\nfn f() {}\r\n",
+        ] {
+            let d = join(&doc_lines(src));
+            assert_eq!(d.text, "One.\n\nTwo.\n  three", "{src:?}");
+            assert_eq!(d.file, Some(FileId::DUMMY));
+            assert_eq!(d.lines.len(), 4);
+            for word in ["One.", "Two.", "three", "hree"] {
+                assert_eq!(
+                    d.source(d.text.find(word).unwrap()),
+                    Some(src.find(word).unwrap() as u32),
+                    "{word:?} in {src:?}"
+                );
+            }
+            // A bare `///` is the end of its `///`.
+            let bare = src.find("\n///").unwrap() as u32 + 1;
+            assert_eq!(d.source(d.text.find("\n\n").unwrap() + 1), Some(bare + 3));
+        }
+        assert_eq!(join(&[]).source(0), None);
+        assert_eq!(join(&[]).file, None);
+    }
+
+    #[test]
+    fn rendered_docs_keep_their_source() {
+        let d = render_source(join(&doc_lines("/// One.\nfn f() {}\n")), 3);
+        assert_eq!(d.html, "<p>One.</p>\n");
+        assert_eq!(d.source.text, "One.");
+        assert_eq!(d.source.source(0), Some(4));
+        assert_eq!(render("One.", 3).source, DocText::default());
     }
 }

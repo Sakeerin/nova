@@ -628,9 +628,10 @@ pub(crate) fn relative(page: &str, url: &str) -> String {
     format!("{}{url}", "../".repeat(page.matches('/').count()))
 }
 
-/// Doc lines rendered, their headings moved down `level` levels.
+/// Doc lines rendered, their headings moved down `level` levels, keeping
+/// their source (3.5b spec §11.1).
 fn docs_of(lines: &[Spanned<String>], level: u8) -> Docs {
-    markdown::render(&markdown::join(lines), level)
+    markdown::render_source(markdown::join(lines), level)
 }
 
 /// The last segment of a path type: what an impl is on.
@@ -737,7 +738,7 @@ impl<'a> Ctx<'a> {
             qual,
             page,
             root,
-            docs: markdown::render(&ft.module_docs(), 1),
+            docs: markdown::render_source(ft.module_docs(), 1),
             items,
             other_impls: Vec::new(),
         })
