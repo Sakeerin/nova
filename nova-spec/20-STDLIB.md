@@ -197,7 +197,7 @@ would allocate an array to do the identical work, via a compiler change,
 with nothing visible to any user — a pessimization, not a feature.
 `Formatter`'s body is elided above and described only as a "Format builder
 for Display impls" — there is no specified behaviour there to implement.
-`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:141`) and returns
+`Display` is `fn fmt(self) -> String` (`std/core/lib.nova:198`) and returns
 a whole string in one call regardless, so any builder reachable from it is
 a longer, slower spelling of interpolation: a `mut self` accumulator (ADR
 0005 §1 — ten uses in shipped `std/collections`) is buildable inside `fmt`
