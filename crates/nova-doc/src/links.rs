@@ -72,16 +72,24 @@ fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
-/// The values of every `name="…"` attribute in `html`, unescaped.
+/// The values of every `name="…"` attribute in `html`'s tags, unescaped.
+/// Only a tag, from a `<` to the next `>`, is read: a page's text can show
+/// `href="…"`, but never a raw `<`, which is escaped.
 fn attributes(html: &str, name: &str) -> Vec<String> {
     let pattern = format!(" {name}=\"");
     let mut out = Vec::new();
     let mut rest = html;
-    while let Some(at) = rest.find(&pattern) {
-        let value = &rest[at + pattern.len()..];
-        let end = value.find('"').unwrap_or(value.len());
-        out.push(unescape(&value[..end]));
-        rest = &value[end..];
+    while let Some(open) = rest.find('<') {
+        let tag = &rest[open..];
+        let close = tag.find('>').unwrap_or(tag.len());
+        let mut inside = &tag[..close];
+        while let Some(at) = inside.find(&pattern) {
+            let value = &inside[at + pattern.len()..];
+            let end = value.find('"').unwrap_or(value.len());
+            out.push(unescape(&value[..end]));
+            inside = &value[end..];
+        }
+        rest = &tag[close..];
     }
     out
 }
@@ -240,6 +248,32 @@ mod tests {
             )],
         );
         assert_eq!(check_links(&dir), Vec::new());
+    }
+
+    #[test]
+    fn a_link_written_in_text_is_not_checked() {
+        // pulldown-cmark does not escape `"` in text or inline code, so a
+        // doc can show `href="…"` outside any tag.
+        let dir = site(
+            "text-link",
+            &[(
+                "index.html",
+                "<p>Write <code>&lt;a href=\"gone.html\"&gt;</code> or src=\"gone.js\".</p>",
+            )],
+        );
+        assert_eq!(check_links(&dir), Vec::new());
+    }
+
+    #[test]
+    fn an_id_written_in_text_is_no_target() {
+        let dir = site(
+            "text-id",
+            &[(
+                "index.html",
+                "<p>Not a target: id=\"fn.fake\".</p> <a href=\"#fn.fake\">f</a>",
+            )],
+        );
+        assert_eq!(check_links(&dir), vec![broken("index.html", "#fn.fake")]);
     }
 
     #[test]
