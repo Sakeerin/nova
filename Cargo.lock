@@ -1133,6 +1133,7 @@ dependencies = [
  "lsp-types",
  "nova-ast",
  "nova-diagnostics",
+ "nova-doc",
  "nova-driver",
  "nova-fmt",
  "nova-hir",

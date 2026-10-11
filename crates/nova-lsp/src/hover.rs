@@ -148,7 +148,8 @@ fn module_line(a: &Analysis, m: usize) -> String {
     format!("module {stem}")
 }
 
-/// The `///` docs of `target`'s declaration (spec §5.1).
+/// The `///` docs of `target`'s declaration (spec §5.1), without their
+/// examples' hidden lines.
 fn docs_of(a: &Analysis, target: &Target) -> String {
     if !matches!(
         target,
@@ -174,7 +175,9 @@ fn docs_of(a: &Analysis, target: &Target) -> String {
             return String::new();
         }
     }
-    docs_above(text, at)
+    // An example's hidden lines are left out, as on the site (3.5b spec
+    // §8.2).
+    nova_doc::hide_lines(&docs_above(text, at))
 }
 
 /// The `///` lines directly above the line holding byte `at`, attributes
@@ -211,6 +214,29 @@ mod tests {
         assert_eq!(docs_above(text, at), "");
         let crlf = "//// not a doc\r\n/// Doc.\r\nfn c() {}\r\n";
         assert_eq!(docs_above(crlf, crlf.find("fn c").unwrap()), "Doc.");
+    }
+
+    #[test]
+    fn hover_leaves_out_an_examples_hidden_lines() {
+        // 3.5b spec §8.2: the example as the site shows it.
+        let text = "/// Doubles `n`.\n///\n/// ```\n/// # let n = 2\n/// let d = twice(n)\n\
+                    /// ```\nfn twice(n: Int) -> Int { n * 2 }\n\nfn main() {\n    \
+                    let d = twice(1)\n}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-hover-hidden")
+            .join("main.nova");
+        let overlay = crate::workspace::Overlay::default().with(&path, text.to_string());
+        let options = crate::analysis::options(None, true);
+        let answer = crate::analysis::answering(&path, &overlay, &options).expect("an answer");
+        let at = text.find("twice(1)").unwrap() as u32;
+        let lsp::HoverContents::Markup(found) = hover(&answer, at).expect("a hover").contents
+        else {
+            panic!("not Markdown");
+        };
+        assert_eq!(
+            found.value,
+            "```nova\nfn twice(n: Int) -> Int\n```\n\nDoubles `n`.\n\n```\nlet d = twice(n)\n```"
+        );
     }
 
     #[test]

@@ -1197,3 +1197,23 @@ fn rename_in_a_loose_module_keeps_to_names_no_importer_can_see() {
     let files: Vec<&str> = found.iter().map(|e| e.0.as_str()).collect();
     assert_eq!(files, ["main.nova", "util.nova"], "{found:?}");
 }
+
+// === 3.5b: hover hides an example's hidden lines (spec §8.2, §12.4) ===
+
+const EXAMPLE: &str = "/// Doubles `n`.\n///\n/// ```\n/// # let hidden = 1\n\
+/// let shown = twice(1)\n/// ```\npub fn twice(n: Int) -> Int { n * 2 }\n\n\
+fn main() {\n    let d = twice(2)\n}\n";
+
+#[test]
+fn hover_leaves_out_an_examples_hidden_lines() {
+    let dir = project("hover-hidden-lines", &[("main.nova", EXAMPLE)]);
+    let uri = file_uri(&dir.join("src").join("main.nova"));
+    let mut client = Client::start(&dir, false);
+    open(&mut client, &uri, EXAMPLE);
+    let md = markdown(&hover(&mut client, &uri, at(EXAMPLE, "twice(2)", 0)));
+    assert!(!md.contains("hidden"), "{md}");
+    assert_eq!(
+        md,
+        "```nova\npub fn twice(n: Int) -> Int\n```\n\nDoubles `n`.\n\n```\nlet shown = twice(1)\n```"
+    );
+}
