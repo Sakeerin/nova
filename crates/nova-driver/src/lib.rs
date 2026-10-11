@@ -228,6 +228,12 @@ const SHADOWED_USER_MAIN_NAME: &str = "main.shadowed_by_nova_test";
 /// [`SHADOWED_USER_MAIN_NAME`].
 const NOT_THE_ENTRY_MAIN: &str = "main.not_the_entry";
 
+/// The test function each doc test module adds (spec
+/// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+/// §5.2): in a program of doc tests, the only `@test` function collected.
+/// Each module is its own namespace, so each can use this name.
+pub const DOC_TEST_FUNCTION: &str = "nova_doctest";
+
 /// Rename every `main` declared outside the entry module, `ModuleId(0)`,
 /// so that `nova_mir::lower_module`'s search by name finds the entry's own
 /// `main`, or reports E0601 (spec 3.3a §4.6). A call reaches its function
@@ -747,7 +753,8 @@ impl<'a> FrontendContext<'a> {
         // Phase 3.3a: under `nova test` the root package's tests are
         // kept and a dependency's stripped (spec
         // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md
-        // §4.6).
+        // §4.6). Phase 3.5b: a program of doc tests keeps only the test
+        // each doc test adds (spec 3.5b §5.2).
         strip_test_functions(&mut modules, with_test_module);
         // Register each embedded std module's source in the `FileDb` so a
         // syntax error inside one (a compiler bug, since they ship with the
@@ -816,19 +823,24 @@ impl<'a> FrontendContext<'a> {
     }
 }
 
-/// Remove top-level `@test` functions from `modules`, in place: from every
-/// module, or with `keep_root_tests` only from a dependency's (spec 3.3a
-/// §4.6). `nova test` and the language server keep the root package's
-/// tests, and a loose program's; a dependency's tests never run in its
-/// dependent's binary.
+/// Remove top-level `@test` functions from `modules`, in place, before
+/// resolution:
+/// - without `keep_root_tests` (`nova run`, `build` and `check`), every one;
+/// - with it (`nova test`, and the language server's `tests` option), a
+///   dependency's, whose tests never run in its dependent's binary (spec
+///   3.3a §4.6), keeping the root package's and a loose program's;
+/// - with it, in a program of doc tests (spec
+///   `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+///   §5.2, §6.2), every one but the [`DOC_TEST_FUNCTION`] each doc test
+///   module adds: the library's tests run in the unit tests' binary, and a
+///   `@test` function a block declares is not collected.
 ///
 /// What follows was written when this ran only for `nova run`, `build`
-/// and `check`, and every module was the program's own.
+/// and `check`, and every module was the program's own; why a test is
+/// removed before resolution still holds for every one it removes.
 ///
-/// Only ever called with `with_test_module = false` (`nova run`/`build`/
-/// `check`; never `build_test_binary`'s `nova test` path). A `@test`
-/// function is ordinary Nova source with no special compilation unit of its
-/// own — before this fix, `nova_resolver::resolve_program` collected it,
+/// A `@test` function is ordinary Nova source with no special compilation
+/// unit of its own — before this fix, `nova_resolver::resolve_program` collected it,
 /// gave it a `DefId`, and `nova_typeck::check` type-checked its body exactly
 /// like any other function, regardless of `with_test_module`. That body is
 /// written assuming `std/test`'s `assert`/`assert_eq`/`assert_ne` are in
@@ -874,27 +886,28 @@ impl<'a> FrontendContext<'a> {
 /// subject items before validation ever ran, breaking them. Confining the
 /// strip to this driver function leaves `nova_resolver`'s validation and
 /// collection behavior — and every test that exercises it directly —
-/// completely unchanged; only the four real compilation entry points that
-/// pass `with_test_module = false` are affected, and `nova test` itself
-/// never calls this at all.
+/// completely unchanged.
 ///
 /// As a consequence, `nova_resolver::validate_test_function`'s attribute-
 /// shape diagnostics (`E0082`-`E0085`) do not fire for a stripped function
-/// under `nova build`/`check`/`run` — matching `#[cfg(test)]`, where an
-/// invalid test signature is likewise uncaught outside `cargo test`. `nova
-/// test` validates every `@test` function's shape regardless, since this
-/// function is never called on that path.
+/// — matching `#[cfg(test)]`, where an invalid test signature is likewise
+/// uncaught outside `cargo test`. `nova test` validates the shape of every
+/// `@test` function it keeps.
 fn strip_test_functions(modules: &mut [Loaded], keep_root_tests: bool) {
+    let doc_tests = modules.iter().any(|m| m.doc);
     for module in modules.iter_mut() {
         let root = matches!(module.package, None | Some(PackageId(0)));
-        if keep_root_tests && root {
-            continue;
-        }
-        module.ast.items.retain(|item| {
-            !matches!(
-                &item.value,
-                nova_ast::Item::Function(f) if f.attrs.iter().any(|a| a.name.value == "test")
-            )
+        let doc = module.doc;
+        module.ast.items.retain(|item| match &item.value {
+            nova_ast::Item::Function(f) if f.attrs.iter().any(|a| a.name.value == "test") => {
+                keep_root_tests
+                    && if doc_tests {
+                        doc && f.name.value == DOC_TEST_FUNCTION
+                    } else {
+                        root
+                    }
+            }
+            _ => true,
         });
     }
 }
