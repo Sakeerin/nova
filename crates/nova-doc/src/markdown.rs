@@ -1,10 +1,216 @@
-//! Docs as Markdown (spec §9.1, §9.3; plan decision 12).
+//! Docs as Markdown (spec §9.1, §9.3; plan decision 12), and the one rule
+//! for code blocks and hidden lines that the site, doc tests and hover
+//! share (3.5b spec §4.2, §4.3).
 
 use nova_diagnostics::Spanned;
 use pulldown_cmark::{html, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::escape;
 use crate::highlight::highlight;
+
+/// The options the site renders with, and doc tests and hover read with,
+/// so all three find the same code blocks: a table can end a block.
+fn options() -> Options {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options
+}
+
+/// What a code block is (3.5b spec §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Block {
+    /// Nova, highlighted and run as a doc test. `unknown` holds the words
+    /// after `nova` that mean nothing, which `nova test` warns about.
+    Test {
+        /// The unknown words, in order.
+        unknown: Vec<String>,
+    },
+    /// Nova, highlighted, not run: its first word is `ignore`, or a word
+    /// after `nova` is.
+    Ignored,
+    /// Another language, shown as written.
+    Other,
+}
+
+impl Block {
+    /// Whether it is Nova: highlighted, its hidden lines left out.
+    pub fn is_nova(&self) -> bool {
+        !matches!(self, Block::Other)
+    }
+}
+
+/// The block whose info string is `info`, or an indented block for `None`
+/// (3.5b spec §4.2). The info string is split at commas and whitespace
+/// into words, and empty words are dropped.
+pub fn classify(info: Option<&str>) -> Block {
+    let Some(info) = info else {
+        return Block::Test {
+            unknown: Vec::new(),
+        };
+    };
+    let mut words = info
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty());
+    match words.next() {
+        None => Block::Test {
+            unknown: Vec::new(),
+        },
+        Some("ignore") => Block::Ignored,
+        Some("nova") => {
+            let rest: Vec<&str> = words.collect();
+            if rest.contains(&"ignore") {
+                Block::Ignored
+            } else {
+                Block::Test {
+                    unknown: rest.iter().map(|w| w.to_string()).collect(),
+                }
+            }
+        }
+        Some(_) => Block::Other,
+    }
+}
+
+/// For a hidden line of a Nova block (3.5b spec §4.3), where its `# `, or
+/// its lone `#`, starts and how many bytes it is; `None` for a line that
+/// shows. It runs less that mark.
+pub fn hidden(line: &str) -> Option<(usize, usize)> {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let at = line.len() - rest.len();
+    if rest.starts_with("# ") {
+        Some((at, 2))
+    } else if rest == "#" {
+        Some((at, 1))
+    } else {
+        None
+    }
+}
+
+/// A line of a code block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeLine {
+    /// The line as the block holds it, without its line break.
+    pub text: String,
+    /// How many bytes at its start the parser made up: the rest of a tab
+    /// that a container or the block's indentation took part of.
+    pub pad: usize,
+    /// Where `text[pad..]` starts in the Markdown.
+    pub at: usize,
+}
+
+/// A code block, and where its lines are in the Markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBlock {
+    /// What it is.
+    pub block: Block,
+    /// Where it starts in the Markdown: its opening fence, or an indented
+    /// block's first line.
+    pub start: usize,
+    /// Its lines, in order.
+    pub lines: Vec<CodeLine>,
+}
+
+/// Every code block of the Markdown `text`, as the site finds them.
+pub fn code_blocks(text: &str) -> Vec<CodeBlock> {
+    let mut out: Vec<CodeBlock> = Vec::new();
+    let mut open: Option<CodeBlock> = None;
+    let mut line: Option<CodeLine> = None;
+    for (event, range) in Parser::new_ext(text, options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let block = match &kind {
+                    CodeBlockKind::Indented => classify(None),
+                    CodeBlockKind::Fenced(info) => classify(Some(info)),
+                };
+                open = Some(CodeBlock {
+                    block,
+                    start: range.start,
+                    lines: Vec::new(),
+                });
+            }
+            Event::Text(t) => {
+                let Some(b) = open.as_mut() else {
+                    continue;
+                };
+                if range.is_empty() {
+                    // Spaces the parser made up for a tab's remainder.
+                    let l = line.get_or_insert_with(|| CodeLine {
+                        text: String::new(),
+                        pad: 0,
+                        at: range.start,
+                    });
+                    l.text.push_str(&t);
+                    l.pad += t.len();
+                    l.at = range.start;
+                    continue;
+                }
+                // `t` is `text[range]`: perhaps several lines, perhaps
+                // starting with the line break of a CRLF line.
+                let mut at = range.start;
+                for piece in t.split_inclusive('\n') {
+                    let (body, ends) = match piece.strip_suffix('\n') {
+                        Some(body) => (body, true),
+                        None => (piece, false),
+                    };
+                    let l = line.get_or_insert_with(|| CodeLine {
+                        text: String::new(),
+                        pad: 0,
+                        at,
+                    });
+                    if l.text.len() == l.pad {
+                        l.at = at;
+                    }
+                    l.text.push_str(body);
+                    if ends {
+                        b.lines.extend(line.take());
+                    }
+                    at += piece.len();
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(mut b) = open.take() {
+                    // An unclosed fence's last line has no line break.
+                    b.lines.extend(line.take());
+                    out.push(b);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `markdown` with the hidden lines of its Nova blocks left out (3.5b spec
+/// §8.2), every other byte as it was. Hover shows docs through it.
+pub fn hide_lines(markdown: &str) -> String {
+    if !markdown.contains('#') {
+        return markdown.to_string();
+    }
+    let mut out = String::with_capacity(markdown.len());
+    let mut from = 0;
+    for b in code_blocks(markdown).iter().filter(|b| b.block.is_nova()) {
+        for l in b.lines.iter().filter(|l| hidden(&l.text).is_some()) {
+            // The whole Markdown line, with its `> ` or list indentation
+            // and its line break.
+            let start = markdown[..l.at].rfind('\n').map_or(0, |i| i + 1);
+            let end = markdown[l.at..]
+                .find('\n')
+                .map_or(markdown.len(), |i| l.at + i + 1);
+            out.push_str(&markdown[from..start]);
+            from = end;
+        }
+    }
+    out.push_str(&markdown[from..]);
+    out
+}
+
+/// A Nova block's code as the page shows it, its hidden lines left out
+/// (3.5b spec §8.1).
+fn shown(code: &str) -> String {
+    code.split_inclusive('\n')
+        .filter(|l| hidden(l.strip_suffix('\n').unwrap_or(l)).is_none())
+        .collect()
+}
 
 /// Docs, rendered: their HTML, and their first paragraph as plain text,
 /// which lists and search results show (spec §9.1).
@@ -26,20 +232,18 @@ pub(crate) fn join(lines: &[Spanned<String>]) -> String {
 
 /// `text` rendered (spec §9.1): raw HTML as text, a link or an image to
 /// a script as its text alone, headings moved down `level` levels, and
-/// Nova code blocks coloured (§9.3).
+/// Nova code blocks coloured (§9.3), `ignore` blocks among them, without
+/// their hidden lines (3.5b spec §8.1).
 pub(crate) fn render(text: &str, level: u8) -> Docs {
     if text.trim().is_empty() {
         return Docs::default();
     }
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
     let mut events: Vec<Event> = Vec::new();
     // A code block being read: whether it is Nova, and its text so far.
     let mut code: Option<(bool, String)> = None;
     // For each link or image open, whether it is kept (decision 10).
     let mut kept: Vec<bool> = Vec::new();
-    for event in Parser::new_ext(text, options) {
+    for event in Parser::new_ext(text, options()) {
         if code.is_some() {
             match event {
                 Event::Text(t) => {
@@ -49,7 +253,11 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
                 }
                 Event::End(TagEnd::CodeBlock) => {
                     if let Some((nova, buf)) = code.take() {
-                        let body = if nova { highlight(&buf) } else { escape(&buf) };
+                        let body = if nova {
+                            highlight(&shown(&buf))
+                        } else {
+                            escape(&buf)
+                        };
                         events.push(Event::Html(
                             format!("<pre class=\"code\"><code>{body}</code></pre>\n").into(),
                         ));
@@ -61,17 +269,11 @@ pub(crate) fn render(text: &str, level: u8) -> Docs {
         }
         match event {
             Event::Start(Tag::CodeBlock(kind)) => {
-                let nova = match kind {
-                    CodeBlockKind::Indented => true,
-                    CodeBlockKind::Fenced(info) => {
-                        let lang = info
-                            .split(|c: char| c == ',' || c.is_whitespace())
-                            .next()
-                            .unwrap_or("");
-                        lang.is_empty() || lang == "nova"
-                    }
+                let block = match &kind {
+                    CodeBlockKind::Indented => classify(None),
+                    CodeBlockKind::Fenced(info) => classify(Some(info)),
                 };
-                code = Some((nova, String::new()));
+                code = Some((block.is_nova(), String::new()));
             }
             Event::Html(h) | Event::InlineHtml(h) => events.push(Event::Text(h)),
             // A link or an image to a script is dropped, and its text
@@ -281,6 +483,143 @@ mod tests {
     fn empty_docs_render_nothing() {
         assert_eq!(render("", 3), Docs::default());
         assert_eq!(render("  \n", 3), Docs::default());
+    }
+
+    #[test]
+    fn blocks_are_classified_by_their_first_word() {
+        // 3.5b spec §4.2's table, and an unknown word.
+        let test = |unknown: &[&str]| Block::Test {
+            unknown: unknown.iter().map(|w| w.to_string()).collect(),
+        };
+        for (info, block) in [
+            (None, test(&[])),
+            (Some(""), test(&[])),
+            (Some("nova"), test(&[])),
+            (Some("nova,ignore"), Block::Ignored),
+            (Some("nova ignore"), Block::Ignored),
+            (Some("nova, ignore"), Block::Ignored),
+            (Some("ignore"), Block::Ignored),
+            (Some("text"), Block::Other),
+            (Some("sh"), Block::Other),
+            (Some(",text"), Block::Other),
+            (Some("nova,should_panic"), test(&["should_panic"])),
+            (
+                Some("nova,,no_run  compile_fail"),
+                test(&["no_run", "compile_fail"]),
+            ),
+        ] {
+            assert_eq!(classify(info), block, "{info:?}");
+        }
+        assert!(test(&[]).is_nova());
+        assert!(Block::Ignored.is_nova());
+        assert!(!Block::Other.is_nova());
+    }
+
+    #[test]
+    fn a_hidden_line_starts_with_a_hash_and_a_space_or_is_a_lone_hash() {
+        assert_eq!(hidden("# let a = 1"), Some((0, 2)));
+        assert_eq!(hidden("    # x"), Some((4, 2)));
+        assert_eq!(hidden("\t# x"), Some((1, 2)));
+        assert_eq!(hidden("#"), Some((0, 1)));
+        assert_eq!(hidden("  #"), Some((2, 1)));
+        assert_eq!(hidden("#x"), None);
+        assert_eq!(hidden("// # x"), None);
+        assert_eq!(hidden("let a = 1 # x"), None);
+        assert_eq!(hidden(""), None);
+    }
+
+    #[test]
+    fn hidden_lines_are_left_out_of_nova_code_on_the_page() {
+        // Mutant 1: a `# ` line of a Nova block is not shown; one of a
+        // `text` block is.
+        let d = render(
+            "```\n# let a = 1\n#\nlet b = a\n```\n\n```text\n# shown\n```\n\n    \
+             # let c = 2\n    let d = c\n",
+            3,
+        );
+        assert_eq!(
+            d.html,
+            "<pre class=\"code\"><code><span class=\"kw\">let</span> b = a\n</code></pre>\n\
+             <pre class=\"code\"><code># shown\n</code></pre>\n\
+             <pre class=\"code\"><code><span class=\"kw\">let</span> d = c\n</code></pre>\n"
+        );
+    }
+
+    #[test]
+    fn an_ignored_block_is_highlighted_as_nova() {
+        let d = render("```ignore\n# let a = 1\nfn f() {}\n```", 3);
+        assert_eq!(
+            d.html,
+            "<pre class=\"code\"><code><span class=\"kw\">fn</span> f() {}\n</code></pre>\n"
+        );
+    }
+
+    #[test]
+    fn code_blocks_give_each_line_and_where_it_starts() {
+        let text = "Use:\n\n```nova,ignore\nlet a = 1\n# let b = a\n```\n\n- In a list:\n\n      \
+                    let c = 3\n\n> ```\n> let d = 4\n> ```\n\n```text\nunclosed\nlast";
+        let at = |s: &str| text.find(s).unwrap();
+        let line = |s: &str| CodeLine {
+            text: s.to_string(),
+            pad: 0,
+            at: at(s),
+        };
+        let test = Block::Test {
+            unknown: Vec::new(),
+        };
+        assert_eq!(
+            code_blocks(text),
+            [
+                CodeBlock {
+                    block: Block::Ignored,
+                    start: at("```nova"),
+                    lines: vec![line("let a = 1"), line("# let b = a")],
+                },
+                CodeBlock {
+                    block: test.clone(),
+                    start: at("let c"),
+                    lines: vec![line("let c = 3")],
+                },
+                CodeBlock {
+                    block: test.clone(),
+                    start: at("```\n> let d"),
+                    lines: vec![line("let d = 4")],
+                },
+                CodeBlock {
+                    block: Block::Other,
+                    start: at("```text"),
+                    lines: vec![line("unclosed"), line("last")],
+                },
+            ]
+        );
+        // A tab a list item took part of: two spaces made up before `code`.
+        assert_eq!(
+            code_blocks("- a\n\n \t\tcode"),
+            [CodeBlock {
+                block: test,
+                start: 8,
+                lines: vec![CodeLine {
+                    text: "  code".to_string(),
+                    pad: 2,
+                    at: 8,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn hide_lines_cuts_only_the_hidden_lines_of_nova_blocks() {
+        let md = "Use it:\n\n```\n# let x = 1\nlet y = x\n```\n\n```text\n# shown\n```\n\n\
+                  > ```nova\n> # q\n> let z = 1\n> ```\n\n# Heading\n\n    # let w = 0\n    \
+                  let v = w\n\n```ignore\n#\nlet u = 1\n```\n";
+        assert_eq!(
+            hide_lines(md),
+            "Use it:\n\n```\nlet y = x\n```\n\n```text\n# shown\n```\n\n\
+             > ```nova\n> let z = 1\n> ```\n\n# Heading\n\n    let v = w\n\n\
+             ```ignore\nlet u = 1\n```\n"
+        );
+        assert_eq!(hide_lines("No code # here."), "No code # here.");
+        assert_eq!(hide_lines("# Title\n\nText."), "# Title\n\nText.");
     }
 
     #[test]
