@@ -153,7 +153,9 @@ pub(crate) fn render(
 
 /// What lies between two tokens, which is only spaces and comments, as it
 /// shows (plan decision 11): nothing, one space, or a line break and the
-/// next line's indentation less `base` characters.
+/// next line's indentation less `base` characters. A block comment counts
+/// as one space, except one that begins a line, which goes with the spaces
+/// after it, so the line keeps its own indentation.
 pub(crate) fn gap(between: &str, base: usize) -> String {
     let mut plain = String::new();
     let mut rest = between;
@@ -162,7 +164,12 @@ pub(crate) fn gap(between: &str, base: usize) -> String {
             rest = &after[after.find('\n').unwrap_or(after.len())..];
         } else if let Some(after) = rest.strip_prefix("/*") {
             rest = &after[after.find("*/").map_or(after.len(), |i| i + 2)..];
-            plain.push(' ');
+            let line = plain.rfind('\n').map(|i| &plain[i + 1..]);
+            if line.is_some_and(|l| l.chars().all(|c| matches!(c, ' ' | '\t'))) {
+                rest = rest.trim_start_matches([' ', '\t']);
+            } else {
+                plain.push(' ');
+            }
         } else {
             plain.push(c);
             rest = &rest[c.len_utf8()..];
@@ -205,6 +212,10 @@ mod tests {
         assert_eq!(gap("/*c*/", 0), " ");
         assert_eq!(gap(" // why\n        ", 4), "\n    ");
         assert_eq!(gap("\r\n\r\n    ", 4), "\n");
+        // A block comment that begins a line takes the spaces after it.
+        assert_eq!(gap("\n        /* the left */ ", 4), "\n    ");
+        assert_eq!(gap("\n  /* a */\t/* b */ ", 0), "\n  ");
+        assert_eq!(gap(" // why\n  /* c */\n    ", 2), "\n  ");
     }
 
     #[test]
@@ -229,6 +240,25 @@ mod tests {
     fn a_broken_signature_keeps_its_lines_less_their_indentation() {
         // Review Focus 1.
         let text = "impl P {\n    pub fn far(\n        self,\n        // the distance\n        to: Int,\n    ) -> Int {\n        to\n    }\n}\n";
+        let file = parse(text);
+        let Item::Impl(imp) = &file.items[0].value else {
+            panic!("not an impl")
+        };
+        let f = &imp.functions[0];
+        let ft = FileText::new(text, FileId::DUMMY);
+        let start = decl_start(text, f.name.span.start as usize);
+        let end = fn_end(&ft, f.name.span, f.return_ty.as_ref(), &f.where_clause);
+        assert_eq!(
+            render(&ft, start, end, Some(f.name.span), &|_| None),
+            "<span class=\"kw\">pub</span> <span class=\"kw\">fn</span> \
+             <span class=\"name\">far</span>(\n    <span class=\"kw\">self</span>,\n    \
+             to: Int,\n) -&gt; Int"
+        );
+    }
+
+    #[test]
+    fn a_block_comment_that_begins_a_line_keeps_its_indentation() {
+        let text = "impl P {\n    pub fn far(\n        self,\n        /* the left */ to: Int,\n    ) -> Int {\n        to\n    }\n}\n";
         let file = parse(text);
         let Item::Impl(imp) = &file.items[0].value else {
             panic!("not an impl")
