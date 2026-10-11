@@ -1,0 +1,15 @@
+//! Measures a few shapes with the `shapes` library beside this program.
+
+import shapes
+
+/// The shapes this program measures.
+fn sample() -> [Shape] { [circle(1.0), rectangle(2.0, 3.0)] }
+
+/// One line about `shape`: its area and its perimeter.
+fn describe(shape: Shape) -> String { "area ${shape.area()}, perimeter ${shape.perimeter().value}" }
+
+fn main() {
+    let shapes = sample()
+    for i in 0..shapes.len() { println(describe(shapes[i])) }
+    println("total area ${total_area(shapes)}")
+}

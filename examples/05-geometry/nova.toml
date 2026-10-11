@@ -1,0 +1,8 @@
+[package]
+name = "geometry"
+version = "0.1.0"
+edition = "2026"
+description = "Measures a few shapes with the shapes library beside it"
+
+[dependencies]
+shapes = { path = "shapes" }

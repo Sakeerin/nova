@@ -1,0 +1,70 @@
+//! Shapes on a plane, and what can be measured about them.
+//!
+//! Every size is a `Length` from this package's `units` module, so a
+//! radius cannot be mixed up with a bare number.
+
+import units
+
+/// The ratio of a circle's circumference to its diameter.
+pub const PI: Float = 3.141592653589793
+
+/// A rectangle, by the lengths of its sides.
+pub record Rect {
+    /// Its extent along the horizontal axis.
+    pub width: Length,
+    /// Its extent along the vertical axis.
+    pub height: Length,
+}
+
+/// A shape, by its kind and its size.
+pub type Shape =
+    /// A circle, by its radius.
+    | Circle(Length)
+    /// A rectangle.
+    | Rectangle(Rect)
+
+/// What can be measured about a shape.
+pub trait Measure {
+    /// The area it covers, in square units.
+    fn area(self) -> Float
+
+    /// The length of its outline.
+    fn perimeter(self) -> Length
+}
+
+impl Measure for Rect {
+    fn area(self) -> Float { self.width.value * self.height.value }
+
+    fn perimeter(self) -> Length { self.width.plus(self.height).times(2.0) }
+}
+
+impl Measure for Shape {
+    fn area(self) -> Float {
+        match self {
+            Circle(r) => PI * r.value * r.value
+            Rectangle(rect) => rect.area()
+        }
+    }
+
+    fn perimeter(self) -> Length {
+        match self {
+            Circle(r) => r.times(2.0 * PI)
+            Rectangle(rect) => rect.perimeter()
+        }
+    }
+}
+
+/// A circle of the given radius.
+pub fn circle(radius: Float) -> Shape { Circle(Length::of(radius)) }
+
+/// A rectangle of the given width and height.
+pub fn rectangle(width: Float, height: Float) -> Shape {
+    Rectangle(Rect { width: Length::of(width), height: Length::of(height) })
+}
+
+/// The area `shapes` cover together, counting any overlap twice.
+pub fn total_area(shapes: [Shape]) -> Float {
+    let mut total = 0.0
+    for i in 0..shapes.len() { total = total + shapes[i].area() }
+    total
+}

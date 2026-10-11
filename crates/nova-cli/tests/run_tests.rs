@@ -11257,3 +11257,23 @@ fn check_prints_make_public_as_a_help_line() {
         "stderr: {stderr}"
     );
 }
+
+/// `examples/05-geometry` (spec
+/// `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`
+/// §13): a program and the path library beside it.
+#[test]
+fn example_05_geometry_runs() {
+    let home = std::env::temp_dir().join("nova-run-05-geometry-home");
+    let _ = std::fs::remove_dir_all(&home);
+    nova()
+        .current_dir(repo_root().join("examples/05-geometry"))
+        .env("NOVA_HOME", &home)
+        .arg("run")
+        .assert()
+        .success()
+        .stdout(
+            "area 3.141592653589793, perimeter 6.283185307179586\n\
+             area 6, perimeter 10\n\
+             total area 9.141592653589793\n",
+        );
+}

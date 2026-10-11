@@ -186,9 +186,9 @@ fn every_name_is_covered(a: &Analysis, file: FileId, failures: &mut Vec<String>)
 #[test]
 fn every_name_in_the_corpora_is_indexed() {
     let programs = programs();
-    // 6 examples, 133 top-level runtime programs and the modules program,
-    // on 2026-10-10.
-    assert_eq!(programs.len(), 140, "{programs:#?}");
+    // 7 examples, 133 top-level runtime programs and the modules program,
+    // on 2026-10-11.
+    assert_eq!(programs.len(), 141, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -215,8 +215,9 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 6 + 133 + 3 files of user code, and std's 17.
-    assert_eq!(files, 159);
+    // 7 + 133 + 3 files of user code, 05-geometry's library's 2, and
+    // std's 17.
+    assert_eq!(files, 162);
     failures.sort();
     failures.dedup();
     assert!(

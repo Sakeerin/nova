@@ -1,0 +1,18 @@
+//! Lengths, kept apart from bare numbers.
+
+/// A length on the plane, in whatever unit the caller measures in.
+pub record Length {
+    /// How long it is.
+    pub value: Float,
+}
+
+impl Length {
+    /// A length of `value` units.
+    pub fn of(value: Float) -> Length { Length { value: value } }
+
+    /// This length and `other` laid end to end.
+    pub fn plus(self, other: Length) -> Length { Length::of(self.value + other.value) }
+
+    /// This length scaled by `factor`.
+    pub fn times(self, factor: Float) -> Length { Length::of(self.value * factor) }
+}
