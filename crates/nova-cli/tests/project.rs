@@ -600,3 +600,53 @@ fn init_lib_beside_a_program_makes_a_package_with_both() {
         stdout(&tested)
     );
 }
+
+#[test]
+fn init_lib_in_a_package_says_how_to_add_its_library() {
+    // Spec 3.5b §3: `nova init` still refuses a directory with a
+    // nova.toml, and with `--lib` in a package with no library it says how
+    // to add one.
+    let dir = fresh_dir("init-lib-package").join("app");
+    write_project(&dir, "app", HELLO);
+    // CI sets RUST_BACKTRACE, which would add a backtrace to the error.
+    let out = nova()
+        .current_dir(&dir)
+        .env("RUST_BACKTRACE", "0")
+        .args(["init", "--lib"])
+        .assert()
+        .failure();
+    assert_eq!(
+        stderr(&out),
+        "Error: this directory already has a nova.toml; to add a library to its package, \
+         write src/lib.nova\n"
+    );
+    assert_eq!(read(dir.join("nova.toml")), manifest("app"));
+    assert!(!dir.join("src").join("lib.nova").exists());
+    assert!(!dir.join("tests").exists());
+}
+
+#[test]
+fn init_keeps_its_plain_refusal_unless_a_library_is_missing() {
+    // Spec 3.5b §3: otherwise the message is unchanged.
+    let plain = "Error: this directory already has a nova.toml\n";
+    let dir = fresh_dir("init-lib-has-lib").join("lib");
+    write_project(&dir, "lib", HELLO);
+    std::fs::write(dir.join("src").join("lib.nova"), TEMPLATE_LIB).unwrap();
+    // CI sets RUST_BACKTRACE, which would add a backtrace to the error.
+    let out = nova()
+        .current_dir(&dir)
+        .env("RUST_BACKTRACE", "0")
+        .args(["init", "--lib"])
+        .assert()
+        .failure();
+    assert_eq!(stderr(&out), plain);
+    let dir = fresh_dir("init-no-lib-flag").join("app");
+    write_project(&dir, "app", HELLO);
+    let out = nova()
+        .current_dir(&dir)
+        .env("RUST_BACKTRACE", "0")
+        .arg("init")
+        .assert()
+        .failure();
+    assert_eq!(stderr(&out), plain);
+}

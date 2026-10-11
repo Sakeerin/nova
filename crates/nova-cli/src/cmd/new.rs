@@ -60,6 +60,14 @@ pub fn new(cmd: NewCmd) -> Result<()> {
 pub fn init(cmd: InitCmd) -> Result<()> {
     let cwd = std::env::current_dir().context("reading the current directory")?;
     if cwd.join(nova_pm::MANIFEST).exists() {
+        // Spec 3.5b §3: still refused, but `--lib` in a package with no
+        // library says how to add one.
+        if cmd.lib && !cwd.join("src").join("lib.nova").exists() {
+            bail!(
+                "this directory already has a nova.toml; to add a library to its package, \
+                 write src/lib.nova"
+            );
+        }
         bail!("this directory already has a nova.toml");
     }
     let name = match cmd.name {
