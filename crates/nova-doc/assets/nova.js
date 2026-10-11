@@ -92,6 +92,14 @@
   }
 
   input.addEventListener("input", run);
+  // A result on this page changes only the fragment, which would leave
+  // the results shown: following any result clears the search.
+  results.addEventListener("click", function (ev) {
+    if (ev.target.closest("a")) {
+      input.value = "";
+      run();
+    }
+  });
   document.addEventListener("keydown", function (ev) {
     if (ev.key === "/" && document.activeElement !== input) {
       ev.preventDefault();
