@@ -229,3 +229,29 @@ fn the_probe_reaches_an_imported_module() {
     .unwrap();
     assert_eq!(a.probe.receiver, Some(nova_hir::Ty::String));
 }
+
+/// Spec 3.5a §15.2: an analysis keeps the merged AST, std's items
+/// included, and `module_of` maps each item to its module.
+#[test]
+fn an_analysis_keeps_the_merged_ast() {
+    let sources = mem(&[(
+        "keeps/main.nova",
+        "fn main() {}\n\npub fn helper() -> Int { 1 }\n",
+    )]);
+    let a = analyze(Path::new("keeps/main.nova"), &sources, &Options::default())
+        .expect("the entry reads");
+    let file = a.file.as_ref().expect("the merged AST");
+    let defs = a.definitions.as_ref().expect("the definitions");
+    let own: Vec<&str> = file
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| defs.module_of(*i).0 == 0)
+        .filter_map(|(_, item)| match &item.value {
+            nova_ast::Item::Function(f) => Some(f.name.value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(own, ["main", "helper"]);
+    assert!(file.items.len() > own.len(), "std's items are merged in");
+}
