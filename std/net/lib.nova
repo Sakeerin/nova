@@ -378,13 +378,16 @@ impl TcpListener {
     /// task and serves each connection in another, started with `spawn`.
     /// Returns an `IoError` of kind `Other` if the listener is closed.
     ///
-    /// Accepting in a task of its own, so the client can connect from the
-    /// first:
+    /// Here the server accepts and serves in a task of its own, while this
+    /// one runs the client:
     ///
     /// ```
     /// async fn serve_one(listener: TcpListener) {
     ///     let conn = listener.accept().await.unwrap()
-    ///     let asked = conn.read(64).await.unwrap()
+    ///     let mut asked = bytes_from_string("")
+    ///     while asked.len() < 4 { // a read may return fewer bytes than were sent
+    ///         asked = asked.concat(conn.read(64).await.unwrap())
+    ///     }
     ///     assert_eq(asked.to_string().unwrap(), "ping")
     ///     conn.write(bytes_from_string("pong")).await.unwrap()
     ///     conn.close().await.unwrap()
