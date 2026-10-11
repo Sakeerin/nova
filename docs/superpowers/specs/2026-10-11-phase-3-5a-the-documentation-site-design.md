@@ -213,7 +213,10 @@ of its own, before `nova doc`:
 
 - Every site holds a marker file, `target/doc/.nova-doc`. Before
   writing, `nova doc` removes a `target/doc/` that holds the marker, so
-  no page of a removed module is left behind.
+  no page of a removed module is left behind. [Amended 2026-10-11, final
+  review: it removes everything in it but the marker, and writes the
+  marker before any page, so a write cut short still leaves a directory
+  the next `nova doc` replaces.]
 - It does not touch a non-empty `target/doc/` without the marker, such
   as `cargo doc`'s in a Rust checkout. It stops and says to remove that
   directory.
