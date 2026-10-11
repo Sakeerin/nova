@@ -33,6 +33,13 @@ pub enum RootKind {
     Tests,
     /// In no package (spec §4.1).
     Loose,
+    /// A doc test module (spec
+    /// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+    /// §5), at a path of its own that need not be on disk. In a package's
+    /// program it imports what a `tests/` module imports, and no file
+    /// beside it; without a graph (std's doc tests) it imports nothing. A
+    /// program with one keeps only the test each doc test module adds.
+    Doc,
 }
 
 /// A file the loader starts from.
@@ -141,6 +148,53 @@ impl Program {
         }
     }
 
+    /// A program of doc tests (spec 3.5b §5, §6.2), each of `paths` a
+    /// [`RootKind::Doc`] root, read through the `Sources` given to
+    /// `build_test_program_with`: of the package whose `nova.toml` is in
+    /// `package`, or of no package for std's (`None`).
+    ///
+    /// A package's library, `src/lib.nova`, is a root after them. The
+    /// loader then reads it under the path the root names, as `nova doc`'s
+    /// analysis does, rather than the one an import names, which differs on
+    /// Windows under an empty root; a diagnostic's map finds the library in
+    /// the database by that name (spec 3.5b §7). The first doc test stays
+    /// the entry, which names the binary apart from the unit tests'.
+    ///
+    /// With no `paths` there is no root, and a build fails with "nothing
+    /// to compile" rather than build the library's own tests.
+    pub fn doc_tests(package: Option<&Path>, paths: Vec<PathBuf>) -> Program {
+        let mut roots: Vec<Root> = paths
+            .into_iter()
+            .map(|path| Root {
+                path,
+                kind: RootKind::Doc,
+            })
+            .collect();
+        match package {
+            Some(root) => {
+                let lib = under(root, "src/lib.nova");
+                if !roots.is_empty() && lib.is_file() {
+                    roots.push(Root {
+                        path: lib,
+                        kind: RootKind::Src,
+                    });
+                }
+                Program {
+                    roots,
+                    runs: false,
+                    ..Program::for_package(root, Roots::Program)
+                }
+            }
+            None => Program {
+                db: FileDb::new(),
+                graph: None,
+                roots,
+                runs: false,
+                diagnostics: Vec::new(),
+            },
+        }
+    }
+
     /// Whether the graph found an error.
     pub fn has_errors(&self) -> bool {
         self.diagnostics
@@ -243,8 +297,11 @@ pub(crate) struct Loaded {
     pub ast: nova_ast::File,
     /// Its package. `None` for a loose module.
     pub package: Option<PackageId>,
-    /// Whether it is directly in its package's `tests/`.
+    /// Whether it is directly in its package's `tests/`, or a doc test
+    /// module: its tests are named `<file stem>::<function>`.
     pub test_file: bool,
+    /// Whether it is a doc test module (spec 3.5b §6.2).
+    pub doc: bool,
     /// What each of its imports names, by first segment (spec §4.3).
     pub imports: HashMap<String, ImportTarget>,
     /// Every loaded module it could import, by the name an import of it
@@ -274,6 +331,12 @@ enum Place {
     },
     /// A loose file.
     Loose { dir: PathBuf, stem: String },
+    /// A doc test module, by its path (spec 3.5b §5): of the root package,
+    /// or of none for std's. Nothing imports one.
+    Doc {
+        package: Option<PackageId>,
+        path: PathBuf,
+    },
 }
 
 impl Place {
@@ -281,11 +344,16 @@ impl Place {
         match self {
             Place::Package { package, .. } => Some(*package),
             Place::Loose { .. } => None,
+            Place::Doc { package, .. } => *package,
         }
     }
 
     fn is_test(&self) -> bool {
-        matches!(self, Place::Package { tests: true, .. })
+        matches!(self, Place::Package { tests: true, .. } | Place::Doc { .. })
+    }
+
+    fn is_doc(&self) -> bool {
+        matches!(self, Place::Doc { .. })
     }
 }
 
@@ -387,6 +455,7 @@ pub(crate) fn load_program(
             ast: parsed.file,
             package: place.package(),
             test_file: place.is_test(),
+            doc: place.is_doc(),
             imports: HashMap::new(),
             importable: Vec::new(),
         });
@@ -422,13 +491,20 @@ pub(crate) fn load_program(
                 .flatten()
                 .filter_map(|p| sibling_stem(from, p))
                 .collect();
-            if let (Place::Package { package, tests, .. }, Some(graph)) = (from, graph) {
-                names.extend(
+            let edges = match (from, graph) {
+                (Place::Package { package, tests, .. }, Some(graph)) => {
                     visible_edges(graph, *package, *tests)
-                        .into_iter()
-                        .map(|e| e.import_name),
-                );
-            }
+                }
+                (
+                    Place::Doc {
+                        package: Some(package),
+                        ..
+                    },
+                    Some(graph),
+                ) => visible_edges(graph, *package, true),
+                _ => Vec::new(),
+            };
+            names.extend(edges.into_iter().map(|e| e.import_name));
             names.sort();
             names.dedup();
             for name in names {
@@ -474,6 +550,10 @@ impl<'a> Loader<'a> {
                 tests: true,
                 stem,
             },
+            (RootKind::Doc, graph) => Place::Doc {
+                package: graph.map(|_| PackageId(0)),
+                path: root.path.clone(),
+            },
             _ => Place::Loose {
                 dir: root
                     .path
@@ -489,6 +569,7 @@ impl<'a> Loader<'a> {
     fn label(&self, place: &Place) -> String {
         match place {
             Place::Loose { stem, .. } => stem.clone(),
+            Place::Doc { path, .. } => format!("doc/{}", crate::FrontendContext::module_name(path)),
             Place::Package {
                 package: PackageId(0),
                 tests,
@@ -520,7 +601,7 @@ impl<'a> Loader<'a> {
     /// What `import name`, at `at` in the module at `from`, names (spec
     /// §4.3).
     fn find(&mut self, from: &Place, name: &str, at: Span, db: &FileDb) -> Found {
-        let (package, tests) = match from {
+        let (package, tests, siblings) = match from {
             Place::Loose { dir, .. } => {
                 if !self.has(dir, name) {
                     return Found::Nothing;
@@ -531,14 +612,22 @@ impl<'a> Loader<'a> {
                 };
                 return Found::Module(place, dir.join(format!("{name}.nova")));
             }
-            Place::Package { package, tests, .. } => (*package, *tests),
+            Place::Package { package, tests, .. } => (*package, *tests, true),
+            // What a `tests/` module sees, less the files beside it (spec
+            // 3.5b §5.1).
+            Place::Doc {
+                package: Some(package),
+                ..
+            } => (*package, true, false),
+            // std's doc tests import nothing.
+            Place::Doc { package: None, .. } => return Found::Nothing,
         };
         let graph = self.graph();
         let dir = module_dir(graph.package(package), tests);
         let edge = visible_edges(graph, package, tests)
             .into_iter()
             .find(|edge| edge.import_name == name);
-        let file = self.has(&dir, name).then(|| {
+        let file = (siblings && self.has(&dir, name)).then(|| {
             (
                 Place::Package {
                     package,
