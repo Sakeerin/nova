@@ -1,3 +1,27 @@
+//! A mutex and a bounded channel, for tasks that share data.
+//!
+//! A `Mutex` guards a value so that one task at a time works on it: `lock`
+//! returns a `MutexGuard`, which reads and replaces the value until it is
+//! released. `channel` makes a `Channel`, a queue holding at most a fixed
+//! number of values, which tasks fill through a `Sender` and empty through a
+//! `Receiver`, in the order the values were sent. Every module sees these
+//! names without an import, and a module's own definition of one of them
+//! shadows the one here.
+//!
+//! Tasks take turns on one thread, so a task is interrupted only where it
+//! awaits; a mutex is for a value that must stay consistent across an
+//! `.await`. Copying a `Mutex`, `MutexGuard`, `Channel`, `Sender` or
+//! `Receiver`, or passing it to a function, shares it rather than copying it.
+//! The methods that lock, set, release, send, receive or close take
+//! `mut self`, and need a mutable receiver, such as one held in a `mut`
+//! binding.
+//!
+//! A task waiting for a lock, for room in a channel or for a value yields to
+//! the other tasks and tries again, over and over: it keeps the processor
+//! busy while it waits, and a wait that can never end, such as for a lock
+//! that is never released, goes on forever rather than being reported as a
+//! deadlock.
+
 // Nova standard library -- synchronisation.
 //
 // An *async* mutex, which is the primitive a cooperative executor needs. A
@@ -13,6 +37,15 @@
 // cannot see it and a never-released lock spins instead of being diagnosed.
 // See the design doc's §5 for the condition that would justify revisiting.
 
+/// A value of type `T` that one task at a time can work on, through a
+/// `MutexGuard`.
+///
+/// `lock` and `try_lock` return a guard, and the guard's `release` unlocks
+/// the mutex. Nothing releases a guard for you: one never released leaves the
+/// mutex locked for the rest of the program. A mutex is not re-entrant: a
+/// task that locks one it already holds waits forever. It makes no fairness
+/// guarantee either: when several tasks wait, which one gets the lock next is
+/// unspecified.
 pub record Mutex<T> { locked: Bool, value: T }
 
 // The right to touch a `Mutex`'s value, and the obligation to release it.
@@ -68,9 +101,16 @@ pub record Mutex<T> { locked: Bool, value: T }
 // resurrected guard writes straight to the live mutex. Documented, not
 // enforced. `get` is not guarded by the flag at all, deliberately, and gives
 // its own reason below.
+/// The right to work on a locked `Mutex`'s value, and the duty to release
+/// it.
+///
+/// `get` reads the value and `set` replaces it. Call `release` when done: the
+/// mutex stays locked until then. After `release`, `set` and a second
+/// `release` do nothing, though `get` still reads the value, unguarded.
 pub record MutexGuard<T> { owner: Mutex<T>, released: Bool }
 
 impl<T> Mutex<T> {
+    /// Returns an unlocked mutex holding `value`.
     pub fn new(value: T) -> Mutex<T> { Mutex { locked: false, value: value } }
 
     // Take the flag if it is free. Private: the two public entry points differ
@@ -91,6 +131,10 @@ impl<T> Mutex<T> {
     // Take the lock, or report that it is held. The caller that gets `Some`
     // receives the guard it needs; the caller that gets `None` has nothing it
     // could mistake for one.
+    /// Locks the mutex and returns a guard if it is free, or returns `None`
+    /// if it is locked, even by the calling task.
+    ///
+    /// It is not `async`, and never waits.
     pub fn try_lock(mut self) -> Option<MutexGuard<T>> {
         if self.take() { Some(MutexGuard { owner: self, released: false }) } else { None }
     }
@@ -102,6 +146,13 @@ impl<T> Mutex<T> {
     // task behind everything currently runnable, so the holder always gets a
     // turn and can always release; which *waiter* wins afterwards is
     // unspecified, and this mutex makes no fairness guarantee.
+    /// Locks the mutex, waiting while it is locked, and returns a guard.
+    ///
+    /// An `async fn`. If the mutex is free, it locks it without suspending;
+    /// otherwise the calling task yields to the other tasks and tries again
+    /// until the mutex is released. The wait keeps the processor busy, and
+    /// goes on forever, with no deadlock reported, if the mutex is never
+    /// released, as when the calling task already holds it.
     pub async fn lock(mut self) -> MutexGuard<T> {
         while !self.take() { yield_now().await }
         MutexGuard { owner: self, released: false }
@@ -129,6 +180,13 @@ impl<T> MutexGuard<T> {
     // because nothing unwinds across a poll boundary. A stale read is also the
     // harmless one of the three: it cannot corrupt the mutex, where a stale
     // `set` or `release` writes to it. Documented, not enforced.
+    /// Returns the guarded value.
+    ///
+    /// A record or an array is shared rather than copied, so a change to its
+    /// fields or elements changes the value the mutex holds. A value with
+    /// nothing to change in place, such as an `Int`, `Float`, `Bool`, `Char`
+    /// or `String`, comes out as a copy: replace it with `set`. `get` still
+    /// answers after `release`, though the value is then unguarded.
     pub fn get(self) -> T { self.owner.value }
 
     // Replace the guarded value -- the other half of the pair `Vec<T>` already
@@ -141,6 +199,9 @@ impl<T> MutexGuard<T> {
     // value while that task is inside its critical section. Pinned by
     // `tests/runtime/sync_mutex_stale_guard_cannot_write.nova`; deleting the
     // line below fails that fixture and no other.
+    /// Replaces the guarded value with `v`.
+    ///
+    /// Does nothing if the guard has been released.
     pub fn set(mut self, v: T) {
         if self.released { return }
         self.owner.value = v
@@ -149,6 +210,9 @@ impl<T> MutexGuard<T> {
     // Release the lock. Idempotent -- a second call is a no-op, and `released`
     // makes that true rather than only stated: without it this body is an
     // unconditional write that would free a lock the caller no longer owns.
+    /// Unlocks the mutex, so another task can lock it.
+    ///
+    /// Releasing the same guard again does nothing.
     pub fn release(mut self) {
         if self.released { return }
         self.released = true
@@ -174,6 +238,13 @@ impl<T> MutexGuard<T> {
 // `std/collections/lib.nova:164` carry the same warning for hash bucketing.
 record Ring<T> { data: [T], head: Int, len: Int }
 
+/// A first-in, first-out queue of values of type `T` that holds at most a
+/// fixed number of them, from `channel`.
+///
+/// Values go in through a `Sender` and come out through a `Receiver`, in the
+/// order they were sent. `sender` and `receiver` make as many of each as are
+/// needed, all sharing the one channel. Once a sender closes it, no more
+/// values go in, but those already in it can still be received.
 pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 
 // Two views onto one channel. Records are reference types, so both observe
@@ -207,8 +278,16 @@ pub record Channel<T> { ring: Ring<T>, cap: Int, closed: Bool }
 // DELIBERATELY NOT RECORDED, because it moves: every number this citation
 // has ever carried has been wrong, including the one it was written with.
 // Grep the quoted phrase.
+/// The sending side of a `Channel`, from `Channel::sender`.
+///
+/// Every `Sender` of a channel sends into the same queue, and `close` on any
+/// of them closes the channel for all.
 pub record Sender<T> { ch: Channel<T> }
 
+/// The receiving side of a `Channel`, from `Channel::receiver`.
+///
+/// Every `Receiver` of a channel takes from the same queue, so each value is
+/// received once, by whichever receiver takes it first.
 pub record Receiver<T> { ch: Channel<T> }
 
 // A bounded channel holding at most `buffer` values.
@@ -221,14 +300,21 @@ pub record Receiver<T> { ch: Channel<T> }
 // The call site must annotate: `let ch: Channel<Int> = channel(2)`. The type
 // parameter appears only in the return type, and Nova has no turbofish --
 // `channel<Int>(2)` is a parse error, read as two comparisons.
+/// Returns a new channel, open and empty, that holds at most `buffer` values.
+///
+/// A `buffer` below 1 counts as 1. Annotate the binding with the value type,
+/// as in `let ch: Channel<Int> = channel(8)`: nothing in the call names it.
+/// Room for all `buffer` values is allocated by the first send.
 pub fn channel<T>(buffer: Int) -> Channel<T> {
     let cap = if buffer < 1 { 1 } else { buffer }
     Channel { ring: Ring { data: [], head: 0, len: 0 }, cap: cap, closed: false }
 }
 
 impl<T> Channel<T> {
+    /// Returns a `Sender` for the channel.
     pub fn sender(self) -> Sender<T> { Sender { ch: self } }
 
+    /// Returns a `Receiver` for the channel.
     pub fn receiver(self) -> Receiver<T> { Receiver { ch: self } }
 
     // Enqueue, or report refusal. Private: `Sender::try_send` is the public
@@ -267,11 +353,22 @@ impl<T> Sender<T> {
     // Send if there is room. False when the channel is full OR closed; a
     // caller that needs to distinguish them should use `send`, which returns
     // false only for closed.
+    /// Sends `v` and returns `true` if the channel has room, or returns
+    /// `false` without sending it if the channel is full or closed.
+    ///
+    /// It is not `async`, and never waits. To tell a full channel from a
+    /// closed one, use `send`.
     pub fn try_send(mut self, v: T) -> Bool { self.ch.push(v) }
 
     // Refuse all further sends. Buffered values stay readable, so a producer
     // may close the instant it stops producing and the consumer still drains.
     // Idempotent: a second call sets an already-set flag.
+    /// Closes the channel: later sends, through any sender, return `false`.
+    ///
+    /// Values already in the channel stay there for the receivers, whose
+    /// `recv` returns `None` once they are all taken. Closing a closed channel
+    /// does nothing. Nothing closes a channel for you: close it when done
+    /// sending, or a receiver waiting in `recv` waits forever.
     pub fn close(mut self) { self.ch.closed = true }
 
     // Send, waiting while the channel is full. Returns false only when the
@@ -283,6 +380,14 @@ impl<T> Sender<T> {
     // cost is stated rather than hidden: a waiter stays *runnable*, so
     // `report_deadlock` cannot see it, and a producer blocked on a channel
     // nobody drains spins instead of being diagnosed.
+    /// Sends `v`, waiting while the channel is full, and returns `true` once
+    /// it is in, or `false`, without sending it, if the channel is closed.
+    ///
+    /// An `async fn`. If the channel has room, it sends without suspending;
+    /// otherwise the calling task yields to the other tasks and tries again
+    /// until there is room or the channel is closed. The wait keeps the
+    /// processor busy, and goes on forever, with no deadlock reported, if no
+    /// task ever takes a value out or closes the channel.
     pub async fn send(mut self, v: T) -> Bool {
         while !self.ch.push(v) {
             if self.ch.closed { return false }
@@ -295,6 +400,10 @@ impl<T> Sender<T> {
 impl<T> Receiver<T> {
     // Take a value if one is buffered. None means empty, and says nothing
     // about whether more will arrive -- `recv` is what distinguishes those.
+    /// Takes the oldest value in the channel, or returns `None` if it is
+    /// empty, whether or not it is closed.
+    ///
+    /// It is not `async`, and never waits.
     pub fn try_recv(mut self) -> Option<T> { self.ch.pop() }
 
     // Take the next value, waiting while the channel is empty and open.
@@ -307,6 +416,14 @@ impl<T> Receiver<T> {
     //
     // Buffered values are drained before the close is reported, because `pop`
     // is tried before `closed` is read on every iteration.
+    /// Takes the oldest value in the channel, waiting while it is empty and
+    /// open, or returns `None` once it is closed and empty.
+    ///
+    /// An `async fn`. If a value is there, it takes it without suspending;
+    /// otherwise the calling task yields to the other tasks and tries again.
+    /// The values still in a closed channel are received before `None`. The
+    /// wait keeps the processor busy, and goes on forever, with no deadlock
+    /// reported, if no task ever sends a value or closes the channel.
     pub async fn recv(mut self) -> Option<T> {
         let mut out = self.ch.pop()
         while out.is_none() {
