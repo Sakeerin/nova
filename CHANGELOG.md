@@ -140,6 +140,15 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`examples/05-geometry`,** a program and the path library beside
   it.
 - **Each release attaches std's documentation site.**
+- **Doc tests.** `nova test` runs the Nova code examples in a library's
+  docs, after its unit and integration tests, each as a test named by
+  the item it documents and the example's line. `nova test --doc` runs
+  them alone, and `nova test --doc --std` runs std's. A `# ` line in an
+  example runs but is not shown, and a compile error in an example
+  points at its line in the doc comment. ADR 0035.
+- **std's examples:** every module's docs have an example that runs,
+  and so do 15 items' docs. `examples/05-geometry`'s library has two,
+  which CI runs with the installed `nova`.
 
 ### Changed
 
@@ -149,6 +158,13 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line opens one, and above a first item one sits on.
 - **A panic answering code actions or semantic tokens** no longer ends
   the language server.
+- **`nova init --lib` in a package without a library** says how to add
+  one: write `src/lib.nova`. It still refuses a directory that has a
+  `nova.toml`.
+- **`ignore` code blocks are highlighted as Nova** in `nova doc`'s site.
+  An info string's empty words are dropped, so a block whose info string
+  is `,text` is `text`, no longer Nova.
+- **Hover leaves out an example's hidden lines,** as the site does.
 - **`nova fmt` keeps a blank line between imports,** as gofmt does, and
   sorts each group of imports on its own (ADR 0028).
 - **E0060's note gives way to its fix.** Where a `let` or a parameter
@@ -191,6 +207,12 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `nova run`, `build`, `check` and `test` sync a package's dependencies
   first, and a sync's errors stop them before compiling.
 - A warning in a downloaded dependency is not shown.
+
+### Fixed
+
+- **A test program may hold a closure,** or a function passed as a
+  value. `nova test` used to fail to build it, with an internal codegen
+  error.
 
 ## [0.2.0] - 2026-10-06
 

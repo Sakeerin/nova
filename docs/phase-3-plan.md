@@ -404,6 +404,18 @@ a PR, and a merge on the user's word.
   three. std's site is attached by the next tag's release. 3.5b, `nova
   test --doc`, has its own spec next.
 
+  **Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** 3.5b,
+  "Doc tests", is built
+  (`docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`;
+  ADR 0035): `nova test` runs a library's code examples after its unit
+  tests, `--doc` runs them alone and `--doc --std` runs std's; each of
+  std's 17 modules has an example, with 15 more on single items; and
+  `examples/05-geometry`'s library has two. Its gate's tests run in CI's
+  Test job on three systems, and `.github/scripts/doc-gate.sh` runs the
+  example's doc tests with the installed `nova` in the install job; on
+  this branch they pass on Linux, and the pull request's CI runs them on
+  all three. With 3.5b, 3.5 is complete.
+
 ### 3.6 — The `v0.3.0` release
 - The crates.io blockers of §2 item 8 are fixed, and the names are checked
   again. Then the crates are published at 0.3.0, in dependency order, under

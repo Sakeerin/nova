@@ -54,7 +54,7 @@ nova-mir            → Mid-level IR
 | `nova-pm` | Package manager: `nova.toml`, the package graph, `nova.lock` and the resolver; it never touches the network (ADR 0030, ADR 0031) |
 | `nova-index` | The package index: reading, downloading, packing, the sync step and publishing (ADR 0031) |
 | `nova-bundler` | Frontend bundler |
-| `nova-doc` | Documentation generator: `nova doc`'s site, from an analysis of the program and of std, with signatures linked through the checker's index and Markdown docs (ADR 0034) |
+| `nova-doc` | Documentation generator: `nova doc`'s site, from an analysis of the program and of std, with signatures linked through the checker's index and Markdown docs (ADR 0034); a library's and std's code examples as doc test modules, which `nova test` runs (ADR 0035) |
 | `nova-bench-http` | Keep-alive HTTP load generator for benchmarking `std/http` |
 
 ## Key Design Decisions

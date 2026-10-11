@@ -50,6 +50,11 @@ dependencies' and std's, from the `///` comments above each item;
 `nova doc --open` opens it. Each GitHub release also attaches std's
 site.
 
+The Nova code examples in a library's docs are tests: `nova test` runs
+them after the library's other tests, and `nova test --doc` runs them
+alone. A line of an example that starts with `# ` runs but is not
+shown.
+
 ---
 
 ## How to use this bundle
