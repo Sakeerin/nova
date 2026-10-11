@@ -2,9 +2,9 @@ name: Release
 
 # On a `v*` tag: build the four targets, pack and smoke-test each archive,
 # package the VS Code extension, and publish a GitHub release with the
-# archives, the `.vsix` and SHA256SUMS. On a pull request that changes how
-# `nova` is built or released, run every job but the publish, so a broken
-# release shows before any tag exists (spec
+# archives, the `.vsix`, std's documentation site and SHA256SUMS. On a
+# pull request that changes how `nova` is built or released, run every job
+# but the publish, so a broken release shows before any tag exists (spec
 # docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §7).
 on:
   push:
@@ -117,9 +117,38 @@ jobs:
           path: tools/vscode-nova/*.vsix
           if-no-files-found: error
 
+  # std's documentation site, for the release (spec
+  # docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
+  # §14). Its artifact is named `archive-std-docs` so that `prepare`'s
+  # `archive-*` download takes it.
+  std-docs:
+    name: Write std's documentation site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build nova
+        run: cargo build --locked -p nova-cli
+      - name: Write and pack the site
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          site="$RUNNER_TEMP/std-docs"
+          mkdir "$site"
+          (cd "$site" && "$GITHUB_WORKSPACE/target/debug/nova" doc --std)
+          mkdir -p dist
+          tar -C "$site/target" -czf "dist/nova-std-docs-$version.tar.gz" doc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-std-docs
+          path: dist/nova-std-docs-*.tar.gz
+          if-no-files-found: error
+
   prepare:
     name: Prepare the release
-    needs: [build, vsix]
+    needs: [build, vsix, std-docs]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,11 +163,13 @@ jobs:
           set -euo pipefail
           version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
           # An archive is nova-<version>-<target>; the extension is
-          # nova-vscode-<version>.vsix.
+          # nova-vscode-<version>.vsix; std's site is
+          # nova-std-docs-<version>.tar.gz.
           archives=$(ls release/dist | grep -c -E '^nova-[0-9]' || true)
           vsix=$(ls release/dist | grep -c -E '^nova-vscode-.+\.vsix$' || true)
-          if [ "$archives" -ne 4 ] || [ "$vsix" -ne 1 ]; then
-            echo "::error::expected 4 archives and 1 .vsix, found $archives and $vsix"
+          docs=$(ls release/dist | grep -c -E '^nova-std-docs-.+\.tar\.gz$' || true)
+          if [ "$archives" -ne 4 ] || [ "$vsix" -ne 1 ] || [ "$docs" -ne 1 ]; then
+            echo "::error::expected 4 archives, 1 .vsix and std's site, found $archives, $vsix and $docs"
             ls release/dist
             exit 1
           fi
