@@ -6185,6 +6185,33 @@ fn an_unfiltered_run_with_no_tests_still_succeeds() {
     );
 }
 
+/// A function value in a test program: a closure, and a named function
+/// passed as a value. The type checker numbers the functions it lifts for
+/// them past every resolved definition, where the synthesized `main` took
+/// its `DefId` too, so the first of them collided with it and codegen
+/// failed ("mismatched argument count").
+#[test]
+fn a_test_program_may_hold_function_values() {
+    let dir = write_test_project(
+        "nova-test-cli-function-values",
+        "fn inc(x: Int) -> Int { x + 1 }\n\
+         fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }\n\
+         @test\nfn a_closure() {\n    let f = |x: Int| x + 1\n    assert_eq(f(1), 2)\n}\n\
+         @test\nfn a_named_function_as_a_value() {\n    assert_eq(apply(inc, 1), 2)\n    \
+         assert_eq(Some(1).map(inc).unwrap_or(0), 2)\n}\n",
+    );
+    let assert = nova().current_dir(&dir).arg("test").assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(
+        stdout,
+        "running 2 tests\n\
+         test a_closure ... ok\n\
+         test a_named_function_as_a_value ... ok\n\
+         \n\
+         test result: ok. 2 passed; 0 failed; 0 trapped; 2 total\n"
+    );
+}
+
 // === Task 1 (std/fs on Strings increment): `std/io` error types, and the
 // `eprint`/`eprintln` builtins ===
 

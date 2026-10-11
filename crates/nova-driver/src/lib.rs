@@ -651,7 +651,7 @@ impl FrontendContext {
     /// Run load → lex → parse → resolve → typecheck across all modules.
     /// Returns the merged typed module, the `@test` functions collected along
     /// the way (source order, per `nova_resolver::TestFn`'s doc comment), and
-    /// a `DefId` guaranteed unused by anything resolution allocated — or
+    /// a `DefId` that no definition and no function of the module holds — or
     /// `None` if any stage reported errors.
     ///
     /// `with_test_module` seeds `std/test` (`assert`/`assert_eq`/`assert_ne`)
@@ -661,14 +661,16 @@ impl FrontendContext {
     /// `compile_file`, `build_file`, `build_file_release`) pass `false`, so
     /// those names never resolve in an ordinary compile.
     ///
-    /// The fresh `DefId` is `resolved.definitions.defs().len()`: `Definitions`
-    /// documents `defs` as one global counter shared by every definition kind
-    /// (functions, sums, records, traits, methods, externs, associated
-    /// types), allocated by `push_def` in strict `Vec::len()` order — so every
-    /// id resolution ever handed out is `< that length`, and this value
-    /// cannot collide with any of them. `build_test_binary` uses it to name a
-    /// synthesized `main` that cannot alias an id one of the `@test`
-    /// functions it calls by `DefId` already owns.
+    /// The fresh `DefId` is past both kinds of id the module holds.
+    /// `Definitions` documents `defs` as one global counter shared by every
+    /// definition kind (functions, sums, records, traits, methods, externs,
+    /// associated types), allocated by `push_def` in strict `Vec::len()`
+    /// order, so every id resolution handed out is `< defs().len()`. The type
+    /// checker then numbers the functions it lifts for closures and for named
+    /// functions used as values from `defs().len()` on, so the fresh id is
+    /// also past every function's. `build_test_binary` uses it to name a
+    /// synthesized `main` that cannot alias an id a `@test` function or a
+    /// lifted closure already owns.
     fn check(
         &mut self,
         with_test_module: bool,
@@ -741,7 +743,6 @@ impl FrontendContext {
         if self.errors > 0 {
             return Ok(None);
         }
-        let fresh_def_id = DefId(resolved.definitions.defs().len() as u32);
         let mut tests = resolved.tests;
         name_tests(&mut tests, &resolved.definitions, &modules);
 
@@ -759,6 +760,13 @@ impl FrontendContext {
         }
         let mut module = checked.module;
         keep_the_entry_main(&mut module, &resolved.definitions);
+        let fresh_def_id = DefId(
+            module
+                .functions
+                .iter()
+                .map(|f| f.def_id.0 + 1)
+                .fold(resolved.definitions.defs().len() as u32, u32::max),
+        );
         Ok(Some((module, tests, fresh_def_id)))
     }
 }
