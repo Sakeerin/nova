@@ -42,6 +42,17 @@ approved by the user on 2026-10-11.
 - Read it before Task 1: it is the authority this plan argues from.
 - Its §20 lists 28 decisions, and its §2 the code as it stood.
 
+**Checked on 2026-10-11, before execution:**
+- **A dry run** applied the code of Tasks 1 to 14, 20 and 21 in a scratch
+  worktree, and ran each step. Three faults were found and are fixed here:
+  a clippy `type_complexity` in Task 4, a field nothing read in Task 11,
+  and two corpus counts in `index_complete.rs` that Task 20's example
+  moves. With them fixed, every expected value matched.
+- **A fresh read-only fact-check** read the plan against the spec and the
+  code. It found a panic in Task 7's first version of the new
+  `line_before_item` (fixed, with a test), and the gaps decisions 22 and
+  23 now record.
+
 ## Global Constraints
 
 - **The workspace's minimum Rust stays 1.78,** edition 2021. CI's MSRV job
@@ -161,6 +172,9 @@ code:
     `[name, kind, path, url, summary]`, one per line, written with
     `serde_json`, sorted by path, then kind, then URL. It holds packages,
     modules, items, members, impl methods, primitive types and builtins.
+    A root module's items have the path `package::Item`, without the
+    module's name, since the root module's page is the package's (spec
+    §10.1 writes `package::module::Item::member`).
 15. **The CLI prints warnings** through `render::emit_all` and errors the
     same way, then fails with "could not document due to N previous
     error(s)". On success it prints the start page's path alone on
@@ -186,16 +200,28 @@ code:
 21. **The release workflow's triggers do not change.** This branch
     changes `Cargo.lock` and `crates/nova-cli/Cargo.toml`, which already
     trigger it, so its pull request runs the new job.
-22. **Where the plan refines the spec, the plan records it:** decisions
-    3, 4, 7, 9 to 12, 14 and 20 make the spec exact where it is silent or
-    loose, and the spec does not repeat them.
+22. **An impl on a type of its own package that the site does not
+    document is not shown,** under its type or anywhere: the type has no
+    page, and its methods could not be reached. Spec §5.2's "otherwise on
+    its own module's page" covers impls on another package's type and a
+    user's impls on a primitive. So std's completeness check (§12.2)
+    counts the `pub` methods of inherent impls on public types and
+    primitives only; `std/json`'s private `P`, say, needs none.
+23. **`nova-doc` also depends on `nova-typeck`, `serde_json` and
+    `thiserror`** (spec §15.1 lists the rest): `builtin_text` for the
+    builtins' signatures, JSON strings for the search index, and
+    `WriteError`, since agent.md §4 asks errors to derive through
+    `thiserror`. All three are already locked.
+24. **Where the plan refines the spec, the plan records it:** decisions
+    3, 4, 7, 9 to 12, 14, 20, 22 and 23 make the spec exact where it is
+    silent or loose, and the spec does not repeat them.
 
 ## File Structure
 
 | File | Task | Responsibility |
 |---|---|---|
 | `crates/nova-fmt/src/organize.rs`, `tests/organize.rs` | 1 | Follow-up 1 |
-| `crates/nova-driver/src/program.rs`, `tests/analyze.rs` | 2 | Follow-up 2 |
+| `crates/nova-driver/src/program.rs`, `tests/packages.rs` | 2 | Follow-up 2 |
 | `crates/nova-lsp/src/{analysis,lib}.rs` | 3 | Follow-up 3 |
 | `crates/nova-driver/tests/broken.rs` | 4 | Follow-up 4 |
 | `crates/nova-cli/tests/{lsp_navigation,lsp_fixes}.rs`, `docs/phase-3-plan.md`, `nova-spec/40-TOOLING.md` | 5 | Follow-ups 5, 6, 7 |
@@ -207,13 +233,13 @@ code:
 | `crates/nova-doc/src/model.rs`, `src/lib.rs` | 11 | The model |
 | `crates/nova-doc/src/{render,search}.rs`, `assets/{nova.css,nova.js}` | 12 | Pages, search, themes |
 | `crates/nova-doc/src/{links,write}.rs` | 13 | The link check; writing the site |
-| `crates/nova-cli/{Cargo.toml,src/main.rs,src/cmd/{mod,doc}.rs}`, `tests/doc.rs` | 14 | `nova doc` |
+| `crates/nova-cli/{src/main.rs,src/cmd/{mod,doc}.rs}`, `tests/doc.rs` | 14 | `nova doc` |
 | `crates/nova-doc/tests/{common/mod.rs,std_docs.rs}`, `std/{core}/lib.nova` | 15 | The completeness check; std/core |
 | `std/{collections,strings,bytes,fmt}/lib.nova` | 16 | std's docs, part 2 |
 | `std/{io,fs,net,process}/lib.nova` | 17 | std's docs, part 3 |
 | `std/{task,sync,time,log}/lib.nova` | 18 | std's docs, part 4 |
 | `std/{json,http,crypto,test}/lib.nova`, `tests/std_docs.rs` | 19 | std's docs, part 5 |
-| `examples/05-geometry/**`, `crates/nova-cli/tests/run_tests.rs` | 20 | The example |
+| `examples/05-geometry/**`, `crates/nova-cli/tests/run_tests.rs`, `crates/nova-driver/tests/index_complete.rs` | 20 | The example |
 | `crates/nova-doc/tests/gate.rs`, `.github/scripts/doc-gate.sh`, `.github/workflows/ci.yml` | 21 | The gate |
 | `.github/workflows/release.yml` | 22 | std's site on each release |
 | `docs/adr/0034-the-documentation-generator.md` (new), and the records Task 23 lists | 23 | ADR, notes, CHANGELOG, README, ARCHITECTURE, sweep |
@@ -255,8 +281,9 @@ code:
   it stood at `14dc6e1`. If `cargo fmt` reflowed an earlier task's code
   and an anchor differs, follow the code's meaning and ledger the
   difference.
-- **No local paths and no personal names** go into the repository, a
-  commit message or the PR body.
+- **No local paths and no personal names** go into a commit message, the
+  PR body, or any file but this plan, whose commands name this machine's
+  paths as earlier plans named theirs.
 
 ---
 ### Task 0: The baseline
@@ -678,6 +705,10 @@ impl Sources for Cut {
         }
     }
 }
+
+/// A cut to analyse: its file, its text, and the other files `Cut` serves
+/// (follow-up 4).
+type Job = (PathBuf, String, Vec<(PathBuf, String)>);
 ```
 
 - [ ] **Step 2: The planted program**
@@ -711,7 +742,7 @@ In `cut_programs_never_panic_or_hang`, make each job a triple. Replace
 with
 
 ```rust
-    let mut jobs: Vec<(PathBuf, String, Vec<(PathBuf, String)>)> = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     for (path, n) in &programs {
         let text = std::fs::read_to_string(path).unwrap();
         for cut in cuts(&text, *n) {
@@ -811,9 +842,10 @@ and after the final `assert!(checked > 0, "no cut program had a fix");`:
 
 - [ ] **Step 5: Run the sweep**
 
-Run: `cd /home/user/nova && cargo test -p nova-driver --test broken -- --nocapture 2>&1 | grep -E "fixes checked|test result|panicked" | head`
-Expected: `test result: ok. 1 passed`, and a "fixes checked" count at
-least 2 above PR #108's 44. Ledger the count.
+Run: `cd /home/user/nova && cargo test -p nova-driver --test broken -- --nocapture 2>&1 | grep -E "fixes checked|test result|panicked" | head && cargo clippy -p nova-driver --all-targets --locked -- -D warnings 2>&1 | tail -2`
+Expected: `test result: ok. 1 passed`, and "57 fixes checked" (the
+plan's dry run, 2026-10-11; PR #108's sweep checked 44); then `Finished`.
+Ledger the count.
 
 - [ ] **Step 6: The mutant**
 
@@ -992,13 +1024,32 @@ Append to `lines.rs`'s `mod tests`:
             (crlf.find("/* about").unwrap(), "import m::{x}\r\n\r\n".to_string())
         );
     }
+
+    #[test]
+    fn comments_sharing_a_line_above_an_item_go_with_it() {
+        // Follow-up 9: two comments on one line, and a block comment ending
+        // on the item's own line, are walked over whole, not sliced.
+        let two = "/* a */ // b\nfn f() {}\n";
+        assert_eq!(
+            line_before_item(two, two.find("fn f").unwrap(), "import m::{x}"),
+            (0, "import m::{x}\n\n".to_string())
+        );
+        let shared = "/* a\n */ fn f() {}\n";
+        assert_eq!(
+            line_before_item(shared, shared.find("fn f").unwrap(), "import m::{x}"),
+            (0, "import m::{x}\n\n".to_string())
+        );
+    }
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `cd /home/user/nova && cargo test -p nova-diagnostics lines 2>&1 | grep -E "FAILED|panicked|test result" | head`
-Expected: both new tests FAIL. The first inserts at byte 16, inside the
-comment. The second inserts at `fn f`'s line, below the comment.
+Expected: all three new tests FAIL. The first inserts at byte 16, inside
+the comment. The second and third insert at `fn f`'s line, below the
+comment. The third also guards the new loop's slice: the plan's
+fact-check found that the loop, as first written, panicked on both of its
+texts.
 
 - [ ] **Step 3: The rules**
 
@@ -1050,8 +1101,13 @@ with:
     let nl = ending(text);
     let mut at = line_start(text, item_start);
     // The comments directly above, each with no blank line after it (spec
-    // 3.5a §3, follow-up 9).
+    // 3.5a §3, follow-up 9). One that ends on the line `at` starts, beside
+    // a comment already taken or the item, comes with that line.
     for &(start, end) in comments_before(text, at).iter().rev() {
+        if end > at {
+            at = at.min(line_start(text, start));
+            continue;
+        }
         if text[end..at].matches('\n').count() > 1 {
             break;
         }
@@ -1503,7 +1559,8 @@ mod tests {
 ```
 
 Add `mod`-level `use` lines later, with the code. Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^error" | sort | uniq -c | head`
-Expected: E0425 errors naming `highlight`, `render` and `join`.
+Expected: E0425 errors naming `highlight`, `render` and `join`, and E0433
+errors naming `Docs` and `Spanned`.
 
 - [ ] **Step 3: The highlighter**
 
@@ -1931,7 +1988,7 @@ mod tests {
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^error" | sort | uniq -c | head`
 Expected: E0425 and E0433 errors naming `gap`, `FileText`, `decl_start`,
-`fn_end`, `render`, `Span` and `Token`.
+`fn_end`, `render`, `Span`, `Token` and `FileId`.
 
 - [ ] **Step 2: The code**
 
@@ -2408,6 +2465,15 @@ mod tests {
     }
 
     #[test]
+    fn a_clashing_id_gets_a_number() {
+        // Spec §6.2: the later of two equal ids on one page.
+        let mut taken = HashSet::new();
+        assert_eq!(unique(&mut taken, "impl.Vec.method.a".to_string()), "impl.Vec.method.a");
+        assert_eq!(unique(&mut taken, "impl.Vec.method.a".to_string()), "impl.Vec.method.a-2");
+        assert_eq!(unique(&mut taken, "impl.Vec.method.a".to_string()), "impl.Vec.method.a-3");
+    }
+
+    #[test]
     fn every_builtin_a_module_sees_has_docs() {
         for b in Builtin::ALL.iter().filter(|b| !Builtin::STD_ONLY.contains(*b)) {
             assert!(BUILTINS.iter().any(|(n, _)| *n == b.name()), "{}", b.name());
@@ -2417,7 +2483,7 @@ mod tests {
 ```
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^error" | sort | uniq -c | head`
-Expected: E0412, E0422 and E0425 errors naming `Site`, `Documented`,
+Expected: E0425, E0432 and E0433 errors naming `Site`, `Documented`,
 `Failure`, `document_package` and the rest.
 
 - [ ] **Step 2: The types**
@@ -2440,7 +2506,7 @@ use nova_driver::{analyze_program, Analysis, DiskSources, Options, Program, Root
 use nova_lexer::Token;
 use nova_pm::PackageId;
 use nova_resolver::index::rank;
-use nova_resolver::{Builtin, DefId, DefKind, Definitions, ModuleId, Role, Target};
+use nova_resolver::{Builtin, DefKind, Definitions, ModuleId, Role, Target};
 
 use crate::highlight::highlight;
 use crate::markdown::{self, Docs};
@@ -2449,8 +2515,11 @@ use crate::signature::{self, FileText};
 /// A program documented: its site, and the warnings its analysis found,
 /// with the files they point into.
 pub struct Documented {
+    /// The site, for [`crate::write_site`].
     pub site: Site,
+    /// The files the warnings point into.
     pub db: FileDb,
+    /// The analysis's warnings, for the caller to print.
     pub warnings: Vec<Diagnostic>,
 }
 
@@ -2458,7 +2527,9 @@ pub struct Documented {
 pub enum Failure {
     /// Its analysis found errors, for the caller to print.
     Diagnostics {
+        /// The files the diagnostics point into.
         db: FileDb,
+        /// Every diagnostic the analysis found, errors among them.
         diagnostics: Vec<Diagnostic>,
     },
     /// Anything else, in a sentence.
@@ -2817,8 +2888,6 @@ struct Ctx<'a> {
     uses: HashMap<Span, Target>,
     /// Each rendered module's file, lexed once.
     texts: HashMap<FileId, FileText<'a>>,
-    /// Each record's, sum type's and trait's id, by its merged item index.
-    by_item: HashMap<usize, DefId>,
 }
 
 impl<'a> Ctx<'a> {
@@ -2837,17 +2906,6 @@ impl<'a> Ctx<'a> {
                 uses.insert(o.span, o.target);
             }
         }
-        let by_item = defs
-            .defs()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, d)| match d.kind {
-                DefKind::Record { item_index }
-                | DefKind::Sum { item_index, .. }
-                | DefKind::Trait { item_index } => Some((item_index, DefId(i as u32))),
-                _ => None,
-            })
-            .collect();
         let mut ctx = Ctx {
             a,
             defs,
@@ -2857,7 +2915,6 @@ impl<'a> Ctx<'a> {
             program,
             uses,
             texts: HashMap::new(),
-            by_item,
         };
         for m in 0..defs.module_count() {
             let m = ModuleId(m as u32);
@@ -3640,7 +3697,7 @@ pub(crate) fn sample_site() -> Site {
 - [ ] **Step 7: Run the tests**
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^test result|FAILED|panicked" | head -20`
-Expected: `test result: ok. 23 passed`. Three cases may need a ruling
+Expected: `test result: ok. 24 passed`. Three cases may need a ruling
 rather than a code change:
 - if the checker refuses `impl Int` outside std, remove the `impl Int`
   part of `IMPLS` and its two assertions, and ledger that;
@@ -3792,7 +3849,8 @@ mod tests {
 ```
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^error" | sort | uniq -c | head`
-Expected: E0425 errors naming `pages` and `index`.
+Expected: E0425 errors naming `pages` and `index`, and two E0277 errors
+that follow from them.
 
 - [ ] **Step 2: The renderer**
 
@@ -4499,7 +4557,7 @@ pub(crate) const JS: &str = include_str!("../assets/nova.js");
 - [ ] **Step 5: Run the tests, clippy, and commit**
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^test result|FAILED|panicked" && cargo clippy -p nova-doc --all-targets --locked -- -D warnings 2>&1 | tail -3`
-Expected: `test result: ok. 28 passed`, and `Finished`.
+Expected: `test result: ok. 29 passed`, and `Finished`.
 
 Message: `feat(nova-doc): pages, the search index and two themes`, body:
 spec 3.5a §6, §7 and §10. Every URL is relative, so the site works from
@@ -4574,8 +4632,10 @@ mod tests {
                 (
                     "a/index.html",
                     "<h3 id=\"here\">Here</h3> <a href=\"#here\">s</a> <a href=\"#missing\">m</a> \
-                     <a href=\"../index.html\">u</a> <a href=\"../../out.html\">o</a>",
+                     <a href=\"../index.html\">u</a> <a href=\"../b/index.html#there\">b</a> \
+                     <a href=\"../../out.html\">o</a>",
                 ),
+                ("b/index.html", "<p id=\"there\">There</p>"),
                 ("x.js", ""),
             ],
         );
@@ -4690,8 +4750,8 @@ mod tests {
 ```
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^error" | sort | uniq -c | head`
-Expected: E0425 and E0412 errors naming `check_links`, `BrokenLink`,
-`write_site`, `WriteError` and `MARKER`.
+Expected: E0422, E0425 and E0432 errors naming `check_links`,
+`BrokenLink`, `write_site`, `WriteError` and `MARKER`.
 
 - [ ] **Step 2: The link check**
 
@@ -4707,7 +4767,9 @@ use std::path::Path;
 /// and the link as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokenLink {
+    /// The page, from the site's root, with `/`.
     pub page: String,
+    /// The link, as its attribute holds it, unescaped.
     pub link: String,
 }
 
@@ -4886,8 +4948,10 @@ const MARKER_TEXT: &str =
 /// Why a site was not written.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// The directory exists, holds files, and has no marker.
     #[error("{} exists and was not written by nova doc; remove it, and nova doc will write its site there", .0.display())]
     NotOurs(PathBuf),
+    /// A file or directory could not be removed, read or written.
     #[error("cannot write {}: {}", .0.display(), .1)]
     Io(PathBuf, std::io::Error),
 }
@@ -4938,7 +5002,7 @@ added in Task 9.
 - [ ] **Step 4: Run the tests, clippy and the MSRV check**
 
 Run: `cd /home/user/nova && cargo test -p nova-doc 2>&1 | grep -E "^test result|FAILED|panicked" && cargo clippy -p nova-doc --all-targets --locked -- -D warnings 2>&1 | tail -3 && RUSTFLAGS="-D warnings" cargo +1.78 check --locked -p nova-doc 2>&1 | tail -2`
-Expected: `test result: ok. 34 passed`, `Finished` twice. A dead-code
+Expected: `test result: ok. 35 passed`, `Finished` twice. A dead-code
 error now means the model has a field nothing reads: delete the field,
 or read it where the spec says it shows, and ledger which.
 
@@ -5254,9 +5318,11 @@ fn open_with_a_missing_browser_warns() {
         &dir,
         &[("nova.toml", &manifest("app", "")), ("src/main.nova", "fn main() {}\n")],
     );
+    let home = dir.with_file_name("nova-doc-open-missing-home");
+    let _ = std::fs::remove_dir_all(&home);
     let a = nova()
         .current_dir(&dir)
-        .env("NOVA_HOME", dir.with_file_name("nova-doc-open-missing-home"))
+        .env("NOVA_HOME", &home)
         .env("BROWSER", dir.join("no-such-browser"))
         .args(["doc", "--open"])
         .assert()
@@ -5283,9 +5349,11 @@ fn open_runs_the_browser_with_the_start_page() {
     )
     .unwrap();
     std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dir.with_file_name("nova-doc-open-runs-home");
+    let _ = std::fs::remove_dir_all(&home);
     nova()
         .current_dir(&dir)
-        .env("NOVA_HOME", dir.with_file_name("nova-doc-open-runs-home"))
+        .env("NOVA_HOME", &home)
         .env("BROWSER", &browser)
         .args(["doc", "--open"])
         .assert()
@@ -5557,7 +5625,7 @@ Every std task follows them (spec §12.1):
 - Produces (test-only, `tests/common/mod.rs`): `PRIMITIVES`, `parse`,
   `module_docs`, `public_types`, `needing_docs`, `Source { page, package,
   file, all }`, `std_sources`, `anchors`, `missing`. Task 21's gate tests
-  use the last four.
+  use `PRIMITIVES`, `parse` and the last four.
 
 - [ ] **Step 1: The shared reading code**
 
@@ -5973,9 +6041,19 @@ so).
   compared a std item's text exactly may now see its docs: if one fails,
   check that the docs are the only difference, update its expected text,
   and ledger it.
-- [ ] **Step 5: The mutant.** Delete one `///` line above a `pub fn` in
-  `std/crypto/lib.nova`, run `cargo test -p nova-doc --test std_docs`,
-  expect FAIL naming it, and undo with `git checkout -- std/crypto/lib.nova`.
+- [ ] **Step 4b: Line numbers cited in comments.** std's docs move its
+  lines, and three maintainer comments in
+  `crates/nova-cli/tests/run_tests.rs` cite std lines: `lib.nova:216` and
+  `:230` (near its line 2475), `lib.nova:100` and `:108` (near 2605), and
+  `std/collections/lib.nova:55` and "line 54" (near 2889). No assertion
+  depends on them. Find the code each describes, re-point the number, and
+  ledger each. Then run `git grep -n -E "std/[a-z]+/lib\.nova:[0-9]|lib\.nova:[0-9]+" -- crates docs nova-spec`
+  and do the same for any other citation of a std line.
+
+- [ ] **Step 5: The mutant.** Delete the whole `///` block above a
+  `pub fn` in `std/crypto/lib.nova`, run `cargo test -p nova-doc --test
+  std_docs`, expect FAIL naming it, and undo with `git checkout --
+  std/crypto/lib.nova`.
 - [ ] **Step 6:** Commit: `docs: std's json, http, crypto and test; every
   module checked`.
 
@@ -5985,6 +6063,7 @@ so).
 **Files:**
 - Create: `examples/05-geometry/{nova.toml,README.md,src/main.nova}`,
   `examples/05-geometry/shapes/{nova.toml,src/lib.nova,src/units.nova}`
+- Modify: `crates/nova-driver/tests/index_complete.rs` (two counts)
 - Test: `crates/nova-cli/tests/run_tests.rs`
 
 The files below were run with `nova run` and checked with `nova check`
@@ -6210,6 +6289,38 @@ which links to the library's pages and to std's.
   (`docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`
   §13, §17).
 ~~~
+
+The index-completeness check counts its corpus, which the example joins.
+In `crates/nova-driver/tests/index_complete.rs`, replace
+
+```rust
+    // 6 examples, 133 top-level runtime programs and the modules program,
+    // on 2026-10-10.
+    assert_eq!(programs.len(), 140, "{programs:#?}");
+```
+
+with
+
+```rust
+    // 7 examples, 133 top-level runtime programs and the modules program,
+    // on 2026-10-11.
+    assert_eq!(programs.len(), 141, "{programs:#?}");
+```
+
+and
+
+```rust
+    // 6 + 133 + 3 files of user code, and std's 17.
+    assert_eq!(files, 159);
+```
+
+with
+
+```rust
+    // 7 + 133 + 3 files of user code, 05-geometry's library's 2, and
+    // std's 17.
+    assert_eq!(files, 162);
+```
 
 - [ ] **Step 3: Run the test, and the checks the example joins**
 
@@ -6653,7 +6764,7 @@ Each note begins `**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`
   `nova-ast` alone (ADR 0034).
 - `nova-spec/60-EXAMPLES.md` §9, after its last note: a fourth example
   follows the template, `examples/05-geometry/README.md`; it takes `05-`
-  because §8 reserves `06-` to `15-`.
+  because §6 to §8 reserve `06-` to `15-`.
 
 - [ ] **Step 3: CHANGELOG, README, ARCHITECTURE**
 
@@ -6667,8 +6778,8 @@ Each note begins `**Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`
       light and dark themes. The site carries the dependencies the program
       uses and std. `--std` writes std's site alone, and `--open` opens
       it. Every run checks the site's links. ADR 0034.
-    - **std is documented:** every public item has `///` docs, and every
-      module `//!` docs, which hover shows too.
+    - **std is documented:** every public item has `///` docs, which
+      hover shows too, and every module `//!` docs.
     - **`examples/05-geometry`,** a program and the path library beside
       it.
     - **Each release attaches std's documentation site.**
@@ -6772,7 +6883,7 @@ Sections, in order:
    declared minimum Rust, and that the user approved `pulldown-cmark` on
    2026-10-11.
 7. `### Final review`: filled in after the review.
-8. `### Decisions to review`: this plan's decisions 1-22 by title, the
+8. `### Decisions to review`: this plan's decisions 1-24 by title, the
    spec's decisions 5-28 by title, and every ledger `Ruling:` line with
    its cost if wrong.
 9. `### Deferred minors`: from the final review.
