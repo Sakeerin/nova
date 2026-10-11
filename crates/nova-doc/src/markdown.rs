@@ -249,8 +249,6 @@ impl DocText {
 
     /// Where byte `offset` of `text` is in `file`: each line is a run of
     /// its file's bytes.
-    // Read by doc tests from Task 8, which removes this line.
-    #[allow(dead_code)]
     pub(crate) fn source(&self, offset: usize) -> Option<u32> {
         let i = self
             .lines

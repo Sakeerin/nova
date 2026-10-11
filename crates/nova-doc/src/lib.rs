@@ -2,6 +2,7 @@
 //! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`;
 //! ADR 0034).
 
+mod doctest;
 mod highlight;
 mod links;
 mod markdown;
@@ -11,6 +12,7 @@ mod search;
 mod signature;
 mod write;
 
+pub use doctest::{package_doc_tests, std_doc_tests, DocTest, Origin};
 pub use links::{check_links, BrokenLink};
 pub use markdown::{classify, code_blocks, hidden, hide_lines, Block, CodeBlock, CodeLine};
 pub use model::{document_package, document_std, Documented, Failure, Site};
