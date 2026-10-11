@@ -10,6 +10,29 @@
 //! There is no encryption, no hash other than SHA-256 and SHA-512, and no way
 //! to hash input that arrives in pieces: each function takes all of its
 //! input in one `Bytes`.
+//!
+//! Hashing bytes, tagging a message with HMAC and checking the tag, and
+//! drawing random values:
+//!
+//! ```
+//! let digest = sha256(bytes_from_string("abc"))
+//! assert_eq(digest.len(), 32) // raw bytes, not hex
+//! assert_eq(digest.byte_at(0).unwrap(), 0xba) // SHA-256("abc") is ba7816bf…
+//!
+//! // An HMAC tag proves a message came from someone holding the key.
+//! let key = bytes_from_string("secret key")
+//! let msg = bytes_from_string("amount=10")
+//! let tag = hmac_sha256(key, msg)
+//! assert(hmac_sha256_verify(key, msg, tag), "the tag matches its message")
+//! assert(
+//!     !hmac_sha256_verify(key, bytes_from_string("amount=99"), tag),
+//!     "a changed message does not",
+//! )
+//!
+//! let roll = random_int(1, 6).unwrap()
+//! assert(roll >= 1 && roll <= 6, "both ends are included")
+//! assert_eq(random_bytes(16).unwrap().len(), 16)
+//! ```
 
 // `std/crypto`: hashes, HMAC and random, over three runtime intrinsics.
 //

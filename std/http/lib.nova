@@ -14,6 +14,26 @@
 //! next request. A request's header names are lower-cased, since HTTP
 //! ignores their case, and the order of a response's headers on the wire can
 //! change from one run of a program to the next.
+//!
+//! `Server::listen` serves until the process is stopped, so this example
+//! has the server `dispatch` a request parsed from bytes, with no socket:
+//!
+//! ```
+//! // `listen` serves until the process is stopped, so this example asks the
+//! // server to `dispatch` a request it parsed from bytes, with no socket.
+//! let app = Server::new().get("/hello", |_| Response::text(200, "hi"))
+//!
+//! let raw = bytes_from_string("GET /hello HTTP/1.1\r\nHost: example\r\nX-Trace: abc\r\n\r\n")
+//! let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+//! assert_eq(req.headers.get("x-trace").unwrap(), "abc") // names are lower-cased
+//!
+//! let resp = app.dispatch(req)
+//! assert_eq(resp.status, 200)
+//! assert_eq(resp.headers.get("content-length").unwrap(), "2")
+//! let wire = resp.to_bytes().to_string().unwrap()
+//! assert(wire.starts_with("HTTP/1.1 200 OK\r\n"), "the status line comes first")
+//! assert(wire.ends_with("\r\n\r\nhi"), "then a blank line and the body")
+//! ```
 
 // Nova standard library -- HTTP/1.1, server side.
 //
@@ -296,6 +316,26 @@ pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }
 /// applies to all of `buf`, so bytes after the head count against it too. A
 /// second `Content-Length` header is `BadHeader`, and a header value that is
 /// not valid UTF-8 is `InvalidUtf8`.
+///
+/// Part of a head, then all of it:
+///
+/// ```
+/// let limits = Limits::default()
+///
+/// // Part of a head is `Ok(None)`: read more, then try again with it all.
+/// let start = bytes_from_string("GET /items HTTP/1.1\r\nHost: shop")
+/// assert(parse_request_head(start, limits).unwrap().is_none(), "not a whole head yet")
+/// let whole = start.concat(bytes_from_string("\r\n\r\n"))
+/// let req = parse_request_head(whole, limits).unwrap().unwrap()
+/// assert_eq(req.path, "/items")
+/// assert_eq(req.headers.get("host").unwrap(), "shop")
+///
+/// // A malformed head is an `Err`.
+/// assert(
+///     parse_request_head(bytes_from_string("HELLO\r\n\r\n"), limits).is_err(),
+///     "no target or version",
+/// )
+/// ```
 pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>, HttpError> {
     // Measures the accumulated read buffer, not the head's own exact length:
     // when called from `read_request`, `buf` may hold a few bytes past the
@@ -664,6 +704,32 @@ fn reason_phrase(status: Int) -> String {
 /// whole number written in digits, and the kinds `parse_request_head`
 /// returns for a malformed head. As there, the head's byte limit counts
 /// every byte read so far, which can include the start of the body.
+///
+/// One request read from a connection and answered, over the loopback
+/// address:
+///
+/// ```
+/// async fn serve_one(listener: TcpListener) {
+///     let conn = listener.accept().await.unwrap()
+///     let req = read_request(conn, Limits::default()).await.unwrap()
+///     let reply = Response::text(200, "got ${req.body.len()} bytes")
+///     write_response(conn, reply).await.unwrap()
+///     conn.close().await.unwrap()
+/// }
+///
+/// async fn main() {
+///     let listener = bind("127.0.0.1:0").unwrap()
+///     let server = spawn(serve_one(listener))
+///     let client = connect("127.0.0.1:${listener.local_port().unwrap()}").await.unwrap()
+///     let ask = "POST /upload HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"
+///     client.write(bytes_from_string(ask)).await.unwrap()
+///     let reply = client.read_to_end().await.unwrap().to_string().unwrap()
+///     assert(reply.starts_with("HTTP/1.1 200 OK\r\n"), reply)
+///     assert(reply.ends_with("\r\n\r\ngot 5 bytes"), reply)
+///     server.join().await
+///     listener.close().await.unwrap()
+/// }
+/// ```
 pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, HttpError> {
     let mut buf = bytes_from_string("")
     let mut head: Option<Request> = None

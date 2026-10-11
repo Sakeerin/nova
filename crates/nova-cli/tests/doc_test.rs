@@ -311,9 +311,27 @@ fn a_warning_is_shown_once() {
 
 #[test]
 fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
-    // Spec §6.1. std has no example until plan Tasks 11 to 14 add them, so
-    // this asks only that every one passes; std's gate test asks for one
-    // per module.
+    // Spec §6.1, §9.2, §13: std's examples run, at least one per module,
+    // inside a project or not, and every one passes.
+    const MODULES: [&str; 17] = [
+        "bytes",
+        "collections",
+        "core",
+        "crypto",
+        "fmt",
+        "fs",
+        "http",
+        "io",
+        "json",
+        "log",
+        "net",
+        "process",
+        "strings",
+        "sync",
+        "task",
+        "test",
+        "time",
+    ];
     for dir in [fresh("std-outside"), calc("std-inside", LIB)] {
         let a = nova_test(&dir, &["--doc", "--std"]).success();
         let out = stdout(&a);
@@ -322,12 +340,19 @@ fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
             .and_then(|rest| rest.split(' ').next())
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("{out}"));
+        assert!(count >= 32, "only {count} of std's doc tests ran:\n{out}");
         assert!(
             out.ends_with(&format!(
                 "\ntest result: ok. {count} passed; 0 failed; 0 trapped; {count} total\n"
             )),
             "{out}"
         );
+        for m in MODULES {
+            assert!(
+                out.contains(&format!("\ntest std::{m} (std/{m}/lib.nova:")),
+                "no example of std::{m} ran:\n{out}"
+            );
+        }
         assert!(!out.contains("calc"), "{out}");
         assert_eq!(stderr(&a), "");
     }

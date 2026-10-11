@@ -11,6 +11,26 @@
 //! `Map`, which holds one value per key and keeps no order: `stringify`
 //! writes an object's members in an order that can change from one run of a
 //! program to the next.
+//!
+//! Parsing JSON text, reading values out of an object, and writing a value
+//! back as compact text:
+//!
+//! ```
+//! let doc = parse("{\"name\": \"nova\", \"stars\": 42}").unwrap()
+//! let fields = match doc {
+//!     Object(m) => m
+//!     _ => panic("expected an object")
+//! }
+//! assert_eq(String::from_json(fields.get("name").unwrap()).unwrap(), "nova")
+//! assert_eq(Int::from_json(fields.get("stars").unwrap()).unwrap(), 42)
+//!
+//! // stringify writes compact text; every number is a Float, and 1.0 is `1`.
+//! let list = Array([Number(1.0), Bool(true), Null, "hi".to_json()])
+//! assert_eq(stringify(list), "[1,true,null,\"hi\"]")
+//!
+//! // parse is strict: no trailing commas, no comments, no single quotes.
+//! assert(parse("[1, 2,]").is_err(), "a trailing comma is an error")
+//! ```
 
 // Nova standard library -- JSON.
 //
@@ -597,6 +617,28 @@ fn quote(s: String) -> String { json_quote(s) }
 ///
 /// Returns a `JsonError` if `s` is not such a value, saying what is wrong and
 /// where.
+///
+/// Walking a parsed value, and where an error stopped:
+///
+/// ```
+/// // Walk a parsed value by matching on its variants.
+/// let doc = parse("{\"tags\": [\"fast\", \"small\"]}").unwrap()
+/// let tags = match doc {
+///     Object(fields) => fields.get("tags").unwrap()
+///     _ => panic("expected an object")
+/// }
+/// let count = match tags {
+///     Array(items) => items.len()
+///     _ => 0
+/// }
+/// assert_eq(count, 2)
+///
+/// // An error says what is wrong, and where parse stopped, in characters.
+/// match parse("[1, 2,]") {
+///     Ok(_) => panic("a trailing comma is not JSON")
+///     Err(e) => assert_eq(e.at, 6) // the `]` where a value should be
+/// }
+/// ```
 pub fn parse(s: String) -> Result<JsonValue, JsonError> {
     let mut p = P { cs: s.chars(), pos: 0, err: None }
     p.skip_ws()
@@ -1317,6 +1359,27 @@ fn simple_escape(c: Char) -> Option<String> {
 /// std implements it for `Bool`, `String`, `Float` and `Int`. A type of your
 /// own can implement it too, for instance by building an `Object` from its
 /// fields.
+///
+/// A record of your own written as JSON:
+///
+/// ```
+/// record Point { x: Int, y: Int }
+///
+/// impl ToJson for Point {
+///     fn to_json(self) -> JsonValue {
+///         let mut fields: Map<String, JsonValue> = Map::new()
+///         fields.insert("x", self.x.to_json())
+///         fields.insert("y", self.y.to_json())
+///         Object(fields)
+///     }
+/// }
+///
+/// fn main() {
+///     let text = stringify(Point { x: 1, y: 2 }.to_json())
+///     // An object's members come out in an order that can change between runs.
+///     assert(text == "{\"x\":1,\"y\":2}" || text == "{\"y\":2,\"x\":1}", text)
+/// }
+/// ```
 pub trait ToJson {
     /// Returns `self` as a `JsonValue`.
     ///
