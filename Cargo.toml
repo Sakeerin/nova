@@ -81,3 +81,14 @@ toml_edit = "0.22"
 # MSRV job is their check.
 lsp-server = "=0.7.8"
 lsp-types = "0.97"
+
+# `nova doc` renders `///` docs as Markdown (spec
+# docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
+# §9.1; ADR 0034). pulldown-cmark is the CommonMark crate rustdoc and mdBook
+# use. 0.13.4 declares Rust 1.71.1, and it is pinned so that `cargo update`
+# cannot take a release with a higher minimum. Default features are off:
+# they bring getopts, for its command-line tool. `html` brings
+# pulldown-cmark-escape 0.11.0 (Rust 1.70). Its other dependencies are
+# unicase 2.10.0, which declares no minimum and builds on 1.78 (checked
+# 2026-10-11), and bitflags 2 and memchr, already locked.
+pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
