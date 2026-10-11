@@ -24,6 +24,9 @@ nova-hir = { path = "../nova-hir" }
 nova-driver = { path = "../nova-driver" }
 nova-pm = { path = "../nova-pm" }
 nova-fmt = { path = "../nova-fmt" }
+# Hover hides an example's hidden lines by the site's rule (spec
+# docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md §11.4).
+nova-doc = { path = "../nova-doc" }
 lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 serde_json = { workspace = true }
