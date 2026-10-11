@@ -1,3 +1,17 @@
+//! Files and directories: whole files read and written at once, files opened
+//! to read and write a piece at a time, and directories made, listed and
+//! removed.
+//!
+//! Paths are `String`s, and a relative path is resolved against the process's
+//! current directory. `read_to_string` and `write_string` move a whole file
+//! as text, and `read` and `write` as `Bytes`. `open` returns a `File`, which
+//! reads and writes through `std/io`'s `Read` and `Write`. Failures are
+//! `std/io`'s `IoError`s. Every module sees these names without an import,
+//! and a module's own definition of one of them shadows the one here.
+//!
+//! Every function here that touches the filesystem is an `async fn`, but none
+//! of them suspends: each blocks every task until the operation finishes.
+
 // Nova standard library — filesystem.
 //
 // Compiled as an implicit module and glob-imported into every user module. Error
@@ -49,6 +63,15 @@
 // Read the whole file at `path` as a UTF-8 string.
 //
 // Non-UTF-8 contents are `InvalidData`, not a panic and not lossy replacement.
+/// Reads the whole file at `path` and returns its contents as a `String`.
+///
+/// Returns an `IoError` of kind `NotFound` if nothing exists at `path`,
+/// `PermissionDenied` if the system denies access to it, and `InvalidData` if
+/// the contents are not valid UTF-8. Reading a directory fails too, with a
+/// kind that depends on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn read_to_string(path: String) -> Result<String, IoError> {
     let status = fs_read_to_string(path)
     if status == 0 { return Ok(fs_take_string()) }
@@ -56,6 +79,15 @@ pub async fn read_to_string(path: String) -> Result<String, IoError> {
 }
 
 // Write `content` to `path`, replacing any existing contents.
+/// Writes `content` to the file at `path`, creating the file if it does not
+/// exist and replacing its contents if it does.
+///
+/// Returns an `IoError` of kind `NotFound` if the directory to hold the file
+/// does not exist, and `PermissionDenied` if the system denies access.
+/// Writing to a directory fails too, with a kind that depends on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn write_string(path: String, content: String) -> Result<(), IoError> {
     let status = fs_write_string(path, content)
     if status == 0 { return Ok(()) }
@@ -66,6 +98,15 @@ pub async fn write_string(path: String, content: String) -> Result<(), IoError> 
 //
 // Unlike `read_to_string` this cannot fail with `InvalidData`: there is no
 // encoding to violate.
+/// Reads the whole file at `path` and returns its contents as `Bytes`.
+///
+/// Unlike `read_to_string`, it takes any contents. Returns an `IoError` of
+/// kind `NotFound` if nothing exists at `path`, and `PermissionDenied` if the
+/// system denies access to it. Reading a directory fails too, with a kind
+/// that depends on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn read(path: String) -> Result<Bytes, IoError> {
     let status = fs_read(path)
     if status == 0 { return Ok(fs_take_bytes()) }
@@ -73,6 +114,15 @@ pub async fn read(path: String) -> Result<Bytes, IoError> {
 }
 
 // Write `content` to `path`, replacing any existing contents.
+/// Writes `content` to the file at `path`, creating the file if it does not
+/// exist and replacing its contents if it does.
+///
+/// Returns an `IoError` of kind `NotFound` if the directory to hold the file
+/// does not exist, and `PermissionDenied` if the system denies access.
+/// Writing to a directory fails too, with a kind that depends on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn write(path: String, content: Bytes) -> Result<(), IoError> {
     let status = fs_write(path, content)
     if status == 0 { return Ok(()) }
@@ -81,16 +131,40 @@ pub async fn write(path: String, content: Bytes) -> Result<(), IoError> {
 
 // The OS's temporary-directory path, with no trailing separator guaranteed
 // either way -- join a name onto it the same way `fs_roundtrip` does.
+/// Returns the path of the operating system's directory for temporary files.
+///
+/// On Linux that is the `TMPDIR` environment variable when it is set, and
+/// `/tmp` otherwise. The path may or may not end with a separator, and
+/// nothing checks that the directory exists. Unlike most of this module, it
+/// is not `async`: it touches no file.
 pub fn temp_dir() -> String { fs_temp_dir() }
 
 // Whether `path` exists.
 //
 // Returns `Bool`, not `Result`, per `nova-spec/20-STDLIB.md` §5 — so a path that
 // exists but cannot be examined is indistinguishable from one that is absent.
+/// Returns `true` if something exists at `path`: a file, a directory, or
+/// anything else.
+///
+/// It also returns `false` when `path` cannot be examined, for lack of
+/// permission say, so `false` does not prove that nothing is there. A
+/// symbolic link counts only if what it points to exists.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn exists(path: String) -> Bool { fs_exists(path) }
 
 // Create the directory `path`. The parent must already exist; use
 // `create_dir_all` otherwise. An existing `path` is `AlreadyExists`.
+/// Creates the directory `path`.
+///
+/// Its parent must already exist; `create_dir_all` creates missing parents
+/// too. Returns an `IoError` of kind `AlreadyExists` if anything, a file
+/// included, already exists at `path`, `NotFound` if the parent does not
+/// exist, and `PermissionDenied` if the system denies access.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn create_dir(path: String) -> Result<(), IoError> {
     let status = fs_create_dir(path)
     if status == 0 { return Ok(()) }
@@ -99,6 +173,16 @@ pub async fn create_dir(path: String) -> Result<(), IoError> {
 
 // Create the directory `path`, and any missing parent directories along the
 // way. Unlike `create_dir`, an existing `path` is not an error.
+/// Creates the directory `path`, and every missing directory above it.
+///
+/// A directory already at `path` is not an error, and neither is an empty
+/// `path`: both return `Ok(())`. Returns an `IoError` of kind `AlreadyExists`
+/// if a file is at `path`, and `PermissionDenied` if the system denies
+/// access. A file in the way above `path` gives an error whose kind depends
+/// on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn create_dir_all(path: String) -> Result<(), IoError> {
     let status = fs_create_dir_all(path)
     if status == 0 { return Ok(()) }
@@ -106,6 +190,15 @@ pub async fn create_dir_all(path: String) -> Result<(), IoError> {
 }
 
 // Remove the file `path`.
+/// Removes the file at `path`.
+///
+/// Returns an `IoError` of kind `NotFound` if nothing exists at `path`, and
+/// `PermissionDenied` if the system denies the removal. A directory is not
+/// removed: that fails with a kind that depends on the system, and
+/// `remove_dir_all` removes one.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn remove_file(path: String) -> Result<(), IoError> {
     let status = fs_remove_file(path)
     if status == 0 { return Ok(()) }
@@ -113,6 +206,16 @@ pub async fn remove_file(path: String) -> Result<(), IoError> {
 }
 
 // Remove the directory `path` and everything under it.
+/// Removes the directory `path` and everything in it.
+///
+/// A symbolic link inside is removed, not followed. Returns an `IoError` of
+/// kind `NotFound` if nothing exists at `path`, and `PermissionDenied` if the
+/// system denies removing something; a file at `path` fails with a kind that
+/// depends on the system. A failure part way can leave some of the contents
+/// removed.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
     let status = fs_remove_dir_all(path)
     if status == 0 { return Ok(()) }
@@ -131,7 +234,23 @@ pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
 // lists it, its metadata call fails), which this codebase has not measured
 // against on any platform -- constructing one needs admin rights on Windows,
 // where this was checked.
-pub record DirEntry { pub name: String, pub path: String, pub is_file: Bool, pub is_dir: Bool }
+/// One entry of a directory, as `read_dir` lists it.
+///
+/// A symbolic link is followed: `is_file` and `is_dir` describe what it
+/// points to. Both are `false` when the entry cannot be examined, as for a
+/// link that points to nothing.
+pub record DirEntry {
+    /// The entry's name in its directory, such as `notes.txt`.
+    pub name: String,
+    /// The path given to `read_dir`, then `/`, then `name`, so a path given
+    /// with a trailing `/` gives `//`.
+    pub path: String,
+    /// `true` if the entry is not a directory: a file, or another kind of
+    /// entry such as a pipe.
+    pub is_file: Bool,
+    /// `true` if the entry is a directory.
+    pub is_dir: Bool,
+}
 
 // List the entries in `path`, sorted by name.
 //
@@ -141,6 +260,17 @@ pub record DirEntry { pub name: String, pub path: String, pub is_file: Bool, pub
 // Builds each `DirEntry` here rather than in the runtime: a record built in Rust
 // would put Nova's field layout in two places, which is the drift this module's
 // boundary exists to avoid. The cost is one extra `fs_kind` call per entry.
+/// Returns the entries of the directory `path`, sorted by name.
+///
+/// Names are compared byte by byte, so `B.txt` comes before `a.txt`. Names
+/// beginning with `.` are listed, but `.` and `..` are not, and a name that
+/// is not valid Unicode has U+FFFD in place of its bad bytes. Returns an
+/// `IoError` of kind `NotFound` if nothing exists at `path`, and
+/// `PermissionDenied` if the system denies access; a file at `path` fails
+/// with a kind that depends on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn read_dir(path: String) -> Result<[DirEntry], IoError> {
     let status = fs_read_dir(path)
     if status != 0 {
@@ -181,6 +311,17 @@ pub async fn read_dir(path: String) -> Result<[DirEntry], IoError> {
 // does not compile in this language. Use one of the three constructors
 // below, or build an exotic combination with `let mut o =
 // OpenOptions::default()` followed by field assignment.
+/// How `open` opens a file: to read, write or append, and whether to create
+/// or truncate it.
+///
+/// `reading()`, `writing()` and `appending()` give the usual sets. For any
+/// other, start from `OpenOptions::default()`, which sets every flag to
+/// `false`, in a `let mut` binding, and assign `true` to the flags wanted:
+/// `read`, `write`, `append`, `truncate`, `create`, and `create_new`, which
+/// creates the file and fails if it already exists. `open` returns an
+/// `IoError` of kind `Other` for a set it cannot honour, such as one with
+/// none of `read`, `write` and `append`, or one with `create` or `truncate`
+/// but neither `write` nor `append`.
 pub record OpenOptions {
     read: Bool,
     write: Bool,
@@ -208,6 +349,7 @@ impl Default for OpenOptions {
 }
 
 impl OpenOptions {
+    /// Returns options that open an existing file for reading only.
     pub fn reading() -> OpenOptions {
         OpenOptions {
             read: true,
@@ -221,6 +363,8 @@ impl OpenOptions {
 
     // Write + create + truncate: start this file fresh, creating it if it is
     // not there yet and discarding any content it already has.
+    /// Returns options that open a file for writing only, creating it if it
+    /// does not exist and emptying it if it does.
     pub fn writing() -> OpenOptions {
         OpenOptions {
             read: false,
@@ -234,6 +378,8 @@ impl OpenOptions {
 
     // Append + create: add to this file, creating it if it is not there
     // yet, and leaving any content it already has in place.
+    /// Returns options that open a file for appending only, creating it if it
+    /// does not exist and keeping what it holds: every write goes to the end.
     pub fn appending() -> OpenOptions {
         OpenOptions {
             read: false,
@@ -258,9 +404,26 @@ impl OpenOptions {
 // indistinguishable from closedness, so a forged, stale, or already-closed
 // handle behaves exactly like the real thing does once closed (see `close`
 // below).
+/// A file opened by `open`, to read and write a piece at a time through
+/// `std/io`'s `Read` and `Write`.
+///
+/// Copying a `File` copies the handle: every copy refers to the same open
+/// file. Nothing closes a `File` for you: call `close` when done, or it stays
+/// open until the program exits.
 pub record File { fd: Int }
 
 // Open `path` under `options`.
+/// Opens the file at `path` as `options` say, and returns it.
+///
+/// Returns an `IoError` of kind `NotFound` if the file does not exist and
+/// `options` does not create it, or if the directory to hold it does not
+/// exist; `AlreadyExists` if `options` sets `create_new` and the file exists;
+/// `PermissionDenied` if the system denies access; and `Other` for options it
+/// cannot honour. A directory cannot be read as a file: depending on the
+/// system, opening it or reading it fails.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
 pub async fn open(path: String, options: OpenOptions) -> Result<File, IoError> {
     let status = file_open(
         path,
@@ -281,6 +444,13 @@ impl File {
     // stop a second call the way it would in a language with real
     // ownership. Closing a stale or forged handle is the same no-op: the
     // table lookup a close performs simply removes nothing.
+    /// Closes the file.
+    ///
+    /// It returns `Ok(())`, also when the file is already closed: closing
+    /// reports no error. Afterwards, reading, writing or flushing the file,
+    /// through any copy, returns an `IoError` of kind `Other`.
+    ///
+    /// An `async fn` that never suspends.
     pub async fn close(self) -> Result<(), IoError> {
         let status = file_close(self.fd)
         if status == 0 { return Ok(()) }
