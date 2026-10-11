@@ -2,18 +2,18 @@
 //! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`;
 //! ADR 0034).
 
-// Until Task 13 writes a site, most of the crate is reached only by its
-// tests. Task 13 removes this line.
-#![allow(dead_code)]
-
 mod highlight;
+mod links;
 mod markdown;
 mod model;
 mod render;
 mod search;
 mod signature;
+mod write;
 
+pub use links::{check_links, BrokenLink};
 pub use model::{document_package, document_std, Documented, Failure, Site};
+pub use write::{write_site, WriteError, MARKER};
 
 /// The site's stylesheet: its light and dark themes (spec §10.2).
 pub(crate) const CSS: &str = include_str!("../assets/nova.css");
