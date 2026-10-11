@@ -106,11 +106,16 @@ pub fn organize(text: &str, judge: &dyn Fn(&ImportView) -> Verdict) -> Option<Ve
             _ => return None,
         };
         // After another import, every line between them is this one's lead
-        // (spec §6.5); after anything else, the comments directly above.
+        // (spec §6.5); after anything else, the comments directly above,
+        // unless they begin the file, which makes them its header (spec
+        // 3.5a §3, follow-up 1).
         let lead_start = if k > 0 && imports[k - 1] + 1 == i {
             regions[k - 1].1
         } else {
-            comments_above(text, first_line)
+            match comments_above(text, first_line) {
+                0 => first_line,
+                above => above,
+            }
         };
         let mut lead: Vec<String> = text[lead_start..first_line]
             .lines()

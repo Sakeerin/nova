@@ -111,6 +111,26 @@ fn comments_travel_with_their_imports_and_a_header_stays() {
 }
 
 #[test]
+fn comments_that_start_the_file_stay_at_its_top() {
+    // Follow-up 1 (spec 3.5a §3; plan decision 2): they are the file's
+    // header, not its first import's lead.
+    let unused_m = |v: &ImportView| Verdict {
+        group: Group::Module,
+        unused_glob: v.first == "m",
+        unused_names: Vec::new(),
+    };
+    let text = "// header\nimport m\nimport a\n\nfn main() {}\n";
+    assert_eq!(
+        organized(text, &unused_m),
+        "// header\nimport a\n\nfn main() {}\n"
+    );
+    assert_eq!(
+        organized(text, &keep),
+        "// header\nimport a\nimport m\n\nfn main() {}\n"
+    );
+}
+
+#[test]
 fn a_doc_comment_travels_with_its_import() {
     assert_eq!(
         organized(
