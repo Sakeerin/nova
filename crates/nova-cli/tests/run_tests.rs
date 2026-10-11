@@ -2472,7 +2472,7 @@ fn string_split_and_join_match_the_pinned_semantics() {
 ///    and they MUST walk identically) is only half pinned: a separator
 ///    that can self-overlap when stepped one codepoint at a time is never
 ///    tried. Mutating pass 1's step alone — `i = i + s.len()` to
-///    `i = i + 1` at `lib.nova:265`, leaving pass 2's `lib.nova:279`
+///    `i = i + 1` at `lib.nova:300`, leaving pass 2's `lib.nova:314`
 ///    untouched — makes pass 1 find every overlapping occurrence of `"aa"`
 ///    in `"aaaa"` (3, at positions 0/1/2) instead of the 2 correct
 ///    non-overlapping ones, so `pieces` comes out at 4 instead of 3. Since
@@ -2602,8 +2602,8 @@ fn string_trim_covers_non_ascii_whitespace() {
 /// above: `trim_start` and `trim_end` are each called exactly once in
 /// `string_trim_family_and_repeat`, both on `"  héllo\t\n"` — never
 /// all-whitespace — so neither method's own all-whitespace fallback
-/// (`trim_start_index`'s `cs.len()` fallback at `lib.nova:110`;
-/// `trim_end_index`'s `floor` fallback at `lib.nova:118`) is ever reached
+/// (`trim_start_index`'s `cs.len()` fallback at `lib.nova:130`;
+/// `trim_end_index`'s `floor` fallback at `lib.nova:138`) is ever reached
 /// through them directly. Every all-whitespace input in the suite goes
 /// through `trim()` instead, and `trim()`'s composition SELF-HEALS a wrong
 /// `trim_start_index` result: whatever `a` it returns is fed straight back
@@ -2886,7 +2886,7 @@ fn vec_set_out_of_range_aborts_with_message() {
 }
 
 /// `Vec::set`'s OTHER guard: a negative index. The test above only trips
-/// `std/collections/lib.nova:88`'s `i >= self.len` guard — deleting line 87's
+/// `std/collections/lib.nova:127`'s `i >= self.len` guard — deleting line 126's
 /// separate `i < 0` guard entirely still passes it, since a negative index
 /// then falls straight through to `self.data[i] = v`'s own array-bounds
 /// check, which aborts with a *different*, generic message ("array index -1

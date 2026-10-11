@@ -7,6 +7,26 @@
 //! take time in proportion to its length: to visit every character, call
 //! `chars` once and index the array it returns. Nothing here knows about
 //! grapheme clusters, so a combining accent counts as a character of its own.
+//!
+//! Trimming, splitting, joining and searching strings, where every index
+//! and length counts characters:
+//!
+//! ```
+//! let line = "  name = Nova  "
+//! let parts = line.trim().split(" = ")
+//! assert_eq(parts.len(), 2)
+//! assert_eq(parts[0], "name")
+//! assert_eq(parts[1].to_upper(), "NOVA")
+//! assert_eq(", ".join(["a", "b", "c"]), "a, b, c")
+//!
+//! // Indexes and lengths count characters, not bytes.
+//! let word = "héllo"
+//! assert_eq(word.len(), 5)
+//! assert_eq(bytes_from_string(word).len(), 6)
+//! assert_eq(word.slice(1, 3), "él")
+//! assert_eq(word.index_of("llo").unwrap(), 2)
+//! assert(word.starts_with("hé"), "starts_with compares characters")
+//! ```
 
 // Nova standard library — strings.
 //
@@ -247,6 +267,21 @@ impl String {
     /// give an empty piece. A string without `sep` gives one piece, the whole
     /// string, so `"".split(",")` is `[""]`. An empty `sep` splits the string
     /// into its characters, and `"".split("")` is `[]`.
+    ///
+    /// Nothing is collapsed or trimmed:
+    ///
+    /// ```
+    /// // Nothing is collapsed or trimmed: adjacent separators give an empty piece.
+    /// let pieces = "a,,b,".split(",")
+    /// assert_eq(pieces.len(), 4)
+    /// assert_eq(pieces[1], "")
+    /// assert_eq(pieces[3], "")
+    /// assert_eq(",".join(pieces), "a,,b,") // `join` undoes `split`
+    ///
+    /// assert_eq("".split(",").len(), 1) // one piece: the empty string
+    /// assert_eq("abc".split("").len(), 3) // an empty separator gives the characters
+    /// assert_eq("".split("").len(), 0)
+    /// ```
     pub fn split(self, sep: String) -> [String] {
         let h = str_chars(self)
         let s = str_chars(sep)

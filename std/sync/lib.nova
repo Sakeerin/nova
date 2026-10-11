@@ -120,8 +120,8 @@ impl<T> Mutex<T> {
     //
     // (An earlier version of this comment gave the reason as `Option` having
     // "no `unwrap`". That is false: `Option::unwrap` is at
-    // `std/core/lib.nova:67` and std/core calls it six times, on five lines
-    // -- 430, 460, 478, 541 and 577, the last of which calls it twice.)
+    // `std/core/lib.nova:89` and std/core calls it six times, on five lines
+    // -- 490, 520, 538, 601 and 637, the last of which calls it twice.)
     fn take(mut self) -> Bool {
         if self.locked { return false }
         self.locked = true
@@ -190,7 +190,7 @@ impl<T> MutexGuard<T> {
     pub fn get(self) -> T { self.owner.value }
 
     // Replace the guarded value -- the other half of the pair `Vec<T>` already
-    // ships, `get` at `std/collections/lib.nova:78` with `set` at `:86`, and
+    // ships, `get` at `std/collections/lib.nova:117` with `set` at `:125`, and
     // for the same reason: without it a `Mutex<Int>` is a read-only view.
     //
     // A no-op on a released guard, exactly as `release` is. A stale `set` is
@@ -234,8 +234,8 @@ impl<T> MutexGuard<T> {
 // has non-negative operands, which matters because Nova's `%` is a
 // TRUNCATING remainder -- `-7 % 3` is `-1`, not `2`. Any operation added
 // later that seeks backwards must re-establish this, or the wrap arithmetic
-// lands outside the array. `std/core/lib.nova:263` and
-// `std/collections/lib.nova:164` carry the same warning for hash bucketing.
+// lands outside the array. `std/core/lib.nova:285` and
+// `std/collections/lib.nova:203` carry the same warning for hash bucketing.
 record Ring<T> { data: [T], head: Int, len: Int }
 
 /// A first-in, first-out queue of values of type `T` that holds at most a

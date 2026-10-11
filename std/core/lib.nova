@@ -7,6 +7,28 @@
 //! `Hash` for `Float`. `Iterator` yields values one at a time, and its `map`
 //! and `filter` return a `MapIter` and a `FilterIter`. A module's own
 //! definition of one of these names shadows the one here.
+//!
+//! An absent value, a failure, and an iterator's lazy `filter` and `map`,
+//! run by `collect`:
+//!
+//! ```
+//! // `Option` holds a value that may be absent.
+//! let port: Option<Int> = Some(8080)
+//! assert_eq(port.map(|p| p + 1).unwrap_or(80), 8081)
+//! let missing: Option<Int> = None
+//! assert_eq(missing.unwrap_or(80), 80)
+//!
+//! // `Result` is the outcome of something that can fail.
+//! let checked: Result<Int, String> = missing.ok_or("no port given")
+//! assert(checked.is_err(), "None became an Err")
+//!
+//! // An iterator's `filter` and `map` are lazy; `collect` runs them.
+//! let mut nums: Vec<Int> = Vec::new()
+//! for n in 1..6 { nums.push(n) }
+//! let tens = nums.iter().filter(|n| n % 2 == 0).map(|n| n * 10).collect()
+//! assert_eq(tens.len(), 2)
+//! assert_eq(tens.get(1).unwrap(), 40)
+//! ```
 
 // Nova standard library — core.
 //
@@ -276,6 +298,29 @@ pub trait Default {
 /// Two values equal by `eq` must have the same hash. `Float` has no impl:
 /// `NaN` equals no value, and `0.0` and `-0.0` are equal though their bits
 /// differ.
+///
+/// A record of your own as a `Map` key, with `Eq` and `Hash` that
+/// agree:
+///
+/// ```
+/// record Point { x: Int, y: Int }
+///
+/// impl Eq for Point {
+///     fn eq(self, other: Point) -> Bool { self.x == other.x && self.y == other.y }
+/// }
+///
+/// // Points equal by `eq` must hash alike, so combine the fields' hashes.
+/// impl Hash for Point {
+///     fn hash(self) -> Int { self.x.hash() * 31 + self.y.hash() }
+/// }
+///
+/// fn main() {
+///     let mut names: Map<Point, String> = Map::new()
+///     names.insert(Point { x: 0, y: 0 }, "origin")
+///     assert_eq(names.get(Point { x: 0, y: 0 }).unwrap(), "origin")
+///     assert(!names.contains_key(Point { x: 1, y: 0 }), "a different point")
+/// }
+/// ```
 pub trait Hash {
     /// Returns the value's hash.
     ///
@@ -337,6 +382,21 @@ pub trait Hash {
 /// iterator. A record iterator is shared, not copied: the one these methods
 /// were called on is the one that advances, even when it is held in a
 /// binding that is not `mut`.
+///
+/// The adapters are lazy; a consumer runs them:
+///
+/// ```
+/// let mut words: Vec<String> = Vec::new()
+/// words.push("map")
+/// words.push("filter")
+/// words.push("fold")
+///
+/// // `filter` and `map` do nothing until a consumer such as `fold` runs them.
+/// // A closure that calls a method on its parameter names the parameter's type.
+/// let lengths = words.iter().filter(|w: String| w.starts_with("f")).map(|w: String| w.len())
+/// assert_eq(lengths.fold(0, |acc, n| acc + n), 10)
+/// assert(words.iter().any(|w| w == "map"), "`any` stops at the first match")
+/// ```
 pub trait Iterator {
     /// The type of the values the iterator yields.
     type Item
