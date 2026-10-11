@@ -481,7 +481,7 @@ fn the_gate_on_a_project_with_a_dependency() {
         "fn helper() -> Int {\n    2\n}\n\npub fn twice() -> Int {\n    side() * helper()\n}\n";
     let tidy = "import shapes\nimport geom\nimport extra\n\npub fn total() -> Int {\n    area() + twice()\n}\n";
     let (app, _geom) = lsp_client::app_with_main(
-        "gate",
+        "fixes-gate",
         "pub fn area() -> Int {\n    1\n}\n\npub fn side() -> Int {\n    2\n}\n",
         main,
     );

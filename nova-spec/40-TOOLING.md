@@ -206,7 +206,7 @@ code actions and semantic highlighting
 ADR 0033). Diagnostics carry fixes, made where each error is found,
 which `nova check` prints as `help:` lines and code actions offer;
 organize imports is a source action. Semantic tokens cover names only.
-With 3.4a, every Phase 3 row of this table is delivered.
+With 3.2 and 3.4a, every Phase 3 row of this table is delivered.
 
 ### 3.2 Architecture
 - `tower-lsp` for protocol
