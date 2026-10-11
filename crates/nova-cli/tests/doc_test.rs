@@ -326,6 +326,24 @@ fn a_helper_that_asserts_breaks_neither_section() {
 }
 
 #[test]
+fn an_example_whose_main_returns_a_value_passes() {
+    // Spec §5.2: a block that declares `fn main` runs as a program would,
+    // whatever `main` returns.
+    let lib = "/// Twice `x`.\n///\n/// ```\n/// fn main() -> Int { 1 }\n/// ```\n\
+               pub fn twice(x: Int) -> Int { x * 2 }\n";
+    let dir = package("main-value", &[("src/lib.nova", lib)]);
+    let a = nova_test(&dir, &["--doc"]).success();
+    assert_eq!(
+        stdout(&a),
+        "running 1 doc test\n\
+         test calc::twice (src/lib.nova:3) ... ok\n\
+         \n\
+         test result: ok. 1 passed; 0 failed; 0 trapped; 1 total\n"
+    );
+    assert_eq!(stderr(&a), "");
+}
+
+#[test]
 fn a_warning_is_shown_once() {
     // Spec §6.3: after the unit section, the doc build shows only what is
     // in doc tests' code; under `--doc` alone it shows the rest too.

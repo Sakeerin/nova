@@ -44,9 +44,11 @@ held a closure, or a function passed as a value, did not build.
      them, go to the module's top.
    - A package's block gets `import <package>` first, unless it imports
      the package itself. std's need no import.
-   - A block that declares `fn main` stays as written, and the test calls
-     `main`, under `block_on` when it is `async`. Any other block is the
-     body of the test function, so its last line is no value.
+   - A block that declares `fn main` stays as written, and the test's
+     body is `let _ = main()`, or `let _ = block_on(main())` when it is
+     `async`, so what `main` returns is dropped, as a program drops it.
+     Any other block is the body of the test function, so its last line
+     is no value.
    - The test is `@test fn nova_doctest`. In a program of doc test
      modules only that function is collected, so a `@test` the block
      declares does not run.
