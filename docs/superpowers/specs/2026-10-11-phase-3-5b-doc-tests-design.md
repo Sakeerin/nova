@@ -14,6 +14,15 @@
 >   and its message says how to add a library.
 >
 > Branch `claude/loving-archimedes-frtf5q`.
+>
+> **Amended 2026-10-11, while planning:** research against the code
+> corrected a method's name to the site's path
+> (`shapes::units::Length::plus`), named an impl's own docs, and added
+> four rules the spec left open: a block's last line is no value (§5.2);
+> only the test a doc test adds runs (§5.2); the doc build repeats no
+> warning the unit build showed (§6.3); std's diagnostics name
+> `std/<module>/lib.nova` (§7). Empty info-string words are dropped
+> (§4.2).
 
 A code block in a library's docs is a test. `nova test` compiles each one
 as a test of the package, runs it in its own process, and reports it by
@@ -132,7 +141,8 @@ library `shapes`.
 
 ### 4.2 Which blocks
 
-A block's info string is split at commas and whitespace into words.
+A block's info string is split at commas and whitespace into words,
+and empty words are dropped.
 
 | Block | Shown as | Tested |
 |---|---|---|
@@ -184,13 +194,23 @@ the others (§6.2).
 - So a block that defines an item writes its own `fn main`, since an item
   inside a function body is E0900. §7's mapping makes that error point at
   the item in the doc comment.
+- A block that defines a name the package exports imports what it uses
+  with `import <package>::{…}`, since the added `import <package>` would
+  clash with it (E0002).
+- **A plain body's last line is no value.** The test function returns
+  nothing, so a trailing value is E0010, as in `rustdoc`.
+- **Only the test the doc test adds runs.** A `@test` function the block
+  declares is not collected.
 
 ### 5.3 What it is called
 
 - A doc test is named by the item it documents and the block's first
   line in the source: `shapes::circle (src/lib.nova:41)`.
   - A member: `shapes::Rect::width (src/lib.nova:12)`.
-  - A method: `shapes::Length::plus (src/units.nova:15)`.
+  - A method, by the site's path: `shapes::units::Length::plus
+    (src/units.nova:15)`.
+  - An impl's own docs, by the path it is listed under: `shapes::Rect
+    (src/lib.nova:30)`.
   - A module's `//!` docs: the module's path, `shapes::units
     (src/units.nova:3)`, or the package, `shapes (src/lib.nova:1)`.
   - std's: `std::time (std/time/lib.nova:3)`.
@@ -231,6 +251,9 @@ the others (§6.2).
   line and a blank line: `running N doc tests`, a line per test by its
   name (§5.3), a blank line, and a `test result:` line in today's form.
 - An unknown word's warning (§4.2) prints before the section.
+- **No warning twice.** After the unit section, the doc build shows only
+  diagnostics in doc tests' code: the library's and the manifest's
+  warnings were shown once already. Under `--doc` alone it shows them.
 - **Both sections run** when the unit and integration tests compile,
   even if some fail, so one run reports everything. A compile error in
   either binary stops the run there.
@@ -248,6 +271,8 @@ the others (§6.2).
 - So E0001 in an example of `circle` reads `src/lib.nova:44:9`, and the
   snippet under it is the `///` line.
 - A warning is mapped the same way.
+- std's diagnostics name the module's file as its doc test's name does,
+  `std/time/lib.nova:12:5`.
 - A runtime panic prints as today: its message has no position.
 
 ## 8. The site and hover
