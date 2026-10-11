@@ -981,10 +981,10 @@ fn main() {\n    let side = 3\n    let s = square(side)\n    let w = s.w\n    le
 
 #[test]
 fn the_navigation_gate() {
-    let (app, geom) = app_and_library("gate", GATE_LIB);
+    let (app, geom) = app_and_library("navigation-gate", GATE_LIB);
     std::fs::write(app.join("src").join("main.nova"), GATE_MAIN).unwrap();
     std::fs::write(app.join("src").join("util.nova"), GATE_UTIL).unwrap();
-    let home = home("gate");
+    let home = home("navigation-gate");
     let main = file_uri(&app.join("src").join("main.nova"));
     let mut client = Client::start_with_env(&app, false, &[("NOVA_HOME", &home)]);
     open(&mut client, &main, GATE_MAIN);

@@ -376,6 +376,10 @@ a PR, and a merge on the user's word.
   a multi-file project with a dependency, and the extension's smoke
   test also checks semantic tokens and a quick fix.
 
+  **Amended 2026-10-11 (branch `claude/loving-archimedes-frtf5q`):** the
+  gate above was met in PR #108's CI, on Linux, Windows and macOS and in
+  the VS Code smoke test, after the note was written.
+
 ### 3.5 — `nova doc`
 - `nova doc [--open]` builds a static site under `target/doc/`: a page per
   module, item signatures from the type checker, a search index, and a light
