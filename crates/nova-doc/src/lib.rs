@@ -8,7 +8,10 @@
 
 mod highlight;
 mod markdown;
+mod model;
 mod signature;
+
+pub use model::{document_package, document_std, Documented, Failure, Site};
 
 /// `text` with `&`, `<`, `>`, `"` and `'` written as HTML entities.
 pub(crate) fn escape(text: &str) -> String {
