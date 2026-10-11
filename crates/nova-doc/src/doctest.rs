@@ -270,10 +270,11 @@ fn module(import: Option<&str>, lines: Vec<RunLine>) -> (String, Vec<Origin>) {
     match main {
         Some(is_async) => {
             out.extend(rest.map(|l| (l.text, l.origin)));
+            // What `main` returns is dropped, as a program drops it.
             let call = if is_async {
-                "block_on(main())"
+                "let _ = block_on(main())"
             } else {
-                "main()"
+                "let _ = main()"
             };
             out.push((format!("@test fn {FUNCTION}() {{ {call} }}"), Origin::Added));
         }
@@ -501,13 +502,13 @@ mod tests {
                 Some("shapes"),
                 &["fn main() {", "    let a = 1", "}"][..],
                 "import shapes\nfn main() {\n    let a = 1\n}\n\
-                 @test fn nova_doctest() { main() }\n",
+                 @test fn nova_doctest() { let _ = main() }\n",
             ),
             (
                 Some("shapes"),
                 &["async fn main() {", "}"][..],
                 "import shapes\nasync fn main() {\n}\n\
-                 @test fn nova_doctest() { block_on(main()) }\n",
+                 @test fn nova_doctest() { let _ = block_on(main()) }\n",
             ),
             (
                 Some("shapes"),
@@ -530,6 +531,49 @@ mod tests {
         }
         let (_, origins) = module(Some("shapes"), lines(&["fn main() {", "}"]));
         assert_eq!(origins, [Origin::Added, code(0), code(100), Origin::Added]);
+    }
+
+    /// Serves `text` at every path.
+    struct Memory(String);
+
+    impl nova_driver::Sources for Memory {
+        fn read(&self, _: &Path) -> std::io::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn a_main_that_returns_a_value_runs_as_a_program_would() {
+        // Spec §5.2: the test calls `main` and drops what it returns, so a
+        // `main` that returns a value checks, as it does in a program.
+        for (block, call) in [
+            ("fn main() -> Int { 1 }", "let _ = main()"),
+            ("async fn main() -> Int { 1 }", "let _ = block_on(main())"),
+            ("fn main() {}", "let _ = main()"),
+        ] {
+            let (text, _) = module(None, lines(&[block]));
+            let program = nova_driver::Program::doc_tests(
+                None,
+                vec![PathBuf::from("<doc tests>").join("doc0.nova")],
+            );
+            let options = nova_driver::Options {
+                tests: true,
+                ..nova_driver::Options::default()
+            };
+            let a = nova_driver::analyze_program(program, &Memory(text.clone()), &options)
+                .expect("the module reads");
+            let errors: Vec<&str> = a
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == nova_diagnostics::Severity::Error)
+                .map(|d| d.message.as_str())
+                .collect();
+            assert_eq!(errors, Vec::<&str>::new(), "{block}");
+            assert_eq!(
+                text,
+                format!("{block}\n@test fn nova_doctest() {{ {call} }}\n")
+            );
+        }
     }
 
     #[test]
