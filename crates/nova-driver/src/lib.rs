@@ -313,6 +313,20 @@ pub fn build_test_binary(path: &Path) -> Result<(PathBuf, Vec<TestFn>)> {
 /// adding them. `false` hides a warning; an error is always shown.
 pub type MapDiagnostic<'a> = dyn Fn(&mut FileDb, &mut Diagnostic) -> bool + 'a;
 
+/// The text of the std module a program's `FileDb` names `name`, such as
+/// `<std/time>`, or `None` for any other name. The build adds std's modules
+/// to the database only after loading, so a [`MapDiagnostic`] that shows a
+/// diagnostic in one, as a std doc test's does (spec 3.5b §7), reads its
+/// text here.
+pub fn std_source(name: &str) -> Option<&'static str> {
+    let short = name.strip_prefix("<std/")?.strip_suffix('>')?;
+    nova_resolver::STD_MODULES
+        .iter()
+        .chain(std::iter::once(&nova_resolver::STD_TEST_MODULE))
+        .find(|(module, _)| module.strip_prefix("$std.") == Some(short))
+        .map(|&(_, text)| text)
+}
+
 /// [`build_test_binary`] on `program`: the test binary of its roots.
 pub fn build_test_program(program: Program) -> Result<(PathBuf, Vec<TestFn>)> {
     build_test_program_with(program, &DiskSources, None)
@@ -949,6 +963,25 @@ mod doc_test_builds {
             .expect("a current directory")
             .join(&relative);
         assert_eq!(path_fingerprint(&relative), path_fingerprint(&absolute));
+    }
+
+    #[test]
+    fn std_source_gives_a_std_modules_text_by_its_name_in_the_database() {
+        assert_eq!(
+            std_source("<std/core>"),
+            Some(nova_resolver::STD_MODULES[0].1)
+        );
+        assert_eq!(
+            std_source("<std/time>"),
+            Some(nova_resolver::STD_MODULES[10].1)
+        );
+        assert_eq!(
+            std_source("<std/test>"),
+            Some(nova_resolver::STD_TEST_MODULE.1)
+        );
+        assert_eq!(std_source("<std/nope>"), None);
+        assert_eq!(std_source("std/time/lib.nova"), None);
+        assert_eq!(std_source("src/lib.nova"), None);
     }
 }
 

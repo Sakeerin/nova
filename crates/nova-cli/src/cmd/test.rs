@@ -24,7 +24,7 @@ use std::process::{Command, Output};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use nova_diagnostics::{render, Diagnostic, FileDb, Severity, Span};
+use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity, Span};
 use nova_doc::{DocTest, Failure};
 use nova_driver::{DiskSources, Program, Sources};
 
@@ -38,6 +38,10 @@ pub struct TestCmd {
     /// Run only the doc tests: the code examples in the library's docs.
     #[arg(long)]
     doc: bool,
+
+    /// With --doc: run std's doc tests instead, inside a project or not.
+    #[arg(long, requires = "doc")]
+    std: bool,
 }
 
 /// The three ways a test's process can end, kept distinct end to end rather
@@ -178,8 +182,11 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // (`nova-spec/40-TOOLING.md:20`: `nova test [filter]`, no `[file]`,
     // unlike `run`/`build`/`check`), so it always works on the project
     // around the current directory, or on `src/main.nova` outside any.
-    let mode = project::mode(None)?;
     let filter = cmd.filter.as_deref();
+    if cmd.std {
+        return run_std_doc_tests(filter);
+    }
+    let mode = project::mode(None)?;
     if cmd.doc {
         return run_doc_tests(&mode, filter);
     }
@@ -216,7 +223,7 @@ pub fn run(cmd: TestCmd) -> Result<()> {
     // Both sections run when the unit tests compile, even if some failed
     // (spec 3.5b §6.3), so one run reports everything.
     if let (Some(root), false) = (library, docs.is_empty()) {
-        let tally = run_doc_section(root, &docs, &doc_selected, true)?;
+        let tally = run_doc_section(Some(root), &docs, &doc_selected, true)?;
         sections.push(("doc test", tally));
     }
     finish(&sections)
@@ -235,11 +242,23 @@ fn run_doc_tests(mode: &Mode, filter: Option<&str>) -> Result<()> {
         bail!("nova test --doc tests a library's docs, and this package has no src/lib.nova");
     }
     project::sync(mode)?;
-    let docs = library_doc_tests(root)?;
+    doc_tests_alone(Some(root), &library_doc_tests(root)?, filter)
+}
+
+/// `nova test --doc --std [filter]` (spec 3.5b §6.1): std's doc tests,
+/// inside a project or not.
+fn run_std_doc_tests(filter: Option<&str>) -> Result<()> {
+    let docs = nova_doc::std_doc_tests().map_err(failure)?;
+    doc_tests_alone(None, &docs, filter)
+}
+
+/// The doc section alone, of `docs`: the doc tests of the package at
+/// `package`, or std's.
+fn doc_tests_alone(package: Option<&Path>, docs: &[DocTest], filter: Option<&str>) -> Result<()> {
     let names: Vec<String> = docs.iter().map(|d| d.name.clone()).collect();
     let selected = select(&names, filter);
     ensure_matched(filter, selected.len(), &[(docs.len(), "doc test")])?;
-    let tally = run_doc_section(root, &docs, &selected, false)?;
+    let tally = run_doc_section(package, docs, &selected, false)?;
     finish(&[("doc test", tally)])
 }
 
@@ -282,13 +301,17 @@ fn failure(f: Failure) -> anyhow::Error {
 /// first names the binary.
 const DOC_TESTS: &str = "<doc tests>";
 
+/// The directory, under the current directory, that std's doc tests'
+/// modules are named in, as [`DOC_TESTS`] is for a package's.
+const STD_DOC_TESTS: &str = "<std doc tests>";
+
 /// The doc section (spec 3.5b §6.2, §6.3): the `selected` of `docs`, the
-/// doc tests of the package at `root`, compiled into a binary of their own
-/// and each run in its own process. `after_units` says the unit section
-/// ran: a blank line comes first, and the build shows only what is in doc
-/// tests' code, since the unit build showed the rest.
+/// doc tests of the package at `package`, or std's, compiled into a binary
+/// of their own and each run in its own process. `after_units` says the
+/// unit section ran: a blank line comes first, and the build shows only
+/// what is in doc tests' code, since the unit build showed the rest.
 fn run_doc_section(
-    root: &Path,
+    package: Option<&Path>,
     docs: &[DocTest],
     selected: &[usize],
     after_units: bool,
@@ -301,7 +324,7 @@ fn run_doc_section(
     let (exe, should_panic) = if selected.is_empty() {
         (PathBuf::new(), Vec::new())
     } else {
-        build_doc_tests(root, docs, after_units)?
+        build_doc_tests(package, docs, after_units)?
     };
     if after_units {
         println!();
@@ -310,21 +333,25 @@ fn run_doc_section(
     run_tests(&exe, "doc test", &names, &should_panic, selected)
 }
 
-/// The binary of `docs`, the doc tests of the package at `root`, and
-/// whether each of its tests should panic. Its modules are served from
-/// memory, and its diagnostics point at the docs (spec 3.5b §7).
+/// The binary of `docs`, the doc tests of the package at `package`, or
+/// std's, and whether each of its tests should panic. Its modules are
+/// served from memory, and its diagnostics point at the docs (spec 3.5b
+/// §7).
 fn build_doc_tests(
-    root: &Path,
+    package: Option<&Path>,
     docs: &[DocTest],
     after_units: bool,
 ) -> Result<(PathBuf, Vec<bool>)> {
-    let dir = root.join(DOC_TESTS);
+    let dir = match package {
+        Some(root) => root.join(DOC_TESTS),
+        None => PathBuf::from(STD_DOC_TESTS),
+    };
     let modules: Vec<(PathBuf, String)> = docs
         .iter()
         .enumerate()
         .map(|(i, d)| (dir.join(format!("doc{i}.nova")), d.text.clone()))
         .collect();
-    let program = Program::doc_tests(Some(root), modules.iter().map(|(p, _)| p.clone()).collect());
+    let program = Program::doc_tests(package, modules.iter().map(|(p, _)| p.clone()).collect());
     // A module's name in the program's `FileDb`, and its doc test.
     let by_name: HashMap<String, usize> = modules
         .iter()
@@ -383,7 +410,7 @@ fn to_the_docs(
         };
         in_docs = true;
         let test = &docs[i];
-        let Some(file) = db.id_of(&test.file) else {
+        let Some(file) = doc_file(db, test) else {
             continue;
         };
         let text = db.get_source(file).unwrap_or_default();
@@ -395,6 +422,20 @@ fn to_the_docs(
         d.fixes.clear();
     }
     in_docs
+}
+
+/// The file a doc test's block is in, in `db`. A package's is there, by
+/// the name its analysis gave it, which the doc tests' program reads it
+/// under. A std module's is named `std/<module>/lib.nova`, as the doc
+/// test's name shows it (spec 3.5b §7), and is added from std's sources
+/// when missing: the build adds std's modules, as `<std/time>` and so on,
+/// only after loading.
+fn doc_file(db: &mut FileDb, test: &DocTest) -> Option<FileId> {
+    let Some(text) = nova_driver::std_source(&test.file) else {
+        return db.id_of(&test.file);
+    };
+    let (name, _) = test.place.rsplit_once(':')?;
+    Some(db.id_of(name).unwrap_or_else(|| db.add(name, text)))
 }
 
 /// `offset`, at most `text`'s length, and moved back to a character
@@ -660,6 +701,60 @@ fn finish(sections: &[(&str, Tally)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nova_doc::Origin;
+
+    #[test]
+    fn a_std_doc_tests_diagnostic_points_at_its_modules_file() {
+        // Spec 3.5b §7: std's diagnostics name `std/<module>/lib.nova`, as
+        // the doc test's name does, before the build adds `<std/time>`.
+        let time = nova_driver::std_source("<std/time>").expect("std/time");
+        let third_line = time.match_indices('\n').nth(1).expect("three lines").0 + 1;
+        let test = DocTest {
+            name: "std::time (std/time/lib.nova:2)".to_string(),
+            place: "std/time/lib.nova:2".to_string(),
+            text: "@test fn nova_doctest() {\nlet d = nope\n}\n".to_string(),
+            file: "<std/time>".to_string(),
+            start: 0,
+            lines: vec![
+                Origin::Added,
+                Origin::Code {
+                    at: third_line as u32,
+                    cut: None,
+                },
+                Origin::Added,
+            ],
+            unknown: Vec::new(),
+        };
+        let docs = [test];
+        let mut db = FileDb::new();
+        let module = db.add("<std doc tests>/doc0.nova", docs[0].text.clone());
+        let by_name = HashMap::from([("<std doc tests>/doc0.nova".to_string(), 0)]);
+        let nope = docs[0].text.find("nope").unwrap() as u32;
+        let mut files = Vec::new();
+        for _ in 0..2 {
+            let mut d = Diagnostic::error("E0001", "cannot find `nope` in this scope")
+                .with_primary_label(Span::new(nope, nope + 4, module), "here")
+                .with_fix(nova_diagnostics::Fix::new("a fix", Vec::new()));
+            assert!(to_the_docs(&mut db, &mut d, &by_name, &docs));
+            let span = d.labels[0].span;
+            assert_eq!(db.get_name(span.file), Some("std/time/lib.nova"));
+            assert_eq!(db.get_source(span.file), Some(time));
+            assert_eq!(db.location(span.file, span.start), Some((3, 9)));
+            assert_eq!(span.end - span.start, 4);
+            assert!(d.fixes.is_empty());
+            files.push(span.file);
+        }
+        assert_eq!(
+            files[0], files[1],
+            "the second found the file the first added"
+        );
+        // A label in no doc test's module stays, and says so.
+        let lib = db.add("src/lib.nova", "pub fn f() {}\n");
+        let mut d = Diagnostic::warning("W0000", "a warning")
+            .with_primary_label(Span::new(0, 3, lib), "here");
+        assert!(!to_the_docs(&mut db, &mut d, &by_name, &docs));
+        assert_eq!(d.labels[0].span, Span::new(0, 3, lib));
+    }
 
     #[test]
     fn an_exit_code_is_rendered_in_decimal_and_as_an_unsigned_hex_ntstatus() {

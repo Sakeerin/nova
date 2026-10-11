@@ -308,3 +308,40 @@ fn a_warning_is_shown_once() {
         assert!(stdout(&a).ends_with(DOC_SECTION), "{}", stdout(&a));
     }
 }
+
+#[test]
+fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
+    // Spec §6.1. std has no example until plan Tasks 11 to 14 add them, so
+    // this asks only that every one passes; std's gate test asks for one
+    // per module.
+    for dir in [fresh("std-outside"), calc("std-inside", LIB)] {
+        let a = nova_test(&dir, &["--doc", "--std"]).success();
+        let out = stdout(&a);
+        let count: usize = out
+            .strip_prefix("running ")
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            out.ends_with(&format!(
+                "\ntest result: ok. {count} passed; 0 failed; 0 trapped; {count} total\n"
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("calc"), "{out}");
+        assert_eq!(stderr(&a), "");
+    }
+}
+
+#[test]
+fn std_needs_doc() {
+    let dir = fresh("std-without-doc");
+    let a = nova_test(&dir, &["--std"]).failure();
+    assert_eq!(a.get_output().status.code(), Some(2), "a usage error");
+    assert!(
+        stderr(&a)
+            .starts_with("error: the following required arguments were not provided:\n  --doc\n"),
+        "{}",
+        stderr(&a)
+    );
+}
