@@ -1,3 +1,17 @@
+//! Assertions for tests: `assert`, `assert_eq` and `assert_ne`.
+//!
+//! Each checks a condition and, if it does not hold, panics with a message
+//! that starts `assertion failed:`, which fails the test that called it. A
+//! test marked `@test(should_panic)` passes only if it panics, which is the
+//! way to check that something panics.
+//!
+//! These functions exist only when `nova test` compiles the program. There,
+//! every module sees them without an import, and a module's own definition
+//! of one of them shadows the one here. `nova run`, `nova build` and
+//! `nova check` leave out both `@test` functions and this module, so call
+//! these functions only from `@test` functions: called anywhere else, they
+//! make those commands fail, reporting a function they cannot find.
+
 // std/test — assertions for `@test` functions.
 //
 // Seeded ONLY when compiling under `nova test` (see `STD_TEST_MODULE`), not
@@ -14,12 +28,25 @@
 // `nova_rt_panic_str` calls `std::process::abort()`. `@test(should_panic)` is
 // the supported way to assert that something panics.
 
+/// Checks that `cond` is `true`.
+///
+/// Panics if it is `false`, with the message `assertion failed: ` followed by
+/// `msg`.
 pub fn assert(cond: Bool, msg: String) { if !cond { panic("assertion failed: ${msg}") } }
 
+/// Checks that `a` and `b` are equal.
+///
+/// Panics if `a.ne(b)` is `true`, with a message that shows both values in
+/// their `Debug` form either side of `!=`, such as
+/// `assertion failed: "a" != "b"`.
 pub fn assert_eq<T: Eq + Debug>(a: T, b: T) {
     if a.ne(b) { panic("assertion failed: ${a.dbg()} != ${b.dbg()}") }
 }
 
+/// Checks that `a` and `b` are not equal.
+///
+/// Panics if `a.eq(b)` is `true`, with a message that shows both values in
+/// their `Debug` form either side of `==`, such as `assertion failed: 1 == 1`.
 pub fn assert_ne<T: Eq + Debug>(a: T, b: T) {
     if a.eq(b) { panic("assertion failed: ${a.dbg()} == ${b.dbg()}") }
 }

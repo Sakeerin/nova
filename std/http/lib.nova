@@ -1,3 +1,20 @@
+//! An HTTP/1.1 server: requests read and parsed, responses built and written,
+//! and a router that serves GET routes.
+//!
+//! `Server` is the simple way in: give it a handler for each path with `get`,
+//! then `listen` on an address. A handler is a plain function from a
+//! `Request` to a `Response`, so it cannot await anything. `read_request`,
+//! `write_response` and `parse_request_head` are the parts underneath, for
+//! serving a `std/net` `TcpStream` yourself. There is no HTTP client. Every
+//! module sees these names without an import, and a module's own definition
+//! of one of them shadows the one here.
+//!
+//! Only `Content-Length` says how long a request's body is: chunked transfer
+//! encoding is not supported, and a chunked request's body is misread as the
+//! next request. A request's header names are lower-cased, since HTTP
+//! ignores their case, and the order of a response's headers on the wire can
+//! change from one run of a program to the next.
+
 // Nova standard library -- HTTP/1.1, server side.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
@@ -64,7 +81,27 @@
 // std module is glob-imported into every module, and whether two std modules
 // may export one variant name is not established on this tree. This increment
 // is not the place to find out.
-pub type Method = | Get | Post | Put | Delete | Patch | Head | Options | Unknown(String)
+/// An HTTP request method.
+///
+/// Seven methods have variants of their own, each matched exactly as written
+/// in capitals; any other method, `get` in lower case included, is `Unknown`.
+pub type Method =
+    /// `GET`.
+    | Get
+    /// `POST`.
+    | Post
+    /// `PUT`.
+    | Put
+    /// `DELETE`.
+    | Delete
+    /// `PATCH`.
+    | Patch
+    /// `HEAD`.
+    | Head
+    /// `OPTIONS`.
+    | Options
+    /// Any other method, holding its name as the request wrote it.
+    | Unknown(String)
 
 // Why a request head was rejected.
 //
@@ -82,19 +119,47 @@ pub type Method = | Get | Post | Put | Delete | Patch | Head | Options | Unknown
 // and no `ERR_*` code: `std/http` reports all three itself, so none of them
 // needs to stay in sync with the intrinsic's own numbering the way the first
 // seven do.
+/// Why reading or parsing a request failed.
 pub type HttpErrorKind =
+    /// The request head is too long: longer than the `max_head_bytes` of the
+    /// `Limits` given, or than 8,192 bytes, whatever the limit.
     | HeadTooLarge
+    /// The request head has more headers than the `max_header_count` of the
+    /// `Limits` given, or more than 100, whatever the limit.
     | TooManyHeaders
+    /// The request line is malformed: its method, target or version is not
+    /// valid, or the version is not `HTTP/1.0` or `HTTP/1.1`.
     | BadRequestLine
+    /// A header line is malformed, or `Content-Length` appears twice or is
+    /// not a whole number written in digits.
     | BadHeader
+    /// A line ends badly, as with a carriage return not followed by a line
+    /// feed.
     | BadNewline
+    /// The parser finished a head without its method, target or version,
+    /// which it is not expected to do.
     | IncompleteHeadFields
+    /// Part of a parsed head lay outside the bytes given, which the parser
+    /// is not expected to do.
     | SliceOutOfBuffer
+    /// A header's value is not valid UTF-8.
     | InvalidUtf8
+    /// `Content-Length` is more than the `max_body_bytes` of the `Limits`
+    /// given.
     | BodyTooLarge
+    /// Reading from the connection failed, or the connection closed before
+    /// the request was complete.
     | Transport
 
-pub record HttpError { pub kind: HttpErrorKind, pub message: String }
+/// The error `read_request` and `parse_request_head` return.
+pub record HttpError {
+    /// What went wrong.
+    pub kind: HttpErrorKind,
+    /// A short description, such as `duplicate Content-Length header`. For a
+    /// `Transport` error it is the connection's own error message, or
+    /// `connection closed mid-head` or `connection closed mid-body`.
+    pub message: String,
+}
 
 // Map a parse status to its kind. The argument is the **negated** status the
 // intrinsic returned, so a status of `-3` arrives here as `3`.
@@ -123,6 +188,12 @@ pub record HttpError { pub kind: HttpErrorKind, pub message: String }
 // `crates/nova-runtime/src/http.rs`) argues from httparse's zero-copy
 // contract that it cannot fire in practice and checks anyway, while
 // `IncompleteHeadFields`'s call site carries no such argument either way.
+/// Returns the `HttpErrorKind` for an error code from `parse_offsets`, which
+/// reports the code as a negative status: pass the status negated.
+///
+/// Codes 1 to 7 are `HeadTooLarge`, `TooManyHeaders`, `BadRequestLine`,
+/// `BadHeader`, `BadNewline`, `IncompleteHeadFields` and `SliceOutOfBuffer`,
+/// in that order. Any other code gives `BadRequestLine`.
 pub fn http_error_kind_of(code: Int) -> HttpErrorKind {
     if code == 1 { return HeadTooLarge }
     if code == 2 { return TooManyHeaders }
@@ -143,7 +214,21 @@ pub fn http_error_kind_of(code: Int) -> HttpErrorKind {
 // nowhere for a caller's limit to arrive. The two fields here are checked on
 // this side, in addition. `max_body_bytes` is this side's alone: the intrinsic
 // returns `body_start` and never looks at the body.
-pub record Limits { pub max_head_bytes: Int, pub max_header_count: Int, pub max_body_bytes: Int }
+/// Limits on the size of a request, for `read_request` and
+/// `parse_request_head`.
+///
+/// `Limits::default()` allows a head of 8,192 bytes with 100 headers, and a
+/// body of 1,048,576 bytes (1 MiB); `Server` always uses those. The two head
+/// limits can only be made stricter: a head over 8,192 bytes, or with more
+/// than 100 headers, is refused whatever they say.
+pub record Limits {
+    /// The most bytes a request head may take.
+    pub max_head_bytes: Int,
+    /// The most headers a request may have.
+    pub max_header_count: Int,
+    /// The largest `Content-Length` accepted.
+    pub max_body_bytes: Int,
+}
 
 impl Default for Limits {
     fn default() -> Limits {
@@ -153,10 +238,19 @@ impl Default for Limits {
 
 // A parsed request. `body` is the bytes after the head, already bounded by
 // `Content-Length` and by `Limits::max_body_bytes`.
+/// An HTTP request: its method, target, headers and body.
 pub record Request {
+    /// The request's method.
     pub method: Method,
+    /// The request's target as the request wrote it, query string included,
+    /// such as `/search?q=nova`. Nothing in it is decoded.
     pub path: String,
+    /// The headers, by lower-cased name. Each value has the spaces and tabs
+    /// around it removed. Of two headers with the same name, the last is
+    /// kept.
     pub headers: Map<String, String>,
+    /// The body: as many bytes as `Content-Length` says, or none without that
+    /// header. Empty in a request from `parse_request_head`.
     pub body: Bytes,
 }
 
@@ -171,6 +265,17 @@ pub record Request {
 //
 // Exposed so `tests/runtime/http_offsets.nova` can pin the encoding from this
 // side; ordinary callers want `parse_request_head`.
+/// Returns the raw table of byte offsets that parsing the request head at the
+/// start of `buf` gives. `parse_request_head` is usually the one to call.
+///
+/// Element 0 is a status: 0 for a complete head, 1 for an incomplete one, and
+/// otherwise a negative error code, which `http_error_kind_of` turns into a
+/// kind once negated. Unless the status is 0, the table holds only that
+/// element. A complete head's table goes on with the method's start
+/// and length, the target's start and length, the HTTP minor version (0 or
+/// 1), the number of headers, four elements per header (its name's start and
+/// length, then its value's), and last the offset where the body starts. All
+/// offsets count bytes from the start of `buf`.
 pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }
 
 // Decode a complete head out of `buf`, or report that more bytes are needed.
@@ -178,6 +283,19 @@ pub fn parse_offsets(buf: Bytes) -> [Int] { http_parse_request(buf) }
 // `Ok(None)` means the head is incomplete: read more and call again with the
 // longer buffer. `Ok(Some(req))` is a complete head, with `body` empty --
 // `read_request` fills that in once it knows `Content-Length`.
+/// Parses the request head at the start of `buf`.
+///
+/// Returns `Ok(None)` if `buf` does not yet hold a whole head: read more and
+/// call again with the longer buffer. Once it does, returns `Ok(Some(req))`,
+/// whose `body` is empty: the body's length is in its `content-length`
+/// header. Lines may end with a carriage return and line feed or with a line
+/// feed alone, and empty lines before the request line are skipped.
+///
+/// Returns an `HttpError` whose kind says how the head is malformed, or
+/// `HeadTooLarge` or `TooManyHeaders` if it breaks `limits`. The byte limit
+/// applies to all of `buf`, so bytes after the head count against it too. A
+/// second `Content-Length` header is `BadHeader`, and a header value that is
+/// not valid UTF-8 is `InvalidUtf8`.
 pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>, HttpError> {
     // Measures the accumulated read buffer, not the head's own exact length:
     // when called from `read_request`, `buf` may hold a few bytes past the
@@ -322,10 +440,27 @@ fn method_from(token: String) -> Method {
 // cannot move instead: the exact status line, the exact tail (the blank line
 // and the body), and that each expected header line occurs somewhere
 // between them.
-pub record Response { pub status: Int, pub headers: Map<String, String>, pub body: Bytes }
+/// An HTTP response: a status code, headers and a body.
+///
+/// `ok`, `text`, `json` and `not_found` build the common ones, and each sets
+/// `content-length`. A response built by hand should set it too: `Server`
+/// keeps the connection open after a response, so without it a client cannot
+/// tell where the body ends.
+pub record Response {
+    /// The status code, such as 200 or 404. It is written as given, without
+    /// a check.
+    pub status: Int,
+    /// The headers, by name. Each name is written as given, and their order
+    /// on the wire can change from one run of a program to the next.
+    pub headers: Map<String, String>,
+    /// The body.
+    pub body: Bytes,
+}
 
 impl Response {
     // `200 OK` carrying `body`, with `content-length` set from it.
+    /// Returns a `200 OK` response carrying `body`, with `content-length` set
+    /// and no `content-type`.
     pub fn ok(body: Bytes) -> Response {
         let mut h: Map<String, String> = Map::new()
         h.insert("content-length", "${body.len()}")
@@ -333,6 +468,9 @@ impl Response {
     }
 
     // `status` carrying `s` as UTF-8 text.
+    /// Returns a response with status `status` carrying `s` as UTF-8 text,
+    /// with `content-type` set to `text/plain; charset=utf-8` and
+    /// `content-length` to the text's length in bytes.
     pub fn text(status: Int, s: String) -> Response {
         let body = bytes_from_string(s)
         let mut h: Map<String, String> = Map::new()
@@ -341,12 +479,21 @@ impl Response {
         Response { status: status, headers: h, body: body }
     }
 
+    /// Returns a `404 Not Found` response whose body is the text `not found`.
+    ///
+    /// `Server` answers with it when no route matches.
     pub fn not_found() -> Response { Response::text(404, "not found") }
 
     // `200 OK` carrying `v` as JSON text, with `content-type` and
     // `content-length` set. It takes the name section 6 gives a client-side
     // decoder (`json<T: FromJson>(self)`): there is no client, and one type
     // cannot have both, so the constructor has it.
+    /// Returns a `200 OK` response carrying `v` as JSON text, as `stringify`
+    /// writes it, with `content-type` set to `application/json` and
+    /// `content-length` set.
+    ///
+    /// Panics where `stringify` does, if arrays and objects in `v` nest too
+    /// deep.
     pub fn json(v: JsonValue) -> Response {
         let body = bytes_from_string(stringify(v))
         let mut h: Map<String, String> = Map::new()
@@ -361,6 +508,16 @@ impl Response {
     // a body, which Nova builds with string interpolation and `Bytes::concat`.
     // That is the design's decision rather than a gap -- see
     // docs/adr/0019-offset-table-intrinsic-boundary.md.
+    /// Returns the response as it is sent: the status line, one line per
+    /// header, a blank line, and the body. Each line ends with a carriage
+    /// return and a line feed.
+    ///
+    /// The status line holds `HTTP/1.1`, the status code and a reason phrase:
+    /// the usual one for 200, 201, 204, 400, 404, 405, 413 and 500, and for
+    /// any other code a phrase for its class, such as `Client Error`. Each
+    /// header is written `name: value`. A header whose name or value holds a
+    /// carriage return or a line feed is left out, so it cannot add lines of
+    /// its own. Nothing else is added: no header the response does not hold.
     pub fn to_bytes(self) -> Bytes {
         let mut head = "HTTP/1.1 ${self.status} ${reason_phrase(self.status)}\r\n"
         let names = self.headers.keys()
@@ -489,6 +646,24 @@ fn reason_phrase(status: Int) -> String {
 // function's ordinary keep-alive path works; it is not evidence the pipelined
 // path is safe, and a reader should not conclude otherwise from seeing it
 // green.
+/// Reads one request from `conn`: its head, then a body of `Content-Length`
+/// bytes.
+///
+/// An `async fn`: it suspends the calling task while it waits for the client,
+/// and other tasks run meanwhile. It waits as long as the client takes, so a
+/// client that sends nothing keeps it waiting for ever; `std/time`'s
+/// `timeout` can bound the wait. On a connection kept open for more requests,
+/// call it again for the next one only after answering this one: any bytes
+/// it read past this request's body are dropped, so a request that a client
+/// sends before reading the response can be lost, and both sides then wait
+/// for ever.
+///
+/// Returns an `HttpError` of kind `Transport` if reading fails or the
+/// connection closes before the request is complete, `BodyTooLarge` if
+/// `Content-Length` is more than `limits` allows, `BadHeader` if it is not a
+/// whole number written in digits, and the kinds `parse_request_head`
+/// returns for a malformed head. As there, the head's byte limit counts
+/// every byte read so far, which can include the start of the body.
 pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, HttpError> {
     let mut buf = bytes_from_string("")
     let mut head: Option<Request> = None
@@ -723,6 +898,12 @@ fn char_digit(c: Char) -> Int {
 // it returns the count it managed -- so a caller that ignored the count would
 // silently truncate a response under back-pressure. Returns the total written,
 // which equals the response's length on success.
+/// Writes all of `resp` to `conn`, laid out as `to_bytes` lays it out, and
+/// returns the number of bytes written.
+///
+/// An `async fn`: it suspends the calling task while the connection has no
+/// room for more, and other tasks run meanwhile. Returns the `IoError` a
+/// write fails with, or one of kind `Other` if a write makes no progress.
 pub async fn write_response(conn: TcpStream, resp: Response) -> Result<Int, IoError> {
     let wire = resp.to_bytes()
     let total = wire.len()
@@ -757,6 +938,12 @@ const SERVER_REQUEST_MS: Int = 10000
 
 // A routing table and nothing else. Build one with `Server::new()` and `get`,
 // then `listen`.
+/// A router that serves GET routes over HTTP/1.1.
+///
+/// Build one with `Server::new()` and a call to `get` for each route, then
+/// serve it with `listen`. A request goes to the handler of the route whose
+/// path equals the request's target exactly, query string included; any
+/// other target, and any method but `GET`, gets `Response::not_found()`.
 pub record Server { routes: Vec<Route> }
 
 // One GET route: an exact path, and the handler that answers it.
@@ -767,6 +954,7 @@ record Route { path: String, handler: fn(Request) -> Response }
 record InFlight { req: Request, rest: Bytes }
 
 impl Server {
+    /// Returns a server with no routes.
     pub fn new() -> Server { Server { routes: Vec::new() } }
 
     // Adds a GET route. Takes `self` rather than `mut self`, and returns
@@ -778,6 +966,13 @@ impl Server {
     // alone. A `Vec` is shared, not copied, on assignment, so pushing onto
     // `self.routes` would add the route to every server built from the same
     // base as well.
+    /// Returns a copy of this server with one more route: `GET` requests for
+    /// `path` go to `handler`.
+    ///
+    /// `self` is left unchanged, so calls chain, as in
+    /// `Server::new().get("/", home).get("/about", about)`. `path` must equal
+    /// a request's target exactly: `/a` matches neither `/a/` nor `/a?x=1`. Of
+    /// two routes with the same path, the one added first answers.
     pub fn get(self, path: String, handler: fn(Request) -> Response) -> Server {
         let mut rs: Vec<Route> = Vec::new()
         let mut i = 0
@@ -795,6 +990,13 @@ impl Server {
     // The response to `req`: the handler of the GET route whose path equals
     // `req.path` exactly, or `Response::not_found()` for any other path or
     // method. Socket-free, so a test can call it directly.
+    /// Returns the response to `req`: what the handler of the route whose
+    /// path equals `req.path` returns, or `Response::not_found()` if there is
+    /// none.
+    ///
+    /// Only a `GET` request reaches a handler; any other method, `HEAD`
+    /// included, gets `not_found`. It touches no connection, so a test can
+    /// call it directly with a `Request` it builds.
     pub fn dispatch(self, req: Request) -> Response {
         match req.method {
             Get => {
@@ -844,6 +1046,34 @@ impl Server {
     // **Errors.** A failed `bind` or `accept` returns `Err`. An accept error
     // closes the listener first and leaves the connections running; the flag
     // is not set, so they keep being served.
+    /// Serves HTTP on `addr`, a `"host:port"` string such as
+    /// `"127.0.0.1:8080"`, until the process is asked to stop.
+    ///
+    /// An `async fn`: it suspends the calling task while it waits for
+    /// connections, and serves each connection in a task of its own. A
+    /// handler that panics ends the whole program.
+    ///
+    /// A connection stays open for more requests until the client closes it,
+    /// and they are answered in order, including requests sent before the
+    /// previous response arrived; a `Connection: close` header does not close
+    /// it. Requests are limited as `Limits::default()` says. A malformed or
+    /// oversized request, or one not read and answered within 10 seconds of
+    /// the server starting on it, closes its connection without a response.
+    /// No `100 Continue` is ever sent.
+    ///
+    /// On SIGTERM or SIGINT (Ctrl+C or Ctrl+Break on Windows) it stops
+    /// accepting within about a tenth of a second, and returns `Ok(())`.
+    /// Connections already open are not cut off: each finishes the request it
+    /// has started, and any further request that has already arrived whole,
+    /// then closes; an idle one closes within about a tenth of a second. The
+    /// program does not end until they have, and a second signal ends it at
+    /// once. Once `listen` has run, the program goes on catching those
+    /// signals, even after `listen` returns an `Err`: a program that carries
+    /// on after that is not ended by the next signal, only by a second.
+    ///
+    /// Returns an `IoError` if `addr` cannot be bound, as when it is already
+    /// in use, or if accepting a connection fails. After a failed accept the
+    /// connections already open go on being served.
     pub async fn listen(self, addr: String) -> Result<(), IoError> {
         let _ = shutdown_requested()
         let l = match bind(addr) {

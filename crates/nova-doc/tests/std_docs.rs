@@ -4,32 +4,11 @@
 
 mod common;
 
-/// The modules whose docs are written. Each std task adds its own; the
-/// last checks every module.
-const DONE: &[&str] = &[
-    "core",
-    "collections",
-    "strings",
-    "bytes",
-    "fmt",
-    "io",
-    "fs",
-    "net",
-    "process",
-    "task",
-    "sync",
-    "time",
-    "log",
-];
-
 #[test]
 fn std_is_documented() {
     let public = common::public_types(&common::std_sources());
     let mut missing = Vec::new();
     for (name, text) in nova_std::ALL {
-        if !DONE.contains(&name) {
-            continue;
-        }
         if common::module_docs(text).trim().is_empty() {
             missing.push(format!("std/{name}: no `//!` docs"));
         }
