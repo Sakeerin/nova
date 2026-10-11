@@ -1484,6 +1484,34 @@ mod tests {
         assert_eq!(doubled, ["impl.Int.method.doubled"]);
     }
 
+    const PAIRS: &str = "/// Two of a kind.\npub record Pair<T> {\n    pub a: T,\n    pub b: T,\n}\n\nimpl Pair<Int> {\n    /// Their sum.\n    pub fn total(self) -> Int { self.a + self.b }\n}\n\nimpl Pair<String> {\n    /// The two, joined.\n    pub fn total(self) -> String { \"${self.a}${self.b}\" }\n}\n";
+
+    #[test]
+    fn two_impls_of_one_type_number_a_method_they_share() {
+        // Spec §6.2: both impls go on `Pair`'s anchor, so the later
+        // `total` is numbered.
+        let dir = fresh("pairs");
+        write(
+            &dir,
+            &[
+                ("nova.toml", &manifest("pairs", "")),
+                ("src/lib.nova", PAIRS),
+            ],
+        );
+        let d = documented(&dir);
+        let lib = module(&d.site, "pairs/index.html");
+        let methods: Vec<&str> = item(lib, "record.Pair")
+            .impls
+            .iter()
+            .flat_map(|i| &i.methods)
+            .map(|m| m.anchor.as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            ["record.Pair.method.total", "record.Pair.method.total-2"]
+        );
+    }
+
     #[test]
     fn an_error_is_a_failure_that_carries_its_diagnostics() {
         let dir = fresh("error");
