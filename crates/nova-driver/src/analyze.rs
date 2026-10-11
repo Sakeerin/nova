@@ -84,6 +84,10 @@ pub struct Analysis {
     /// ([`Program::manifest`]).
     pub manifest: Option<FileId>,
     pub definitions: Option<Definitions>,
+    /// The merged AST the resolver built and the checker read: every
+    /// module's items, std's last, which [`Definitions::module_of`] maps to
+    /// their modules. Set whenever `definitions` is (spec 3.5a §15.2).
+    pub file: Option<nova_ast::File>,
     /// The typed module, partial when errors were found.
     pub module: Option<nova_hir::Module>,
     pub probe: ProbeResult,
@@ -135,6 +139,7 @@ pub fn analyze_program(
         graph,
         manifest,
         definitions: None,
+        file: None,
         module: None,
         probe: ProbeResult::default(),
         index: None,
@@ -175,6 +180,7 @@ pub fn analyze_program(
     if stop(&diagnostics) {
         analysis.diagnostics = shown(diagnostics, &registry);
         analysis.definitions = Some(resolved.definitions);
+        analysis.file = Some(resolved.file);
         return Ok(analysis);
     }
 
@@ -219,6 +225,7 @@ pub fn analyze_program(
         index.extend(imports);
         analysis.index = Some(index);
     }
+    analysis.file = Some(resolved.file);
     Ok(analysis)
 }
 
