@@ -397,3 +397,50 @@ fn a_dependencys_tests_are_stripped_and_the_roots_kept() {
     assert!(defined("app_checks_the_area"));
     assert!(!defined("geom_checks_its_area"));
 }
+
+/// A `Sources` that counts every path it is asked for.
+struct Counting(std::sync::Mutex<Vec<PathBuf>>);
+
+impl nova_driver::Sources for Counting {
+    fn read(&self, path: &Path) -> std::io::Result<String> {
+        self.0.lock().unwrap().push(path.to_path_buf());
+        std::fs::read_to_string(path)
+    }
+}
+
+/// Follow-up 2 (spec 3.5a §3; plan decision 3): a sibling file that does
+/// not exist is probed once per directory and name, however many modules
+/// that directory holds.
+#[test]
+fn a_missing_sibling_is_probed_once_per_directory() {
+    let dir = fresh("probe-once");
+    geom(&dir);
+    write(
+        &dir.join("app"),
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import geom\nimport a\nimport b\n\nfn main() {}\n",
+            ),
+            ("src/a.nova", "pub fn x() -> Int { 1 }\n"),
+            ("src/b.nova", "pub fn y() -> Int { 2 }\n"),
+        ],
+    );
+    let sources = Counting(std::sync::Mutex::new(Vec::new()));
+    let a = analyze_program(
+        Program::for_package(&dir.join("app"), Roots::Check),
+        &sources,
+        &options(false),
+    )
+    .expect("the entry reads");
+    assert_eq!(codes(&a), Vec::<&str>::new());
+    let probes = sources
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.ends_with("geom.nova"))
+        .count();
+    assert_eq!(probes, 1);
+}

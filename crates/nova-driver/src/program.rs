@@ -321,6 +321,7 @@ pub(crate) fn load_program(
         graph,
         sources,
         listings: HashMap::new(),
+        known: HashMap::new(),
     };
     let mut load = Load::default();
     let mut pending: Vec<Vec<(String, Pending)>> = Vec::new();
@@ -453,6 +454,10 @@ struct Loader<'a> {
     sources: &'a dyn Sources,
     /// Each directory's file names, read once (spec §4.3, decision 5).
     listings: HashMap<PathBuf, Vec<String>>,
+    /// Each `has` answered, by directory and stem: a name the listing lacks
+    /// costs one read per load, not one per module (spec 3.5a §3,
+    /// follow-up 2).
+    known: HashMap<(PathBuf, String), bool>,
 }
 
 impl<'a> Loader<'a> {
@@ -588,6 +593,18 @@ impl<'a> Loader<'a> {
         }
     }
 
+    /// Whether `dir` holds `<stem>.nova` ([`Loader::look`]), answered once
+    /// per load (spec 3.5a §3, follow-up 2).
+    fn has(&mut self, dir: &Path, stem: &str) -> bool {
+        let key = (dir.to_path_buf(), stem.to_string());
+        if let Some(&known) = self.known.get(&key) {
+            return known;
+        }
+        let found = self.look(dir, stem);
+        self.known.insert(key, found);
+        found
+    }
+
     /// Whether `dir` holds `<stem>.nova`, its name matching exactly (spec
     /// §4.3). A name the disk does not hold in any case may be an editor's
     /// unsaved buffer, read through `Sources`.
@@ -595,7 +612,7 @@ impl<'a> Loader<'a> {
     /// An empty `dir`, a loose entry named without one (`nova run
     /// main.nova`), is the current directory: `read_dir("")` fails on every
     /// system, which would leave the case-insensitive read to decide.
-    fn has(&mut self, dir: &Path, stem: &str) -> bool {
+    fn look(&mut self, dir: &Path, stem: &str) -> bool {
         let name = format!("{stem}.nova");
         let listed = if dir.as_os_str().is_empty() {
             Path::new(".")
