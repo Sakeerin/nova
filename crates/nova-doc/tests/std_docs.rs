@@ -16,6 +16,10 @@ const DONE: &[&str] = &[
     "fs",
     "net",
     "process",
+    "task",
+    "sync",
+    "time",
+    "log",
 ];
 
 #[test]

@@ -1,3 +1,18 @@
+//! Tasks: starting async work, waiting for it, and running it from code
+//! that is not `async`.
+//!
+//! `spawn` hands a future to the executor as a new task and returns a
+//! `JoinHandle`, whose `join` waits for the task's value. `block_on` runs
+//! tasks from code that is not `async`, and `yield_now` lets the other tasks
+//! take a turn. Every module sees these names without an import, and a
+//! module's own definition of one of them shadows the one here.
+//!
+//! Tasks take turns on one thread. A task runs until it awaits something that
+//! is not ready, and then the next ready task runs, in the order they became
+//! ready. No task runs except while `block_on` is running, and `block_on`
+//! returns only once every task has finished. An `async fn main` runs under
+//! `block_on`. A task that panics ends the whole program.
+
 // Nova standard library — tasks.
 //
 // Compiled as an implicit module and glob-imported into every user module, so
@@ -61,6 +76,12 @@
 // No bound on `T` here: a bound on a record's type parameter is a resolution
 // scope and is not enforced at construction (ADR 0007), so any bound belongs on
 // the `impl` instead. There is none to state.
+/// A handle on a task started by `spawn`, whose `join` waits for the task's
+/// value.
+///
+/// Copying a `JoinHandle` copies the handle: every copy refers to the same
+/// task. There is no way to cancel a task, and dropping its handle leaves it
+/// to run on.
 pub record JoinHandle<T> { fut: Future<T> }
 
 impl<T> JoinHandle<T> {
@@ -87,6 +108,16 @@ impl<T> JoinHandle<T> {
     // on the claim this handle has through `self.fut`. Calling `join` twice
     // on one handle reads the same value twice — deliberately, because Nova
     // has no move checking, so `self` by value cannot stop a second call.
+    /// Waits for the task to finish, and returns its value.
+    ///
+    /// An `async fn`: it suspends the calling task until the task finishes,
+    /// and other tasks run meanwhile. If the task has already finished, it
+    /// returns at once, without suspending. Any number of tasks can join one
+    /// task, and joining it again returns the same value again. If every task
+    /// left is waiting in a `join`, as when two tasks join each other, the
+    /// program prints a deadlock report naming each one and ends. A task that
+    /// never finishes because it keeps yielding is not detected: joining it
+    /// waits forever.
     pub async fn join(self) -> T {
         task_join_future(self.fut).await
         task_release(self.fut)
@@ -103,6 +134,14 @@ impl<T> JoinHandle<T> {
 //
 // `task_spawn`'s returned id is discarded: the handle's identity is `fut`
 // itself now, so nothing downstream ever needs the id back.
+/// Starts `fut` as a new task, and returns a `JoinHandle` for it.
+///
+/// It is not `async`, and the new task does not run yet: it joins the back
+/// of the queue of ready tasks, and runs only while `block_on` is running, so
+/// a task spawned outside `block_on`, with no `block_on` called after, never
+/// runs at all. Each future is meant to run once: do not also await it or
+/// pass it to `block_on`. Panics if `fut` is already a task that has not
+/// finished.
 pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {
     task_spawn(fut)
     JoinHandle { fut: fut }
@@ -115,6 +154,12 @@ pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {
 // `.await`, and nothing else in the language is a future that is not already
 // ready. Each call awaits a fresh one, so two tasks yielding at the same time
 // do not share a resume point.
+/// Suspends the calling task for one turn, letting the other ready tasks run
+/// first.
+///
+/// An `async fn` that always suspends: the task goes to the back of the queue
+/// of ready tasks, and resumes once each task ahead of it has had a turn.
+/// With no other task ready, it resumes at once.
 pub async fn yield_now() { task_yield_future().await }
 
 // Run this thread's executor until every queued task has finished, and produce
@@ -134,6 +179,20 @@ pub async fn yield_now() { task_yield_future().await }
 // **Not callable from inside an `async fn`.** A nested call would run a second
 // executor loop from inside the first one's frame; the runtime detects that and
 // ends the process with a diagnostic rather than corrupting the shared queue.
+/// Runs `fut` to completion from code that is not `async`, and returns its
+/// value.
+///
+/// It runs every other task too, including those spawned before the call,
+/// and returns only once all of them have finished, even those asleep or
+/// waiting for a connection. If every task left is waiting in a `join`, as
+/// when two tasks join each other, it prints a deadlock report naming each
+/// one and ends the program. A task that keeps yielding without finishing
+/// keeps it from returning. An `async fn main` runs under `block_on`, so it
+/// needs no call of its own.
+///
+/// Panics if called while `block_on` is already running, as from an
+/// `async fn` or a function one calls: there, `.await` the future instead.
+/// Panics too if `fut` is already a task that has not finished.
 pub fn block_on<T>(fut: Future<T>) -> T {
     task_drive(fut)
     task_output(fut)

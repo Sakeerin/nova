@@ -1,20 +1,68 @@
+//! Log lines, each with a time and a level, written to standard error or
+//! standard output.
+//!
+//! `Log::trace`, `Log::debug`, `Log::info`, `Log::warn` and `Log::error` each
+//! write one line made of the time in UTC, the level and the message, such as
+//! `2026-08-19T02:40:13.123Z INFO server started`. The message is written as
+//! given, so a newline in it splits it over lines. A call below the
+//! configured `LogLevel` writes nothing. `Log::init_with` sets that level and
+//! where lines go; until it is called, the level is `Info` and lines go to
+//! standard error. Every module sees these names without an import, and a
+//! module's own definition of one of them shadows the one here.
+//!
+//! Logging is not `async`: each call writes its line before it returns, so
+//! any function can log. The configuration holds for the whole program, and
+//! the last call to `Log::init` or `Log::init_with` sets it.
+
 // Levels, ordered by `to_int` below. The order is load-bearing: filtering
 // compares those integers, because Nova has no `==` on sum types
 // (`E0013`), so `to_int` is the only mechanism available rather than a
 // convenience.
-pub type LogLevel = | Trace | Debug | Info | Warn | Error
+/// How severe a log message is, from least to most: `Trace`, `Debug`,
+/// `Info`, `Warn`, `Error`.
+///
+/// The configured level lets through the messages at that level and above,
+/// and drops the rest.
+pub type LogLevel =
+    /// Fine-grained detail; the least severe level.
+    | Trace
+    /// Detail for debugging.
+    | Debug
+    /// A normal event; the default level.
+    | Info
+    /// Something unexpected that the program can carry on from.
+    | Warn
+    /// A failure; the most severe level.
+    | Error
 
 // One variant today. `Json` arrives with the increment that brings string
 // escaping; declaring the field now means adding that variant later breaks
 // only exhaustive matches, where adding a *field* to `LogConfig` would
 // break every construction site.
-pub type LogFormat = | Human
+/// How a log line is laid out. `Human` is the only layout.
+pub type LogFormat =
+    /// The time, the level's label and the message, separated by single
+    /// spaces, such as `2026-08-19T02:40:13.123Z WARN disk almost full`.
+    | Human
 
 // `File(String)` arrives with the increment that adds a synchronous
 // file-write path; every `std/fs` write is `async fn` today.
-pub type LogOutput = | Stderr | Stdout
+/// Where log lines are written.
+pub type LogOutput =
+    /// Standard error; the default.
+    | Stderr
+    /// Standard output.
+    | Stdout
 
-pub record LogConfig { pub level: LogLevel, pub format: LogFormat, pub output: LogOutput }
+/// A logger configuration, for `Log::init_with`.
+pub record LogConfig {
+    /// The least severe level written; messages below it are dropped.
+    pub level: LogLevel,
+    /// How each line is laid out.
+    pub format: LogFormat,
+    /// Where the lines are written.
+    pub output: LogOutput,
+}
 
 // The logger's namespace. An empty record because Nova has no free-standing
 // namespaces, and associated functions rather than top-level ones because a
@@ -23,9 +71,16 @@ pub record LogConfig { pub level: LogLevel, pub format: LogFormat, pub output: L
 // `import_std_module` resolves such a collision silently in the *user's*
 // favour — making this module's `error` unreachable with no diagnostic.
 // `std/strings` refused the same trade for `join`.
+/// The logger, whose functions are called on the type itself, as in
+/// `Log::warn("disk almost full")`.
+///
+/// It holds nothing. Its functions write log lines and set the logger's
+/// configuration.
 pub record Log {}
 
 impl LogLevel {
+    /// Returns the level's rank, from 0 for `Trace` to 4 for `Error`: a higher
+    /// rank is more severe, so two levels compare by their ranks.
     pub fn to_int(self) -> Int {
         match self {
             Trace => 0
@@ -36,6 +91,8 @@ impl LogLevel {
         }
     }
 
+    /// Returns the level's name as log lines show it: `TRACE`, `DEBUG`,
+    /// `INFO`, `WARN` or `ERROR`.
     pub fn label(self) -> String {
         match self {
             Trace => "TRACE"
@@ -83,17 +140,37 @@ impl Log {
     // (`crates/nova-cli/tests/run_tests.rs`), which overwrites a
     // configuration wrong in both fields with a call to `init()` and checks
     // that the runtime's actual default comes back, not the wrong one.
+    /// Restores the default configuration: level `Info`, the `Human` layout,
+    /// and standard error.
+    ///
+    /// Calling it is optional, since a program that never configures the
+    /// logger has this configuration already. It replaces any configuration
+    /// set before.
     pub fn init() { Log::init_with(LogConfig { level: Info, format: Human, output: Stderr }) }
 
     // `config.format` is deliberately unread: `LogFormat` has one variant,
     // so there is nothing to branch on yet.
+    /// Sets the logger's configuration, replacing any set before.
+    ///
+    /// From then on, messages below `config.level` are dropped, and lines go
+    /// to `config.output`. `config.format` has one choice, `Human`.
     pub fn init_with(config: LogConfig) {
         log_set_config(config.level.to_int(), to_stderr_flag(config.output))
     }
 
+    /// Writes `msg` as a log line at level `Trace`, the least severe, if the
+    /// configured level is `Trace`.
     pub fn trace(msg: String) { emit(Trace, msg) }
+    /// Writes `msg` as a log line at level `Debug`, if the configured level is
+    /// `Debug` or `Trace`.
     pub fn debug(msg: String) { emit(Debug, msg) }
+    /// Writes `msg` as a log line at level `Info`, if the configured level is
+    /// `Info`, as it is by default, or less severe.
     pub fn info(msg: String) { emit(Info, msg) }
+    /// Writes `msg` as a log line at level `Warn`, unless the configured level
+    /// is `Error`.
     pub fn warn(msg: String) { emit(Warn, msg) }
+    /// Writes `msg` as a log line at level `Error`, the most severe, whatever
+    /// the configured level.
     pub fn error(msg: String) { emit(Error, msg) }
 }

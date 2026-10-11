@@ -1,3 +1,16 @@
+//! Clocks, durations, sleeping and time limits.
+//!
+//! `Instant` reads a monotonic clock, for measuring how long something takes,
+//! and `SystemTime` reads the wall clock, for timestamps. A `Duration` is a
+//! span of time, which `sleep` takes to suspend a task and `timeout` to limit
+//! how long a future may take. Every module sees these names without an
+//! import, and a module's own definition of one of them shadows the one here.
+//!
+//! A `Duration` counts whole nanoseconds in an `Int`. `Duration::from_secs`,
+//! `from_millis` and `from_micros` build one, and saturate rather than
+//! overflow. A duration can be negative, and `sleep` and `timeout` treat a
+//! negative one as zero.
+
 // A point on this process's monotonic clock.
 //
 // `nanos` is not privacy-enforced -- no record field in this language is --
@@ -7,6 +20,13 @@
 // `elapsed`. Held as nanoseconds since the runtime's single process epoch,
 // so a real reading is never negative and two real `Instant`s are ordered
 // by subtraction.
+/// A reading of a monotonic clock, from `Instant::now`, for measuring how
+/// much time passes.
+///
+/// The clock never goes backwards, unlike the wall clock `SystemTime` reads,
+/// and its readings mean nothing outside the program that took them. Measure
+/// between two readings with `duration_since`, or from one reading to now
+/// with `elapsed`.
 pub record Instant { nanos: Int }
 
 // A span of time, held in nanoseconds because all three constructors below
@@ -19,6 +39,14 @@ pub record Instant { nanos: Int }
 // supported way to build one. That matters concretely: a negative or
 // absurd `nanos` reaching `sleep` is treated as an immediate wake -- the
 // same silent no-op the saturating constructors exist to prevent.
+/// A span of time, counted in whole nanoseconds; it can be negative.
+///
+/// Build one with `from_secs`, `from_millis` or `from_micros`, and read it
+/// back with `as_secs` or `as_millis`. The constructors saturate: a count too
+/// large for an `Int` of nanoseconds gives the longest `Duration`,
+/// 9,223,372,036,854,775,807 nanoseconds (just over 292 years), and one too
+/// far below zero gives the most negative, -9,223,372,036,854,775,808
+/// nanoseconds.
 pub record Duration { nanos: Int }
 
 const NANOS_PER_SEC: Int = 1_000_000_000
@@ -69,14 +97,22 @@ const MIN_NANOS: Int = -MAX_NANOS - 1
 
 impl Instant {
     // The current reading of the monotonic clock.
+    /// Returns the current reading of the monotonic clock.
     pub fn now() -> Instant { Instant { nanos: time_now_nanos() } }
 
     // How long since `self`. Zero if `self` is somehow in the future.
+    /// Returns the time that has passed since `self` was read.
+    ///
+    /// It is never negative.
     pub fn elapsed(self) -> Duration { Instant::now().duration_since(self) }
 
     // The span from `earlier` to `self`, **saturating at zero** so an elapsed
     // time can never come back negative when the arguments are the wrong way
     // round.
+    /// Returns the time from `earlier` to `self`.
+    ///
+    /// Saturates at zero: if `earlier` is in fact the later reading, the
+    /// result is a zero duration, never a negative one.
     pub fn duration_since(self, earlier: Instant) -> Duration {
         if self.nanos <= earlier.nanos {
             Duration { nanos: 0 }
@@ -89,6 +125,10 @@ impl Instant {
 impl Duration {
     // Whole seconds. Clamps above `MAX_SECS` and below `MIN_SECS`; see the
     // constants above.
+    /// Returns a duration of `s` seconds.
+    ///
+    /// Saturates: an `s` above 9,223,372,036 gives the longest `Duration`, and
+    /// one below -9,223,372,036 the most negative.
     pub fn from_secs(s: Int) -> Duration {
         if s > MAX_SECS {
             Duration { nanos: MAX_NANOS }
@@ -100,6 +140,10 @@ impl Duration {
     }
 
     // Whole milliseconds. Clamps above `MAX_MILLIS` and below `MIN_MILLIS`.
+    /// Returns a duration of `ms` milliseconds.
+    ///
+    /// Saturates: an `ms` above 9,223,372,036,854 gives the longest
+    /// `Duration`, and one below -9,223,372,036,854 the most negative.
     pub fn from_millis(ms: Int) -> Duration {
         if ms > MAX_MILLIS {
             Duration { nanos: MAX_NANOS }
@@ -111,6 +155,10 @@ impl Duration {
     }
 
     // Whole microseconds. Clamps above `MAX_MICROS` and below `MIN_MICROS`.
+    /// Returns a duration of `us` microseconds.
+    ///
+    /// Saturates: a `us` above 9,223,372,036,854,775 gives the longest
+    /// `Duration`, and one below -9,223,372,036,854,775 the most negative.
     pub fn from_micros(us: Int) -> Duration {
         if us > MAX_MICROS {
             Duration { nanos: MAX_NANOS }
@@ -122,10 +170,14 @@ impl Duration {
     }
 
     // Whole seconds, truncating. `from_millis(1500).as_secs()` is `1`.
+    /// Returns the duration in whole seconds, rounded toward zero: 1.5 seconds
+    /// gives 1, and -1.5 seconds gives -1.
     pub fn as_secs(self) -> Int { self.nanos / NANOS_PER_SEC }
 
     // Whole milliseconds, truncating. `from_micros(1).as_millis()` is `0`,
     // which `tests/runtime/time_conversions.nova` pins deliberately.
+    /// Returns the duration in whole milliseconds, rounded toward zero: 1,999
+    /// microseconds give 1, and -1,999 microseconds give -1.
     pub fn as_millis(self) -> Int { self.nanos / NANOS_PER_MILLI }
 }
 
@@ -148,6 +200,12 @@ impl Duration {
 // returns early just re-parks on the same deadline instead of waking the
 // sleeper ahead of schedule. A non-positive `d` wakes immediately rather
 // than being rejected.
+/// Suspends the calling task for at least `d`.
+///
+/// An `async fn`: other tasks run meanwhile, and a sleeping task uses no
+/// processor time. It can wake a little after `d` has passed, never before. A
+/// zero or negative `d` returns at once without suspending, so no other task
+/// gets a turn; `yield_now` gives them one.
 pub async fn sleep(d: Duration) { task_sleep_future_nanos(d.nanos).await }
 
 // What `task_timeout_future` reports when the inner future finished first.
@@ -159,6 +217,8 @@ const TIMEOUT_COMPLETED: Int = 0
 // Carries nothing, and needs to: the caller passed `d` in, so it already has
 // the only fact there is. It is the one record in this library with no field
 // to disclose as un-enforced, because it has no field.
+/// The error `timeout` returns when its time runs out before the future
+/// finishes. It holds nothing.
 pub record TimeoutError {}
 
 // Run `fut`, giving up after `d`.
@@ -176,6 +236,23 @@ pub record TimeoutError {}
 // registered that nothing can reach or close, and it leaks until the process
 // exits -- which is what `docs/adr/0012-file-descriptor-lifecycle.md` already
 // says of any descriptor nobody closes.
+/// Runs `fut` in the calling task, giving up once `d` has passed.
+///
+/// An `async fn`: it suspends the calling task while `fut` waits, and other
+/// tasks run meanwhile. Returns `Ok` with `fut`'s value if it finishes in
+/// time, or `Err(TimeoutError {})` if `d` passes first. `fut` runs before the
+/// time is checked, so even with a zero or negative `d`, a future that
+/// finishes without waiting gives `Ok`. The time is checked only when `fut`
+/// waits: a future that computes past `d` without awaiting anything still
+/// gives `Ok`.
+///
+/// On a timeout, `fut` is abandoned, not cancelled: it is never resumed, and
+/// nothing tells it so. A task it was joining runs on, and a stream it was
+/// reading or writing stays open, but a `connect` it was making leaves its
+/// socket open until the program exits. Today, a future that waits by
+/// yielding and trying again, as `std/sync`'s `lock`, `send` and `recv` and
+/// `yield_now` do, is tried again only once `d` has passed, so under
+/// `timeout` it takes all of `d` even when it could have finished sooner.
 pub async fn timeout<T>(d: Duration, fut: Future<T>) -> Result<T, TimeoutError> {
     if task_timeout_future(d.nanos, fut).await == TIMEOUT_COMPLETED {
         Ok(task_output(fut))
@@ -234,6 +311,12 @@ fn civil_from_days(days: Int) -> [Int] {
 // `Int::pad`'s sign digit eats the padding budget does the width itself
 // break: `nanos: -43_200_000_000_000` (a half day) renders
 // `1970-01-01T-12:00:00.000Z`, 25 characters, not 24.
+/// A reading of the wall clock, from `SystemTime::now`: the time since
+/// 1970-01-01 00:00:00 UTC, in nanoseconds.
+///
+/// The wall clock can jump forwards or backwards when the system's time is
+/// set, so measure how much time passes with `Instant` instead. `to_iso8601`
+/// renders a reading as text.
 pub record SystemTime { nanos: Int }
 
 impl SystemTime {
@@ -244,6 +327,12 @@ impl SystemTime {
     // and has no date/time crate, so there is no timezone database to
     // consult and a local-time offset would be a guess that is wrong twice
     // a year in every DST zone.
+    /// Returns the time as ISO 8601 text in UTC, to the millisecond, such as
+    /// `2026-08-19T02:40:13.123Z`.
+    ///
+    /// The text is 24 characters long for any reading from `now`. Fractions
+    /// of a millisecond are dropped, not rounded, and there is no local time
+    /// zone.
     pub fn to_iso8601(self) -> String {
         let nanos_per_day = 86_400_000_000_000
         let days = self.nanos / nanos_per_day
@@ -258,5 +347,10 @@ impl SystemTime {
 
     // The live wall clock: nanoseconds since the Unix epoch, read from the
     // OS at call time.
+    /// Returns the current wall-clock time.
+    ///
+    /// A system clock set before 1970 reads as 1970-01-01T00:00:00.000Z, and
+    /// one set past April 2262, beyond what an `Int` of nanoseconds holds,
+    /// reads as that limit.
     pub fn now() -> SystemTime { SystemTime { nanos: time_now_epoch_nanos() } }
 }
