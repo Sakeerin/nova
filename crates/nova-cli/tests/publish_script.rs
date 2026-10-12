@@ -1,8 +1,11 @@
 //! The publish script (spec
 //! `docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
 //! §5.2, §11.2): `.github/scripts/publish-crates.sh`, run with `bash`
-//! against a fake `cargo` and a sparse index served by the loopback server.
-//! Nothing reaches the internet, and no real cargo publishes anything.
+//! against a fake `cargo`, and a sparse index and crates.io's owners API
+//! served by the loopback server. Each run is in a directory of its own,
+//! which stands for the repository's root: it holds the root `Cargo.toml`
+//! the script reads the workspace's version from. Nothing reaches the
+//! internet, and no real cargo publishes anything.
 //!
 //! The fake `cargo` appends its arguments, one line per run, to
 //! `cargo.log`, and answers as the test's `answers` file says, one line per
@@ -28,6 +31,9 @@ use support::{Response, Server};
 
 const TOKEN: &str = "secret-token-value";
 const VERSION: &str = "0.3.0";
+/// The crates.io login that owns the crates, as the runs give it in
+/// `NOVA_PUBLISH_OWNER`.
+const OWNER: &str = "nova-maintainer";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -103,9 +109,20 @@ echo "   Uploading $crate (fake)"
 echo "   Published $crate (fake)" >&2
 "#;
 
-/// A sparse index on the loopback server: each `(path, status, body)`,
-/// and 404 for any other path.
-fn index(files: &[(String, u16, String)]) -> Server {
+/// The root `Cargo.toml` at `version`, laid out as the repository's: the
+/// only line that starts with `version = ` is `[workspace.package]`'s.
+fn workspace_manifest(version: &str) -> String {
+    format!(
+        "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nversion = \"{version}\"\n\
+         edition = \"2021\"\n\n[workspace.dependencies]\n\
+         nova-ast = {{ path = \"crates/nova-ast\", version = \"={version}\" }}\n"
+    )
+}
+
+/// crates.io on the loopback server, its sparse index at the root and its
+/// API under `/api/v1`: each `(path, status, body)`, and 404 for any other
+/// path.
+fn crates_io(files: &[(String, u16, String)]) -> Server {
     let files: HashMap<String, (u16, String)> = files
         .iter()
         .map(|(path, status, body)| (path.clone(), (*status, body.clone())))
@@ -140,6 +157,31 @@ fn index_file(name: &str, versions: &[(&str, bool)]) -> (String, u16, String) {
     (index_path(name), 200, body)
 }
 
+/// A crate's owners in crates.io's API.
+fn owners_path(name: &str) -> String {
+    format!("/api/v1/crates/{name}/owners")
+}
+
+/// A crate's owners file, owned by `logins`, as crates.io's API writes it:
+/// a team's login has the form `github:<org>:<team>`.
+fn owners_file(name: &str, logins: &[&str]) -> (String, u16, String) {
+    let users: Vec<String> = logins
+        .iter()
+        .enumerate()
+        .map(|(id, login)| {
+            let kind = if login.contains(':') { "team" } else { "user" };
+            format!(
+                r#"{{"kind":"{kind}","id":{id},"login":"{login}","url":"https://example.com/{id}","name":"Owner {id}","avatar":"https://example.com/{id}.png"}}"#
+            )
+        })
+        .collect();
+    (
+        owners_path(name),
+        200,
+        format!(r#"{{"users":[{}]}}"#, users.join(",")),
+    )
+}
+
 struct Run {
     success: bool,
     code: Option<i32>,
@@ -155,17 +197,33 @@ impl Run {
     }
 }
 
-/// `bash publish-crates.sh ARGS` in a fresh directory called `name`, with
-/// the fake cargo answering as `answers` says, `index_url` as the sparse
-/// index, no wait after a rate limit, and the token set. Whatever happens,
-/// the token's value is printed nowhere.
-fn publish(name: &str, args: &[&str], answers: &str, index_url: &str) -> Run {
+/// `bash publish-crates.sh ARGS` in a fresh directory called `name`, which
+/// holds a root `Cargo.toml` at `VERSION`, with the fake cargo answering as
+/// `answers` says, `url` as crates.io (the sparse index at its root, the
+/// API under `/api/v1`), `OWNER` as the crates' owner, no wait after a
+/// rate limit, and the token set. Whatever happens, the token's value is
+/// printed nowhere.
+fn publish(name: &str, args: &[&str], answers: &str, url: &str) -> Run {
+    publish_with(name, args, answers, url, |_, _| {})
+}
+
+/// `publish`, with `change` applied to the command and the run's directory
+/// just before the run.
+fn publish_with(
+    name: &str,
+    args: &[&str],
+    answers: &str,
+    url: &str,
+    change: impl FnOnce(&mut Command, &Path),
+) -> Run {
     let dir = fresh(name);
     let cargo = dir.join("cargo");
     std::fs::write(&cargo, FAKE_CARGO).expect("write the fake cargo");
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755))
         .expect("make the fake cargo executable");
     std::fs::write(dir.join("answers"), answers).expect("write the answers");
+    std::fs::write(dir.join("Cargo.toml"), workspace_manifest(VERSION))
+        .expect("write the root Cargo.toml");
     // On macOS, the system's bash 3.2, which a Homebrew bash first on PATH
     // would hide: the script must run under both.
     let bash = if cfg!(target_os = "macos") {
@@ -180,7 +238,9 @@ fn publish(name: &str, args: &[&str], answers: &str, index_url: &str) -> Run {
         .current_dir(&dir)
         .env("CARGO", &cargo)
         .env("FAKE_CARGO_DIR", &dir)
-        .env("NOVA_PUBLISH_INDEX", index_url)
+        .env("NOVA_PUBLISH_INDEX", url)
+        .env("NOVA_PUBLISH_API", format!("{url}/api/v1"))
+        .env("NOVA_PUBLISH_OWNER", OWNER)
         .env("NOVA_PUBLISH_WAIT", "0")
         .env("CARGO_REGISTRY_TOKEN", TOKEN);
     // Loopback only: a proxy in the environment must not see the requests.
@@ -194,6 +254,7 @@ fn publish(name: &str, args: &[&str], answers: &str, index_url: &str) -> Run {
     ] {
         command.env_remove(proxy);
     }
+    change(&mut command, &dir);
     let output = command.output().expect("run bash publish-crates.sh");
     let run = Run {
         success: output.status.success(),
@@ -242,7 +303,7 @@ fn summary_line(crate_name: &str, what: &str) -> String {
 #[test]
 fn publishes_every_crate_in_the_lists_order() {
     let list = publish_list();
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let run = publish("in-order", &[VERSION], "", &server.url);
     assert!(run.success, "{}", run.output());
     assert_eq!(run.log, publish_args(&list), "{}", run.output());
@@ -262,7 +323,8 @@ fn publishes_every_crate_in_the_lists_order() {
         .map(|crate_name| summary_line(crate_name, "published"))
         .collect();
     assert_eq!(summary(&run), expected, "{}", run.output());
-    // Each crate's index file was asked for once, before its publish.
+    // Each crate's index file was asked for once, and no owners, since
+    // crates.io has none of them.
     let asked: Vec<String> = server
         .requests()
         .iter()
@@ -279,10 +341,17 @@ fn publishes_every_crate_in_the_lists_order() {
 fn skips_a_crate_the_index_lists_at_the_version_and_publishes_one_listed_at_others() {
     let list = publish_list();
     let (at_version, yanked_at_version, at_others) = (&list[0], &list[1], &list[2]);
-    let server = index(&[
+    let server = crates_io(&[
         index_file(at_version, &[("0.2.0", false), (VERSION, false)]),
+        // Ours, whatever the case of the login.
+        owners_file(at_version, &["Nova-Maintainer"]),
         // A yanked version is still taken.
         index_file(yanked_at_version, &[(VERSION, true)]),
+        // Ours, with a team and another user.
+        owners_file(
+            yanked_at_version,
+            &["someone-else", "github:nova-lang:publish", OWNER],
+        ),
         // A prerelease of the same numbers, and longer versions that start
         // with them, are other versions.
         index_file(
@@ -295,6 +364,7 @@ fn skips_a_crate_the_index_lists_at_the_version_and_publishes_one_listed_at_othe
                 ("10.3.0", false),
             ],
         ),
+        owners_file(at_others, &[OWNER]),
     ]);
     let run = publish("skips", &[VERSION], "", &server.url);
     assert!(run.success, "{}", run.output());
@@ -319,13 +389,125 @@ fn skips_a_crate_the_index_lists_at_the_version_and_publishes_one_listed_at_othe
     assert_eq!(summary[0], summary_line(at_version, "skipped"));
     assert_eq!(summary[1], summary_line(yanked_at_version, "skipped"));
     assert_eq!(summary[2], summary_line(at_others, "published"));
+    // The owners of each crate crates.io has were asked for, and only
+    // theirs, with the User-Agent crates.io's API requires; no request
+    // carried the token.
+    let requests = server.requests();
+    let owners_asked: Vec<String> = requests
+        .iter()
+        .filter(|request| request.path.starts_with("/api/"))
+        .map(|request| request.path.clone())
+        .collect();
+    assert_eq!(
+        owners_asked,
+        [
+            owners_path(at_version),
+            owners_path(yanked_at_version),
+            owners_path(at_others)
+        ]
+    );
+    for request in &requests {
+        if request.path.starts_with("/api/") {
+            let agent = request.header("user-agent").unwrap_or("");
+            assert!(agent.starts_with("nova-publish-crates "), "{agent:?}");
+        }
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|(_, value)| !value.contains(TOKEN)),
+            "{request:?}"
+        );
+    }
+}
+
+#[test]
+fn stops_before_any_upload_when_crates_io_has_a_crate_someone_else_owns() {
+    let list = publish_list();
+    let ours = &list[0];
+    // The last crate in the list, so that a check made crate by crate would
+    // have published the 18 before it. Taken at VERSION, as someone who read
+    // the release's version in its plan would take it, or at another.
+    let taken = &list[18];
+    for (name, version) in [("taken-at-version", VERSION), ("taken-elsewhere", "0.0.1")] {
+        let server = crates_io(&[
+            index_file(ours, &[("0.2.0", false)]),
+            owners_file(ours, &[OWNER]),
+            index_file(taken, &[(version, false)]),
+            owners_file(taken, &["squatter", "github:squatters:all"]),
+        ]);
+        let run = publish(name, &[VERSION], "", &server.url);
+        assert_eq!(run.code, Some(1), "{name}: {}", run.output());
+        assert!(run.log.is_empty(), "{name}: {}", run.output());
+        for named in [taken.as_str(), "squatter", "github:squatters:all", OWNER] {
+            assert!(run.stderr.contains(named), "{name}: {}", run.output());
+        }
+        assert!(
+            run.stderr.contains("nothing was published"),
+            "{name}: {}",
+            run.output()
+        );
+        let summary = summary(&run);
+        let expected: Vec<String> = list
+            .iter()
+            .map(|crate_name| summary_line(crate_name, "not tried"))
+            .collect();
+        assert_eq!(summary, expected, "{name}: {}", run.output());
+    }
+}
+
+#[test]
+fn stops_before_any_upload_when_crates_ios_api_cannot_say_who_owns_a_crate() {
+    let list = publish_list();
+    let listed = &list[2];
+    // A server error, a crate the index has and the API does not, and a
+    // refusal (crates.io refuses a request without a User-Agent so).
+    for status in [500, 404, 403] {
+        let server = crates_io(&[
+            index_file(listed, &[("0.2.0", false)]),
+            (
+                owners_path(listed),
+                status,
+                r#"{"errors":[{"detail":"no"}]}"#.to_string(),
+            ),
+        ]);
+        let name = format!("owners-{status}");
+        let run = publish(&name, &[VERSION], "", &server.url);
+        assert_eq!(run.code, Some(1), "{name}: {}", run.output());
+        assert!(run.log.is_empty(), "{name}: {}", run.output());
+        let url = format!("{}{}", server.url, owners_path(listed));
+        assert!(run.stderr.contains(&url), "{name}: {}", run.output());
+        assert!(
+            run.stderr.contains(&status.to_string()),
+            "{name}: {}",
+            run.output()
+        );
+        assert!(
+            run.stderr.contains("nothing was published"),
+            "{name}: {}",
+            run.output()
+        );
+    }
+    // And an API that cannot be reached: nothing listens on loopback port 1.
+    let server = crates_io(&[index_file(listed, &[("0.2.0", false)])]);
+    let run = publish_with("owners-down", &[VERSION], "", &server.url, |command, _| {
+        command.env("NOVA_PUBLISH_API", "http://127.0.0.1:1/api/v1");
+    });
+    assert_eq!(run.code, Some(1), "{}", run.output());
+    assert!(run.log.is_empty(), "{}", run.output());
+    assert!(
+        run.stderr
+            .contains(&format!("http://127.0.0.1:1{}", owners_path(listed))),
+        "{}",
+        run.output()
+    );
 }
 
 #[test]
 fn waits_out_the_rate_limit_retries_the_same_crate_then_goes_on() {
     let list = publish_list();
     let limited = &list[3];
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let run = publish(
         "rate-limit",
         &[VERSION],
@@ -351,7 +533,7 @@ fn waits_out_the_rate_limit_retries_the_same_crate_then_goes_on() {
 fn gives_up_after_thirty_rate_limited_attempts() {
     let list = publish_list();
     let limited = &list[2];
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let run = publish(
         "rate-limit-30",
         &[VERSION],
@@ -371,7 +553,7 @@ fn gives_up_after_thirty_rate_limited_attempts() {
 fn stops_at_any_other_failure_with_cargos_output_and_publishes_nothing_after_it() {
     let list = publish_list();
     let failing = &list[5];
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let run = publish(
         "failure",
         &[VERSION],
@@ -393,18 +575,19 @@ fn stops_at_any_other_failure_with_cargos_output_and_publishes_nothing_after_it(
     assert_eq!(summary[4], summary_line(&list[4], "published"));
     assert_eq!(summary[5], summary_line(failing, "failed"));
     assert_eq!(summary[6], summary_line(&list[6], "not tried"));
-    // The index was asked for it and the five before it, and no other.
-    assert_eq!(server.requests().len(), 6);
+    // The index was asked for every crate, once, before the first upload.
+    assert_eq!(server.requests().len(), 19);
 }
 
 #[test]
 fn stops_when_the_index_answers_neither_200_nor_404() {
     let list = publish_list();
     let broken = &list[4];
-    let server = index(&[(index_path(broken), 500, "oops".to_string())]);
+    let server = crates_io(&[(index_path(broken), 500, "oops".to_string())]);
     let run = publish("index-500", &[VERSION], "", &server.url);
     assert!(!run.success, "{}", run.output());
-    assert_eq!(run.log, publish_args(&list[..4]), "{}", run.output());
+    // Before any upload: the crates before it were only looked up.
+    assert!(run.log.is_empty(), "{}", run.output());
     let url = format!("{}{}", server.url, index_path(broken));
     assert!(run.stderr.contains(&url), "{}", run.output());
     assert!(run.stderr.contains("500"), "{}", run.output());
@@ -430,7 +613,7 @@ fn never_prints_the_token() {
     // `publish` checks every run; this one goes through a rate limit and a
     // failure, the paths that print cargo's output.
     let list = publish_list();
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let answers = format!("{} 429 1\n{} fail\n", list[0], list[1]);
     let run = publish("token", &[VERSION], &answers, &server.url);
     assert!(!run.success, "{}", run.output());
@@ -439,7 +622,7 @@ fn never_prints_the_token() {
 
 #[test]
 fn refuses_a_missing_or_malformed_version_before_anything_runs() {
-    let server = index(&[]);
+    let server = crates_io(&[]);
     let run = publish("no-version", &[], "", &server.url);
     assert_eq!(run.code, Some(2), "{}", run.output());
     assert!(
@@ -451,6 +634,61 @@ fn refuses_a_missing_or_malformed_version_before_anything_runs() {
         let run = publish("bad-version", &[bad], "", &server.url);
         assert_eq!(run.code, Some(2), "{bad}: {}", run.output());
         assert!(run.log.is_empty(), "{bad}: {}", run.output());
+    }
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn refuses_a_version_other_than_the_workspaces_before_anything_runs() {
+    let server = crates_io(&[]);
+    // A tree at 0.2.0, where `cargo publish` would upload 0.2.0 whatever
+    // VERSION says.
+    let run = publish_with("stale-tree", &[VERSION], "", &server.url, |_, dir| {
+        std::fs::write(dir.join("Cargo.toml"), workspace_manifest("0.2.0"))
+            .expect("write the root Cargo.toml");
+    });
+    assert_eq!(run.code, Some(2), "{}", run.output());
+    assert!(run.log.is_empty(), "{}", run.output());
+    assert!(
+        run.stderr.contains("'0.2.0'") && run.stderr.contains(&format!("'{VERSION}'")),
+        "{}",
+        run.output()
+    );
+    // Run somewhere other than the repository's root.
+    let run = publish_with("no-manifest", &[VERSION], "", &server.url, |_, dir| {
+        std::fs::remove_file(dir.join("Cargo.toml")).expect("remove the root Cargo.toml");
+    });
+    assert_eq!(run.code, Some(2), "{}", run.output());
+    assert!(run.log.is_empty(), "{}", run.output());
+    assert!(
+        run.stderr.contains("the repository's root"),
+        "{}",
+        run.output()
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn refuses_to_run_without_the_owners_login() {
+    let server = crates_io(&[]);
+    for (name, owner) in [
+        ("no-owner", None),
+        ("empty-owner", Some("")),
+        ("bad-owner", Some("nova maintainer")),
+    ] {
+        let run = publish_with(name, &[VERSION], "", &server.url, |command, _| {
+            match owner {
+                Some(owner) => command.env("NOVA_PUBLISH_OWNER", owner),
+                None => command.env_remove("NOVA_PUBLISH_OWNER"),
+            };
+        });
+        assert_eq!(run.code, Some(2), "{name}: {}", run.output());
+        assert!(run.log.is_empty(), "{name}: {}", run.output());
+        assert!(
+            run.stderr.contains("NOVA_PUBLISH_OWNER"),
+            "{name}: {}",
+            run.output()
+        );
     }
     assert!(server.requests().is_empty());
 }

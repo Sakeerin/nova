@@ -8,7 +8,17 @@
 # <version>, so crates.io receives exactly the tagged tree the GitHub
 # release was built from. It repeats CI's package gate, then
 # publish-crates.sh uploads the crates in order, skipping any crates.io
-# already has, so a run that stopped can be started again on the same tag.
+# already has at the version, so a run that stopped can be started again
+# on the same tag.
+#
+# Before the first upload, publish-crates.sh checks that every one of the
+# 19 names crates.io already has is owned by the repository's owner
+# (NOVA_PUBLISH_OWNER below; crates.io's logins are GitHub logins), and
+# stops otherwise with nothing published: someone else's crate under one
+# of these names would be skipped as if it were ours, then built, build
+# script and all, by the next crate's `cargo publish` in the step that
+# holds the token. Should the repository move to an organization, set it to
+# the login of the account that owns the crates.
 #
 # The token is the `crates-io` environment's secret CARGO_REGISTRY_TOKEN,
 # which the maintainer adds before a run and deletes after it
@@ -84,5 +94,6 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          NOVA_PUBLISH_OWNER: ${{ github.repository_owner }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: bash .github/scripts/publish-crates.sh "$VERSION"
