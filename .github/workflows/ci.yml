@@ -244,6 +244,28 @@ jobs:
       - name: std survives packaging
         run: cargo package -p nova-std --locked
 
+  # The package route (spec
+  # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+  # §4): the 19 crates crates.io will get package and verify, their
+  # lockfiles agree with the workspace's, and a `nova` installed from the
+  # packages, as `cargo install nova-cli` installs from crates.io, embeds
+  # its runtime and passes the Phase 3.0 gate. The install job above
+  # installs from the checkout; this one from what would be uploaded.
+  package:
+    name: Packaged nova (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Package the 19 crates, install nova from them, run the gate
+        shell: bash
+        run: bash .github/scripts/package-gate.sh "$RUNNER_TEMP/package-gate"
+
   # The VS Code extension (spec
   # docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md §8): it
   # is platform-neutral, and the Rust gate test drives `nova lsp` on all
