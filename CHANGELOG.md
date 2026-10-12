@@ -153,13 +153,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   macOS, and `install.ps1`, for Windows. They install the latest
   release's `nova`, or the version `NOVA_VERSION` names, into
   `~/.nova/bin` (`$NOVA_HOME/bin`), after checking its archive against
-  the release's `SHA256SUMS`. `install.ps1` adds the directory to the
-  user's PATH, and `install.sh` prints the line to add. The release
-  workflow runs both on its own archives. ADR 0036.
+  the release's `SHA256SUMS`. The new `nova` must run before it replaces
+  the old one, so one that cannot start on the machine replaces nothing.
+  `install.ps1` adds the directory to the user's PATH, and `install.sh`
+  prints the line to add. The release workflow runs both on its own
+  archives. ADR 0036.
 - **"Publish to crates.io",** a workflow run only by hand, on a release's
-  tag, publishes the 19 crates `nova` needs in dependency order. It
-  skips any crates.io already has and waits out its rate limit, so a
-  run that stopped can be started again.
+  tag, publishes the 19 crates `nova` needs in dependency order. Before
+  the first upload it stops if crates.io has any of the names under
+  another owner than the repository's. It skips a crate crates.io
+  already has at the version and waits out its rate limit, so a run
+  that stopped can be started again.
 - **"Release gate",** a workflow run only by hand, installs a released
   `nova` from crates.io and with the install script, on Linux, macOS and
   Windows, and runs the gate on each.
@@ -199,6 +203,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The templates `nova new` and `nova init` write are in `nova fmt`'s
   layout,** so a new project passes `nova fmt --check`. What a new
   program prints is unchanged.
+- **The Linux release archive is built on Ubuntu 22.04,** so its `nova`
+  runs with glibc 2.35 and later, not only with 24.04's 2.39; the release
+  workflow checks it.
 - **`nova fmt` keeps a blank line between imports,** as gofmt does, and
   sorts each group of imports on its own (ADR 0028).
 - **E0060's note gives way to its fix.** Where a `let` or a parameter
