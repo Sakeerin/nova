@@ -50,7 +50,7 @@ async function start(): Promise<void> {
     void vscode.window.showErrorMessage(
       `Nova: could not start "${command} lsp" (${String(error)}). ` +
         "Set nova.server.path, or install nova: " +
-        "cargo install --locked --git https://github.com/Sakeerin/nova nova-cli",
+        "cargo install nova-cli --locked (or see https://github.com/Sakeerin/nova#install)",
     );
   }
 }

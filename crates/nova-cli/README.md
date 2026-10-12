@@ -19,7 +19,7 @@ with. The install also builds Nova's runtime library and embeds it in
 `nova`, so the installed binary needs nothing beside it.
 
 Or a ready-built `nova` from the latest GitHub release, checked against
-the release's `SHA256SUMS`. On Linux and macOS, into `~/.nova/bin`:
+the release's `SHA256SUMS`. On Linux (x86_64) and macOS, into `~/.nova/bin`:
 
 ```sh
 curl -sSfL https://github.com/Sakeerin/nova/releases/latest/download/install.sh | sh
@@ -50,8 +50,9 @@ nova run
 
 - [The repository](https://github.com/Sakeerin/nova): the language's
   documentation, the changelog and the releases.
-- The VS Code extension is attached to each release as
-  `nova-vscode-<version>.vsix`.
+- The VS Code extension is **Nova** by `sakeerin`, on the Marketplace and
+  Open VSX (`code --install-extension sakeerin.nova`), and each release
+  attaches it as `nova-vscode-<version>.vsix`.
 
 The other `nova-*` crates on crates.io are `nova`'s own libraries. Their
 API is internal and changes with every release.
