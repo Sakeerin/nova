@@ -9,12 +9,23 @@
     "type": "git",
     "url": "https://github.com/Sakeerin/nova"
   },
+  "homepage": "https://github.com/Sakeerin/nova/tree/main/tools/vscode-nova",
+  "bugs": {
+    "url": "https://github.com/Sakeerin/nova/issues"
+  },
   "engines": {
     "vscode": "^1.91.0"
   },
   "categories": [
     "Programming Languages",
     "Formatters"
+  ],
+  "keywords": [
+    "nova",
+    "programming language",
+    "language server",
+    "lsp",
+    "formatter"
   ],
   "activationEvents": [
     "onLanguage:nova"
