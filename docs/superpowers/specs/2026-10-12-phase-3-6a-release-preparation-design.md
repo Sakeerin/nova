@@ -23,6 +23,16 @@
 >   `examples/05-geometry`.
 >
 > Branch `claude/loving-archimedes-frtf5q`.
+>
+> **Amended 2026-10-12, while planning:** a prototype of every part found
+> that the project `nova new` makes fails `nova fmt --check`: its
+> templates put one-expression bodies on three lines, which `nova fmt`
+> joins into one. §8's format check would fail on every runner, and a
+> user's first project would not be formatted. 3.6a fixes the templates
+> (§7.1), the one change outside tests §12 now allows. And since no test
+> runs `install.ps1`'s PATH code, `release.yml`'s Windows build now runs
+> the script against its own archive with PATH on (§6.3). Decisions 24
+> and 25.
 
 After 3.6a, publishing `v0.3.0` is a sequence of steps someone only has
 to start: a version bump, a tag, a workflow run, two store uploads and an
@@ -383,7 +393,13 @@ codesigned macOS binary (§17).
   `NOVA_VERSION` set: the real archive's layout, checksum and binary;
 - every place that reads the version reads the workspace's, since
   nova-cli's manifest no longer holds it;
-- its pull-request trigger also covers `tools/install/**`.
+- its pull-request trigger also covers `tools/install/**`;
+- the Windows build job runs `install.ps1`, in Windows PowerShell 5.1,
+  against its own archive served over loopback, with PATH on: the
+  installed `nova version` must say `runtime: embedded`, and the user's
+  PATH in the registry must then hold the install directory. The runner
+  is thrown away after the job, so its PATH may change; this is the only
+  place the PATH code runs before a user's machine.
 
 ## 7. The extension
 
@@ -403,6 +419,19 @@ publisher `sakeerin` and the Open VSX namespace `sakeerin`, then runs
 `npx @vscode/vsce publish --packagePath nova-vscode-0.3.0.vsix` and
 `npx ovsx publish nova-vscode-0.3.0.vsix` with the release's file. No
 store token goes into GitHub.
+
+### 7.1 The templates
+
+`crates/nova-cli/src/template.rs`'s program and library templates, and
+the `tests/` file `nova new` writes beside a library, become exactly what
+`nova fmt` writes: a one-expression body on one line, as in `fn
+greeting() -> String { "Hello, Nova!" }`. The programs behave as before:
+`gate.sh`, `packages-gate.sh` and `registry-gate.sh` check their output,
+and it does not change. A test in `crates/nova-cli/tests/project.rs`
+runs `nova new`, `nova new --lib`, `nova init` and `nova init --lib`, and
+requires `nova fmt --check` to pass on each project; the constants there
+that pin the templates follow. The 3.0 spec, which quotes the template,
+gets a dated note.
 
 ## 8. The gate, in CI
 
@@ -537,6 +566,7 @@ Each must fail the named test:
 6. `install.sh`'s checksum comparison removed → §11.3.
 7. `install.ps1` ignoring `NOVA_VERSION` → §11.3 (Windows, in CI).
 8. A licence copy edited in one crate → §11.1.
+9. A template back on three lines → §7.1's test.
 
 ## 12. Crates and files touched
 
@@ -549,8 +579,8 @@ Each must fail the named test:
 - Changed: `ci.yml` (the package job), `release.yml` (§6.3),
   `tools/vscode-nova/package.json`.
 - Tests: three new files in `crates/nova-cli/tests/`.
-- No Rust code outside tests changes. No new crate, no new npm package,
-  no `Cargo.lock` change.
+- No Rust code outside tests changes but the templates (§7.1). No new
+  crate, no new npm package, no `Cargo.lock` change.
 
 ## 13. The gate for 3.6a
 
@@ -675,3 +705,10 @@ Made in this spec, for review:
 21. Texts that name how to install `nova` change in 3.6b's release commit.
 22. `docs/releasing.md` is the runbook for this and later releases.
 23. The tag comes before the crates.io publish.
+
+Amended while planning (2026-10-12):
+
+24. `nova new`'s templates are written as `nova fmt` writes them, with a
+    test that every new project passes `nova fmt --check` (§7.1).
+25. `release.yml`'s Windows build runs `install.ps1` with PATH on, against
+    its own archive (§6.3).
