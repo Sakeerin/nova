@@ -38,7 +38,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Built on Ubuntu 22.04, so that the archive's nova needs no glibc
+          # newer than its 2.35 and starts on Ubuntu 22.04, Debian 12 and
+          # later; a build on ubuntu-latest (24.04) needs glibc 2.39. A step
+          # below holds the floor.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             smoke: true
           # Cross-built on an Apple Silicon runner, as before. This design
@@ -57,9 +61,37 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # rust-cache's key names the system (Linux) but not the image, so
+      # without the runner's label a cache saved on ubuntu-latest could
+      # restore build scripts and proc macros linked against glibc 2.39
+      # into the ubuntu-22.04 build.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} -p nova-cli
+      # The glibc floor: no GLIBC_x.y the binary's dynamic symbols name, weak
+      # ones included (the loader needs every version the binary records),
+      # may be newer than 2.35, or the archive's nova would not start on
+      # Ubuntu 22.04. A change of runner image would otherwise raise the
+      # floor silently.
+      - name: Check that the Linux nova needs glibc 2.35 at most
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          floor=2.35
+          nova="target/${{ matrix.target }}/release/nova"
+          highest=$(objdump -T "$nova" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -V | tail -n 1 || true)
+          if [ -z "$highest" ]; then
+            echo "::error::objdump -T found no GLIBC_ version in $nova"
+            exit 1
+          fi
+          echo "nova needs glibc $highest at most; the floor is $floor"
+          if [ "$(printf '%s\n%s\n' "$highest" "$floor" | sort -V | tail -n 1)" != "$floor" ]; then
+            echo "::error::nova needs glibc $highest, newer than $floor: it would not start on Ubuntu 22.04"
+            exit 1
+          fi
       - name: Pack the archive
         shell: bash
         run: |
