@@ -84,9 +84,11 @@ jobs:
             exit 1
           fi
           echo "Publishing $VERSION from $GITHUB_REF ($GITHUB_SHA)."
-      - uses: dtolnay/rust-toolchain@stable
-      # No Swatinem/rust-cache: this job holds the token, so it restores
-      # nothing another workflow saved.
+      # No toolchain action: rust-toolchain.toml selects stable, which the
+      # runner's rustup already has, so no third-party action, whose branch
+      # ref could change under it, runs before the step that holds the
+      # token. No Swatinem/rust-cache either: this job restores nothing
+      # another workflow saved.
       - name: Package the 19 crates, install nova from them, run the gate
         shell: bash
         run: bash .github/scripts/package-gate.sh "$RUNNER_TEMP/package-gate"
