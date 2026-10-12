@@ -511,6 +511,23 @@ installs a `nova` that needs nothing beside it (ADR 0027).
 also holds `registry/`, the downloaded packages, and `credentials.toml`,
 the token `nova login` stores (ADR 0031).
 
+**Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** the
+scripts are release assets, at
+`https://github.com/Sakeerin/nova/releases/latest/download/install.sh`
+and
+`https://github.com/Sakeerin/nova/releases/latest/download/install.ps1`;
+there is no `novalang.dev`. Each installs this system's archive into
+`$NOVA_HOME/bin`, `~/.nova/bin` by default, after checking it against
+the release's `SHA256SUMS`. `install.ps1` adds the directory to the
+user's PATH; `install.sh` edits no file, and prints the line to add.
+`NOVA_VERSION` picks a version other than the latest, and
+`NOVA_INSTALL_BASE` another place to fetch from. They work from
+`v0.3.0`, the first release that carries them. §10.3's `nova self
+update` and `nova self uninstall` stay out (ADR 0026): run the script
+again to update, and delete `~/.nova` to uninstall
+(`docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
+§6; ADR 0036).
+
 ### 10.2 Windows
 ```powershell
 irm https://novalang.dev/install.ps1 | iex

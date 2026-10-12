@@ -85,6 +85,15 @@ crates, found a route on stable Cargo (the plan's decision 1).
 - **The package route first runs for real at 3.6's crates.io install.**
   3.0 tests only its decisions and its copy.
 
+  **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** since
+  3.6a, CI's "Packaged nova (os)" runs it, emulated, on every pull
+  request, on Linux, macOS and Windows. It packages and verifies the 19
+  crates for crates.io, installs `nova` from the unpacked packages
+  with a `[patch.crates-io]` entry for each library, a release build that
+  embeds the runtime, and runs `gate.sh --test` on it
+  (`.github/scripts/package-gate.sh`; ADR 0036). Its first real run is
+  3.6b's release gate, after the crates are on crates.io.
+
 ## References
 
 - `docs/phase-3-plan.md` §2 items 1 and 8, and §3 decision 1.

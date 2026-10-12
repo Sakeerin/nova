@@ -212,6 +212,19 @@ On tag `v*`:
 - Update install.sh / install.ps1 metadata
 - Publish docs to `novalang.dev`
 
+**Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** as
+built (3.0's `.github/workflows/release.yml`, and 3.6a's), four targets:
+x86_64-unknown-linux-gnu, x86_64-apple-darwin (cross-built, and never
+run), aarch64-apple-darwin and x86_64-pc-windows-msvc. There is no
+linux-aarch64 build. The install scripts, `install.sh` and `install.ps1`,
+are attached to every release and covered by its `SHA256SUMS`; they need
+no metadata, since they find the latest release through GitHub's
+redirect. The workflow runs `install.sh` on the release's own Linux
+archive and `install.ps1` on its Windows one. std's documentation site is
+a release asset (3.5a, ADR 0034), and there is no `novalang.dev`
+(`docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
+§6.3; ADR 0036).
+
 ---
 
 ## 5. Performance Regression Tracking
