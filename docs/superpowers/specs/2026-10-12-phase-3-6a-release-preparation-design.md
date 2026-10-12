@@ -141,6 +141,19 @@ left as paths:
 - After 72 hours a published crate can be deleted only with a single
   owner, no reverse dependencies and under 100 downloads a month (plan §6
   risk 5). For the 19, that makes a publish permanent.
+
+  **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`), after
+  the final review:** crates.io's source
+  (`src/controllers/krate/delete.rs`, read that day) refuses to delete a
+  crate that another crate depends on at any age, not only after 72
+  hours, and after 72 hours allows at most 1000 downloads for each month
+  since the crate's first publish, not 100 (RFC 3660's figure). So within
+  the 72 hours, too, the 19 can be deleted only in the reverse of the
+  publish order, `nova-cli` first (§14 risk 1's window included); after
+  them they can still be deleted, in that order, while each has a single
+  owner and few downloads. A publish is not permanent, but it is hard to
+  undo, and a deleted name is free for anyone 24 hours later.
+  `docs/releasing.md` §7 and ADR 0036 give the rules.
 - The version is read from nova-cli's manifest by `release.yml`
   (`:62,137,164`, its first `version = "..."` line), which also requires
   the tag to be `v<version>` (`:178-183`) and CHANGELOG to have a section
