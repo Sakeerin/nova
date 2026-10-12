@@ -262,7 +262,7 @@ It merges by rebase, on the user's word. Phase 4 starts after it.
 - The exact wording of CHANGELOG's lead paragraph, the README's install
   section and the extension's texts.
 - The ADR's inventory, from the Phase 3 specs, ADRs 0026 to 0036 and the
-  pull requests #96 to #111.
+  Phase 3 pull requests, 3.0's to PR #111.
 
 ## 13. Decisions
 
