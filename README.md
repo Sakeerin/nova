@@ -7,29 +7,51 @@
 
 ## Install
 
+With Rust installed:
+
 ```bash
-cargo install --locked --git https://github.com/Sakeerin/nova nova-cli
+cargo install nova-cli --locked
 nova new hello
 cd hello
 nova run
 ```
 
-`--locked` builds with the dependency versions this repository tests with.
-The install also builds Nova's runtime library and embeds it in `nova`, so
-the installed `nova` needs nothing beside it. It unpacks the library into
-`~/.nova/runtime/` the first time it links a program, and `NOVA_HOME` moves
-that directory. From the next release on, each GitHub release also carries
-ready-built archives for Linux, macOS and Windows.
+`--locked` builds with the dependency versions the release was tested
+with. The install also builds Nova's runtime library and embeds it in
+`nova`, so the installed `nova` needs nothing beside it. It unpacks the
+library into `~/.nova/runtime/` the first time it links a program, and
+`NOVA_HOME` moves that directory.
+
+Without Rust, a ready-built `nova` from the latest GitHub release,
+checked against the release's `SHA256SUMS`: on Linux (x86_64) and macOS, into
+`~/.nova/bin`,
+
+```bash
+curl -sSfL https://github.com/Sakeerin/nova/releases/latest/download/install.sh | sh
+```
+
+and on Windows, into `%USERPROFILE%\.nova\bin`, which the script adds
+to your PATH:
+
+```powershell
+irm https://github.com/Sakeerin/nova/releases/latest/download/install.ps1 | iex
+```
+
+Each release also attaches the archives the scripts install from. `nova
+build` and `nova test` need a C linker: `cc` on Linux and macOS, the
+Visual Studio Build Tools on Windows. `nova run` needs nothing else.
 
 ### Editor support
 
 `nova lsp` is a language server: it gives an editor diagnostics,
 completion, formatting, hover, go to definition, find references,
 rename, quick fixes, organize imports and semantic highlighting. For
-VS Code, `tools/vscode-nova/` is the
-extension. Each GitHub release attaches it as `nova-vscode-<version>.vsix`,
-which installs with **Extensions: Install from VSIX…**. It runs the `nova`
-on your PATH, or the one the `nova.server.path` setting names.
+VS Code, install **Nova** by `sakeerin`, the extension in
+`tools/vscode-nova/`, from the Marketplace or Open VSX
+(`code --install-extension sakeerin.nova`). Each GitHub release also
+attaches it as `nova-vscode-<version>.vsix`, which installs with
+**Extensions: Install from VSIX…**. It runs the `nova` on your PATH, or
+the one the `nova.server.path` setting names.
 
 ### Packages
 

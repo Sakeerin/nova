@@ -42,7 +42,11 @@ maintainer's own, on their accounts.
   <https://marketplace.visualstudio.com/manage>, signed in with a
   Microsoft account, create a publisher whose ID is `sakeerin`. It must
   equal `publisher` in `tools/vscode-nova/package.json`, which
-  `crates/nova-cli/tests/vscode_extension.rs` pins. Publishing takes an
+  `crates/nova-cli/tests/vscode_extension.rs` pins. Search the
+  Marketplace for an extension whose display name is exactly `Nova`: a
+  display name must be unique there, so if one exists, change
+  `displayName` in `package.json` (and the README's "install **Nova**")
+  in the release commit, before anything is published. Publishing takes an
   Azure DevOps personal access token (step 4), made at
   <https://dev.azure.com> under User settings → Personal access tokens.
 - **Open VSX.** Log in at <https://open-vsx.org> with GitHub, link an
@@ -111,6 +115,16 @@ A pull request whose last commit is the release commit:
    above it. Phase 2's `[0.2.0]` section, from the commit "docs: finalize
    CHANGELOG for the v0.2.0 release", is the model. `release.yml` takes the
    release notes from this section, and fails without it.
+
+   **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** when
+   a phase's gate installs what its release published, as Phase 3's does,
+   the gate runs after the tag. Then the lead paragraph calls the release
+   the phase's, with its gate to follow, in place of "Phase 3 is complete"
+   above; the ADR for the phase's boundary, written after the gate, calls
+   the phase complete (spec
+   `docs/superpowers/specs/2026-10-12-phase-3-6b-the-release-design.md`,
+   decision 6).
+
 3. **`tools/vscode-nova/CHANGELOG.md`,** which the stores show:
    `## [Unreleased]` becomes `## [0.3.0] - <the date>` (for `v0.3.0`, with
    the line "The first published version." under it). If the extension
@@ -144,6 +158,16 @@ git tag -a "v$version" -m "Nova v$version" "$commit"
 For a phase's release the message says so, as `v0.2.0`'s did: for
 example `-m "Nova v0.3.0 — Phase 3 (Tooling)" -m "Phase 3 is complete,
 within the boundary docs/adr/<its ADR> records."`.
+
+**Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** when
+a phase's gate installs what its release published, as Phase 3's does,
+the gate runs after the tag, and the message above does not yet say the
+phase is complete. For `v0.3.0` the message is `-m "Nova v0.3.0 — Phase 3
+(Tooling)" -m "The release of Phase 3. Its gate runs on this release;
+docs/adr/0037-phase-3-boundary.md will record the result and the
+boundary."` (spec
+`docs/superpowers/specs/2026-10-12-phase-3-6b-the-release-design.md`,
+decision 6).
 
 **[stop]** Push it:
 

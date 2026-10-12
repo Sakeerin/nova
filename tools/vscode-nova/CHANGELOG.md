@@ -6,7 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The extension's version is always the version of Nova it is released
 with.
 
-## [Unreleased]
+## [0.3.0] - 2026-10-12
+
+The first published version.
 
 ### Added
 

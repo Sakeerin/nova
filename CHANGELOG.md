@@ -9,6 +9,19 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-12
+
+**Phase 3, "Tooling", is released.** This is the `v0.{phase}.0`
+milestone `nova-spec/00-MASTER-SPEC.md` §7 reserves for a phase:
+`nova fmt`, `nova lsp` and the VS Code extension, packages with
+`nova.toml`, `nova add` and a git-backed package index, `nova doc` and
+doc tests, and `nova` itself on crates.io, with install scripts for
+Linux, macOS and Windows. The Phase 3 gate runs on this release, as it
+must: it installs what the release published. Its result, and the
+boundary Phase 3 closes within, will be recorded in
+`docs/adr/0037-phase-3-boundary.md`. `nova --version` now reports
+0.3.0.
+
 ### Added
 
 - **Projects.** `nova new <name>` and `nova init [--name <name>]` write a
@@ -198,8 +211,7 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova-bench-http`, `nova-bundler`, `nova-codegen-wasm` and
   `nova-test` are `publish = false`,** since `nova` does not need them.
 - **One workspace version,** in `[workspace.package]`, with exact pins
-  between the crates in `[workspace.dependencies]`. `Cargo.lock` is
-  unchanged.
+  between the crates in `[workspace.dependencies]`.
 - **The templates `nova new` and `nova init` write are in `nova fmt`'s
   layout,** so a new project passes `nova fmt --check`. What a new
   program prints is unchanged.
