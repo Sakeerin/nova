@@ -253,10 +253,16 @@ uninstalls it.
 - **The first upload is slow.** crates.io allows a burst of 5 new crates,
   then one every 10 minutes, so the 19 take about 2 h 20 min. The job's
   345 minutes cover it after the package gate.
-- **A publish is permanent.** After 72 hours a crate can be deleted only
-  with a single owner, no reverse dependencies and under 100 downloads a
-  month, which the 19, depending on each other, do not meet. The release
-  gate runs inside that window.
+- **A publish is hard to undo.** crates.io refuses to delete a crate that
+  another crate depends on, at any age, so the 19 can be deleted only one
+  at a time, in the reverse of the publish order, `nova-cli` first. After
+  72 hours a crate can also be deleted only while it has a single owner
+  and at most 1000 downloads for each month since its first publish (RFC
+  3660 said 100). Anyone can register a deleted name 24 hours later.
+  These are crates.io's rules as its source,
+  `src/controllers/krate/delete.rs`, had them on 2026-10-12. Yanking is
+  the normal way to withdraw a version; the release gate runs within the
+  72 hours, while deleting is simplest.
 - **What first runs in the pull request's CI:**
   - the package route on Windows and macOS, with Git Bash's paths and
     GNU tar on Windows;

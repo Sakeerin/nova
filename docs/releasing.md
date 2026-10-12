@@ -342,8 +342,8 @@ the install gates on it, and installs it with the release's `install.sh`
 or `install.ps1` and runs `gate.sh --test` on that. It publishes nothing.
 All six jobs must pass. Keep the run's address for the record.
 
-If the crates.io jobs fail, decide quickly: for 72 hours after publishing,
-crates.io still lets an owner delete a crate (section 7).
+If the crates.io jobs fail, decide quickly: deleting the crates is
+simplest within 72 hours of publishing them (section 7).
 
 ### 6.2 On a clean machine
 
@@ -530,12 +530,22 @@ on crates.io for good, at that version.
 **Yank or delete.** `cargo yank --version 0.3.0 <crate>` (a token with
 the **yank** scope) hides a version from new resolution, keeps it for
 lockfiles that already name it, and can be undone with `--undo`; it is
-the normal way to withdraw a version. Deleting removes a whole crate: an
-owner can do it within 72 hours of publishing (crates.io → the crate →
-Settings), and after that only under conditions the 19, which depend on
-each other, do not meet (`docs/phase-3-plan.md` §6, risk 5). Delete only
-when a publish must be undone entirely, for example a file that should
-never have been in a tarball.
+the normal way to withdraw a version. Deleting removes a whole crate,
+every version of it: its owner does it at crates.io → the crate →
+Settings, logged in (crates.io takes no token for it). Delete only when a
+publish must be undone entirely, for example a file that should never
+have been in a tarball. crates.io's rules (its
+`src/controllers/krate/delete.rs`, read on 2026-10-12):
+- It refuses to delete a crate that another crate on crates.io depends
+  on, whatever its age. So the 19 are deleted one at a time in the
+  reverse of `publish-crates.sh`'s list: `nova-cli` first, then
+  `nova-lsp`, `nova-doc`, `nova-driver` and so on, `nova-diagnostics`
+  last.
+- Within 72 hours of a crate's first publish, that is the only rule.
+  After them, a crate can also be deleted only while it has a single
+  owner and at most 1000 downloads for each month since its first publish.
+  (RFC 3660 said 100 a month, as `docs/phase-3-plan.md` §6 risk 5 does.)
+- Anyone can register a deleted name 24 hours later.
 
 **The extension** (step 4). A refused token: make a new one. A refused
 name or listing: the `.vsix` is the release's, so a change to it is a new
@@ -547,6 +557,7 @@ index line last, so a publish that failed can be run again and finishes.
 A published version stays: there is no yank in the index.
 
 **The release gate or the clean-machine run fails** (step 6). Record what
-failed. **[stop]** The maintainer decides: within 72 hours of the
-crates.io publish the crates can still be deleted (above); otherwise, or
-as well, fix it and release the next patch version.
+failed. **[stop]** The maintainer decides: delete the crates, `nova-cli`
+first (above), which is simplest within 72 hours of the crates.io
+publish; or, instead or as well, fix it and release the next patch
+version.
