@@ -1,0 +1,156 @@
+name: Release gate
+
+# The Phase 3 gate, run on fresh runners against what a release published
+# (spec docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+# §8): `nova` installed from crates.io, and `nova` installed by the
+# release's own install script, each on Linux, macOS and Windows. It runs
+# only when started from the Actions tab, after the crates and the GitHub
+# release of that version are up (docs/releasing.md). It uses no secret and
+# publishes nothing. Its log, with the maintainer's own run on a clean
+# machine, is the gate's record.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The released version to check, without the v (for example 0.3.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  # `cargo install nova-cli` from crates.io, then the gates CI's `install`
+  # job runs on a `cargo install --path` copy.
+  crates-io:
+    name: From crates.io (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: The version is a version
+        shell: bash
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 0.3.0 (give it without the v)"
+            exit 1
+          fi
+      # The gate scripts and examples/05-geometry, as the tag has them.
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+      - uses: dtolnay/rust-toolchain@stable
+      # No Swatinem/rust-cache here, unlike CI: a restored cache would fill
+      # ~/.cargo/registry before the install, and the nested runtime build
+      # must resolve offline from what this install itself downloaded
+      # (spec §4 and §14, risk 1).
+      - name: Install nova from crates.io
+        shell: bash
+        run: cargo install nova-cli --version "=$VERSION" --locked --root "$RUNNER_TEMP/crates-io"
+      - name: Nothing but nova was installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -A "$RUNNER_TEMP/crates-io/bin"
+          case "$(ls -A "$RUNNER_TEMP/crates-io/bin")" in
+            nova|nova.exe) ;;
+            *) echo "::error::the install put more than nova into bin/"; exit 1 ;;
+          esac
+      - name: The installed nova is the version asked for
+        shell: bash
+        run: |
+          set -euo pipefail
+          first=$("$RUNNER_TEMP/crates-io/bin/nova" version | head -n 1 | tr -d '\r')
+          if [ "$first" != "nova $VERSION" ]; then
+            echo "::error::nova version printed '$first', not 'nova $VERSION'"
+            exit 1
+          fi
+      - name: The installed nova makes, runs, builds and tests a project
+        shell: bash
+        run: bash .github/scripts/gate.sh "$RUNNER_TEMP/crates-io/bin/nova" "$RUNNER_TEMP/gate" --test
+      # gate.sh made the project with `nova new demo` in its WORKDIR. The
+      # templates are written in nova fmt's layout, so the check finds
+      # nothing to change.
+      - name: The project nova new made passes nova fmt --check
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/gate/demo"
+          "$RUNNER_TEMP/crates-io/bin/nova" fmt --check
+      - name: The installed nova builds a program against a path library
+        shell: bash
+        run: bash .github/scripts/packages-gate.sh "$RUNNER_TEMP/crates-io/bin/nova" "$RUNNER_TEMP/packages"
+      - name: The installed nova documents an example that uses a dependency, and runs its doc tests
+        shell: bash
+        run: bash .github/scripts/doc-gate.sh "$RUNNER_TEMP/crates-io/bin/nova" "$RUNNER_TEMP/doc"
+
+  # The release's install script, from the release's own assets, then
+  # gate.sh on the `nova` it installed into ~/.nova/bin.
+  install-script:
+    name: From the install script (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: The version is a version
+        shell: bash
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 0.3.0 (give it without the v)"
+            exit 1
+          fi
+      # The gate scripts, as the tag has them.
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ inputs.version }}
+      # NOVA_VERSION is set for the script alone: gate.sh refuses to run
+      # with any NOVA_ variable in its environment.
+      - name: Install nova with install.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: curl -sSfL "https://github.com/Sakeerin/nova/releases/download/v$VERSION/install.sh" | NOVA_VERSION="$VERSION" sh
+      # PowerShell 7, then Windows PowerShell 5.1, which is what `irm | iex`
+      # runs in on a Windows that has nothing else; the second install
+      # replaces the first, and the gate checks it.
+      - name: Install nova with install.ps1 (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:NOVA_VERSION = $env:VERSION
+          irm "https://github.com/Sakeerin/nova/releases/download/v$env:VERSION/install.ps1" | iex
+      - name: Install nova with install.ps1 (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:NOVA_VERSION = $env:VERSION
+          irm "https://github.com/Sakeerin/nova/releases/download/v$env:VERSION/install.ps1" | iex
+      - name: Where the script installed nova
+        id: installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Windows ]; then
+            nova="$USERPROFILE/.nova/bin/nova.exe"
+          else
+            nova="$HOME/.nova/bin/nova"
+          fi
+          ls -l "$nova"
+          first=$("$nova" version | head -n 1 | tr -d '\r')
+          if [ "$first" != "nova $VERSION" ]; then
+            echo "::error::nova version printed '$first', not 'nova $VERSION'"
+            exit 1
+          fi
+          echo "nova=$nova" >> "$GITHUB_OUTPUT"
+      - name: The installed nova makes, runs, builds and tests a project
+        shell: bash
+        env:
+          INSTALLED: ${{ steps.installed.outputs.nova }}
+        run: bash .github/scripts/gate.sh "$INSTALLED" "$RUNNER_TEMP/gate" --test
