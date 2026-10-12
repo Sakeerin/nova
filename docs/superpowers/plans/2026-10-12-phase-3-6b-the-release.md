@@ -308,6 +308,10 @@ word:
   crates.io account's e-mail is verified (runbook, "Before the first
   release"); the user says when each is done. **This comes before the
   merge of Task 5's PR** (decision 7).
+  The user also searches the Marketplace for an extension whose display
+  name is exactly `Nova` (display names are unique there; the final
+  review's S1). If one exists, `displayName` and the README's "install
+  **Nova**" change in the release commit before the merge.
 - **Step 1.** On the word: merge Task 5's PR by rebase, pinned to its
   head (`merge_pull_request`, `merge_method: rebase`, `expectedHeadSha`
   the head); check the merged tree equals the head's; read CI on `main`.
