@@ -149,6 +149,29 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **std's examples:** every module's docs have an example that runs,
   and so do 15 items' docs. `examples/05-geometry`'s library has two,
   which CI runs with the installed `nova`.
+- **Install scripts.** Each release attaches `install.sh`, for Linux and
+  macOS, and `install.ps1`, for Windows. They install the latest
+  release's `nova`, or the version `NOVA_VERSION` names, into
+  `~/.nova/bin` (`$NOVA_HOME/bin`), after checking its archive against
+  the release's `SHA256SUMS`. `install.ps1` adds the directory to the
+  user's PATH, and `install.sh` prints the line to add. The release
+  workflow runs both on its own archives. ADR 0036.
+- **"Publish to crates.io",** a workflow run only by hand, on a release's
+  tag, publishes the 19 crates `nova` needs in dependency order. It
+  skips any crates.io already has and waits out its rate limit, so a
+  run that stopped can be started again.
+- **"Release gate",** a workflow run only by hand, installs a released
+  `nova` from crates.io and with the install script, on Linux, macOS and
+  Windows, and runs the gate on each.
+- **"Packaged nova (os)"** in CI packages the 19 crates on three systems,
+  installs `nova` from the packages as crates.io would, and runs the gate
+  on it.
+- **The crates' READMEs and licence texts.** `nova-cli` has a README of
+  its own, its crates.io page, and the other 18 share one. Each of the 19
+  carries both licence texts.
+- **The extension's CHANGELOG,** which the Marketplace shows.
+- **The release runbook,** `docs/releasing.md`: every step of a release,
+  each marked where it stops for the maintainer's word.
 
 ### Changed
 
@@ -165,6 +188,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   An info string's empty words are dropped, so a block whose info string
   is `,text` is `text`, no longer Nova.
 - **Hover leaves out an example's hidden lines,** as the site does.
+- **The crates' metadata:** the real repository and homepage,
+  `https://github.com/Sakeerin/nova`; descriptions that name Nova and say
+  the libraries are internal; keywords and categories on `nova-cli`.
+- **`nova-bench-http`, `nova-bundler`, `nova-codegen-wasm` and
+  `nova-test` are `publish = false`,** since `nova` does not need them.
+- **One workspace version,** in `[workspace.package]`, with exact pins
+  between the crates in `[workspace.dependencies]`. `Cargo.lock` is
+  unchanged.
+- **The templates `nova new` and `nova init` write are in `nova fmt`'s
+  layout,** so a new project passes `nova fmt --check`. What a new
+  program prints is unchanged.
 - **`nova fmt` keeps a blank line between imports,** as gofmt does, and
   sorts each group of imports on its own (ADR 0028).
 - **E0060's note gives way to its fix.** Where a `let` or a parameter

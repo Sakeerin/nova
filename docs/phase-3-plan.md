@@ -121,6 +121,12 @@ position 8 and in `14-CODEGEN.md` §9 (DWARF).
    **Amended 2026-10-07 (branch `phase-3-0-foundations`):** 3.0 removes the
    first blocker, because std is now the crate `nova-std`; the other two
    remain for 3.6.
+
+   **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** 3.6a
+   removes the other two. The dependencies between workspace crates carry
+   exact versions, through `[workspace.dependencies]`, and `repository` is
+   `https://github.com/Sakeerin/nova`. The 19 crates `nova-cli` needs
+   package and verify in CI, on three systems (ADR 0036).
 9. **The tooling crates are stubs.** `nova-fmt`, `nova-lsp`, `nova-pm`,
    `nova-doc` and `nova-test`, like Phase 4's `nova-bundler` and
    `nova-codegen-wasm`, each have a one-line `lib.rs` and a manifest. None of
@@ -431,6 +437,22 @@ a PR, and a merge on the user's word.
 - The close-out, as Phase 2's was: an ADR for Phase 3's boundary, a
   CHANGELOG `[0.3.0]`, and the `v0.3.0` tag, pushed only on the user's
   word.
+
+  **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):** 3.6
+  is two sub-phases (the user, 2026-10-12). 3.6a, "Release preparation",
+  is built
+  (`docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`;
+  ADR 0036). It prepared everything and published nothing. crates.io gets
+  the 19 crates `cargo install nova-cli` needs, not every workspace crate
+  as §1 first planned, and the four others are `publish = false`; the
+  names were checked again on 2026-10-12, and all were free. A workflow
+  the user starts publishes the crates. The install scripts are release
+  assets. The extension is published by hand. The gate has a workflow,
+  and a checklist for the user's own run in the runbook,
+  `docs/releasing.md`. 3.6a's tests pass on Linux on this branch, and the
+  pull request's CI runs them on all three systems. 3.6b publishes, step
+  by step on the user's word, runs the gate, writes the records and
+  pushes the `v0.3.0` tag.
 
 ## 5. Cross-cutting
 
