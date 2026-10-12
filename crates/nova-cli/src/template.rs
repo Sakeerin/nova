@@ -2,32 +2,26 @@
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md`
 //! §6.3, and for a library
 //! `docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md`
-//! §5.5), with `\n` line endings on every system.
+//! §5.5), with `\n` line endings on every system. Each `.nova` file is
+//! already in `nova fmt`'s layout, so `nova fmt --check` passes on a new
+//! project (spec
+//! `docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
+//! §7.1): a body holding one expression stays on one line.
 
 const MAIN: &str = concat!(
-    "fn greeting() -> String {\n",
-    "    \"Hello, Nova!\"\n",
-    "}\n",
+    "fn greeting() -> String { \"Hello, Nova!\" }\n",
     "\n",
-    "fn main() {\n",
-    "    println(greeting())\n",
-    "}\n",
+    "fn main() { println(greeting()) }\n",
     "\n",
     "@test\n",
-    "fn greeting_says_hello() {\n",
-    "    assert_eq(greeting(), \"Hello, Nova!\")\n",
-    "}\n",
+    "fn greeting_says_hello() { assert_eq(greeting(), \"Hello, Nova!\") }\n",
 );
 
 const LIB: &str = concat!(
-    "pub fn greeting() -> String {\n",
-    "    \"Hello, Nova!\"\n",
-    "}\n",
+    "pub fn greeting() -> String { \"Hello, Nova!\" }\n",
     "\n",
     "@test\n",
-    "fn greeting_says_hello() {\n",
-    "    assert_eq(greeting(), \"Hello, Nova!\")\n",
-    "}\n",
+    "fn greeting_says_hello() { assert_eq(greeting(), \"Hello, Nova!\") }\n",
 );
 
 /// What a template makes.
@@ -79,8 +73,8 @@ pub fn files(name: &str, kind: Kind) -> Vec<(String, String)> {
             files.push((
                 format!("tests/{import}_test.nova"),
                 format!(
-                    "import {import}\n\n@test\nfn greeting_is_public() {{\n    \
-                     assert_eq(greeting(), \"Hello, Nova!\")\n}}\n"
+                    "import {import}\n\n@test\n\
+                     fn greeting_is_public() {{ assert_eq(greeting(), \"Hello, Nova!\") }}\n"
                 ),
             ));
         }

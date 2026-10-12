@@ -349,7 +349,7 @@ fn an_import_resolves_when_run_from_a_subdirectory() {
         .stdout("from util\n");
 }
 
-const TEMPLATE_MAIN: &str = "fn greeting() -> String {\n    \"Hello, Nova!\"\n}\n\nfn main() {\n    println(greeting())\n}\n\n@test\nfn greeting_says_hello() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n";
+const TEMPLATE_MAIN: &str = "fn greeting() -> String { \"Hello, Nova!\" }\n\nfn main() { println(greeting()) }\n\n@test\nfn greeting_says_hello() { assert_eq(greeting(), \"Hello, Nova!\") }\n";
 
 fn read(path: impl AsRef<Path>) -> String {
     let path = path.as_ref();
@@ -518,7 +518,7 @@ fn init_suggests_the_name_flag_for_a_bad_directory_name() {
 // === Phase 3.3a: library templates (spec
 // docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.5) ===
 
-const TEMPLATE_LIB: &str = "pub fn greeting() -> String {\n    \"Hello, Nova!\"\n}\n\n@test\nfn greeting_says_hello() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n";
+const TEMPLATE_LIB: &str = "pub fn greeting() -> String { \"Hello, Nova!\" }\n\n@test\nfn greeting_says_hello() { assert_eq(greeting(), \"Hello, Nova!\") }\n";
 
 #[test]
 fn new_lib_writes_a_library_and_its_tests_pass() {
@@ -537,7 +537,7 @@ fn new_lib_writes_a_library_and_its_tests_pass() {
     assert_eq!(read(project.join("src").join("lib.nova")), TEMPLATE_LIB);
     assert_eq!(
         read(project.join("tests").join("json_api_test.nova")),
-        "import json_api\n\n@test\nfn greeting_is_public() {\n    assert_eq(greeting(), \"Hello, Nova!\")\n}\n"
+        "import json_api\n\n@test\nfn greeting_is_public() { assert_eq(greeting(), \"Hello, Nova!\") }\n"
     );
     assert!(read(project.join("README.md")).contains("`nova test` runs the tests in"));
     assert!(!project.join("src").join("main.nova").exists());
@@ -649,4 +649,49 @@ fn init_keeps_its_plain_refusal_unless_a_library_is_missing() {
         .assert()
         .failure();
     assert_eq!(stderr(&out), plain);
+}
+
+// === Phase 3.6a: the templates are in `nova fmt`'s layout (spec
+// docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+// §7.1: every project `nova new` and `nova init` make passes `nova fmt
+// --check`, which the release gate, §8, runs) ===
+
+#[test]
+fn every_template_passes_fmt_check_as_written() {
+    let dir = fresh_dir("templates-formatted");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let nova_in = |cwd: &Path| {
+        let mut command = nova();
+        command.current_dir(cwd).env("NOVA_HOME", &home);
+        command
+    };
+    nova_in(&dir).args(["new", "program"]).assert().success();
+    nova_in(&dir)
+        .args(["new", "--lib", "library"])
+        .assert()
+        .success();
+    for (name, args) in [
+        ("init-program", &["init"][..]),
+        ("init-library", &["init", "--lib"]),
+    ] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+        nova_in(&dir.join(name)).args(args).assert().success();
+    }
+    let mut unformatted = String::new();
+    for project in ["program", "library", "init-program", "init-library"] {
+        let checked = nova_in(&dir.join(project))
+            .args(["fmt", "--check"])
+            .assert();
+        let output = checked.get_output();
+        if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+            unformatted.push_str(&format!(
+                "{project}: nova fmt --check exited {:?}\n{}{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(unformatted.is_empty(), "{unformatted}");
 }
