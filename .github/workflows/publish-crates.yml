@@ -1,0 +1,88 @@
+# Publishes the 19 crates to crates.io (spec
+# docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+# §5.1). It runs only when started by hand, from the Actions tab ("Run
+# workflow", with the tag v<version> chosen under "Use workflow from") or
+# with `gh workflow run publish-crates.yml --ref v<version> -f
+# version=<version>`; never on a push, a pull request or a tag. It refuses
+# unless it runs on the tag v<version> and the workspace's version is
+# <version>, so crates.io receives exactly the tagged tree the GitHub
+# release was built from. It repeats CI's package gate, then
+# publish-crates.sh uploads the crates in order, skipping any crates.io
+# already has, so a run that stopped can be started again on the same tag.
+#
+# The token is the `crates-io` environment's secret CARGO_REGISTRY_TOKEN,
+# which the maintainer adds before a run and deletes after it
+# (docs/releasing.md); only the publish step's environment holds it.
+name: Publish to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to publish, without the v; the run must be on the tag v<version>
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Two runs never overlap, and a second one waits rather than cancelling
+# the first mid-publish.
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    # The maintainer can require their own approval in this environment.
+    environment: crates-io
+    # 19 new crates at one every 15 minutes, after the package gate; a
+    # hosted runner's job may last 360.
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The input reaches the shell through `env:` only, never pasted into
+      # the script, so no version string can inject a command.
+      - name: Refuse unless this is the tag v<version>, at that version, with a token
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          # Whether the secret is set, not the secret itself.
+          HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
+            echo "::error::this run is on $GITHUB_REF; start it on the tag v$VERSION"
+            exit 1
+          fi
+          # [workspace.package]'s, the only line of the root Cargo.toml that
+          # starts with `version = `.
+          workspace=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$workspace" != "$VERSION" ]; then
+            echo "::error::the workspace's version is '$workspace', not '$VERSION'"
+            exit 1
+          fi
+          if [ "$HAS_TOKEN" != true ]; then
+            echo "::error::the crates-io environment has no secret CARGO_REGISTRY_TOKEN"
+            exit 1
+          fi
+          echo "Publishing $VERSION from $GITHUB_REF ($GITHUB_SHA)."
+      - uses: dtolnay/rust-toolchain@stable
+      # No Swatinem/rust-cache: this job holds the token, so it restores
+      # nothing another workflow saved.
+      - name: Package the 19 crates, install nova from them, run the gate
+        shell: bash
+        run: bash .github/scripts/package-gate.sh "$RUNNER_TEMP/package-gate"
+      - name: Publish the 19 crates, skipping any crates.io already has
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: bash .github/scripts/publish-crates.sh "$VERSION"
