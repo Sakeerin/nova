@@ -429,6 +429,23 @@ writes is unchanged.
   }
   ```
 
+  **Amended 2026-10-12 (branch `claude/loving-archimedes-frtf5q`):**
+  `src/main.nova` is written in `nova fmt`'s layout, which keeps a body
+  holding one expression on one line (3.1 spec, "Blocks"), so `nova fmt
+  --check` passes on a new project
+  (`docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
+  §7.1). The library template and its `tests/` file (3.3a spec §5.5) follow
+  the same layout. What the program prints is unchanged:
+
+  ```nova
+  fn greeting() -> String { "Hello, Nova!" }
+
+  fn main() { println(greeting()) }
+
+  @test
+  fn greeting_says_hello() { assert_eq(greeting(), "Hello, Nova!") }
+  ```
+
 - Every file is written with `\n` line endings, on every system.
 - **How it differs from `40-TOOLING.md` §1.2's template, on purpose:**
   - it has no `authors` placeholder, which would be published as written
