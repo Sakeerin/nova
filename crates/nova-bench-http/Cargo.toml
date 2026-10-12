@@ -1,11 +1,16 @@
 [package]
 name = "nova-bench-http"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Keep-alive HTTP load generator for benchmarking Nova's std/http (no dependencies)"
+# Not on crates.io: `nova` does not need it (spec
+# docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+# §3.1).
+publish = false
 
 [[bin]]
 name = "nova-bench-http"

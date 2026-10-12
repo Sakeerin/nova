@@ -1,11 +1,13 @@
 [package]
 name = "nova-index"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The package index for Nova: reading, downloading, packing and publishing"
+homepage.workspace = true
+description = "The Nova language's package index client (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,8 +16,8 @@ description = "The package index for Nova: reading, downloading, packing and pub
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-pm = { path = "../nova-pm" }
+nova-diagnostics = { workspace = true }
+nova-pm = { workspace = true }
 semver = { workspace = true }
 # The index's lines and config.json (spec
 # docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md

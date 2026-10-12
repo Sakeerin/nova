@@ -1,11 +1,13 @@
 [package]
 name = "nova-pm"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Package manager for Nova"
+homepage.workspace = true
+description = "The Nova language's package manager (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,8 +16,8 @@ description = "Package manager for Nova"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-lexer = { path = "../nova-lexer" }
+nova-diagnostics = { workspace = true }
+nova-lexer = { workspace = true }
 crc32fast = { workspace = true }
 semver = { workspace = true }
 toml_edit = { workspace = true }

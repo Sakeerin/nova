@@ -1,11 +1,16 @@
 [package]
 name = "nova-codegen-wasm"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "WebAssembly codegen backend for Nova (browser builds)"
+# Not on crates.io: `nova` does not need it (spec
+# docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+# §3.1).
+publish = false
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,7 +19,7 @@ description = "WebAssembly codegen backend for Nova (browser builds)"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-mir = { path = "../nova-mir" }
+nova-diagnostics = { workspace = true }
+nova-mir = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

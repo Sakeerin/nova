@@ -18,6 +18,7 @@ on:
       - crates/nova-runtime/build.rs
       - crates/nova-cli/Cargo.toml
       - crates/nova-runtime/Cargo.toml
+      - Cargo.toml
       - Cargo.lock
       - tools/vscode-nova/**
 
@@ -59,7 +60,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          # The workspace's version: [workspace.package]'s, the only line
+          # of the root Cargo.toml that starts with `version = `.
+          version=$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
           name="nova-$version-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp README.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
@@ -134,7 +137,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          version=$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
           site="$RUNNER_TEMP/std-docs"
           mkdir "$site"
           (cd "$site" && "$GITHUB_WORKSPACE/target/debug/nova" doc --std)
@@ -161,7 +164,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version=$(tr -d '\r' < crates/nova-cli/Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
+          version=$(tr -d '\r' < Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n 1)
           # An archive is nova-<version>-<target>; the extension is
           # nova-vscode-<version>.vsix; std's site is
           # nova-std-docs-<version>.tar.gz.
@@ -177,7 +180,7 @@ jobs:
           bash .github/scripts/release-notes.sh "$version" CHANGELOG.md > release/notes.md
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             if [ "$GITHUB_REF_NAME" != "v$version" ]; then
-              echo "::error::the tag $GITHUB_REF_NAME does not match nova-cli's version $version"
+              echo "::error::the tag $GITHUB_REF_NAME does not match the workspace's version $version"
               exit 1
             fi
             tag=$GITHUB_REF_NAME

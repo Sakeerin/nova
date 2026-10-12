@@ -1,11 +1,13 @@
 [package]
 name = "nova-typeck"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Type checker and inference for Nova (Hindley-Milner + extensions)"
+homepage.workspace = true
+description = "The Nova language's type checker (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,10 +16,10 @@ description = "Type checker and inference for Nova (Hindley-Milner + extensions)
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-ast = { path = "../nova-ast" }
-nova-hir = { path = "../nova-hir" }
-nova-resolver = { path = "../nova-resolver" }
+nova-diagnostics = { workspace = true }
+nova-ast = { workspace = true }
+nova-hir = { workspace = true }
+nova-resolver = { workspace = true }
 indexmap = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }

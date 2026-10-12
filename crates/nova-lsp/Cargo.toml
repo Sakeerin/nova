@@ -1,11 +1,13 @@
 [package]
 name = "nova-lsp"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Language Server Protocol implementation for Nova"
+homepage.workspace = true
+description = "The Nova language's language server (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,19 +16,19 @@ description = "Language Server Protocol implementation for Nova"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-lexer = { path = "../nova-lexer" }
-nova-ast = { path = "../nova-ast" }
-nova-parser = { path = "../nova-parser" }
-nova-resolver = { path = "../nova-resolver" }
-nova-typeck = { path = "../nova-typeck" }
-nova-hir = { path = "../nova-hir" }
-nova-driver = { path = "../nova-driver" }
-nova-pm = { path = "../nova-pm" }
-nova-fmt = { path = "../nova-fmt" }
+nova-diagnostics = { workspace = true }
+nova-lexer = { workspace = true }
+nova-ast = { workspace = true }
+nova-parser = { workspace = true }
+nova-resolver = { workspace = true }
+nova-typeck = { workspace = true }
+nova-hir = { workspace = true }
+nova-driver = { workspace = true }
+nova-pm = { workspace = true }
+nova-fmt = { workspace = true }
 # Hover hides an example's hidden lines by the site's rule (spec
 # docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md §11.4).
-nova-doc = { path = "../nova-doc" }
+nova-doc = { workspace = true }
 lsp-server = { workspace = true }
 lsp-types = { workspace = true }
 serde_json = { workspace = true }
