@@ -13,11 +13,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Retry `attempt` until it returns a value, for at most 60 s. */
+/** True for the error VS Code rejects a request with when it cancels it. */
+function isCanceled(error: unknown): boolean {
+  return error instanceof Error && (error.name === "Canceled" || error.message === "Canceled");
+}
+
+/**
+ * Retry `attempt` until it returns a value, for at most 60 s. A request
+ * VS Code cancels on its way (opening a document or a re-check can cancel
+ * one in flight) counts as no value yet, and is tried again.
+ */
 async function eventually<T>(what: string, attempt: () => Promise<T | undefined>): Promise<T> {
   const deadline = Date.now() + 60000;
   for (;;) {
-    const value = await attempt();
+    let value: T | undefined;
+    try {
+      value = await attempt();
+    } catch (error) {
+      if (!isCanceled(error)) {
+        throw error;
+      }
+    }
     if (value !== undefined) {
       return value;
     }
