@@ -139,12 +139,17 @@ fn sha256(path: &Path) -> String {
     hash
 }
 
+/// What a `nova` that cannot start on this system looks like to the
+/// scripts: neither Windows nor a Unix kernel can run these bytes, and a
+/// Unix shell refuses them as a binary ("Exec format error").
+const NOT_A_PROGRAM: &[u8] = b"\x7fELF\x02\x01\x01\0\0\0\0\0\0\0\0\0 not a nova\n";
+
 /// Pack release `version`'s archive for `target` in `dir` as release.yml
-/// does: one directory, `nova-<version>-<target>`, holding `nova` (or
-/// `nova.exe`), `README.md` and both licences; `tar -czf` on Unix and
-/// `Compress-Archive` on Windows. Returns the archive's path. The packed
-/// directory is removed, as each copy of a debug `nova` is large.
-fn pack(dir: &Path, version: &str, target: &str) -> PathBuf {
+/// does: one directory, `nova-<version>-<target>`, holding `binary` as
+/// `nova` (or `nova.exe`), `README.md` and both licences; `tar -czf` on
+/// Unix and `Compress-Archive` on Windows. Returns the archive's path. The
+/// packed directory is removed, as each copy of a debug `nova` is large.
+fn pack(dir: &Path, version: &str, target: &str, binary: &Path) -> PathBuf {
     let name = format!("nova-{version}-{target}");
     let stage = dir.join(format!("stage-{version}"));
     let inner = stage.join(&name);
@@ -152,7 +157,7 @@ fn pack(dir: &Path, version: &str, target: &str) -> PathBuf {
     for file in ["README.md", "LICENSE-MIT", "LICENSE-APACHE"] {
         std::fs::copy(repo().join(file), inner.join(file)).expect("copy a release file");
     }
-    std::fs::copy(nova(), inner.join(format!("nova{EXE_SUFFIX}"))).expect("copy nova");
+    std::fs::copy(binary, inner.join(format!("nova{EXE_SUFFIX}"))).expect("copy nova");
     let archive = archive_name(version, target);
     if cfg!(windows) {
         run_ok(
@@ -186,10 +191,21 @@ enum Sums {
 }
 
 /// Release `version`'s files for `target`, each by its path under
-/// `/releases/download/`: the archive, and a `SHA256SUMS` that also lists
-/// another asset, as a real release's does.
+/// `/releases/download/`: the archive, around this test's own `nova`, and
+/// a `SHA256SUMS` that also lists another asset, as a real release's does.
 fn release(dir: &Path, version: &str, target: &str, sums: Sums) -> HashMap<String, Vec<u8>> {
-    let archive = pack(dir, version, target);
+    release_of(dir, version, target, sums, &nova())
+}
+
+/// `release`, with `binary` as the archive's `nova`.
+fn release_of(
+    dir: &Path,
+    version: &str,
+    target: &str,
+    sums: Sums,
+    binary: &Path,
+) -> HashMap<String, Vec<u8>> {
+    let archive = pack(dir, version, target, binary);
     let name = archive.file_name().unwrap().to_str().unwrap().to_string();
     let hash = sha256(&archive);
     let other = format!(
@@ -452,12 +468,52 @@ fn running_it_again_replaces_the_binary() {
     assert_installed(&bin(&dir));
     // Stand in for an older nova; the second run must replace it.
     std::fs::write(bin(&dir).join(format!("nova{EXE_SUFFIX}")), "an older nova").unwrap();
+    // On Windows, also for the nova.exe.old an earlier update leaves when
+    // the nova it replaced was still running; the next run removes it.
+    if cfg!(windows) {
+        std::fs::write(bin(&dir).join("nova.exe.old"), "an even older nova").unwrap();
+    }
 
     let second = run(&mut script(&dir, &server));
     let (out, err) = (stdout(&second), stderr(&second));
     assert!(second.status.success(), "{out}\n{err}");
     assert_installed(&bin(&dir));
     assert_prints_version(&out);
+}
+
+#[test]
+fn a_nova_that_cannot_run_here_replaces_nothing() {
+    let Some(target) = target_or_skip() else {
+        return;
+    };
+    let dir = fresh("cannot-run");
+    let broken = dir.join("not-a-program");
+    std::fs::write(&broken, NOT_A_PROGRAM).unwrap();
+    let server = serve(release_of(&dir, LATEST, target, Sums::Right, &broken));
+    // A working nova is installed already, this test's own; the new one has
+    // to run before it replaces anything.
+    std::fs::create_dir_all(bin(&dir)).unwrap();
+    std::fs::copy(nova(), bin(&dir).join(format!("nova{EXE_SUFFIX}"))).unwrap();
+
+    let output = run(&mut script(&dir, &server));
+    let (out, err) = (stdout(&output), stderr(&output));
+    assert!(!output.status.success(), "{out}\n{err}");
+    for said in ["nothing was replaced", "cargo install nova-cli --locked"] {
+        assert!(err.contains(said), "no `{said}` in:\n{err}");
+    }
+    // The archive was downloaded and checked: what stopped the install is
+    // that its nova does not run.
+    let checked = format!(
+        "nova: checked {} against SHA256SUMS",
+        archive_name(LATEST, target)
+    );
+    assert!(
+        out.lines().any(|l| l == checked),
+        "no `{checked}` in:\n{out}"
+    );
+    assert!(paths(&server).ends_with(&downloads(LATEST, target)));
+    // The old nova is there byte for byte, with nothing beside it.
+    assert_installed(&bin(&dir));
 }
 
 #[cfg(unix)]

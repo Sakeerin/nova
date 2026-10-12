@@ -186,24 +186,67 @@
                 throw "$archive holds no $name\nova.exe"
             }
 
-            # Step 5: written beside the old nova, then moved over it, so a
-            # failed install leaves the old one.
+            # Step 5: written beside the old nova, run there (step 6), and
+            # only then moved in, so a failed install, or a nova that cannot
+            # run on this machine, leaves the old one. The staged name ends
+            # in .exe: PowerShell runs no other file itself.
             New-Item -ItemType Directory -Path $bin -Force | Out-Null
             $bin = (Get-Item -LiteralPath $bin).FullName
             $exe = Join-Path $bin 'nova.exe'
-            $staged = Join-Path $bin ('nova-install-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+            $old = Join-Path $bin 'nova.exe.old'
+            $staged = Join-Path $bin ('nova-install-' + [Guid]::NewGuid().ToString('N') + '.exe')
             Copy-Item -LiteralPath $source -Destination $staged
-            Move-Item -LiteralPath $staged -Destination $exe -Force
-            $staged = $null
-            Say "installed $exe"
 
-            # Step 6: the installed nova says what it is.
+            # Step 6: the new nova says what it is, before it replaces
+            # anything.
+            $ran = $false
+            $why = "'nova version' failed"
             try {
-                $printed = @(& $exe version)
+                $printed = @(& $staged version)
+                $ran = $LASTEXITCODE -eq 0
             } catch {
-                throw "nova was installed in $bin, but did not run: $($_.Exception.Message)"
+                $why = $_.Exception.GetBaseException().Message
             }
-            if ($LASTEXITCODE -ne 0) { throw "nova was installed in $bin, but 'nova version' failed" }
+            if (-not $ran) {
+                throw "the new nova does not run on this machine ($why), so nothing was replaced; install it with: cargo install nova-cli --locked"
+            }
+
+            # A nova.exe that is running, such as the language server VS
+            # Code started, can be renamed but not replaced or deleted. So
+            # the old one becomes nova.exe.old, the new one moves in, and the
+            # old one is removed if it can be, else by the next run; if the
+            # new one cannot move in, the old one is renamed back.
+            if (Test-Path -LiteralPath $old) {
+                Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $old) {
+                    throw "$old, an older nova, is still running, so nothing was replaced; close the programs that use nova, VS Code among them, and run this again"
+                }
+            }
+            $hadOld = Test-Path -LiteralPath $exe
+            if ($hadOld) {
+                try {
+                    Move-Item -LiteralPath $exe -Destination $old
+                } catch {
+                    throw "could not rename $exe to nova.exe.old ($($_.Exception.Message)), so nothing was replaced"
+                }
+            }
+            try {
+                Move-Item -LiteralPath $staged -Destination $exe
+            } catch {
+                $why = $_.Exception.Message
+                if ($hadOld) {
+                    Move-Item -LiteralPath $old -Destination $exe -ErrorAction SilentlyContinue
+                    if (-not (Test-Path -LiteralPath $exe)) {
+                        throw "could not move the new nova into $bin ($why), nor the old one back: rename $old to nova.exe"
+                    }
+                }
+                throw "could not move the new nova into $bin ($why), so nothing was replaced"
+            }
+            $staged = $null
+            if ($hadOld) {
+                Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+            }
+            Say "installed $exe"
             foreach ($printedLine in $printed) { Write-Host $printedLine }
         } finally {
             if ($staged -and (Test-Path -LiteralPath $staged)) {
