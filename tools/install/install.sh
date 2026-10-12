@@ -126,21 +126,24 @@ main() {
   tar -xzf "$tmp/$archive" -C "$tmp/unpacked" || die "could not unpack $archive"
   [ -f "$tmp/unpacked/$name/nova" ] || die "$archive holds no $name/nova"
 
-  # Step 5: written beside the old nova, then renamed over it, so a failed
-  # install leaves the old one.
+  # Step 5: written beside the old nova, run there (step 6), and only then
+  # renamed over it, so a failed install, or a nova that cannot run on
+  # this system, leaves the old one.
   mkdir -p "$bin" || die "could not make $bin"
   bin=$(CDPATH='' cd -- "$bin" && pwd)
   staged=$bin/.nova-install.$$
   cp "$tmp/unpacked/$name/nova" "$staged" || die "could not write to $bin"
   chmod +x "$staged"
+
+  # Step 6: the new nova says what it is, before it replaces anything.
+  if ! printed=$("$staged" version); then
+    rm -f "$staged"
+    staged=
+    die "the new nova does not run on this system (\`nova version\` failed), so nothing was replaced; install it with: cargo install nova-cli --locked"
+  fi
   mv -f "$staged" "$bin/nova" || die "could not replace $bin/nova"
   staged=
   say "installed $bin/nova"
-
-  # Step 6: the installed nova says what it is.
-  if ! printed=$("$bin/nova" version); then
-    die "nova was installed in $bin, but \`nova version\` failed"
-  fi
   printf '%s\n' "$printed"
 
   # Step 7: no file is edited; the line to add, if the directory is not on
