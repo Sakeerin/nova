@@ -1,11 +1,16 @@
 [package]
 name = "nova-test"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Test runner for Nova projects"
+# Not on crates.io: `nova` does not need it (spec
+# docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
+# §3.1).
+publish = false
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,6 +19,6 @@ description = "Test runner for Nova projects"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
+nova-diagnostics = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

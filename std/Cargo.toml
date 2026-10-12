@@ -1,11 +1,13 @@
 [package]
 name = "nova-std"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The Nova standard library's sources, embedded for the compiler"
+homepage.workspace = true
+description = "The Nova language's standard library sources (internal to the nova toolchain)"
+readme = "../crates/README.md"
 
 [lib]
 path = "lib.rs"

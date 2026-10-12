@@ -1,11 +1,13 @@
 [package]
 name = "nova-codegen-cranelift"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Cranelift codegen backend for Nova (fast debug builds)"
+homepage.workspace = true
+description = "The Nova language's Cranelift code generator (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,10 +16,10 @@ description = "Cranelift codegen backend for Nova (fast debug builds)"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-mir = { path = "../nova-mir" }
-nova-hir = { path = "../nova-hir" }
-nova-runtime = { path = "../nova-runtime" }
+nova-diagnostics = { workspace = true }
+nova-mir = { workspace = true }
+nova-hir = { workspace = true }
+nova-runtime = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 rustc-hash = { workspace = true }

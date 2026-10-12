@@ -1,11 +1,13 @@
 [package]
 name = "nova-runtime"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "GC and async runtime for Nova (linked into compiled binaries)"
+homepage.workspace = true
+description = "The Nova language's runtime: garbage collector and async executor (internal to the nova toolchain)"
+readme = "../README.md"
 # `links` lets this crate's build script hand metadata to the crates that
 # depend on it: nova-cli's build script reads DEP_NOVA_RUNTIME_MANIFEST_DIR
 # to find this source and build the staticlib it embeds
@@ -22,7 +24,7 @@ bench = false
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
+nova-diagnostics = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 

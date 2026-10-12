@@ -1,11 +1,15 @@
 [package]
 name = "nova-cli"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The nova compiler and toolchain CLI"
+homepage.workspace = true
+description = "The Nova programming language: compiler, formatter, language server, package manager and documentation generator"
+readme = "README.md"
+keywords = ["nova", "programming-language", "compiler", "lsp", "formatter"]
+categories = ["compilers", "command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "nova"
@@ -16,22 +20,22 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-lexer = { path = "../nova-lexer" }
-nova-ast = { path = "../nova-ast" }
-nova-parser = { path = "../nova-parser" }
-nova-driver = { path = "../nova-driver" }
-nova-pm = { path = "../nova-pm" }
-nova-fmt = { path = "../nova-fmt" }
-nova-lsp = { path = "../nova-lsp" }
+nova-diagnostics = { workspace = true }
+nova-lexer = { workspace = true }
+nova-ast = { workspace = true }
+nova-parser = { workspace = true }
+nova-driver = { workspace = true }
+nova-pm = { workspace = true }
+nova-fmt = { workspace = true }
+nova-lsp = { workspace = true }
 # `nova doc` (spec
 # docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
 # §4).
-nova-doc = { path = "../nova-doc" }
+nova-doc = { workspace = true }
 # The package index: syncing, packing and publishing (spec
 # docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md
 # §9).
-nova-index = { path = "../nova-index" }
+nova-index = { workspace = true }
 # `nova add json@1.4` checks its requirement.
 semver = { workspace = true }
 # `nova add` and `nova remove` edit nova.toml, keeping its comments and
@@ -45,7 +49,7 @@ tracing-subscriber = { workspace = true }
 # docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md §4.1).
 # The runtime is already linked into `nova` through nova-codegen-cranelift,
 # so this adds no code; only a direct dependent receives the metadata.
-nova-runtime = { path = "../nova-runtime" }
+nova-runtime = { workspace = true }
 
 [build-dependencies]
 flate2 = { workspace = true }

@@ -1,11 +1,13 @@
 [package]
 name = "nova-doc"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Documentation generator for Nova"
+homepage.workspace = true
+description = "The Nova language's documentation generator (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,13 +16,13 @@ description = "Documentation generator for Nova"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-ast = { path = "../nova-ast" }
-nova-lexer = { path = "../nova-lexer" }
-nova-resolver = { path = "../nova-resolver" }
-nova-typeck = { path = "../nova-typeck" }
-nova-driver = { path = "../nova-driver" }
-nova-pm = { path = "../nova-pm" }
+nova-diagnostics = { workspace = true }
+nova-ast = { workspace = true }
+nova-lexer = { workspace = true }
+nova-resolver = { workspace = true }
+nova-typeck = { workspace = true }
+nova-driver = { workspace = true }
+nova-pm = { workspace = true }
 # `///` docs as Markdown (spec
 # docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md
 # §9.1).

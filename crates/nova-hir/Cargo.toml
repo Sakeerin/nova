@@ -1,11 +1,13 @@
 [package]
 name = "nova-hir"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-level IR for Nova (desugared AST)"
+homepage.workspace = true
+description = "The Nova language's high-level IR (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,5 +16,5 @@ description = "High-level IR for Nova (desugared AST)"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-resolver = { path = "../nova-resolver" }
+nova-diagnostics = { workspace = true }
+nova-resolver = { workspace = true }

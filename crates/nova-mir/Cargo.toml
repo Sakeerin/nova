@@ -1,11 +1,13 @@
 [package]
 name = "nova-mir"
-version = "0.2.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Mid-level IR for Nova (3-address style)"
+homepage.workspace = true
+description = "The Nova language's mid-level IR (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
@@ -14,9 +16,9 @@ description = "Mid-level IR for Nova (3-address style)"
 bench = false
 
 [dependencies]
-nova-diagnostics = { path = "../nova-diagnostics" }
-nova-hir = { path = "../nova-hir" }
-nova-resolver = { path = "../nova-resolver" }
+nova-diagnostics = { workspace = true }
+nova-hir = { workspace = true }
+nova-resolver = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
