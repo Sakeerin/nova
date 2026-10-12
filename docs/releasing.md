@@ -35,7 +35,9 @@ maintainer's own, on their accounts.
 
 - **crates.io.** Log in at <https://crates.io> with the GitHub account
   that will own the crates, and verify its e-mail address under Account
-  Settings: crates.io refuses a publish from an account without one.
+  Settings: crates.io refuses a publish from an account without one. It
+  must be the account that owns the repository: the publish workflow
+  names the repository's owner as the crates' owner (step 3).
 - **The VS Code Marketplace.** At
   <https://marketplace.visualstudio.com/manage>, signed in with a
   Microsoft account, create a publisher whose ID is `sakeerin`. It must
@@ -149,12 +151,13 @@ within the boundary docs/adr/<its ADR> records."`.
 git push origin "v$version"
 ```
 
-The tag starts `release.yml`, which builds the four targets, smoke-tests
-three of them, installs the Windows archive with `install.ps1` (PATH on)
-and the Linux one with `install.sh`, and creates the GitHub release
-`v0.3.0` (not a draft, and a prerelease only if the version has a `-`).
-Follow it with `gh run watch`, picking the Release run. Then check the
-release:
+The tag starts `release.yml`, which builds the four targets (Linux on
+Ubuntu 22.04, failing if its `nova` needs a glibc newer than 2.35),
+smoke-tests three of them, installs the Windows archive with
+`install.ps1` (PATH on) and the Linux one with `install.sh`, and creates
+the GitHub release `v0.3.0` (not a draft, and a prerelease only if the
+version has a `-`). Follow it with `gh run watch`, picking the Release
+run. Then check the release:
 
 ```sh
 gh release view "v$version" --repo Sakeerin/nova --json isPrerelease,assets --jq '.isPrerelease, .assets[].name'
@@ -193,7 +196,10 @@ crates.io", publishes the 19 crates in dependency order with
 `.github/scripts/publish-crates.sh` (spec §5). It runs only when started
 by hand, only on the tag `v<version>` whose workspace version is
 `<version>`, and it first repeats CI's package check
-(`.github/scripts/package-gate.sh`).
+(`.github/scripts/package-gate.sh`). Before its first upload the script
+checks all 19 names: each crate crates.io already has, at any version,
+must be owned by the repository's owner, or the run stops there with
+nothing published.
 
 1. **[stop]** Make a token at crates.io, Account Settings → API Tokens →
    New Token:
@@ -220,13 +226,15 @@ by hand, only on the tag `v<version>` whose workspace version is
    The run waits for the environment's reviewer: approve it under "Review
    deployments".
 4. Wait. The package check takes about as long as CI's install job. The
-   upload of 19 new crates then takes about 2 h 20 min: crates.io allows a
-   burst of 5 new crates and then one every 10 minutes, and the script
-   prints `rate limited: waiting <n> s` and tries again. A later release
-   only adds versions to existing crates, which crates.io allows 30 at a
-   time and then one a minute, so its upload takes minutes. The job's
-   limit is 345 minutes. It ends with one line per crate, published or
-   skipped.
+   script then prints a line for each crate, `<crate>: not on crates.io`
+   or `<crate>: on crates.io, owned by <logins>`, and stops at one that
+   someone else owns (section 7). The upload of 19 new crates takes about
+   2 h 20 min: crates.io allows a burst of 5 new crates and then one every
+   10 minutes, and the script prints `rate limited: waiting <n> s` and
+   tries again. A later release only adds versions to existing crates,
+   which crates.io allows 30 at a time and then one a minute, so its
+   upload takes minutes. The job's limit is 345 minutes. It ends with one
+   line per crate, published or skipped.
 5. Check what crates.io serves:
 
    ```sh
@@ -510,6 +518,15 @@ git tag -d "v$version"
 Fix it on `main` in a pull request, and release the next patch version
 (`0.3.1`) from step 1. A tag that was pushed is not moved to another
 commit.
+
+**The publish stops before uploading anything** (step 3), saying
+`<crate> is on crates.io, owned by <logins>, not by <owner>; nothing was
+published`. Someone else has taken that name, and the release cannot go
+out under it: renaming the crate is a change for the next patch version,
+from step 1. If the crate is in fact the maintainer's, under another
+login, that login adds the repository's owner to its owners (`cargo owner
+--add <owner> <crate>`); once the invitation is accepted on crates.io,
+start the workflow again.
 
 **A crate is rejected in the middle of the publish** (step 3). The script
 stops at the first failure with cargo's output; the crates before it are
