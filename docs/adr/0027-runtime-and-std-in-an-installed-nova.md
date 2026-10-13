@@ -94,6 +94,14 @@ crates, found a route on stable Cargo (the plan's decision 1).
   (`.github/scripts/package-gate.sh`; ADR 0036). Its first real run is
   3.6b's release gate, after the crates are on crates.io.
 
+  **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** it
+  ran for real. The "Release gate" workflow's run 38367944634 installed
+  `nova` 0.3.0 with `cargo install nova-cli --locked` from crates.io on
+  Linux, macOS and Windows, in 2 min 3 s, 1 min 58 s and 3 min 41 s. Each
+  `nova` said `runtime: embedded`, and passed `gate.sh --test`, the
+  packages gate and the doc gate. The maintainer's own install, on
+  Windows, took about two minutes (`docs/adr/0037-phase-3-boundary.md`).
+
 ## References
 
 - `docs/phase-3-plan.md` §2 items 1 and 8, and §3 decision 1.

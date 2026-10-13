@@ -94,6 +94,19 @@ commands that publish.
   bytes to the index repository; tarballs are release assets, which do
   not count towards its size. The by-hand publish (spec §11.2) measures
   these, and its figures are added here when it runs.
+
+  **Measured 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** the
+  first publish to the real index, `shapes` 0.1.0 from
+  `examples/05-geometry` (3 files, 1,304 bytes), in Phase 3's gate
+  (`docs/adr/0037-phase-3-boundary.md`). GitHub's `rate_limit` endpoint
+  read 15 core requests used before `nova publish` and 17 after, so
+  GitHub counted two requests for it, though a first publish sends about
+  six (the index file and the release looked up, the release made, the
+  tarball uploaded to uploads.github.com, the index line written). The
+  index repository's size, as the API reported it right after, was 0 KB:
+  GitHub counts whole kilobytes and updates the figure lazily, so it says
+  only that `config.json` and one line are under a kilobyte, or not yet
+  counted. Neither limit is near.
 - **Yanking** is not in 3.3; a published version stays.
 - **A stale editor.** The language server sees a fetch only through the
   lock's change, which is why a sync rewrites the lock after unpacking.

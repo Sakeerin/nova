@@ -561,6 +561,16 @@ Definition of Done is met but the last, the `v0.2.0` tag.
 spec's §7 Definition of Done is met, within
 `docs/adr/0025-phase-2-boundary.md`'s boundary.
 
+**Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`): Phase 3
+is complete as `v0.3.0`, within `docs/adr/0037-phase-3-boundary.md`'s
+boundary.** Its inventory takes Phase 3's promises from the Phase 3 list
+below, `docs/phase-3-plan.md` and `nova-spec/40-TOOLING.md`, and says
+whether each shipped and where it is recorded; positions 7 and 8, the REPL
+and the debugger, are among those ADR 0026 left out. The Phase 3 gate was
+met on what `v0.3.0` published: `nova-cli` installed from crates.io on
+three systems in CI, and the maintainer's own run, recorded in that ADR.
+Every item of the §7 Definition of Done is met.
+
 ### Phase 0 — Foundation (week 1–4)
 **Goal:** Repo skeleton + lexer + parser for a minimal subset.
 
