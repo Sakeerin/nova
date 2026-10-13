@@ -135,7 +135,14 @@ Three commits, in this order.
      >   **Nova** by `sakeerin` in the Extensions view; its display name
      >   stays Nova. If you installed `0.3.0`'s `.vsix`, uninstall it first
      >   (`code --uninstall-extension sakeerin.nova`): VS Code counts the
-     >   two IDs as two extensions, and each would start `nova lsp`.
+     >   two IDs as two extensions that claim the same settings and
+     >   command, so whichever starts second fails, and the one left
+     >   running may be the old one.
+     >
+     > (Corrected 2026-10-13, from the release PR's review: the text first
+     > said "each would start `nova lsp`". The extension registers its
+     > command before it starts the server, and VS Code refuses a second
+     > registration of a command, so the second extension stops there.)
 
    - **`tools/vscode-nova/CHANGELOG.md`**, which the stores show:
      - a `## [0.3.1]` section: "The first version in the Marketplace and
