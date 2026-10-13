@@ -336,10 +336,10 @@ grep " nova-vscode-$version.vsix\$" SHA256SUMS | sha256sum --check   # macOS: sh
    (`-p <token>` in place of `OVSX_PAT` does the same, and leaves the
    token in the shell's history.)
 3. Check the listings, which can take a few minutes to appear:
-   <https://marketplace.visualstudio.com/items?itemName=sakeerin.nova>
-   and <https://open-vsx.org/extension/sakeerin/nova>. Each shows version
-   0.3.0, the README, the CHANGELOG, and the repository, homepage and
-   issues links. Revoke the Azure DevOps token when done.
+   <https://marketplace.visualstudio.com/items?itemName=sakeerin.vscode-nova>
+   and <https://open-vsx.org/extension/sakeerin/vscode-nova>. Each shows
+   version 0.3.0, the README, the CHANGELOG, and the repository, homepage
+   and issues links. Revoke the Azure DevOps token when done.
 
 ## 5. The index (first release only)
 
@@ -450,9 +450,9 @@ The commands, in order, each with what it should show:
    `Hello, Nova!`.
 3. **Autocomplete.** Install the extension from the store: in VS Code's
    Extensions view, search for Nova and install the one by `sakeerin`, or
-   `code --install-extension sakeerin.nova`. Open the folder (`code .`),
-   open `src/main.nova`, and replace it with this, cramped on purpose for
-   step 4:
+   `code --install-extension sakeerin.vscode-nova`. Open the folder
+   (`code .`), open `src/main.nova`, and replace it with this, cramped on
+   purpose for step 4:
 
    ```nova
    record Point{x:Int,y:Int}
@@ -542,7 +542,7 @@ Release:        v0.3.0
 Date:           YYYY-MM-DD
 Machine:        <OS and version>, <architecture>; <fresh VM image | new user account>
 Rust:           <rustc --version>
-VS Code:        <version>; extension sakeerin.nova <version>, from <Marketplace | Open VSX>
+VS Code:        <version>; extension sakeerin.vscode-nova <version>, from <Marketplace | Open VSX>
 Release gate:   <the Actions run's address>, <all six jobs passed?>
 
 1. cargo install nova-cli --locked     <duration>
