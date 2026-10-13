@@ -43,5 +43,7 @@ fn the_extension_has_nova_clis_version_and_its_floor() {
     assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(package["engines"]["vscode"], "^1.91.0");
     assert_eq!(package["publisher"], "sakeerin");
+    assert_eq!(package["name"], "vscode-nova");
+    assert_eq!(package["displayName"], "Nova");
     assert_eq!(package["contributes"]["languages"][0]["id"], "nova");
 }

@@ -296,7 +296,7 @@ fn every_published_crate_carries_a_readme_both_licences_and_its_links() {
 }
 
 #[test]
-fn the_extension_has_the_workspace_version() {
+fn the_extension_has_the_workspace_version_and_its_name() {
     let version = workspace_version();
     let extension = root().join("tools").join("vscode-nova");
     let json = |file: &str| -> Value {
@@ -311,5 +311,11 @@ fn the_extension_has_the_workspace_version() {
         lock["packages"][""]["version"],
         version.as_str(),
         "package-lock.json's packages[\"\"]"
+    );
+    let name = &package["name"];
+    assert_eq!(&lock["name"], name, "package-lock.json's name");
+    assert_eq!(
+        &lock["packages"][""]["name"], name,
+        "package-lock.json's packages[\"\"] name"
     );
 }
