@@ -4,9 +4,9 @@
 > Crates: `nova-cli`, `nova-fmt`, `nova-lsp`, `nova-pm`, `nova-doc`
 >
 > **Amended 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase 3
-> is complete as `v0.3.0`. `docs/adr/0037-phase-3-boundary.md` lists, row by
-> row, what this file describes that shipped, what did not, and where each
-> deferred item went.
+> is complete as `v0.3.0`. `docs/adr/0037-phase-3-boundary.md` lists what
+> this file describes that shipped, what did not, and where each deferred
+> item went.
 
 ---
 

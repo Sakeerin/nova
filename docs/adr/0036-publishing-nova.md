@@ -327,7 +327,7 @@ uninstalls it.
     published the 19 crates: its package gate took 2 min 48 s, and the
     uploads 2 h 25 min. The owner check found all 19 names free. The
     three runs before it stopped before any upload, as the guards are
-    meant to: two at the workflow's first step, because the `crates-io`
+    meant to: two at the workflow's guard step, because the `crates-io`
     environment had no `CARGO_REGISTRY_TOKEN` yet (and no required
     reviewer, so they started at once), and one at the first upload,
     because crates.io refuses a publish from an account without a

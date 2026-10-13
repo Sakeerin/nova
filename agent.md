@@ -124,7 +124,7 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-cli` | `nova` binary, CLI arg parsing | `nova-driver`, `clap` |
 | `nova-fmt` | Opinionated formatter | `nova-ast` |
 | `nova-lsp` | LSP server | `tower-lsp` |
-| `nova-pm` | Package manager | `nova-driver`, `toml` |
+| `nova-pm` | Package manager | `nova-diagnostics`, `nova-lexer`, `toml_edit` |
 | `nova-bundler` | Frontend bundler | `nova-codegen-wasm` |
 | `nova-doc` | Doc generator | `nova-ast` |
 | `nova-test` | A stub; the test runner is `nova-cli`'s `cmd/test.rs` | — |

@@ -44,7 +44,8 @@ to 2026-10-12. `v0.3.0` was released on 2026-10-13:
 - the 19 crates `cargo install nova-cli` needs, on crates.io at 0.3.0;
 - the package index, `Sakeerin/nova-index`, with its first package.
 
-The user decided, before the release (the 3.6b spec's §13):
+Before the release, the user decided (the 3.6b spec's §13, decision 1),
+and approved with that spec (decisions 6 and 9):
 - **two pull requests:** the release, then this close-out after the gate;
 - **`v0.3.0` is Phase 3's release,** with its gate to follow, because the
   gate installs what the release published; this ADR then calls Phase 3
@@ -52,11 +53,13 @@ The user decided, before the release (the 3.6b spec's §13):
 - **a failure that needs a change to the repository is released as
   `0.3.1`;** nothing published is replaced.
 
-And on 2026-10-13, during the release:
-- **the extension's name:** the VS Code Marketplace refused `nova`, so
-  the extension becomes `vscode-nova`, in `0.3.1`, after the gate (below);
-- **the gate's own run** on the maintainer's machine, in a separate
-  install, since no second machine was at hand (below).
+On 2026-10-13, during the release:
+- **the user decided the extension's name:** the VS Code Marketplace
+  refused `nova`, so the extension becomes `vscode-nova`, in `0.3.1`,
+  after the gate (below);
+- **the user ran the gate's own run on their machine,** in a separate
+  install, since no second machine was at hand; this ADR rules on it
+  (below).
 
 ## Decision
 
@@ -78,14 +81,16 @@ And on 2026-10-13, during the release:
 | A debugger: DWARF from both backends, DAP in VS Code | position 8 | not built: no debug information is emitted | ADR 0026 |
 | The Phase 3 gate | the master spec's §3 | met on what `v0.3.0` published | "The gate's record", below |
 | 3.0: an installed `nova` that needs nothing beside it; projects | 3.0 | shipped; 3.0's gate met | ADR 0027 |
-| 3.3: publishing to a local index, in CI | 3.3 | shipped; met | ADR 0031 |
+| 3.3: publishing to a local index, in CI | 3.3 | shipped; this part of 3.3's gate met | ADR 0031 |
 | 3.3: the same publish, by hand, to the real index | 3.3 | done, in the Phase 3 gate | ADR 0031's figures |
 | 3.6: the crates on crates.io | 3.6 | shipped: 19 crates, not every workspace crate | ADR 0036 |
 | 3.6: the extension in the Marketplace and Open VSX | 3.6 | not done | decided here |
 | 3.6: install scripts fetching the release's binaries | 3.6; 40-TOOLING §10 | shipped, as release assets | ADR 0036 |
+| 3.6's gate, "on a clean machine", "with the published extension" | 3.6 | met, on a separate install of the maintainer's machine and with the release's `.vsix` rather than a store's | decided here |
 | `nova build --target wasm`, `nova bundle`, `nova dev`; the LSP rows marked Phase 4 | 40-TOOLING §1.1, §3.1 | not built | ADR 0026; Phase 4 |
 | `nova lint`, `nova bench` | 40-TOOLING §1.1, §8 | not built | ADR 0026; backlog |
 | `nova install`, `nova clean`, `nova owner`, `nova self update`, `nova self uninstall` | 40-TOOLING §1.1, §4.5, §10.3 | not built | ADR 0026; backlog |
+| Multiple toolchains, `nova +stable build` | 40-TOOLING §10.3 | not built | Phase 6, as §10.3 says |
 | The language server on `salsa` | 40-TOOLING §3.2; ADR 0025's mapping | replaced: a whole-program re-check, within its budgets | ADR 0029; decided here |
 | The Zed and Neovim extensions | 40-TOOLING §3.3 | not built | ADR 0026; backlog |
 | Manifest features, git dependencies, `[build]`, `[[bin]]`, `[lib]` | 40-TOOLING §4.1 | not built: they warn M0006 | the plan's decision 2; backlog |
@@ -100,10 +105,12 @@ And on 2026-10-13, during the release:
 
 **Status words:**
 - *Shipped:* a `v0.3.0` user can rely on it, within the limits its record
-  states.
-- *Not built:* nothing implements it.
+  states; *shipped differently* when its record changed how.
+- *Not built:* nothing implements it. *Done* and *not done* say the same
+  of a step that is not a feature, such as a publish.
 - *Replaced:* something else does its job, as its record says.
-- *Backlog*, *Phase 4:* where a deferred item goes.
+- *Met:* a gate's checks passed, as the row and its record state them.
+- *Backlog*, *Phase 4*, *Phase 6:* where a deferred item goes.
 - *Decided here:* a section below makes the decision.
 
 ### Deviations no earlier record decides
@@ -118,38 +125,47 @@ extension had the display name `Nova`, and none had.
 
 The Marketplace then refused the upload: an extension's manifest `name`
 must be unique across the whole store, not only within a publisher, and
-another publisher's extension is named `nova`. Open VSX would have taken
-`sakeerin.nova`, but one extension would then have two IDs.
+another publisher's extension is named `nova`. Open VSX could have taken
+`sakeerin.nova`, but one extension would then have had two IDs.
 
 **Decision (the user, 2026-10-13):** the extension's `name` becomes
 `vscode-nova`, so its ID is `sakeerin.vscode-nova` in both stores; its
 display name stays `Nova`. The change is released as `0.3.1`, after the
 gate, as the 3.6b spec's decision 9 asks, because the extension's version
-is `nova-cli`'s. `v0.3.0`'s extension is published to neither store, and
-the gate installed it from the release's `.vsix`. `0.3.1` also:
-- corrects the texts that name `sakeerin.nova`: the root README and
-  `crates/nova-cli/README.md`, whose copy in `nova-cli` 0.3.0 on
-  crates.io stays as published;
-- has the runbook check the manifest `name` before the tag, as its note
-  of this date says.
+is `nova-cli`'s. `v0.3.0`'s extension is published to neither store.
 
-Until then the root README says where the extension is.
+For the gate, the release's `.vsix` stands for "the published
+extension": it is the file the release published, the one the stores
+would have received, and it gives the same autocomplete. (This ruling is
+made here, for the user's review with this ADR.)
+
+`0.3.1` also corrects the texts that still name `sakeerin.nova`:
+`crates/nova-cli/README.md`, whose copy in `nova-cli` 0.3.0 on crates.io
+stays as published, and the runbook's store listings, its 6.2 install
+line and its transcript template. This branch already took the store
+install out of the root README, which gets it back in `0.3.1`, and the
+runbook already checks the manifest `name` (its note of this date).
 
 #### The gate's "clean machine": decided, a separate install on the maintainer's machine stands
 
 The plan's 3.6 gate asks for a run "on a clean machine", and the runbook
 allows a fresh virtual machine or a new user account. No second machine
 was at hand, so the maintainer ran it on their own Windows machine and
-account, with everything of the run in one directory (the runbook's 6.2
-note of this date): `nova` installed with `--root` there, a `NOVA_HOME`
-there, its `bin` first on `PATH`, and VS Code started with its own user
-data and extensions directories, holding only the Nova extension.
+account, kept apart in one directory as far as it went (the runbook's
+6.2 note of this date): `nova` installed with `--root` there, its `bin`
+first on `PATH`, a `NOVA_HOME` there from step 5 on, and VS Code started
+with its own user data and extensions directories, holding only the Nova
+extension. Steps 1 to 4 unpacked the runtime into the account's own
+`~/.nova` (the gate's record, below), and Rust and `~/.cargo`, with its
+registry cache, were the account's own.
 
-**Decision:** that run, with the "Release gate" workflow's six jobs on
-clean runners, meets the gate. The workflow is the part that proves a
-machine with nothing of Nova on it can install and use `nova`; the
-maintainer's run adds what a workflow cannot, the editor's autocomplete
-and a publish to the real index. A later phase's gate runs on a fresh
+**Decision (made here, for the user's review with this ADR):** that run,
+with the "Release gate" workflow's six jobs, meets the gate. The jobs
+cover a machine with nothing of Nova on it: each starts on a clean
+runner, and installs and uses `nova` there on Linux, macOS or Windows.
+The maintainer's run adds what a workflow cannot, the editor's
+autocomplete and a publish to the real index, and nothing it shared with
+the account changes those two. A later phase's gate runs on a fresh
 machine or account, as the runbook says.
 
 #### `salsa`: decided, not adopted
@@ -173,12 +189,16 @@ These rows have no section above:
   here.
 - **The registry server:** ADR 0026 replaced it with the git-backed index,
   and ADR 0031 built it.
+- **`nova fmt`'s paths and `--stdin`:** ADR 0028 reads position 1's
+  "only `--check`" as "no style options".
 - **`tower-lsp`:** ADR 0029 records why the server is on `lsp-server`.
 - **The 19 crates:** ADR 0036 records why `cargo install nova-cli` needs
   19, and why the other four workspace crates are `publish = false`.
 - **The installer:** ADR 0036 records the release assets in place of
   `novalang.dev`, and why `install.sh` prints the PATH line rather than
   edit a shell profile.
+- **The archives and packages 3.6a left out** (linux-aarch64, musl,
+  signed macOS binaries, Homebrew, winget): ADR 0036 lists them.
 - **The by-hand publish of 3.3:** it ran in the Phase 3 gate, and ADR
   0031 has its figures.
 - **The 40-TOOLING rows ADR 0026 left out,** and the limits ADRs 0030,
@@ -194,7 +214,7 @@ These rows have no section above:
 
 | Job | How `nova` was installed | Then |
 |---|---|---|
-| From crates.io, Linux | `cargo install nova-cli --locked`, 2 min 3 s | `nova 0.3.0`, `x86_64-unknown-linux-gnu`, `runtime: embedded`; nothing but `nova` installed; the gate, `nova fmt --check` on the new project, the packages gate and the doc gate passed |
+| From crates.io, Linux | `cargo install nova-cli --version "=0.3.0" --locked`, 2 min 3 s | `nova 0.3.0`, `x86_64-unknown-linux-gnu`, `runtime: embedded`; nothing but `nova` installed; the gate, `nova fmt --check` on the new project, the packages gate and the doc gate passed |
 | From crates.io, macOS | the same, 1 min 58 s | the same, on `aarch64-apple-darwin` |
 | From crates.io, Windows | the same, 3 min 41 s | the same, on `x86_64-pc-windows-msvc` |
 | From the install script, Linux | `install.sh` | the gate passed |
@@ -216,7 +236,8 @@ VS Code:        1.141.0; extension sakeerin.nova 0.3.0, from the release's
 Release gate:   https://github.com/Sakeerin/nova/actions/runs/38367944634,
                 all six jobs passed
 
-1. cargo install nova-cli --locked     about 2 min
+1. cargo install nova-cli --locked --root ~/nova-gate
+                                       about 2 min
    nova version                        nova 0.3.0
                                        target: x86_64-pc-windows-msvc
                                        runtime: embedded
@@ -274,9 +295,10 @@ pull request.
 - **Left out of Phase 3 by ADR 0026:** the REPL; the debugger (DWARF from
   both backends, DAP in VS Code); `nova lint`; `nova bench`; `nova
   install`, `nova clean`, `nova owner`, `nova self update` and `nova self
-  uninstall`; the CI template and `setup-nova`; parallel test runs, TAP
-  output, `--bench` and `tests/**`; edition rules; the Zed and Neovim
-  extensions.
+  uninstall`; the CI template and `setup-nova`; parallel test runs and TAP
+  output; edition rules; the Zed and Neovim extensions.
+- **`nova test`'s other gaps** (ADRs 0003, 0030): `--bench`, and
+  `tests/**` below the top level of `tests/`.
 - **Packages and the index** (ADRs 0030 and 0031; #105, #106):
   - yanking; several major versions of a package side by side;
     transparent mirrors; re-exports and `geom::utils` paths; separate
@@ -288,7 +310,10 @@ pull request.
     with no library; M0010 naming manifests; Windows path spellings in
     messages; `nova add` through a symlinked `--path`, and `real_path` on
     UNC paths; exact case for `src/lib.nova`, `src/main.nova`, `src` and
-    `tests`; the watch limit for a dependency's `nova.toml`;
+    `tests`; the watch limit for a dependency's `nova.toml`; tests of rule
+    5's note, a CRLF manifest under `add` and `remove`, review focus 2
+    through `nova run`'s output, and `nova build` of a hyphenated
+    package;
   - `nova login` checking the token's shape before sending it; `parse_lock`
     checking names, checksums and order; M0005 pointing at `nova update`
     when `nova fetch` cannot repair a lock; an invalid `NOVA_INDEX` in a
@@ -309,7 +334,8 @@ pull request.
   - a rename that cannot place an edit refusing as a whole; std's cache
     across versions, its temporary file and read-only mark; hover's
     signature edge cases; the cost of the index when it is off; per-request
-    canonicalisation; tests of client URI spellings and UTF-16 columns;
+    canonicalisation; tests of client URI spellings, UTF-16 columns and
+    definition of `import <package>`;
   - navigation of type aliases, `import … as` and the remaining pattern
     forms;
   - document versions on code-action edits; a semantic-tokens refresh when
@@ -353,10 +379,15 @@ pull request.
   tests' temporary directories; `VCRUNTIME140.dll` and `+crt-static`;
   actions pinned to commits; a test of an update while `nova.exe` runs;
   CI's redundant `cargo package -p nova-std` step; a runbook line on `gh
-  release edit` when a publish fails for good.
+  release edit` when a publish fails for good; `publish-crates.yml`'s
+  comment that says one new crate every 15 minutes, where crates.io allows
+  one every 10.
 - **Housekeeping:** the workspace `Cargo.toml` declares `chumsky`,
   `rustyline` and `toml`, which no crate uses; the master spec's §0 and
-  sample manifest still say `novalang/nova`; `nova-test` is a stub.
+  sample manifest still say `novalang/nova`; `nova-test` is a stub;
+  `nova-spec/20-STDLIB.md` cites `Display`'s `fn fmt` at
+  `std/core/lib.nova:220`, the trait's line, where the `fn` is two lines
+  below (#103).
 
 Mapped elsewhere:
 - **`0.3.1`:** the extension as `vscode-nova` in both stores, the texts
@@ -373,8 +404,9 @@ Met while closing Phase 3; recorded, not decided:
 - The master spec's §1.1 says "No interpreter beyond REPL eval", and
   ADR 0001 says "Phase 3 uses AOT-then-dlopen" for its REPL; no REPL
   exists.
-  `nova-spec/14-CODEGEN.md` §9.1 says LLVM emits DWARF 4 through
-  `inkwell`, and neither backend emits debug information.
+- `nova-spec/14-CODEGEN.md` §9.1 says LLVM emits DWARF 4; neither backend
+  emits debug information. (Its note that there is no `inkwell` was
+  already there.)
 - `docs/phase-3-plan.md`'s status line still says "draft", as Phase 2's
   plan's did after its close.
 
