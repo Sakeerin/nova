@@ -872,6 +872,13 @@ uses `serde_json`, which `nova-cli`, `nova-index` and `nova-lsp` already
 used, so of the three dependencies the paragraph above names, only
 `chumsky` and `rustyline` are unused.
 
+**Amended 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase
+3 closed without `salsa`: the language server re-checks whole programs
+within its budgets (ADR 0029), and `docs/adr/0037-phase-3-boundary.md`
+closes ADR 0025's mapping. The workspace `Cargo.toml` also declares
+`toml = "0.8"`, which no crate uses since `nova-pm` dropped it, so the
+unused declarations are `chumsky`, `rustyline` and `toml`.
+
 ---
 
 ## 7. Definition of Done (per phase)

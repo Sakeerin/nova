@@ -254,7 +254,7 @@ You don't need a PhD, but these concepts appear throughout the codebase:
 | SSA form | `nova-mir` |
 | Register allocation | `nova-codegen-cranelift` / LLVM handles it |
 | Dataflow analysis | Future optimization passes |
-| DWARF debug info | Emitted by both Cranelift and LLVM backends |
+| DWARF debug info | Not emitted yet: the debugger is outside Phase 3 (ADR 0026) |
 | WebAssembly binary format | `nova-codegen-wasm` |
 | Structured concurrency | `nova-runtime` task model |
 
