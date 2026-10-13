@@ -4,7 +4,7 @@
 //! not, every dependency between workspace crates is an exact pin on the
 //! workspace's version, `publish-crates.sh` uploads them in dependency
 //! order, each tarball carries a README and both licence texts, and the
-//! VS Code extension has the same version.
+//! VS Code extension has the same version, and its lock the same name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
