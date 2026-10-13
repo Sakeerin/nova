@@ -1,6 +1,6 @@
 # `0.3.1`, the extension's rename: design
 
-> Status: **draft for review** (2026-10-13). The patch release that ADR
+> Status: **approved by the user** (2026-10-13). The patch release that ADR
 > 0037 maps out of Phase 3: the VS Code extension's `name` becomes
 > `vscode-nova`, and `0.3.1` publishes it to the Marketplace and Open VSX
 > (`docs/adr/0037-phase-3-boundary.md`, "The extension's stores"). On
