@@ -9,6 +9,25 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-13
+
+A patch release for the VS Code extension: it is in the Marketplace and
+Open VSX as `sakeerin.vscode-nova`, because the Marketplace refused the
+name `nova` that `0.3.0`'s extension had
+(`docs/adr/0037-phase-3-boundary.md`). `nova` itself is unchanged;
+`nova --version` reports 0.3.1.
+
+### Changed
+
+- **The VS Code extension's ID is `sakeerin.vscode-nova`.** Install it
+  with `code --install-extension sakeerin.vscode-nova`, or find **Nova**
+  by `sakeerin` in the Extensions view; its display name stays Nova. If
+  you installed `0.3.0`'s `.vsix`, uninstall it first
+  (`code --uninstall-extension sakeerin.nova`): VS Code counts the two
+  IDs as two extensions that claim the same settings and command, so
+  whichever starts second fails, and the one left running may be the old
+  one.
+
 ## [0.3.0] - 2026-10-12
 
 **Phase 3, "Tooling", is released.** This is the `v0.{phase}.0`

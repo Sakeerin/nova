@@ -8,7 +8,7 @@ resolver = "2"
 # and package-lock.json, and Cargo.lock (spec
 # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
 # §3.2); nova-cli's tests/release_manifests.rs holds them to it.
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
@@ -24,25 +24,25 @@ homepage = "https://github.com/Sakeerin/nova"
 # stable, so nova-cli is never built against another release's
 # nova-driver, even by a `cargo install` without `--locked`.
 # Dev-dependencies stay `{ path = ... }`, which `cargo package` strips.
-nova-ast = { path = "crates/nova-ast", version = "=0.3.0" }
-nova-cli = { path = "crates/nova-cli", version = "=0.3.0" }
-nova-codegen-cranelift = { path = "crates/nova-codegen-cranelift", version = "=0.3.0" }
-nova-codegen-llvm = { path = "crates/nova-codegen-llvm", version = "=0.3.0" }
-nova-diagnostics = { path = "crates/nova-diagnostics", version = "=0.3.0" }
-nova-doc = { path = "crates/nova-doc", version = "=0.3.0" }
-nova-driver = { path = "crates/nova-driver", version = "=0.3.0" }
-nova-fmt = { path = "crates/nova-fmt", version = "=0.3.0" }
-nova-hir = { path = "crates/nova-hir", version = "=0.3.0" }
-nova-index = { path = "crates/nova-index", version = "=0.3.0" }
-nova-lexer = { path = "crates/nova-lexer", version = "=0.3.0" }
-nova-lsp = { path = "crates/nova-lsp", version = "=0.3.0" }
-nova-mir = { path = "crates/nova-mir", version = "=0.3.0" }
-nova-parser = { path = "crates/nova-parser", version = "=0.3.0" }
-nova-pm = { path = "crates/nova-pm", version = "=0.3.0" }
-nova-resolver = { path = "crates/nova-resolver", version = "=0.3.0" }
-nova-runtime = { path = "crates/nova-runtime", version = "=0.3.0" }
-nova-std = { path = "std", version = "=0.3.0" }
-nova-typeck = { path = "crates/nova-typeck", version = "=0.3.0" }
+nova-ast = { path = "crates/nova-ast", version = "=0.3.1" }
+nova-cli = { path = "crates/nova-cli", version = "=0.3.1" }
+nova-codegen-cranelift = { path = "crates/nova-codegen-cranelift", version = "=0.3.1" }
+nova-codegen-llvm = { path = "crates/nova-codegen-llvm", version = "=0.3.1" }
+nova-diagnostics = { path = "crates/nova-diagnostics", version = "=0.3.1" }
+nova-doc = { path = "crates/nova-doc", version = "=0.3.1" }
+nova-driver = { path = "crates/nova-driver", version = "=0.3.1" }
+nova-fmt = { path = "crates/nova-fmt", version = "=0.3.1" }
+nova-hir = { path = "crates/nova-hir", version = "=0.3.1" }
+nova-index = { path = "crates/nova-index", version = "=0.3.1" }
+nova-lexer = { path = "crates/nova-lexer", version = "=0.3.1" }
+nova-lsp = { path = "crates/nova-lsp", version = "=0.3.1" }
+nova-mir = { path = "crates/nova-mir", version = "=0.3.1" }
+nova-parser = { path = "crates/nova-parser", version = "=0.3.1" }
+nova-pm = { path = "crates/nova-pm", version = "=0.3.1" }
+nova-resolver = { path = "crates/nova-resolver", version = "=0.3.1" }
+nova-runtime = { path = "crates/nova-runtime", version = "=0.3.1" }
+nova-std = { path = "std", version = "=0.3.1" }
+nova-typeck = { path = "crates/nova-typeck", version = "=0.3.1" }
 
 # Parsing & errors
 chumsky = "0.9"
