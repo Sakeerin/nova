@@ -99,10 +99,12 @@ commands that publish.
   first publish to the real index, `shapes` 0.1.0 from
   `examples/05-geometry` (3 files, 1,304 bytes), in Phase 3's gate
   (`docs/adr/0037-phase-3-boundary.md`). GitHub's `rate_limit` endpoint
-  read 15 core requests used before `nova publish` and 17 after, so
-  GitHub counted two requests for it, though a first publish sends about
-  six (the index file and the release looked up, the release made, the
-  tarball uploaded to uploads.github.com, the index line written). The
+  read 15 core requests used before `nova package` and `nova publish`
+  (`nova package` sends none) and 17 after, so GitHub counted two
+  requests for the publish, though a first publish sends six: it reads
+  the package's index file twice (to verify the package, then to append
+  to the file), looks the release up and makes it, uploads the tarball to
+  uploads.github.com, and writes the index line. The
   index repository's size, as the API reported it right after, was 0 KB:
   GitHub counts whole kilobytes and updates the figure lazily, so it says
   only that `config.json` and one line are under a kilobyte, or not yet

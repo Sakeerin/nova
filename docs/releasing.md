@@ -261,9 +261,9 @@ nothing published.
    **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** if
    the run starts without waiting, the environment has no required
    reviewer: cancel it, and finish "Before the first release". For
-   `v0.3.0` the first two runs started at once and stopped at the
-   workflow's first step, because the environment had neither its
-   reviewer nor the secret; the third stopped at the first upload,
+   `v0.3.0` the first two runs started at once, because the environment
+   had no reviewer yet, and stopped at the workflow's guard step, because
+   it had no secret either; the third stopped at the first upload,
    because the account's e-mail address was not verified. None uploaded
    anything, and the fourth published the 19.
 4. Wait. The package check takes about as long as CI's install job. The
@@ -416,14 +416,15 @@ needs:
 
 **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):**
 `v0.3.0`'s run was made on the maintainer's own Windows machine and
-account, kept apart in one directory, in one Git Bash window:
-`cargo install nova-cli --locked --root ~/nova-gate`, `~/nova-gate/bin`
-first on `PATH`, `NOVA_HOME` set to `~/nova-gate/nova-home` (checked from
-step 5 on, before `nova login`), and VS Code
-started with its own `--user-data-dir` and `--extensions-dir` under
-`~/nova-gate`, with the extension installed there from the release's
-`.vsix` (`code --install-extension nova-vscode-<version>.vsix`). A fresh
-machine or account remains the better choice. In step 5, type
+account, kept apart in one directory, in Git Bash, with step 4 in VS
+Code's terminal: `cargo install nova-cli --locked --root ~/nova-gate`,
+`~/nova-gate/bin` first on `PATH`, `NOVA_HOME` set to
+`~/nova-gate/nova-home` only from step 5 on (set it before step 1), and
+VS Code started with its own `--user-data-dir` and `--extensions-dir`
+under `~/nova-gate`, with the extension installed there from the
+release's `.vsix` (`code --install-extension nova-vscode-<version>.vsix`).
+Rust and `~/.cargo` were the account's own. A fresh machine or account
+remains the better choice. In step 5, type
 `read -rs TOKEN` alone, press Enter, and only then paste the token: on
 the same line, the token is shown, and `read` takes the next line as its
 input.

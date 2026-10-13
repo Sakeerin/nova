@@ -528,4 +528,5 @@ spec and ADR 0026 follow.
 is 3.0's spec.
 
 **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase 3
-is closed (`docs/adr/0037-phase-3-boundary.md`). The next step is Phase 4.
+is closed (`docs/adr/0037-phase-3-boundary.md`). Next come `0.3.1`, which
+renames the extension (ADR 0037), and Phase 4.
