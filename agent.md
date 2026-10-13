@@ -127,7 +127,7 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-pm` | Package manager | `nova-driver`, `toml` |
 | `nova-bundler` | Frontend bundler | `nova-codegen-wasm` |
 | `nova-doc` | Doc generator | `nova-ast` |
-| `nova-test` | Test runner | `nova-driver` |
+| `nova-test` | A stub; the test runner is `nova-cli`'s `cmd/test.rs` | — |
 
 **Amended 2026-10-08 (branch `phase-3-2-lsp-core`):** `nova-lsp` is built
 on `lsp-server` 0.7.8, pinned, and `lsp-types` 0.97, not `tower-lsp`, and it

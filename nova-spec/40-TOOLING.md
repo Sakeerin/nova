@@ -2,6 +2,11 @@
 
 > Phase: 3 (most), 0–1 (CLI skeleton)
 > Crates: `nova-cli`, `nova-fmt`, `nova-lsp`, `nova-pm`, `nova-doc`
+>
+> **Amended 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase 3
+> is complete as `v0.3.0`. `docs/adr/0037-phase-3-boundary.md` lists, row by
+> row, what this file describes that shipped, what did not, and where each
+> deferred item went.
 
 ---
 
@@ -238,6 +243,12 @@ reasons and the measured budget.
 exists. It is TypeScript with `vscode-languageclient` 10, a TextMate
 grammar, and a smoke test in CI, and it runs the installed `nova`. The
 Zed and Neovim extensions are outside Phase 3 (ADR 0026).
+
+**Amended 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** each
+release attaches the extension as `nova-vscode-<version>.vsix`. `v0.3.0`'s
+is in neither the VS Code Marketplace nor Open VSX: the Marketplace
+refused its name, `nova`, which another extension has. `0.3.1` renames it
+`vscode-nova` and publishes it to both (ADR 0037).
 
 ---
 
