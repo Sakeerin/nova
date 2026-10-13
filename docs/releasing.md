@@ -93,14 +93,14 @@ A pull request whose last commit is the release commit:
    `version` and the 19 `=` pins in `[workspace.dependencies]`), in
    `tools/vscode-nova/package.json`, and in
    `tools/vscode-nova/package-lock.json` (the two `version` lines under
-   `"name": "nova"`; the lock holds other packages' versions too). From a
-   checkout of `main`, on a new branch:
+   `"name": "vscode-nova"`; the lock holds other packages' versions too).
+   From a checkout of `main`, on a new branch:
 
    ```sh
    old=0.2.0   # the version main has now
    perl -pi -e "s/^version = \"\Q$old\E\"\$/version = \"$version\"/; s/version = \"=\Q$old\E\"/version = \"=$version\"/" Cargo.toml
    perl -pi -e "s/^  \"version\": \"\Q$old\E\",\$/  \"version\": \"$version\",/" tools/vscode-nova/package.json
-   perl -0pi -e "s/(\"name\": \"nova\",\n\s*\"version\": )\"\Q$old\E\"/\$1\"$version\"/g" tools/vscode-nova/package-lock.json
+   perl -0pi -e "s/(\"name\": \"vscode-nova\",\n\s*\"version\": )\"\Q$old\E\"/\$1\"$version\"/g" tools/vscode-nova/package-lock.json
    cargo update --workspace
    git diff --stat
    ```
