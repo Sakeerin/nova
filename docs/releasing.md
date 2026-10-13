@@ -49,6 +49,14 @@ maintainer's own, on their accounts.
   in the release commit, before anything is published. Publishing takes an
   Azure DevOps personal access token (step 4), made at
   <https://dev.azure.com> under User settings → Personal access tokens.
+
+  **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** the
+  manifest's `name` must be unique across the Marketplace too, not only
+  its display name. `v0.3.0`'s upload was refused because another
+  publisher has an extension named `nova`, and the search above had found
+  no display name `Nova`. Before the tag, also make sure no extension uses
+  the `name` in `package.json`; `0.3.1` renames the extension
+  `vscode-nova` (`docs/adr/0037-phase-3-boundary.md`).
 - **Open VSX.** Log in at <https://open-vsx.org> with GitHub, link an
   Eclipse Foundation account (made at <https://accounts.eclipse.org> with
   the same GitHub account) under Settings, and sign the Publisher
@@ -249,6 +257,15 @@ nothing published.
 
    The run waits for the environment's reviewer: approve it under "Review
    deployments".
+
+   **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** if
+   the run starts without waiting, the environment has no required
+   reviewer: cancel it, and finish "Before the first release". For
+   `v0.3.0` the first two runs started at once and stopped at the
+   workflow's first step, because the environment had neither its
+   reviewer nor the secret; the third stopped at the first upload,
+   because the account's e-mail address was not verified. None uploaded
+   anything, and the fourth published the 19.
 4. Wait. The package check takes about as long as CI's install job. The
    script then prints a line for each crate, `<crate>: not on crates.io`
    or `<crate>: on crates.io, owned by <logins>`, and stops at one that
@@ -280,6 +297,11 @@ nothing published.
 
 The extension is published by hand, from the release's own `.vsix`. No
 store token goes into GitHub.
+
+**Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):**
+`v0.3.0`'s extension was not published: the Marketplace refused its name
+(the Accounts note above). It reaches the stores in `0.3.1`, as
+`sakeerin.vscode-nova`.
 
 ```sh
 git clone --depth 1 --branch "v$version" https://github.com/Sakeerin/nova "nova-$version"
@@ -391,6 +413,20 @@ needs:
   "Desktop development with C++" on Windows;
 - VS Code;
 - `curl` and `tar`, which current Windows has too.
+
+**Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):**
+`v0.3.0`'s run was made on the maintainer's own Windows machine and
+account, kept apart in one directory, in one Git Bash window:
+`cargo install nova-cli --locked --root ~/nova-gate`, `~/nova-gate/bin`
+first on `PATH`, `NOVA_HOME` set to `~/nova-gate/nova-home` (checked from
+step 5 on, before `nova login`), and VS Code
+started with its own `--user-data-dir` and `--extensions-dir` under
+`~/nova-gate`, with the extension installed there from the release's
+`.vsix` (`code --install-extension nova-vscode-<version>.vsix`). A fresh
+machine or account remains the better choice. In step 5, type
+`read -rs TOKEN` alone, press Enter, and only then paste the token: on
+the same line, the token is shown, and `read` takes the next line as its
+input.
 
 The commands, in order, each with what it should show:
 

@@ -4,6 +4,11 @@
 > §3 (Phase 3) and `nova-spec/40-TOOLING.md`. The user's decisions of
 > 2026-10-06 are in §1. Each sub-phase below gets its own spec, plan and
 > review before it is built.
+>
+> **Amended 2026-10-13 (branch `claude/loving-archimedes-frtf5q`): closed.**
+> Phase 3 is complete as `v0.3.0`. `docs/adr/0037-phase-3-boundary.md`
+> records what each sub-phase below shipped, what it deferred, and where
+> each deferred item went.
 
 ## 1. Goal (from the spec)
 
@@ -454,6 +459,16 @@ a PR, and a merge on the user's word.
   by step on the user's word, runs the gate, writes the records and
   pushes the `v0.3.0` tag.
 
+  **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** 3.6b
+  is done. `v0.3.0` was tagged on 2026-10-13, and its GitHub release and
+  the 19 crates were published. The gate was met on them: the "Release
+  gate" workflow on three systems, and the user's own run on Windows, in
+  a separate install on their machine rather than a clean one, with the
+  extension from the release's `.vsix`. The Marketplace refused the
+  extension's name, `nova`, so the extension is in neither store until
+  `0.3.1` renames it. `docs/adr/0037-phase-3-boundary.md` has the
+  details.
+
 ## 5. Cross-cutting
 
 - **Testing:** every tool is tested end to end through the `nova` binary, as
@@ -511,3 +526,6 @@ spec and ADR 0026 follow.
 
 **Done 2026-10-06:** the spike's answer is under decision 1. The next step
 is 3.0's spec.
+
+**Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase 3
+is closed (`docs/adr/0037-phase-3-boundary.md`). The next step is Phase 4.

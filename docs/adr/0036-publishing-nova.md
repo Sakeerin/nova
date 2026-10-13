@@ -314,6 +314,32 @@ uninstalls it.
 - **What first runs for real at 3.6b:** the uploads, the crates.io
   install's nested runtime build, the release gate, and the store and
   token pages, which the runbook writes from their documentation.
+
+  **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`): what
+  `v0.3.0`'s release showed** (`docs/adr/0037-phase-3-boundary.md` has
+  the gate):
+  - **The GitHub release.** The `v0.3.0` tag's Release run published the
+    eight assets and `SHA256SUMS`; each asset, downloaded again, matched
+    its sum. The session that prepared the release could not push a tag
+    (GitHub answered 403), so the maintainer made and pushed it with the
+    runbook's commands.
+  - **The uploads.** The fourth "Publish to crates.io" run, 38346870861,
+    published the 19 crates: its package gate took 2 min 48 s, and the
+    uploads 2 h 25 min. The owner check found all 19 names free. The
+    three runs before it stopped before any upload, as the guards are
+    meant to: two at the workflow's first step, because the `crates-io`
+    environment had no `CARGO_REGISTRY_TOKEN` yet (and no required
+    reviewer, so they started at once), and one at the first upload,
+    because crates.io refuses a publish from an account without a
+    verified e-mail address.
+  - **The crates.io install** built its runtime and passed the gate on
+    Linux, macOS and Windows (ADR 0027's note of this date).
+  - **The store pages.** The VS Code Marketplace refused the extension:
+    a manifest `name` must be unique across the whole store, as well as
+    its display name, and `nova` is taken. The runbook checked only the
+    display name. So `v0.3.0`'s extension is in neither store, and the
+    gate installed it from the release's `.vsix`; `0.3.1` renames it
+    `vscode-nova` (ADR 0037).
 - ADR 0031's figures for GitHub's limits come from 3.6b's first publish to
   the real index, and are added there.
 - The texts that say how to install `nova` (the root README, the
