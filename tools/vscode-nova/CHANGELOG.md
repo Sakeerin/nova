@@ -6,9 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The extension's version is always the version of Nova it is released
 with.
 
+## [0.3.1] - 2026-10-13
+
+The first version in the Marketplace and Open VSX.
+
+### Changed
+
+- **The extension's ID is `sakeerin.vscode-nova`.** The Marketplace
+  refused the name `nova`, which another extension has. The display
+  name stays Nova, and nothing else changed. If you installed `0.3.0`
+  from its `.vsix`, uninstall it first
+  (`code --uninstall-extension sakeerin.nova`): VS Code counts the two
+  IDs as two extensions that claim the same settings and command, so
+  whichever starts second fails, and the one left running may be the old
+  one.
+
 ## [0.3.0] - 2026-10-12
 
-The first published version.
+Released with Nova 0.3.0 as the GitHub release's `.vsix` only, as
+`sakeerin.nova`: the Marketplace refused its name.
 
 ### Added
 

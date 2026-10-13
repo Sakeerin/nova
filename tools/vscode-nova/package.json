@@ -2,7 +2,7 @@
   "name": "vscode-nova",
   "displayName": "Nova",
   "description": "The Nova language: colouring, and diagnostics, completion, formatting, hover, go to definition, find references, rename, quick fixes, organize imports and semantic highlighting from nova lsp.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "sakeerin",
   "license": "MIT OR Apache-2.0",
   "repository": {
