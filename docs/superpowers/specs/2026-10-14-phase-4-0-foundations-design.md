@@ -1,7 +1,7 @@
 # Phase 4.0, "Foundations and the first WASM program": design
 
 - **Date:** 2026-10-14.
-- **Status:** awaiting the user's review.
+- **Status:** approved by the user on 2026-10-14.
 - **The user's decisions, 2026-10-14:**
   - the WASM runtime takes route (a), from the spike (`docs/phase-4-plan.md`
     §3, decision 1);
@@ -44,7 +44,7 @@ OS do not build yet.
 **The gate** (the plan's §4, as the user changed it on 2026-10-14):
 - `examples/01-hello-world`, built with `--target wasm`, prints under Node
   what its native build prints, on all three operating systems.
-- So does each `tests/runtime/` program §9.2 lists. The three listed
+- So does each `tests/runtime/` program §9.2 lists. The five listed
   panicking programs fail with the native build's message.
 - Hello world's `app.wasm` and `app.js` together are under 30 KB gzipped,
   checked by a test.
