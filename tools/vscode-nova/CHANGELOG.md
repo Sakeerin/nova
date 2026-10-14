@@ -6,9 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The extension's version is always the version of Nova it is released
 with.
 
-## [0.3.1] - 2026-10-13
+## [0.3.2] - 2026-10-14
 
 The first version in the Marketplace and Open VSX.
+
+### Changed
+
+- **The display name is Nova Language Tools.** The Marketplace refused
+  `Nova`, which other extensions hold as `nova` and `NOVA`. The ID stays
+  `sakeerin.vscode-nova`, and the README takes the new name as its
+  title; nothing else changed.
+
+## [0.3.1] - 2026-10-13
+
+Released with Nova 0.3.1 as the GitHub release's `.vsix` only: the
+Marketplace refused its display name, `Nova`.
 
 ### Changed
 
