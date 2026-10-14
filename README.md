@@ -46,7 +46,7 @@ Visual Studio Build Tools on Windows. `nova run` needs nothing else.
 `nova lsp` is a language server: it gives an editor diagnostics,
 completion, formatting, hover, go to definition, find references,
 rename, quick fixes, organize imports and semantic highlighting. For
-VS Code, install **Nova** by `sakeerin`, the extension in
+VS Code, install **Nova Language Tools** by `sakeerin`, the extension in
 `tools/vscode-nova/`, from the Marketplace or Open VSX
 (`code --install-extension sakeerin.vscode-nova`). Each GitHub release
 also attaches it as `nova-vscode-<version>.vsix`, which installs with

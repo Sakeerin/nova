@@ -449,10 +449,10 @@ The commands, in order, each with what it should show:
 
    `Hello, Nova!`.
 3. **Autocomplete.** Install the extension from the store: in VS Code's
-   Extensions view, search for Nova and install the one by `sakeerin`, or
-   `code --install-extension sakeerin.vscode-nova`. Open the folder
-   (`code .`), open `src/main.nova`, and replace it with this, cramped on
-   purpose for step 4:
+   Extensions view, search for Nova Language Tools and install the one by
+   `sakeerin`, or `code --install-extension sakeerin.vscode-nova`. Open
+   the folder (`code .`), open `src/main.nova`, and replace it with this,
+   cramped on purpose for step 4:
 
    ```nova
    record Point{x:Int,y:Int}

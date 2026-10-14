@@ -50,9 +50,10 @@ nova run
 
 - [The repository](https://github.com/Sakeerin/nova): the language's
   documentation, the changelog and the releases.
-- The VS Code extension is **Nova** by `sakeerin`, on the Marketplace and
-  Open VSX (`code --install-extension sakeerin.vscode-nova`), and each
-  release attaches it as `nova-vscode-<version>.vsix`.
+- The VS Code extension is **Nova Language Tools** by `sakeerin`, on the
+  Marketplace and Open VSX
+  (`code --install-extension sakeerin.vscode-nova`), and each release
+  attaches it as `nova-vscode-<version>.vsix`.
 
 The other `nova-*` crates on crates.io are `nova`'s own libraries. Their
 API is internal and changes with every release.
