@@ -322,7 +322,7 @@ The records name no user, machine or path.
 
 ## 10. `0.3.2`, the display name (added 2026-10-14)
 
-> Status: **draft for review** (2026-10-14).
+> Status: **approved by the user** (2026-10-14).
 >
 > On 2026-10-14 the Marketplace refused `0.3.1`'s `.vsix`: "This
 > extension display name is taken."
