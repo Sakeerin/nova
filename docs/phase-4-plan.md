@@ -3,8 +3,9 @@
 > Status: **approved** by the user (2026-10-14). Derived from
 > `nova-spec/00-MASTER-SPEC.md` §3 (Phase 4), `nova-spec/30-FRONTEND.md`,
 > `nova-spec/14-CODEGEN.md` §2.3 and §8, `nova-spec/13-RUNTIME.md` §8, and
-> `nova-spec/60-EXAMPLES.md` §6 and §7. The user's decisions of 2026-10-14 are in §1. Each sub-phase
-> below gets its own spec, plan and review before it is built.
+> `nova-spec/60-EXAMPLES.md` §6 and §7. The user's decisions of 2026-10-14
+> are in §1. Each sub-phase below gets its own spec, plan and review before
+> it is built.
 
 ## 1. Goal (from the spec)
 
