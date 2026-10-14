@@ -155,27 +155,38 @@ extension is in both stores, as **Nova Language Tools**
   - "Release gate" passed all six jobs on it (run 38505596370).
 
   The Marketplace accepted the `name` but refused the display name:
-  "This extension display name is taken." Two other extensions are called
-  `nova` and `NOVA`, and the Marketplace compares display names without
-  regard to case; the runbook's search for exactly `Nova` had missed
-  them. `0.3.1`'s extension reached neither store.
+  "This extension display name is taken." Two other extensions have the
+  display names `nova` and `NOVA`, and the Marketplace compares display
+  names without regard to case; the runbook's search for exactly `Nova`
+  had missed them. `0.3.1`'s extension reached neither store: the
+  Marketplace refused it, and Open VSX waited for `0.3.2`, by the user's
+  decision.
 - **`0.3.2`** changed the display name to `Nova Language Tools`, the
   user's decision (spec
   `docs/superpowers/specs/2026-10-13-release-0-3-1-design.md` §10).
-  First a query of the Marketplace's gallery API found the name free.
-  Then, on 2026-10-14:
+  First a query of the Marketplace's gallery API found the display name
+  free. Then, on 2026-10-14:
   - the tag `v0.3.2` and its release (run 38510244399);
   - the 19 crates (run 38511828598);
   - "Release gate", which passed all six jobs (run 38522461402).
 - **The stores.**
   - The maintainer uploaded the release's `nova-vscode-0.3.2.vsix` on
-    the Marketplace's manage page.
+    the Marketplace's manage page, which accepted it.
   - The maintainer published it to Open VSX with `ovsx`, creating the
     namespace `sakeerin`. Open VSX marks the namespace unverified until
     its owner claims it.
+- **The listings.**
+  - **The Marketplace's,** as VS Code shows it: Nova Language Tools by
+    `sakeerin`, `sakeerin.vscode-nova` 0.3.2, the README, the categories
+    Programming Languages and Formatters, and links to the repository,
+    the issues and the licence.
+  - **Open VSX's:** Nova Language Tools 0.3.2 by `sakeerin`, MIT OR
+    Apache-2.0, and the README, under the unverified-namespace warning.
+  - The CHANGELOG tabs were not opened.
 - **The check.**
   - The maintainer opened a separate VS Code, with `nova` 0.3.2
-    installed from crates.io.
+    installed from crates.io. `nova version` said `nova 0.3.2`,
+    `x86_64-pc-windows-msvc` and `runtime: embedded`.
   - There, the maintainer installed Nova Language Tools from the
     Marketplace (`sakeerin.vscode-nova@0.3.2`).
   - Completion after `p.` offered `x` and `y` as fields, `x` typed
@@ -430,8 +441,11 @@ pull request.
 Mapped elsewhere:
 - **`0.3.1`:** the extension as `vscode-nova` in both stores, the texts
   that name `sakeerin.nova`, and the runbook's check of the manifest
-  `name` (decided above). (Recorded 2026-10-14: the stores took it in
-  `0.3.2`, as Nova Language Tools; see the note above.)
+  `name` (decided above).
+
+  **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+  the stores took it in `0.3.2`, as Nova Language Tools (the note under
+  "The extension's stores").
 - **Phase 4:** `nova build --target wasm`, `nova bundle`, `nova dev`, and
   the LSP rows `40-TOOLING.md` §3.1 marks Phase 4.
 
@@ -465,6 +479,11 @@ Met while closing Phase 3; recorded, not decided:
 - What a `v0.3.0` user can rely on is the "shipped" rows, within the
   limits their records state. The editor extension is the release's
   `.vsix` until `0.3.1` puts it in the stores.
+
+  **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+  the stores took it in `0.3.2`, not `0.3.1`. The inventory's rows and
+  these lines stay as the boundary's record of `v0.3.0`; the note under
+  "The extension's stores" has what followed.
 - The backlog promises nothing. `0.3.1` carries the extension's rename.
 - Dated notes point here from:
   - the master spec's phase notes before Phase 0, and its §6 (`salsa`, and
