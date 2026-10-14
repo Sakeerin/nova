@@ -146,6 +146,44 @@ line and its transcript template. This branch already took the store
 install out of the root README, which gets it back in `0.3.1`, and the
 runbook already checks the manifest `name` (its note of this date).
 
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** the
+extension is in both stores, as **Nova Language Tools**
+(`sakeerin.vscode-nova`), from `0.3.2`.
+- **`0.3.1`** carried the new `name`:
+  - the tag `v0.3.1`, its GitHub release, and the 19 crates (run
+    38501806159);
+  - "Release gate" passed all six jobs on it (run 38505596370).
+
+  The Marketplace accepted the `name` but refused the display name:
+  "This extension display name is taken." Two other extensions are called
+  `nova` and `NOVA`, and the Marketplace compares display names without
+  regard to case; the runbook's search for exactly `Nova` had missed
+  them. `0.3.1`'s extension reached neither store.
+- **`0.3.2`** changed the display name to `Nova Language Tools`, the
+  user's decision (spec
+  `docs/superpowers/specs/2026-10-13-release-0-3-1-design.md` §10).
+  First a query of the Marketplace's gallery API found the name free.
+  Then, on 2026-10-14:
+  - the tag `v0.3.2` and its release (run 38510244399);
+  - the 19 crates (run 38511828598);
+  - "Release gate", which passed all six jobs (run 38522461402).
+- **The stores.**
+  - The maintainer uploaded the release's `nova-vscode-0.3.2.vsix` on
+    the Marketplace's manage page.
+  - The maintainer published it to Open VSX with `ovsx`, creating the
+    namespace `sakeerin`. Open VSX marks the namespace unverified until
+    its owner claims it.
+- **The check.**
+  - The maintainer opened a separate VS Code, with `nova` 0.3.2
+    installed from crates.io.
+  - There, the maintainer installed Nova Language Tools from the
+    Marketplace (`sakeerin.vscode-nova@0.3.2`).
+  - Completion after `p.` offered `x` and `y` as fields, `x` typed
+    `Int`.
+  - A first try showed only VS Code's word-based suggestions. That
+    window had no `nova` on its PATH, so the server did not start until
+    `nova.server.path` named it.
+
 #### The gate's "clean machine": decided, a separate install on the maintainer's machine stands
 
 The plan's 3.6 gate asks for a run "on a clean machine", and the runbook
@@ -392,7 +430,8 @@ pull request.
 Mapped elsewhere:
 - **`0.3.1`:** the extension as `vscode-nova` in both stores, the texts
   that name `sakeerin.nova`, and the runbook's check of the manifest
-  `name` (decided above).
+  `name` (decided above). (Recorded 2026-10-14: the stores took it in
+  `0.3.2`, as Nova Language Tools; see the note above.)
 - **Phase 4:** `nova build --target wasm`, `nova bundle`, `nova dev`, and
   the LSP rows `40-TOOLING.md` §3.1 marks Phase 4.
 

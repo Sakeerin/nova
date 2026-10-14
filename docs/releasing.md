@@ -57,6 +57,31 @@ maintainer's own, on their accounts.
   no display name `Nova`. Before the tag, also make sure no extension uses
   the `name` in `package.json`; `0.3.1` renames the extension
   `vscode-nova` (`docs/adr/0037-phase-3-boundary.md`).
+
+  **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+  the note above is wrong on one point.
+  - **`Nova` was taken.** Two extensions had the display names `nova`
+    and `NOVA`, and the Marketplace compares display names without
+    regard to case, so it refused `0.3.1`'s upload.
+  - **The new name.** The extension is now **Nova Language Tools**,
+    and the README says "install **Nova Language Tools**".
+  - **The check.** If the `name` or the `displayName` in `package.json`
+    ever changes, check it against the gallery API before the tag. The
+    query covers all the Marketplace's products, and the grep ignores
+    case:
+
+    ```sh
+    q() { curl -sS -X POST https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery \
+      -H 'Accept: application/json;api-version=7.2-preview.1' -H 'Content-Type: application/json' \
+      -d "{\"filters\":[{\"criteria\":[{\"filterType\":10,\"value\":\"$1\"}],\"pageSize\":1000}],\"flags\":0}" \
+      | grep -o '"extensionName":"[^"]*","displayName":"[^"]*"'; }
+    q nova | wc -l                                                     # well over 100: the query sees names
+    q "nova language tools" | grep -ic '"displayName":"nova language tools"'   # 1 now: ours
+    ```
+
+    A search for a hyphenated word, such as `vscode-nova`, returns
+    nothing. Search the words apart (`vscode nova`), and grep for the
+    `extensionName`.
 - **Open VSX.** Log in at <https://open-vsx.org> with GitHub, link an
   Eclipse Foundation account (made at <https://accounts.eclipse.org> with
   the same GitHub account) under Settings, and sign the Publisher
@@ -139,6 +164,13 @@ A pull request whose last commit is the release commit:
    did not change since the last release, add a section that says
    "Released with Nova 0.3.0; no change to the extension." The extension's
    version always moves with Nova's.
+
+   **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+   the extension's CHANGELOG has no `## [Unreleased]` heading.
+   - Each release adds its section above the last, as `0.3.1` and
+     `0.3.2` did.
+   - A section that says its version reached the stores is corrected if
+     it did not, as `[0.3.0]`'s and `[0.3.1]`'s were.
 4. Anything else the release's own spec puts in the release commit (for
    `v0.3.0`: the texts that say how to install `nova`, spec §7).
 
@@ -182,6 +214,10 @@ decision 6).
 ```sh
 git push origin "v$version"
 ```
+
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`v0.3.2` was pushed before CI on `main` had finished. CI passed, on the
+tree that CI had passed on the pull request, but wait for it.
 
 The tag starts `release.yml`, which builds the four targets (Linux on
 Ubuntu 22.04, failing if its `nova` needs a glibc newer than 2.35),
@@ -276,6 +312,11 @@ nothing published.
    which crates.io allows 30 at a time and then one a minute, so its
    upload takes minutes. The job's limit is 345 minutes. It ends with one
    line per crate, published or skipped.
+
+   **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+   `0.3.1` and `0.3.2` each added 19 versions within the burst, in under
+   two minutes. Once the crates exist, a token with `publish-update`
+   alone suffices.
 5. Check what crates.io serves:
 
    ```sh
@@ -302,6 +343,21 @@ store token goes into GitHub.
 `v0.3.0`'s extension was not published: the Marketplace refused its name
 (the Accounts note above). It reaches the stores in `0.3.1`, as
 `sakeerin.vscode-nova`.
+
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`0.3.1`'s extension was refused too, for its display name. `0.3.2`'s, as
+Nova Language Tools, is in both stores.
+- **The Marketplace.** The maintainer downloaded the `.vsix` and checked
+  its sum, as below. Then the maintainer uploaded it on the Marketplace's
+  manage page (<https://marketplace.visualstudio.com/manage> → the
+  publisher → **New extension** → **Visual Studio Code**), in place of
+  item 1's `vsce publish`. The upload needs no Azure DevOps token.
+- **Open VSX.** `ovsx publish` followed, after
+  `npx ovsx create-namespace sakeerin` (once).
+- **The namespace.** Open VSX marks a namespace unverified until its
+  owner claims it, through an issue at
+  <https://github.com/EclipseFdn/open-vsx.org/issues>. The extension
+  installs either way.
 
 ```sh
 git clone --depth 1 --branch "v$version" https://github.com/Sakeerin/nova "nova-$version"
@@ -428,6 +484,15 @@ remains the better choice. In step 5, type
 `read -rs TOKEN` alone, press Enter, and only then paste the token: on
 the same line, the token is shown, and `read` takes the next line as its
 input.
+
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`0.3.2`'s store install ran in a separate VS Code under `~/nova-032`.
+- **The extension needs `nova.server.path`** when the window's PATH has
+  no `nova`.
+- **Without it,** completion offers only VS Code's word-based
+  suggestions, each marked `abc`, keywords included.
+- **With it,** and after **Nova: Restart Language Server**, completion
+  after `p.` offered the fields `x` and `y`.
 
 The commands, in order, each with what it should show:
 

@@ -250,6 +250,11 @@ is in neither the VS Code Marketplace nor Open VSX: the Marketplace
 refused its name, `nova`, which another extension has. `0.3.1` renames it
 `vscode-nova` and publishes it to both (ADR 0037).
 
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`0.3.1` renamed it, but the Marketplace refused its display name too.
+Since `0.3.2` the extension is in both stores, as **Nova Language
+Tools** (`sakeerin.vscode-nova`; ADR 0037).
+
 ---
 
 ## 4. Package Manager (`nova-pm`)
