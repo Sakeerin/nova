@@ -344,15 +344,17 @@ The records name no user, machine or path.
   - the tag `v0.3.1` (on `230f4ba`, the release commit);
   - the GitHub release, with eight assets and `SHA256SUMS`;
   - the 19 crates at `0.3.1` (run 38501806159).
-- **"Release gate" on `0.3.1`:** run 38505596370; the records PR states
-  its result.
+- **"Release gate" on `0.3.1`:** run 38505596370 passed all six jobs,
+  from crates.io and with the install scripts, on Linux, macOS and
+  Windows.
 - **Neither store has the extension.** The name check passed; only the
   display name was refused.
 
 ### 10.2 The release pull request
 
-The branch restarts from `main` (`230f4ba`). It has three commits, as in
-§3, and the release commit stays last.
+The branch restarts from `main` (`230f4ba`). After the spec's and the
+plan's commits it has three, as in §3, and the release commit stays
+last.
 
 1. **The display name, test-first.**
    - `vscode_extension.rs` asserts `displayName` = `Nova Language Tools`,
@@ -386,8 +388,12 @@ The branch restarts from `main` (`230f4ba`). It has three commits, as in
      >   Tools.** Its ID stays `sakeerin.vscode-nova`: install it with
      >   `code --install-extension sakeerin.vscode-nova`, or find **Nova
      >   Language Tools** by `sakeerin` in the Extensions view. If you
-     >   installed `0.3.0`'s `.vsix`, uninstall `sakeerin.nova` first, as
-     >   `[0.3.1]` says.
+     >   installed `0.3.0`'s `.vsix`, uninstall it first:
+     >   `code --uninstall-extension sakeerin.nova`.
+     >
+     > (Corrected 2026-10-14, from the release PR's review: the item first
+     > ended "uninstall `sakeerin.nova` first, as `[0.3.1]` says", which
+     > points nowhere in the GitHub release notes this section becomes.)
 
    - **the extension's CHANGELOG:**
      - a `[0.3.2]` section: "The first version in the Marketplace and
@@ -424,12 +430,19 @@ Spec §4 and §5 apply, with `0.3.2`. The differences:
 
 - **The tag message:**
   `-m "Nova v0.3.2" -m "The VS Code extension as Nova Language Tools (sakeerin.vscode-nova), in the Marketplace and Open VSX."`
-- **The extension.** The user uploads `nova-vscode-0.3.2.vsix` on the
-  Marketplace's manage page, then publishes it to Open VSX with `ovsx`.
+- **The extension.** The user first downloads `nova-vscode-0.3.2.vsix`
+  and `SHA256SUMS` from the release and checks the sum, as the runbook's
+  step 4 does. Then the user uploads the `.vsix` on the Marketplace's
+  manage page, in place of the runbook's `vsce publish`, and publishes it
+  to Open VSX with `ovsx`.
 - **The checks:**
   - "Release gate" runs on `0.3.2`;
-  - the user's store install (§5) uses `nova` 0.3.2, and expects
-    `sakeerin.vscode-nova@0.3.2`.
+  - the user's store install follows §5, with three changes:
+    - a new directory, `~/nova-032`;
+    - `nova version` says `nova 0.3.2`;
+    - in the Extensions view, the user installs **Nova Language Tools**
+      by `sakeerin`, and `--list-extensions` shows
+      `sakeerin.vscode-nova@0.3.2`.
 
 ### 10.4 The records pull request
 
@@ -437,11 +450,17 @@ Spec §4 and §5 apply, with `0.3.2`. The differences:
 - `0.3.1`'s refusal, and its "Release gate" run;
 - `0.3.2` in both stores.
 
-The runbook also gets:
-- a dated note that the display-name check queries the gallery API, with
-  the command of §10.3;
-- the review's nit on step 1 item 3: the extension's CHANGELOG has no
-  `[Unreleased]` heading.
+The runbook also gets a dated note in its Accounts section. The note:
+- says the display-name check queries the gallery API, with the command
+  of §10.3, and compares names ignoring case, across all the
+  Marketplace's products, not "exactly";
+- corrects the note of 2026-10-13, which says the search found no
+  display name `Nova`: two extensions had `nova` and `NOVA`;
+- points to the README's "install **Nova Language Tools**", not
+  "install **Nova**".
+
+It also takes the review's nit on step 1 item 3: the extension's
+CHANGELOG has no `[Unreleased]` heading.
 
 ### 10.5 If something fails
 
