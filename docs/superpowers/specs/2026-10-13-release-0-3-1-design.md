@@ -319,3 +319,153 @@ The records name no user, machine or path.
 8. **The tag is the user's to push** (this session's credential cannot).
    Each workflow is started by the agent on the user's word, as in 3.6b
    decision 3.
+
+## 10. `0.3.2`, the display name (added 2026-10-14)
+
+> Status: **draft for review** (2026-10-14).
+>
+> On 2026-10-14 the Marketplace refused `0.3.1`'s `.vsix`: "This
+> extension display name is taken."
+> - Two extensions named `nova` have the display names `nova` and `NOVA`,
+>   and the Marketplace compares display names without regard to case.
+> - The manifest `name`, `vscode-nova`, passed this time.
+>
+> §7 says that the fix is `0.3.2`. On 2026-10-14 the user decided (§10.6,
+> decisions 9 to 12):
+> - the display name becomes `Nova Language Tools`;
+> - Open VSX waits for `0.3.2`, so both stores start at the same version
+>   and name;
+> - "Release gate" runs on `0.3.1` at once;
+> - `0.3.2` is planned here, in this spec and its plan.
+
+### 10.1 Where `0.3.1` stands
+
+- **Released:**
+  - the tag `v0.3.1` (on `230f4ba`, the release commit);
+  - the GitHub release, with eight assets and `SHA256SUMS`;
+  - the 19 crates at `0.3.1` (run 38501806159).
+- **"Release gate" on `0.3.1`:** run 38505596370; the records PR states
+  its result.
+- **Neither store has the extension.** The name check passed; only the
+  display name was refused.
+
+### 10.2 The release pull request
+
+The branch restarts from `main` (`230f4ba`). It has three commits, as in
+§3, and the release commit stays last.
+
+1. **The display name, test-first.**
+   - `vscode_extension.rs` asserts `displayName` = `Nova Language Tools`,
+     and fails first.
+   - `package.json`'s `displayName` becomes `Nova Language Tools`. The
+     lock carries no display name.
+   - The names of the language itself stay `Nova`: the settings' title,
+     the language alias, and the language client's name.
+2. **The texts:**
+   - **the root README:** install **Nova Language Tools** by `sakeerin`;
+   - **`nova-cli`'s README**, which crates.io shows for `0.3.2`: the
+     extension is **Nova Language Tools** by `sakeerin`;
+   - **the extension's README**, which the stores show: its title, "Nova
+     for VS Code", becomes "Nova Language Tools";
+   - **the runbook's 6.2 step 3:** search for Nova Language Tools.
+3. **The release commit:**
+   - **the version is `0.3.2`,** by the runbook's commands with
+     `old=0.3.1`;
+   - **`CHANGELOG.md`'s `[0.3.2]`:**
+
+     > A patch release for the VS Code extension: its display name is
+     > **Nova Language Tools**. The Marketplace refused `0.3.1`'s display
+     > name, `Nova`: two other extensions are called `nova` and `NOVA`,
+     > and it compares display names without regard to case. `0.3.1`'s
+     > extension reached neither store. `nova` itself is unchanged;
+     > `nova --version` reports 0.3.2.
+     >
+     > ### Changed
+     >
+     > - **The VS Code extension's display name is Nova Language
+     >   Tools.** Its ID stays `sakeerin.vscode-nova`: install it with
+     >   `code --install-extension sakeerin.vscode-nova`, or find **Nova
+     >   Language Tools** by `sakeerin` in the Extensions view. If you
+     >   installed `0.3.0`'s `.vsix`, uninstall `sakeerin.nova` first, as
+     >   `[0.3.1]` says.
+
+   - **the extension's CHANGELOG:**
+     - a `[0.3.2]` section: "The first version in the Marketplace and
+       Open VSX", with the change;
+     - `[0.3.1]`'s line "The first version in the Marketplace and Open
+       VSX." becomes "Released with Nova 0.3.1 as the GitHub release's
+       `.vsix` only: the Marketplace refused its display name, `Nova`."
+       (decision 14).
+
+As in §3, the PR then gets:
+- the full checks and the package gate;
+- one fresh read-only review, and one fix pass;
+- CI on three systems.
+
+### 10.3 Publishing and the check
+
+Spec §4 and §5 apply, with `0.3.2`. The differences:
+
+- **Step 0.** Before the release commit, the user checks that no
+  Marketplace extension has the display name `Nova Language Tools`,
+  ignoring case. The query leaves out the VS Code filter, in case display
+  names are unique across all the Marketplace's products (decision 16):
+
+  ```sh
+  q4() { curl -sS -X POST https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery \
+    -H 'Accept: application/json;api-version=7.2-preview.1' -H 'Content-Type: application/json' \
+    -d "{\"filters\":[{\"criteria\":[{\"filterType\":10,\"value\":\"$1\"}],\"pageSize\":1000}],\"flags\":0}" \
+    | grep -o '"extensionName":"[^"]*","displayName":"[^"]*"'; }
+  q4 nova | wc -l                                                    # well over 100
+  q4 nova | grep -ic '"displayName":"nova"'                          # 2 or more: the refused name
+  q4 nova | grep -ic '"displayName":"nova language tools"'           # must be 0
+  q4 "nova language tools" | grep -ic '"displayName":"nova language tools"'   # must be 0
+  ```
+
+- **The tag message:**
+  `-m "Nova v0.3.2" -m "The VS Code extension as Nova Language Tools (sakeerin.vscode-nova), in the Marketplace and Open VSX."`
+- **The extension.** The user uploads `nova-vscode-0.3.2.vsix` on the
+  Marketplace's manage page, then publishes it to Open VSX with `ovsx`.
+- **The checks:**
+  - "Release gate" runs on `0.3.2`;
+  - the user's store install (§5) uses `nova` 0.3.2, and expects
+    `sakeerin.vscode-nova@0.3.2`.
+
+### 10.4 The records pull request
+
+§6 applies, and the notes cover both versions:
+- `0.3.1`'s refusal, and its "Release gate" run;
+- `0.3.2` in both stores.
+
+The runbook also gets:
+- a dated note that the display-name check queries the gallery API, with
+  the command of §10.3;
+- the review's nit on step 1 item 3: the extension's CHANGELOG has no
+  `[Unreleased]` heading.
+
+### 10.5 If something fails
+
+§7 applies. If the Marketplace refuses `Nova Language Tools` too, stop
+and ask the user: another name is `0.3.3`.
+
+### 10.6 Decisions
+
+**The user's (2026-10-14):**
+
+9. The display name is `Nova Language Tools`.
+10. Open VSX waits for `0.3.2`.
+11. "Release gate" runs on `0.3.1` at once.
+12. `0.3.2` is planned in this spec and its plan.
+
+**Made here, for review with this section:**
+
+13. **The extension's README takes the new name as its title.** The
+    language's own names (the settings' title, the alias, the client's
+    name) stay `Nova`.
+14. **The extension's CHANGELOG corrects `[0.3.1]`'s line,** as decision
+    5 did for `[0.3.0]`. The root CHANGELOG's `[0.3.1]` stays as
+    released, and `[0.3.2]` says what happened.
+15. **The test pins the new display name,** as decision 7 pinned the
+    old.
+16. **The display-name check leaves out the VS Code filter,** since the
+    Marketplace's uniqueness may span all its products.
