@@ -1,4 +1,4 @@
-# Nova for VS Code
+# Nova Language Tools
 
 Colouring for `.nova` files, and from `nova lsp`: diagnostics, completion,
 formatting, hover, go to definition, find references, rename, quick
