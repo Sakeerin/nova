@@ -340,6 +340,11 @@ uninstalls it.
     display name. So `v0.3.0`'s extension is in neither store, and the
     gate installed it from the release's `.vsix`; `0.3.1` renames it
     `vscode-nova` (ADR 0037).
+
+    **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+    `0.3.1` renamed it, and the Marketplace then refused its display
+    name, `Nova`. `0.3.2` is in both stores, as Nova Language Tools (ADR
+    0037's note of this date).
 - ADR 0031's figures for GitHub's limits come from 3.6b's first publish to
   the real index, and are added there.
 - The texts that say how to install `nova` (the root README, the

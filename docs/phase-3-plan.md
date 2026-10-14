@@ -469,6 +469,11 @@ a PR, and a merge on the user's word.
   `0.3.1` renames it. `docs/adr/0037-phase-3-boundary.md` has the
   details.
 
+  **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+  the Marketplace refused `0.3.1`'s display name as well. Since `0.3.2`
+  the extension is in both stores, as Nova Language Tools
+  (`sakeerin.vscode-nova`; ADR 0037).
+
 ## 5. Cross-cutting
 
 - **Testing:** every tool is tested end to end through the `nova` binary, as
@@ -530,3 +535,7 @@ is 3.0's spec.
 **Recorded 2026-10-13 (branch `claude/loving-archimedes-frtf5q`):** Phase 3
 is closed (`docs/adr/0037-phase-3-boundary.md`). Next come `0.3.1`, which
 renames the extension (ADR 0037), and Phase 4.
+
+**Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`0.3.1` and `0.3.2` are released, and the extension is in both stores.
+Next comes Phase 4.
