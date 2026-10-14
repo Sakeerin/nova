@@ -1,9 +1,9 @@
 # Phase 4 Plan — Frontend / WASM
 
-> Status: **draft** (2026-10-14). Derived from `nova-spec/00-MASTER-SPEC.md`
-> §3 (Phase 4), `nova-spec/30-FRONTEND.md`, `nova-spec/14-CODEGEN.md` §2.3
-> and §8, `nova-spec/13-RUNTIME.md` §8, and `nova-spec/60-EXAMPLES.md` §6
-> and §7. The user's decisions of 2026-10-14 are in §1. Each sub-phase
+> Status: **approved** by the user (2026-10-14). Derived from
+> `nova-spec/00-MASTER-SPEC.md` §3 (Phase 4), `nova-spec/30-FRONTEND.md`,
+> `nova-spec/14-CODEGEN.md` §2.3 and §8, `nova-spec/13-RUNTIME.md` §8, and
+> `nova-spec/60-EXAMPLES.md` §6 and §7. The user's decisions of 2026-10-14 are in §1. Each sub-phase
 > below gets its own spec, plan and review before it is built.
 
 ## 1. Goal (from the spec)
@@ -210,6 +210,38 @@ departs from the master spec or from `30-FRONTEND.md`.
    - what a user's machine and CI need.
 
    The user picks the route from its results, and 4.0's spec builds it.
+
+   **Spike result, 2026-10-14: route (a), by the user.** The spike ran in
+   scratch space, and nothing from it is in the repository.
+   - **The program:** a string literal, an `Int` interpolated through
+     `fib(20)`, and `Float` arithmetic, including `1.0 / 3.0`, `1.0e21`
+     and `1.0e-7`.
+   - **The pipeline:** `nova` 0.3.2's front end made the MIR. A small
+     backend lowered it with `wasm-encoder` 0.243.0, and `wasmparser`
+     0.243.0 validated the module. Both routes ran under Node 22 and
+     printed what `nova run` prints.
+   - **The sizes, gzipped:** (a) 1,847 bytes for `app.wasm` and `app.js`;
+     (b) 9,931 bytes, of which the runtime's module was 8,782.
+   - **(b)'s runtime ships every function, in every app.**
+     - Without `Float` formatting it was 749 bytes; `core::fmt`'s
+       formatting is about 8 KB.
+     - `str::parse::<f64>` adds 14.6 KB, and `char::to_uppercase` 1.5 KB.
+     - A whole runtime would leave little of hello world's 30 KB.
+   - **(b)'s module was byte-identical** when built in two directories by
+     one toolchain. Rust 1.78 built a different one, 24,917 bytes against
+     18,707, so a committed binary would need a pinned toolchain.
+   - **JS's formatting of a `Float` differs from Rust's in exact ties.**
+     261 of 2,005,144 doubles differed. For example, Rust prints
+     1658206780088562.25 ending in `.3`, and JS in `.2`, because
+     ECMAScript picks the even digit.
+     - Route (a) must detect ties.
+     - Its runtime functions are held to the native runtime's by
+       differential tests like this one.
+
+   So 4.0 builds route (a). Its spec decides:
+   - whether the runtime is written as WASM instructions in the backend,
+     or in Nova with memory builtins;
+   - which functions JS provides.
 2. **The backend.**
    - MIR is lowered straight to WASM with `wasm-encoder`, pinned to the
      last version that builds on Rust 1.78. `wasmparser` of the same
@@ -559,3 +591,6 @@ The spike for decision 1, in scratch space with nothing pushed:
 
 The user picks the route from its results. Then 4.0's spec and ADR 0038
 follow.
+
+**Done 2026-10-14:** the user picked route (a); the spike's results are
+under decision 1. The next step is 4.0's spec.
