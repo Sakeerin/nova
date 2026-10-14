@@ -9,6 +9,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-14
+
+A patch release for the VS Code extension: its display name is **Nova
+Language Tools**. The Marketplace refused `0.3.1`'s display name, `Nova`:
+two other extensions are called `nova` and `NOVA`, and it compares
+display names without regard to case. `0.3.1`'s extension reached neither
+store. `nova` itself is unchanged; `nova --version` reports 0.3.2.
+
+### Changed
+
+- **The VS Code extension's display name is Nova Language Tools.** Its ID
+  stays `sakeerin.vscode-nova`: install it with
+  `code --install-extension sakeerin.vscode-nova`, or find **Nova
+  Language Tools** by `sakeerin` in the Extensions view. If you installed
+  `0.3.0`'s `.vsix`, uninstall it first:
+  `code --uninstall-extension sakeerin.nova`.
+
 ## [0.3.1] - 2026-10-13
 
 A patch release for the VS Code extension: it is in the Marketplace and
