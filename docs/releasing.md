@@ -59,29 +59,31 @@ maintainer's own, on their accounts.
   `vscode-nova` (`docs/adr/0037-phase-3-boundary.md`).
 
   **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
-  the note above is wrong on one point.
-  - **`Nova` was taken.** Two extensions had the display names `nova`
+  the search above, for exactly `Nova`, missed two extensions.
+  - **`Nova` was taken.** Two extensions have the display names `nova`
     and `NOVA`, and the Marketplace compares display names without
-    regard to case, so it refused `0.3.1`'s upload.
+    regard to case, so it refused `0.3.1`'s upload. Compare names
+    ignoring case, across all the Marketplace's products, not
+    "exactly".
   - **The new name.** The extension is now **Nova Language Tools**,
     and the README says "install **Nova Language Tools**".
   - **The check.** If the `name` or the `displayName` in `package.json`
-    ever changes, check it against the gallery API before the tag. The
-    query covers all the Marketplace's products, and the grep ignores
-    case:
+    ever changes, check it against the gallery API before the release
+    commit. The query covers all the Marketplace's products, and the
+    grep ignores case:
 
     ```sh
     q() { curl -sS -X POST https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery \
       -H 'Accept: application/json;api-version=7.2-preview.1' -H 'Content-Type: application/json' \
       -d "{\"filters\":[{\"criteria\":[{\"filterType\":10,\"value\":\"$1\"}],\"pageSize\":1000}],\"flags\":0}" \
       | grep -o '"extensionName":"[^"]*","displayName":"[^"]*"'; }
-    q nova | wc -l                                                     # well over 100: the query sees names
-    q "nova language tools" | grep -ic '"displayName":"nova language tools"'   # 1 now: ours
+    q nova | wc -l    # well over 100: the query sees names
+    q "nova language tools" | grep -ic '"displayName":"nova language tools"'    # 0 for a new name (1 now: ours)
     ```
 
     A search for a hyphenated word, such as `vscode-nova`, returns
-    nothing. Search the words apart (`vscode nova`), and grep for the
-    `extensionName`.
+    nothing at all, as `0.3.1`'s first check did. Search the words apart
+    (`vscode nova`), and grep for the `extensionName`.
 - **Open VSX.** Log in at <https://open-vsx.org> with GitHub, link an
   Eclipse Foundation account (made at <https://accounts.eclipse.org> with
   the same GitHub account) under Settings, and sign the Publisher
@@ -316,7 +318,7 @@ nothing published.
    **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
    `0.3.1` and `0.3.2` each added 19 versions within the burst, in under
    two minutes. Once the crates exist, a token with `publish-update`
-   alone suffices.
+   alone would suffice.
 5. Check what crates.io serves:
 
    ```sh
@@ -345,13 +347,15 @@ store token goes into GitHub.
 `sakeerin.vscode-nova`.
 
 **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
-`0.3.1`'s extension was refused too, for its display name. `0.3.2`'s, as
-Nova Language Tools, is in both stores.
-- **The Marketplace.** The maintainer downloaded the `.vsix` and checked
-  its sum, as below. Then the maintainer uploaded it on the Marketplace's
-  manage page (<https://marketplace.visualstudio.com/manage> → the
-  publisher → **New extension** → **Visual Studio Code**), in place of
-  item 1's `vsce publish`. The upload needs no Azure DevOps token.
+the Marketplace refused `0.3.1`'s extension too, for its display name,
+and Open VSX waited for `0.3.2`. `0.3.2`'s, as Nova Language Tools, is in
+both stores.
+- **The Marketplace.** The maintainer uploaded the release's `.vsix` on
+  the Marketplace's manage page
+  (<https://marketplace.visualstudio.com/manage> → the publisher →
+  **New extension** → **Visual Studio Code**), in place of item 1's
+  `vsce publish`. The upload needs no Azure DevOps token. Download the
+  `.vsix` and check its sum first, as below.
 - **Open VSX.** `ovsx publish` followed, after
   `npx ovsx create-namespace sakeerin` (once).
 - **The namespace.** Open VSX marks a namespace unverified until its
@@ -486,7 +490,8 @@ the same line, the token is shown, and `read` takes the next line as its
 input.
 
 **Recorded 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
-`0.3.2`'s store install ran in a separate VS Code under `~/nova-032`.
+`0.3.2`'s store install ran in a separate VS Code, with its own user
+data and extensions directories.
 - **The extension needs `nova.server.path`** when the window's PATH has
   no `nova`.
 - **Without it,** completion offers only VS Code's word-based
