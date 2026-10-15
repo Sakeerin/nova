@@ -19,6 +19,9 @@ mod lower;
 mod mono;
 
 pub use mono::lower_module;
+/// The operators of [`Stmt::Bin`], re-exported so a backend needs no
+/// dependency on `nova-hir` to name them.
+pub use nova_hir::BinOp;
 
 /// The async ABI this compiler generates against: the state object's slot
 /// layout, the future value's slot layout, and the poll statuses.
@@ -846,6 +849,123 @@ mod rt_func_tests {
 /// arithmetic, so any longer array would wrap the size — see `ArrayAlloc`. This
 /// is the exact largest `len` for which `8*len + 8` still fits in an `i64`.
 pub const MAX_ARRAY_LEN: i64 = (i64::MAX - 8) / 8;
+
+/// What an [`RtFunc`] is on the WASM target (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmRuntime {
+    /// A function of `std/rt`, by its name there: MIR calls it directly
+    /// (`lower_module_with`).
+    Nova(&'static str),
+    /// An import from the shim's `env`, by its field name.
+    Host(&'static str),
+    /// Nothing on WASM: a program that needs it is E0091.
+    Unavailable,
+}
+
+impl RtFunc {
+    /// This runtime function on the WASM target. Exhaustive, so a new
+    /// runtime function has to decide what it is there.
+    pub fn on_wasm(self) -> WasmRuntime {
+        match self {
+            RtFunc::Println => WasmRuntime::Host("println"),
+            RtFunc::Print => WasmRuntime::Host("print"),
+            RtFunc::EPrint => WasmRuntime::Host("eprint"),
+            RtFunc::EPrintln => WasmRuntime::Host("eprintln"),
+            RtFunc::StrConcat => WasmRuntime::Nova("rt_str_concat"),
+            RtFunc::StrConcatN => WasmRuntime::Nova("rt_str_concat_n"),
+            RtFunc::IntToStr => WasmRuntime::Nova("rt_int_to_str"),
+            RtFunc::FloatToStr => WasmRuntime::Host("float_to_str"),
+            RtFunc::FloatFixed => WasmRuntime::Host("float_fixed"),
+            RtFunc::StrToFloat => WasmRuntime::Host("str_to_float"),
+            RtFunc::BoolToStr => WasmRuntime::Nova("rt_bool_to_str"),
+            RtFunc::CharToStr => WasmRuntime::Nova("rt_char_to_str"),
+            RtFunc::StrEq => WasmRuntime::Nova("rt_str_eq"),
+            RtFunc::StrCmp => WasmRuntime::Nova("rt_str_cmp"),
+            RtFunc::StrHash => WasmRuntime::Nova("rt_str_hash"),
+            RtFunc::StrLenChars => WasmRuntime::Nova("rt_str_len_chars"),
+            RtFunc::StrChars => WasmRuntime::Nova("rt_str_chars"),
+            RtFunc::StrFromChars => WasmRuntime::Nova("rt_str_from_chars"),
+            RtFunc::StrJoin => WasmRuntime::Nova("rt_str_join"),
+            RtFunc::StrIndexOf => WasmRuntime::Nova("rt_str_index_of"),
+            RtFunc::JsonQuote => WasmRuntime::Nova("rt_json_quote"),
+            RtFunc::StrToUpper => WasmRuntime::Host("str_to_upper"),
+            RtFunc::StrToLower => WasmRuntime::Host("str_to_lower"),
+            RtFunc::Alloc => WasmRuntime::Nova("rt_alloc"),
+            RtFunc::CheckBounds => WasmRuntime::Nova("rt_check_bounds"),
+            RtFunc::Panic => WasmRuntime::Host("panic"),
+            RtFunc::BytesLen => WasmRuntime::Nova("rt_bytes_len"),
+            RtFunc::BytesFromString => WasmRuntime::Nova("rt_bytes_from_string"),
+            RtFunc::BytesIsUtf8 => WasmRuntime::Nova("rt_bytes_is_utf8"),
+            RtFunc::BytesToStringUnchecked => WasmRuntime::Nova("rt_bytes_to_string_unchecked"),
+            RtFunc::BytesAt => WasmRuntime::Nova("rt_bytes_at"),
+            RtFunc::BytesSlice => WasmRuntime::Nova("rt_bytes_slice"),
+            RtFunc::BytesConcat => WasmRuntime::Nova("rt_bytes_concat"),
+            RtFunc::BytesToInts => WasmRuntime::Nova("rt_bytes_to_ints"),
+            RtFunc::BytesFromInts => WasmRuntime::Nova("rt_bytes_from_ints"),
+            RtFunc::BytesEq => WasmRuntime::Nova("rt_bytes_eq"),
+            RtFunc::IntHashSeed => WasmRuntime::Host("int_hash_seed"),
+            RtFunc::TestSelector
+            | RtFunc::TaskSpawn
+            | RtFunc::TaskBlockOn
+            | RtFunc::TaskIsDone
+            | RtFunc::TaskTakeOutput
+            | RtFunc::TaskRelease
+            | RtFunc::TaskYieldFuture
+            | RtFunc::TaskSleepFutureNanos
+            | RtFunc::TaskJoinFuture
+            | RtFunc::TaskTimeoutFuture
+            | RtFunc::FsReadToString
+            | RtFunc::FsWriteString
+            | RtFunc::FsTakeString
+            | RtFunc::FsLastErrorMessage
+            | RtFunc::FsTempDir
+            | RtFunc::FsExists
+            | RtFunc::FsCreateDir
+            | RtFunc::FsCreateDirAll
+            | RtFunc::FsRemoveFile
+            | RtFunc::FsRemoveDirAll
+            | RtFunc::FsReadDir
+            | RtFunc::FsTakeStringArray
+            | RtFunc::FsKind
+            | RtFunc::FsRead
+            | RtFunc::FsTakeBytes
+            | RtFunc::FsWrite
+            | RtFunc::FileOpen
+            | RtFunc::FileClose
+            | RtFunc::FileRead
+            | RtFunc::FileWrite
+            | RtFunc::FileFlush
+            | RtFunc::IoStdinRead
+            | RtFunc::IoStdoutWrite
+            | RtFunc::IoStderrWrite
+            | RtFunc::IoStdoutFlush
+            | RtFunc::IoStderrFlush
+            | RtFunc::NetConnect
+            | RtFunc::NetClose
+            | RtFunc::NetRead
+            | RtFunc::NetWrite
+            | RtFunc::NetReadTimeout
+            | RtFunc::NetListen
+            | RtFunc::NetLocalPort
+            | RtFunc::NetAccept
+            | RtFunc::HttpParseRequest
+            | RtFunc::CryptoHash
+            | RtFunc::CryptoRandomBytes
+            | RtFunc::CryptoRandomInt
+            | RtFunc::TimeNowNanos
+            | RtFunc::TimeNowEpochNanos
+            | RtFunc::LogConfigLevel
+            | RtFunc::LogConfigToStderr
+            | RtFunc::LogSetConfig
+            | RtFunc::ShutdownRequested
+            | RtFunc::ProcessArgCount
+            | RtFunc::ProcessArg
+            | RtFunc::ProcessExit => WasmRuntime::Unavailable,
+        }
+    }
+}
 
 /// A single 3-address statement.
 #[derive(Debug)]

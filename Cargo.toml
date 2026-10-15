@@ -64,6 +64,12 @@ cranelift-jit = "0.105"
 cranelift-native = "0.105"
 cranelift-object = "0.105"
 cc = "1"
+# Phase 4's WASM backend (spec
+# docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §8):
+# 0.243.0 is the last release of each that declares a minimum Rust under
+# the workspace's 1.78. `wasmparser` only validates what tests build.
+wasm-encoder = "=0.243.0"
+wasmparser = { version = "=0.243.0", default-features = false, features = ["std", "validate", "features", "simd"] }
 
 # Tooling
 clap = { version = "4", features = ["derive"] }
