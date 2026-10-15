@@ -31,6 +31,9 @@ pub struct Options<'a> {
 /// The name of `std/rt`'s allocator, a root of every WASM build.
 const RT_ALLOC: &str = "rt_alloc";
 
+/// The executor's entry, which an `async fn main`'s shim calls.
+const RT_BLOCK_ON: &str = "rt_task_block_on";
+
 /// The other `std/rt` functions every WASM build exports, by export name:
 /// roots, since only the shim calls them (spec 4.1 §6.3).
 const RT_EXPORTS: [(&str, &str); 1] = [("nova_alloc_leaf", "rt_alloc_leaf")];
@@ -87,6 +90,14 @@ pub fn lower_module_with(
                 .and_then(|def| module.function(*def).map(|f| (def, &f.name)))
             {
                 mir.runtime_exports.push((export, mangle(def, name, &[])));
+                worklist.push((def, Vec::new()));
+            }
+        }
+        // An `async fn main`'s shim, made after this loop, hands its future
+        // to the executor, so the executor's entry is a root (spec 4.1
+        // §4.4).
+        if main.is_async {
+            if let Some(&def) = impls.functions.get(RT_BLOCK_ON) {
                 worklist.push((def, Vec::new()));
             }
         }
@@ -371,7 +382,8 @@ fn route_runtime(f: &mut Function, impls: &RuntimeImpls, module: &hir::Module) -
 }
 
 /// E0091 for each runtime function the module still calls that is neither
-/// the shim's nor routed to `std/rt` (spec 4.0 §3.3), once per function.
+/// the shim's, the backend's, nor routed to `std/rt` (spec 4.0 §3.3), once
+/// per function.
 fn unavailable_on_wasm(mir: &Module, main_span: nova_diagnostics::Span) -> Vec<Diagnostic> {
     let mut seen: Vec<RtFunc> = Vec::new();
     for stmt in mir
@@ -381,7 +393,8 @@ fn unavailable_on_wasm(mir: &Module, main_span: nova_diagnostics::Span) -> Vec<D
         .flat_map(|b| &b.stmts)
     {
         if let Stmt::CallRuntime { func, .. } = stmt {
-            if !matches!(func.on_wasm(), WasmRuntime::Host(_)) && !seen.contains(func) {
+            let kept = matches!(func.on_wasm(), WasmRuntime::Host(_) | WasmRuntime::Builtin);
+            if !kept && !seen.contains(func) {
                 seen.push(*func);
             }
         }

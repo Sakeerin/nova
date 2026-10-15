@@ -5,9 +5,12 @@
 //! Values map as `I64` → `i64`, `F64` → `f64`, `I8` → `i32` (0 or 1),
 //! `Ptr` → `i32`, and `Unit` to no value; each non-`Unit` temp is a local.
 //! Blocks are structured by [`structure`]'s analysis, or, for an
-//! irreducible graph, run by a dispatch loop. Runtime functions are of three
+//! irreducible graph, run by a dispatch loop. Runtime functions are of four
 //! kinds on WASM ([`nova_mir::WasmRuntime`]): `std/rt`'s, which MIR already
-//! calls directly; the shim's, imported from `env`; and none.
+//! calls directly; the shim's, imported from `env`; the one this backend
+//! emits itself, the yield future (spec
+//! `docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+//! §4.3); and none.
 
 mod shim;
 mod structure;
@@ -133,6 +136,15 @@ struct Layout {
     /// The type of each `call_indirect` the module makes: `(env, params...)
     /// -> ret`, interned before any function is lowered.
     indirect: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
+    /// The yield future's builder, when the module builds one.
+    yield_future: Option<u32>,
+    /// The shim's `abort`, when the module imports it.
+    abort: Option<u32>,
+}
+
+/// A poll function's type on WASM: `(state, ctx) -> status` (ADR 0039).
+fn poll_type() -> (Vec<ValType>, Vec<ValType>) {
+    indirect_type(&[MirTy::Ptr], MirTy::I64)
 }
 
 /// A `call_indirect`'s type: the environment pointer, then `params`.
@@ -202,16 +214,24 @@ fn compile(mir: &Module) -> Result<Output> {
         table: HashMap::new(),
         alloc: None,
         indirect: HashMap::new(),
+        yield_future: None,
+        abort: None,
     };
     let (data, literals) = literal_data(mir);
     layout.heap_base = i64::from(DATA_BASE) + data.len() as i64;
     layout.literals = literals;
 
-    // The host functions the program calls, in first-use order.
+    // The host functions the program calls, in first-use order; whether it
+    // builds a yield future, polls one, or aborts.
     let mut host_order: Vec<RtFunc> = Vec::new();
+    let (mut yields, mut polls, mut aborts) = (false, false, false);
     for f in &mir.functions {
         for b in &f.blocks {
             for s in &b.stmts {
+                if let Stmt::Mem { op, .. } = s {
+                    polls |= *op == MemOp::Poll;
+                    aborts |= *op == MemOp::Abort;
+                }
                 if let Stmt::CallRuntime { func, .. } = s {
                     match func.on_wasm() {
                         WasmRuntime::Host(_) => {
@@ -219,6 +239,7 @@ fn compile(mir: &Module) -> Result<Output> {
                                 host_order.push(*func);
                             }
                         }
+                        WasmRuntime::Builtin => yields = true,
                         WasmRuntime::Nova(name) => bail!(
                             "`{}` reached the WASM backend: MIR must call `std/rt`'s `{name}`",
                             func.symbol()
@@ -243,11 +264,22 @@ fn compile(mir: &Module) -> Result<Output> {
         layout.hosts.insert(*func, i as u32);
         import_names.push(name);
     }
-    let first = host_order.len() as u32;
+    if aborts {
+        let ty = types.of(vec![], vec![]);
+        imports.import("env", "abort", EntityType::Function(ty));
+        layout.abort = Some(import_names.len() as u32);
+        import_names.push("abort");
+    }
+    let first = import_names.len() as u32;
     for (i, f) in mir.functions.iter().enumerate() {
         layout.funcs.insert(f.name.clone(), first + i as u32);
         layout.rets.insert(f.name.clone(), f.ret);
         layout.params.insert(f.name.clone(), abi_params(f).to_vec());
+    }
+    // The yield future's builder and poll function follow MIR's functions.
+    let yield_poll = first + mir.functions.len() as u32 + 1;
+    if yields {
+        layout.yield_future = Some(yield_poll - 1);
     }
     if let Some(name) = &mir.runtime_alloc {
         layout.alloc = Some(
@@ -269,6 +301,11 @@ fn compile(mir: &Module) -> Result<Output> {
             layout.indirect.insert(key, ty);
         }
     }
+    if polls || yields {
+        let key = poll_type();
+        let ty = types.of(key.0.clone(), key.1.clone());
+        layout.indirect.insert(key, ty);
+    }
     // Every function whose address is taken, in first-use order: its code
     // pointer is its place in the table (spec §4.3).
     let mut table: Vec<u32> = Vec::new();
@@ -289,6 +326,12 @@ fn compile(mir: &Module) -> Result<Output> {
             }
         }
     }
+    let yield_slot = table.len() as u32;
+    if yields {
+        table.push(yield_poll);
+    }
+    // A `call_indirect` needs a table, if an empty one.
+    let indirect = !layout.indirect.is_empty();
 
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
@@ -304,12 +347,22 @@ fn compile(mir: &Module) -> Result<Output> {
         })?;
         code.function(&body);
     }
+    if yields {
+        let alloc = layout
+            .alloc
+            .ok_or_else(|| anyhow!("a yield future, but the module has no allocator"))?;
+        functions.function(types.of(vec![], vec![ValType::I32]));
+        code.function(&yield_future(alloc, yield_slot));
+        let (params, results) = poll_type();
+        functions.function(types.of(params, results));
+        code.function(&yield_poll_body());
+    }
 
     let mut module = wasm_encoder::Module::new();
     module.section(&types.section);
     module.section(&imports);
     module.section(&functions);
-    if !table.is_empty() {
+    if !table.is_empty() || indirect {
         let mut tables = TableSection::new();
         tables.table(TableType {
             element_type: RefType::FUNCREF,
@@ -367,6 +420,51 @@ fn compile(mir: &Module) -> Result<Output> {
         wasm: module.finish(),
         imports: import_names,
     })
+}
+
+/// The yield future's builder, `() -> future` (spec 4.1 §4.3): a zeroed
+/// two-slot state, and a future of the poll function at `slot` in the table
+/// and that state.
+fn yield_future(alloc: u32, slot: u32) -> Function {
+    let mut f = Function::new([(2, ValType::I32)]);
+    for (local, size) in [(0, 16), (1, 16)] {
+        f.instruction(&I::I64Const(size));
+        f.instruction(&I::Call(alloc));
+        f.instruction(&I::I32WrapI64);
+        f.instruction(&I::LocalSet(local));
+    }
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::I64Const(i64::from(slot)));
+    f.instruction(&I::I64Store(mem(0, 3)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64ExtendI32U);
+    f.instruction(&I::I64Store(mem(8, 3)));
+    f.instruction(&I::LocalGet(1));
+    f.instruction(&I::End);
+    f
+}
+
+/// The yield future's poll function, `nova-runtime`'s `poll_yield_once`:
+/// pending once, with no wait staged, then ready with the output 0.
+fn yield_poll_body() -> Function {
+    let mut f = Function::new([]);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Load(mem(0, 3)));
+    f.instruction(&I::I64Eqz);
+    f.instruction(&I::If(BlockType::Result(ValType::I64)));
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(1));
+    f.instruction(&I::I64Store(mem(0, 3)));
+    f.instruction(&I::I64Const(0));
+    f.instruction(&I::Else);
+    f.instruction(&I::LocalGet(0));
+    f.instruction(&I::I64Const(0));
+    f.instruction(&I::I64Store(mem(8, 3)));
+    f.instruction(&I::I64Const(1));
+    f.instruction(&I::End);
+    f.instruction(&I::End);
+    f
 }
 
 /// A label the code being emitted is nested in.
@@ -767,11 +865,14 @@ impl<'a> FnLower<'a> {
                 self.result(*dst, ret);
             }
             Stmt::CallRuntime { dst, func, args } => {
-                let index = *self
-                    .layout
-                    .hosts
-                    .get(func)
-                    .ok_or_else(|| anyhow!("`{}` is not a host function", func.symbol()))?;
+                let index = match (func.on_wasm(), self.layout.yield_future) {
+                    (WasmRuntime::Builtin, Some(index)) => index,
+                    _ => *self
+                        .layout
+                        .hosts
+                        .get(func)
+                        .ok_or_else(|| anyhow!("`{}` is not a host function", func.symbol()))?,
+                };
                 for a in args {
                     self.get(*a);
                 }
@@ -1077,10 +1178,37 @@ impl<'a> FnLower<'a> {
                 self.out.push(I::I64ExtendI32S);
             }
             MemOp::HeapBase => self.out.push(I::I64Const(self.layout.heap_base)),
+            MemOp::Poll => {
+                // `poll(state, null)`, the future's table index its code.
+                self.wrap(arg(0)?);
+                self.out.push(I::LocalSet(self.scratch));
+                self.out.push(I::LocalGet(self.scratch));
+                self.out.push(I::I32Load(mem(8, 2)));
+                self.out.push(I::I32Const(0));
+                self.out.push(I::LocalGet(self.scratch));
+                self.out.push(I::I32Load(mem(0, 2)));
+                self.out.push(I::CallIndirect {
+                    type_index: self.layout.indirect[&poll_type()],
+                    table_index: 0,
+                });
+            }
+            MemOp::Abort => {
+                let abort = self
+                    .layout
+                    .abort
+                    .ok_or_else(|| anyhow!("an abort, but the module does not import one"))?;
+                self.out.push(I::Call(abort));
+                self.out.push(I::Unreachable);
+            }
         }
         let produces = matches!(
             op,
-            MemOp::Load8 | MemOp::Load64 | MemOp::Pages | MemOp::Grow | MemOp::HeapBase
+            MemOp::Load8
+                | MemOp::Load64
+                | MemOp::Pages
+                | MemOp::Grow
+                | MemOp::HeapBase
+                | MemOp::Poll
         );
         if produces {
             self.result(dst, MirTy::I64);
@@ -1655,6 +1783,147 @@ mod tests {
         assert_eq!(out.imports, ["println", "print"]);
     }
 
+    /// `host_abort` imports the shim's `abort` after the host functions,
+    /// once (spec 4.1 §4.5).
+    #[test]
+    fn an_abort_imports_the_shims_abort() {
+        let abort = || Stmt::Mem {
+            dst: None,
+            op: MemOp::Abort,
+            args: vec![],
+        };
+        let print = Stmt::CallRuntime {
+            dst: None,
+            func: RtFunc::EPrint,
+            args: vec![Temp(0)],
+        };
+        let f = func(
+            "main",
+            0,
+            vec![MirTy::Ptr],
+            MirTy::Unit,
+            vec![block(vec![print, abort(), abort()], ret_unit())],
+        );
+        let out = valid(&module(vec![f]));
+        assert_eq!(out.imports, ["eprint", "abort"]);
+    }
+
+    /// `future_poll` with no function value in the module still has a
+    /// table, empty, to call through (spec 4.1 §4.3).
+    #[test]
+    fn a_poll_without_a_function_value_validates() {
+        let f = func(
+            "main",
+            0,
+            vec![MirTy::I64, MirTy::I64],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::ConstInt(Temp(0), 0),
+                    Stmt::Mem {
+                        dst: Some(Temp(1)),
+                        op: MemOp::Poll,
+                        args: vec![Temp(0)],
+                    },
+                ],
+                ret_unit(),
+            )],
+        );
+        valid(&module(vec![f]));
+    }
+
+    /// The yield future the backend builds is pending once, then ready, as
+    /// `future_poll` reports it, run under Node (spec 4.1 §4.3, §9.3).
+    #[test]
+    fn the_yield_future_is_pending_once_then_ready() {
+        // `addr(x) = x`: a call converts the future's `Ptr` to the `Int`
+        // address a poll takes.
+        let addr = func(
+            "addr",
+            1,
+            vec![MirTy::I64],
+            MirTy::I64,
+            vec![block(vec![], Terminator::Return(Some(Temp(0))))],
+        );
+        // t0 future, t1 its address, t2 and t3 the two statuses, t4 and t5
+        // where they go.
+        let poll = |dst| Stmt::Mem {
+            dst: Some(Temp(dst)),
+            op: MemOp::Poll,
+            args: vec![Temp(1)],
+        };
+        let store = |at, v| Stmt::Mem {
+            dst: None,
+            op: MemOp::Store64,
+            args: vec![Temp(at), Temp(v)],
+        };
+        let main = func(
+            "main",
+            0,
+            vec![
+                MirTy::Ptr,
+                MirTy::I64,
+                MirTy::I64,
+                MirTy::I64,
+                MirTy::I64,
+                MirTy::I64,
+            ],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::CallRuntime {
+                        dst: Some(Temp(0)),
+                        func: RtFunc::TaskYieldFuture,
+                        args: vec![],
+                    },
+                    Stmt::Call {
+                        dst: Some(Temp(1)),
+                        callee: "addr".to_string(),
+                        args: vec![Temp(0)],
+                    },
+                    poll(2),
+                    poll(3),
+                    Stmt::ConstInt(Temp(4), i64::from(DATA_BASE)),
+                    Stmt::ConstInt(Temp(5), i64::from(DATA_BASE) + 8),
+                    store(4, 2),
+                    store(5, 3),
+                ],
+                ret_unit(),
+            )],
+        );
+        let mut m = with_alloc(main);
+        m.functions.push(addr);
+        let out = valid(&m);
+        assert!(out.imports.is_empty(), "{:?}", out.imports);
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-yield");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::write(dir.join("app.wasm"), &out.wasm).expect("the module");
+        let script = format!(
+            "const fs = require(\"fs\");\n\
+             WebAssembly.instantiate(fs.readFileSync(process.argv[2]), {{ env: {{}} }}).then(({{ instance }}) => {{\n  \
+             instance.exports.main();\n  \
+             const view = new DataView(instance.exports.memory.buffer);\n  \
+             console.log(view.getBigInt64({DATA_BASE}, true), view.getBigInt64({DATA_BASE} + 8, true));\n\
+             }});\n"
+        );
+        std::fs::write(dir.join("run.cjs"), script).expect("the script");
+        let out = node
+            .arg(dir.join("run.cjs"))
+            .arg(dir.join("app.wasm"))
+            .output()
+            .expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "0n 1n\n");
+    }
+
     /// A runtime function `std/rt` implements must have become a call to
     /// it; one WASM lacks must have been refused already (E0091).
     #[test]
@@ -1664,7 +1933,7 @@ mod tests {
                 RtFunc::StrConcat,
                 "MIR must call `std/rt`'s `rt_str_concat`",
             ),
-            (RtFunc::TaskBlockOn, "which has no such function"),
+            (RtFunc::TestSelector, "which has no such function"),
         ] {
             let f = |func| {
                 func_with(

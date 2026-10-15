@@ -160,24 +160,20 @@ fn a_user_module_cannot_call_a_memory_builtin() {
     );
 }
 
-/// A program that needs a runtime function WASM lacks is E0091, from
-/// `check` as from `build` (spec §3.3).
+/// An `async fn main`, which was E0091, checks and runs on WASM (spec 4.1
+/// §4.4).
 #[test]
-fn check_for_wasm_reports_a_runtime_function_wasm_lacks() {
-    let dir = fresh("check-async");
+fn an_async_main_runs_under_node() {
+    let dir = fresh("async-main");
     write(
         &dir,
         &[("main.nova", "async fn main() { println(\"a\") }\n")],
     );
-    let a = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
-    assert!(
-        stderr(&a).contains(
-            "error[E0091]: this program needs `task_block_on`, which target wasm does not have"
-        ),
-        "{}",
-        stderr(&a)
-    );
-    nova_in(&dir, &["check", "main.nova"]).success();
+    nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).success();
+    let Some(node) = node() else { return };
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&a), "a\n");
 }
 
 fn repo_root() -> PathBuf {
@@ -688,7 +684,41 @@ mod gate {
         system_time_now,
         time_conversions,
         time_saturation,
+        // Tasks, under `block_on`.
+        async_tasks,
+        interpolation_nary,
+        spawned_output_survives_release,
+        task_sleep_order,
     );
+
+    #[test]
+    fn forged_join_handle() {
+        super::gate_panics(
+            "forged_join_handle",
+            "nova: panic: nova_rt_task_join_future: this future was never spawned, so there is no task to ask about",
+            str::is_empty,
+        );
+    }
+
+    #[test]
+    fn recycled_task_state() {
+        super::gate_panics(
+            "recycled_task_state",
+            "nova: panic: nova_rt_task_join_future: this future was never spawned, so there is no task to ask about",
+            str::is_empty,
+        );
+    }
+
+    #[test]
+    fn task_deadlock() {
+        super::gate_panics(
+            "task_deadlock",
+            "nova: deadlock: 2 tasks are parked and none can wake\n  \
+             task 1 is waiting for task 2 to finish\n  \
+             task 2 is waiting for task 1 to finish\n",
+            str::is_empty,
+        );
+    }
 
     #[test]
     fn log_default_level() {

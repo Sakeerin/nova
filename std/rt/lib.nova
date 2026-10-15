@@ -793,3 +793,481 @@ fn rt_log_set_config(level: Int, to_stderr: Int) {
     if to_stderr != 0 { set = 2 }
     mem_store64(LOG_SET, set)
 }
+
+// The executor (spec 4.1 §4), ported from `nova-runtime`'s `task.rs`: a FIFO
+// run queue, tasks parked on a deadline or on another task, woken in the
+// order they were parked, and no wakers. Its state is in leaf objects, which
+// the collector keeps but does not trace; each unreleased task's state is a
+// root instead (§6.4).
+
+// The executor's block, or 0 before its first use. At 0 the task table, a
+// task to 32 bytes: its poll function, its state, its output and its flags
+// (1 done, 2 released, 4 kept until its output is taken, 8 its state freed),
+// laid out as a future at its start; at 8 its count and at 16 its capacity.
+// At 24 the run queue, a ring of task ids; at 32 its head, 40 its length and
+// 48 its capacity. At 56 the parked tasks, 32 bytes each: the id, the task it
+// waits for plus 1 or 0, whether it has a deadline, and the deadline; at 64
+// their count and at 72 the capacity. At 80 the polled task plus 1, or 0
+// outside a poll. At 88 the wait the poll staged: 1 a deadline, 2 a task; at
+// 96 the deadline and at 104 the task. At 112, 1 while a `block_on` or
+// `async fn main` runs. At 120 the index from a state's address to its
+// task, 16 bytes a slot (the address, the id plus 1); at 128 its capacity, a
+// power of 2, and at 136 the slots used.
+const EXEC: Int = 48
+
+// The block, made at the first use.
+fn exec() -> Int {
+    let e = mem_load64(EXEC)
+    if e != 0 { return e }
+    let b = rt_alloc_leaf(144)
+    mem_store64(b, rt_alloc_leaf(32 * 16))
+    mem_store64(b + 16, 16)
+    mem_store64(b + 24, rt_alloc_leaf(8 * 16))
+    mem_store64(b + 48, 16)
+    mem_store64(b + 56, rt_alloc_leaf(32 * 16))
+    mem_store64(b + 72, 16)
+    mem_store64(b + 120, rt_alloc_leaf(16 * 16))
+    mem_store64(b + 128, 16)
+    mem_store64(EXEC, b)
+    b
+}
+
+// Task `id`'s entry, and its flags.
+fn task_at(e: Int, id: Int) -> Int { mem_load64(e) + 32 * id }
+
+fn task_flags(e: Int, id: Int) -> Int { mem_load64(task_at(e, id) + 24) }
+
+fn set_task_flags(e: Int, id: Int, flags: Int) { mem_store64(task_at(e, id) + 24, flags) }
+
+// A new task, never polled, with the poll function and state given.
+fn task_new(e: Int, poll: Int, state: Int) -> Int {
+    let n = mem_load64(e + 8)
+    let cap = mem_load64(e + 16)
+    if n == cap {
+        let bigger = rt_alloc_leaf(64 * cap)
+        mem_copy(bigger, mem_load64(e), 32 * n)
+        mem_store64(e, bigger)
+        mem_store64(e + 16, 2 * cap)
+    }
+    let t = mem_load64(e) + 32 * n
+    mem_store64(t, poll)
+    mem_store64(t + 8, state)
+    mem_store64(e + 8, n + 1)
+    n
+}
+
+// Queue task `id` at the back.
+fn queue_push(e: Int, id: Int) {
+    let cap = mem_load64(e + 48)
+    let len = mem_load64(e + 40)
+    if len == cap {
+        let ring = mem_load64(e + 24)
+        let head = mem_load64(e + 32)
+        let bigger = rt_alloc_leaf(16 * cap)
+        let mut i = 0
+        while i < len {
+            mem_store64(bigger + 8 * i, mem_load64(ring + 8 * ((head + i) % cap)))
+            i = i + 1
+        }
+        mem_store64(e + 24, bigger)
+        mem_store64(e + 32, 0)
+        mem_store64(e + 48, 2 * cap)
+    }
+    let at = (mem_load64(e + 32) + len) % mem_load64(e + 48)
+    mem_store64(mem_load64(e + 24) + 8 * at, id)
+    mem_store64(e + 40, len + 1)
+}
+
+// The task at the front of the queue, taken off it; the queue is not empty.
+fn queue_pop(e: Int) -> Int {
+    let head = mem_load64(e + 32)
+    let id = mem_load64(mem_load64(e + 24) + 8 * head)
+    mem_store64(e + 32, (head + 1) % mem_load64(e + 48))
+    mem_store64(e + 40, mem_load64(e + 40) - 1)
+    id
+}
+
+// The index's slot for a state's address: states are 16-aligned, and the
+// page number is folded in.
+fn index_home(state: Int, cap: Int) -> Int {
+    let x = state >> 4
+    let folded = x ^ (x >> 12)
+    folded & (cap - 1)
+}
+
+// Map `state` to task `id`, replacing what it mapped to.
+fn index_put(e: Int, state: Int, id: Int) {
+    if 2 * (mem_load64(e + 136) + 1) > mem_load64(e + 128) {
+        index_rebuild(e, 2 * mem_load64(e + 128))
+    }
+    let table = mem_load64(e + 120)
+    let cap = mem_load64(e + 128)
+    let mut i = index_home(state, cap)
+    while true {
+        let k = mem_load64(table + 16 * i)
+        if k == 0 {
+            mem_store64(table + 16 * i, state)
+            mem_store64(table + 16 * i + 8, id + 1)
+            mem_store64(e + 136, mem_load64(e + 136) + 1)
+            return
+        }
+        if k == state {
+            mem_store64(table + 16 * i + 8, id + 1)
+            return
+        }
+        i = (i + 1) & (cap - 1)
+    }
+}
+
+// The task `state` maps to, or -1.
+fn index_get(e: Int, state: Int) -> Int {
+    let table = mem_load64(e + 120)
+    let cap = mem_load64(e + 128)
+    let mut i = index_home(state, cap)
+    while true {
+        let k = mem_load64(table + 16 * i)
+        if k == 0 { return 0 - 1 }
+        if k == state { return mem_load64(table + 16 * i + 8) - 1 }
+        i = (i + 1) & (cap - 1)
+    }
+    0
+}
+
+// The index made again with `cap` slots, from every task whose state has
+// not been freed, in spawn order, so a state spawned again maps to its last
+// task, as `BY_STATE`'s insert leaves it.
+fn index_rebuild(e: Int, cap: Int) {
+    mem_store64(e + 120, rt_alloc_leaf(16 * cap))
+    mem_store64(e + 128, cap)
+    mem_store64(e + 136, 0)
+    let n = mem_load64(e + 8)
+    let mut id = 0
+    while id < n {
+        if (task_flags(e, id) & 8) == 0 { index_put(e, mem_load64(task_at(e, id) + 8), id) }
+        id = id + 1
+    }
+}
+
+// Park task `id`: on task `target1 - 1` if `target1` is not 0, and until
+// `deadline` if `timed` is not 0.
+fn park(e: Int, id: Int, target1: Int, timed: Int, deadline: Int) {
+    let n = mem_load64(e + 64)
+    let cap = mem_load64(e + 72)
+    if n == cap {
+        let bigger = rt_alloc_leaf(64 * cap)
+        mem_copy(bigger, mem_load64(e + 56), 32 * n)
+        mem_store64(e + 56, bigger)
+        mem_store64(e + 72, 2 * cap)
+    }
+    let p = mem_load64(e + 56) + 32 * n
+    mem_store64(p, id)
+    mem_store64(p + 8, target1)
+    mem_store64(p + 16, timed)
+    mem_store64(p + 24, deadline)
+    mem_store64(e + 64, n + 1)
+}
+
+// Queue every parked task whose deadline is due at `now` (`done` < 0), or
+// that waits for task `done`, in the order they were parked; the rest stay,
+// in their order (`wake_due` and `wake_tasks_waiting_on`).
+fn wake(e: Int, done: Int, now: Int) {
+    let parked = mem_load64(e + 56)
+    let n = mem_load64(e + 64)
+    let mut kept = 0
+    let mut i = 0
+    while i < n {
+        let p = parked + 32 * i
+        let mut due = false
+        if done < 0 {
+            due = mem_load64(p + 16) != 0 && mem_load64(p + 24) <= now
+        } else {
+            due = mem_load64(p + 8) == done + 1
+        }
+        if due {
+            queue_push(e, mem_load64(p))
+        } else {
+            mem_copy(parked + 32 * kept, p, 32)
+            kept = kept + 1
+        }
+        i = i + 1
+    }
+    mem_store64(e + 64, kept)
+}
+
+// The earliest deadline of a parked task, or -1 when none has one. Every
+// deadline is at least 0.
+fn earliest(e: Int) -> Int {
+    let parked = mem_load64(e + 56)
+    let n = mem_load64(e + 64)
+    let mut at = 0 - 1
+    let mut i = 0
+    while i < n {
+        let p = parked + 32 * i
+        if mem_load64(p + 16) != 0 {
+            let d = mem_load64(p + 24)
+            if at < 0 || d < at { at = d }
+        }
+        i = i + 1
+    }
+    at
+}
+
+// Stage a wait until `deadline` for the polled task; deadlines merge to the
+// earliest (`try_stage`).
+fn stage_deadline(e: Int, deadline: Int) {
+    if mem_load64(e + 80) == 0 { panic("nova_rt: a park was staged outside a poll") }
+    let staged = mem_load64(e + 88)
+    if (staged & 1) == 0 || deadline < mem_load64(e + 96) { mem_store64(e + 96, deadline) }
+    mem_store64(e + 88, staged | 1)
+}
+
+// Stage a wait for task `id`; a second one in the same poll means an inner
+// future's pending status was dropped.
+fn stage_task(e: Int, id: Int) {
+    if mem_load64(e + 80) == 0 { panic("nova_rt: a park was staged outside a poll") }
+    let staged = mem_load64(e + 88)
+    if (staged & 2) != 0 {
+        let mut deadline = "None"
+        if (staged & 1) != 0 { deadline = "Some(_)" }
+        let prev = mem_load64(e + 104)
+        panic(
+            "nova_rt: two parks staged in one poll (Task { id: ${prev}, deadline: ${deadline} } then Task { id: ${id}, deadline: None }); an inner future's POLL_PENDING did not propagate",
+        )
+    }
+    mem_store64(e + 104, id)
+    mem_store64(e + 88, staged | 2)
+}
+
+// Release task `id`, once: its state stops being a root.
+fn release_id(e: Int, id: Int) {
+    let flags = task_flags(e, id)
+    if (flags & 2) == 0 { set_task_flags(e, id, flags | 2) }
+}
+
+// Poll task `id` once (`poll_one`). Pending with a wait staged parks it,
+// and without one queues it at the back; ready records the output, queues
+// the tasks waiting for it, and releases it unless its output is to be
+// taken. A wait staged by a poll that ends ready is dropped.
+fn poll_task(e: Int, id: Int) {
+    mem_store64(e + 80, id + 1)
+    let status = future_poll(task_at(e, id))
+    mem_store64(e + 80, 0)
+    let staged = mem_load64(e + 88)
+    mem_store64(e + 88, 0)
+    if status == 0 {
+        if staged == 0 {
+            queue_push(e, id)
+        } else {
+            let mut target1 = 0
+            if (staged & 2) != 0 { target1 = mem_load64(e + 104) + 1 }
+            park(e, id, target1, staged & 1, mem_load64(e + 96))
+        }
+        return
+    }
+    if status != 1 {
+        panic(
+            "poll function for task ${id} returned ${status}, which is neither POLL_PENDING (0) nor POLL_READY (1)",
+        )
+    }
+    let t = task_at(e, id)
+    mem_store64(t + 16, mem_load64(mem_load64(t + 8) + 8))
+    let flags = mem_load64(t + 24) | 1
+    mem_store64(t + 24, flags)
+    wake(e, id, 0)
+    if (flags & 4) == 0 { release_id(e, id) }
+}
+
+// Poll queued tasks until none is queued, waking due deadlines after each
+// poll while any task is parked, so a task that yields in a loop cannot
+// starve a sleeper.
+fn drain(e: Int) {
+    while mem_load64(e + 40) > 0 {
+        poll_task(e, queue_pop(e))
+        if mem_load64(e + 64) > 0 { wake(e, 0 - 1, time_now_nanos()) }
+    }
+}
+
+// A task for the future at `fut`, queued at the back, not run
+// (`spawn_internal`).
+fn spawn_task(e: Int, fut: Int, keep: Bool) -> Int {
+    let state = mem_load64(fut + 8)
+    let prior = index_get(e, state)
+    if prior >= 0 {
+        if (task_flags(e, prior) & 2) == 0 {
+            panic(
+                "nova_rt_task_spawn: this future is already a live task; spawn it again only after its task has been released",
+            )
+        }
+    }
+    let id = task_new(e, mem_load64(fut), state)
+    if keep { set_task_flags(e, id, 4) }
+    index_put(e, state, id)
+    queue_push(e, id)
+    id
+}
+
+// The task of the future at `fut`, which must have been spawned.
+fn task_id_of(e: Int, fut: Int, who: String) -> Int {
+    let id = index_get(e, mem_load64(fut + 8))
+    if id < 0 { panic("${who}: this future was never spawned, so there is no task to ask about") }
+    id
+}
+
+// Take a finished task's output, once (`take_output_internal`).
+fn take_output(e: Int, id: Int) -> Int {
+    if id < 0 || id >= mem_load64(e + 8) { panic("nova_rt_task_take_output: unknown task id") }
+    let flags = task_flags(e, id)
+    if (flags & 1) == 0 {
+        panic(
+            "nova_rt_task_take_output: task ${id} has not completed; poll nova_rt_task_is_done until it reports true first",
+        )
+    }
+    if (flags & 2) != 0 && (flags & 4) == 0 {
+        panic(
+            "nova_rt_task_take_output: task ${id}'s GC root has already been released -- a spawned task's is released when it completes -- so its output can no longer be taken; read it through its future, as JoinHandle::join does",
+        )
+    }
+    if (flags & 2) != 0 {
+        panic(
+            "nova_rt_task_take_output: task ${id}'s output was already taken; taking released the state object's GC root, so a heap-valued output may already have been collected",
+        )
+    }
+    set_task_flags(e, id, flags | 2)
+    mem_load64(task_at(e, id) + 16)
+}
+
+// The deadlock report, on stderr, then an abort (`report_deadlock`): tasks
+// are parked, none has a deadline, and nothing is queued.
+fn report_deadlock(e: Int) {
+    let n = mem_load64(e + 64)
+    let mut plural = "tasks are"
+    if n == 1 { plural = "task is" }
+    eprint("nova: deadlock: ${n} ${plural} parked and none can wake\n")
+    let mut i = 0
+    while i < n {
+        let p = mem_load64(e + 56) + 32 * i
+        let id = mem_load64(p)
+        let target1 = mem_load64(p + 8)
+        if target1 == 0 {
+            eprint("  task ${id} is waiting on a deadline\n")
+        } else if mem_load64(p + 16) != 0 {
+            eprint("  task ${id} is waiting for task ${target1 - 1} to finish, with a deadline\n")
+        } else {
+            eprint("  task ${id} is waiting for task ${target1 - 1} to finish\n")
+        }
+        i = i + 1
+    }
+    host_abort()
+}
+
+// `nova_rt_task_spawn`.
+fn rt_task_spawn(fut: Int) -> Int { spawn_task(exec(), fut, false) }
+
+// `nova_rt_task_block_on` (spec 4.1 §4.4): the root queued behind earlier
+// spawns, every task drained, and the root's output. With only deadlines
+// left, it waits for the earliest by reading the clock in a loop, as native
+// `thread::sleep` holds the thread.
+fn rt_task_block_on(fut: Int) -> Int {
+    let e = exec()
+    if mem_load64(e + 112) != 0 {
+        panic(
+            "nova_rt_task_block_on called re-entrantly: an async fn must not call block_on, which would run a second executor loop from inside the first one's frame",
+        )
+    }
+    mem_store64(e + 112, 1)
+    let root = spawn_task(e, fut, true)
+    drain(e)
+    while mem_load64(e + 64) > 0 {
+        let at = earliest(e)
+        if at < 0 { report_deadlock(e) }
+        while time_now_nanos() < at {}
+        wake(e, 0 - 1, time_now_nanos())
+        drain(e)
+    }
+    mem_store64(e + 112, 0)
+    take_output(e, root)
+}
+
+// `nova_rt_task_is_done`.
+fn rt_task_is_done(fut: Int) -> Bool {
+    let e = exec()
+    let done = task_flags(e, task_id_of(e, fut, "nova_rt_task_is_done")) & 1
+    done != 0
+}
+
+// `nova_rt_task_take_output`.
+fn rt_task_take_output(id: Int) -> Int { take_output(exec(), id) }
+
+// `nova_rt_task_release`: idempotent.
+fn rt_task_release(fut: Int) {
+    let e = exec()
+    release_id(e, task_id_of(e, fut, "nova_rt_task_release"))
+}
+
+// A deadline `nanos` from now, a negative count as 0, saturating
+// (`deadline_nanos_from_now`).
+fn deadline_from_now(nanos: Int) -> Int {
+    let now = time_now_nanos()
+    let mut d = nanos
+    if d < 0 { d = 0 }
+    if d > 9223372036854775807 - now { 9223372036854775807 } else { now + d }
+}
+
+// The leaf futures (spec 4.1 §4.3) are `async fn`s over the one the backend
+// builds, `task_yield_future`, which is pending once with no wait staged.
+// Each stages its wait, then awaits a fresh one, so its task parks; woken, it
+// checks again. Each fixes its deadline or its target at its first poll,
+// which comes as it is built: std awaits each where it builds it.
+
+// `nova_rt_task_sleep_future_nanos`: due at once completes without
+// suspending.
+async fn rt_task_sleep_future_nanos(nanos: Int) -> Int {
+    let deadline = deadline_from_now(nanos)
+    while time_now_nanos() < deadline {
+        stage_deadline(exec(), deadline)
+        task_yield_future().await
+    }
+    0
+}
+
+// `nova_rt_task_join_future`: an unspawned future aborts.
+async fn rt_task_join_future(fut: Int) -> Int {
+    let e = exec()
+    let target = task_id_of(e, fut, "nova_rt_task_join_future")
+    while (task_flags(e, target) & 1) == 0 {
+        stage_task(e, target)
+        task_yield_future().await
+    }
+    0
+}
+
+// `nova_rt_task_timeout_future`: 0 when the future at `inner` completes,
+// polled first, and 1 when the deadline passes first. A wait the inner
+// future staged is dropped when the timeout completes, and the inner future
+// is abandoned, not cancelled.
+async fn rt_task_timeout_future(nanos: Int, inner: Int) -> Int {
+    let deadline = deadline_from_now(nanos)
+    let e = exec()
+    while true {
+        let staged = mem_load64(e + 88)
+        let at = mem_load64(e + 96)
+        let target = mem_load64(e + 104)
+        let status = future_poll(inner)
+        if status != 0 && status != 1 {
+            panic(
+                "nova_rt: a future polled by a timeout returned ${status}, which is neither POLL_PENDING (0) nor POLL_READY (1)",
+            )
+        }
+        let mut done = 0 - 1
+        if status == 1 { done = 0 } else if time_now_nanos() >= deadline { done = 1 }
+        if done >= 0 {
+            mem_store64(e + 88, staged)
+            mem_store64(e + 96, at)
+            mem_store64(e + 104, target)
+            return done
+        }
+        stage_deadline(e, deadline)
+        task_yield_future().await
+    }
+    0
+}

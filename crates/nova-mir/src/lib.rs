@@ -870,6 +870,8 @@ pub enum WasmRuntime {
     Nova(&'static str),
     /// An import from the shim's `env`, by its field name.
     Host(&'static str),
+    /// Emitted by the backend itself (spec 4.1 §4.3).
+    Builtin,
     /// Nothing on WASM: a program that needs it is E0091.
     Unavailable,
 }
@@ -921,16 +923,16 @@ impl RtFunc {
             RtFunc::LogConfigLevel => WasmRuntime::Nova("rt_log_config_level"),
             RtFunc::LogConfigToStderr => WasmRuntime::Nova("rt_log_config_to_stderr"),
             RtFunc::LogSetConfig => WasmRuntime::Nova("rt_log_set_config"),
+            RtFunc::TaskSpawn => WasmRuntime::Nova("rt_task_spawn"),
+            RtFunc::TaskBlockOn => WasmRuntime::Nova("rt_task_block_on"),
+            RtFunc::TaskIsDone => WasmRuntime::Nova("rt_task_is_done"),
+            RtFunc::TaskTakeOutput => WasmRuntime::Nova("rt_task_take_output"),
+            RtFunc::TaskRelease => WasmRuntime::Nova("rt_task_release"),
+            RtFunc::TaskYieldFuture => WasmRuntime::Builtin,
+            RtFunc::TaskSleepFutureNanos => WasmRuntime::Nova("rt_task_sleep_future_nanos"),
+            RtFunc::TaskJoinFuture => WasmRuntime::Nova("rt_task_join_future"),
+            RtFunc::TaskTimeoutFuture => WasmRuntime::Nova("rt_task_timeout_future"),
             RtFunc::TestSelector
-            | RtFunc::TaskSpawn
-            | RtFunc::TaskBlockOn
-            | RtFunc::TaskIsDone
-            | RtFunc::TaskTakeOutput
-            | RtFunc::TaskRelease
-            | RtFunc::TaskYieldFuture
-            | RtFunc::TaskSleepFutureNanos
-            | RtFunc::TaskJoinFuture
-            | RtFunc::TaskTimeoutFuture
             | RtFunc::FsReadToString
             | RtFunc::FsWriteString
             | RtFunc::FsTakeString
@@ -1154,7 +1156,7 @@ pub enum Stmt {
         ty: MirTy,
     },
     /// A memory access in line: see [`MemOp`]. `dst` is `None` exactly for
-    /// the stores, `Copy` and `Fill`.
+    /// the stores, `Copy`, `Fill` and `Abort`.
     Mem {
         dst: Option<Temp>,
         op: MemOp,
@@ -1164,9 +1166,11 @@ pub enum Stmt {
 
 /// A WASM memory access, the lowering of one of `std/rt`'s memory builtins
 /// (spec `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
-/// §5.1). Addresses and values are `I64`; the WASM backend wraps an address
-/// to 32 bits. Only a WASM build's std calls the builtins, so no native
-/// backend emits these: both refuse one as an internal error.
+/// §5.1), or of its executor's poll or abort (spec
+/// `docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+/// §4.3, §4.5). Addresses and values are `I64`; the WASM backend wraps an
+/// address to 32 bits. Only a WASM build's std calls the builtins, so no
+/// native backend emits these: both refuse one as an internal error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemOp {
     /// `(addr) -> byte`, zero-extended.
@@ -1187,6 +1191,11 @@ pub enum MemOp {
     Grow,
     /// `() -> the heap's first address`.
     HeapBase,
+    /// `(future) -> status`: one poll of the future at `future`, with a null
+    /// context.
+    Poll,
+    /// `()`: the host's abort, which ends the program writing nothing.
+    Abort,
 }
 
 /// Block terminators.
