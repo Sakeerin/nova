@@ -1,0 +1,34 @@
+// Nova standard library — the runtime of a WASM build.
+//
+// Compiled only when the target is WASM (spec
+// docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §5).
+// Where a native build calls a `nova-runtime` function, MIR calls the
+// function here of the same name with an `rt_` prefix, and each is a port of
+// that one, with the same results. None is `pub`, so no program sees them.
+//
+// A runtime value is an `Int` address. A `String` or `Bytes` value is a
+// 16-byte header: its length at offset 0, and at offset 8 the address of its
+// bytes. An array is `{len, elems...}`, element `i` at offset `8 + 8*i`.
+// Memory is read and written through the `mem_*` builtins, which only this
+// target's std sees.
+
+// The runtime's state words, at fixed addresses below the data segment
+// (spec §4.1): Nova has no mutable globals.
+
+// The next free address, or 0 before the first allocation.
+const HEAP_NEXT: Int = 8
+
+// Allocate `size` bytes, zeroed, 8-aligned (spec §5.2). The heap only grows:
+// the collector is 4.1's.
+fn rt_alloc(size: Int) -> Int {
+    let mut n = size
+    if n < 8 { n = 8 }
+    n = (n + 7) & -8
+    let mut at = mem_load64(HEAP_NEXT)
+    if at == 0 { at = heap_base() }
+    let end = at + n
+    let have = mem_pages() * 65536
+    if end > have { if mem_grow((end - have + 65535) / 65536) < 0 { panic("out of memory") } }
+    mem_store64(HEAP_NEXT, end)
+    at
+}

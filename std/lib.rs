@@ -2,7 +2,7 @@
 //! build time so the compiler stays one self-contained executable.
 //!
 //! Every `include_str!` path stays inside this package, so `cargo package`
-//! carries all 17 files, and its verification step builds the packaged copy
+//! carries all 18 files, and its verification step builds the packaged copy
 //! on its own (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §3).
 //! `nova-resolver` gives each module its `$std.*` name and its place.
@@ -41,8 +41,15 @@ pub const TASK: &str = include_str!("task/lib.nova");
 pub const TEST: &str = include_str!("test/lib.nova");
 /// `std/time/lib.nova`.
 pub const TIME: &str = include_str!("time/lib.nova");
+/// `std/rt/lib.nova`, the runtime of a WASM build, written in Nova. Not in
+/// [`ALL`]: only a WASM build compiles it, and it has no public item, so it
+/// is not documented (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §3.2).
+pub const RT: &str = include_str!("rt/lib.nova");
 
-/// Every embedded module, by its directory under `std/`.
+/// Every documented module, by its directory under `std/`: all but
+/// [`RT`].
 pub const ALL: [(&str, &str); 17] = [
     ("bytes", BYTES),
     ("collections", COLLECTIONS),
@@ -68,7 +75,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
 
-    /// Every `std/*/lib.nova` on disk is embedded, and nothing else is.
+    /// Every `std/*/lib.nova` on disk is embedded, and nothing else is:
+    /// [`super::ALL`]'s, and `std/rt`'s as [`super::RT`].
     #[test]
     fn every_std_module_is_embedded() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -86,9 +94,10 @@ mod tests {
         let embedded: BTreeSet<String> = super::ALL
             .iter()
             .map(|(name, _)| name.to_string())
+            .chain(["rt".to_string()])
             .collect();
         assert_eq!(embedded, on_disk);
-        assert_eq!(on_disk.len(), 17);
+        assert_eq!(on_disk.len(), 18);
     }
 
     /// Each entry carries its own file, not a neighbour's.
@@ -100,5 +109,8 @@ mod tests {
                 .expect("read a std module");
             assert_eq!(source, on_disk, "std/{name}/lib.nova");
         }
+        let rt = std::fs::read_to_string(root.join("rt").join("lib.nova"))
+            .expect("read std/rt/lib.nova");
+        assert_eq!(super::RT, rt, "std/rt/lib.nova");
     }
 }

@@ -899,6 +899,37 @@ builtins! {
     /// after flushing stdout, and never returns. Runtime symbol
     /// `nova_rt_process_exit`. Std-only.
     ProcessExit,
+    /// `mem_load8(addr: Int) -> Int` — the byte at `addr`, zero-extended.
+    /// `std/rt`, the runtime of a WASM build, reads memory through this and
+    /// the eight builtins after it (spec
+    /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §5.1). Each is lowered to WASM instructions in line, and no native
+    /// backend has them. WASM-only: see [`Builtin::WASM_ONLY`].
+    MemLoad8,
+    /// `mem_store8(addr: Int, v: Int)` — store `v`'s low byte at `addr`.
+    /// WASM-only.
+    MemStore8,
+    /// `mem_load64(addr: Int) -> Int` — the 8 bytes at `addr`. WASM-only.
+    MemLoad64,
+    /// `mem_store64(addr: Int, v: Int)` — store `v` as 8 bytes at `addr`.
+    /// WASM-only.
+    MemStore64,
+    /// `mem_copy(dst: Int, src: Int, n: Int)` — copy `n` bytes from `src` to
+    /// `dst`; the two may overlap (`memory.copy`). WASM-only.
+    MemCopy,
+    /// `mem_fill(dst: Int, byte: Int, n: Int)` — set `n` bytes at `dst` to
+    /// `byte`'s low byte (`memory.fill`). WASM-only.
+    MemFill,
+    /// `mem_pages() -> Int` — the memory's size in 64 KiB pages
+    /// (`memory.size`). WASM-only.
+    MemPages,
+    /// `mem_grow(pages: Int) -> Int` — grow the memory by `pages`, returning
+    /// its size before, or -1 when it cannot grow (`memory.grow`). WASM-only.
+    MemGrow,
+    /// `heap_base() -> Int` — the heap's first address: the end of the data
+    /// segment, rounded up to 8, which the backend fixes when it lays the
+    /// module out. WASM-only.
+    HeapBase,
 }
 
 impl Builtin {
@@ -997,6 +1028,15 @@ impl Builtin {
             Builtin::ProcessArgCount => "process_arg_count",
             Builtin::ProcessArg => "process_arg",
             Builtin::ProcessExit => "process_exit",
+            Builtin::MemLoad8 => "mem_load8",
+            Builtin::MemStore8 => "mem_store8",
+            Builtin::MemLoad64 => "mem_load64",
+            Builtin::MemStore64 => "mem_store64",
+            Builtin::MemCopy => "mem_copy",
+            Builtin::MemFill => "mem_fill",
+            Builtin::MemPages => "mem_pages",
+            Builtin::MemGrow => "mem_grow",
+            Builtin::HeapBase => "heap_base",
         }
     }
 
@@ -1106,6 +1146,23 @@ impl Builtin {
         Builtin::ProcessArgCount,
         Builtin::ProcessArg,
         Builtin::ProcessExit,
+    ];
+
+    /// Builtins seeded into an std module's scope only when the target is
+    /// [`CompileTarget::Wasm`]: the memory access `std/rt` is written on (spec
+    /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §3.3, §5.1). They are not in [`Builtin::STD_ONLY`], so a native build
+    /// has none of them, in std or anywhere else.
+    pub const WASM_ONLY: [Builtin; 9] = [
+        Builtin::MemLoad8,
+        Builtin::MemStore8,
+        Builtin::MemLoad64,
+        Builtin::MemStore64,
+        Builtin::MemCopy,
+        Builtin::MemFill,
+        Builtin::MemPages,
+        Builtin::MemGrow,
+        Builtin::HeapBase,
     ];
 }
 
@@ -1666,6 +1723,18 @@ pub fn resolve_program(
     std_files: &[FileId],
     extra_std: Option<((&str, &str), FileId)>,
 ) -> ProgramResolution {
+    resolve_program_for(CompileTarget::Native, modules, std_files, extra_std)
+}
+
+/// [`resolve_program`] for `target`: its std modules
+/// ([`CompileTarget::std_modules`], one id per entry in `std_files`) and its rules
+/// (spec 4.0 §3.2, §3.3).
+pub fn resolve_program_for(
+    target: CompileTarget,
+    modules: &[ModuleSource],
+    std_files: &[FileId],
+    extra_std: Option<((&str, &str), FileId)>,
+) -> ProgramResolution {
     let mut definitions = Definitions::default();
     let mut diagnostics = Vec::new();
     let mut merged = Vec::new();
@@ -1675,7 +1744,8 @@ pub fn resolve_program(
     // Every `STD_MODULES` entry plus, only when the caller passed one, the
     // extra std module — combined here so the rest of this function has one
     // uniform list to iterate instead of a special case for the extra entry.
-    let std_entries: Vec<(&str, &str)> = STD_MODULES
+    let std_entries: Vec<(&str, &str)> = target
+        .std_modules()
         .iter()
         .copied()
         .chain(extra_std.map(|(entry, _)| entry))
@@ -1752,6 +1822,11 @@ pub fn resolve_program(
             for b in Builtin::STD_ONLY {
                 scope.values.insert(b.name().to_string(), Res::Builtin(b));
             }
+            if target == CompileTarget::Wasm {
+                for b in Builtin::WASM_ONLY {
+                    scope.values.insert(b.name().to_string(), Res::Builtin(b));
+                }
+            }
         }
         definitions.modules.push(scope);
         exports.push(Exports::default());
@@ -1786,6 +1861,24 @@ pub fn resolve_program(
             diagnostics[before..]
                 .iter_mut()
                 .for_each(|d| d.fixes.clear());
+        }
+    }
+
+    // A WASM build links no C library, so an `extern` block can name
+    // nothing (spec 4.0 §3.3).
+    if target == CompileTarget::Wasm {
+        for m in &all[..std_start] {
+            for item in &m.file.items {
+                if let Item::Extern(_) = &item.value {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "E0090",
+                            "extern functions are not available on target wasm",
+                        )
+                        .with_primary_label(item.span, "this `extern` block"),
+                    );
+                }
+            }
         }
     }
 
@@ -1890,6 +1983,53 @@ pub const STD_MODULES: [(&str, &str); 16] = [
     ("$std.http", nova_std::HTTP),
     ("$std.crypto", nova_std::CRYPTO),
     ("$std.process", nova_std::PROCESS),
+];
+
+/// What a program is compiled for (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §3).
+/// It decides which std modules are compiled
+/// ([`CompileTarget::std_modules`]),
+/// whether std sees [`Builtin::WASM_ONLY`], and whether `extern` blocks are
+/// allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompileTarget {
+    /// A native executable, through Cranelift or LLVM.
+    #[default]
+    Native,
+    /// A WASM module, with its JS shim.
+    Wasm,
+}
+
+impl CompileTarget {
+    /// The std modules compiled for this target, in module-index order.
+    pub fn std_modules(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            CompileTarget::Native => &STD_MODULES,
+            CompileTarget::Wasm => &WASM_STD_MODULES,
+        }
+    }
+
+    /// The target's name, as `--target` spells it and diagnostics say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            CompileTarget::Native => "native",
+            CompileTarget::Wasm => "wasm",
+        }
+    }
+}
+
+/// The std modules a WASM build compiles (spec 4.0 §3.2): the six of
+/// [`STD_MODULES`] that need no operating system, in the same order, then
+/// `std/rt`, the runtime written in Nova. Their names are those of
+/// [`STD_MODULES`], so `std/core` keeps its place first.
+pub const WASM_STD_MODULES: [(&str, &str); 7] = [
+    ("$std.core", nova_std::CORE),
+    ("$std.bytes", nova_std::BYTES),
+    ("$std.collections", nova_std::COLLECTIONS),
+    ("$std.strings", nova_std::STRINGS),
+    ("$std.fmt", nova_std::FMT),
+    ("$std.json", nova_std::JSON),
+    ("$std.rt", nova_std::RT),
 ];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
@@ -3181,6 +3321,91 @@ mod tests {
                 "`{name}` should resolve to the user's own definition"
             );
         }
+    }
+
+    /// Resolve one module for `target`, with a dummy file id per std module
+    /// (spec `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §3).
+    fn resolve_for(target: CompileTarget, src: &str) -> ProgramResolution {
+        let file = parse_file(src);
+        let mut sources = [ModuleSource::new("main", &file)];
+        name_imports(&mut sources);
+        let std_files: Vec<FileId> = target.std_modules().iter().map(|_| FileId::DUMMY).collect();
+        resolve_program_for(target, &sources, &std_files, None)
+    }
+
+    /// A WASM build compiles its own std (spec 4.0 §3.2): six of the native
+    /// modules, then `std/rt`, after the user's. A native build has no
+    /// `std/rt`.
+    #[test]
+    fn a_wasm_build_compiles_wasms_std_modules() {
+        let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
+        assert!(wasm.diagnostics.is_empty(), "{:?}", wasm.diagnostics);
+        let names: Vec<&str> = (1..=WASM_STD_MODULES.len())
+            .map(|m| wasm.definitions.module_name(ModuleId(m as u32)))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "$std.core",
+                "$std.bytes",
+                "$std.collections",
+                "$std.strings",
+                "$std.fmt",
+                "$std.json",
+                "$std.rt"
+            ]
+        );
+        let native = resolve_for(CompileTarget::Native, "fn main() { }\n");
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert!((1..=STD_MODULES.len())
+            .all(|m| native.definitions.module_name(ModuleId(m as u32)) != "$std.rt"));
+    }
+
+    /// The memory builtins are in every std module of a WASM build, and
+    /// nowhere else: not in a user module, and not in a native build at all
+    /// (spec 4.0 §3.3).
+    #[test]
+    fn the_memory_builtins_exist_only_in_a_wasm_builds_std() {
+        let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
+        let native = resolve_for(CompileTarget::Native, "fn main() { }\n");
+        for b in Builtin::WASM_ONLY {
+            let name = b.name();
+            for mid in 1..=WASM_STD_MODULES.len() {
+                assert!(
+                    matches!(
+                        wasm.definitions.resolve_value(ModuleId(mid as u32), name),
+                        Some(Res::Builtin(seen)) if seen == b
+                    ),
+                    "`{name}` must resolve inside WASM std module {mid}"
+                );
+            }
+            assert!(
+                wasm.definitions.resolve_value(ModuleId(0), name).is_none(),
+                "`{name}` must not resolve in a user module"
+            );
+            for mid in 0..=STD_MODULES.len() {
+                assert!(
+                    native
+                        .definitions
+                        .resolve_value(ModuleId(mid as u32), name)
+                        .is_none(),
+                    "`{name}` must not resolve in native module {mid}"
+                );
+            }
+        }
+    }
+
+    /// An `extern` block is E0090 on WASM, and accepted natively (spec 4.0
+    /// §3.3).
+    #[test]
+    fn an_extern_block_is_e0090_on_wasm() {
+        let src = "extern \"C\" {\n    fn abs(x: Int) -> Int\n}\nfn main() { }\n";
+        let wasm = resolve_for(CompileTarget::Wasm, src);
+        let codes: Vec<&str> = wasm.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["E0090"], "{:?}", wasm.diagnostics);
+        let native = resolve_for(CompileTarget::Native, src);
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
     }
 
     /// The other half of the std-only contract: each of these names *is*

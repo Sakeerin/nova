@@ -29,6 +29,30 @@ pub struct RunCmd {
 pub struct CheckCmd {
     /// The Nova source file to check (default: as for `nova run`).
     file: Option<PathBuf>,
+
+    /// What to check for: `native`, or `wasm`, with WASM's std and rules.
+    #[arg(long, value_enum, default_value_t = TargetArg::Native)]
+    target: TargetArg,
+}
+
+/// What `--target` names (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TargetArg {
+    /// A native executable.
+    Native,
+    /// A WASM module and its JS shim.
+    Wasm,
+}
+
+impl From<TargetArg> for nova_driver::Target {
+    fn from(target: TargetArg) -> Self {
+        match target {
+            TargetArg::Native => nova_driver::Target::Native,
+            TargetArg::Wasm => nova_driver::Target::Wasm,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -124,7 +148,7 @@ pub fn check(cmd: CheckCmd) -> Result<()> {
     project::sync(&mode)?;
     let program = mode.program(Roots::Check);
     let entry = entry(&program);
-    match nova_driver::check_program(program)? {
+    match nova_driver::check_program_for(program, cmd.target.into())? {
         Outcome::Ok(()) => {
             println!("ok: {}", entry.display());
             Ok(())
