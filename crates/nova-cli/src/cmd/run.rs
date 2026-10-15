@@ -71,6 +71,23 @@ pub struct BuildCmd {
     /// backend.
     #[arg(long)]
     release: bool,
+
+    /// What to build for: `native`, an executable; or `wasm`, a page in a
+    /// directory (default: dist/ at the project's root, or in the current
+    /// directory), which `-o` names.
+    #[arg(long, value_enum, default_value_t = TargetArg::Native)]
+    target: TargetArg,
+}
+
+#[derive(Args)]
+pub struct BundleCmd {
+    /// The Nova source file to build (default: as for `nova run`).
+    file: Option<PathBuf>,
+
+    /// The directory to write (default: dist/ at the project's root, or in
+    /// the current directory).
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 /// The program's entry, which `nova run` passes as its first argument and
@@ -99,7 +116,49 @@ pub fn run(cmd: RunCmd) -> Result<()> {
     }
 }
 
+/// `nova bundle`: `nova build --target wasm` (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §3.1).
+pub fn bundle(cmd: BundleCmd) -> Result<()> {
+    build(BuildCmd {
+        file: cmd.file,
+        output: cmd.output,
+        release: false,
+        target: TargetArg::Wasm,
+    })
+}
+
+/// `nova build --target wasm`: `dist/` at the project's root, or in the
+/// current directory, unless `-o` names it (spec 4.0 §7).
+fn build_wasm(cmd: BuildCmd) -> Result<()> {
+    if cmd.release {
+        anyhow::bail!("`--release` does not apply to `--target wasm`");
+    }
+    let mode = project::mode(cmd.file)?;
+    project::refuse_library(&mode)?;
+    project::sync(&mode)?;
+    let program = project::program_to_run(&mode)?;
+    let output = match (cmd.output, &mode) {
+        (Some(output), _) => output,
+        (None, Mode::Project { root, .. }) => root.join("dist"),
+        (None, Mode::File(_)) => PathBuf::from("dist"),
+    };
+    match nova_driver::build_program_wasm(program, &output)? {
+        Outcome::Ok(dir) => {
+            println!("built {}", dir.display());
+            Ok(())
+        }
+        Outcome::Failed { errors } => anyhow::bail!(
+            "could not compile due to {errors} previous error{}",
+            if errors == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 pub fn build(cmd: BuildCmd) -> Result<()> {
+    if cmd.target == TargetArg::Wasm {
+        return build_wasm(cmd);
+    }
     let mode = project::mode(cmd.file)?;
     project::refuse_library(&mode)?;
     project::sync(&mode)?;

@@ -174,6 +174,34 @@ pub fn build_program(program: Program, output: &Path) -> Result<Outcome<PathBuf>
     Ok(Outcome::Ok(output.to_path_buf()))
 }
 
+/// Build `program` for WASM into `out_dir`: `index.html`, `app.js` and
+/// `app.wasm`, replacing those three and leaving the rest of the directory
+/// alone (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §7).
+pub fn build_program_wasm(program: Program, out_dir: &Path) -> Result<Outcome<PathBuf>> {
+    let mir = match lower_to_mir_for(program, Target::Wasm)? {
+        Outcome::Ok(mir) => mir,
+        Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
+    };
+    let output = nova_codegen_wasm::compile_module(&mir)
+        .context("internal WASM codegen error (this is a compiler bug)")?;
+    let app_js = nova_codegen_wasm::shim(&output.imports)
+        .context("internal WASM codegen error (this is a compiler bug)")?;
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("failed to create {}", out_dir.display()))?;
+    for (name, bytes) in [
+        ("index.html", nova_codegen_wasm::INDEX_HTML.as_bytes()),
+        ("app.js", app_js.as_bytes()),
+        ("app.wasm", output.wasm.as_slice()),
+    ] {
+        let path = out_dir.join(name);
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(Outcome::Ok(out_dir.to_path_buf()))
+}
+
 /// An intermediate-file path derived from `output` that can never alias it:
 /// the full output file name plus `.nova.<ext>` (so even `-o out.ll` /
 /// `-o out.obj` yield a distinct `out.ll.nova.ll` / `out.obj.nova.obj` and the
@@ -622,11 +650,16 @@ fn synthesize_test_main(main_id: DefId, tests: &[TestFn]) -> hir::Function {
 
 /// Run the front end and MIR lowering, rendering any diagnostics.
 fn lower_to_mir(program: Program) -> Result<Outcome<nova_mir::Module>> {
-    let mut ctx = FrontendContext::new(program)?;
+    lower_to_mir_for(program, Target::Native)
+}
+
+/// [`lower_to_mir`] for `target`.
+fn lower_to_mir_for(program: Program, target: Target) -> Result<Outcome<nova_mir::Module>> {
+    let mut ctx = FrontendContext::new(program)?.for_target(target);
     let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? else {
         return Ok(Outcome::Failed { errors: ctx.errors });
     };
-    match nova_mir::lower_module(&module) {
+    match nova_mir::lower_module_with(&module, &mir_options(ctx.runtime.as_ref())) {
         Ok(mir) => Ok(Outcome::Ok(mir)),
         Err(diags) => {
             ctx.render(&diags);

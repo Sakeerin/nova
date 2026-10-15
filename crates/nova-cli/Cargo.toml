@@ -61,3 +61,7 @@ insta = { workspace = true }
 serde_json = { workspace = true }
 # The stand-in GitHub API the registry tests share with nova-index's.
 base64 = { workspace = true }
+# The WASM gate's size check (spec
+# docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §9.5);
+# already a build dependency, so the lockfile does not change.
+flate2 = { workspace = true }
