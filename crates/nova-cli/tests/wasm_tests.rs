@@ -543,6 +543,50 @@ fn gate_panics(name: &str, message: &str, printed: fn(&str) -> bool) {
     assert!(printed(&stdout(&a)), "stdout: {}", stdout(&a));
 }
 
+/// Each line of `text`, with a leading `to_iso8601` timestamp, where there
+/// is a well-formed one, written `<time>`.
+fn untimed(text: &str) -> Vec<String> {
+    let stamp = |s: &str| {
+        s.len() == 24
+            && s.bytes().enumerate().all(|(i, c)| match i {
+                4 | 7 => c == b'-',
+                10 => c == b'T',
+                13 | 16 => c == b':',
+                19 => c == b'.',
+                23 => c == b'Z',
+                _ => c.is_ascii_digit(),
+            })
+    };
+    text.lines()
+        .map(|l| match l.split_once(' ') {
+            Some((s, rest)) if stamp(s) => format!("<time> {rest}"),
+            _ => l.to_string(),
+        })
+        .collect()
+}
+
+/// One of the gate's log programs (spec 4.1 §9.2): built for WASM, it
+/// writes these lines under Node, as `run_tests.rs` checks them natively,
+/// and its stdout is its `.stdout` file where it has one.
+fn gate_log(name: &str, out: &[&str], err: &[&str]) {
+    let Some(node) = node() else { return };
+    let source = repo_root()
+        .join("tests/runtime")
+        .join(format!("{name}.nova"));
+    let dir = fresh(&format!("gate-{name}"));
+    let dist = build_wasm(&dir, &source);
+    let a = run_wasm(node, &dist).success();
+    if let Ok(expected) = std::fs::read_to_string(source.with_extension("stdout")) {
+        assert_eq!(
+            stdout(&a),
+            expected.replace("\r\n", "\n"),
+            "the .stdout file"
+        );
+    }
+    assert_eq!(untimed(&stdout(&a)), out, "stdout");
+    assert_eq!(untimed(&stderr(&a)), err, "stderr");
+}
+
 macro_rules! gate {
     ($($name:ident),+ $(,)?) => {
         $(
@@ -605,7 +649,80 @@ mod gate {
         json_round_trip,
         json_stringify,
         json_stringify_escapes,
+        // Channels, without a task.
+        channel_clamps_buffer_below_one,
+        channel_close_refuses_send,
+        channel_close_then_drain,
+        channel_enqueue_wraps_after_dequeue,
+        channel_fifo_order,
+        channel_full_refuses,
+        channel_uncontended,
+        // Time.
+        system_time_iso8601,
+        system_time_now,
+        time_conversions,
+        time_saturation,
     );
+
+    #[test]
+    fn log_default_level() {
+        super::gate_log(
+            "log_default_level",
+            &["done"],
+            &[
+                "<time> INFO yes-info",
+                "<time> WARN yes-warn",
+                "<time> ERROR yes-error",
+            ],
+        );
+    }
+
+    #[test]
+    fn log_init_with_threshold() {
+        super::gate_log(
+            "log_init_with_threshold",
+            &["done"],
+            &["<time> WARN kept-warn", "<time> ERROR kept-error"],
+        );
+    }
+
+    #[test]
+    fn log_reconfigure_after_logging() {
+        super::gate_log(
+            "log_reconfigure_after_logging",
+            &["done"],
+            &["<time> INFO before", "<time> ERROR after-kept"],
+        );
+    }
+
+    #[test]
+    fn log_init_resets_to_default() {
+        super::gate_log(
+            "log_init_resets_to_default",
+            &["done"],
+            &["<time> INFO yes"],
+        );
+    }
+
+    #[test]
+    fn log_stdout_output() {
+        super::gate_log("log_stdout_output", &["<time> INFO on-stdout"], &[]);
+    }
+
+    #[test]
+    fn log_level_labels() {
+        super::gate_log(
+            "log_level_labels",
+            &[
+                "<time> TRACE a",
+                "<time> DEBUG b",
+                "<time> INFO c",
+                "<time> WARN d",
+                "<time> ERROR e",
+            ],
+            &[],
+        );
+    }
 
     #[test]
     fn panic_unwrap() {

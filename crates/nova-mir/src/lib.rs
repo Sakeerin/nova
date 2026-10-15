@@ -911,6 +911,11 @@ impl RtFunc {
             RtFunc::BytesFromInts => WasmRuntime::Nova("rt_bytes_from_ints"),
             RtFunc::BytesEq => WasmRuntime::Nova("rt_bytes_eq"),
             RtFunc::IntHashSeed => WasmRuntime::Host("int_hash_seed"),
+            RtFunc::TimeNowNanos => WasmRuntime::Host("time_now_nanos"),
+            RtFunc::TimeNowEpochNanos => WasmRuntime::Host("time_now_epoch_nanos"),
+            RtFunc::LogConfigLevel => WasmRuntime::Nova("rt_log_config_level"),
+            RtFunc::LogConfigToStderr => WasmRuntime::Nova("rt_log_config_to_stderr"),
+            RtFunc::LogSetConfig => WasmRuntime::Nova("rt_log_set_config"),
             RtFunc::TestSelector
             | RtFunc::TaskSpawn
             | RtFunc::TaskBlockOn
@@ -959,11 +964,6 @@ impl RtFunc {
             | RtFunc::CryptoHash
             | RtFunc::CryptoRandomBytes
             | RtFunc::CryptoRandomInt
-            | RtFunc::TimeNowNanos
-            | RtFunc::TimeNowEpochNanos
-            | RtFunc::LogConfigLevel
-            | RtFunc::LogConfigToStderr
-            | RtFunc::LogSetConfig
             | RtFunc::ShutdownRequested
             | RtFunc::ProcessArgCount
             | RtFunc::ProcessArg
