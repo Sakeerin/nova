@@ -122,3 +122,23 @@ fn a_user_module_cannot_call_a_memory_builtin() {
         stderr(&a)
     );
 }
+
+/// A program that needs a runtime function WASM lacks is E0091, from
+/// `check` as from `build` (spec §3.3).
+#[test]
+fn check_for_wasm_reports_a_runtime_function_wasm_lacks() {
+    let dir = fresh("check-async");
+    write(
+        &dir,
+        &[("main.nova", "async fn main() { println(\"a\") }\n")],
+    );
+    let a = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
+    assert!(
+        stderr(&a).contains(
+            "error[E0091]: this program needs `task_block_on`, which target wasm does not have"
+        ),
+        "{}",
+        stderr(&a)
+    );
+    nova_in(&dir, &["check", "main.nova"]).success();
+}

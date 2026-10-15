@@ -1083,6 +1083,7 @@ mod tests {
                 blocks: vec![crate::Block { stmts, term }],
             }],
             externs: Vec::new(),
+            runtime_alloc: None,
         }
     }
 
@@ -1607,6 +1608,7 @@ mod tests {
                 blocks,
             }],
             externs: Vec::new(),
+            runtime_alloc: None,
         }
     }
 

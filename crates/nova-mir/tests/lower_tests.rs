@@ -1806,3 +1806,138 @@ fn an_async_main_is_wrapped_in_a_shim_that_drives_it() {
         "the user's body must still have been split into a poll fn: {names:?}"
     );
 }
+
+/// `src` lowered for WASM (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §5.4): resolved against WASM's std, with `std/rt`'s functions found by
+/// name as the driver finds them.
+fn wasm_mir_for(src: &str) -> Result<nova_mir::Module, Vec<nova_diagnostics::Diagnostic>> {
+    use nova_resolver::{CompileTarget, Def, DefKind, ModuleSource};
+    let (tokens, lex_errors) = lex(src, FileId::DUMMY);
+    assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+    let (ast, parse_errors) = parse(&tokens, FileId::DUMMY);
+    assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+    let ast = ast.expect("no AST");
+    let mut sources = [ModuleSource::new("main", &ast)];
+    nova_resolver::name_imports(&mut sources);
+    let std_files: Vec<FileId> = CompileTarget::Wasm
+        .std_modules()
+        .iter()
+        .map(|_| FileId::DUMMY)
+        .collect();
+    let resolved =
+        nova_resolver::resolve_program_for(CompileTarget::Wasm, &sources, &std_files, None);
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "resolve: {:?}",
+        resolved.diagnostics
+    );
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(
+        checked.diagnostics.is_empty(),
+        "typeck: {:?}",
+        checked.diagnostics
+    );
+    let defs = &resolved.definitions;
+    let mut impls = nova_mir::RuntimeImpls::default();
+    for f in &checked.module.functions {
+        if let Some(Def {
+            kind: DefKind::Fn { item_index },
+            ..
+        }) = defs.defs().get(f.def_id.0 as usize)
+        {
+            if defs.module_name(defs.module_of(*item_index)) == "$std.rt" {
+                impls.functions.insert(f.name.clone(), f.def_id);
+            }
+        }
+    }
+    nova_mir::lower_module_with(
+        &checked.module,
+        &nova_mir::Options {
+            runtime: Some(&impls),
+        },
+    )
+}
+
+/// On WASM, a runtime function `std/rt` implements is a direct call to it,
+/// and the module gains that function; the shim's stay `CallRuntime`s; the
+/// allocator is a root, named in `runtime_alloc` (spec 4.0 §5.4).
+#[test]
+fn a_wasm_build_calls_std_rt_where_a_native_build_calls_the_runtime() {
+    let src = "fn main() { println(\"n = ${7}\") }";
+    let mir = wasm_mir_for(src).expect("lowers for WASM");
+    let main = stmts_of(&mir, "main");
+    assert_eq!(count_rt(&main, nova_mir::RtFunc::IntToStr), 0);
+    assert_eq!(count_rt(&main, nova_mir::RtFunc::StrConcat), 0);
+    assert_eq!(count_rt(&main, nova_mir::RtFunc::Println), 1);
+    let calls: Vec<&str> = main
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::Call { callee, .. } => Some(callee.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.iter().any(|c| c.starts_with("rt_int_to_str.")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.starts_with("rt_str_concat.")),
+        "{calls:?}"
+    );
+    let names = function_names(&mir);
+    for f in [
+        "rt_int_to_str.",
+        "rt_str_concat.",
+        "rt_str_alloc.",
+        "rt_alloc.",
+    ] {
+        assert!(names.iter().any(|n| n.starts_with(f)), "{f}: {names:?}");
+    }
+    let alloc = mir
+        .runtime_alloc
+        .as_deref()
+        .expect("the allocator is named");
+    assert!(alloc.starts_with("rt_alloc."), "{alloc}");
+    assert!(names.contains(&alloc), "{names:?}");
+
+    // Natively, nothing changes.
+    let native = mir_for(src);
+    assert_eq!(
+        count_rt(&stmts_of(&native, "main"), nova_mir::RtFunc::IntToStr),
+        1
+    );
+    assert_eq!(native.runtime_alloc, None);
+}
+
+/// Only what the program reaches joins it: a literal needs no `Int` text.
+#[test]
+fn a_wasm_build_holds_only_the_runtime_functions_it_reaches() {
+    let mir = wasm_mir_for("fn main() { println(\"hi\") }").expect("lowers for WASM");
+    let names = function_names(&mir);
+    assert!(
+        names.iter().any(|n| n.starts_with("rt_alloc.")),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with("rt_int_to_str.")),
+        "{names:?}"
+    );
+}
+
+/// A runtime function WASM lacks is E0091, naming it (spec 4.0 §3.3).
+#[test]
+fn a_runtime_function_wasm_lacks_is_e0091() {
+    let diags = wasm_mir_for("async fn main() { println(\"a\") }").expect_err("refused");
+    let messages: Vec<(&str, &str)> = diags
+        .iter()
+        .map(|d| (d.code.as_str(), d.message.as_str()))
+        .collect();
+    assert_eq!(
+        messages,
+        [(
+            "E0091",
+            "this program needs `task_block_on`, which target wasm does not have"
+        )]
+    );
+}

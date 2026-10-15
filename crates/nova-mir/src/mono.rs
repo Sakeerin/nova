@@ -5,16 +5,45 @@ use nova_diagnostics::Diagnostic;
 use nova_hir as hir;
 use nova_hir::Ty;
 use nova_resolver::DefId;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::lower::lower_function;
-use crate::{mangle, mir_ty, ExternDecl, Function, MirTy, Module, Temp};
+use crate::{mangle, mir_ty, ExternDecl, Function, MirTy, Module, RtFunc, Stmt, Temp, WasmRuntime};
+
+/// `std/rt`'s functions, by name: what a WASM build calls where a native one
+/// calls `nova-runtime` (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §5.4).
+#[derive(Debug, Default)]
+pub struct RuntimeImpls {
+    pub functions: FxHashMap<String, DefId>,
+}
+
+/// How [`lower_module_with`] lowers.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Options<'a> {
+    /// For a WASM build: each [`WasmRuntime::Nova`] runtime function becomes
+    /// a call to its `std/rt` function, which joins the module; each
+    /// [`WasmRuntime::Unavailable`] one is E0091. `None` lowers natively.
+    pub runtime: Option<&'a RuntimeImpls>,
+}
+
+/// The name of `std/rt`'s allocator, a root of every WASM build.
+const RT_ALLOC: &str = "rt_alloc";
 
 /// Lower a typed HIR module to monomorphized MIR.
 ///
 /// Instances are discovered from `main` outward, so unreferenced functions
 /// (and never-instantiated generic functions) are not emitted.
 pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
+    lower_module_with(module, &Options::default())
+}
+
+/// [`lower_module`] as `options` say: natively, or for WASM with `std/rt`.
+pub fn lower_module_with(
+    module: &hir::Module,
+    options: &Options,
+) -> Result<Module, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
     let Some(main) = module.functions.iter().find(|f| f.name == "main") else {
         diagnostics.push(Diagnostic::error(
@@ -32,9 +61,22 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     }
 
     let entry = main.def_id;
+    let main_span = main.span;
     let mut mir = Module::default();
     let mut done: FxHashSet<String> = FxHashSet::default();
     let mut worklist: Vec<(DefId, Vec<Ty>)> = vec![(entry, Vec::new())];
+    // A WASM build's allocator is a root: the backend calls it for every
+    // `Make*`, and the async transform adds calls to it after this loop.
+    if let Some(impls) = options.runtime {
+        if let Some((&def, name)) = impls
+            .functions
+            .get(RT_ALLOC)
+            .and_then(|def| module.function(*def).map(|f| (def, &f.name)))
+        {
+            mir.runtime_alloc = Some(mangle(def, name, &[]));
+            worklist.push((def, Vec::new()));
+        }
+    }
     // The symbol an `async fn main` was lowered under, once it has been
     // lowered — the future-building wrapper `async_main_shim` calls. `None`
     // for the ordinary case of a non-async entry point.
@@ -227,7 +269,14 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         }
         let mut request = |def: DefId, args: Vec<Ty>| worklist.push((def, args));
         match lower_function(&specialized, &name, module, entry, &mut request) {
-            Ok(f) => mir.functions.push(f),
+            Ok(mut f) => {
+                if let Some(impls) = options.runtime {
+                    for def in route_runtime(&mut f, impls, module) {
+                        worklist.push((def, Vec::new()));
+                    }
+                }
+                mir.functions.push(f)
+            }
             Err(d) => diagnostics.extend(d),
         }
     }
@@ -242,6 +291,17 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
         // it needs no generics resolved and lands once for both codegen
         // backends.
         crate::async_lower::transform(&mut mir);
+        if let Some(impls) = options.runtime {
+            // The transform's state objects call `RtFunc::Alloc`, whose
+            // function is a root and so lowered already.
+            for f in &mut mir.functions {
+                route_runtime(f, impls, module);
+            }
+            diagnostics.extend(unavailable_on_wasm(&mir, main_span));
+            if !diagnostics.is_empty() {
+                return Err(diagnostics);
+            }
+        }
         debug_assert!(
             mir.functions.iter().all(|f| !f.is_async),
             "the async transform must leave no function flagged: one that reaches \
@@ -262,6 +322,66 @@ pub fn lower_module(module: &hir::Module) -> Result<Module, Vec<Diagnostic>> {
     } else {
         Err(diagnostics)
     }
+}
+
+/// Turn each of `f`'s calls to a [`WasmRuntime::Nova`] runtime function into
+/// a call to its `std/rt` function, returning those functions for the
+/// worklist (spec 4.0 §5.4). A name `impls` lacks stays a `CallRuntime`, and
+/// [`unavailable_on_wasm`] reports it.
+fn route_runtime(f: &mut Function, impls: &RuntimeImpls, module: &hir::Module) -> Vec<DefId> {
+    let mut needed = Vec::new();
+    for block in &mut f.blocks {
+        for stmt in &mut block.stmts {
+            let Stmt::CallRuntime { dst, func, args } = stmt else {
+                continue;
+            };
+            let WasmRuntime::Nova(name) = func.on_wasm() else {
+                continue;
+            };
+            let Some((&def, hir_name)) = impls
+                .functions
+                .get(name)
+                .and_then(|def| module.function(*def).map(|g| (def, &g.name)))
+            else {
+                continue;
+            };
+            *stmt = Stmt::Call {
+                dst: *dst,
+                callee: mangle(def, hir_name, &[]),
+                args: std::mem::take(args),
+            };
+            needed.push(def);
+        }
+    }
+    needed
+}
+
+/// E0091 for each runtime function the module still calls that is neither
+/// the shim's nor routed to `std/rt` (spec 4.0 §3.3), once per function.
+fn unavailable_on_wasm(mir: &Module, main_span: nova_diagnostics::Span) -> Vec<Diagnostic> {
+    let mut seen: Vec<RtFunc> = Vec::new();
+    for stmt in mir
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.stmts)
+    {
+        if let Stmt::CallRuntime { func, .. } = stmt {
+            if !matches!(func.on_wasm(), WasmRuntime::Host(_)) && !seen.contains(func) {
+                seen.push(*func);
+            }
+        }
+    }
+    seen.iter()
+        .map(|func| {
+            let name = func.symbol().trim_start_matches("nova_rt_");
+            Diagnostic::error(
+                "E0091",
+                format!("this program needs `{name}`, which target wasm does not have"),
+            )
+            .with_primary_label(main_span, "in the program this `main` starts")
+        })
+        .collect()
 }
 
 /// The `main` an `async fn main` gets: call the future-building wrapper
