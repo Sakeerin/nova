@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The package route (spec
 # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
-# §4): the 19 crates publish-crates.sh lists package and verify as
+# §4): the 20 crates publish-crates.sh lists package and verify as
 # crates.io would check them; each packaged Cargo.lock names only what the
 # workspace's names, at the same versions; `nova` installs from the unpacked
 # packages as `cargo install nova-cli` would from crates.io, a release build
@@ -36,8 +36,8 @@ done < <(tr -d '\r' < .github/scripts/publish-crates.sh | awk '
   /^crates=\(/ { listing = 1; next }
   listing && /^\)/ { exit }
   listing { gsub(/[ \t]/, ""); if ($0 != "" && $0 !~ /^#/) print }')
-if [ "${#crates[@]}" -ne 19 ] || [ -z "$version" ]; then
-  echo "package-gate: expected 19 crates and a version, found ${#crates[@]} and '$version'" >&2
+if [ "${#crates[@]}" -ne 20 ] || [ -z "$version" ]; then
+  echo "package-gate: expected 20 crates and a version, found ${#crates[@]} and '$version'" >&2
   exit 1
 fi
 echo "package-gate: ${#crates[@]} crates at $version, in $workdir"

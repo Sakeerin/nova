@@ -1070,6 +1070,7 @@ dependencies = [
  "nova-ast",
  "nova-codegen-cranelift",
  "nova-codegen-llvm",
+ "nova-codegen-wasm",
  "nova-diagnostics",
  "nova-hir",
  "nova-lexer",

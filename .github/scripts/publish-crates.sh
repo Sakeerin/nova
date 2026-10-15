@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes the 19 crates to crates.io, in the order below (spec
+# Publishes the 20 crates to crates.io, in the order below (spec
 # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
 # §5.2). It runs from the repository's root, and refuses unless VERSION is
 # the workspace's version there: `cargo publish` uploads the version the
@@ -57,6 +57,7 @@ crates=(
   nova-typeck
   nova-codegen-cranelift
   nova-codegen-llvm
+  nova-codegen-wasm
   nova-driver
   nova-doc
   nova-lsp

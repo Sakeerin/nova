@@ -1,4 +1,4 @@
-# Publishes the 19 crates to crates.io (spec
+# Publishes the 20 crates to crates.io (spec
 # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
 # §5.1). It runs only when started by hand, from the Actions tab ("Run
 # workflow", with the tag v<version> chosen under "Use workflow from") or
@@ -12,7 +12,7 @@
 # on the same tag.
 #
 # Before the first upload, publish-crates.sh checks that every one of the
-# 19 names crates.io already has is owned by the repository's owner
+# 20 names crates.io already has is owned by the repository's owner
 # (NOVA_PUBLISH_OWNER below; crates.io's logins are GitHub logins), and
 # stops otherwise with nothing published: someone else's crate under one
 # of these names would be skipped as if it were ours, then built, build
@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     # The maintainer can require their own approval in this environment.
     environment: crates-io
-    # 19 new crates at one every 15 minutes, after the package gate; a
+    # 20 new crates at one every 15 minutes, after the package gate; a
     # hosted runner's job may last 360.
     timeout-minutes: 345
     steps:
@@ -89,10 +89,10 @@ jobs:
       # ref could change under it, runs before the step that holds the
       # token. No Swatinem/rust-cache either: this job restores nothing
       # another workflow saved.
-      - name: Package the 19 crates, install nova from them, run the gate
+      - name: Package the 20 crates, install nova from them, run the gate
         shell: bash
         run: bash .github/scripts/package-gate.sh "$RUNNER_TEMP/package-gate"
-      - name: Publish the 19 crates, skipping any crates.io already has
+      - name: Publish the 20 crates, skipping any crates.io already has
         shell: bash
         env:
           VERSION: ${{ inputs.version }}

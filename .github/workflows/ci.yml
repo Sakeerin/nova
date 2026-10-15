@@ -246,7 +246,7 @@ jobs:
 
   # The package route (spec
   # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
-  # §4): the 19 crates crates.io will get package and verify, their
+  # §4): the 20 crates crates.io will get package and verify, their
   # lockfiles agree with the workspace's, and a `nova` installed from the
   # packages, as `cargo install nova-cli` installs from crates.io, embeds
   # its runtime and passes the Phase 3.0 gate. The install job above
@@ -262,7 +262,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Package the 19 crates, install nova from them, run the gate
+      - name: Package the 20 crates, install nova from them, run the gate
         shell: bash
         run: bash .github/scripts/package-gate.sh "$RUNNER_TEMP/package-gate"
 

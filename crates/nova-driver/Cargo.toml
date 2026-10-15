@@ -27,6 +27,7 @@ nova-mir = { workspace = true }
 nova-pm = { workspace = true }
 nova-codegen-cranelift = { workspace = true }
 nova-codegen-llvm = { workspace = true }
+nova-codegen-wasm = { workspace = true }
 # Unpacking the runtime library nova-cli embeds (spec
 # 2026-10-07-phase-3-0-foundations-design.md §4.2).
 flate2 = { workspace = true }

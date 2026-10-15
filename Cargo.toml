@@ -16,7 +16,7 @@ repository = "https://github.com/Sakeerin/nova"
 homepage = "https://github.com/Sakeerin/nova"
 
 [workspace.dependencies]
-# The 19 crates published to crates.io, for the normal and build
+# The 20 crates published to crates.io, for the normal and build
 # dependencies between them (spec
 # docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
 # §3.2). Each pin is exact and equals the version above: the crates are
@@ -28,6 +28,7 @@ nova-ast = { path = "crates/nova-ast", version = "=0.3.2" }
 nova-cli = { path = "crates/nova-cli", version = "=0.3.2" }
 nova-codegen-cranelift = { path = "crates/nova-codegen-cranelift", version = "=0.3.2" }
 nova-codegen-llvm = { path = "crates/nova-codegen-llvm", version = "=0.3.2" }
+nova-codegen-wasm = { path = "crates/nova-codegen-wasm", version = "=0.3.2" }
 nova-diagnostics = { path = "crates/nova-diagnostics", version = "=0.3.2" }
 nova-doc = { path = "crates/nova-doc", version = "=0.3.2" }
 nova-driver = { path = "crates/nova-driver", version = "=0.3.2" }
