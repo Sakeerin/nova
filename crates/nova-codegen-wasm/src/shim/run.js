@@ -10,7 +10,30 @@ async function load(options) {
   return WebAssembly.instantiateStreaming(fetch(url), imports);
 }
 
-// Load app.wasm and run `main`. A panic or a trap ends the program as a
+// The event loop, for a module with an `async fn main` (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §5): `nova_turn` runs what is due and returns the milliseconds until the
+// next deadline, or -1 once no task waits, and a timer calls it again. A
+// timer that fires early makes a turn that only says what is left.
+function turns() {
+  return new Promise((resolve, reject) => {
+    const turn = () => {
+      let delay;
+      try {
+        delay = Number(wasm.nova_turn());
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      if (delay < 0) resolve();
+      else setTimeout(turn, Math.min(delay, 2147483647));
+    };
+    turn();
+  });
+}
+
+// Load app.wasm and run `main`, then its turns, if it has any: the promise
+// resolves when the program ends. A panic or a trap ends the program as a
 // native build ends: its message on stderr and, under Node, the exit status
 // of an abort (134) or of a trap (132).
 export default async function init(options = {}) {
@@ -18,6 +41,7 @@ export default async function init(options = {}) {
   wasm = instance.exports;
   try {
     wasm.main();
+    if (wasm.nova_turn) await turns();
   } catch (e) {
     let status;
     if (e instanceof NovaPanic) {

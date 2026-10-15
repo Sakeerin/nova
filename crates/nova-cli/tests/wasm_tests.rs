@@ -160,6 +160,118 @@ fn a_user_module_cannot_call_a_memory_builtin() {
     );
 }
 
+/// While an `async fn main` sleeps, it has returned to JS, which runs
+/// other work, here an interval's ticks; `init` resolves when the program
+/// ends (spec 4.1 §5, §7.2).
+#[test]
+fn an_async_main_returns_to_js_while_it_sleeps() {
+    let Some(node) = node() else { return };
+    let dir = fresh("event-loop");
+    write(
+        &dir,
+        &[
+            (
+                "main.nova",
+                "async fn main() {\n    sleep(Duration::from_millis(100)).await\n    println(\"woke\")\n}\n",
+            ),
+            (
+                "run.mjs",
+                "import init from \"./dist/app.js\";\nlet ticks = 0;\nconst timer = setInterval(() => ticks++, 5);\nawait init();\nclearInterval(timer);\nconsole.log(ticks > 0 ? \"responsive\" : \"blocked\");\n",
+            ),
+        ],
+    );
+    build_wasm(&dir, Path::new("main.nova"));
+    let mut node = node;
+    let a = node
+        .arg(dir.join("run.mjs"))
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+    assert_eq!(stdout(&a), "woke\nresponsive\n");
+}
+
+/// Only a module with an `async fn main` exports the turn: one without
+/// keeps 4.0's shape (spec 4.1 §5).
+#[test]
+fn only_an_async_main_exports_the_turn() {
+    let Some(node) = node() else { return };
+    let dir = fresh("turn-export");
+    write(
+        &dir,
+        &[
+            ("sync/main.nova", "fn main() { println(\"a\") }\n"),
+            ("async/main.nova", "async fn main() { println(\"a\") }\n"),
+            (
+                "exports.cjs",
+                "const fs = require(\"fs\");\nconst m = new WebAssembly.Module(fs.readFileSync(process.argv[2]));\nconsole.log(WebAssembly.Module.exports(m).map((e) => e.name).join(\" \"));\n",
+            ),
+        ],
+    );
+    let mut seen = Vec::new();
+    for kind in ["sync", "async"] {
+        let dist = build_wasm(&dir.join(kind), Path::new("main.nova"));
+        let mut node = Command::new("node");
+        let a = node
+            .arg(dir.join("exports.cjs"))
+            .arg(dist.join("app.wasm"))
+            .assert()
+            .success();
+        seen.push(stdout(&a));
+    }
+    drop(node);
+    assert_eq!(seen[0], "main memory nova_alloc nova_alloc_leaf\n");
+    assert_eq!(
+        seen[1],
+        "main memory nova_alloc nova_alloc_leaf nova_turn\n"
+    );
+}
+
+/// A panic in a later turn, on a timer, ends the program as one in `main`
+/// does (spec 4.1 §5).
+#[test]
+fn a_panic_in_a_later_turn_exits_134() {
+    let Some(node) = node() else { return };
+    let dir = fresh("late-panic");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "async fn main() {\n    println(\"before\")\n    sleep(Duration::from_millis(10)).await\n    panic(\"late\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "before\n");
+    assert_eq!(stderr(&a), "nova: panic: late\n");
+}
+
+/// Tasks of an `async fn main` that wait on each other are reported by a
+/// turn, as natively, and abort (spec 4.1 §4.5, §5).
+#[test]
+fn a_deadlock_under_async_main_is_reported_as_natively() {
+    let dir = fresh("async-deadlock");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "async fn wait_for(h: JoinHandle<()>) { h.join().await }\n\n\
+             async fn main() {\n    let mut h = JoinHandle { fut: yield_now() }\n    \
+             let t = spawn(wait_for(h))\n    h.fut = t.fut\n    t.join().await\n    \
+             println(\"unreachable\")\n}\n",
+        )],
+    );
+    let report = "nova: deadlock: 2 tasks are parked and none can wake\n  \
+                  task 0 is waiting for task 1 to finish\n  \
+                  task 1 is waiting for task 1 to finish\n";
+    let native = nova_in(&dir, &["run", "main.nova"]).failure();
+    assert_eq!(stderr(&native), report);
+    let Some(node) = node() else { return };
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "");
+    assert_eq!(stderr(&a), report);
+}
+
 /// An `async fn main`, which was E0091, checks and runs on WASM (spec 4.1
 /// §4.4).
 #[test]
@@ -212,9 +324,13 @@ fn build_wasm(dir: &Path, file: &Path) -> PathBuf {
     dist
 }
 
-/// `node dist/app.js`, with no backtrace from `nova` involved.
+/// `node dist/app.js`, with no backtrace from `nova` involved, killed
+/// after a minute: a channel program that regresses hangs rather than
+/// fails (spec 4.1 §9.2).
 fn run_wasm(mut node: Command, dist: &Path) -> Assert {
-    node.arg(dist.join("app.js")).assert()
+    node.arg(dist.join("app.js"))
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
 }
 
 /// `dist/` holds the page, the shim and the module, and `nova build`
@@ -689,7 +805,45 @@ mod gate {
         interpolation_nary,
         spawned_output_survives_release,
         task_sleep_order,
+        // `async fn main`, on the event loop: sleeps and timeouts.
+        time_elapsed,
+        timeout_elapsed,
+        timeout_elapsed_then_join,
+        timeout_elapsed_twice,
+        timeout_join_elapsed,
+        timeout_join_ok,
+        timeout_ok,
+        timeout_value,
+        // Mutexes and channels between tasks.
+        channel_recv_suspends_only_to_retry,
+        channel_send_refuses_when_closed,
+        channel_send_suspends_only_to_retry,
+        channel_two_tasks_blocking,
+        sync_mutex_int_set_serialises,
+        sync_mutex_release_is_idempotent,
+        sync_mutex_stale_guard_cannot_steal,
+        sync_mutex_stale_guard_cannot_write,
+        sync_mutex_try_lock_fails_when_held,
+        sync_mutex_two_tasks_serialise,
+        sync_mutex_uncontended,
     );
+
+    /// `examples/03-producer-consumer`: two tasks and a channel (spec 4.1
+    /// §1).
+    #[test]
+    fn producer_consumer_example() {
+        let Some(node) = super::node() else { return };
+        let dir = super::fresh("gate-producer-consumer");
+        let dist = super::build_wasm(
+            &dir,
+            &super::repo_root().join("examples/03-producer-consumer/src/main.nova"),
+        );
+        let a = super::run_wasm(node, &dist).success();
+        assert_eq!(
+            super::stdout(&a),
+            "got 1\ngot 2\ngot 3\ngot 4\ngot 5\ndone\n"
+        );
+    }
 
     #[test]
     fn forged_join_handle() {

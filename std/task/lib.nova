@@ -11,7 +11,9 @@
 //! is not ready, and then the next ready task runs, in the order they became
 //! ready. No task runs except while `block_on` is running, and `block_on`
 //! returns only once every task has finished. An `async fn main` runs under
-//! `block_on`. A task that panics ends the whole program.
+//! `block_on`; built for WASM, it runs on the event loop instead, and returns
+//! to JS while its tasks wait on timers. A task that panics ends the whole
+//! program.
 //!
 //! Two tasks started with `spawn` and joined, run from code that is not
 //! `async` by `block_on`:
@@ -210,6 +212,10 @@ pub async fn yield_now() { task_yield_future().await }
 /// one and ends the program. A task that keeps yielding without finishing
 /// keeps it from returning. An `async fn main` runs under `block_on`, so it
 /// needs no call of its own.
+///
+/// Built for WASM, `block_on` waits for a timer by reading the clock, so a
+/// page does not respond until it returns. An `async fn main` waits on the
+/// event loop instead.
 ///
 /// Panics if called while `block_on` is already running, as from an
 /// `async fn` or a function one calls: there, `.await` the future instead.

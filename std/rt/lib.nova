@@ -1271,3 +1271,33 @@ async fn rt_task_timeout_future(nanos: Int, inner: Int) -> Int {
     }
     0
 }
+
+// `async fn main` on the event loop (spec 4.1 §4.4, §5). Its shim calls
+// this with the root's future instead of `block_on`: the root is spawned as
+// `block_on` would, and run until nothing can run without a timer. Then JS
+// calls `nova_turn`, on a timer, until it returns -1. The flag stays set,
+// so a `block_on` inside aborts, as it does natively, where `async fn main`
+// is one `block_on`.
+fn rt_task_main(fut: Int) {
+    let e = exec()
+    mem_store64(e + 112, 1)
+    spawn_task(e, fut, true)
+    drain(e)
+}
+
+// `nova_turn`: wake what is due, run what is queued, then the time until
+// the earliest deadline in milliseconds, rounded up, or -1 when no task is
+// parked. A timer may fire early; the turn then only says what is left.
+// Parked tasks without a deadline can never wake: the deadlock report.
+fn rt_turn() -> Int {
+    let e = exec()
+    wake(e, 0 - 1, time_now_nanos())
+    drain(e)
+    if mem_load64(e + 64) == 0 { return 0 - 1 }
+    let at = earliest(e)
+    if at < 0 { report_deadlock(e) }
+    let left = at - time_now_nanos()
+    if left <= 0 { return 0 }
+    let ms = left / 1000000
+    if left % 1000000 == 0 { ms } else { ms + 1 }
+}
