@@ -32,6 +32,28 @@ function hashSeed() {
 }
 ";
 
+/// The two clocks (spec 4.1 §7.1). The monotonic one counts from its first
+/// reading, as `nova-runtime`'s does, and every step of it is
+/// non-decreasing; the wall clock is 0 before 1970 and saturates at
+/// `i64::MAX`.
+const CLOCKS: &str = "
+// The monotonic clock, in nanoseconds since its first reading.
+let origin;
+function nowNanos() {
+  const t = performance.now();
+  if (origin === undefined) origin = t;
+  return BigInt(Math.floor((t - origin) * 1e6));
+}
+
+// The wall clock, in nanoseconds since 1970, to the millisecond.
+function epochNanos() {
+  const ms = Date.now();
+  if (ms < 0) return 0n;
+  const ns = BigInt(ms) * 1000000n;
+  return ns > 9223372036854775807n ? 9223372036854775807n : ns;
+}
+";
+
 /// A host function's entry in `env`, by its import name.
 fn host(name: &str) -> Result<&'static str> {
     Ok(match name {
@@ -48,6 +70,8 @@ fn host(name: &str) -> Result<&'static str> {
         "str_to_upper" => "  str_to_upper: (s) => string(text(s).toUpperCase()),\n",
         "str_to_lower" => "  str_to_lower: (s) => string(text(s).toLowerCase()),\n",
         "int_hash_seed" => "  int_hash_seed: () => hashSeed(),\n",
+        "time_now_nanos" => "  time_now_nanos: () => nowNanos(),\n",
+        "time_now_epoch_nanos" => "  time_now_epoch_nanos: () => epochNanos(),\n",
         other => bail!("the shim has no host function `{other}`"),
     })
 }
@@ -61,6 +85,9 @@ pub fn shim(imports: &[&str]) -> Result<String> {
     }
     if uses(&["int_hash_seed"]) {
         js.push_str(SEED);
+    }
+    if uses(&["time_now_nanos", "time_now_epoch_nanos"]) {
+        js.push_str(CLOCKS);
     }
     js.push_str("\n// The host functions the module imports.\nconst env = {\n");
     for name in imports {
@@ -91,9 +118,41 @@ mod tests {
         let plain = shim(&["println"]).expect("a shim");
         assert!(!plain.contains("function floatText"), "{plain}");
         assert!(!plain.contains("function hashSeed"), "{plain}");
+        assert!(!plain.contains("function nowNanos"), "{plain}");
         let floats = shim(&["float_fixed", "int_hash_seed"]).expect("a shim");
         assert!(floats.contains("function floatFixed"), "{floats}");
         assert!(floats.contains("function hashSeed"), "{floats}");
+        let clocks = shim(&["time_now_epoch_nanos"]).expect("a shim");
+        assert!(clocks.contains("function epochNanos"), "{clocks}");
+    }
+
+    /// The monotonic clock starts at 0 and never decreases over a busy
+    /// loop; the wall clock is within a second of `Date.now()` (spec 4.1
+    /// §9.4).
+    #[test]
+    fn the_clocks_are_monotonic_and_the_wall_clock_is_now() {
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let script = format!(
+            "{CLOCKS}\nconst first = nowNanos();\nlet last = first;\n\
+             for (let i = 0; i < 100000; i++) {{\n  const t = nowNanos();\n  \
+             if (t < last) throw new Error(`went back: ${{last}} then ${{t}}`);\n  last = t;\n}}\n\
+             const wall = epochNanos() - BigInt(Date.now()) * 1000000n;\n\
+             console.log(first, last > 0n, wall >= -1000000000n && wall <= 1000000000n);\n"
+        );
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-clocks");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("clocks.js");
+        std::fs::write(&file, script).expect("the script");
+        let out = node.arg(&file).output().expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "0n true true\n");
     }
 
     /// An import the shim cannot provide is refused, not left undefined.

@@ -545,3 +545,29 @@ fn rt_bytes_from_ints(ints: Int) -> Int {
 
 // `nova_rt_bytes_eq`.
 fn rt_bytes_eq(a: Int, b: Int) -> Bool { rt_str_eq(a, b) }
+
+// The log configuration's state words (spec 4.1 §4.6): 0 while unset, else
+// 1 plus whether lines go to stderr; and the level. Memory starts zeroed, so
+// an unset configuration reads as `nova-runtime`'s default, `Info` (2) to
+// stderr.
+const LOG_SET: Int = 32
+
+const LOG_LEVEL: Int = 40
+
+// `nova_rt_log_config_level`.
+fn rt_log_config_level() -> Int { if mem_load64(LOG_SET) == 0 { 2 } else { mem_load64(LOG_LEVEL) } }
+
+// `nova_rt_log_config_to_stderr`: 1 or 0.
+fn rt_log_config_to_stderr() -> Int {
+    let set = mem_load64(LOG_SET)
+    if set == 0 { 1 } else { set - 1 }
+}
+
+// `nova_rt_log_set_config`: the level as given, and any nonzero flag as
+// stderr.
+fn rt_log_set_config(level: Int, to_stderr: Int) {
+    mem_store64(LOG_LEVEL, level)
+    let mut set = 1
+    if to_stderr != 0 { set = 2 }
+    mem_store64(LOG_SET, set)
+}
