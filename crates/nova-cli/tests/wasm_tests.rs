@@ -142,3 +142,186 @@ fn check_for_wasm_reports_a_runtime_function_wasm_lacks() {
     );
     nova_in(&dir, &["check", "main.nova"]).success();
 }
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+/// `node`, or `None` when it is not on `PATH`, in which case the test
+/// passes without running; under `NOVA_REQUIRE_NODE=1`, as in CI, a missing
+/// `node` fails it instead (spec §9.1).
+fn node() -> Option<Command> {
+    let found = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if found {
+        return Some(Command::new("node"));
+    }
+    assert_ne!(
+        std::env::var("NOVA_REQUIRE_NODE").as_deref(),
+        Ok("1"),
+        "NOVA_REQUIRE_NODE=1, but `node` is not on PATH"
+    );
+    eprintln!("skipped: `node` is not on PATH");
+    None
+}
+
+/// Build `file` for WASM into `dir/dist`, which must succeed.
+fn build_wasm(dir: &Path, file: &Path) -> PathBuf {
+    let dist = dir.join("dist");
+    let file = file.to_string_lossy().into_owned();
+    let out = dist.to_string_lossy().into_owned();
+    nova_in(dir, &["build", "--target", "wasm", &file, "-o", &out]).success();
+    dist
+}
+
+/// `node dist/app.js`, with no backtrace from `nova` involved.
+fn run_wasm(mut node: Command, dist: &Path) -> Assert {
+    node.arg(dist.join("app.js")).assert()
+}
+
+/// `dist/` holds the page, the shim and the module, and `nova build`
+/// names it (spec §7).
+#[test]
+fn build_for_wasm_writes_dist() {
+    let dir = fresh("build-dist");
+    write(&dir, &[("main.nova", "fn main() { println(\"hi\") }\n")]);
+    let a = nova_in(&dir, &["build", "--target", "wasm", "main.nova"]).success();
+    assert_eq!(stdout(&a), "built dist\n");
+    let dist = dir.join("dist");
+    let page = std::fs::read_to_string(dist.join("index.html")).expect("index.html");
+    assert!(page.contains("import init from \"./app.js\";"), "{page}");
+    let js = std::fs::read_to_string(dist.join("app.js")).expect("app.js");
+    assert!(js.contains("export default async function init("), "{js}");
+    let wasm = std::fs::read(dist.join("app.wasm")).expect("app.wasm");
+    assert_eq!(&wasm[..4], b"\0asm");
+}
+
+/// `nova bundle` is `nova build --target wasm`, and `-o` names the
+/// directory; anything else in it stays (spec §3.1, §7).
+#[test]
+fn bundle_is_build_for_wasm() {
+    let dir = fresh("bundle");
+    write(
+        &dir,
+        &[
+            ("main.nova", "fn main() { println(\"hi\") }\n"),
+            ("out/keep.txt", "kept"),
+        ],
+    );
+    let a = nova_in(&dir, &["bundle", "main.nova", "-o", "out"]).success();
+    assert_eq!(stdout(&a), "built out\n");
+    for name in ["index.html", "app.js", "app.wasm", "keep.txt"] {
+        assert!(dir.join("out").join(name).is_file(), "{name}");
+    }
+}
+
+/// In a project, `dist/` is at the project's root (spec §7).
+#[test]
+fn a_project_builds_into_dist_at_its_root() {
+    let dir = fresh("project");
+    write(
+        &dir,
+        &[
+            (
+                "nova.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("src/main.nova", "fn main() { println(\"hi\") }\n"),
+        ],
+    );
+    nova_in(&dir.join("src"), &["build", "--target", "wasm"]).success();
+    assert!(dir.join("dist").join("app.wasm").is_file());
+}
+
+/// `--release` names the LLVM backend, which WASM does not use.
+#[test]
+fn release_does_not_apply_to_wasm() {
+    let dir = fresh("release");
+    write(&dir, &[("main.nova", "fn main() { println(\"hi\") }\n")]);
+    let a = nova_in(
+        &dir,
+        &["build", "--target", "wasm", "--release", "main.nova"],
+    )
+    .failure();
+    assert!(
+        stderr(&a).contains("`--release` does not apply to `--target wasm`"),
+        "{}",
+        stderr(&a)
+    );
+}
+
+/// The gate: hello world prints under Node what its native build prints
+/// (spec §1).
+#[test]
+fn hello_world_runs_under_node() {
+    let Some(node) = node() else { return };
+    let dir = fresh("hello");
+    let dist = build_wasm(
+        &dir,
+        &repo_root().join("examples/01-hello-world/src/main.nova"),
+    );
+    let a = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&a), "Hello, World!\n");
+}
+
+/// The gate's size check: hello world's module and shim are under 30 KB
+/// gzipped (spec §9.5).
+#[test]
+fn hello_world_is_under_30_kb_gzipped() {
+    use std::io::Write;
+    let dir = fresh("hello-size");
+    let dist = build_wasm(
+        &dir,
+        &repo_root().join("examples/01-hello-world/src/main.nova"),
+    );
+    let mut total = 0;
+    for name in ["app.wasm", "app.js"] {
+        let bytes = std::fs::read(dist.join(name)).expect("read a dist file");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&bytes).expect("compress");
+        total += gz.finish().expect("compress").len();
+    }
+    println!("hello world: {total} bytes gzipped");
+    assert!(total < 30 * 1024, "{total} bytes gzipped");
+}
+
+/// A panic ends the program with its message and an abort's status, 134;
+/// what it printed first stays (spec §6).
+#[test]
+fn a_panic_exits_134_with_its_message() {
+    let Some(node) = node() else { return };
+    let dir = fresh("panic");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn main() {\n    println(\"before\")\n    panic(\"boom\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "before\n");
+    assert_eq!(stderr(&a), "nova: panic: boom\n");
+}
+
+/// A trap, here a division by zero, ends it with a trap's status, 132.
+#[test]
+fn a_trap_exits_132() {
+    let Some(node) = node() else { return };
+    let dir = fresh("trap");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn d(a: Int, b: Int) -> Int { a / b }\nfn main() { println(\"${d(1, 0)}\") }\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(132);
+    assert_eq!(stderr(&a), "nova: trap: divide by zero\n");
+}

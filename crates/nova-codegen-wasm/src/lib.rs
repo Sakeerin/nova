@@ -9,7 +9,10 @@
 //! kinds on WASM ([`nova_mir::WasmRuntime`]): `std/rt`'s, which MIR already
 //! calls directly; the shim's, imported from `env`; and none.
 
+mod shim;
 mod structure;
+
+pub use shim::{shim, INDEX_HTML};
 
 use std::borrow::Cow;
 use std::collections::HashMap;

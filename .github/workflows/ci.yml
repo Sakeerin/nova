@@ -34,9 +34,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The WASM target's tests run what they build under Node, and must not
+      # pass without it (spec
+      # docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md
+      # §9.1).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: cargo build
         run: cargo build --locked --workspace
       - name: cargo test
+        env:
+          NOVA_REQUIRE_NODE: "1"
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
       # std/ and examples/ stay in nova fmt's layout (spec

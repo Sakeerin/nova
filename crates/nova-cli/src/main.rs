@@ -40,8 +40,11 @@ enum Command {
     Parse(cmd::parse::ParseCmd),
     /// Compile and run a Nova program.
     Run(cmd::run::RunCmd),
-    /// Compile a Nova program to a standalone executable.
+    /// Compile a Nova program to a standalone executable, or with
+    /// `--target wasm` to a page in dist/.
     Build(cmd::run::BuildCmd),
+    /// Compile a Nova program to a page in dist/: `build --target wasm`.
+    Bundle(cmd::run::BundleCmd),
     /// Type-check a Nova program without running it.
     Check(cmd::run::CheckCmd),
     /// Compile and run `@test` functions, one process per test.
@@ -102,6 +105,7 @@ fn main() -> Result<()> {
         Command::Parse(cmd) => cmd::parse::run(cmd),
         Command::Run(cmd) => cmd::run::run(cmd),
         Command::Build(cmd) => cmd::run::build(cmd),
+        Command::Bundle(cmd) => cmd::run::bundle(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
         Command::Test(cmd) => cmd::test::run(cmd),
         // Its exit code says more than success or failure (spec §7.2).
