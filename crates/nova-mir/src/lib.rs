@@ -18,7 +18,7 @@ mod async_lower;
 mod lower;
 mod mono;
 
-pub use mono::lower_module;
+pub use mono::{lower_module, lower_module_with, Options, RuntimeImpls};
 /// The operators of [`Stmt::Bin`], re-exported so a backend needs no
 /// dependency on `nova-hir` to name them.
 pub use nova_hir::BinOp;
@@ -67,6 +67,11 @@ pub struct Module {
     pub functions: Vec<Function>,
     /// `extern` (FFI) symbols the program calls, to be declared as imports.
     pub externs: Vec<ExternDecl>,
+    /// A WASM build's allocator: the mangled name of `std/rt`'s `rt_alloc`,
+    /// which the backend calls for every `Make*` and exports (spec
+    /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §5.4). `None` for a native build.
+    pub runtime_alloc: Option<String>,
 }
 
 /// An imported external (C-ABI) function: its raw symbol and ABI classes.

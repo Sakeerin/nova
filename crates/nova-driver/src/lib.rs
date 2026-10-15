@@ -98,7 +98,8 @@ pub fn check_program_counted_for(program: Program, target: Target) -> Result<Che
     let mut ctx = FrontendContext::new(program)?.for_target(target);
     if let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? {
         if runs {
-            if let Err(diags) = nova_mir::lower_module(&module) {
+            let lowered = nova_mir::lower_module_with(&module, &mir_options(ctx.runtime.as_ref()));
+            if let Err(diags) = lowered {
                 ctx.render(&diags);
             }
         }
@@ -253,6 +254,33 @@ const NOT_THE_ENTRY_MAIN: &str = "main.not_the_entry";
 /// §5.2): in a program of doc tests, the only `@test` function collected.
 /// Each module is its own namespace, so each can use this name.
 pub const DOC_TEST_FUNCTION: &str = "nova_doctest";
+
+/// `std/rt`'s functions in `module`, by name (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §5.4).
+fn runtime_impls(module: &hir::Module, definitions: &Definitions) -> nova_mir::RuntimeImpls {
+    let mut impls = nova_mir::RuntimeImpls::default();
+    for function in &module.functions {
+        let def = definitions.defs().get(function.def_id.0 as usize);
+        if let Some(Def {
+            kind: DefKind::Fn { item_index },
+            ..
+        }) = def
+        {
+            if definitions.module_name(definitions.module_of(*item_index)) == "$std.rt" {
+                impls
+                    .functions
+                    .insert(function.name.clone(), function.def_id);
+            }
+        }
+    }
+    impls
+}
+
+/// The options MIR lowering takes for this context's target.
+fn mir_options(runtime: Option<&nova_mir::RuntimeImpls>) -> nova_mir::Options<'_> {
+    nova_mir::Options { runtime }
+}
 
 /// Rename every `main` declared outside the entry module, `ModuleId(0)`,
 /// so that `nova_mir::lower_module`'s search by name finds the entry's own
@@ -643,6 +671,9 @@ struct FrontendContext<'a> {
     /// What the program is compiled for: its std modules and rules (spec
     /// 4.0 §3).
     target: Target,
+    /// For a WASM build, once checked: `std/rt`'s functions, by name (spec
+    /// 4.0 §5.4).
+    runtime: Option<nova_mir::RuntimeImpls>,
 }
 
 impl<'a> FrontendContext<'a> {
@@ -676,6 +707,7 @@ impl<'a> FrontendContext<'a> {
             sources,
             map,
             target: Target::Native,
+            runtime: None,
         };
         ctx.render(&diagnostics);
         if ctx.errors == 0 {
@@ -861,6 +893,9 @@ impl<'a> FrontendContext<'a> {
         }
         let mut module = checked.module;
         keep_the_entry_main(&mut module, &resolved.definitions);
+        if self.target == Target::Wasm {
+            self.runtime = Some(runtime_impls(&module, &resolved.definitions));
+        }
         let fresh_def_id = DefId(
             module
                 .functions

@@ -32,3 +32,85 @@ fn rt_alloc(size: Int) -> Int {
     mem_store64(HEAP_NEXT, end)
     at
 }
+
+// A string's length in bytes.
+fn str_len(s: Int) -> Int { mem_load64(s) }
+
+// The address of a string's bytes. The header keeps it in the low half of
+// its second word, the high half zero.
+fn str_bytes(s: Int) -> Int { mem_load64(s + 8) }
+
+// A header for `len` bytes, with the bytes inline at offset 16, as
+// `nova-runtime`'s `alloc_str_object`. Room for one byte at least, so an
+// empty string's bytes are still its own.
+fn rt_str_alloc(len: Int) -> Int {
+    let mut room = len
+    if room < 1 { room = 1 }
+    let h = rt_alloc(16 + room)
+    mem_store64(h, len)
+    mem_store64(h + 8, h + 16)
+    h
+}
+
+// `nova_rt_str_concat`.
+fn rt_str_concat(a: Int, b: Int) -> Int {
+    let la = str_len(a)
+    let lb = str_len(b)
+    let h = rt_str_alloc(la + lb)
+    let at = str_bytes(h)
+    mem_copy(at, str_bytes(a), la)
+    mem_copy(at + la, str_bytes(b), lb)
+    h
+}
+
+// `nova_rt_str_concat_n`: every string of the array `parts`, in order. A
+// negative length counts as zero.
+fn rt_str_concat_n(parts: Int) -> Int {
+    let mut n = mem_load64(parts)
+    if n < 0 { n = 0 }
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        total = total + str_len(mem_load64(parts + 8 + 8 * i))
+        i = i + 1
+    }
+    let h = rt_str_alloc(total)
+    let mut at = str_bytes(h)
+    i = 0
+    while i < n {
+        let part = mem_load64(parts + 8 + 8 * i)
+        let len = str_len(part)
+        mem_copy(at, str_bytes(part), len)
+        at = at + len
+        i = i + 1
+    }
+    h
+}
+
+// `nova_rt_int_to_str`. The digits are counted and written on the negative
+// side, where `i64::MIN` still has a value.
+fn rt_int_to_str(v: Int) -> Int {
+    let negative = v < 0
+    let mut rest = v
+    if !negative { rest = -v }
+    let mut digits = 1
+    let mut t = rest / 10
+    while t != 0 {
+        digits = digits + 1
+        t = t / 10
+    }
+    let mut len = digits
+    if negative { len = len + 1 }
+    let h = rt_str_alloc(len)
+    let start = str_bytes(h)
+    let mut at = start + len
+    let mut k = 0
+    while k < digits {
+        at = at - 1
+        mem_store8(at, 48 - rest % 10)
+        rest = rest / 10
+        k = k + 1
+    }
+    if negative { mem_store8(start, 45) }
+    h
+}
