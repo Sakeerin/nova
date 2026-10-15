@@ -88,22 +88,59 @@ fn check_for_wasm_refuses_an_extern_block() {
     nova_in(&dir, &["check", "main.nova"]).success();
 }
 
-/// A native-only module is not compiled for WASM, so its names do not
-/// resolve (spec §3.2).
-#[test]
-fn check_for_wasm_has_no_native_only_module() {
-    let dir = fresh("check-process");
-    write(
-        &dir,
-        &[("main.nova", "fn main() { println(\"${args().len()}\") }\n")],
-    );
+/// A name from a std module WASM does not compile is E0092 there, naming
+/// the module, and the same program checks natively (spec 4.1 §3.2).
+fn missing_on_wasm(name: &str, source: &str, error: &str) {
+    let dir = fresh(&format!("missing-{name}"));
+    write(&dir, &[("main.nova", source)]);
     let a = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
     assert!(
-        stderr(&a).contains("error[E0001]: cannot find function `args` in this scope"),
+        stderr(&a).contains(&format!("error[E0092]: {error}")),
         "{}",
         stderr(&a)
     );
+    assert!(!stderr(&a).contains("E0001"), "{}", stderr(&a));
     nova_in(&dir, &["check", "main.nova"]).success();
+}
+
+/// A function of a native-only module (spec 4.1 §3.2).
+#[test]
+fn a_native_only_function_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "function",
+        "fn main() { println(\"${args().len()}\") }\n",
+        "`args` is in `std/process`, which target wasm does not have",
+    );
+}
+
+/// A type of a native-only module, in a signature.
+#[test]
+fn a_native_only_type_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "type",
+        "fn size(f: File) -> Int { 0 }\nfn main() { println(\"x\") }\n",
+        "`File` is in `std/fs`, which target wasm does not have",
+    );
+}
+
+/// A qualified call into a native-only module's type, which was E0900.
+#[test]
+fn a_native_only_qualified_call_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "qualified",
+        "fn main() {\n    let o = OpenOptions::reading()\n    println(\"x\")\n}\n",
+        "`OpenOptions` is in `std/fs`, which target wasm does not have",
+    );
+}
+
+/// A record literal of a native-only module's record.
+#[test]
+fn a_native_only_record_literal_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "record",
+        "fn main() {\n    let s = Stdin {}\n    println(\"x\")\n}\n",
+        "`Stdin` is in `std/io`, which target wasm does not have",
+    );
 }
 
 /// The memory builtins are `std/rt`'s: a user module cannot call one, even

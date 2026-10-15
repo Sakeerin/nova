@@ -1306,9 +1306,28 @@ pub struct Definitions {
     packages: Vec<Option<u32>>,
     /// The first std module's index: the user modules come before it.
     std_start: usize,
+    /// What the program is compiled for.
+    target: CompileTarget,
+    /// Each public name of a std module the target does not compile, and
+    /// that module's name, as `$std.time` (spec 4.1 §3.2).
+    missing: FxHashMap<String, &'static str>,
 }
 
 impl Definitions {
+    /// What the program is compiled for.
+    pub fn target(&self) -> CompileTarget {
+        self.target
+    }
+
+    /// The std module that exports `name` when the target does not compile
+    /// that module, as `std/time`: a name that does not resolve here is
+    /// E0092, not E0001 (spec 4.1 §3.2).
+    pub fn missing_module(&self, name: &str) -> Option<String> {
+        self.missing
+            .get(name)
+            .map(|m| m.replacen("$std.", "std/", 1))
+    }
+
     /// All collected definitions, indexable by `DefId.0`.
     pub fn defs(&self) -> &[Def] {
         &self.defs
@@ -1946,6 +1965,8 @@ pub fn resolve_program_for(
     definitions.packages = all.iter().map(|m| m.package).collect();
     definitions.std_start = std_start;
     definitions.exports = exports;
+    definitions.target = target;
+    definitions.missing = missing_names(target);
 
     ProgramResolution {
         file: File { items: merged },
@@ -1954,6 +1975,46 @@ pub fn resolve_program_for(
         tests,
         imports,
     }
+}
+
+/// Each public name of each std module `target` does not compile, mapped to
+/// that module's name; the first module to export a name keeps it
+/// (spec 4.1 §3.2). The modules are parsed and their items collected as
+/// for a build, into scopes that are then dropped.
+fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
+    let compiled = target.std_modules();
+    let mut missing: FxHashMap<String, &'static str> = FxHashMap::default();
+    for &(name, src) in &STD_MODULES {
+        if compiled.iter().any(|&(n, _)| n == name) {
+            continue;
+        }
+        let (Some(file), _) = std_module(src, FileId::DUMMY) else {
+            continue;
+        };
+        let mut exp = Exports::default();
+        for (i, item) in file.items.iter().enumerate() {
+            collect_item(
+                &mut Vec::new(),
+                &mut ModuleScope::default(),
+                &mut exp,
+                &mut IndexMap::new(),
+                &mut IndexMap::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                i,
+                &item.value,
+            );
+        }
+        let names = exp
+            .values
+            .keys()
+            .chain(exp.types.keys())
+            .chain(exp.traits.keys());
+        for n in names {
+            missing.entry(n.clone()).or_insert(name);
+        }
+    }
+    missing
 }
 
 /// The embedded standard-library modules, compiled as implicit modules and
@@ -2018,17 +2079,22 @@ impl CompileTarget {
     }
 }
 
-/// The std modules a WASM build compiles (spec 4.0 §3.2): the six of
-/// [`STD_MODULES`] that need no operating system, in the same order, then
-/// `std/rt`, the runtime written in Nova. Their names are those of
-/// [`STD_MODULES`], so `std/core` keeps its place first.
-pub const WASM_STD_MODULES: [(&str, &str); 7] = [
+/// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1): the
+/// ten of [`STD_MODULES`] that need no operating system, in the same order,
+/// then `std/rt`, the runtime written in Nova. Their names are those of
+/// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
+/// gives a name the same winner in std's glob imports.
+pub const WASM_STD_MODULES: [(&str, &str); 11] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
     ("$std.strings", nova_std::STRINGS),
     ("$std.fmt", nova_std::FMT),
+    ("$std.task", nova_std::TASK),
+    ("$std.sync", nova_std::SYNC),
+    ("$std.time", nova_std::TIME),
     ("$std.json", nova_std::JSON),
+    ("$std.log", nova_std::LOG),
     ("$std.rt", nova_std::RT),
 ];
 
@@ -3334,9 +3400,9 @@ mod tests {
         resolve_program_for(target, &sources, &std_files, None)
     }
 
-    /// A WASM build compiles its own std (spec 4.0 §3.2): six of the native
-    /// modules, then `std/rt`, after the user's. A native build has no
-    /// `std/rt`.
+    /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1): ten of
+    /// the native modules, in native's order, then `std/rt`, after the
+    /// user's. A native build has no `std/rt`.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3352,7 +3418,11 @@ mod tests {
                 "$std.collections",
                 "$std.strings",
                 "$std.fmt",
+                "$std.task",
+                "$std.sync",
+                "$std.time",
                 "$std.json",
+                "$std.log",
                 "$std.rt"
             ]
         );
@@ -3360,6 +3430,35 @@ mod tests {
         assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
         assert!((1..=STD_MODULES.len())
             .all(|m| native.definitions.module_name(ModuleId(m as u32)) != "$std.rt"));
+    }
+
+    /// A WASM build knows the module of each public name of the std
+    /// modules it does not compile, in every namespace; a native build
+    /// compiles them all, and knows none (spec 4.1 §3.2).
+    #[test]
+    fn a_wasm_build_knows_where_each_missing_name_lives() {
+        let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
+        assert_eq!(wasm.definitions.target(), CompileTarget::Wasm);
+        for (name, module) in [
+            ("args", "std/process"),
+            ("File", "std/fs"),
+            ("NotFound", "std/io"),
+            ("Read", "std/io"),
+            ("TcpStream", "std/net"),
+            ("Server", "std/http"),
+            ("sha256", "std/crypto"),
+        ] {
+            assert_eq!(
+                wasm.definitions.missing_module(name).as_deref(),
+                Some(module),
+                "{name}"
+            );
+        }
+        for name in ["Instant", "spawn", "Mutex", "Log", "Vec", "rt_alloc"] {
+            assert_eq!(wasm.definitions.missing_module(name), None, "{name}");
+        }
+        let native = resolve_for(CompileTarget::Native, "fn main() { }\n");
+        assert_eq!(native.definitions.missing_module("args"), None);
     }
 
     /// The memory builtins are in every std module of a WASM build, and
