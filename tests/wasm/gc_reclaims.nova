@@ -1,0 +1,31 @@
+// The collector reclaims what no task reaches (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §9.3), as `run_tests.rs`'s `gc_reclaims_garbage` checks natively: 300
+// turns of 1,000 records each, about 4.8 MB, none kept past its turn. Run
+// under NOVA_GC_DEBUG, every collection must find fewer than 1,000 objects
+// live.
+
+record Point { x: Int, y: Int }
+
+// A thousand records, each dropped as the next is made.
+fn churn(n: Int) -> Int {
+    let mut sum = 0
+    let mut i = 0
+    while i < n {
+        let p = Point { x: i, y: 2 * i }
+        sum = sum + p.y - p.x
+        i = i + 1
+    }
+    sum
+}
+
+async fn main() {
+    let mut total = 0
+    let mut turn = 0
+    while turn < 300 {
+        total = total + churn(1000)
+        sleep(Duration::from_millis(1)).await
+        turn = turn + 1
+    }
+    println("${total}")
+}

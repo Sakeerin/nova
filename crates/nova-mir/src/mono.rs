@@ -37,8 +37,12 @@ const RT_ALLOC: &str = "rt_alloc";
 const RT_MAIN: &str = "rt_task_main";
 
 /// The `std/rt` functions a WASM build with an `async fn main` also
-/// exports, by export name: the turn JS calls on each timer (spec 4.1 §5).
-const RT_TURN_EXPORTS: [(&str, &str); 1] = [("nova_turn", "rt_turn")];
+/// exports, by export name: the turn JS calls on each timer, and the
+/// collector's switches, set before `main` (spec 4.1 §5, §6.6).
+const RT_TURN_EXPORTS: [(&str, &str); 2] = [
+    ("nova_turn", "rt_turn"),
+    ("nova_gc_switches", "rt_gc_switches"),
+];
 
 /// The other `std/rt` functions every WASM build exports, by export name:
 /// roots, since only the shim calls them (spec 4.1 §6.3).

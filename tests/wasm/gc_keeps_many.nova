@@ -1,0 +1,37 @@
+// Many objects live across collections (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §6.4): a task keeps 20,000 records in a `Vec`, whose array is a large
+// object, while NOVA_GC_STRESS collects at the end of every turn. Tracing
+// the array queues every record at once, past the worklist's first page.
+
+record Cell { i: Int, square: Int }
+
+async fn keeper(n: Int) -> Int {
+    let mut cells = Vec::new()
+    let mut i = 0
+    while i < n {
+        cells.push(Cell { i: i, square: i * i })
+        i = i + 1
+    }
+    let mut turn = 0
+    while turn < 5 {
+        sleep(Duration::from_millis(1)).await
+        turn = turn + 1
+    }
+    let mut sum = 0
+    i = 0
+    while i < n {
+        match cells.get(i) {
+            Some(c) => { sum = sum + c.square - c.i * c.i + c.i }
+            None => {}
+        }
+        i = i + 1
+    }
+    sum
+}
+
+async fn main() {
+    let h = spawn(keeper(20000))
+    let v = h.join().await
+    println("sum ${v}")
+}
