@@ -1,7 +1,9 @@
 // Nova standard library — the runtime of a WASM build.
 //
 // Compiled only when the target is WASM (spec
-// docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §5).
+// docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §5, and
+// for the allocator, the collector and the executor,
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md).
 // Where a native build calls a `nova-runtime` function, MIR calls the
 // function here of the same name with an `rt_` prefix, and each is a port of
 // that one, with the same results. None is `pub`, so no program sees them.
@@ -13,25 +15,245 @@
 // target's std sees.
 
 // The runtime's state words, at fixed addresses below the data segment
-// (spec §4.1): Nova has no mutable globals.
+// (spec 4.0 §4.1, 4.1 §6.1): Nova has no mutable globals. Each is named
+// where it is used: `HEAP_META`, `STR_SEED`, `STR_SEED_DRAWN`, `LOG_SET`,
+// `LOG_LEVEL`, `EXEC`, `GC_SINCE`, `GC_NEXT`, `GC_COUNT` and
+// `GC_SWITCHES`, at 8 to 80.
 
-// The next free address, or 0 before the first allocation.
-const HEAP_NEXT: Int = 8
+// The allocator (spec 4.1 §6.2), ported from `nova-runtime`'s
+// `gc/pages.rs`. Memory from the first 64 KiB boundary at or above
+// `heap_base()` holds the allocator's metadata, three WASM pages; then come
+// the heap's pages, also 64 KiB. A small object, 2,048 bytes or less, takes
+// a slot in a page of one size class; a larger one takes a run of whole
+// pages. What the collector records of a small object is in its page's
+// bitmaps, and of a large one in front of it in its first page, found
+// through the page table: nothing read from an object's own bytes is taken
+// for either.
 
-// Allocate `size` bytes, zeroed, 8-aligned (spec §5.2). The heap only grows:
-// the collector is 4.1's.
-fn rt_alloc(size: Int) -> Int {
+// The address of the allocator's metadata, or 0 before the first
+// allocation. The metadata: at 0 the first heap page's number, at 8 the
+// frontier's (the first page never used), at 16 and 24 the collector's
+// worklist and its capacity; at 64, 256 and 448 three words per size class:
+// the page it allocates from, the slot it looks at next, and the first of
+// its other pages with a free slot; and at 1024 the page table, a word per
+// page of the largest memory. A page's word is 0 outside the heap, else a
+// kind and 256 times a datum: 1 free; 2 small, with its class; 3 the first
+// page of a large object, with its page count; 4 a large object's later
+// page, with its first page's number; 5 the collector's.
+const HEAP_META: Int = 8
+
+// Bytes allocated since the last collection.
+const GC_SINCE: Int = 56
+
+// The page size, the largest memory in pages (1 GB), and the largest
+// object, which is also the largest allocation.
+const PAGE: Int = 65536
+
+const MAX_PAGES: Int = 16384
+
+const MAX_ALLOC: Int = 1073741824
+
+// A small page's header: its class at 0, its slot size at 8, its slot count
+// at 16, and the next page of its class with a free slot at 24; then three
+// bitmaps of 64 words, a bit per slot: allocated at 32, marked at 544 and
+// scanned at 1056. The slots start at 1568.
+const SLOTS: Int = 1568
+
+// The metadata, made the first time it is asked for. Memory starts
+// zeroed, so every page's word starts at 0.
+fn heap_meta() -> Int {
+    let m = mem_load64(HEAP_META)
+    if m != 0 { return m }
+    let at = (heap_base() + PAGE - 1) & (0 - PAGE)
+    let first = at / PAGE + 3
+    grow_to(first)
+    mem_store64(at, first)
+    mem_store64(at + 8, first)
+    mem_store64(HEAP_META, at)
+    at
+}
+
+// Memory of `pages` pages at least.
+fn grow_to(pages: Int) {
+    let have = mem_pages()
+    if pages > have { if mem_grow(pages - have) < 0 { panic("out of memory") } }
+}
+
+// Page `p`'s word, and setting it.
+fn page_word(m: Int, p: Int) -> Int { mem_load64(m + 1024 + 8 * p) }
+
+fn set_page_word(m: Int, p: Int, w: Int) { mem_store64(m + 1024 + 8 * p, w) }
+
+// The size class of `n` bytes, for `1 <= n <= 2048`: `CLASS_OF` in
+// `gc/pages.rs`, whose 24 classes step by 16 to 128, then by 32, 64, 128
+// and 256, each to twice the last.
+fn class_of(n: Int) -> Int {
+    if n <= 128 {
+        (n + 15) / 16 - 1
+    } else if n <= 256 {
+        8 + (n - 129) / 32
+    } else if n <= 512 {
+        12 + (n - 257) / 64
+    } else if n <= 1024 {
+        16 + (n - 513) / 128
+    } else {
+        20 + (n - 1025) / 256
+    }
+}
+
+// The slot size of class `c`: `CLASS_SIZES` in `gc/pages.rs`.
+fn class_size(c: Int) -> Int {
+    if c < 8 {
+        16 * (c + 1)
+    } else if c < 12 {
+        128 + 32 * (c - 7)
+    } else if c < 16 {
+        256 + 64 * (c - 11)
+    } else if c < 20 {
+        512 + 128 * (c - 15)
+    } else {
+        1024 + 256 * (c - 19)
+    }
+}
+
+// `n` pages in a row for the allocator: the first free run of them, else at
+// the frontier, which a run of free pages just below it joins, growing the
+// memory as needed.
+fn take_pages(m: Int, n: Int) -> Int {
+    let frontier = mem_load64(m + 8)
+    let mut run = 0
+    let mut p = mem_load64(m)
+    while p < frontier {
+        if page_word(m, p) == 1 {
+            run = run + 1
+            if run == n { return p + 1 - n }
+        } else {
+            run = 0
+        }
+        p = p + 1
+    }
+    let start = frontier - run
+    if start + n > MAX_PAGES { panic("out of memory") }
+    grow_to(start + n)
+    mem_store64(m + 8, start + n)
+    start
+}
+
+// A new page for class `c`, with every slot free.
+fn new_page(m: Int, c: Int) -> Int {
+    let p = take_pages(m, 1)
+    let base = p * PAGE
+    mem_fill(base, 0, SLOTS)
+    let slot = class_size(c)
+    mem_store64(base, c)
+    mem_store64(base + 8, slot)
+    mem_store64(base + 16, (PAGE - SLOTS) / slot)
+    set_page_word(m, p, 2 + 256 * c)
+    p
+}
+
+// A free slot of page `p`, class `c`, from the class's next slot on, zeroed
+// and marked allocated and, if `scan`, scanned; or 0 when there is none.
+fn page_take(m: Int, c: Int, p: Int, scan: Bool) -> Int {
+    let base = p * PAGE
+    let n = mem_load64(base + 16)
+    let mut i = mem_load64(m + 256 + 8 * c)
+    while i < n {
+        let w = base + 32 + 8 * (i >> 6)
+        let bits = mem_load64(w)
+        if bits == 0 - 1 {
+            i = ((i >> 6) + 1) << 6
+        } else if ((bits >> (i & 63)) & 1) == 0 {
+            let bit = 1 << (i & 63)
+            mem_store64(w, bits | bit)
+            let sw = w + 1024
+            if scan {
+                mem_store64(sw, mem_load64(sw) | bit)
+            } else {
+                mem_store64(sw, mem_load64(sw) & (bit ^ (0 - 1)))
+            }
+            mem_store64(m + 256 + 8 * c, i + 1)
+            let slot = mem_load64(base + 8)
+            let at = base + SLOTS + i * slot
+            mem_fill(at, 0, slot)
+            return at
+        } else {
+            i = i + 1
+        }
+    }
+    mem_store64(m + 256 + 8 * c, n)
+    0
+}
+
+// A slot of class `c`: from the class's page, then its other pages with a
+// free slot, then a new page (`alloc_slot` in `gc/pages.rs`).
+fn small_alloc(m: Int, c: Int, scan: Bool) -> Int {
+    while true {
+        let p = mem_load64(m + 64 + 8 * c)
+        if p == 0 {
+            mem_store64(m + 64 + 8 * c, new_page(m, c))
+            mem_store64(m + 256 + 8 * c, 0)
+        } else {
+            let at = page_take(m, c, p, scan)
+            if at != 0 { return at }
+            let next = mem_load64(m + 448 + 8 * c)
+            if next != 0 { mem_store64(m + 448 + 8 * c, mem_load64(next * PAGE + 24)) }
+            mem_store64(m + 64 + 8 * c, next)
+            mem_store64(m + 256 + 8 * c, 0)
+        }
+    }
+    0
+}
+
+// A large object: a run of pages, its size at the first one's start and at
+// 8 its flags (1 marked, 2 scanned), then the object, zeroed.
+fn large_alloc(m: Int, n: Int, scan: Bool) -> Int {
+    let pages = (n + 16 + PAGE - 1) / PAGE
+    let p = take_pages(m, pages)
+    let base = p * PAGE
+    mem_fill(base, 0, n + 16)
+    mem_store64(base, n)
+    if scan { mem_store64(base + 8, 2) }
+    set_page_word(m, p, 3 + 256 * pages)
+    let mut k = 1
+    while k < pages {
+        set_page_word(m, p + k, 4 + 256 * p)
+        k = k + 1
+    }
+    base + 16
+}
+
+// `size` bytes, zeroed, 8-aligned, traced by the collector if `scan`
+// (`gc::alloc` in `nova-runtime`). Over 1 GB is refused before any page
+// arithmetic. What it takes, a whole slot for a small object, counts toward
+// the next collection.
+fn gc_alloc(size: Int, scan: Bool) -> Int {
+    if size > MAX_ALLOC { panic("out of memory") }
     let mut n = size
     if n < 8 { n = 8 }
     n = (n + 7) & -8
-    let mut at = mem_load64(HEAP_NEXT)
-    if at == 0 { at = heap_base() }
-    let end = at + n
-    let have = mem_pages() * 65536
-    if end > have { if mem_grow((end - have + 65535) / 65536) < 0 { panic("out of memory") } }
-    mem_store64(HEAP_NEXT, end)
+    let m = heap_meta()
+    let mut taken = n
+    let mut at = 0
+    if n <= 2048 {
+        let c = class_of(n)
+        taken = class_size(c)
+        at = small_alloc(m, c, scan)
+    } else {
+        at = large_alloc(m, n, scan)
+    }
+    mem_store64(GC_SINCE, mem_load64(GC_SINCE) + taken)
     at
 }
+
+// `nova_rt_alloc`: an object the collector traces. MIR calls it for every
+// record, sum, array, closure and `async fn` state, and the shim as
+// `nova_alloc`.
+fn rt_alloc(size: Int) -> Int { gc_alloc(size, true) }
+
+// A leaf: an object the collector keeps but does not trace, as a string's
+// or a `Bytes`' is (spec 4.1 §6.3). The shim calls it as `nova_alloc_leaf`.
+fn rt_alloc_leaf(size: Int) -> Int { gc_alloc(size, false) }
 
 // A string's length in bytes.
 fn str_len(s: Int) -> Int { mem_load64(s) }
@@ -41,12 +263,12 @@ fn str_len(s: Int) -> Int { mem_load64(s) }
 fn str_bytes(s: Int) -> Int { mem_load64(s + 8) }
 
 // A header for `len` bytes, with the bytes inline at offset 16, as
-// `nova-runtime`'s `alloc_str_object`. Room for one byte at least, so an
-// empty string's bytes are still its own.
+// `nova-runtime`'s `alloc_str_object`, a leaf. Room for one byte at least,
+// so an empty string's bytes are still its own.
 fn rt_str_alloc(len: Int) -> Int {
     let mut room = len
     if room < 1 { room = 1 }
-    let h = rt_alloc(16 + room)
+    let h = rt_alloc_leaf(16 + room)
     mem_store64(h, len)
     mem_store64(h + 8, h + 16)
     h

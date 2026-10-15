@@ -31,6 +31,10 @@ pub struct Options<'a> {
 /// The name of `std/rt`'s allocator, a root of every WASM build.
 const RT_ALLOC: &str = "rt_alloc";
 
+/// The other `std/rt` functions every WASM build exports, by export name:
+/// roots, since only the shim calls them (spec 4.1 §6.3).
+const RT_EXPORTS: [(&str, &str); 1] = [("nova_alloc_leaf", "rt_alloc_leaf")];
+
 /// Lower a typed HIR module to monomorphized MIR.
 ///
 /// Instances are discovered from `main` outward, so unreferenced functions
@@ -75,6 +79,16 @@ pub fn lower_module_with(
         {
             mir.runtime_alloc = Some(mangle(def, name, &[]));
             worklist.push((def, Vec::new()));
+        }
+        for (export, rt) in RT_EXPORTS {
+            if let Some((&def, name)) = impls
+                .functions
+                .get(rt)
+                .and_then(|def| module.function(*def).map(|f| (def, &f.name)))
+            {
+                mir.runtime_exports.push((export, mangle(def, name, &[])));
+                worklist.push((def, Vec::new()));
+            }
         }
     }
     // The symbol an `async fn main` was lowered under, once it has been

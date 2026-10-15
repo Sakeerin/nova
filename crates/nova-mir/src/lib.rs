@@ -72,6 +72,11 @@ pub struct Module {
     /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
     /// §5.4). `None` for a native build.
     pub runtime_alloc: Option<String>,
+    /// The other `std/rt` functions a WASM build exports for the shim to
+    /// call, as `(export, mangled name)` (spec
+    /// `docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+    /// §5, §6.3). Empty for a native build.
+    pub runtime_exports: Vec<(&'static str, String)>,
 }
 
 /// An imported external (C-ABI) function: its raw symbol and ABI classes.

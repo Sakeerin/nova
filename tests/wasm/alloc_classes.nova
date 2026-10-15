@@ -1,0 +1,62 @@
+// The allocator's size classes and large objects, held to nova-runtime's
+// results: built natively and for WASM, this prints the same (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §6.2). Arrays of every length from 0 to 300 take every class and the
+// first large sizes; each is filled, and all are checked after all are
+// made, so an object that overlapped its neighbour would show.
+
+fn filled(n: Int, seed: Int) -> [Int] {
+    let mut xs = [0; n]
+    let mut i = 0
+    while i < n {
+        xs[i] = seed * 1000 + i
+        i = i + 1
+    }
+    xs
+}
+
+fn intact(xs: [Int], seed: Int) -> Bool {
+    let mut i = 0
+    while i < xs.len() {
+        if xs[i] != seed * 1000 + i { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn main() {
+    let mut all = Vec::new()
+    let mut n = 0
+    while n <= 300 {
+        all.push(filled(n, n))
+        n = n + 1
+    }
+    let mut ok = 0
+    let mut total = 0
+    n = 0
+    while n <= 300 {
+        match all.get(n) {
+            Some(xs) => {
+                if intact(xs, n) { ok = ok + 1 }
+                total = total + xs.len()
+            }
+            None => {}
+        }
+        n = n + 1
+    }
+    println("${ok} of 301 arrays intact, ${total} elements")
+    // Strings of every length to 2,100 bytes, end to end.
+    let mut s = ""
+    let mut lens = 0
+    let mut k = 0
+    while k < 2100 {
+        s = "${s}x"
+        lens = lens + s.len()
+        k = k + 1
+    }
+    println("${s.len()} ${lens}")
+    // Large objects of one and of several pages.
+    let big = filled(9000, 7)
+    let bigger = filled(300000, 9)
+    println("${intact(big, 7)} ${intact(bigger, 9)} ${bigger[299999]}")
+}
