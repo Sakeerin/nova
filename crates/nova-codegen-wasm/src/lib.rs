@@ -20,8 +20,9 @@ use nova_mir::{
     WasmRuntime,
 };
 use wasm_encoder::{
-    BlockType, CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection,
-    ImportSection, Instruction as I, MemArg, MemorySection, MemoryType, TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
+    ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction as I, MemArg,
+    MemorySection, MemoryType, RefType, TableSection, TableType, TypeSection, ValType,
 };
 
 use structure::{Cfg, UNREACHED};
@@ -99,6 +100,55 @@ struct Layout {
     hosts: HashMap<RtFunc, u32>,
     /// The heap's first address ([`MemOp::HeapBase`]).
     heap_base: i64,
+    /// Each string literal's header, by its text (spec §4.5).
+    literals: HashMap<String, u32>,
+    /// Each function value's place in the table, by the function's name.
+    table: HashMap<String, u32>,
+    /// `std/rt`'s allocator, when the module has one.
+    alloc: Option<u32>,
+    /// The type of each `call_indirect` the module makes: `(env, params...)
+    /// -> ret`, interned before any function is lowered.
+    indirect: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
+}
+
+/// A `call_indirect`'s type: the environment pointer, then `params`.
+fn indirect_type(params: &[MirTy], ret: MirTy) -> (Vec<ValType>, Vec<ValType>) {
+    let mut abi = vec![ValType::I32];
+    abi.extend(vals(params));
+    (abi, val(ret).into_iter().collect())
+}
+
+/// The data segment: each distinct string literal's 16-byte header,
+/// `{len: i64, ptr: i32, 0: i32}`, then its bytes, each part 8-aligned,
+/// from [`DATA_BASE`] (spec §4.5). Returns the bytes and each header's
+/// address.
+fn literal_data(mir: &Module) -> (Vec<u8>, HashMap<String, u32>) {
+    let mut data: Vec<u8> = Vec::new();
+    let mut at: HashMap<String, u32> = HashMap::new();
+    for stmt in mir
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.stmts)
+    {
+        let Stmt::ConstStr(_, text) = stmt else {
+            continue;
+        };
+        if at.contains_key(text) {
+            continue;
+        }
+        let header = DATA_BASE + data.len() as u32;
+        let bytes = header + 16;
+        data.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        data.extend_from_slice(&bytes.to_le_bytes());
+        data.extend_from_slice(&[0; 4]);
+        data.extend_from_slice(text.as_bytes());
+        while data.len() % 8 != 0 {
+            data.push(0);
+        }
+        at.insert(text.clone(), header);
+    }
+    (data, at)
 }
 
 /// Lower `mir` to a WASM module. `main` is exported, with the memory.
@@ -111,7 +161,14 @@ pub fn compile_module(mir: &Module) -> Result<Output> {
         params: HashMap::new(),
         hosts: HashMap::new(),
         heap_base: i64::from(DATA_BASE),
+        literals: HashMap::new(),
+        table: HashMap::new(),
+        alloc: None,
+        indirect: HashMap::new(),
     };
+    let (data, literals) = literal_data(mir);
+    layout.heap_base = i64::from(DATA_BASE) + data.len() as i64;
+    layout.literals = literals;
 
     // The host functions the program calls, in first-use order.
     let mut host_order: Vec<RtFunc> = Vec::new();
@@ -155,6 +212,46 @@ pub fn compile_module(mir: &Module) -> Result<Output> {
         layout.rets.insert(f.name.clone(), f.ret);
         layout.params.insert(f.name.clone(), abi_params(f).to_vec());
     }
+    if let Some(name) = &mir.runtime_alloc {
+        layout.alloc = Some(
+            *layout
+                .funcs
+                .get(name)
+                .ok_or_else(|| anyhow!("the allocator `{name}` is not in the module"))?,
+        );
+    }
+    for stmt in mir
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.stmts)
+    {
+        if let Stmt::CallIndirect { params, ret, .. } = stmt {
+            let key = indirect_type(params, *ret);
+            let ty = types.of(key.0.clone(), key.1.clone());
+            layout.indirect.insert(key, ty);
+        }
+    }
+    // Every function whose address is taken, in first-use order: its code
+    // pointer is its place in the table (spec §4.3).
+    let mut table: Vec<u32> = Vec::new();
+    for stmt in mir
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.stmts)
+    {
+        if let Stmt::MakeClosure { code, .. } = stmt {
+            if !layout.table.contains_key(code) {
+                let index = *layout
+                    .funcs
+                    .get(code)
+                    .ok_or_else(|| anyhow!("a function value of an undeclared `{code}`"))?;
+                layout.table.insert(code.clone(), table.len() as u32);
+                table.push(index);
+            }
+        }
+    }
 
     let mut functions = FunctionSection::new();
     let mut code = CodeSection::new();
@@ -171,6 +268,17 @@ pub fn compile_module(mir: &Module) -> Result<Output> {
     module.section(&types.section);
     module.section(&imports);
     module.section(&functions);
+    if !table.is_empty() {
+        let mut tables = TableSection::new();
+        tables.table(TableType {
+            element_type: RefType::FUNCREF,
+            table64: false,
+            minimum: table.len() as u64,
+            maximum: Some(table.len() as u64),
+            shared: false,
+        });
+        module.section(&tables);
+    }
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
         minimum: MEMORY_PAGES,
@@ -188,8 +296,25 @@ pub fn compile_module(mir: &Module) -> Result<Output> {
         .ok_or_else(|| anyhow!("the module has no `main`"))?;
     exports.export("main", ExportKind::Func, main);
     exports.export("memory", ExportKind::Memory, 0);
+    if let Some(alloc) = layout.alloc {
+        exports.export("nova_alloc", ExportKind::Func, alloc);
+    }
     module.section(&exports);
+    if !table.is_empty() {
+        let mut elements = ElementSection::new();
+        elements.active(
+            Some(0),
+            &ConstExpr::i32_const(0),
+            Elements::Functions(Cow::Owned(table)),
+        );
+        module.section(&elements);
+    }
     module.section(&code);
+    if !data.is_empty() {
+        let mut segments = DataSection::new();
+        segments.active(0, &ConstExpr::i32_const(DATA_BASE as i32), data);
+        module.section(&segments);
+    }
     Ok(Output {
         wasm: module.finish(),
         imports: import_names,
@@ -215,6 +340,8 @@ struct FnLower<'a> {
     locals: Vec<Option<u32>>,
     /// The dispatch loop's block number, when the graph is irreducible.
     pc: u32,
+    /// An `i32` local for an address a statement builds in two steps.
+    scratch: u32,
     decls: Vec<(u32, ValType)>,
     out: Vec<I<'static>>,
     ctx: Vec<Ctx>,
@@ -249,12 +376,14 @@ impl<'a> FnLower<'a> {
             }
         }
         let pc = next;
-        decls.push((1, ValType::I32));
+        let scratch = next + 1;
+        decls.push((2, ValType::I32));
         FnLower {
             f,
             layout,
             locals,
             pc,
+            scratch,
             decls,
             out: Vec::new(),
             ctx: Vec::new(),
@@ -563,11 +692,21 @@ impl<'a> FnLower<'a> {
                     .funcs
                     .get(callee)
                     .ok_or_else(|| anyhow!("a call to an undeclared `{callee}`"))?;
-                for a in args {
+                // A call MIR routed to `std/rt` passes a `Ptr` where the
+                // function takes an `Int` address, and may return the reverse
+                // (spec §5.4).
+                let params = &layout.params[callee];
+                for (a, want) in args.iter().zip(params) {
                     self.get(*a);
+                    self.convert(self.ty(*a), *want);
                 }
                 self.out.push(I::Call(index));
                 let ret = layout.rets[callee];
+                if let Some(d) = dst {
+                    if val(ret).is_some() && self.locals[d.0 as usize].is_some() {
+                        self.convert(ret, self.ty(*d));
+                    }
+                }
                 self.result(*dst, ret);
             }
             Stmt::CallRuntime { dst, func, args } => {
@@ -586,13 +725,247 @@ impl<'a> FnLower<'a> {
                 }
             }
             Stmt::Mem { dst, op, args } => self.mem(*dst, *op, args)?,
+            Stmt::ConstStr(t, text) => {
+                let at = self.layout.literals[text];
+                self.out.push(I::I32Const(at as i32));
+                self.set(*t);
+            }
+            Stmt::MakeSum { dst, tag, fields } => {
+                self.alloc(8 + 8 * fields.len() as i64)?;
+                self.set(*dst);
+                self.get(*dst);
+                self.out.push(I::I64Const(i64::from(*tag)));
+                self.out.push(I::I64Store(mem(0, 3)));
+                for (i, (v, ty)) in fields.iter().enumerate() {
+                    self.store_field(*dst, 8 + 8 * i as u64, *v, *ty);
+                }
+            }
+            Stmt::MakeRecord { dst, fields } => {
+                self.alloc(8 * fields.len() as i64)?;
+                self.set(*dst);
+                for (i, (v, ty)) in fields.iter().enumerate() {
+                    self.store_field(*dst, 8 * i as u64, *v, *ty);
+                }
+            }
+            Stmt::MakeArray { dst, elems } => {
+                self.alloc(8 + 8 * elems.len() as i64)?;
+                self.set(*dst);
+                self.get(*dst);
+                self.out.push(I::I64Const(elems.len() as i64));
+                self.out.push(I::I64Store(mem(0, 3)));
+                for (i, (v, ty)) in elems.iter().enumerate() {
+                    self.store_field(*dst, 8 + 8 * i as u64, *v, *ty);
+                }
+            }
+            Stmt::ArrayAlloc { dst, len } => {
+                // `8 + 8*len` bytes, `len` at offset 0. MIR has checked
+                // `len`'s range, and the allocator zeroes.
+                let alloc = self.alloc_index()?;
+                self.get(*len);
+                self.out.push(I::I64Const(8));
+                self.out.push(I::I64Mul);
+                self.out.push(I::I64Const(8));
+                self.out.push(I::I64Add);
+                self.out.push(I::Call(alloc));
+                self.out.push(I::I32WrapI64);
+                self.set(*dst);
+                self.get(*dst);
+                self.get(*len);
+                self.out.push(I::I64Store(mem(0, 3)));
+            }
+            Stmt::MakeClosure {
+                dst,
+                code,
+                captures,
+            } => {
+                // The environment: the captures in 8-byte slots, or null.
+                if captures.is_empty() {
+                    self.out.push(I::I32Const(0));
+                    self.out.push(I::LocalSet(self.scratch));
+                } else {
+                    self.alloc(8 * captures.len() as i64)?;
+                    self.out.push(I::LocalSet(self.scratch));
+                    for (i, (v, ty)) in captures.iter().enumerate() {
+                        self.store_at(self.scratch, 8 * i as u64, *v, *ty);
+                    }
+                }
+                // `{ code, env }`: the code is the function's table index.
+                let slot = self.layout.table[code];
+                self.alloc(16)?;
+                self.set(*dst);
+                self.get(*dst);
+                self.out.push(I::I64Const(i64::from(slot)));
+                self.out.push(I::I64Store(mem(0, 3)));
+                self.get(*dst);
+                self.out.push(I::LocalGet(self.scratch));
+                self.out.push(I::I64ExtendI32U);
+                self.out.push(I::I64Store(mem(8, 3)));
+            }
+            Stmt::CallIndirect {
+                dst,
+                callee,
+                params,
+                ret,
+                args,
+            } => {
+                self.get(*callee);
+                self.out.push(I::I32Load(mem(8, 2)));
+                for a in args {
+                    self.get(*a);
+                }
+                self.get(*callee);
+                self.out.push(I::I32Load(mem(0, 2)));
+                let ty = self.layout.indirect[&indirect_type(params, *ret)];
+                self.out.push(I::CallIndirect {
+                    type_index: ty,
+                    table_index: 0,
+                });
+                self.result(*dst, *ret);
+            }
+            Stmt::SumTag { dst, sum } => {
+                self.get(*sum);
+                self.out.push(I::I64Load(mem(0, 3)));
+                self.set(*dst);
+            }
+            Stmt::SumField {
+                dst,
+                sum,
+                index,
+                ty,
+            } => self.load_field(*dst, *sum, 8 + 8 * u64::from(*index), *ty),
+            Stmt::RecordField {
+                dst,
+                record,
+                index,
+                ty,
+            } => self.load_field(*dst, *record, 8 * u64::from(*index), *ty),
+            Stmt::SetField {
+                record,
+                index,
+                value,
+                ty,
+            } => self.store_field(*record, 8 * u64::from(*index), *value, *ty),
+            Stmt::ArrayLen { dst, arr } => {
+                self.get(*arr);
+                self.out.push(I::I64Load(mem(0, 3)));
+                self.set(*dst);
+            }
+            Stmt::ArrayGet {
+                dst,
+                arr,
+                index,
+                ty,
+            } => {
+                if val(*ty).is_some() {
+                    self.elem_addr(*arr, *index);
+                    self.out.push(I::LocalSet(self.scratch));
+                    self.load_at(*dst, self.scratch, 8, *ty);
+                }
+            }
+            Stmt::ArraySet {
+                arr,
+                index,
+                value,
+                ty,
+            } => {
+                if val(*ty).is_some() {
+                    self.elem_addr(*arr, *index);
+                    self.out.push(I::LocalSet(self.scratch));
+                    self.store_at(self.scratch, 8, *value, *ty);
+                }
+            }
             Stmt::Await { .. } => bail!(
                 "an `.await` marker reached codegen: `nova-mir`'s async state-machine \
                  transform must split every `async fn` body at its await points first"
             ),
-            other => bail!("not lowered yet: {other:?}"),
         }
         Ok(())
+    }
+
+    /// Convert the value on the stack from `from`'s class to `to`'s, where a
+    /// `Ptr` meets an `Int` address (spec §5.4); otherwise nothing.
+    fn convert(&mut self, from: MirTy, to: MirTy) {
+        match (from, to) {
+            (MirTy::Ptr, MirTy::I64) => self.out.push(I::I64ExtendI32U),
+            (MirTy::I64, MirTy::Ptr) => self.out.push(I::I32WrapI64),
+            _ => {}
+        }
+    }
+
+    fn alloc_index(&self) -> Result<u32> {
+        self.layout
+            .alloc
+            .ok_or_else(|| anyhow!("a heap object, but the module has no allocator"))
+    }
+
+    /// Allocate `size` bytes; the object's address is left on the stack.
+    fn alloc(&mut self, size: i64) -> Result<()> {
+        let alloc = self.alloc_index()?;
+        self.out.push(I::I64Const(size));
+        self.out.push(I::Call(alloc));
+        self.out.push(I::I32WrapI64);
+        Ok(())
+    }
+
+    /// `arr + 8*index`, the address of element `index` less its 8-byte
+    /// header, as an `i32`.
+    fn elem_addr(&mut self, arr: Temp, index: Temp) {
+        self.get(arr);
+        self.get(index);
+        self.out.push(I::I32WrapI64);
+        self.out.push(I::I32Const(3));
+        self.out.push(I::I32Shl);
+        self.out.push(I::I32Add);
+    }
+
+    /// Store `v` of class `ty` at `object + offset`.
+    fn store_field(&mut self, object: Temp, offset: u64, v: Temp, ty: MirTy) {
+        if let Some(i) = self.locals[object.0 as usize] {
+            self.store_at(i, offset, v, ty);
+        }
+    }
+
+    /// Store `v` of class `ty` at `local + offset`, `local` an `i32`
+    /// address. A `Ptr` is stored zero-extended to 8 bytes (spec §4.1).
+    fn store_at(&mut self, local: u32, offset: u64, v: Temp, ty: MirTy) {
+        if val(ty).is_none() {
+            return;
+        }
+        self.out.push(I::LocalGet(local));
+        self.get(v);
+        match ty {
+            MirTy::I64 => self.out.push(I::I64Store(mem(offset, 3))),
+            MirTy::F64 => self.out.push(I::F64Store(mem(offset, 3))),
+            MirTy::I8 => self.out.push(I::I32Store8(mem(offset, 0))),
+            MirTy::Ptr => {
+                self.out.push(I::I64ExtendI32U);
+                self.out.push(I::I64Store(mem(offset, 3)));
+            }
+            MirTy::Unit => unreachable!("handled above"),
+        }
+    }
+
+    /// Load `object + offset` of class `ty` into `dst`.
+    fn load_field(&mut self, dst: Temp, object: Temp, offset: u64, ty: MirTy) {
+        if let Some(i) = self.locals[object.0 as usize] {
+            self.load_at(dst, i, offset, ty);
+        }
+    }
+
+    /// Load `local + offset` of class `ty` into `dst`.
+    fn load_at(&mut self, dst: Temp, local: u32, offset: u64, ty: MirTy) {
+        if val(ty).is_none() || self.locals[dst.0 as usize].is_none() {
+            return;
+        }
+        self.out.push(I::LocalGet(local));
+        self.out.push(match ty {
+            MirTy::I64 => I::I64Load(mem(offset, 3)),
+            MirTy::F64 => I::F64Load(mem(offset, 3)),
+            MirTy::I8 => I::I32Load8U(mem(offset, 0)),
+            MirTy::Ptr => I::I32Load(mem(offset, 2)),
+            MirTy::Unit => unreachable!("handled above"),
+        });
+        self.set(dst);
     }
 
     /// A memory access in line (spec §5.1).
@@ -1119,6 +1492,311 @@ mod tests {
         );
         let e = compile_module(&module(vec![f])).expect_err("refused");
         assert!(e.to_string().contains("float remainder (%)"), "{e}");
+    }
+
+    /// A bump allocator over the heap, as `std/rt`'s `rt_alloc` would be:
+    /// `(size: i64) -> i64`. Its state word is at 8.
+    fn alloc_fn() -> MirFn {
+        let m = |op, args: Vec<u32>, dst: Option<u32>| Stmt::Mem {
+            dst: dst.map(Temp),
+            op,
+            args: args.into_iter().map(Temp).collect(),
+        };
+        // t0 size, t1 state address, t2 at, t3 end
+        func(
+            "rt_alloc.9",
+            1,
+            vec![MirTy::I64, MirTy::I64, MirTy::I64, MirTy::I64],
+            MirTy::I64,
+            vec![block(
+                vec![
+                    Stmt::ConstInt(Temp(1), 8),
+                    m(MemOp::Load64, vec![1], Some(2)),
+                    Stmt::Bin {
+                        dst: Temp(3),
+                        op: BinOp::Add,
+                        class: OperandClass::Int,
+                        lhs: Temp(2),
+                        rhs: Temp(0),
+                    },
+                    m(MemOp::Store64, vec![1, 3], None),
+                ],
+                Terminator::Return(Some(Temp(2))),
+            )],
+        )
+    }
+
+    fn with_alloc(main: MirFn) -> Module {
+        Module {
+            functions: vec![main, alloc_fn()],
+            runtime_alloc: Some("rt_alloc.9".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn exports(wasm: &[u8]) -> Vec<String> {
+        wasmparser::Parser::new(0)
+            .parse_all(wasm)
+            .filter_map(Result::ok)
+            .filter_map(|p| match p {
+                wasmparser::Payload::ExportSection(r) => Some(
+                    r.into_iter()
+                        .filter_map(Result::ok)
+                        .map(|e| e.name.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Every heap statement, through the module's allocator, which is
+    /// exported as `nova_alloc` (spec §4.4, §4.7).
+    #[test]
+    fn heap_objects_lower_through_the_allocator() {
+        // t0 sum, t1 tag, t2 int, t3 record, t4 array, t5 len, t6 float,
+        // t7 bool
+        let stmts = vec![
+            Stmt::ConstInt(Temp(2), 5),
+            Stmt::ConstFloat(Temp(6), 2.5),
+            Stmt::ConstBool(Temp(7), true),
+            Stmt::MakeSum {
+                dst: Temp(0),
+                tag: 1,
+                fields: vec![(Temp(2), MirTy::I64), (Temp(6), MirTy::F64)],
+            },
+            Stmt::SumTag {
+                dst: Temp(1),
+                sum: Temp(0),
+            },
+            Stmt::SumField {
+                dst: Temp(6),
+                sum: Temp(0),
+                index: 1,
+                ty: MirTy::F64,
+            },
+            Stmt::MakeRecord {
+                dst: Temp(3),
+                fields: vec![(Temp(0), MirTy::Ptr), (Temp(7), MirTy::I8)],
+            },
+            Stmt::RecordField {
+                dst: Temp(0),
+                record: Temp(3),
+                index: 0,
+                ty: MirTy::Ptr,
+            },
+            Stmt::SetField {
+                record: Temp(3),
+                index: 1,
+                value: Temp(7),
+                ty: MirTy::I8,
+            },
+            Stmt::MakeArray {
+                dst: Temp(4),
+                elems: vec![(Temp(2), MirTy::I64)],
+            },
+            Stmt::ArrayLen {
+                dst: Temp(5),
+                arr: Temp(4),
+            },
+            Stmt::ArrayAlloc {
+                dst: Temp(4),
+                len: Temp(5),
+            },
+            Stmt::ArraySet {
+                arr: Temp(4),
+                index: Temp(1),
+                value: Temp(2),
+                ty: MirTy::I64,
+            },
+            Stmt::ArrayGet {
+                dst: Temp(2),
+                arr: Temp(4),
+                index: Temp(1),
+                ty: MirTy::I64,
+            },
+        ];
+        let temps = vec![
+            MirTy::Ptr,
+            MirTy::I64,
+            MirTy::I64,
+            MirTy::Ptr,
+            MirTy::Ptr,
+            MirTy::I64,
+            MirTy::F64,
+            MirTy::I8,
+        ];
+        let out = valid(&with_alloc(func(
+            "main",
+            0,
+            temps,
+            MirTy::Unit,
+            vec![block(stmts, ret_unit())],
+        )));
+        assert_eq!(exports(&out.wasm), ["main", "memory", "nova_alloc"]);
+    }
+
+    /// A string literal is a header in the data segment: an address, with no
+    /// allocation (spec §4.5).
+    #[test]
+    fn a_string_literal_is_a_static_header() {
+        let main = func(
+            "main",
+            0,
+            vec![MirTy::Ptr],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::ConstStr(Temp(0), "hey".to_string()),
+                    Stmt::ConstStr(Temp(0), "hey".to_string()),
+                ],
+                ret_unit(),
+            )],
+        );
+        let out = valid(&module(vec![main]));
+        let data: Vec<(u32, Vec<u8>)> = wasmparser::Parser::new(0)
+            .parse_all(&out.wasm)
+            .filter_map(Result::ok)
+            .filter_map(|p| match p {
+                wasmparser::Payload::DataSection(r) => Some(
+                    r.into_iter()
+                        .filter_map(Result::ok)
+                        .map(|d| (0, d.data.to_vec()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // One literal, once: length 3, bytes at 64 + 16 = 80, then "hey",
+        // padded to 8.
+        let mut want = 3u64.to_le_bytes().to_vec();
+        want.extend(80u32.to_le_bytes());
+        want.extend([0; 4]);
+        want.extend(b"hey\0\0\0\0\0");
+        assert_eq!(data, [(0, want)]);
+    }
+
+    /// A function value is its table index and an environment; calling one
+    /// is `call_indirect` (spec §4.3).
+    #[test]
+    fn a_closure_is_a_table_index_and_an_environment() {
+        // The closure: (env, x) -> x + its capture.
+        let mut lambda = func(
+            "lambda.3",
+            1,
+            vec![MirTy::Ptr, MirTy::I64, MirTy::I64],
+            MirTy::I64,
+            vec![block(
+                vec![
+                    Stmt::RecordField {
+                        dst: Temp(2),
+                        record: Temp(0),
+                        index: 0,
+                        ty: MirTy::I64,
+                    },
+                    Stmt::Bin {
+                        dst: Temp(1),
+                        op: BinOp::Add,
+                        class: OperandClass::Int,
+                        lhs: Temp(1),
+                        rhs: Temp(2),
+                    },
+                ],
+                Terminator::Return(Some(Temp(1))),
+            )],
+        );
+        lambda.takes_env = true;
+        lambda.capture_count = 1;
+        let main = func(
+            "main",
+            0,
+            vec![MirTy::I64, MirTy::Ptr],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::ConstInt(Temp(0), 2),
+                    Stmt::MakeClosure {
+                        dst: Temp(1),
+                        code: "lambda.3".to_string(),
+                        captures: vec![(Temp(0), MirTy::I64)],
+                    },
+                    Stmt::CallIndirect {
+                        dst: Some(Temp(0)),
+                        callee: Temp(1),
+                        params: vec![MirTy::I64],
+                        ret: MirTy::I64,
+                        args: vec![Temp(0)],
+                    },
+                ],
+                ret_unit(),
+            )],
+        );
+        let mut m = with_alloc(main);
+        m.functions.push(lambda);
+        let out = valid(&m);
+        let elements: usize = wasmparser::Parser::new(0)
+            .parse_all(&out.wasm)
+            .filter_map(Result::ok)
+            .map(|p| match p {
+                wasmparser::Payload::ElementSection(r) => r.count() as usize,
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(elements, 1);
+    }
+
+    /// A call MIR routed to `std/rt` passes a `Ptr` to an `Int` parameter
+    /// and keeps an `Int` result in a `Ptr`: the backend converts both, or
+    /// the module would not validate (spec §5.4).
+    #[test]
+    fn a_call_into_std_rt_converts_between_ptr_and_int() {
+        let rt = func(
+            "rt_str_concat.4",
+            1,
+            vec![MirTy::I64],
+            MirTy::I64,
+            vec![block(vec![], Terminator::Return(Some(Temp(0))))],
+        );
+        let main = func(
+            "main",
+            0,
+            vec![MirTy::Ptr],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::ConstStr(Temp(0), "a".to_string()),
+                    Stmt::Call {
+                        dst: Some(Temp(0)),
+                        callee: "rt_str_concat.4".to_string(),
+                        args: vec![Temp(0)],
+                    },
+                ],
+                ret_unit(),
+            )],
+        );
+        valid(&module(vec![main, rt]));
+    }
+
+    /// A heap object needs the allocator; a module without one is refused.
+    #[test]
+    fn a_heap_object_without_an_allocator_is_refused() {
+        let main = func(
+            "main",
+            0,
+            vec![MirTy::Ptr],
+            MirTy::Unit,
+            vec![block(
+                vec![Stmt::MakeRecord {
+                    dst: Temp(0),
+                    fields: vec![],
+                }],
+                ret_unit(),
+            )],
+        );
+        let e = compile_module(&module(vec![main])).expect_err("refused");
+        assert!(e.to_string().contains("no allocator"), "{e}");
     }
 
     trait CloneStmt {
