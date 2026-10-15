@@ -325,3 +325,45 @@ fn a_trap_exits_132() {
     let a = run_wasm(node, &dist).code(132);
     assert_eq!(stderr(&a), "nova: trap: divide by zero\n");
 }
+
+/// A program in `tests/wasm/`, held to its `.stdout` file natively and,
+/// built for WASM, under Node: the two must print the same (spec §9.3).
+fn differential(name: &str) {
+    let source = repo_root().join("tests/wasm").join(format!("{name}.nova"));
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    let dir = fresh(&format!("diff-{name}"));
+    let native = nova_in(&dir, &["run", &source.to_string_lossy()]).success();
+    assert_eq!(stdout(&native), expected, "natively");
+    let Some(node) = node() else { return };
+    let dist = build_wasm(&dir, &source);
+    let wasm = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&wasm), expected, "on WASM");
+}
+
+/// `std/rt`'s string and bytes functions are `nova-runtime`'s (spec §5.3).
+#[test]
+fn std_rt_strings_and_bytes_match_nova_runtime() {
+    differential("strings_and_bytes");
+}
+
+/// `check_bounds` panics with `nova-runtime`'s message (spec §5.3).
+#[test]
+fn an_index_out_of_bounds_panics_as_natively() {
+    let Some(node) = node() else { return };
+    let dir = fresh("bounds");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn main() {\n    let xs = [1, 2, 3]\n    let i = xs.len() + 2\n    println(\"${xs[i]}\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(
+        stderr(&a),
+        "nova: panic: array index 5 out of bounds for length 3\n"
+    );
+}

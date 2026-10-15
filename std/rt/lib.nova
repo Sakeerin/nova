@@ -114,3 +114,434 @@ fn rt_int_to_str(v: Int) -> Int {
     if negative { mem_store8(start, 45) }
     h
 }
+
+// A copy of the string or bytes `s`: `gc_str` and `gc_bytes`, which copy.
+fn str_copy(s: Int) -> Int {
+    let len = str_len(s)
+    let h = rt_str_alloc(len)
+    mem_copy(str_bytes(h), str_bytes(s), len)
+    h
+}
+
+// A new string of the ASCII bytes `b0..b4`, of which the first `n` count.
+fn ascii(n: Int, b0: Int, b1: Int, b2: Int, b3: Int, b4: Int) -> Int {
+    let h = rt_str_alloc(n)
+    let at = str_bytes(h)
+    mem_store8(at, b0)
+    if n > 1 { mem_store8(at + 1, b1) }
+    if n > 2 { mem_store8(at + 2, b2) }
+    if n > 3 { mem_store8(at + 3, b3) }
+    if n > 4 { mem_store8(at + 4, b4) }
+    h
+}
+
+// `nova_rt_bool_to_str`.
+fn rt_bool_to_str(v: Bool) -> Int {
+    if v { ascii(4, 116, 114, 117, 101, 0) } else { ascii(5, 102, 97, 108, 115, 101) }
+}
+
+// `char::from_u32(v as u32)`, or U+FFFD where that is `None`.
+fn scalar(v: Int) -> Int {
+    let c = v & 4294967295
+    if c > 1114111 || (c >= 55296 && c <= 57343) { 65533 } else { c }
+}
+
+// How many bytes UTF-8 takes for the scalar value `c`.
+fn utf8_len(c: Int) -> Int {
+    if c < 128 { 1 } else if c < 2048 { 2 } else if c < 65536 { 3 } else { 4 }
+}
+
+// Write `c` as UTF-8 at `at`, returning the address after it.
+fn utf8_put(at: Int, c: Int) -> Int {
+    if c < 128 {
+        mem_store8(at, c)
+        at + 1
+    } else if c < 2048 {
+        mem_store8(at, 192 | (c >> 6))
+        mem_store8(at + 1, 128 | (c & 63))
+        at + 2
+    } else if c < 65536 {
+        mem_store8(at, 224 | (c >> 12))
+        mem_store8(at + 1, 128 | ((c >> 6) & 63))
+        mem_store8(at + 2, 128 | (c & 63))
+        at + 3
+    } else {
+        mem_store8(at, 240 | (c >> 18))
+        mem_store8(at + 1, 128 | ((c >> 12) & 63))
+        mem_store8(at + 2, 128 | ((c >> 6) & 63))
+        mem_store8(at + 3, 128 | (c & 63))
+        at + 4
+    }
+}
+
+// `nova_rt_char_to_str`.
+fn rt_char_to_str(v: Int) -> Int {
+    let c = scalar(v)
+    let h = rt_str_alloc(utf8_len(c))
+    utf8_put(str_bytes(h), c)
+    h
+}
+
+// Whether the `n` bytes at `p` and at `q` are equal.
+fn mem_eq(p: Int, q: Int, n: Int) -> Bool {
+    let mut i = 0
+    while i < n {
+        if mem_load8(p + i) != mem_load8(q + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// `nova_rt_str_eq`, and `nova_rt_bytes_eq`.
+fn rt_str_eq(a: Int, b: Int) -> Bool {
+    let n = str_len(a)
+    if n != str_len(b) { return false }
+    mem_eq(str_bytes(a), str_bytes(b), n)
+}
+
+// `nova_rt_str_cmp`: byte by byte, then the shorter first.
+fn rt_str_cmp(a: Int, b: Int) -> Int {
+    let la = str_len(a)
+    let lb = str_len(b)
+    let mut n = la
+    if lb < n { n = lb }
+    let pa = str_bytes(a)
+    let pb = str_bytes(b)
+    let mut i = 0
+    while i < n {
+        let x = mem_load8(pa + i)
+        let y = mem_load8(pb + i)
+        if x < y { return -1 }
+        if x > y { return 1 }
+        i = i + 1
+    }
+    if la < lb { -1 } else if la > lb { 1 } else { 0 }
+}
+
+// `z >> k` as an unsigned shift: Nova's `>>` keeps the sign.
+fn shr(z: Int, k: Int) -> Int { (z >> k) & ((1 << (64 - k)) - 1) }
+
+// `nova-runtime`'s `splitmix64_finalize`.
+fn splitmix(value: Int) -> Int {
+    let mut z = value
+    z = z ^ shr(z, 30)
+    z = z * -4658895280553007687
+    z = z ^ shr(z, 27)
+    z = z * -7723592293110705685
+    z ^ shr(z, 31)
+}
+
+// The state words of `str_hash`'s seed: the seed, and whether it is drawn.
+const STR_SEED: Int = 16
+
+const STR_SEED_DRAWN: Int = 24
+
+// `str_hash_seed`: drawn once per run from the shim's random seed, kept
+// apart from `int_hash_seed`'s own value, as the native seeds are apart.
+fn str_seed() -> Int {
+    if mem_load64(STR_SEED_DRAWN) == 0 {
+        mem_store64(STR_SEED, splitmix(int_hash_seed() ^ 6148914691236517205))
+        mem_store64(STR_SEED_DRAWN, 1)
+    }
+    mem_load64(STR_SEED)
+}
+
+// `nova_rt_str_hash`: seeded FNV-1a over the bytes, then the finalizer.
+fn rt_str_hash(s: Int) -> Int {
+    let mut h = str_seed()
+    let p = str_bytes(s)
+    let n = str_len(s)
+    let mut i = 0
+    while i < n {
+        h = (h ^ mem_load8(p + i)) * 1099511628211
+        i = i + 1
+    }
+    splitmix(h)
+}
+
+// How many characters the `n` bytes of UTF-8 at `p` hold: the bytes that
+// do not continue one.
+fn chars_in(p: Int, n: Int) -> Int {
+    let mut count = 0
+    let mut i = 0
+    while i < n {
+        if (mem_load8(p + i) & 192) != 128 { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+// `nova_rt_str_len_chars`.
+fn rt_str_len_chars(s: Int) -> Int { chars_in(str_bytes(s), str_len(s)) }
+
+// `nova_rt_str_chars`: the string's characters, as an array of scalar
+// values. The string is valid UTF-8.
+fn rt_str_chars(s: Int) -> Int {
+    let p = str_bytes(s)
+    let len = str_len(s)
+    let n = chars_in(p, len)
+    let arr = rt_alloc(8 + 8 * n)
+    mem_store64(arr, n)
+    let mut i = 0
+    let mut k = 0
+    while i < len {
+        let b = mem_load8(p + i)
+        let mut c = b
+        let mut width = 1
+        if b >= 240 {
+            c = ((b & 7) << 18) | ((mem_load8(p + i + 1) & 63) << 12)
+            c = c | ((mem_load8(p + i + 2) & 63) << 6) | (mem_load8(p + i + 3) & 63)
+            width = 4
+        } else if b >= 224 {
+            c = ((b & 15) << 12) | ((mem_load8(p + i + 1) & 63) << 6)
+            c = c | (mem_load8(p + i + 2) & 63)
+            width = 3
+        } else if b >= 192 {
+            c = ((b & 31) << 6) | (mem_load8(p + i + 1) & 63)
+            width = 2
+        }
+        mem_store64(arr + 8 + 8 * k, c)
+        k = k + 1
+        i = i + width
+    }
+    arr
+}
+
+// `nova_rt_str_from_chars`: an invalid value becomes U+FFFD, and a negative
+// length counts as zero.
+fn rt_str_from_chars(chars: Int) -> Int {
+    let mut n = mem_load64(chars)
+    if n < 0 { n = 0 }
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        total = total + utf8_len(scalar(mem_load64(chars + 8 + 8 * i)))
+        i = i + 1
+    }
+    let h = rt_str_alloc(total)
+    let mut at = str_bytes(h)
+    i = 0
+    while i < n {
+        at = utf8_put(at, scalar(mem_load64(chars + 8 + 8 * i)))
+        i = i + 1
+    }
+    h
+}
+
+// `nova_rt_str_join`: the parts, with `sep` between each pair.
+fn rt_str_join(sep: Int, parts: Int) -> Int {
+    let mut n = mem_load64(parts)
+    if n < 0 { n = 0 }
+    let ls = str_len(sep)
+    let mut total = 0
+    if n > 0 { total = ls * (n - 1) }
+    let mut i = 0
+    while i < n {
+        total = total + str_len(mem_load64(parts + 8 + 8 * i))
+        i = i + 1
+    }
+    let h = rt_str_alloc(total)
+    let mut at = str_bytes(h)
+    i = 0
+    while i < n {
+        if i > 0 {
+            mem_copy(at, str_bytes(sep), ls)
+            at = at + ls
+        }
+        let part = mem_load64(parts + 8 + 8 * i)
+        let len = str_len(part)
+        mem_copy(at, str_bytes(part), len)
+        at = at + len
+        i = i + 1
+    }
+    h
+}
+
+// `nova_rt_str_index_of`: the character index of the first `needle` in
+// `haystack`, or -1. A byte match starts on a character boundary, since no
+// character starts with a continuation byte.
+fn rt_str_index_of(haystack: Int, needle: Int) -> Int {
+    let h = str_bytes(haystack)
+    let lh = str_len(haystack)
+    let n = str_bytes(needle)
+    let ln = str_len(needle)
+    let mut at = 0
+    while at + ln <= lh {
+        if mem_eq(h + at, n, ln) { return chars_in(h, at) }
+        at = at + 1
+    }
+    // Not `-1` on a line of its own, which would continue the `while`.
+    0 - 1
+}
+
+// The extra bytes byte `b` takes in a JSON string literal.
+fn json_extra(b: Int) -> Int {
+    if b == 34 || b == 92 || b == 10 || b == 13 || b == 9 || b == 8 || b == 12 {
+        1
+    } else if b < 32 {
+        5
+    } else {
+        0
+    }
+}
+
+// The letter of a hex digit, lowercase.
+fn hex_digit(d: Int) -> Int { if d < 10 { 48 + d } else { 87 + d } }
+
+// `nova_rt_json_quote`: `s` as a JSON string literal, quotes included
+// (RFC 8259).
+fn rt_json_quote(s: Int) -> Int {
+    let p = str_bytes(s)
+    let n = str_len(s)
+    let mut extra = 0
+    let mut i = 0
+    while i < n {
+        extra = extra + json_extra(mem_load8(p + i))
+        i = i + 1
+    }
+    let h = rt_str_alloc(n + 2 + extra)
+    let mut at = str_bytes(h)
+    mem_store8(at, 34)
+    at = at + 1
+    i = 0
+    while i < n {
+        let b = mem_load8(p + i)
+        let e = json_extra(b)
+        if e == 0 {
+            mem_store8(at, b)
+            at = at + 1
+        } else if e == 1 {
+            mem_store8(at, 92)
+            let mut letter = b
+            if b == 10 { letter = 110 }
+            if b == 13 { letter = 114 }
+            if b == 9 { letter = 116 }
+            if b == 8 { letter = 98 }
+            if b == 12 { letter = 102 }
+            mem_store8(at + 1, letter)
+            at = at + 2
+        } else {
+            mem_store8(at, 92)
+            mem_store8(at + 1, 117)
+            mem_store8(at + 2, 48)
+            mem_store8(at + 3, 48)
+            mem_store8(at + 4, hex_digit(b >> 4))
+            mem_store8(at + 5, hex_digit(b & 15))
+            at = at + 6
+        }
+        i = i + 1
+    }
+    mem_store8(at, 34)
+    h
+}
+
+// `nova_rt_check_bounds`.
+fn rt_check_bounds(index: Int, len: Int) {
+    if index < 0 || index >= len { panic("array index ${index} out of bounds for length ${len}") }
+}
+
+// `nova_rt_bytes_len`.
+fn rt_bytes_len(b: Int) -> Int { str_len(b) }
+
+// `nova_rt_bytes_from_string`.
+fn rt_bytes_from_string(s: Int) -> Int { str_copy(s) }
+
+// Whether byte `b` continues a UTF-8 character.
+fn continues(b: Int) -> Bool { b >= 128 && b <= 191 }
+
+// `nova_rt_bytes_is_utf8`: `std::str::from_utf8`'s rules. No overlong form,
+// no surrogate, nothing past U+10FFFF.
+fn rt_bytes_is_utf8(b: Int) -> Bool {
+    let p = str_bytes(b)
+    let n = str_len(b)
+    let mut i = 0
+    while i < n {
+        let b0 = mem_load8(p + i)
+        if b0 < 128 {
+            i = i + 1
+        } else {
+            let mut width = 0
+            let mut lo = 128
+            let mut hi = 191
+            if b0 >= 194 && b0 <= 223 { width = 2 }
+            if b0 >= 224 && b0 <= 239 { width = 3 }
+            if b0 >= 240 && b0 <= 244 { width = 4 }
+            if b0 == 224 { lo = 160 }
+            if b0 == 237 { hi = 159 }
+            if b0 == 240 { lo = 144 }
+            if b0 == 244 { hi = 143 }
+            if width == 0 || i + width > n { return false }
+            let b1 = mem_load8(p + i + 1)
+            if b1 < lo || b1 > hi { return false }
+            let mut k = 2
+            while k < width {
+                if !continues(mem_load8(p + i + k)) { return false }
+                k = k + 1
+            }
+            i = i + width
+        }
+    }
+    true
+}
+
+// `nova_rt_bytes_to_string_unchecked`.
+fn rt_bytes_to_string_unchecked(b: Int) -> Int { str_copy(b) }
+
+// `nova_rt_bytes_at`.
+fn rt_bytes_at(b: Int, i: Int) -> Int {
+    if i < 0 { panic("nova_rt_bytes_at: negative index") }
+    if i >= str_len(b) { panic("nova_rt_bytes_at: index out of range") }
+    mem_load8(str_bytes(b) + i)
+}
+
+// `nova_rt_bytes_slice`: the bounds clamped to `0..len`, and empty when
+// they cross.
+fn rt_bytes_slice(b: Int, start: Int, end: Int) -> Int {
+    let len = str_len(b)
+    let mut lo = start
+    if lo < 0 { lo = 0 }
+    if lo > len { lo = len }
+    let mut hi = end
+    if hi < 0 { hi = 0 }
+    if hi > len { hi = len }
+    if hi <= lo { return rt_str_alloc(0) }
+    let h = rt_str_alloc(hi - lo)
+    mem_copy(str_bytes(h), str_bytes(b) + lo, hi - lo)
+    h
+}
+
+// `nova_rt_bytes_concat`.
+fn rt_bytes_concat(a: Int, b: Int) -> Int { rt_str_concat(a, b) }
+
+// `nova_rt_bytes_to_ints`.
+fn rt_bytes_to_ints(b: Int) -> Int {
+    let n = str_len(b)
+    let p = str_bytes(b)
+    let arr = rt_alloc(8 + 8 * n)
+    mem_store64(arr, n)
+    let mut i = 0
+    while i < n {
+        mem_store64(arr + 8 + 8 * i, mem_load8(p + i))
+        i = i + 1
+    }
+    arr
+}
+
+// `nova_rt_bytes_from_ints`: each element must be a byte.
+fn rt_bytes_from_ints(ints: Int) -> Int {
+    let mut n = mem_load64(ints)
+    if n < 0 { n = 0 }
+    let h = rt_str_alloc(n)
+    let at = str_bytes(h)
+    let mut i = 0
+    while i < n {
+        let v = mem_load64(ints + 8 + 8 * i)
+        if v < 0 || v > 255 { panic("nova_rt_bytes_from_ints: element out of range 0..=255") }
+        mem_store8(at + i, v)
+        i = i + 1
+    }
+    h
+}
+
+// `nova_rt_bytes_eq`.
+fn rt_bytes_eq(a: Int, b: Int) -> Bool { rt_str_eq(a, b) }
