@@ -506,6 +506,32 @@ fn case_and_hash_match_nova_runtime() {
     differential("case_and_hash");
 }
 
+/// The allocator's size classes and large objects keep every object
+/// apart (spec 4.1 §6.2).
+#[test]
+fn the_allocator_keeps_objects_apart() {
+    differential("alloc_classes");
+}
+
+/// An allocation over 1 GB, the memory's limit, is refused with "out of
+/// memory" before any page arithmetic could wrap (spec 4.1 §6.2).
+#[test]
+fn an_allocation_over_1_gb_is_out_of_memory() {
+    let Some(node) = node() else { return };
+    let dir = fresh("oom");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn main() {\n    println(\"before\")\n    let n = 200000000\n    let xs = [0; n]\n    println(\"${xs.len()}\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "before\n");
+    assert_eq!(stderr(&a), "nova: panic: out of memory\n");
+}
+
 /// One of the gate's programs (spec §9.2): built for WASM, it prints under
 /// Node what its `.stdout` file says the native build prints.
 fn gate_program(name: &str) {

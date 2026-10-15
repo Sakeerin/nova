@@ -1084,6 +1084,7 @@ mod tests {
             }],
             externs: Vec::new(),
             runtime_alloc: None,
+            runtime_exports: Vec::new(),
         }
     }
 
@@ -1609,6 +1610,7 @@ mod tests {
             }],
             externs: Vec::new(),
             runtime_alloc: None,
+            runtime_exports: Vec::new(),
         }
     }
 

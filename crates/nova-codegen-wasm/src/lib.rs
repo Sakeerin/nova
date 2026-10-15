@@ -34,9 +34,9 @@ use structure::{Cfg, UNREACHED};
 pub const MEMORY_PAGES: u64 = 256;
 /// Memory's largest size, in pages: 1 GB.
 pub const MEMORY_MAX_PAGES: u64 = 16384;
-/// Where the data segment starts (spec §4.1): `0..8` is never an object,
-/// and `8..64` holds `std/rt`'s state words.
-pub const DATA_BASE: u32 = 64;
+/// Where the data segment starts (spec §4.1, 4.1 §6.1): `0..8` is never an
+/// object, and `8..128` holds `std/rt`'s state words.
+pub const DATA_BASE: u32 = 128;
 
 /// The most locals a function may have, its parameters included: V8 and
 /// `wasmparser` refuse a function with more.
@@ -339,6 +339,13 @@ fn compile(mir: &Module) -> Result<Output> {
     exports.export("memory", ExportKind::Memory, 0);
     if let Some(alloc) = layout.alloc {
         exports.export("nova_alloc", ExportKind::Func, alloc);
+    }
+    for (export, name) in &mir.runtime_exports {
+        let index = *layout
+            .funcs
+            .get(name)
+            .ok_or_else(|| anyhow!("the export `{export}` names `{name}`, not in the module"))?;
+        exports.export(export, ExportKind::Func, index);
     }
     module.section(&exports);
     if !table.is_empty() {
@@ -1850,6 +1857,30 @@ mod tests {
         assert_eq!(exports(&out.wasm), ["main", "memory", "nova_alloc"]);
     }
 
+    /// The other functions MIR names for the shim are exported under their
+    /// names, after the allocator; one the module lacks is refused (spec
+    /// 4.1 §6.3).
+    #[test]
+    fn the_runtime_exports_are_exported() {
+        let main = func(
+            "main",
+            0,
+            vec![],
+            MirTy::Unit,
+            vec![block(vec![], ret_unit())],
+        );
+        let mut m = with_alloc(main);
+        m.runtime_exports = vec![("nova_alloc_leaf", "rt_alloc.9".to_string())];
+        let out = valid(&m);
+        assert_eq!(
+            exports(&out.wasm),
+            ["main", "memory", "nova_alloc", "nova_alloc_leaf"]
+        );
+        m.runtime_exports = vec![("nova_turn", "rt_turn.4".to_string())];
+        let e = compile_module(&m).expect_err("refused");
+        assert!(e.to_string().contains("`rt_turn.4`"), "{e}");
+    }
+
     /// A string literal is a header in the data segment: an address, with no
     /// allocation (spec §4.5).
     #[test]
@@ -1882,10 +1913,10 @@ mod tests {
             })
             .flatten()
             .collect();
-        // One literal, once: length 3, bytes at 64 + 16 = 80, then "hey",
+        // One literal, once: length 3, bytes at 128 + 16 = 144, then "hey",
         // padded to 8.
         let mut want = 3u64.to_le_bytes().to_vec();
-        want.extend(80u32.to_le_bytes());
+        want.extend(144u32.to_le_bytes());
         want.extend([0; 4]);
         want.extend(b"hey\0\0\0\0\0");
         assert_eq!(data, [(0, want)]);

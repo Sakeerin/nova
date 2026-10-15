@@ -1900,6 +1900,16 @@ fn a_wasm_build_calls_std_rt_where_a_native_build_calls_the_runtime() {
         .expect("the allocator is named");
     assert!(alloc.starts_with("rt_alloc."), "{alloc}");
     assert!(names.contains(&alloc), "{names:?}");
+    // The shim's leaf allocator is a root too, exported (spec 4.1 §6.3).
+    let exports: Vec<(&str, &str)> = mir
+        .runtime_exports
+        .iter()
+        .map(|(e, f)| (*e, f.as_str()))
+        .collect();
+    assert_eq!(exports.len(), 1, "{exports:?}");
+    assert_eq!(exports[0].0, "nova_alloc_leaf");
+    assert!(exports[0].1.starts_with("rt_alloc_leaf."), "{exports:?}");
+    assert!(names.contains(&exports[0].1), "{names:?}");
 
     // Natively, nothing changes.
     let native = mir_for(src);
@@ -1908,6 +1918,7 @@ fn a_wasm_build_calls_std_rt_where_a_native_build_calls_the_runtime() {
         1
     );
     assert_eq!(native.runtime_alloc, None);
+    assert!(native.runtime_exports.is_empty());
 }
 
 /// Only what the program reaches joins it: a literal needs no `Int` text.

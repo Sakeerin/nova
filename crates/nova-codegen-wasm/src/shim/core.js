@@ -18,11 +18,12 @@ function text(s) {
   return decoder.decode(new Uint8Array(wasm.memory.buffer, view.getUint32(s + 8, true), len));
 }
 
-// A new Nova string holding `value`, placed by std/rt's allocator: the
-// header, then the bytes inline at 16.
+// A new Nova string holding `value`, placed by std/rt's allocator as a leaf,
+// which the collector does not trace: the header, then the bytes inline at
+// 16.
 function string(value) {
   const bytes = encoder.encode(value);
-  const s = Number(wasm.nova_alloc(BigInt(16 + Math.max(bytes.length, 1))));
+  const s = Number(wasm.nova_alloc_leaf(BigInt(16 + Math.max(bytes.length, 1))));
   const view = new DataView(wasm.memory.buffer);
   view.setBigUint64(s, BigInt(bytes.length), true);
   view.setUint32(s + 8, s + 16, true);
