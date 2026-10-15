@@ -1,7 +1,9 @@
 //! The workspace's manifests are ready for crates.io (spec
 //! `docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
-//! §3, §11.1): the 19 crates `nova` needs are published, the other four are
-//! not, every dependency between workspace crates is an exact pin on the
+//! §3, §11.1; and spec
+//! `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §8):
+//! the 20 crates `nova` needs are published, the other three are not,
+//! every dependency between workspace crates is an exact pin on the
 //! workspace's version, `publish-crates.sh` uploads them in dependency
 //! order, each tarball carries a README and both licence texts, and the
 //! VS Code extension has the same version, and its lock the same name.
@@ -13,12 +15,9 @@ use std::process::Command;
 use serde_json::Value;
 
 /// The members that `publish = false` keeps off crates.io (spec §3.1).
-const UNPUBLISHED: [&str; 4] = [
-    "nova-bench-http",
-    "nova-bundler",
-    "nova-codegen-wasm",
-    "nova-test",
-];
+/// `nova-codegen-wasm` left this list with 4.0, which `nova-driver`'s
+/// WASM builds need (spec 4.0 §8).
+const UNPUBLISHED: [&str; 3] = ["nova-bench-http", "nova-bundler", "nova-test"];
 
 const REPOSITORY: &str = "https://github.com/Sakeerin/nova";
 
@@ -156,7 +155,7 @@ fn publish_list() -> Vec<String> {
 }
 
 #[test]
-fn exactly_the_four_crates_nova_does_not_need_are_unpublished() {
+fn exactly_the_three_crates_nova_does_not_need_are_unpublished() {
     let members = members();
     let unpublished: BTreeSet<&str> = members
         .iter()
@@ -167,7 +166,7 @@ fn exactly_the_four_crates_nova_does_not_need_are_unpublished() {
         unpublished,
         UNPUBLISHED.into_iter().collect::<BTreeSet<_>>()
     );
-    assert_eq!(published(&members).len(), 19);
+    assert_eq!(published(&members).len(), 20);
 }
 
 #[test]

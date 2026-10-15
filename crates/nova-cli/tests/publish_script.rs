@@ -59,7 +59,7 @@ fn publish_list() -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .map(str::to_string)
         .collect();
-    assert_eq!(list.len(), 19, "{list:?}");
+    assert_eq!(list.len(), 20, "{list:?}");
     list
 }
 
@@ -576,7 +576,7 @@ fn stops_at_any_other_failure_with_cargos_output_and_publishes_nothing_after_it(
     assert_eq!(summary[5], summary_line(failing, "failed"));
     assert_eq!(summary[6], summary_line(&list[6], "not tried"));
     // The index was asked for every crate, once, before the first upload.
-    assert_eq!(server.requests().len(), 19);
+    assert_eq!(server.requests().len(), 20);
 }
 
 #[test]

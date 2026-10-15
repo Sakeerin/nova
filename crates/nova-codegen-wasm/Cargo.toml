@@ -6,11 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "WebAssembly codegen backend for Nova (browser builds)"
-# Not on crates.io: `nova` does not need it (spec
-# docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md
-# §3.1).
-publish = false
+description = "The Nova language's WebAssembly code generator (internal to the nova toolchain)"
+readme = "../README.md"
 
 [lib]
 # Not a benchmark target: `cargo bench` would otherwise build this under
