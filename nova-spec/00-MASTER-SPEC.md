@@ -879,6 +879,11 @@ closes ADR 0025's mapping. The workspace `Cargo.toml` also declares
 `toml = "0.8"`, which no crate uses since `nova-pm` dropped it, so the
 unused declarations are `chumsky`, `rustyline` and `toml`.
 
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** Phase 4's
+backend uses `wasm-encoder` 0.243.0, pinned, and validates with `wasmparser`
+0.243.0 in tests only; each is the last release that declares a minimum Rust
+under 1.78. There is no `walrus` (ADR 0038, ADR 0039).
+
 ---
 
 ## 7. Definition of Done (per phase)

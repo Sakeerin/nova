@@ -73,6 +73,13 @@ writes std's site alone, and it prints the start page's path
 (`docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`
 §4; ADR 0034).
 
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`nova build --target <native|wasm>`, `nova bundle [FILE] [-o DIR]` and
+`nova check --target <native|wasm>` exist. With `wasm`, `build` writes `dist/`
+and refuses `--release`
+(`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §3.1; ADR
+0039).
+
 ### 1.2 Project Template (`nova new`)
 
 ```

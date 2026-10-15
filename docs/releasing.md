@@ -3,7 +3,7 @@
 The steps of a release, from `v0.3.0` on, in the order they run (spec
 `docs/superpowers/specs/2026-10-12-phase-3-6a-release-preparation-design.md`
 §9). A release publishes the same version everywhere at once: the GitHub
-release with its archives and install scripts, the 19 crates on crates.io,
+release with its archives and install scripts, the 20 crates on crates.io,
 and the VS Code extension on the Marketplace and Open VSX. The package
 index is set up once, at the first release, whose gate publishes `shapes`
 to it.
@@ -117,7 +117,7 @@ only for the length of a publish (step 3).
 A pull request whose last commit is the release commit:
 
 1. **The version.** It is set in the root `Cargo.toml` (the workspace's
-   `version` and the 19 `=` pins in `[workspace.dependencies]`), in
+   `version` and the 20 `=` pins in `[workspace.dependencies]`), in
    `tools/vscode-nova/package.json`, and in
    `tools/vscode-nova/package-lock.json` (the two `version` lines under
    `"name": "vscode-nova"`; the lock holds other packages' versions too).
@@ -177,7 +177,7 @@ A pull request whose last commit is the release commit:
    `v0.3.0`: the texts that say how to install `nova`, spec §7).
 
 The pull request runs CI, including "Packaged nova", which packages the
-19 crates at the new version and installs `nova` from them, and
+20 crates at the new version and installs `nova` from them, and
 `release.yml` without its publish job, whose release notes come from
 item 2's section. Wait until all of it is green.
 
@@ -262,12 +262,12 @@ why the tag comes before crates.io.
 ## 3. crates.io
 
 The workflow `.github/workflows/publish-crates.yml`, "Publish to
-crates.io", publishes the 19 crates in dependency order with
+crates.io", publishes the 20 crates in dependency order with
 `.github/scripts/publish-crates.sh` (spec §5). It runs only when started
 by hand, only on the tag `v<version>` whose workspace version is
 `<version>`, and it first repeats CI's package check
 (`.github/scripts/package-gate.sh`). Before its first upload the script
-checks all 19 names: each crate crates.io already has, at any version,
+checks all 20 names: each crate crates.io already has, at any version,
 must be owned by the repository's owner, or the run stops there with
 nothing published.
 
@@ -319,6 +319,11 @@ nothing published.
    `0.3.1` and `0.3.2` each added 19 versions within the burst, in under
    two minutes. Once the crates exist, a token with `publish-update`
    alone would suffice.
+
+   **Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** the
+   next release adds one crate, `nova-codegen-wasm`
+   (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+   §8), so its token keeps **publish-new** as well.
 5. Check what crates.io serves:
 
    ```sh
@@ -685,10 +690,10 @@ publish must be undone entirely, for example a file that should never
 have been in a tarball. crates.io's rules (its
 `src/controllers/krate/delete.rs`, read on 2026-10-12):
 - It refuses to delete a crate that another crate on crates.io depends
-  on, whatever its age. So the 19 are deleted one at a time in the
+  on, whatever its age. So the 20 are deleted one at a time in the
   reverse of `publish-crates.sh`'s list: `nova-cli` first, then
-  `nova-lsp`, `nova-doc`, `nova-driver` and so on, `nova-diagnostics`
-  last.
+  `nova-lsp`, `nova-doc`, `nova-driver`, `nova-codegen-wasm` and so on,
+  `nova-diagnostics` last.
 - Within 72 hours of a crate's first publish, that is the only rule.
   After them, a crate can also be deleted only while it has a single
   owner and at most 1000 downloads for each month since its first publish.
