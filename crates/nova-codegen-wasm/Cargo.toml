@@ -23,3 +23,7 @@ nova-diagnostics = { workspace = true }
 nova-mir = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+wasm-encoder = { workspace = true }
+
+[dev-dependencies]
+wasmparser = { workspace = true }
