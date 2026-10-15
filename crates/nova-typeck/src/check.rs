@@ -4259,7 +4259,9 @@ impl<'a> Checker<'a> {
             | Builtin::MemFill
             | Builtin::MemPages
             | Builtin::MemGrow
-            | Builtin::HeapBase => "",
+            | Builtin::HeapBase
+            | Builtin::FuturePoll
+            | Builtin::HostAbort => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -8107,6 +8109,8 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::MemCopy | Builtin::MemFill => (vec![Ty::Int, Ty::Int, Ty::Int], Ty::Unit),
         Builtin::MemPages | Builtin::HeapBase => (vec![], Ty::Int),
         Builtin::MemGrow => (vec![Ty::Int], Ty::Int),
+        Builtin::FuturePoll => (vec![Ty::Int], Ty::Int),
+        Builtin::HostAbort => (vec![], Ty::Unit),
     }
 }
 
@@ -16339,6 +16343,14 @@ mod tests {
                 Builtin::MemGrow => (
                     (vec![Ty::Int], Ty::Int),
                     "`mem_grow(pages)` in `std/rt`'s `rt_alloc`",
+                ),
+                Builtin::FuturePoll => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`future_poll(fut)` in `std/rt`'s executor",
+                ),
+                Builtin::HostAbort => (
+                    (vec![], Ty::Unit),
+                    "`host_abort()` in `std/rt`'s deadlock report",
                 ),
             }
         }

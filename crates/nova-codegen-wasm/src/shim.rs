@@ -72,6 +72,7 @@ fn host(name: &str) -> Result<&'static str> {
         "int_hash_seed" => "  int_hash_seed: () => hashSeed(),\n",
         "time_now_nanos" => "  time_now_nanos: () => nowNanos(),\n",
         "time_now_epoch_nanos" => "  time_now_epoch_nanos: () => epochNanos(),\n",
+        "abort" => "  abort: () => {\n    throw new NovaPanic();\n  },\n",
         other => bail!("the shim has no host function `{other}`"),
     })
 }

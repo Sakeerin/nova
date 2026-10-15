@@ -1812,6 +1812,14 @@ fn an_async_main_is_wrapped_in_a_shim_that_drives_it() {
 /// §5.4): resolved against WASM's std, with `std/rt`'s functions found by
 /// name as the driver finds them.
 fn wasm_mir_for(src: &str) -> Result<nova_mir::Module, Vec<nova_diagnostics::Diagnostic>> {
+    wasm_mir_without(src, &[])
+}
+
+/// [`wasm_mir_for`], as if `std/rt` lacked the functions named in `missing`.
+fn wasm_mir_without(
+    src: &str,
+    missing: &[&str],
+) -> Result<nova_mir::Module, Vec<nova_diagnostics::Diagnostic>> {
     use nova_resolver::{CompileTarget, Def, DefKind, ModuleSource};
     let (tokens, lex_errors) = lex(src, FileId::DUMMY);
     assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
@@ -1846,7 +1854,9 @@ fn wasm_mir_for(src: &str) -> Result<nova_mir::Module, Vec<nova_diagnostics::Dia
             ..
         }) = defs.defs().get(f.def_id.0 as usize)
         {
-            if defs.module_name(defs.module_of(*item_index)) == "$std.rt" {
+            if defs.module_name(defs.module_of(*item_index)) == "$std.rt"
+                && !missing.contains(&f.name.as_str())
+            {
                 impls.functions.insert(f.name.clone(), f.def_id);
             }
         }
@@ -1937,9 +1947,12 @@ fn a_wasm_build_holds_only_the_runtime_functions_it_reaches() {
 }
 
 /// A runtime function WASM lacks is E0091, naming it (spec 4.0 §3.3).
+/// After 4.1 every one a program can reach through WASM's std is there, so
+/// the test takes one away.
 #[test]
 fn a_runtime_function_wasm_lacks_is_e0091() {
-    let diags = wasm_mir_for("async fn main() { println(\"a\") }").expect_err("refused");
+    let diags = wasm_mir_without("fn main() { println(\"n = ${7}\") }", &["rt_int_to_str"])
+        .expect_err("refused");
     let messages: Vec<(&str, &str)> = diags
         .iter()
         .map(|d| (d.code.as_str(), d.message.as_str()))
@@ -1948,7 +1961,21 @@ fn a_runtime_function_wasm_lacks_is_e0091() {
         messages,
         [(
             "E0091",
-            "this program needs `task_block_on`, which target wasm does not have"
+            "this program needs `int_to_str`, which target wasm does not have"
         )]
+    );
+}
+
+/// An `async fn main` lowers for WASM: its shim calls `std/rt`'s
+/// executor, which joins the module (spec 4.1 §4.4).
+#[test]
+fn a_wasm_build_of_an_async_main_holds_the_executor() {
+    let mir = wasm_mir_for("async fn main() { println(\"a\") }").expect("lowers for WASM");
+    let main = stmts_of(&mir, "main");
+    assert_eq!(count_rt(&main, nova_mir::RtFunc::TaskBlockOn), 0);
+    let names = function_names(&mir);
+    assert!(
+        names.iter().any(|n| n.starts_with("rt_task_block_on.")),
+        "{names:?}"
     );
 }

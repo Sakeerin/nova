@@ -930,6 +930,16 @@ builtins! {
     /// segment, rounded up to 8, which the backend fixes when it lays the
     /// module out. WASM-only.
     HeapBase,
+    /// `future_poll(future: Int) -> Int` — poll the future at `future` once,
+    /// with a null context, returning its status: 0 pending, 1 ready. The
+    /// executor in `std/rt` drives every task through this (spec
+    /// `docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+    /// §4.3). WASM-only.
+    FuturePoll,
+    /// `host_abort()` — end the program with an abort's status, writing
+    /// nothing: the deadlock report has written its own lines (spec 4.1
+    /// §4.5). WASM-only.
+    HostAbort,
 }
 
 impl Builtin {
@@ -1037,6 +1047,8 @@ impl Builtin {
             Builtin::MemPages => "mem_pages",
             Builtin::MemGrow => "mem_grow",
             Builtin::HeapBase => "heap_base",
+            Builtin::FuturePoll => "future_poll",
+            Builtin::HostAbort => "host_abort",
         }
     }
 
@@ -1151,9 +1163,10 @@ impl Builtin {
     /// Builtins seeded into an std module's scope only when the target is
     /// [`CompileTarget::Wasm`]: the memory access `std/rt` is written on (spec
     /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
-    /// §3.3, §5.1). They are not in [`Builtin::STD_ONLY`], so a native build
-    /// has none of them, in std or anywhere else.
-    pub const WASM_ONLY: [Builtin; 9] = [
+    /// §3.3, §5.1), and the executor's poll and abort (spec 4.1 §4.3, §4.5).
+    /// They are not in [`Builtin::STD_ONLY`], so a native build has none of
+    /// them, in std or anywhere else.
+    pub const WASM_ONLY: [Builtin; 11] = [
         Builtin::MemLoad8,
         Builtin::MemStore8,
         Builtin::MemLoad64,
@@ -1163,6 +1176,8 @@ impl Builtin {
         Builtin::MemPages,
         Builtin::MemGrow,
         Builtin::HeapBase,
+        Builtin::FuturePoll,
+        Builtin::HostAbort,
     ];
 }
 
