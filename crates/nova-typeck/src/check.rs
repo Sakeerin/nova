@@ -717,9 +717,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     None => {
-                        self.error("E0001", format!("cannot find trait `{name}`"), path.span);
-                        if let Some(seg) = path.value.segments.last() {
-                            self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                        if !self.missing_on_target(name, path.span) {
+                            self.error("E0001", format!("cannot find trait `{name}`"), path.span);
+                            if let Some(seg) = path.value.segments.last() {
+                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            }
                         }
                     }
                 }
@@ -1230,9 +1232,11 @@ impl<'a> Checker<'a> {
                             Some(id)
                         }
                         None => {
-                            self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
-                            if let Some(seg) = tr.value.segments.last() {
-                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            if !self.missing_on_target(name, tr.span) {
+                                self.error("E0001", format!("cannot find trait `{name}`"), tr.span);
+                                if let Some(seg) = tr.value.segments.last() {
+                                    self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                                }
                             }
                             continue;
                         }
@@ -2324,9 +2328,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                         None => {
-                            self.error("E0001", format!("cannot find trait `{name}`"), b.span);
-                            if let Some(seg) = b.value.segments.last() {
-                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            if !self.missing_on_target(name, b.span) {
+                                self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                                if let Some(seg) = b.value.segments.last() {
+                                    self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                                }
                             }
                         }
                     }
@@ -2384,9 +2390,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                     None => {
-                        self.error("E0001", format!("cannot find trait `{name}`"), b.span);
-                        if let Some(seg) = b.value.segments.last() {
-                            self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                        if !self.missing_on_target(name, b.span) {
+                            self.error("E0001", format!("cannot find trait `{name}`"), b.span);
+                            if let Some(seg) = b.value.segments.last() {
+                                self.name_fixes(seg.clone(), Need::Trait, Vec::new());
+                            }
                         }
                     }
                 }
@@ -2625,12 +2633,14 @@ impl<'a> Checker<'a> {
                         }
                     };
                 }
-                self.error("E0001", format!("cannot find type `{name}`"), ty.span);
-                self.name_fixes(
-                    path.segments[0].clone(),
-                    Need::Type,
-                    generics.keys().cloned().collect(),
-                );
+                if !self.missing_on_target(name, ty.span) {
+                    self.error("E0001", format!("cannot find type `{name}`"), ty.span);
+                    self.name_fixes(
+                        path.segments[0].clone(),
+                        Need::Type,
+                        generics.keys().cloned().collect(),
+                    );
+                }
                 Ty::Error
             }
             ast::Type::Tuple(items) if items.is_empty() => Ty::Unit,
@@ -3631,6 +3641,9 @@ impl<'a> Checker<'a> {
                 );
                 return error_expr(span);
             }
+            if self.missing_on_target(ty_name, path.segments[0].span) {
+                return error_expr(span);
+            }
             self.unsupported(span, "module-qualified paths");
             // Spec 3.4b §4.2, §4.3: a qualifier this module never imported,
             // or misspelled.
@@ -3710,9 +3723,11 @@ impl<'a> Checker<'a> {
                 error_expr(span)
             }
             None => {
-                self.error("E0001", format!("cannot find `{name}` in this scope"), span);
-                let nearby = fixes::visible_locals(fcx);
-                self.name_fixes(path.segments[0].clone(), Need::Value, nearby);
+                if !self.missing_on_target(name, span) {
+                    self.error("E0001", format!("cannot find `{name}` in this scope"), span);
+                    let nearby = fixes::visible_locals(fcx);
+                    self.name_fixes(path.segments[0].clone(), Need::Value, nearby);
+                }
                 error_expr(span)
             }
         }
@@ -3764,17 +3779,19 @@ impl<'a> Checker<'a> {
                             return self.check_builtin_call(fcx, b, args, span);
                         }
                         None => {
-                            self.error(
-                                "E0001",
-                                format!("cannot find function `{name}` in this scope"),
-                                callee.span,
-                            );
-                            let nearby = fixes::visible_locals(fcx);
-                            self.name_fixes(
-                                path.segments[0].clone(),
-                                Need::Call(args.len()),
-                                nearby,
-                            );
+                            if !self.missing_on_target(name, callee.span) {
+                                self.error(
+                                    "E0001",
+                                    format!("cannot find function `{name}` in this scope"),
+                                    callee.span,
+                                );
+                                let nearby = fixes::visible_locals(fcx);
+                                self.name_fixes(
+                                    path.segments[0].clone(),
+                                    Need::Call(args.len()),
+                                    nearby,
+                                );
+                            }
                             return error_expr(span);
                         }
                     }
@@ -5077,8 +5094,10 @@ impl<'a> Checker<'a> {
         }
         let name = path.segments[0].value.as_str();
         let Some(def_id) = self.defs.resolve_type(self.cur_module, name) else {
-            self.error("E0001", format!("cannot find record `{name}`"), span);
-            self.name_fixes(path.segments[0].clone(), Need::Record, Vec::new());
+            if !self.missing_on_target(name, path.segments[0].span) {
+                self.error("E0001", format!("cannot find record `{name}`"), span);
+                self.name_fixes(path.segments[0].clone(), Need::Record, Vec::new());
+            }
             return error_expr(span);
         };
         let Some(record) = self.records.iter().find(|r| r.def_id == def_id).cloned() else {
@@ -7481,6 +7500,24 @@ impl<'a> Checker<'a> {
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span) {
         self.diagnostics
             .push(Diagnostic::error(code, message).with_primary_label(span, "here"));
+    }
+
+    /// E0092, labelled on `span`, when `name` is exported by a std module
+    /// the target does not compile (spec 4.1 §3.2). `true` when it reported
+    /// one: the caller then reports nothing more.
+    fn missing_on_target(&mut self, name: &str, span: Span) -> bool {
+        let Some(module) = self.defs.missing_module(name) else {
+            return false;
+        };
+        let target = self.defs.target().name();
+        self.diagnostics.push(
+            Diagnostic::error(
+                "E0092",
+                format!("`{name}` is in `{module}`, which target {target} does not have"),
+            )
+            .with_primary_label(span, format!("not on target {target}")),
+        );
+        true
     }
 
     fn unsupported(&mut self, span: Span, what: &str) {
