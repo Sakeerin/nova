@@ -1,0 +1,21 @@
+0 -1 42 9223372036854775807 -9223372036854775808
+true false
+a é € 😀
+[] len 0 chars 0 rev []
+[a] len 1 chars 1 rev [a]
+[héllo] len 5 chars 5 rev [olléh]
+[€uro] len 4 chars 4 rev [oru€]
+[😀!] len 2 chars 2 rev [!😀]
+less greater greater equal
+greater true false true
+6 none 0
+true true true
+[ïve c] [naïve]
+[a, é, €] [] [xy]
+4 [€€€]
+a|€|😀|
+5 226 none none
+3 0 5
+'h€!' not UTF-8 'h€!?'
+5 true false
+not UTF-8;not UTF-8;not UTF-8;not UTF-8;'😀';'';

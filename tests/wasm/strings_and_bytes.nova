@@ -1,0 +1,72 @@
+// The string and bytes functions of std/rt, held to nova-runtime's results:
+// built natively and for WASM, this prints the same (spec
+// docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §9.3).
+
+fn order(a: String, b: String) -> String {
+    match a.cmp(b) {
+        Less => "less"
+        Equal => "equal"
+        Greater => "greater"
+    }
+}
+
+fn show(o: Option<Int>) -> String {
+    match o {
+        Some(v) => "${v}"
+        None => "none"
+    }
+}
+
+fn text(b: Bytes) -> String {
+    match b.to_string() {
+        Some(s) => "'${s}'"
+        None => "not UTF-8"
+    }
+}
+
+fn main() {
+    // Ints, Bools and Chars as text.
+    println("${0} ${-1} ${42} ${9223372036854775807} ${-9223372036854775807 - 1}")
+    println("${true} ${false}")
+    println("${'a'} ${'é'} ${'€'} ${'😀'}")
+
+    // Comparing and measuring.
+    let words = ["", "a", "héllo", "€uro", "😀!"]
+    for i in 0..words.len() {
+        let w = words[i]
+        println("[${w}] len ${w.len()} chars ${w.chars().len()} rev [${w.reverse()}]")
+    }
+    println("${order("a", "b")} ${order("b", "a")} ${order("ab", "a")} ${order("", "")}")
+    println("${order("é", "z")} ${"abc" == "abc"} ${"abc" == "abd"} ${"" == ""}")
+
+    // Searching, slicing and joining.
+    let s = "naïve café, naïve"
+    println("${show(s.index_of("café"))} ${show(s.index_of("x"))} ${show(s.index_of(""))}")
+    println("${s.contains("ïv")} ${s.starts_with("naï")} ${s.ends_with("ve")}")
+    println("[${s.slice(2, 7)}] [${s.slice(12, 17)}]")
+    println("[${", ".join(["a", "é", "€"])}] [${"-".join([])}] [${"".join(["x", "y"])}]")
+    println("${"a,b,,c".split(",").len()} [${"€".repeat(3)}]")
+    let cs = "a€😀".chars()
+    for i in 0..cs.len() { print("${cs[i]}|") }
+    println("")
+
+    // Bytes.
+    let b = bytes_from_string("h€!")
+    println("${b.len()} ${show(b.byte_at(1))} ${show(b.byte_at(5))} ${show(b.byte_at(-1))}")
+    println("${b.slice(1, 4).len()} ${b.slice(3, 1).len()} ${b.slice(-5, 99).len()}")
+    println("${text(b)} ${text(b.slice(0, 2))} ${text(b.concat(bytes_from_string("?")))}")
+    println(
+        "${b.to_ints().len()} ${b.eq(bytes_from_string("h€!"))} ${b.eq(bytes_from_ints([104]))}",
+    )
+    // Overlong, a surrogate, past U+10FFFF, cut short, four bytes, ASCII.
+    let samples = [
+        [0xc0, 0x80],
+        [0xed, 0xa0, 0x80],
+        [0xf4, 0x90, 0x80, 0x80],
+        [0xe2, 0x82],
+        [0xf0, 0x9f, 0x98, 0x80],
+        [0x7f],
+    ]
+    for i in 0..samples.len() { print("${text(bytes_from_ints(samples[i]))};") }
+    println("")
+}
