@@ -1,0 +1,31 @@
+// Case mapping and string hashing, held to nova-runtime's: built natively
+// and for WASM, this prints the same (spec
+// docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md §9.3).
+// On WASM the shim maps case with JS's full Unicode mappings.
+
+fn main() {
+    let words = [
+        "Hello, World",
+        "straße",
+        "İstanbul",
+        "ΟΔΟΣ",
+        "ǅungla",
+        "Ünïcödé",
+        "ﬁne",
+        "日本語 text",
+        "",
+    ]
+    for i in 0..words.len() {
+        let w = words[i]
+        println("[${w.to_upper()}] [${w.to_lower()}]")
+    }
+    // A hash is the same for equal strings within one run, and a map finds
+    // what it holds.
+    let a = "nova"
+    let half = "va"
+    let b = "no${half}"
+    println("${a.hash() == b.hash()} ${a.hash() == "nova!".hash()}")
+    let mut m = Map::new()
+    for i in 0..100 { m.insert("key${i}", i) }
+    println("${m.len()} ${m.get("key42").unwrap_or(-1)} ${m.get("key100").unwrap_or(-1)}")
+}

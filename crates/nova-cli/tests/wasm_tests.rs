@@ -367,3 +367,169 @@ fn an_index_out_of_bounds_panics_as_natively() {
         "nova: panic: array index 5 out of bounds for length 3\n"
     );
 }
+
+/// The shim's `Float` text is `nova-runtime`'s, exact ties included (spec
+/// §6, §9.3).
+#[test]
+fn float_text_matches_nova_runtime() {
+    differential("float_text");
+}
+
+/// The shim's `Float::fixed` rounds as `nova-runtime`'s does, half to even
+/// on the exact value (spec §6, §9.3).
+#[test]
+fn float_fixed_matches_nova_runtime() {
+    differential("float_fixed");
+}
+
+/// Case mapping and hashing on WASM agree with `nova-runtime` (spec §6,
+/// §9.3).
+#[test]
+fn case_and_hash_match_nova_runtime() {
+    differential("case_and_hash");
+}
+
+/// One of the gate's programs (spec §9.2): built for WASM, it prints under
+/// Node what its `.stdout` file says the native build prints.
+fn gate_program(name: &str) {
+    let Some(node) = node() else { return };
+    let source = repo_root()
+        .join("tests/runtime")
+        .join(format!("{name}.nova"));
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    let dir = fresh(&format!("gate-{name}"));
+    let dist = build_wasm(&dir, &source);
+    let a = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&a), expected);
+}
+
+/// One of the gate's panicking programs: it fails with the native build's
+/// message on stderr and an abort's status, as `run_tests.rs` checks it
+/// natively, and what it printed first passes `printed`. It ends by its
+/// own panic, not by a stack overflow or a trap.
+fn gate_panics(name: &str, message: &str, printed: fn(&str) -> bool) {
+    let Some(node) = node() else { return };
+    let source = repo_root()
+        .join("tests/runtime")
+        .join(format!("{name}.nova"));
+    let dir = fresh(&format!("gate-{name}"));
+    let dist = build_wasm(&dir, &source);
+    let a = run_wasm(node, &dist).code(134);
+    let err = stderr(&a);
+    assert!(err.contains(message), "stderr: {err}");
+    assert!(
+        !err.contains("stack overflow") && !err.contains("nova: trap"),
+        "stderr: {err}"
+    );
+    assert!(printed(&stdout(&a)), "stdout: {}", stdout(&a));
+}
+
+macro_rules! gate {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                super::gate_program(stringify!($name));
+            }
+        )+
+    };
+}
+
+/// The gate's `tests/runtime/` programs, by behaviour (spec §9.2).
+mod gate {
+    gate!(
+        // Control flow and constants.
+        break_continue,
+        constants,
+        for_loops,
+        // Data.
+        array_repeat,
+        arrays,
+        collections,
+        field_assign,
+        map_keys,
+        match_enum,
+        records,
+        // Functions, generics and traits.
+        assoc_fn,
+        assoc_types,
+        closures,
+        generic_impls,
+        generic_trait_methods,
+        generics,
+        iterator,
+        method_generics,
+        supertraits,
+        trait_assoc_fn,
+        traits,
+        where_clauses,
+        // std.
+        prelude_option_result,
+        std_core,
+        strings,
+        // Bytes.
+        bytes_basics,
+        // Formatting.
+        fmt_float_edge,
+        fmt_float_fixed,
+        fmt_int_pad,
+        fmt_string_pad,
+        // JSON.
+        json_depth_empty,
+        json_depth_leaf,
+        json_object_forged_map,
+        json_parse_numbers,
+        json_parse_strings,
+        json_parse_values,
+        json_render_deep,
+        json_render_guard_under,
+        json_round_trip,
+        json_stringify,
+        json_stringify_escapes,
+    );
+
+    #[test]
+    fn panic_unwrap() {
+        super::gate_panics("panic_unwrap", "nova: panic: called get on None", |out| {
+            out.contains('7') && !out.contains("unreachable")
+        });
+    }
+
+    #[test]
+    fn bytes_from_ints_too_high() {
+        super::gate_panics(
+            "bytes_from_ints_too_high",
+            "nova: panic: nova_rt_bytes_from_ints: element out of range 0..=255",
+            |out| !out.contains('1'),
+        );
+    }
+
+    #[test]
+    fn bytes_from_ints_too_low() {
+        super::gate_panics(
+            "bytes_from_ints_too_low",
+            "nova: panic: nova_rt_bytes_from_ints: element out of range 0..=255",
+            |out| !out.contains('1'),
+        );
+    }
+
+    #[test]
+    fn json_render_guard() {
+        super::gate_panics(
+            "json_render_guard",
+            "nova: panic: stringify: nesting too deep or cyclic value",
+            |out| out == "built, about to render\n",
+        );
+    }
+
+    #[test]
+    fn json_stringify_cycle() {
+        super::gate_panics(
+            "json_stringify_cycle",
+            "nova: panic: stringify: nesting too deep or cyclic value",
+            |out| out == "about to render a cyclic value\n",
+        );
+    }
+}
