@@ -14,10 +14,11 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova build --target wasm`, and its alias `nova bundle`,** compile a
   program to WebAssembly: `dist/` holds `index.html`, `app.js` and
   `app.wasm`, which run in a browser, or under Node with `node
-  dist/app.js`. A program may use the whole language and std's core,
-  bytes, collections, strings, fmt and json; hello world is about 2 KB
-  gzipped. A panic exits with status 134 and a trap with 132 under Node,
-  as natively (ADR 0039).
+  dist/app.js`, and a `package.json` that tells Node `app.js` is a module.
+  A program may use the whole language and std's core, bytes,
+  collections, strings, fmt and json; hello world is about 2 KB gzipped.
+  Under Node a panic exits with status 134, as natively, and a trap such
+  as a division by zero with 132 (ADR 0039).
 - **`nova check --target wasm`** checks a program against WASM's std and
   rules: an `extern` block is E0090, and a program that needs what WASM
   lacks, such as `async fn main`, is E0091.

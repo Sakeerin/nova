@@ -28,4 +28,6 @@ fn main() {
     let mut m = Map::new()
     for i in 0..100 { m.insert("key${i}", i) }
     println("${m.len()} ${m.get("key42").unwrap_or(-1)} ${m.get("key100").unwrap_or(-1)}")
+    // A leading U+FEFF is text like any other: the shim must not drop it.
+    println("\u{FEFF}bom [${"\u{FEFF}abc".to_upper()}] [${"\u{FEFF}ABC".to_lower()}]")
 }

@@ -194,8 +194,9 @@ nova dev                     # dev server with HMR
 
 **Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** 4.0 builds
 `nova build --target wasm` and `nova bundle`. `dist/` holds `index.html`,
-`app.js` and `app.wasm`, at a project's root or in the current directory, or
-where `-o` names. A program may use the language and std's core, bytes,
+`app.js` and `app.wasm`, and a `package.json` marking `app.js` a module for
+Node, at a project's root or in the current directory, or where `-o`
+names. A program may use the language and std's core, bytes,
 collections, strings, fmt and json; `manifest.json`, `assets/`, a user's own
 `index.html` and `wasm-opt` come with 4.3
 (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §7; ADRs

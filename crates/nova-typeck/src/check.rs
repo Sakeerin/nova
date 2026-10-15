@@ -8960,7 +8960,8 @@ mod tests {
 
     /// The memory builtins are `std/rt`'s alone (spec
     /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
-    /// §3.3): a user module never sees them, whatever the target.
+    /// §3.3): a user module never sees them. This checks a native build;
+    /// the resolver's tests check a WASM build's user modules.
     #[test]
     fn no_wasm_only_builtin_is_callable_from_user_code() {
         for b in Builtin::WASM_ONLY {

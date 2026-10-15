@@ -8,6 +8,11 @@ use anyhow::{bail, Result};
 /// The page `dist/` holds: it loads `app.js` as a module and calls `init`.
 pub const INDEX_HTML: &str = include_str!("shim/index.html");
 
+/// `dist/package.json`: `app.js` is an ES module, whatever a
+/// `package.json` above `dist/` says, so `node dist/app.js` reads it as
+/// one. Browsers do not read it.
+pub const PACKAGE_JSON: &str = "{\"type\":\"module\"}\n";
+
 const CORE: &str = include_str!("shim/core.js");
 const RUN: &str = include_str!("shim/run.js");
 const FLOAT: &str = include_str!("shim/float.js");
@@ -98,27 +103,6 @@ mod tests {
         assert!(e.to_string().contains("no host function `fetch`"), "{e}");
     }
 
-    /// `node`, or `None` when it is not on `PATH`, in which case the test
-    /// passes without running; under `NOVA_REQUIRE_NODE=1`, as in CI, a
-    /// missing `node` fails it instead (spec §9.1).
-    fn node() -> Option<std::process::Command> {
-        let found = std::process::Command::new("node")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if found {
-            return Some(std::process::Command::new("node"));
-        }
-        assert_ne!(
-            std::env::var("NOVA_REQUIRE_NODE").as_deref(),
-            Ok("1"),
-            "NOVA_REQUIRE_NODE=1, but `node` is not on PATH"
-        );
-        eprintln!("skipped: `node` is not on PATH");
-        None
-    }
-
     /// `floatFrom`, which `str_to_float` calls, is Rust's
     /// `str::parse::<f64>` with `unwrap_or(0.0)` on every case of its
     /// grammar, valid and not (spec §6, §9.3). `str_to_float` is std's
@@ -126,7 +110,9 @@ mod tests {
     /// shim's own code under Node and compares the bits.
     #[test]
     fn float_from_is_rusts_parse() {
-        let Some(mut node) = node() else { return };
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
         let cases = [
             // Digits, a point, an exponent.
             "0",

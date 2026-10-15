@@ -199,6 +199,8 @@ fn build_for_wasm_writes_dist() {
     assert!(js.contains("export default async function init("), "{js}");
     let wasm = std::fs::read(dist.join("app.wasm")).expect("app.wasm");
     assert_eq!(&wasm[..4], b"\0asm");
+    let package = std::fs::read_to_string(dist.join("package.json")).expect("package.json");
+    assert_eq!(package, "{\"type\":\"module\"}\n");
 }
 
 /// `nova bundle` is `nova build --target wasm`, and `-o` names the
@@ -215,7 +217,13 @@ fn bundle_is_build_for_wasm() {
     );
     let a = nova_in(&dir, &["bundle", "main.nova", "-o", "out"]).success();
     assert_eq!(stdout(&a), "built out\n");
-    for name in ["index.html", "app.js", "app.wasm", "keep.txt"] {
+    for name in [
+        "index.html",
+        "app.js",
+        "app.wasm",
+        "package.json",
+        "keep.txt",
+    ] {
         assert!(dir.join("out").join(name).is_file(), "{name}");
     }
 }
@@ -324,6 +332,78 @@ fn a_trap_exits_132() {
     let dist = build_wasm(&dir, Path::new("main.nova"));
     let a = run_wasm(node, &dist).code(132);
     assert_eq!(stderr(&a), "nova: trap: divide by zero\n");
+}
+
+/// Recursion deeper than V8's stack ends as a native stack overflow does:
+/// the message, and an abort's status (spec §6, plan decision 17).
+#[test]
+fn a_stack_overflow_exits_134_with_its_message() {
+    let Some(node) = node() else { return };
+    let dir = fresh("overflow");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn down(n: Int) -> Int { if n == 0 { 0 } else { 1 + down(n - 1) } }\nfn main() { println(\"${down(100000000)}\") }\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stderr(&a), "nova: stack overflow\n");
+}
+
+/// `node <dir>/dist/app.js` runs the program when `<dir>` is reached
+/// through a symbolic link, as a temporary directory is on macOS: Node
+/// resolves the link in `import.meta.url`, so `app.js` must too.
+#[cfg(unix)]
+#[test]
+fn app_js_runs_through_a_symbolic_link() {
+    let Some(node) = node() else { return };
+    let dir = fresh("symlink");
+    write(
+        &dir,
+        &[("real/main.nova", "fn main() { println(\"hi\") }\n")],
+    );
+    build_wasm(&dir.join("real"), Path::new("main.nova"));
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).expect("a link");
+    let a = run_wasm(node, &dir.join("link").join("dist")).success();
+    assert_eq!(stdout(&a), "hi\n");
+}
+
+/// A project's own `package.json` does not change how Node reads
+/// `dist/app.js`: `dist/package.json` says it is a module.
+#[test]
+fn app_js_runs_beside_a_commonjs_package_json() {
+    let Some(node) = node() else { return };
+    let dir = fresh("commonjs");
+    write(
+        &dir,
+        &[
+            ("package.json", "{\"type\":\"commonjs\"}\n"),
+            ("main.nova", "fn main() { println(\"hi\") }\n"),
+        ],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&a), "hi\n");
+    assert_eq!(stderr(&a), "");
+}
+
+/// A function needing more locals than WebAssembly allows is refused when
+/// it is built, naming the limit, and not reported as a compiler bug.
+#[test]
+fn a_function_over_the_local_limit_is_refused() {
+    let dir = fresh("locals");
+    let mut source = String::from("fn main() {\n");
+    for i in 0..12000 {
+        source.push_str(&format!("    println(\"line {i}: ${{{i} * 2}}\")\n"));
+    }
+    source.push_str("}\n");
+    write(&dir, &[("main.nova", &source)]);
+    let a = nova_in(&dir, &["build", "--target", "wasm", "main.nova"]).failure();
+    let err = stderr(&a);
+    assert!(err.contains("WebAssembly allows 50000"), "{err}");
+    assert!(!err.contains("compiler bug"), "{err}");
 }
 
 /// A program in `tests/wasm/`, held to its `.stdout` file natively and,
