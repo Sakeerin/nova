@@ -69,7 +69,9 @@ program:
    - `I64` → `i64`, `F64` → `f64`, `I8` → `i32`, `Ptr` → `i32`.
    - One 32-bit memory, 16 MB at first and at most 1 GB.
    - Address 0 is never an object; `8..64` holds `std/rt`'s state words; the
-     data segment starts at 64.
+     data segment starts at 64. **Amended 2026-10-15 (branch
+     `claude/loving-archimedes-frtf5q`):** in 4.1 the state words are
+     `8..128`, and the data segment starts at 128 (ADR 0040).
    - Slots stay 8 bytes, a `Ptr` zero-extended in its slot.
    - A string literal is a static header in the data segment, not an
      allocation per evaluation.

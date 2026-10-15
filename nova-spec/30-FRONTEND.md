@@ -202,6 +202,14 @@ collections, strings, fmt and json; `manifest.json`, `assets/`, a user's own
 (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §7; ADRs
 0038 and 0039).
 
+**Amended 2026-10-15 (branch `claude/loving-archimedes-frtf5q`):** 4.1 adds
+std's task, sync, time and log, and async on the event loop: an `async fn
+main` returns to JS, which calls the module again on each timer, and `init`
+resolves when the program ends. A name from a module WASM lacks is E0092,
+naming the module
+(`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+§3, §5, §7; ADR 0040).
+
 ### 7.1 Output Layout
 ```
 dist/
