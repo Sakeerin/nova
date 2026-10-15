@@ -870,6 +870,8 @@ fn gate_log(name: &str, out: &[&str], err: &[&str]) {
 
 macro_rules! gate {
     ($($name:ident),+ $(,)?) => {
+        /// The programs this macro made a test for.
+        pub const PROGRAMS: &[&str] = &[$(stringify!($name)),+];
         $(
             #[test]
             fn $name() {
@@ -969,7 +971,47 @@ mod gate {
         sync_mutex_try_lock_fails_when_held,
         sync_mutex_two_tasks_serialise,
         sync_mutex_uncontended,
+        // Bytes, hashing and JSON's traits, which 4.0's build ran already.
+        bytes_api,
+        hash,
+        hash_diffusion,
+        json_traits,
     );
+
+    /// The programs a test of their own in this module checks, by its name.
+    pub const ALSO: &[&str] = &[
+        "panic_unwrap",
+        "bytes_from_ints_too_high",
+        "bytes_from_ints_too_low",
+        "json_render_guard",
+        "json_stringify_cycle",
+        "log_default_level",
+        "log_init_with_threshold",
+        "log_reconfigure_after_logging",
+        "log_init_resets_to_default",
+        "log_stdout_output",
+        "log_level_labels",
+        "forged_join_handle",
+        "recycled_task_state",
+        "task_deadlock",
+        "eprint_family",
+    ];
+
+    /// `eprint` and `eprintln` write to stderr, as `run_tests.rs` checks
+    /// natively.
+    #[test]
+    fn eprint_family() {
+        let Some(node) = super::node() else { return };
+        let source = super::repo_root().join("tests/runtime/eprint_family.nova");
+        let expected = std::fs::read_to_string(source.with_extension("stdout"))
+            .expect("the expected output")
+            .replace("\r\n", "\n");
+        let dir = super::fresh("gate-eprint_family");
+        let dist = super::build_wasm(&dir, &source);
+        let a = super::run_wasm(node, &dist).success();
+        assert_eq!(super::stdout(&a), expected);
+        assert_eq!(super::stderr(&a), "ab\n");
+    }
 
     /// `examples/03-producer-consumer`: two tasks and a channel (spec 4.1
     /// §1).
@@ -1174,6 +1216,7 @@ mod stress {
         json_round_trip,
         json_stringify_escapes,
         json_parse_strings,
+        bytes_api,
     );
 
     #[test]
@@ -1185,5 +1228,112 @@ mod stress {
             "nova: panic: nova_rt_task_join_future: this future was never spawned, so there is no task to ask about",
             str::is_empty,
         );
+    }
+}
+
+/// The `tests/runtime/` programs WASM does not run, each with its reason:
+/// the native-only std modules it names, each E0092 on WASM, or the error
+/// that is why it never can (spec 4.1 §9.2).
+const LEFT_OUT: &[(&str, &str)] = &[
+    ("bytes_reserved", "E0089 (its error is the point)"),
+    ("crypto_hashes", "std/crypto"),
+    ("crypto_random", "std/crypto"),
+    ("extern_ffi", "E0090 (an extern block)"),
+    ("file_errors", "std/fs, std/io"),
+    ("file_lifetime", "std/fs, std/io"),
+    ("file_open_dir", "std/fs, std/io"),
+    ("file_roundtrip", "std/fs"),
+    ("fs_already_exists", "std/fs, std/io"),
+    ("fs_bytes_errors", "std/fs, std/io"),
+    ("fs_bytes_roundtrip", "std/fs"),
+    ("fs_dirs", "std/fs"),
+    ("fs_invalid_data", "std/fs, std/io"),
+    ("fs_io_types", "std/io"),
+    ("fs_not_found", "std/fs, std/io"),
+    ("fs_permission_denied", "std/fs, std/io"),
+    ("fs_read_dir", "std/fs"),
+    ("fs_roundtrip", "std/fs"),
+    ("fs_write_then_read", "std/fs"),
+    ("http_keepalive", "std/http, std/net"),
+    ("http_limits", "std/http"),
+    ("http_malformed", "std/http"),
+    ("http_offsets", "std/http"),
+    ("http_partial", "std/http"),
+    ("http_serialise", "std/http"),
+    ("http_server_dispatch", "std/http"),
+    ("io_broken_stderr", "std/io"),
+    ("io_broken_stdout", "std/io"),
+    ("io_read_stdin_write_only", "std/io"),
+    ("io_read_to_end", "std/io"),
+    ("io_streams", "std/io"),
+    ("net_interleave", "std/fs, std/net"),
+    ("net_lifetime", "std/fs, std/io, std/net"),
+    ("net_listener_accept", "std/net"),
+    ("net_refused", "std/fs, std/io, std/net"),
+    ("net_roundtrip", "std/fs, std/net"),
+    ("net_timeout", "std/fs, std/io, std/net"),
+    ("nova_test", "E0601 (a test file, which `nova test` runs)"),
+    ("process_args", "std/process"),
+    ("process_exit", "std/io, std/process"),
+];
+
+/// Every program in `tests/runtime/` is in the gate or left out, once, and
+/// each name in the lists is a program: a new program must join one or the
+/// other (spec 4.1 §9.2).
+#[test]
+fn every_runtime_program_is_in_the_gate_or_left_out() {
+    let mut programs: Vec<String> = std::fs::read_dir(repo_root().join("tests/runtime"))
+        .expect("tests/runtime")
+        .filter_map(|e| {
+            let path = e.expect("an entry").path();
+            (path.extension()? == "nova").then(|| {
+                path.file_stem()
+                    .expect("a name")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect();
+    programs.sort();
+    let mut listed: Vec<String> = gate::PROGRAMS
+        .iter()
+        .chain(gate::ALSO)
+        .chain(LEFT_OUT.iter().map(|(n, _)| n))
+        .map(|n| n.to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(listed, programs);
+}
+
+/// Each program left out is refused on WASM for its reason: E0092 naming
+/// exactly its modules, or its error (spec 4.1 §9.2).
+#[test]
+fn each_left_out_program_is_refused_for_its_reason() {
+    let dir = fresh("left-out");
+    for (name, reason) in LEFT_OUT {
+        let source = repo_root()
+            .join("tests/runtime")
+            .join(format!("{name}.nova"));
+        let a = nova_in(
+            &dir,
+            &["check", "--target", "wasm", &source.to_string_lossy()],
+        )
+        .failure();
+        let err = stderr(&a);
+        if reason.starts_with("std/") {
+            let mut modules: Vec<&str> = err
+                .lines()
+                .filter(|l| l.starts_with("error[E0092]: "))
+                .filter_map(|l| l.split('`').nth(3))
+                .collect();
+            modules.sort();
+            modules.dedup();
+            assert_eq!(modules.join(", "), *reason, "{name}: {err}");
+        } else {
+            assert!(
+                err.contains(&format!("error[{}]", &reason[..5])),
+                "{name}: {err}"
+            );
+        }
     }
 }
