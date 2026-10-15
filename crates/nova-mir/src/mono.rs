@@ -31,8 +31,14 @@ pub struct Options<'a> {
 /// The name of `std/rt`'s allocator, a root of every WASM build.
 const RT_ALLOC: &str = "rt_alloc";
 
-/// The executor's entry, which an `async fn main`'s shim calls.
-const RT_BLOCK_ON: &str = "rt_task_block_on";
+/// What an `async fn main`'s shim calls on WASM: `std/rt`'s entry to the
+/// event loop, which spawns the root and runs the first turn (spec 4.1
+/// §4.4).
+const RT_MAIN: &str = "rt_task_main";
+
+/// The `std/rt` functions a WASM build with an `async fn main` also
+/// exports, by export name: the turn JS calls on each timer (spec 4.1 §5).
+const RT_TURN_EXPORTS: [(&str, &str); 1] = [("nova_turn", "rt_turn")];
 
 /// The other `std/rt` functions every WASM build exports, by export name:
 /// roots, since only the shim calls them (spec 4.1 §6.3).
@@ -72,33 +78,33 @@ pub fn lower_module_with(
     let mut mir = Module::default();
     let mut done: FxHashSet<String> = FxHashSet::default();
     let mut worklist: Vec<(DefId, Vec<Ty>)> = vec![(entry, Vec::new())];
+    // On WASM, what an `async fn main`'s shim calls instead of `block_on`.
+    let mut main_entry: Option<String> = None;
     // A WASM build's allocator is a root: the backend calls it for every
-    // `Make*`, and the async transform adds calls to it after this loop.
+    // `Make*`, and the async transform adds calls to it after this loop. So
+    // is each function only JS calls, and, for an `async fn main`, what its
+    // shim, made after this loop, calls (spec 4.1 §4.4, §5, §6.3).
     if let Some(impls) = options.runtime {
-        if let Some((&def, name)) = impls
-            .functions
-            .get(RT_ALLOC)
-            .and_then(|def| module.function(*def).map(|f| (def, &f.name)))
-        {
-            mir.runtime_alloc = Some(mangle(def, name, &[]));
-            worklist.push((def, Vec::new()));
-        }
-        for (export, rt) in RT_EXPORTS {
-            if let Some((&def, name)) = impls
+        let mut root = |rt: &str| {
+            let (&def, f) = impls
                 .functions
                 .get(rt)
-                .and_then(|def| module.function(*def).map(|f| (def, &f.name)))
-            {
-                mir.runtime_exports.push((export, mangle(def, name, &[])));
-                worklist.push((def, Vec::new()));
+                .and_then(|def| module.function(*def).map(|f| (def, f)))?;
+            worklist.push((def, Vec::new()));
+            Some(mangle(def, &f.name, &[]))
+        };
+        mir.runtime_alloc = root(RT_ALLOC);
+        for (export, rt) in RT_EXPORTS {
+            if let Some(name) = root(rt) {
+                mir.runtime_exports.push((export, name));
             }
         }
-        // An `async fn main`'s shim, made after this loop, hands its future
-        // to the executor, so the executor's entry is a root (spec 4.1
-        // §4.4).
         if main.is_async {
-            if let Some(&def) = impls.functions.get(RT_BLOCK_ON) {
-                worklist.push((def, Vec::new()));
+            main_entry = root(RT_MAIN);
+            for (export, rt) in RT_TURN_EXPORTS {
+                if let Some(name) = root(rt) {
+                    mir.runtime_exports.push((export, name));
+                }
             }
         }
     }
@@ -310,7 +316,8 @@ pub fn lower_module_with(
         // Before the transform, so the shim is in place whichever order the two
         // are read in: it is not `is_async`, so `transform` walks past it.
         if let Some(wrapper) = async_entry {
-            mir.functions.push(async_main_shim(&wrapper));
+            mir.functions
+                .push(async_main_shim(&wrapper, main_entry.as_deref()));
         }
         // Run on the finished module rather than per function inside the loop:
         // it needs no generics resolved and lands once for both codegen
@@ -432,8 +439,24 @@ fn unavailable_on_wasm(mir: &Module, main_span: nova_diagnostics::Span) -> Vec<D
 /// which is the future's output slot — is discarded. That matches what happens
 /// to a non-async `fn main`'s return value, and it is why this shim does not
 /// need to know the output's machine class.
-fn async_main_shim(wrapper: &str) -> Function {
+///
+/// On WASM, `entry` names `std/rt`'s `rt_task_main`, which the shim calls
+/// instead: it spawns the root and returns to JS once nothing can run
+/// without a timer (spec 4.1 §4.4).
+fn async_main_shim(wrapper: &str, entry: Option<&str>) -> Function {
     let future = Temp(0);
+    let drive = match entry {
+        Some(entry) => crate::Stmt::Call {
+            dst: None,
+            callee: entry.to_string(),
+            args: vec![future],
+        },
+        None => crate::Stmt::CallRuntime {
+            dst: None,
+            func: crate::RtFunc::TaskBlockOn,
+            args: vec![future],
+        },
+    };
     Function {
         name: "main".to_string(),
         params: 0,
@@ -449,11 +472,7 @@ fn async_main_shim(wrapper: &str) -> Function {
                     callee: wrapper.to_string(),
                     args: Vec::new(),
                 },
-                crate::Stmt::CallRuntime {
-                    dst: None,
-                    func: crate::RtFunc::TaskBlockOn,
-                    args: vec![future],
-                },
+                drive,
             ],
             term: crate::Terminator::Return(None),
         }],

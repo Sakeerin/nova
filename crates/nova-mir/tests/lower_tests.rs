@@ -1966,16 +1966,39 @@ fn a_runtime_function_wasm_lacks_is_e0091() {
     );
 }
 
-/// An `async fn main` lowers for WASM: its shim calls `std/rt`'s
-/// executor, which joins the module (spec 4.1 §4.4).
+/// An `async fn main` lowers for WASM: its shim calls `std/rt`'s entry
+/// to the event loop, not `block_on`, and the module exports the turn
+/// (spec 4.1 §4.4, §5).
 #[test]
-fn a_wasm_build_of_an_async_main_holds_the_executor() {
+fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
     let mir = wasm_mir_for("async fn main() { println(\"a\") }").expect("lowers for WASM");
-    let main = stmts_of(&mir, "main");
-    assert_eq!(count_rt(&main, nova_mir::RtFunc::TaskBlockOn), 0);
+    // The shim, which keeps the bare name; the wrapper is `main.N`.
+    let shim: Vec<&nova_mir::Stmt> = mir
+        .functions
+        .iter()
+        .filter(|f| f.name == "main")
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.stmts))
+        .collect();
+    assert_eq!(count_rt(&shim, nova_mir::RtFunc::TaskBlockOn), 0);
+    let calls: Vec<&str> = shim
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::Call { callee, .. } => Some(callee.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        calls.iter().any(|c| c.starts_with("rt_task_main.")),
+        "{calls:?}"
+    );
     let names = function_names(&mir);
     assert!(
-        names.iter().any(|n| n.starts_with("rt_task_block_on.")),
+        !names.iter().any(|n| n.starts_with("rt_task_block_on.")),
         "{names:?}"
     );
+    let exports: Vec<&str> = mir.runtime_exports.iter().map(|(e, _)| *e).collect();
+    assert_eq!(exports, ["nova_alloc_leaf", "nova_turn"]);
+    for (_, f) in &mir.runtime_exports {
+        assert!(names.contains(&f.as_str()), "{f}: {names:?}");
+    }
 }
