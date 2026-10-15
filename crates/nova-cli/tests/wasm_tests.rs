@@ -162,7 +162,8 @@ fn a_user_module_cannot_call_a_memory_builtin() {
 
 /// While an `async fn main` sleeps, it has returned to JS, which runs
 /// other work, here an interval's ticks; `init` resolves when the program
-/// ends (spec 4.1 §5, §7.2).
+/// ends; and `init`'s options set the collector's switches, as a page
+/// would (spec 4.1 §5, §6.6, §7.2).
 #[test]
 fn an_async_main_returns_to_js_while_it_sleeps() {
     let Some(node) = node() else { return };
@@ -176,7 +177,7 @@ fn an_async_main_returns_to_js_while_it_sleeps() {
             ),
             (
                 "run.mjs",
-                "import init from \"./dist/app.js\";\nlet ticks = 0;\nconst timer = setInterval(() => ticks++, 5);\nawait init();\nclearInterval(timer);\nconsole.log(ticks > 0 ? \"responsive\" : \"blocked\");\n",
+                "import init from \"./dist/app.js\";\nlet ticks = 0;\nconst timer = setInterval(() => ticks++, 5);\nawait init({ gcStress: true, gcDebug: true });\nclearInterval(timer);\nconsole.log(ticks > 0 ? \"responsive\" : \"blocked\");\n",
             ),
         ],
     );
@@ -188,6 +189,11 @@ fn an_async_main_returns_to_js_while_it_sleeps() {
         .assert()
         .success();
     assert_eq!(stdout(&a), "woke\nresponsive\n");
+    assert!(
+        stderr(&a).starts_with("nova-gc: collection 1 freed "),
+        "{}",
+        stderr(&a)
+    );
 }
 
 /// Only a module with an `async fn main` exports the turn: one without
@@ -222,7 +228,7 @@ fn only_an_async_main_exports_the_turn() {
     assert_eq!(seen[0], "main memory nova_alloc nova_alloc_leaf\n");
     assert_eq!(
         seen[1],
-        "main memory nova_alloc nova_alloc_leaf nova_turn\n"
+        "main memory nova_alloc nova_alloc_leaf nova_turn nova_gc_switches\n"
     );
 }
 
@@ -327,8 +333,14 @@ fn build_wasm(dir: &Path, file: &Path) -> PathBuf {
 /// `node dist/app.js`, with no backtrace from `nova` involved, killed
 /// after a minute: a channel program that regresses hangs rather than
 /// fails (spec 4.1 §9.2).
-fn run_wasm(mut node: Command, dist: &Path) -> Assert {
+fn run_wasm(node: Command, dist: &Path) -> Assert {
+    run_wasm_with(node, dist, &[])
+}
+
+/// [`run_wasm`], with `env` set: the collector's switches.
+fn run_wasm_with(mut node: Command, dist: &Path, env: &[(&str, &str)]) -> Assert {
     node.arg(dist.join("app.js"))
+        .envs(env.iter().copied())
         .timeout(std::time::Duration::from_secs(60))
         .assert()
 }
@@ -644,9 +656,129 @@ fn an_allocation_over_1_gb_is_out_of_memory() {
     assert_eq!(stderr(&a), "nova: panic: out of memory\n");
 }
 
+/// A program in `tests/wasm/` that needs the collector: natively, then
+/// built for WASM and run with `env`, it prints the same. Returns what the
+/// WASM build wrote on stderr, the collector's lines among it.
+fn collected(name: &str, env: &[(&str, &str)]) -> String {
+    let source = repo_root().join("tests/wasm").join(format!("{name}.nova"));
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    let dir = fresh(&format!("gc-{name}"));
+    let native = nova_in(&dir, &["run", &source.to_string_lossy()]).success();
+    assert_eq!(stdout(&native), expected, "natively");
+    let Some(node) = node() else {
+        return String::new();
+    };
+    let dist = build_wasm(&dir, &source);
+    let wasm = run_wasm_with(node, &dist, env).success();
+    assert_eq!(stdout(&wasm), expected, "on WASM");
+    stderr(&wasm)
+}
+
+/// The objects live after each collection, from `nova-runtime`'s
+/// `NOVA_GC_DEBUG` line, which the WASM collector writes too.
+fn live_after_each(stderr: &str) -> Vec<u64> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("nova-gc: collection "))
+        .map(|l| {
+            let (_, rest) = l.split_once(" bytes, ").expect("the freed bytes");
+            let (live, _) = rest.split_once(" objects live").expect("the live count");
+            live.parse().expect("a count")
+        })
+        .collect()
+}
+
+/// The collector reclaims what no task reaches: 300 turns of 1,000 records
+/// each, and no collection finds 1,000 objects live, as
+/// `gc_reclaims_garbage` checks natively (spec 4.1 §9.3).
+#[test]
+fn the_collector_reclaims_what_no_task_reaches() {
+    let err = collected("gc_reclaims", &[("NOVA_GC_DEBUG", "1")]);
+    if node().is_none() {
+        return;
+    }
+    let live = live_after_each(&err);
+    assert!(live.len() >= 3, "{err}");
+    assert!(live.iter().all(|&n| n < 1000), "{err}");
+}
+
+/// A record only a task reaches survives a collection at the end of every
+/// turn (spec 4.1 §9.3).
+#[test]
+fn a_record_only_a_task_reaches_survives() {
+    let err = collected(
+        "gc_keeps_task_records",
+        &[("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")],
+    );
+    if node().is_none() {
+        return;
+    }
+    assert!(live_after_each(&err).len() >= 50, "{err}");
+}
+
+/// A yield still yields once collections have freed slots for reuse: the
+/// allocator zeroes every slot it hands out, and the yield future's state
+/// starts at tag 0 by that (spec 4.1 §6.2).
+#[test]
+fn a_yield_yields_after_collections() {
+    let err = collected(
+        "gc_yields_after_collections",
+        &[("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")],
+    );
+    if node().is_none() {
+        return;
+    }
+    assert!(live_after_each(&err).len() >= 4, "{err}");
+}
+
+/// 20,000 records a task keeps survive collections: their array is a
+/// large object, and tracing it queues them all, past the worklist's first
+/// page (spec 4.1 §6.4).
+#[test]
+fn many_records_a_task_keeps_survive() {
+    let err = collected(
+        "gc_keeps_many",
+        &[("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")],
+    );
+    if node().is_none() {
+        return;
+    }
+    let live = live_after_each(&err);
+    assert!(live.len() >= 5, "{err}");
+    assert!(live.iter().all(|&n| n > 20000), "{err}");
+}
+
+/// A future built where a freed state was names no old task: joining it,
+/// never spawned, aborts as natively, where the executor's index still held
+/// the old address it would find a finished task (spec 4.1 §4.2, §6.4).
+#[test]
+fn a_freed_state_names_no_old_task() {
+    let source = repo_root().join("tests/wasm/gc_forgets_freed_states.nova");
+    let message = "nova: panic: nova_rt_task_join_future: this future was never spawned, \
+                   so there is no task to ask about";
+    let dir = fresh("gc-freed-states");
+    let native = nova_in(&dir, &["run", &source.to_string_lossy()]).failure();
+    assert!(stderr(&native).contains(message), "{}", stderr(&native));
+    let Some(node) = node() else { return };
+    let dist = build_wasm(&dir, &source);
+    let env = [("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")];
+    let a = run_wasm_with(node, &dist, &env).code(134);
+    assert_eq!(stdout(&a), "");
+    let err = stderr(&a);
+    assert!(err.contains(message), "{err}");
+    assert!(!live_after_each(&err).is_empty(), "{err}");
+}
+
 /// One of the gate's programs (spec §9.2): built for WASM, it prints under
 /// Node what its `.stdout` file says the native build prints.
 fn gate_program(name: &str) {
+    gate_program_with(name, "gate", &[]);
+}
+
+/// [`gate_program`] in a directory named for `kind`, with `env` set.
+fn gate_program_with(name: &str, kind: &str, env: &[(&str, &str)]) {
     let Some(node) = node() else { return };
     let source = repo_root()
         .join("tests/runtime")
@@ -654,9 +786,9 @@ fn gate_program(name: &str) {
     let expected = std::fs::read_to_string(source.with_extension("stdout"))
         .expect("the expected output")
         .replace("\r\n", "\n");
-    let dir = fresh(&format!("gate-{name}"));
+    let dir = fresh(&format!("{kind}-{name}"));
     let dist = build_wasm(&dir, &source);
-    let a = run_wasm(node, &dist).success();
+    let a = run_wasm_with(node, &dist, env).success();
     assert_eq!(stdout(&a), expected);
 }
 
@@ -665,13 +797,24 @@ fn gate_program(name: &str) {
 /// natively, and what it printed first passes `printed`. It ends by its
 /// own panic, not by a stack overflow or a trap.
 fn gate_panics(name: &str, message: &str, printed: fn(&str) -> bool) {
+    gate_panics_with(name, "gate", &[], message, printed);
+}
+
+/// [`gate_panics`] in a directory named for `kind`, with `env` set.
+fn gate_panics_with(
+    name: &str,
+    kind: &str,
+    env: &[(&str, &str)],
+    message: &str,
+    printed: fn(&str) -> bool,
+) {
     let Some(node) = node() else { return };
     let source = repo_root()
         .join("tests/runtime")
         .join(format!("{name}.nova"));
-    let dir = fresh(&format!("gate-{name}"));
+    let dir = fresh(&format!("{kind}-{name}"));
     let dist = build_wasm(&dir, &source);
-    let a = run_wasm(node, &dist).code(134);
+    let a = run_wasm_with(node, &dist, env).code(134);
     let err = stderr(&a);
     assert!(err.contains(message), "stderr: {err}");
     assert!(
@@ -974,6 +1117,73 @@ mod gate {
             "json_stringify_cycle",
             "nova: panic: stringify: nesting too deep or cyclic value",
             |out| out == "about to render a cyclic value\n",
+        );
+    }
+}
+
+macro_rules! stressed {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                super::gate_program_with(
+                    stringify!($name),
+                    "stress",
+                    &[("NOVA_GC_STRESS", "1")],
+                );
+            }
+        )+
+    };
+}
+
+/// Under `NOVA_GC_STRESS`, which collects at the end of every turn, the
+/// gate's async programs, and the programs native runs under it, print the
+/// same (spec 4.1 §9.3). A program with no `async fn main` has one turn,
+/// and never collects.
+mod stress {
+    stressed!(
+        // `async fn main`.
+        time_elapsed,
+        timeout_elapsed,
+        timeout_elapsed_then_join,
+        timeout_elapsed_twice,
+        timeout_join_elapsed,
+        timeout_join_ok,
+        timeout_ok,
+        timeout_value,
+        channel_recv_suspends_only_to_retry,
+        channel_send_refuses_when_closed,
+        channel_send_suspends_only_to_retry,
+        channel_two_tasks_blocking,
+        sync_mutex_int_set_serialises,
+        sync_mutex_release_is_idempotent,
+        sync_mutex_stale_guard_cannot_steal,
+        sync_mutex_stale_guard_cannot_write,
+        sync_mutex_try_lock_fails_when_held,
+        sync_mutex_two_tasks_serialise,
+        sync_mutex_uncontended,
+        // What `run_tests.rs` runs under it natively.
+        async_tasks,
+        interpolation_nary,
+        spawned_output_survives_release,
+        std_core,
+        collections,
+        strings,
+        assoc_types,
+        iterator,
+        json_round_trip,
+        json_stringify_escapes,
+        json_parse_strings,
+    );
+
+    #[test]
+    fn recycled_task_state() {
+        super::gate_panics_with(
+            "recycled_task_state",
+            "stress",
+            &[("NOVA_GC_STRESS", "1")],
+            "nova: panic: nova_rt_task_join_future: this future was never spawned, so there is no task to ask about",
+            str::is_empty,
         );
     }
 }

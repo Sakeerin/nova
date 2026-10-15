@@ -32,8 +32,10 @@
 
 // The address of the allocator's metadata, or 0 before the first
 // allocation. The metadata: at 0 the first heap page's number, at 8 the
-// frontier's (the first page never used), at 16 and 24 the collector's
-// worklist and its capacity; at 64, 256 and 448 three words per size class:
+// frontier's (the first page never used), at 16, 24 and 32 the collector's
+// worklist, its capacity and its length, and at 40, 48 and 56 the last
+// sweep's freed bytes, live objects and live bytes; at 64, 256 and 448
+// three words per size class:
 // the page it allocates from, the slot it looks at next, and the first of
 // its other pages with a free slot; and at 1024 the page table, a word per
 // page of the largest memory. A page's word is 0 outside the heap, else a
@@ -933,12 +935,18 @@ fn index_get(e: Int, state: Int) -> Int {
     0
 }
 
-// The index made again with `cap` slots, from every task whose state has
-// not been freed, in spawn order, so a state spawned again maps to its last
-// task, as `BY_STATE`'s insert leaves it.
+// The index made again with `cap` slots.
 fn index_rebuild(e: Int, cap: Int) {
     mem_store64(e + 120, rt_alloc_leaf(16 * cap))
     mem_store64(e + 128, cap)
+    index_fill(e)
+}
+
+// The index emptied and filled again from every task whose state has not
+// been freed, in spawn order, so a state spawned again maps to its last
+// task, as `BY_STATE`'s insert leaves it.
+fn index_fill(e: Int) {
+    mem_fill(mem_load64(e + 120), 0, 16 * mem_load64(e + 128))
     mem_store64(e + 136, 0)
     let n = mem_load64(e + 8)
     let mut id = 0
@@ -1283,6 +1291,7 @@ fn rt_task_main(fut: Int) {
     mem_store64(e + 112, 1)
     spawn_task(e, fut, true)
     drain(e)
+    gc_turn_end()
 }
 
 // `nova_turn`: wake what is due, run what is queued, then the time until
@@ -1293,6 +1302,7 @@ fn rt_turn() -> Int {
     let e = exec()
     wake(e, 0 - 1, time_now_nanos())
     drain(e)
+    gc_turn_end()
     if mem_load64(e + 64) == 0 { return 0 - 1 }
     let at = earliest(e)
     if at < 0 { report_deadlock(e) }
@@ -1300,4 +1310,273 @@ fn rt_turn() -> Int {
     if left <= 0 { return 0 }
     let ms = left / 1000000
     if left % 1000000 == 0 { ms } else { ms + 1 }
+}
+
+// The collector (spec 4.1 §6.4 to §6.6), ported from `nova-runtime`'s
+// `gc.rs`: conservative and non-moving, marking from the roots, then
+// sweeping by bitmap. A word is a pointer if it falls inside an allocated
+// object, at its start or not. It runs only at the end of a turn, when the
+// WASM stack holds nothing it has to see: its roots are the executor's block
+// and tables, and each unreleased task's state.
+
+// The next collection's threshold, or 0 for the first, 1 MiB; collections so
+// far; and the switches, 1 stress and 2 debug.
+const GC_NEXT: Int = 64
+
+const GC_COUNT: Int = 72
+
+const GC_SWITCHES: Int = 80
+
+// The switches, from the shim before `main`, as `nova_gc_switches`.
+fn rt_gc_switches(flags: Int) { mem_store64(GC_SWITCHES, flags) }
+
+// Collect at the end of a turn if the bytes allocated since the last
+// collection have reached the threshold, or always under stress.
+fn gc_turn_end() {
+    if mem_load64(HEAP_META) == 0 { return }
+    let mut limit = mem_load64(GC_NEXT)
+    if limit == 0 { limit = 1048576 }
+    if (mem_load64(GC_SWITCHES) & 1) != 0 || mem_load64(GC_SINCE) >= limit { gc_collect() }
+}
+
+// One collection (`collect_with_roots`): mark from the roots, sweep, prune
+// the executor's index of freed states, and set the next threshold to twice
+// the live bytes, 1 MiB at least. Under debug, `nova-runtime`'s line.
+fn gc_collect() {
+    let m = heap_meta()
+    let e = mem_load64(EXEC)
+    if e != 0 {
+        gc_mark(m, e)
+        gc_mark(m, mem_load64(e))
+        gc_mark(m, mem_load64(e + 24))
+        gc_mark(m, mem_load64(e + 56))
+        gc_mark(m, mem_load64(e + 120))
+        let n = mem_load64(e + 8)
+        let mut id = 0
+        while id < n {
+            if (task_flags(e, id) & 2) == 0 { gc_mark(m, mem_load64(task_at(e, id) + 8)) }
+            id = id + 1
+        }
+    }
+    gc_trace(m)
+    gc_sweep(m)
+    if e != 0 { gc_prune(m, e) }
+    let count = mem_load64(GC_COUNT) + 1
+    mem_store64(GC_COUNT, count)
+    let bytes = mem_load64(m + 56)
+    let mut next = 2 * bytes
+    if next < 1048576 { next = 1048576 }
+    mem_store64(GC_NEXT, next)
+    if (mem_load64(GC_SWITCHES) & 2) != 0 {
+        let freed = mem_load64(m + 40)
+        let live = mem_load64(m + 48)
+        eprintln(
+            "nova-gc: collection ${count} freed ${freed} bytes, ${live} objects live (${bytes} bytes)",
+        )
+    }
+    mem_store64(GC_SINCE, 0)
+}
+
+// Mark the object word `w` falls in, if any, and queue it to be traced
+// unless it is a leaf (`try_mark`).
+fn gc_mark(m: Int, w: Int) {
+    if w < mem_load64(m) * PAGE || w >= mem_load64(m + 8) * PAGE { return }
+    let p = w / PAGE
+    let word = page_word(m, p)
+    let kind = word & 255
+    if kind == 2 {
+        let base = p * PAGE
+        let off = w - base - SLOTS
+        if off < 0 { return }
+        let slot = mem_load64(base + 8)
+        let i = off / slot
+        if i >= mem_load64(base + 16) { return }
+        let at = 8 * (i >> 6)
+        let bit = 1 << (i & 63)
+        if (mem_load64(base + 32 + at) & bit) == 0 { return }
+        let marks = mem_load64(base + 544 + at)
+        if (marks & bit) != 0 { return }
+        mem_store64(base + 544 + at, marks | bit)
+        if (mem_load64(base + 1056 + at) & bit) != 0 { work_push(m, base + SLOTS + i * slot, slot) }
+    } else if kind == 3 || kind == 4 {
+        let mut head = p
+        if kind == 4 { head = word >> 8 }
+        let base = head * PAGE
+        let size = mem_load64(base)
+        if w < base + 16 || w >= base + 16 + size { return }
+        let flags = mem_load64(base + 8)
+        if (flags & 1) != 0 { return }
+        mem_store64(base + 8, flags | 1)
+        if (flags & 2) != 0 { work_push(m, base + 16, size) }
+    }
+}
+
+// Queue `len` bytes at `at` to be traced, on the worklist: pages of the
+// collector's own, which double when full. V8's stack is too small for
+// recursion.
+fn work_push(m: Int, at: Int, len: Int) {
+    let n = mem_load64(m + 32)
+    let cap = mem_load64(m + 24)
+    if n == cap {
+        let old = mem_load64(m + 16)
+        let mut pages = 1
+        if cap > 0 { pages = 2 * cap * 16 / PAGE }
+        let p = take_pages(m, pages)
+        let mut k = 0
+        while k < pages {
+            set_page_word(m, p + k, 5)
+            k = k + 1
+        }
+        if cap > 0 {
+            mem_copy(p * PAGE, old, 16 * n)
+            let first = old / PAGE
+            k = 0
+            while k < cap * 16 / PAGE {
+                set_page_word(m, first + k, 1)
+                k = k + 1
+            }
+        }
+        mem_store64(m + 16, p * PAGE)
+        mem_store64(m + 24, pages * PAGE / 16)
+    }
+    let wl = mem_load64(m + 16) + 16 * n
+    mem_store64(wl, at)
+    mem_store64(wl + 8, len)
+    mem_store64(m + 32, n + 1)
+}
+
+// Trace until the worklist is empty: mark what every word of each queued
+// object points into.
+fn gc_trace(m: Int) {
+    while mem_load64(m + 32) > 0 {
+        let n = mem_load64(m + 32) - 1
+        mem_store64(m + 32, n)
+        let wl = mem_load64(m + 16) + 16 * n
+        let at = mem_load64(wl)
+        let end = at + mem_load64(wl + 8)
+        let mut p = at
+        while p < end {
+            gc_mark(m, mem_load64(p))
+            p = p + 8
+        }
+    }
+}
+
+// The set bits of `x`.
+fn popcount(x: Int) -> Int {
+    let a = x - ((x >> 1) & 6148914691236517205)
+    let b = (a & 3689348814741910323) + ((a >> 2) & 3689348814741910323)
+    let c = (b + (b >> 4)) & 1085102592571150095
+    let d = (c * 72340172838076673) >> 56
+    d & 255
+}
+
+// Sweep (`Pages::sweep`, and the large objects' `retain`): an unmarked
+// object is freed, a page left empty becomes free for any use, as does a
+// large object's run; the marks are cleared; each class goes on from one of
+// its pages with a free slot. The freed bytes, the live objects and the live
+// bytes go to the metadata's words 40, 48 and 56.
+fn gc_sweep(m: Int) {
+    let mut freed = 0
+    let mut live = 0
+    let mut bytes = 0
+    let mut c = 0
+    while c < 24 {
+        mem_store64(m + 448 + 8 * c, 0)
+        c = c + 1
+    }
+    let frontier = mem_load64(m + 8)
+    let mut p = mem_load64(m)
+    while p < frontier {
+        let word = page_word(m, p)
+        let kind = word & 255
+        let base = p * PAGE
+        let mut step = 1
+        if kind == 2 {
+            let slot = mem_load64(base + 8)
+            let n = mem_load64(base + 16)
+            let mut kept = 0
+            let mut k = 0
+            while 64 * k < n {
+                let a = mem_load64(base + 32 + 8 * k)
+                let marks = mem_load64(base + 544 + 8 * k)
+                freed = freed + popcount(a ^ marks) * slot
+                kept = kept + popcount(marks)
+                mem_store64(base + 32 + 8 * k, marks)
+                mem_store64(base + 544 + 8 * k, 0)
+                k = k + 1
+            }
+            live = live + kept
+            bytes = bytes + kept * slot
+            if kept == 0 {
+                set_page_word(m, p, 1)
+            } else if kept < n {
+                let cls = word >> 8
+                mem_store64(base + 24, mem_load64(m + 448 + 8 * cls))
+                mem_store64(m + 448 + 8 * cls, p)
+            }
+        } else if kind == 3 {
+            step = word >> 8
+            let size = mem_load64(base)
+            let flags = mem_load64(base + 8)
+            if (flags & 1) != 0 {
+                mem_store64(base + 8, flags - 1)
+                live = live + 1
+                bytes = bytes + size
+            } else {
+                freed = freed + size
+                let mut k = 0
+                while k < step {
+                    set_page_word(m, p + k, 1)
+                    k = k + 1
+                }
+            }
+        }
+        p = p + step
+    }
+    c = 0
+    while c < 24 {
+        let next = mem_load64(m + 448 + 8 * c)
+        if next != 0 { mem_store64(m + 448 + 8 * c, mem_load64(next * PAGE + 24)) }
+        mem_store64(m + 64 + 8 * c, next)
+        mem_store64(m + 256 + 8 * c, 0)
+        c = c + 1
+    }
+    mem_store64(m + 40, freed)
+    mem_store64(m + 48, live)
+    mem_store64(m + 56, bytes)
+}
+
+// Whether an allocated object starts at `a`: after a sweep, whether `a`
+// still names one (`slot_scan`, and the large objects' search).
+fn gc_is_live(m: Int, a: Int) -> Bool {
+    if a < mem_load64(m) * PAGE || a >= mem_load64(m + 8) * PAGE { return false }
+    let p = a / PAGE
+    let base = p * PAGE
+    let kind = page_word(m, p) & 255
+    if kind == 2 {
+        let off = a - base - SLOTS
+        let slot = mem_load64(base + 8)
+        if off < 0 || off % slot != 0 || off / slot >= mem_load64(base + 16) { return false }
+        let i = off / slot
+        let bits = mem_load64(base + 32 + 8 * (i >> 6))
+        return ((bits >> (i & 63)) & 1) != 0
+    }
+    kind == 3 && a == base + 16
+}
+
+// Forget every freed state (`prune_freed_states`): a task whose state was
+// freed is marked so, and the index filled again without it, so a new
+// object at the same address names no old task.
+fn gc_prune(m: Int, e: Int) {
+    let n = mem_load64(e + 8)
+    let mut id = 0
+    while id < n {
+        let flags = task_flags(e, id)
+        if (flags & 8) == 0 && !gc_is_live(m, mem_load64(task_at(e, id) + 8)) {
+            set_task_flags(e, id, flags | 8)
+        }
+        id = id + 1
+    }
+    index_fill(e)
 }

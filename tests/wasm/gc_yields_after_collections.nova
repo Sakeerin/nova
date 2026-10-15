@@ -1,0 +1,30 @@
+// A yield still yields after collections have freed slots for reuse (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §6.2): the allocator zeroes every slot it hands out, and the yield
+// future's state starts at tag 0 by that. Run under NOVA_GC_STRESS, each
+// round starts a turn after a collection, and its lines must come in
+// native's order.
+
+async fn worker(round: Int) -> Int {
+    let mut step = 0
+    while step < 3 {
+        println("worker ${round}.${step}")
+        yield_now().await
+        step = step + 1
+    }
+    step
+}
+
+async fn main() {
+    let mut round = 0
+    let mut steps = 0
+    while round < 4 {
+        let h = spawn(worker(round))
+        yield_now().await
+        println("main ${round}")
+        steps = steps + h.join().await
+        sleep(Duration::from_millis(1)).await
+        round = round + 1
+    }
+    println("steps ${steps}")
+}

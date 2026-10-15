@@ -32,6 +32,16 @@ function turns() {
   });
 }
 
+// The collector's switches (spec 4.1 §6.6): under Node, NOVA_GC_STRESS and
+// NOVA_GC_DEBUG, set to anything, as natively; else `init`'s `gcStress` and
+// `gcDebug`, which also override them.
+function gcSwitches(options) {
+  const env = isNode ? process.env : {};
+  const stress = options.gcStress ?? env.NOVA_GC_STRESS !== undefined;
+  const debug = options.gcDebug ?? env.NOVA_GC_DEBUG !== undefined;
+  return (stress ? 1 : 0) | (debug ? 2 : 0);
+}
+
 // Load app.wasm and run `main`, then its turns, if it has any: the promise
 // resolves when the program ends. A panic or a trap ends the program as a
 // native build ends: its message on stderr and, under Node, the exit status
@@ -39,6 +49,7 @@ function turns() {
 export default async function init(options = {}) {
   const { instance } = await load(options);
   wasm = instance.exports;
+  if (wasm.nova_gc_switches) wasm.nova_gc_switches(BigInt(gcSwitches(options)));
   try {
     wasm.main();
     if (wasm.nova_turn) await turns();

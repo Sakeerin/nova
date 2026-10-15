@@ -1997,7 +1997,10 @@ fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
         "{names:?}"
     );
     let exports: Vec<&str> = mir.runtime_exports.iter().map(|(e, _)| *e).collect();
-    assert_eq!(exports, ["nova_alloc_leaf", "nova_turn"]);
+    assert_eq!(
+        exports,
+        ["nova_alloc_leaf", "nova_turn", "nova_gc_switches"]
+    );
     for (_, f) in &mir.runtime_exports {
         assert!(names.contains(&f.as_str()), "{f}: {names:?}");
     }
