@@ -9,6 +9,23 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nova build --target wasm`, and its alias `nova bundle`,** compile a
+  program to WebAssembly: `dist/` holds `index.html`, `app.js` and
+  `app.wasm`, which run in a browser, or under Node with `node
+  dist/app.js`. A program may use the whole language and std's core,
+  bytes, collections, strings, fmt and json; hello world is about 2 KB
+  gzipped. A panic exits with status 134 and a trap with 132 under Node,
+  as natively (ADR 0039).
+- **`nova check --target wasm`** checks a program against WASM's std and
+  rules: an `extern` block is E0090, and a program that needs what WASM
+  lacks, such as `async fn main`, is E0091.
+
+### Changed
+
+- **`nova-codegen-wasm` is published** with the next release: 20 crates.
+
 ## [0.3.2] - 2026-10-14
 
 A patch release for the VS Code extension: its display name is **Nova

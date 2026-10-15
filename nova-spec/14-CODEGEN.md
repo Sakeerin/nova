@@ -55,6 +55,16 @@ deferred: `docs/adr/0025-phase-2-boundary.md`.
 - Output: `.wasm` file + JS shim
 - Use case: frontend
 
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):**
+`crates/nova-codegen-wasm` lowers every MIR statement to one module with
+`wasm-encoder` 0.243.0, the last release that declares a minimum Rust under the
+workspace's 1.78. There is no `walrus`: MIR already holds only what `main`
+reaches. The runtime is `std/rt`, written in Nova on memory builtins, and the
+shim provides printing, `Float` text and case mapping.
+`nova build --target wasm` and `nova bundle` write `dist/`
+(`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`; ADR
+0039).
+
 ---
 
 ## 3. Calling Convention
@@ -223,6 +233,14 @@ Plus a `nova-bundler` step that:
 2. Stubs out import functions (DOM, fetch, etc.)
 3. Tree-shakes
 4. Outputs `app.wasm` + `app.js`
+
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** as built in
+4.0, the backend writes the shim as well, from the host functions the module
+imports, and `nova-driver` writes `dist/`. Values map as `I64` → `i64`, `F64` →
+`f64`, `I8` → `i32` and `Ptr` → `i32`; slots stay 8 bytes; control flow is
+structured by Ramsey's "Beyond Relooper", with a dispatch loop for an
+irreducible graph; function values are `funcref` table indices. Tree shaking is
+monomorphization's. `nova-bundler` is still empty (ADR 0039).
 
 ---
 

@@ -609,6 +609,17 @@ For browser target:
 - Phase 4 decision: **start with reference counting** for WASM target (simpler, smaller); revisit later
 - DOM access via auto-generated bindings from web-sys
 
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** a WASM
+build's runtime is `std/rt`, written in Nova on nine memory builtins that only
+that target's std sees. Each function is the port of a `nova-runtime` function,
+with the same results, and the JS shim does printing, `Float` text and case
+mapping, held to the same results. There is no `wasm-bindgen`. In 4.0 the
+allocator only grows; the collector is mark-sweep between event turns, not
+reference counting, by the user's decision (ADR 0038), and arrives in 4.1.
+`std/dom` is a written subset, in 4.2
+(`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §5, §6;
+ADR 0039).
+
 ---
 
 ## 9. Build Config Impact

@@ -422,6 +422,14 @@ pass, a PR, and a merge on the user's word.
     all three operating systems.
   - Hello world is under 30 KB gzipped, checked by a test.
 
+**Amended 2026-10-14 (branch `claude/loving-archimedes-frtf5q`):** by the
+user's decisions of 2026-10-14, 4.0 covers every MIR statement, without a
+collector, and its runtime is written in Nova (`std/rt`). Its gate is hello
+world and the `tests/runtime/` programs its spec lists: `02-fibonacci` reads
+`args()`, which WASM's std lacks. 4.1 keeps the collector, std's other modules,
+async and the full golden suite
+(`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`).
+
 ### 4.1 — The language on WASM
 - **The rest of MIR:** records, sums, arrays, closures, generics, and
   async.
