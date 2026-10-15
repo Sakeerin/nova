@@ -4233,7 +4233,16 @@ impl<'a> Checker<'a> {
             | Builtin::ShutdownRequested
             | Builtin::ProcessArgCount
             | Builtin::ProcessArg
-            | Builtin::ProcessExit => "",
+            | Builtin::ProcessExit
+            | Builtin::MemLoad8
+            | Builtin::MemStore8
+            | Builtin::MemLoad64
+            | Builtin::MemStore64
+            | Builtin::MemCopy
+            | Builtin::MemFill
+            | Builtin::MemPages
+            | Builtin::MemGrow
+            | Builtin::HeapBase => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -8056,6 +8065,11 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::ProcessArgCount => (vec![], Ty::Int),
         Builtin::ProcessArg => (vec![Ty::Int], Ty::String),
         Builtin::ProcessExit => (vec![Ty::Int], Ty::Unit),
+        Builtin::MemLoad8 | Builtin::MemLoad64 => (vec![Ty::Int], Ty::Int),
+        Builtin::MemStore8 | Builtin::MemStore64 => (vec![Ty::Int, Ty::Int], Ty::Unit),
+        Builtin::MemCopy | Builtin::MemFill => (vec![Ty::Int, Ty::Int, Ty::Int], Ty::Unit),
+        Builtin::MemPages | Builtin::HeapBase => (vec![], Ty::Int),
+        Builtin::MemGrow => (vec![Ty::Int], Ty::Int),
     }
 }
 
@@ -8940,6 +8954,22 @@ mod tests {
                     .iter()
                     .map(|d| (d.code.clone(), d.message.clone()))
                     .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// The memory builtins are `std/rt`'s alone (spec
+    /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §3.3): a user module never sees them, whatever the target.
+    #[test]
+    fn no_wasm_only_builtin_is_callable_from_user_code() {
+        for b in Builtin::WASM_ONLY {
+            let name = b.name();
+            let r = check_src(&format!("fn main() {{ {name}() }}"));
+            assert!(
+                error_codes(&r).contains(&"E0001"),
+                "`{name}` must not resolve in a user module, got {:?}",
+                r.diagnostics
             );
         }
     }
@@ -16251,6 +16281,26 @@ mod tests {
                 Builtin::ProcessExit => (
                     (vec![Ty::Int], Ty::Unit),
                     "`process_exit(code)` in `std/process`'s `exit`",
+                ),
+                Builtin::MemLoad8 | Builtin::MemLoad64 => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`mem_load8(addr)` / `mem_load64(addr)` in `std/rt`",
+                ),
+                Builtin::MemStore8 | Builtin::MemStore64 => (
+                    (vec![Ty::Int, Ty::Int], Ty::Unit),
+                    "`mem_store8(addr, v)` / `mem_store64(addr, v)` in `std/rt`",
+                ),
+                Builtin::MemCopy | Builtin::MemFill => (
+                    (vec![Ty::Int, Ty::Int, Ty::Int], Ty::Unit),
+                    "`mem_copy(dst, src, n)` / `mem_fill(dst, byte, n)` in `std/rt`",
+                ),
+                Builtin::MemPages | Builtin::HeapBase => (
+                    (vec![], Ty::Int),
+                    "`mem_pages()` / `heap_base()` in `std/rt`'s `rt_alloc`",
+                ),
+                Builtin::MemGrow => (
+                    (vec![Ty::Int], Ty::Int),
+                    "`mem_grow(pages)` in `std/rt`'s `rt_alloc`",
                 ),
             }
         }

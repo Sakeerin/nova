@@ -12,6 +12,7 @@ mod program;
 mod runtime_cache;
 
 pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Probe, Sources};
+pub use nova_resolver::CompileTarget as Target;
 pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 
@@ -74,8 +75,27 @@ pub fn check_program(program: Program) -> Result<Outcome<()>> {
 /// [`check_program`], counting the errors and warnings it rendered.
 /// Publishing's verification fails on either (spec 3.3b §6.6).
 pub fn check_program_counted(program: Program) -> Result<Checked> {
+    check_program_counted_for(program, Target::Native)
+}
+
+/// [`check_program`] for `target`: against its std and its rules (spec
+/// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §3.1).
+pub fn check_program_for(program: Program, target: Target) -> Result<Outcome<()>> {
+    let checked = check_program_counted_for(program, target)?;
+    if checked.errors > 0 {
+        Ok(Outcome::Failed {
+            errors: checked.errors,
+        })
+    } else {
+        Ok(Outcome::Ok(()))
+    }
+}
+
+/// [`check_program_counted`] for `target`.
+pub fn check_program_counted_for(program: Program, target: Target) -> Result<Checked> {
     let runs = program.runs;
-    let mut ctx = FrontendContext::new(program)?;
+    let mut ctx = FrontendContext::new(program)?.for_target(target);
     if let Some((module, _tests, _fresh_def_id)) = ctx.check(false)? {
         if runs {
             if let Err(diags) = nova_mir::lower_module(&module) {
@@ -323,6 +343,7 @@ pub fn std_source(name: &str) -> Option<&'static str> {
     nova_resolver::STD_MODULES
         .iter()
         .chain(std::iter::once(&nova_resolver::STD_TEST_MODULE))
+        .chain(&nova_resolver::WASM_STD_MODULES)
         .find(|(module, _)| module.strip_prefix("$std.") == Some(short))
         .map(|&(_, text)| text)
 }
@@ -619,6 +640,9 @@ struct FrontendContext<'a> {
     /// Called on each diagnostic before it is counted and rendered (spec
     /// 3.5b §7).
     map: Option<&'a MapDiagnostic<'a>>,
+    /// What the program is compiled for: its std modules and rules (spec
+    /// 4.0 §3).
+    target: Target,
 }
 
 impl<'a> FrontendContext<'a> {
@@ -651,6 +675,7 @@ impl<'a> FrontendContext<'a> {
             registry_files: HashSet::new(),
             sources,
             map,
+            target: Target::Native,
         };
         ctx.render(&diagnostics);
         if ctx.errors == 0 {
@@ -662,6 +687,12 @@ impl<'a> FrontendContext<'a> {
                 .with_context(|| format!("failed to open {}", entry.display()))?;
         }
         Ok(ctx)
+    }
+
+    /// Compile for `target` rather than natively.
+    fn for_target(mut self, target: Target) -> Self {
+        self.target = target;
+        self
     }
 
     /// The first root.
@@ -773,9 +804,12 @@ impl<'a> FrontendContext<'a> {
         // Register each embedded std module's source in the `FileDb` so a
         // syntax error inside one (a compiler bug, since they ship with the
         // compiler) is reported against a real, named file instead of
-        // `FileId::DUMMY`. One id per `nova_resolver::STD_MODULES` entry, in
-        // order — e.g. `$std.core` names `<std/core>`.
-        let std_files: Vec<FileId> = nova_resolver::STD_MODULES
+        // `FileId::DUMMY`. One id per entry of the target's std modules
+        // (`CompileTarget::std_modules`), in order — e.g. `$std.core` names
+        // `<std/core>`.
+        let std_files: Vec<FileId> = self
+            .target
+            .std_modules()
             .iter()
             .map(|&(name, src)| {
                 let short = name.strip_prefix("$std.").unwrap_or(name);
@@ -804,7 +838,8 @@ impl<'a> FrontendContext<'a> {
                 importable: m.importable.clone(),
             })
             .collect();
-        let resolved = nova_resolver::resolve_program(&sources, &std_files, extra_std);
+        let resolved =
+            nova_resolver::resolve_program_for(self.target, &sources, &std_files, extra_std);
         self.render(&resolved.diagnostics);
         if self.errors > 0 {
             return Ok(None);

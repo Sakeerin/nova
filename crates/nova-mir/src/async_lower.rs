@@ -1023,6 +1023,14 @@ fn visit_temps(stmt: &mut Stmt, f: &mut impl FnMut(&mut Temp, Role)) {
             f(index, Read);
             f(value, Read);
         }
+        Stmt::Mem { dst, args, .. } => {
+            for a in args.iter_mut() {
+                f(a, Read);
+            }
+            if let Some(d) = dst {
+                f(d, Write);
+            }
+        }
     }
 }
 

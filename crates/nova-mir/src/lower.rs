@@ -6,8 +6,8 @@ use nova_hir::Ty;
 use nova_resolver::{Builtin, DefId};
 
 use crate::{
-    mangle, mir_ty, Block, BlockId, Function, MirTy, OperandClass, RtFunc, Stmt, Temp, Terminator,
-    MAX_ARRAY_LEN,
+    mangle, mir_ty, Block, BlockId, Function, MemOp, MirTy, OperandClass, RtFunc, Stmt, Temp,
+    Terminator, MAX_ARRAY_LEN,
 };
 
 /// How one [`Builtin`] reaches its implementation, decided by the exhaustive
@@ -24,6 +24,10 @@ enum Lowering {
     Reinterpret,
     /// Two typed field loads reaching a finished future's output slot.
     FutureOutput,
+    /// One [`Stmt::Mem`]: a WASM memory access in line (spec
+    /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+    /// §5.1).
+    Mem(MemOp),
 }
 
 /// Lower a specialized (generic-free) HIR function to MIR.
@@ -783,6 +787,15 @@ impl<'a> Lowerer<'a> {
                     Builtin::ProcessArgCount => Lowering::Runtime(RtFunc::ProcessArgCount),
                     Builtin::ProcessArg => Lowering::Runtime(RtFunc::ProcessArg),
                     Builtin::ProcessExit => Lowering::Runtime(RtFunc::ProcessExit),
+                    Builtin::MemLoad8 => Lowering::Mem(MemOp::Load8),
+                    Builtin::MemStore8 => Lowering::Mem(MemOp::Store8),
+                    Builtin::MemLoad64 => Lowering::Mem(MemOp::Load64),
+                    Builtin::MemStore64 => Lowering::Mem(MemOp::Store64),
+                    Builtin::MemCopy => Lowering::Mem(MemOp::Copy),
+                    Builtin::MemFill => Lowering::Mem(MemOp::Fill),
+                    Builtin::MemPages => Lowering::Mem(MemOp::Pages),
+                    Builtin::MemGrow => Lowering::Mem(MemOp::Grow),
+                    Builtin::HeapBase => Lowering::Mem(MemOp::HeapBase),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {
@@ -861,6 +874,11 @@ impl<'a> Lowerer<'a> {
                             });
                         }
                     }
+                    Lowering::Mem(op) => self.push(Stmt::Mem {
+                        dst,
+                        op,
+                        args: arg_temps,
+                    }),
                 }
             }
             hir::Callee::Local(l) => {

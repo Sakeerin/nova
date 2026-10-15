@@ -1189,9 +1189,8 @@ impl<'a> Ctx<'a> {
             .collect();
         self.place(&mut modules, &mut primitives, pending);
         modules.sort_by(|a, b| a.name.cmp(&b.name));
-        let builtins = Builtin::ALL
+        let builtins = Builtin::GLOBAL
             .iter()
-            .filter(|b| !Builtin::STD_ONLY.contains(*b))
             .map(|b| BuiltinDoc {
                 name: b.name(),
                 signature: highlight(&nova_typeck::builtin_text(*b, self.defs)),
@@ -1621,10 +1620,7 @@ mod tests {
 
     #[test]
     fn every_builtin_a_module_sees_has_docs() {
-        for b in Builtin::ALL
-            .iter()
-            .filter(|b| !Builtin::STD_ONLY.contains(*b))
-        {
+        for b in Builtin::GLOBAL.iter() {
             assert!(BUILTINS.iter().any(|(n, _)| *n == b.name()), "{}", b.name());
         }
     }

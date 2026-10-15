@@ -1023,6 +1023,40 @@ pub enum Stmt {
         value: Temp,
         ty: MirTy,
     },
+    /// A memory access in line: see [`MemOp`]. `dst` is `None` exactly for
+    /// the stores, `Copy` and `Fill`.
+    Mem {
+        dst: Option<Temp>,
+        op: MemOp,
+        args: Vec<Temp>,
+    },
+}
+
+/// A WASM memory access, the lowering of one of `std/rt`'s memory builtins
+/// (spec `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
+/// §5.1). Addresses and values are `I64`; the WASM backend wraps an address
+/// to 32 bits. Only a WASM build's std calls the builtins, so no native
+/// backend emits these: both refuse one as an internal error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemOp {
+    /// `(addr) -> byte`, zero-extended.
+    Load8,
+    /// `(addr, v)`: `v`'s low byte.
+    Store8,
+    /// `(addr) -> word`.
+    Load64,
+    /// `(addr, v)`.
+    Store64,
+    /// `(dst, src, n)`, which may overlap.
+    Copy,
+    /// `(dst, byte, n)`.
+    Fill,
+    /// `() -> pages`.
+    Pages,
+    /// `(pages) -> old pages`, or -1.
+    Grow,
+    /// `() -> the heap's first address`.
+    HeapBase,
 }
 
 /// Block terminators.

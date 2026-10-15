@@ -564,6 +564,14 @@ impl<'a, 'm, M: ClModule> Translator<'a, 'm, M> {
                      at its await points before a module is emitted"
                 ));
             }
+            // A memory access exists only in a WASM build's std (spec
+            // docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md
+            // §5.1): the resolver seeds its builtins for no native build.
+            Stmt::Mem { op, .. } => {
+                return Err(anyhow!(
+                    "a WASM memory access ({op:?}) reached the Cranelift backend"
+                ));
+            }
             Stmt::CallRuntime { dst, func, args } => {
                 let id = self.rt(func.symbol());
                 let arg_vals = self.arg_values(args)?;
