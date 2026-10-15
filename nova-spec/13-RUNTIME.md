@@ -620,6 +620,18 @@ reference counting, by the user's decision (ADR 0038), and arrives in 4.1.
 (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §5, §6;
 ADR 0039).
 
+**Amended 2026-10-15 (branch `claude/loving-archimedes-frtf5q`):** 4.1 adds
+the collector and the executor, both in `std/rt`. The collector is
+conservative, non-moving mark-sweep on `gc/pages.rs`'s page design, run only
+at the end of a turn, when the WASM stack holds nothing: its roots are the
+executor's tables and each unreleased task's state. The executor is a port of
+`task.rs`, with its order and its deadlock report; `async fn main` returns to
+JS, and each timer calls the exported `nova_turn`. `block_on` works, waiting
+for a deadline by reading the clock, so a page that sleeps in it does not
+respond
+(`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+§4 to §6; ADR 0040).
+
 ---
 
 ## 9. Build Config Impact

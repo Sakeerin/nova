@@ -441,6 +441,16 @@ async and the full golden suite
     built for WASM and run under Node, what its native build prints.
   - The programs left out are listed, each with its reason.
 
+**Amended 2026-10-15 (branch `claude/loving-archimedes-frtf5q`):** by the
+user's decisions of 2026-10-15, the executor is written in Nova, in `std/rt`;
+WASM's std gains sync as well, for `examples/03-producer-consumer`; and
+`block_on` works on WASM, waiting for a deadline by reading the clock, which
+departs from decision 4. The gate is 94 of `tests/runtime/`'s 134 programs
+and that example; the 40 left out need std/fs, io, net, http, crypto or
+process, or never can run
+(`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`;
+ADR 0040).
+
 ### 4.2 — `std/dom` and the shim
 - **A table of handles** for JS objects, and a table of Nova closures that
   JS can call. The second is one of the collector's roots.

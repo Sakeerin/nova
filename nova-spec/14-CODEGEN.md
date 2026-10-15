@@ -242,6 +242,17 @@ structured by Ramsey's "Beyond Relooper", with a dispatch loop for an
 irreducible graph; function values are `funcref` table indices. Tree shaking is
 monomorphization's. `nova-bundler` is still empty (ADR 0039).
 
+**Amended 2026-10-15 (branch `claude/loving-archimedes-frtf5q`):** in 4.1 the
+backend builds the yield future itself, a builder and a poll function of type
+`(state, ctx) -> status` in the table, and lowers two more WASM-only
+builtins: `future_poll`, a `call_indirect` with a null context, and
+`host_abort`, an import of the shim's `abort`. A module exports
+`nova_alloc_leaf`, and, with an `async fn main`, `nova_turn` and
+`nova_gc_switches`. `std/rt`'s state words are `8..128`, and the data segment
+starts at 128
+(`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
+§4.3, §6.1; ADR 0040).
+
 ---
 
 ## 9. Debugging

@@ -15,13 +15,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   program to WebAssembly: `dist/` holds `index.html`, `app.js` and
   `app.wasm`, which run in a browser, or under Node with `node
   dist/app.js`, and a `package.json` that tells Node `app.js` is a module.
-  A program may use the whole language and std's core, bytes,
-  collections, strings, fmt and json; hello world is about 2 KB gzipped.
-  Under Node a panic exits with status 134, as natively, and a trap such
-  as a division by zero with 132 (ADR 0039).
+  A program may use the whole language, async included, and std's core,
+  bytes, collections, strings, fmt, task, sync, time, json and log; hello
+  world is about 4 KB gzipped. Under Node a panic exits with status 134, as
+  natively, and a trap such as a division by zero with 132 (ADR 0039).
+- **Async on WASM:** an `async fn main` returns to JS while its tasks wait
+  on timers, and each timer runs the next turn. `block_on` works too, but
+  holds the page while it waits (ADR 0040).
+- **A collector on WASM:** mark-sweep between turns, on the native
+  collector's page design. In a program with an `async fn main`,
+  `NOVA_GC_STRESS` and `NOVA_GC_DEBUG` work under Node as natively
+  (ADR 0040).
 - **`nova check --target wasm`** checks a program against WASM's std and
-  rules: an `extern` block is E0090, and a program that needs what WASM
-  lacks, such as `async fn main`, is E0091.
+  rules: an `extern` block is E0090, and a name from a std module WASM
+  lacks is E0092, naming the module.
 
 ### Changed
 
